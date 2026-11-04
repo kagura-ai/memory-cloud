@@ -62,8 +62,8 @@ export interface OwnerFixedContext {
 
 /** What the successor picker shows, from the 409 (#2420). */
 export interface TransferPicker {
+  /** The owned workspaces that need a successor (rows of the picker). */
   workspaceIds: string[];
-  contextIds: string[];
   workspaces: TransferWorkspace[];
   contexts: TransferContext[];
   ownerFixedContexts: OwnerFixedContext[];
@@ -184,7 +184,6 @@ export function userDeleteFailure(error: unknown): UserDeleteFailure {
       if (Array.isArray(detail.workspaces) && Array.isArray(detail.contexts)) {
         failure.picker = {
           workspaceIds: strings(workspace_ids),
-          contextIds: strings(context_ids),
           workspaces: entries(detail.workspaces, parseWorkspace),
           contexts: entries(detail.contexts, parseContext),
           ownerFixedContexts: entries(

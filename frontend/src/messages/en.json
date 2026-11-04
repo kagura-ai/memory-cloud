@@ -2681,8 +2681,8 @@
       },
       "deleteDialog": {
         "title": "Delete user {name}?",
-        "handover": "Workspaces this user owns and the shared contexts they created are handed over to a successor, not deleted. You choose the successors in the next step if any are needed.",
-        "deleted": "Their memories, API keys and private contexts nobody else wrote in are permanently deleted. This cannot be undone.",
+        "handover": "Workspaces this user owns (other than ones already deleted) and the shared contexts they created are handed over to a successor, not deleted. You choose the successors in the next step if any are needed.",
+        "deleted": "Their memories, API keys and private contexts nobody else wrote in are permanently deleted, and so is every workspace they own that was already deleted, with everything still in it. This cannot be undone.",
         "confirm": "Delete user",
         "deleting": "Deleting…",
         "pickTitle": "Choose successors for {name}",

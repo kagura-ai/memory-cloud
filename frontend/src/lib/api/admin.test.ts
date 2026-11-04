@@ -90,7 +90,6 @@ describe("userDeleteFailure (#2417)", () => {
       contexts: 1,
       picker: {
         workspaceIds: ["ws-1"],
-        contextIds: ["ctx-1"],
         workspaces: [
           {
             id: "ws-1",

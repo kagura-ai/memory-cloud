@@ -304,7 +304,27 @@ describe("UserDeleteDialog (#2420)", () => {
     );
   });
 
-  it("closes and toasts any other refusal", async () => {
+  it("closes and toasts a refusal at the confirm step", async () => {
+    mockDeleteUser.mockRejectedValueOnce(
+      new ApiError({
+        error: "BILLING-005",
+        message: "A paid subscription is active for this workspace.",
+        status: 409,
+        details: {},
+      }),
+    );
+    const { onClose } = renderDialog();
+    fireEvent.click(screen.getByTestId(IDS.confirm));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variant: "destructive",
+        description: `${NS}.messages.deleteErrorWithReason:{"reason":"A paid subscription is active for this workspace."}`,
+      }),
+    );
+  });
+
+  it("keeps the picker and its picks on a refusal after it, saying why", async () => {
     const { onClose } = await openPicker();
     fireEvent.change(selectIn(IDS.workspaceRow("ws-own")), {
       target: { value: "succ" },
@@ -314,22 +334,42 @@ describe("UserDeleteDialog (#2420)", () => {
     });
     mockDeleteUser.mockRejectedValueOnce(
       new ApiError({
-        error: "BILLING-005",
-        message: "A paid subscription is active for this workspace.",
+        error: "HTTP-409",
+        message: "Context successor must have workspace/context access",
         status: 409,
-        details: {},
+        details: { detail: "Context successor must have workspace/context access" },
       }),
     );
     fireEvent.click(screen.getByTestId(IDS.submit));
-    await waitFor(() =>
-      expect(mockToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          variant: "destructive",
-          description: `${NS}.messages.deleteErrorWithReason:{"reason":"A paid subscription is active for this workspace."}`,
-        }),
+    const alert = await screen.findByTestId(IDS.error);
+    expect(
+      within(alert).getByText(
+        `${NS}.messages.deleteErrorWithReason:{"reason":"Context successor must have workspace/context access"}`,
       ),
+    ).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(mockToast).not.toHaveBeenCalled();
+    expect(selectIn(IDS.workspaceRow("ws-own")).value).toBe("succ");
+    expect(selectIn(IDS.contextRow("ctx-other")).value).toBe("reach");
+    expect((screen.getByTestId(IDS.submit) as HTMLButtonElement).disabled).toBe(
+      false,
     );
-    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("sends one DELETE for a double click", async () => {
+    let finish: (value: unknown) => void = () => {};
+    mockDeleteUser.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { onDeleted } = renderDialog();
+    const confirm = screen.getByTestId(IDS.confirm);
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    finish({});
+    await waitFor(() => expect(onDeleted).toHaveBeenCalled());
+    expect(mockDeleteUser).toHaveBeenCalledTimes(1);
   });
 
   it("falls back to the counts toast when an older API sends ids only", async () => {

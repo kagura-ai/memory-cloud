@@ -15,4 +15,6 @@ export const USER_DELETE_DIALOG_TEST_IDS = {
   ownerFixedRow: (id: string) => `user-delete-owner-fixed-${id}`,
   /** The notice that a later 409 changed the list. */
   changed: "user-delete-changed",
+  /** A refusal of the picker's DELETE, shown in the dialog. */
+  error: "user-delete-error",
 } as const;

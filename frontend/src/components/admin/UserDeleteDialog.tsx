@@ -8,9 +8,10 @@
  * workspace the user owns, a successor for each shared context it created
  * (by default the workspace's successor, where the workspace is handed over)
  * and, read-only, the connector write targets, which go to the workspace's
- * owner. The DELETE is then sent again with the selections. Another 409 (the
- * user's resources changed meanwhile) refreshes the picker; any other failure
- * closes the dialog with a toast.
+ * owner. The DELETE is then sent again with the selections. Another 409 with
+ * the picker (the user's resources changed meanwhile) refreshes it; any other
+ * refusal of that DELETE is shown in the dialog with the picks kept. A refusal
+ * at the confirm step closes the dialog with a toast.
  */
 
 import { useMemo, useState } from "react";
@@ -84,9 +85,6 @@ function mergePicker(
   const fixed = new Set(next.ownerFixedContexts.map((c) => c.id));
   return {
     workspaceIds: [...new Set([...shown.workspaceIds, ...next.workspaceIds])],
-    contextIds: [...new Set([...shown.contextIds, ...next.contextIds])].filter(
-      (id) => !fixed.has(id),
-    ),
     workspaces: byId(shown.workspaces, next.workspaces),
     contexts: byId(shown.contexts, next.contexts).filter(
       (c) => !fixed.has(c.id),
@@ -113,6 +111,8 @@ export function UserDeleteDialog({
   const [picker, setPicker] = useState<TransferPicker | null>(null);
   const [changed, setChanged] = useState(false);
   const [busy, setBusy] = useState(false);
+  // A refusal of the picker's DELETE, shown in the dialog (#2420 review).
+  const [error, setError] = useState<string | null>(null);
   const [workspacePicks, setWorkspacePicks] = useState<Picks>({});
   const [contextPicks, setContextPicks] = useState<Picks>({});
 
@@ -165,6 +165,7 @@ export function UserDeleteDialog({
       merged.contexts.map((c) => [c.id, new Set(c.candidate_user_ids)]),
     );
     setChanged(picker !== null);
+    setError(null);
     setPicker(merged);
     // A pick the refreshed list no longer offers is cleared.
     setWorkspacePicks((prev) =>
@@ -182,6 +183,7 @@ export function UserDeleteDialog({
 
   const send = async () => {
     setBusy(true);
+    setError(null);
     try {
       if (picker === null) {
         await deleteUser(user.id);
@@ -211,20 +213,23 @@ export function UserDeleteDialog({
         showPicker(failure.picker);
         return;
       }
+      const description =
+        failure.kind === "transfer_required"
+          ? t("messages.deleteTransferRequired", {
+              workspaces: failure.workspaces,
+              contexts: failure.contexts,
+            })
+          : failure.kind === "message"
+            ? t("messages.deleteErrorWithReason", { reason: failure.message })
+            : t("messages.deleteError");
+      if (picker !== null) {
+        // The picks stay: a successor that lost access can be changed, or
+        // the dialog cancelled and opened again for a fresh list.
+        setError(description);
+        return;
+      }
       onClose();
-      toast({
-        title: tCommon("error"),
-        description:
-          failure.kind === "transfer_required"
-            ? t("messages.deleteTransferRequired", {
-                workspaces: failure.workspaces,
-                contexts: failure.contexts,
-              })
-            : failure.kind === "message"
-              ? t("messages.deleteErrorWithReason", { reason: failure.message })
-              : t("messages.deleteError"),
-        variant: "destructive",
-      });
+      toast({ title: tCommon("error"), description, variant: "destructive" });
     } finally {
       setBusy(false);
     }
@@ -268,6 +273,12 @@ export function UserDeleteDialog({
         <Alert data-testid={IDS.changed}>
           <Info className="h-4 w-4" />
           <AlertDescription>{t("deleteDialog.changed")}</AlertDescription>
+        </Alert>
+      )}
+      {error && (
+        <Alert variant="destructive" data-testid={IDS.error}>
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
