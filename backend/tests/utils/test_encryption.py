@@ -153,6 +153,42 @@ class TestKeyRing:
         assert APIKeyEncryption(generate_fernet_key()).key_count == 1
 
 
+# Tokens written by the single-key ``APIKeyEncryption`` before the key ring
+# (#2394), one per derivation: a raw 44-character Fernet key used as is, and a
+# plain string hashed with SHA-256. Test keys only. Any change to how a key is
+# derived (encoding, blanks, the hash) breaks every stored value; this fails.
+_RAW_FERNET_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+_PLAIN_STRING_KEY = "pre-key-ring-plain-secret-2394"
+_PRE_RING_TOKENS = {
+    "raw": (
+        _RAW_FERNET_KEY,
+        "gAAAAABq6uuLmbwTzcsE8cmssmh31-piXkksmVD9CgZ4OzZrDzkBCcE32aaNOtOgt3Ah6dfXcCbxntjHue8V9i7LnZI0waf37GFd_6EIIp2Yui8zdYHPs74=",
+    ),
+    "plain": (
+        _PLAIN_STRING_KEY,
+        "gAAAAABq6uuLD0mIRjgtVTvBXRptL2U1TACaCbeKUOa_z1XPrGjYPjVN9LxIRe30leJity67_eRdw_IeSyo2VGhPWjuY9N7Y8l3zMBaiFC5shzE88CsvrkJPOWi2Ob2EcuzDhyszKvjZ",
+    ),
+}
+
+
+class TestTokensWrittenBeforeTheKeyRing:
+    """Values stored before #2394 stay readable, as the current or a previous key."""
+
+    @pytest.mark.parametrize("name", sorted(_PRE_RING_TOKENS))
+    def test_the_same_key_alone_decrypts_them(self, name):
+        key, token = _PRE_RING_TOKENS[name]
+        encryptor = APIKeyEncryption(key)
+        assert encryptor.decrypt(token) == f"written-before-the-key-ring-{name}"
+        assert encryptor.is_current(token) is True
+
+    @pytest.mark.parametrize("name", sorted(_PRE_RING_TOKENS))
+    def test_the_key_as_a_previous_key_decrypts_them(self, name):
+        key, token = _PRE_RING_TOKENS[name]
+        ring = APIKeyEncryption(generate_fernet_key(), previous_keys=[key])
+        assert ring.decrypt(token) == f"written-before-the-key-ring-{name}"
+        assert ring.is_current(token) is False
+
+
 class TestGetEncryptor:
     """``get_encryptor`` reads ``API_KEY_SECRET`` from the cached settings (#2239)."""
 

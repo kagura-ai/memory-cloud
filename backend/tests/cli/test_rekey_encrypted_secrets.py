@@ -147,6 +147,23 @@ async def test_apply_writes_after_the_report(fake_db) -> None:
     assert [c.kwargs["dry_run"] for c in run.call_args_list] == [True, False]
 
 
+@pytest.mark.parametrize(
+    ("answer", "dry_runs"), [("n", [True]), ("y", [True, False])], ids=["declined", "confirmed"]
+)
+async def test_apply_without_yes_asks_before_writing(fake_db, capsys, answer, dry_runs) -> None:
+    applied = _report(re_encrypted=2)
+    applied.dry_run = False
+    run = AsyncMock(side_effect=[_report(re_encrypted=2), applied])
+    with (
+        patch.object(cli, "rekey_encrypted_secrets", run),
+        patch("builtins.input", return_value=answer) as prompt,
+    ):
+        assert await cli._main(cli._parse(["--apply"])) == 0
+    assert "Update 2 encrypted value(s) to the current key?" in prompt.call_args.args[0]
+    assert [c.kwargs["dry_run"] for c in run.call_args_list] == dry_runs
+    assert ("skipped" in capsys.readouterr().out) is (answer == "n")
+
+
 async def test_yes_without_apply_is_a_usage_error(fake_db) -> None:
     run = AsyncMock()
     with patch.object(cli, "rekey_encrypted_secrets", run):
