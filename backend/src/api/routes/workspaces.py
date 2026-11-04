@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.analysis_allowlist import check_workspace_in_allowlist
@@ -36,6 +36,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Context, ExternalAPIKey, User, Workspace, WorkspaceMember
 from models.schemas import OpenAIKeyStatusResponse
+from services.identity_link_service import linked_user_ids
 from services.ownership_notifications import (
     notify_new_owner_best_effort as _notify_new_owner_best_effort,
 )
@@ -45,7 +46,7 @@ from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
 from utils.auth_helpers import get_user_id
 from utils.datetime import to_utc_iso
-from utils.exceptions import ValidationError
+from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1004,6 +1005,87 @@ async def update_member_context_access(
         "user_id": member.user_id,
         "allowed_context_ids": _context_ids_str(member.allowed_context_ids),
     }
+
+
+class MemberContextAccessContext(BaseModel):
+    """A context the context access dialog offers for one member (#2327)."""
+
+    id: UUID
+    name: str
+    display_name: str | None = None
+    summary: str | None = None
+    is_private: bool
+    # The member's own private context (or one of an account linked to the
+    # member, #1784): assignable to them, to nobody else.
+    is_own_private: bool = False
+
+
+class MemberContextAccessResponse(BaseModel):
+    """A member's context access list and the contexts it may hold (#2327)."""
+
+    user_id: str
+    role: str
+    allowed_context_ids: list[UUID] | None = None
+    contexts: list[MemberContextAccessContext]
+
+
+@router.get(
+    "/{workspace_id}/members/{user_id}/context-access",
+    response_model=MemberContextAccessResponse,
+)
+async def get_member_context_access(
+    workspace_id: UUID,
+    user_id: str,
+    user: APIKeyOrSessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> MemberContextAccessResponse:
+    """A member's context access list and the contexts it can be given.
+
+    #2327: the members page's context access dialog. ``contexts`` holds every
+    live shared context of the workspace and the member's own private ones
+    (``is_own_private``), by name; another account's private context is never
+    listed. A private context stays open to its creator and the accounts
+    linked to it (#1784) only, so it is offered to them alone.
+
+    Session admin+ or a workspace-owner API key (OAuth 403); 404 when
+    ``user_id`` is not a member of the workspace.
+    """
+    await authorize_workspace_management(
+        user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
+    )
+    member = await WorkspaceService(db).get_member(workspace_id, user_id, raise_if_not_found=False)
+    if member is None:
+        raise NotFoundException("Member")
+
+    owners = await linked_user_ids(db, user_id)
+    result = await db.execute(
+        select(Context)
+        .where(
+            Context.workspace_id == workspace_id,
+            Context.deleted_at.is_(None),
+            or_(Context.is_private.is_(False), Context.created_by.in_(owners)),
+        )
+        .order_by(Context.name)
+    )
+    contexts = [
+        MemberContextAccessContext(
+            id=c.id,
+            name=c.name,
+            display_name=c.display_name,
+            summary=c.summary,
+            is_private=c.is_private,
+            is_own_private=c.is_private and c.created_by in owners,
+        )
+        for c in result.scalars().all()
+    ]
+    return MemberContextAccessResponse(
+        user_id=member.user_id,
+        role=member.role,
+        allowed_context_ids=(
+            None if member.allowed_context_ids is None else list(member.allowed_context_ids)
+        ),
+        contexts=contexts,
+    )
 
 
 @router.delete("/{workspace_id}/members/{user_id}", status_code=204)

@@ -37,7 +37,10 @@ import {
 } from "@/components/ui/dialog";
 import { Loader2, Trash2, UserPlus, Users } from "lucide-react";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
-import { TableLoadingState } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  TableLoadingState,
+} from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -57,6 +60,25 @@ import type { Context } from "@/lib/types/context";
 interface MembersSectionProps {
   contextId: string;
   context: Context;
+}
+
+/**
+ * #2327: the add was refused because the member's workspace context access
+ * list does not include this context (409 RES-002, `details.reason`). Such a
+ * row would grant nothing, so the operator is asked to extend the list.
+ */
+function isContextNotInAccessList(err: unknown): boolean {
+  return (
+    err instanceof ApiError &&
+    err.status === 409 &&
+    err.details?.reason === "context_not_in_access_list"
+  );
+}
+
+/** The add the operator is asked to repeat with the list extended (#2327). */
+interface ExtendTarget {
+  userId: string;
+  role: ContextRole;
 }
 
 function isContextRole(role: string): role is ContextRole {
@@ -99,6 +121,9 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
 
   const [removeTarget, setRemoveTarget] = useState<ContextMember | null>(null);
   const [submittingRemove, setSubmittingRemove] = useState(false);
+
+  const [extendTarget, setExtendTarget] = useState<ExtendTarget | null>(null);
+  const [submittingExtend, setSubmittingExtend] = useState(false);
 
   const currentUserId = user?.id ?? null;
 
@@ -174,23 +199,37 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
     await ensureWorkspaceMembersLoaded();
   };
 
+  const finishAdd = async (userId: string, listExtended: boolean) => {
+    setRecentlyAddedIds((prev) => {
+      const next = new Set(prev);
+      next.add(userId);
+      return next;
+    });
+    toast({
+      title: t(
+        listExtended ? "addMemberSuccessListExtended" : "addMemberSuccess",
+      ),
+    });
+    setAddDialogOpen(false);
+    await loadMembers();
+  };
+
   const handleAddSubmit = async () => {
     if (!addSelectedUserId) return;
     try {
       setSubmittingAdd(true);
-      await addContextMember(contextId, {
+      const added = await addContextMember(contextId, {
         user_id: addSelectedUserId,
         role: addSelectedRole,
       });
-      setRecentlyAddedIds((prev) => {
-        const next = new Set(prev);
-        next.add(addSelectedUserId);
-        return next;
-      });
-      toast({ title: t("addMemberSuccess") });
-      setAddDialogOpen(false);
-      await loadMembers();
+      await finishAdd(addSelectedUserId, added.access_list_extended === true);
     } catch (err) {
+      if (isContextNotInAccessList(err)) {
+        // A question, not a failure: the confirm dialog resends the add.
+        setAddDialogOpen(false);
+        setExtendTarget({ userId: addSelectedUserId, role: addSelectedRole });
+        return;
+      }
       const apiError = err instanceof ApiError ? err : null;
       toast({
         title: apiError?.details?.detail || t("addMemberFailed"),
@@ -199,6 +238,38 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
     } finally {
       setSubmittingAdd(false);
     }
+  };
+
+  const handleExtendConfirm = async () => {
+    if (!extendTarget) return;
+    try {
+      setSubmittingExtend(true);
+      const added = await addContextMember(contextId, {
+        user_id: extendTarget.userId,
+        role: extendTarget.role,
+        extend_access_list: true,
+      });
+      setExtendTarget(null);
+      await finishAdd(extendTarget.userId, added.access_list_extended === true);
+    } catch (err) {
+      const apiError = err instanceof ApiError ? err : null;
+      // The refusals here (403 for a caller below workspace admin, a 409)
+      // carry their reason in `message`, not in the legacy `details.detail`.
+      const serverMessage =
+        apiError && apiError.status > 0 ? apiError.message : undefined;
+      toast({
+        title:
+          apiError?.details?.detail || serverMessage || t("addMemberFailed"),
+        variant: "destructive",
+      });
+    } finally {
+      setSubmittingExtend(false);
+    }
+  };
+
+  const extendTargetName = (target: ExtendTarget): string => {
+    const wm = workspaceMembers.find((m) => m.user_id === target.userId);
+    return wm?.user_email || wm?.user_name || target.userId;
   };
 
   const handleRoleChange = async (member: ContextMember, newRole: string) => {
@@ -464,6 +535,38 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* #2327: the member's context access list misses this context */}
+      <AlertDialog
+        open={extendTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !submittingExtend) setExtendTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("extendAccessListTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {extendTarget
+                ? t("extendAccessListDesc", {
+                    name: extendTargetName(extendTarget),
+                  })
+                : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={submittingExtend}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
+            {/* A regular Button keeps the dialog open while the add is in
+                flight, as the remove confirmation below does. */}
+            <Button onClick={handleExtendConfirm} disabled={submittingExtend}>
+              {submittingExtend && <InlineSpinner size="sm" className="mr-2" />}
+              {t("extendAccessListConfirm")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Remove confirmation */}
       <AlertDialog

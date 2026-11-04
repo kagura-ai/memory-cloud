@@ -775,6 +775,46 @@ Soft-delete a context. The context row is marked deleted (sets `deleted_at`) so 
 
 ---
 
+### POST /api/v1/contexts/{context_id}/members
+
+Give a workspace member a role in a shared context. Session only; the caller owns the context or is a workspace owner or admin.
+
+**Request Body:**
+
+```json
+{
+  "user_id": "member-user-id",
+  "role": "editor",
+  "extend_access_list": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `user_id` | string | Yes | A member of the context's workspace |
+| `role` | string | Yes | `owner`, `editor` or `viewer` |
+| `extend_access_list` | boolean | No | Default `false`. When the member's (or viewer's) context access list does not include this context, add the context to that list in the same transaction. Workspace owner or admin only (`403` otherwise) |
+
+A context role does nothing for a member whose context access list does not include the context (see [Concepts](concepts.md)). Without `extend_access_list` such an add answers `409`:
+
+```json
+{
+  "error": "RES-002",
+  "message": "This member's context access list does not include this context, so a context role would give them nothing. A workspace owner or admin can add it to the list by resending with extend_access_list=true, or edit the member's context access first.",
+  "details": {
+    "reason": "context_not_in_access_list",
+    "user_id": "member-user-id",
+    "context_id": "550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+A context member row the member already holds but whose list does not reach the context (it grants nothing and is hidden from the context member list) is handled the same way: `409` without the flag; with it the list is extended and that row is kept at the requested role. Only a row that already grants the context answers `400` (already a context member).
+
+**Response:** `201 Created` with `user_id`, `role`, `added_at` and `access_list_extended` (`true` when the context was added to the member's list).
+
+---
+
 ## Workspace Member APIs
 
 A member's **context access list** (`allowed_context_ids`) decides which contexts a member or viewer reaches ([concepts](concepts.md#workspace)):
@@ -787,7 +827,7 @@ A member's **context access list** (`allowed_context_ids`) decides which context
 
 A private context stays open only to its creator, whatever the list says, and the list is kept when the member's role changes. Every id in a list must be a live context of the workspace: an id of another workspace, a deleted context or an unknown id is `400` `Invalid context IDs: [...]`, and two spellings of one id are stored once.
 
-Both endpoints below accept a session admin or owner, or a **workspace-owner API key** (#1164, #2326; a key bound to another workspace gets `404`, an admin's key `403`, and a deployment can switch owner-key member management off). OAuth access tokens are refused with `403`. A change made with an API key is written to the audit log.
+The endpoints below accept a session admin or owner, or a **workspace-owner API key** (#1164, #2326; a key bound to another workspace gets `404`, an admin's key `403`, and a deployment can switch owner-key member management off). OAuth access tokens are refused with `403`. A change made with an API key is written to the audit log.
 
 ### POST /api/v1/workspaces/{workspace_id}/members
 
@@ -839,6 +879,40 @@ Replace a member's context access list.
   "status": "ok",
   "user_id": "user-123",
   "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+---
+
+### GET /api/v1/workspaces/{workspace_id}/members/{user_id}/context-access
+
+A member's context access list and the contexts it can be given: every live shared context of the workspace plus the member's own private contexts (including those of an account linked to the member, `is_own_private`), ordered by name. Another member's private context is never listed. A read: nothing is written to the audit log. `404` when `user_id` is not a member of the workspace. Set the list with `PUT` on the same path.
+
+**Response:**
+
+```json
+{
+  "user_id": "member-user-id",
+  "role": "member",
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"],
+  "contexts": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "team-notes",
+      "display_name": "Team Notes",
+      "summary": null,
+      "is_private": false,
+      "is_own_private": false
+    },
+    {
+      "id": "6fa459ea-ee8a-4ca4-894e-db77e160355e",
+      "name": "drafts",
+      "display_name": null,
+      "summary": null,
+      "is_private": true,
+      "is_own_private": true
+    }
+  ]
 }
 ```
 
