@@ -573,11 +573,14 @@ export interface UserDetail {
 /**
  * Successors for an admin user deletion (#2372): resource id → surviving
  * user_id. A workspace's successor also takes the contexts the user created
- * there unless `context_transfers` names another one.
+ * there unless `context_transfers` names another one. `delete_workspaces`
+ * names owned workspaces nobody else is in (`members: []` in the 409) to
+ * delete with the user instead, everything in them included (#2640).
  */
 export interface UserDeleteTransfers {
   workspace_transfers: Record<string, string>;
   context_transfers: Record<string, string>;
+  delete_workspaces?: string[];
 }
 
 /**

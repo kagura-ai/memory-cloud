@@ -394,24 +394,113 @@ describe("UserDeleteDialog (#2420)", () => {
     expect(screen.queryByTestId(IDS.submit)).toBeNull();
   });
 
-  it("says when no member can take a workspace over", async () => {
+  // #2640: a workspace nobody else is in (ws-solo, with ctx-solo created in
+  // it) is deleted with the user on an explicit tick; ws-own still needs a
+  // successor.
+  const SOLO = {
+    id: "ws-solo",
+    name: "Solo",
+    owner_user_id: "departing",
+    members: [] as ReturnType<typeof member>[],
+  };
+  const SOLO_PICKER = {
+    workspace_ids: ["ws-solo", "ws-own"],
+    context_ids: ["ctx-solo"],
+    workspaces: [SOLO, PICKER.workspaces[0]],
+    contexts: [
+      {
+        id: "ctx-solo",
+        name: "solo-notes",
+        display_name: null,
+        workspace_id: "ws-solo",
+        is_private: false,
+        candidate_user_ids: [],
+      },
+    ],
+    owner_fixed_contexts: [],
+  };
+
+  async function openSoloPicker() {
+    mockDeleteUser.mockRejectedValueOnce(transferRequired(SOLO_PICKER));
+    const handlers = renderDialog();
+    fireEvent.click(screen.getByTestId(IDS.confirm));
+    await screen.findByTestId(IDS.workspaceRow("ws-solo"));
+    return handlers;
+  }
+
+  it("offers to delete a workspace no member can take over, never by default", async () => {
+    await openSoloPicker();
+    const row = screen.getByTestId(IDS.workspaceRow("ws-solo"));
+    expect(within(row).getByText(`${NS}.deleteDialog.noMembers`)).toBeTruthy();
+    expect(within(row).getByText(`${NS}.deleteDialog.deleteWithUser`)).toBeTruthy();
+    expect(within(row).queryByRole("combobox")).toBeNull();
+    const tick = within(row).getByRole("checkbox");
+    expect(tick.getAttribute("aria-checked")).toBe("false");
+    // A context of it waits on its workspace while the workspace is kept.
+    expect(screen.getByTestId(IDS.contextRow("ctx-solo"))).toBeTruthy();
+
+    const submit = screen.getByTestId(IDS.submit) as HTMLButtonElement;
+    fireEvent.change(selectIn(IDS.workspaceRow("ws-own")), {
+      target: { value: "succ" },
+    });
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(screen.getByTestId(IDS.deleteWorkspace("ws-solo")));
+    expect(tick.getAttribute("aria-checked")).toBe("true");
+    // Its context goes with it: no row, no selection.
+    expect(screen.queryByTestId(IDS.contextRow("ctx-solo"))).toBeNull();
+    expect(submit.disabled).toBe(false);
+  });
+
+  it("sends the ticked workspace in delete_workspaces, not as a transfer", async () => {
+    const { onDeleted } = await openSoloPicker();
+    fireEvent.click(screen.getByTestId(IDS.deleteWorkspace("ws-solo")));
+    const submit = screen.getByTestId(IDS.submit) as HTMLButtonElement;
+    // A workspace with members still needs a successor.
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(selectIn(IDS.workspaceRow("ws-own")), {
+      target: { value: "succ" },
+    });
+    mockDeleteUser.mockResolvedValueOnce({});
+    fireEvent.click(submit);
+    await waitFor(() => expect(onDeleted).toHaveBeenCalled());
+    expect(mockDeleteUser).toHaveBeenLastCalledWith("departing", {
+      workspace_transfers: { "ws-own": "succ" },
+      context_transfers: {},
+      delete_workspaces: ["ws-solo"],
+    });
+  });
+
+  it("clears the tick when a refreshed 409 gives the workspace a member", async () => {
+    await openSoloPicker();
+    fireEvent.click(screen.getByTestId(IDS.deleteWorkspace("ws-solo")));
+    fireEvent.change(selectIn(IDS.workspaceRow("ws-own")), {
+      target: { value: "succ" },
+    });
     mockDeleteUser.mockRejectedValueOnce(
       transferRequired({
         workspace_ids: ["ws-solo"],
         context_ids: [],
-        workspaces: [
-          { id: "ws-solo", name: "Solo", owner_user_id: "departing", members: [] },
-        ],
+        workspaces: [{ ...SOLO, members: [member("joined", "Joined", "member")] }],
         contexts: [],
         owner_fixed_contexts: [],
       }),
     );
-    renderDialog();
-    fireEvent.click(screen.getByTestId(IDS.confirm));
-    const row = await screen.findByTestId(IDS.workspaceRow("ws-solo"));
-    expect(within(row).getByText(`${NS}.deleteDialog.noMembers`)).toBeTruthy();
-    expect((screen.getByTestId(IDS.submit) as HTMLButtonElement).disabled).toBe(
-      true,
+    fireEvent.click(screen.getByTestId(IDS.submit));
+    await screen.findByTestId(IDS.changed);
+    expect(screen.queryByTestId(IDS.deleteWorkspace("ws-solo"))).toBeNull();
+    const solo = selectIn(IDS.workspaceRow("ws-solo"));
+    expect(solo.value).toBe("");
+    const submit = screen.getByTestId(IDS.submit) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+
+    fireEvent.change(solo, { target: { value: "joined" } });
+    mockDeleteUser.mockResolvedValueOnce({});
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(mockDeleteUser).toHaveBeenLastCalledWith("departing", {
+        workspace_transfers: { "ws-solo": "joined", "ws-own": "succ" },
+        context_transfers: {},
+      }),
     );
   });
 });

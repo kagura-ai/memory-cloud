@@ -8,7 +8,9 @@
  * workspace the user owns, a successor for each shared context it created
  * (by default the workspace's successor, where the workspace is handed over)
  * and, read-only, the connector write targets, which go to the workspace's
- * owner. The DELETE is then sent again with the selections. Another 409 with
+ * owner. A workspace nobody else is in has no successor to pick: the admin
+ * may tick it to delete it with the user instead, its contexts included
+ * (#2640). The DELETE is then sent again with the selections. Another 409 with
  * the picker (the user's resources changed meanwhile) refreshes it; any other
  * refusal, at either step, is shown in the dialog (the picks are kept).
  */
@@ -19,6 +21,7 @@ import { AlertCircle, Info } from "lucide-react";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -114,6 +117,10 @@ export function UserDeleteDialog({
   const [error, setError] = useState<string | null>(null);
   const [workspacePicks, setWorkspacePicks] = useState<Picks>({});
   const [contextPicks, setContextPicks] = useState<Picks>({});
+  // Workspaces nobody else is in, ticked to be deleted with the user (#2640).
+  const [deleteWorkspaces, setDeleteWorkspaces] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const workspaces = useMemo(
     () => new Map((picker?.workspaces ?? []).map((w) => [w.id, w])),
@@ -126,14 +133,26 @@ export function UserDeleteDialog({
   const workspaceRows: TransferWorkspace[] = (picker?.workspaceIds ?? []).map(
     (id) => workspaces.get(id) ?? { id, name: id, owner_user_id: "", members: [] },
   );
-  const contextRows = picker?.contexts ?? [];
+  // Only an explicit tick on a workspace with no other member deletes it.
+  const deleting = new Set(
+    workspaceRows
+      .filter((w) => w.members.length === 0 && deleteWorkspaces.has(w.id))
+      .map((w) => w.id),
+  );
+  // What is in a workspace deleted with the user goes with it: no successor.
+  const contextRows = (picker?.contexts ?? []).filter(
+    (c) => !deleting.has(c.workspace_id),
+  );
+  const ownerFixedRows = (picker?.ownerFixedContexts ?? []).filter(
+    (c) => !deleting.has(c.workspace_id),
+  );
 
   const contextChoice = (contextId: string, workspaceId: string) =>
     contextPicks[contextId] ??
     (handedOver.has(workspaceId) ? SAME_AS_WORKSPACE : undefined);
 
   const complete =
-    workspaceRows.every((w) => workspacePicks[w.id]) &&
+    workspaceRows.every((w) => workspacePicks[w.id] || deleting.has(w.id)) &&
     contextRows.every((c) => contextChoice(c.id, c.workspace_id) !== undefined);
 
   const roleLabel = (role: string) =>
@@ -178,7 +197,19 @@ export function UserDeleteDialog({
           (value === SAME_AS_WORKSPACE || (candidates.get(id)?.has(value) ?? false)),
       ),
     );
+    // A workspace someone joined meanwhile takes a successor again.
+    setDeleteWorkspaces(
+      (prev) => new Set([...prev].filter((id) => members.get(id)?.size === 0)),
+    );
   };
+
+  const setDeleting = (workspaceId: string, on: boolean) =>
+    setDeleteWorkspaces((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(workspaceId);
+      else next.delete(workspaceId);
+      return next;
+    });
 
   const send = async () => {
     setBusy(true);
@@ -189,7 +220,11 @@ export function UserDeleteDialog({
       } else {
         await deleteUser(user.id, {
           workspace_transfers: Object.fromEntries(
-            workspaceRows.map((w) => [w.id, workspacePicks[w.id]]),
+            workspaceRows.flatMap((w) =>
+              !deleting.has(w.id) && workspacePicks[w.id]
+                ? [[w.id, workspacePicks[w.id]]]
+                : [],
+            ),
           ),
           // Only explicit picks: "same as the workspace successor" is the
           // server's default for a context of a workspace handed over.
@@ -199,6 +234,7 @@ export function UserDeleteDialog({
               return value && value !== SAME_AS_WORKSPACE ? [[c.id, value]] : [];
             }),
           ),
+          ...(deleting.size > 0 ? { delete_workspaces: [...deleting] } : {}),
         });
       }
       toast({
@@ -291,9 +327,25 @@ export function UserDeleteDialog({
             >
               <p className="text-sm font-medium">{w.name}</p>
               {w.members.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  {t("deleteDialog.noMembers")}
-                </p>
+                <div className="space-y-1.5">
+                  <p className="text-xs text-muted-foreground">
+                    {t("deleteDialog.noMembers")}
+                  </p>
+                  <label
+                    htmlFor={IDS.deleteWorkspace(w.id)}
+                    className="flex cursor-pointer items-start gap-2 text-sm"
+                  >
+                    <Checkbox
+                      id={IDS.deleteWorkspace(w.id)}
+                      data-testid={IDS.deleteWorkspace(w.id)}
+                      className="mt-0.5"
+                      checked={deleting.has(w.id)}
+                      onCheckedChange={(checked) => setDeleting(w.id, checked === true)}
+                      disabled={busy}
+                    />
+                    {t("deleteDialog.deleteWithUser")}
+                  </label>
+                </div>
               ) : (
                 <Select
                   value={workspacePicks[w.id] ?? ""}
@@ -392,7 +444,7 @@ export function UserDeleteDialog({
         </section>
       )}
 
-      {picker && picker.ownerFixedContexts.length > 0 && (
+      {ownerFixedRows.length > 0 && (
         <section className="space-y-3">
           <div>
             <h3 className="text-sm font-semibold">{t("deleteDialog.ownerFixed")}</h3>
@@ -400,7 +452,7 @@ export function UserDeleteDialog({
               {t("deleteDialog.ownerFixedHint")}
             </p>
           </div>
-          {picker.ownerFixedContexts.map((c) => {
+          {ownerFixedRows.map((c) => {
             const successor = workspacePicks[c.workspace_id];
             return (
               <div

@@ -2694,7 +2694,7 @@
         "confirm": "Delete user",
         "deleting": "Deleting…",
         "pickTitle": "Choose successors for {name}",
-        "pickDescription": "This user still owns the resources below. Pick who takes each one over; the user is deleted when you submit.",
+        "pickDescription": "This user still owns the resources below. Pick who takes each one over, or delete a workspace nobody else is in with the user; the user is deleted when you submit.",
         "changed": "The user's resources changed while you were choosing. Check the list and submit again.",
         "workspaces": "Workspaces",
         "contexts": "Contexts",
@@ -2708,7 +2708,8 @@
         "sameAsWorkspace": "Same as the workspace successor",
         "workspaceSuccessor": "Successor for workspace {workspace}",
         "contextSuccessor": "Successor for context {context}",
-        "noMembers": "No other member can take this workspace over. Add a member first, or delete the workspace: a deleted workspace is removed with the user.",
+        "noMembers": "No other member can take this workspace over. Delete it with the user, or cancel and add a member first.",
+        "deleteWithUser": "Delete this workspace with the user. Everything in it is permanently deleted.",
         "noCandidates": "No member can take this context over. Give a member access to it first.",
         "submit": "Hand over and delete"
       },
