@@ -35,7 +35,7 @@ paths:
 - NEVER hardcode API keys, passwords, or tokens in source code
 - Use environment variables via `Settings` (pydantic-settings)
 - API keys: SHA256 hash for storage, never store plaintext
-- Encryption: Fernet (AES-128 CBC + HMAC) via `utils/encryption.py`
+- Encryption: Fernet (AES-128 CBC + HMAC) via `utils/encryption.py`, a key ring: `API_KEY_SECRET` encrypts, `API_KEY_SECRET_PREVIOUS` still decrypts (#2394). A new encrypted column goes into `ENCRYPTED_COLUMNS` of `cli/rekey_encrypted_secrets.py` (a test walks the models for `*_encrypted` / `totp_secret` / `encrypted_value`)
 
 ## CORS
 - NEVER use wildcard origins (`allow_origins=["*"]`) in production
