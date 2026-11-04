@@ -19,11 +19,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
+from config.plan_tiers import has_feature
 from models.auth import User, Workspace, WorkspaceInvitation, WorkspaceMember
 from services.email_service import EmailService, get_email_service
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import NotFoundException, QuotaExceededError, ValidationError
+from utils.exceptions import (
+    FeatureNotAvailableError,
+    NotFoundException,
+    QuotaExceededError,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -390,6 +396,9 @@ class InvitationService:
             ValidationError: If validation fails (expired, email mismatch, already member, etc.)
             NotFoundException: If the invitation, the workspace or the accepter's
                 ``users`` row is not found
+            FeatureNotAvailableError: If the workspace's plan no longer has
+                ``team_invitations`` (403, #2621); nothing is written and the
+                invitation stays pending
         """
         # Get invitation
         invitation = await self.get_invitation(token)
@@ -422,6 +431,12 @@ class InvitationService:
         # #2564: the workspace row first, as in add_member, held to the commit.
         # Raises NotFoundException for a missing / soft-deleted workspace.
         workspace = await lock_workspace_for_update(self.db, invitation.workspace_id)
+
+        # #2621: the plan gate of creating an invitation and of add_member. An
+        # invitation issued before a downgrade admits no one once the plan has
+        # no team invitations; refused before anything else is locked or written.
+        if not has_feature(workspace.plan_name, "team_invitations"):
+            raise FeatureNotAvailableError.for_feature(workspace.plan_name, "team_invitations")
 
         # #2601: the accepter's users row (its current workspace is set below)
         # right after the workspace row and before any row in it, as in
