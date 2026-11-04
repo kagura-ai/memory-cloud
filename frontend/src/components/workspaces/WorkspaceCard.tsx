@@ -11,7 +11,7 @@ import { PlanBadge } from '@/components/common/PlanBadge';
 import type { PlanTier } from '@/lib/utils/planLabel';
 import { useTranslations } from 'next-intl';
 import { Brain, Users } from 'lucide-react';
-import { WorkspaceRelationship } from './WorkspaceRelationship';
+import { WorkspaceMark, WorkspaceRelationship } from './WorkspaceRelationship';
 
 export interface WorkspaceInfo {
   id: string;
@@ -57,9 +57,7 @@ export function WorkspaceCard({
           ${isSelected ? 'bg-blue-50 dark:bg-blue-900' : ''}
         `}
       >
-        <div className="w-6 h-6 rounded bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-          {workspace.name.charAt(0).toUpperCase()}
-        </div>
+        <WorkspaceMark role={workspace.current_user_role} className="h-7 w-7" />
         <div className="min-w-0 flex-1">
           <div className="truncate font-medium" title={workspace.name}>{workspace.name}</div>
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
@@ -98,9 +96,7 @@ export function WorkspaceCard({
     >
       <div className="flex items-start justify-between">
         <div className="flex items-start gap-3">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white text-lg font-bold flex-shrink-0">
-            {workspace.name.charAt(0).toUpperCase()}
-          </div>
+          <WorkspaceMark role={workspace.current_user_role} className="h-10 w-10" />
           <div className="text-left min-w-0">
             <div className="flex items-center gap-2 mb-1">
               <h3 className="font-semibold text-slate-900 dark:text-white truncate">

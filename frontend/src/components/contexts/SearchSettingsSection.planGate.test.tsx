@@ -107,12 +107,12 @@ const COPY = {
   en: {
     title: "The M plan includes reranking",
     description: "Upgrade to the M plan to use reranking.",
-    action: "Upgrade to M",
+    action: "View plans",
   },
   ja: {
     title: "リランキング は M プランで利用できます",
     description: "リランキング を利用するには M プランにアップグレードしてください。",
-    action: "M にアップグレード",
+    action: "プランを見る",
   },
 } as const;
 

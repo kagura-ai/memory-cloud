@@ -1100,11 +1100,11 @@
     "failedToUpdateProfile": "Failed to update profile"
   },
   "workspace": {
-    "ownedGroup": "Your workspaces",
+    "ownedGroup": "Owned workspaces",
     "sharedGroup": "Shared workspaces",
     "currentWorkspaceCaption": "Current workspace",
-    "ownedBadge": "Owned by you",
-    "sharedBadge": "Shared with you",
+    "ownedBadge": "Owner",
+    "sharedBadge": "Shared",
     "loadingWorkspaces": "Loading workspaces…",
     "title": "Workspace",
     "settings": "Workspace Settings",
