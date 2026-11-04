@@ -35,6 +35,7 @@ from mcp_server.tools._helpers import (
     _lint_response_field,
     _log_tool_usage,
     _persistence_response_field,
+    _plan_headroom_field,
     _resolve_context,
     _resolve_context_id,
     _session_response_field,
@@ -57,6 +58,7 @@ from services.memory_service import (
     DuplicateCandidateError,
 )
 from services.permission_service import VIEWER_READ_ONLY_REASON
+from services.plan_headroom import MEMORIES, drop_quota_reading
 from utils.exceptions import (
     AuthorizationError,
     ContentSizeExceededError,
@@ -429,6 +431,8 @@ async def handle_remember_batch(
                     except Exception as exc:  # per item: the batch goes on
                         await db.rollback()
                         rolled_back = True
+                        # #2615: its quota check recorded a row that was rolled back.
+                        drop_quota_reading(MEMORIES)
                         results.append(_finish(i, item_error(exc)))
                     else:
                         results.append(
@@ -446,12 +450,15 @@ async def handle_remember_batch(
                 context_id,
                 workspace_id,
             )
+            headroom: dict[str, Any] = {}
             if any(r["status"] == "success" for r in results):
                 if rolled_back:
                     await db.refresh(context)  # expired by the rollback; one indexed read
                 await _touch_context_last_used(db, context)
                 await db.commit()
-            return _envelope(results, context_fields, **note)
+                # #2615: one notice set per call, from the last item's counts.
+                headroom = await _plan_headroom_field(db, context, workspace_id)
+            return _envelope(results, context_fields, **note, **headroom)
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()

@@ -32,6 +32,7 @@ from db.redis import (
     increment_counter,
     set_cache,
     set_co_activation,
+    set_if_absent,
 )
 from utils.exceptions import RedisError
 
@@ -289,6 +290,27 @@ class TestSetCache:
     async def test_set_error_raises_redis_error(self, boom_redis):
         with pytest.raises(RedisError, match="Failed to set cache"):
             await set_cache("k", "v")
+
+
+class TestSetIfAbsent:
+    """set_if_absent: SET NX EX — the first caller in the window claims the key (#2615)."""
+
+    async def test_first_call_claims_the_key_with_its_ttl(self, fake_redis):
+        key = _k("nx")
+        assert await set_if_absent(key, "1", ttl=3600) is True
+        assert await fake_redis.get(key) == "1"
+        assert 0 < await fake_redis.ttl(key) <= 3600
+
+    async def test_a_held_key_is_not_claimed_or_extended(self, fake_redis):
+        key = _k("nxheld")
+        await fake_redis.set(key, "first", ex=60)
+        assert await set_if_absent(key, "second", ttl=3600) is False
+        assert await fake_redis.get(key) == "first"
+        assert await fake_redis.ttl(key) <= 60
+
+    async def test_error_raises_redis_error(self, boom_redis):
+        with pytest.raises(RedisError, match="Failed to set cache"):
+            await set_if_absent("k", "1", ttl=10)
 
 
 class TestDeleteCache:

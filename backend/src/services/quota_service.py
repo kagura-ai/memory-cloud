@@ -12,7 +12,7 @@ Responsibilities:
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date
 from typing import Any
 from uuid import UUID
 
@@ -38,7 +38,13 @@ from models.auth import (
 )
 from services.effective_quota_service import EffectiveQuotaService
 from services.memory_counts import count_live_memories
-from utils.datetime import to_utc_iso, utcnow
+from services.plan_headroom import (
+    MEMORIES,
+    MEMORIES_PER_DAY,
+    QuotaReading,
+    record_quota_reading,
+)
+from utils.datetime import next_utc_midnight_iso, utcnow
 from utils.exceptions import FeatureNotAvailableError, QuotaExceededError, RedisError
 from utils.logger import get_logger
 
@@ -105,11 +111,6 @@ async def _refund(key: str, count: int, workspace_id: UUID) -> None:
 
 def _memories_per_day_key(workspace_id: UUID, today: date) -> str:
     return f"quota:workspace:{workspace_id}:memories:{today.isoformat()}"
-
-
-def _next_utc_midnight_iso(today: date) -> str:
-    """``resets_at`` for the daily memory quota: tomorrow 00:00Z as ISO-8601."""
-    return to_utc_iso(datetime.combine(today + timedelta(days=1), datetime.min.time(), UTC)) or ""
 
 
 def _context_cap_upgrade_tier(max_contexts: int) -> str | None:
@@ -188,6 +189,18 @@ class QuotaService:
         effective_quota_service = EffectiveQuotaService(self.db)
         effective_quotas = await effective_quota_service.get_effective_quotas(workspace_id)
         memory_limit = effective_quotas["memory_limit"]
+
+        # #2615: the count this write leaves (its own row included) for the
+        # plan headroom notice of an MCP write; a no-op on every other path.
+        record_quota_reading(
+            MEMORIES,
+            QuotaReading(
+                workspace_id=workspace_id,
+                used=current_count + 1 if current_count < memory_limit else current_count,
+                limit=memory_limit,
+                plan=workspace.plan_name,
+            ),
+        )
 
         # Check against effective limit
         if current_count >= memory_limit:
@@ -289,7 +302,7 @@ class QuotaService:
 
         limit = workspace.effective_memories_per_day
         today = utcnow().date()
-        resets_at = _next_utc_midnight_iso(today)
+        resets_at = next_utc_midnight_iso(today)
 
         def _refuse(used_today: int) -> tuple[bool, str | None]:
             error = (
@@ -347,6 +360,18 @@ class QuotaService:
             )
             return True, None
 
+        # #2615: the day's count after this reservation (or after its refund)
+        # for the plan headroom notice of an MCP write.
+        record_quota_reading(
+            MEMORIES_PER_DAY,
+            QuotaReading(
+                workspace_id=workspace_id,
+                used=new_total if new_total <= limit else new_total - count,
+                limit=limit,
+                plan=workspace.plan_name,
+                resets_at=resets_at,
+            ),
+        )
         if new_total > limit:
             # Release the reservation so the refused attempt does not consume
             # budget. Best-effort: if this fails the phantom reservation
@@ -1083,7 +1108,7 @@ class QuotaService:
                 "percentage": round(daily_percentage, 2),
                 "warning": daily_percentage >= 80,
                 "exceeded": daily_percentage >= 100,
-                "resets_at": _next_utc_midnight_iso(today),
+                "resets_at": next_utc_midnight_iso(today),
             },
             "features": {
                 "reranking": "reranking" in plan.features,

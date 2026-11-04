@@ -11,7 +11,17 @@ Python writes via ``utcnow()`` here). See ``.claude/rules/backend.md``
 for the full convention.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+
+
+def next_utc_midnight_iso(today: date) -> str:
+    """``resets_at`` of a daily counter keyed by the UTC day: tomorrow 00:00Z, ISO 8601.
+
+    ``today`` is passed in so a caller that also keys a counter by the day
+    reads the clock once (a midnight crossing cannot pair one day's count with
+    the next day's reset).
+    """
+    return to_utc_iso(datetime.combine(today + timedelta(days=1), datetime.min.time(), UTC)) or ""
 
 
 def to_utc_iso(dt: datetime | None) -> str | None:

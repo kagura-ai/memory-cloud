@@ -28,6 +28,7 @@ from mcp_server.tools._helpers import (
     _dumps,
     _error_response,
     _log_tool_usage,
+    _plan_headroom_field,
     _resolve_context_for_read,
     _resolve_context_id,
     execute_with_timeout,
@@ -138,6 +139,30 @@ def envelope_budget(max_chars: int, reply_format: str, context_fields: dict[str,
     return max_chars - json_chars(context_fields)
 
 
+# #2615: the plan headroom notice takes at most this share of bootstrap's budget.
+_HEADROOM_SHARE = 4
+
+
+def fit_headroom(headroom: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Hold the ``plan_headroom`` field to a quarter of ``max_chars``.
+
+    Past it (three entries against the 2,000 floor), ``help`` stays on the
+    most severe entry only (the first ``critical``, else the first); past it
+    still, that entry alone stays. The lanes keep the rest of the budget.
+    """
+    cap = max_chars // _HEADROOM_SHARE
+    if not headroom or json_chars(headroom) <= cap:
+        return headroom
+    notices = headroom["plan_headroom"]
+    lead = next((n for n in notices if n["level"] == "critical"), notices[0])
+    trimmed = {
+        "plan_headroom": [
+            n if n is lead else {k: v for k, v in n.items() if k != "help"} for n in notices
+        ]
+    }
+    return trimmed if json_chars(trimmed) <= cap else {"plan_headroom": [lead]}
+
+
 _FULL_TOO_SMALL_HELP = (
     'format="index" returns one short row per memory (an 80-character summary head, '
     "summary_cut when cut; pinned keeps its text) and no instructions; read a row "
@@ -149,7 +174,7 @@ async def handle_bootstrap(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Rehydrate an interactive session on one context in one call (#1851)."""
-    from db.base import get_db
+    from db.base import get_db, isolated_session
     from mcp_server.tools.context import _guardrails_field
     from services.session_bootstrap_service import SessionBootstrapService
 
@@ -179,6 +204,20 @@ async def handle_bootstrap(
             # Read before any lane runs: the guardrails read and the lanes roll
             # the session back when they fail, which expires this instance.
             context_fields = _context_response_fields(context)
+            # #2615: a session start always carries the notice (no throttle).
+            # Its reads run in a session of their own, so a failed one cannot
+            # abort the transaction the lanes read in; its room comes off the
+            # budget like the context fields'. That session is closed, never
+            # committed: a read the timeout cancelled invalidates its
+            # connection, and a commit there would raise past the helper.
+            async with isolated_session(db) as headroom_db:
+                headroom = await _plan_headroom_field(
+                    headroom_db, context, workspace_id, throttle=False
+                )
+            headroom = fit_headroom(headroom, max_chars)
+            budget = envelope_budget(max_chars, reply_format, context_fields)
+            if headroom:
+                budget -= json_chars(headroom)
             envelope = await execute_with_timeout(
                 SessionBootstrapService(db).build(
                     user_id=user_id,
@@ -186,7 +225,7 @@ async def handle_bootstrap(
                     context=context,
                     since=since,
                     include=include,
-                    max_chars=envelope_budget(max_chars, reply_format, context_fields),
+                    max_chars=budget,
                     guardrails_provider=partial(_guardrails_field, db, user_id, context),
                     format=reply_format,
                 ),
@@ -194,6 +233,7 @@ async def handle_bootstrap(
             )
             await _log_tool_usage(db, user_id, "bootstrap", start, 200, context_id, workspace_id)
             envelope.update(context_fields)
+            envelope.update(headroom)
             return [TextContent(type="text", text=_dumps(envelope))]
         except _ContextNotFoundError as e:
             await _log_tool_usage(db, user_id, "bootstrap", start, 404, context_id, workspace_id)

@@ -44,6 +44,8 @@ from mcp_server.tools._profiles import (
 # #2470 took explore out of core: 41,396, and the budget came down with it.
 # #2585 (update_memory's add_tags / remove_tags / details_patch, paid for by trimming
 # update_memory's text): 41,486 (14 chars spare).
+# #2615 (plan_headroom? in four Returns lines, paid for by trimming bootstrap,
+# remember_batch and remember): 41,485 (15 chars spare).
 CORE_CHAR_BUDGET = 41_500  # (#2470) 21 core tools
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]

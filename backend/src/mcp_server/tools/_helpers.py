@@ -351,6 +351,54 @@ def _context_cap_error_response(exc: Any) -> ToolErrorContent:
     )
 
 
+async def _plan_headroom_field(
+    db: "AsyncSession",
+    context: Any,
+    session_workspace_id: UUID | None,
+    *,
+    throttle: bool = True,
+) -> dict[str, Any]:
+    """The #2615 ``plan_headroom`` field of a write / bootstrap envelope.
+
+    The numbers are the ones the call's quota checks and the dispatcher's
+    rate limit recorded (``services.plan_headroom``, the collector
+    ``execute_tool_call`` opens); a dimension nothing recorded is read once.
+
+    Args:
+        db: The handler's session.
+        context: The resolved context; its workspace owns the memory caps.
+        session_workspace_id: The call's workspace (the MCP-call cap).
+        throttle: False for ``bootstrap``, which always carries the notice.
+
+    Returns:
+        ``{"plan_headroom": [...]}``, or ``{}`` when no dimension is at 80 %
+        — absent, never ``[]`` or ``null``. The notice is advisory: a failed
+        read, or one slower than ``READ_TIMEOUT_SECONDS``, is logged and
+        leaves the field out; it never fails the call.
+    """
+    from services.plan_headroom import (
+        READ_TIMEOUT_SECONDS,
+        current_plan_headroom_counts,
+        plan_headroom,
+    )
+
+    try:
+        notices = await asyncio.wait_for(
+            plan_headroom(
+                db,
+                workspace_id=context.workspace_id,
+                session_workspace_id=session_workspace_id,
+                counts=current_plan_headroom_counts(),
+                throttle=throttle,
+            ),
+            timeout=READ_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.warning("plan_headroom_failed", exc_info=True)
+        return {}
+    return {"plan_headroom": notices} if notices else {}
+
+
 def _context_response_fields(context: Any) -> dict[str, Any]:
     """Extract common context fields for tool responses.
 
