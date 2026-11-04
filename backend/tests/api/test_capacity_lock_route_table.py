@@ -188,6 +188,7 @@ ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/workspaces/{workspace_id}/members"): ALLOWED,
     ("PUT", "/api/v1/workspaces/{workspace_id}/members/{user_id}"): ALLOWED,
     ("DELETE", "/api/v1/workspaces/{workspace_id}/members/{user_id}"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}/members/{user_id}/context-access"): ALLOWED,
     ("PUT", "/api/v1/workspaces/{workspace_id}/members/{user_id}/context-access"): ALLOWED,
     ("GET", "/api/v1/workspaces/{workspace_id}/memory-timeline"): ALLOWED,
     ("GET", "/api/v1/workspaces/{workspace_id}/openai-key-status"): ALLOWED,

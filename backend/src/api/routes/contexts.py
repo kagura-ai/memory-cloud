@@ -38,7 +38,12 @@ from services.context_service import ContextService, TagSortMode
 from services.identity_link_service import linked_user_ids
 from services.plan_seats import writes_paused_context_ids
 from utils.datetime import to_utc_iso
-from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
+from utils.exceptions import (
+    ContextNotInAccessListError,
+    FeatureNotAvailableError,
+    NotFoundException,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1291,6 +1296,9 @@ class ContextMemberResponse(BaseModel):
     # effective role regardless of ContextMember.role). Mutations via /members
     # may succeed on the DB row but will not change effective access.
     is_workspace_admin: bool = False
+    # #2327: set on an add that also added the context to the member's
+    # workspace context access list (``extend_access_list``).
+    access_list_extended: bool = False
 
     class Config:
         from_attributes = True
@@ -1301,6 +1309,15 @@ class AddContextMemberRequest(BaseModel):
 
     user_id: str = Field(..., min_length=1)
     role: str = Field(..., pattern=r"^(owner|editor|viewer)$")
+    extend_access_list: bool = Field(
+        False,
+        description=(
+            "When the member's (or viewer's) workspace context access list does not "
+            "include this context, add the context to that list in the same step. "
+            "Without it such an add answers 409 (details.reason = "
+            "context_not_in_access_list). Workspace owner or admin only."
+        ),
+    )
 
 
 class UpdateContextMemberRoleRequest(BaseModel):
@@ -1502,11 +1519,18 @@ async def add_context_member(
     """Add a member to context.
 
     Requires owner access to context (or workspace admin/owner).
+
+    #2327: a member or viewer whose workspace context access list does not
+    include the context answers 409 (``details.reason`` =
+    ``context_not_in_access_list``) unless ``extend_access_list`` is sent, in
+    which case a workspace owner or admin adds the context to that list in the
+    same transaction (``access_list_extended`` in the response).
     """
     from sqlalchemy import func, select
 
     from models.auth import ContextMember
     from services.permission_service import PermissionService
+    from services.workspace_service import WorkspaceService
 
     user = await get_current_user(request)
     perm_service = PermissionService(db)
@@ -1552,6 +1576,30 @@ async def add_context_member(
             detail=f"User {body.user_id} is already a context member",
         )
 
+    # #2327: a member or viewer whose context access list does not reach this
+    # context gets nothing from a context member row (check_context_access
+    # refuses the context before the row is read) and the row stays hidden
+    # from the member list. Refused unless the caller asks to extend the list;
+    # the row is locked because an extend rewrites it.
+    target = await WorkspaceService(db).get_member(
+        context.workspace_id, body.user_id, with_lock=True, populate_existing=True
+    )
+    if target is None:  # is_workspace_member above saw the row; narrows the type
+        raise NotFoundException("Member")
+    access_list_extended = False
+    if target.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER) and not reaches_context(
+        target.role, target.allowed_context_ids, context_id
+    ):
+        if not body.extend_access_list:
+            raise ContextNotInAccessListError(user_id=body.user_id, context_id=context_id)
+        # The list is the workspace admin's (PUT …/context-access); a context
+        # owner below admin manages this context's members only.
+        await perm_service.check_workspace_admin(user["user_id"], context.workspace_id)
+        # Not reached, so the context is not on the list yet.
+        target.allowed_context_ids = [*(target.allowed_context_ids or []), context_id]
+        target.updated_at = func.now()
+        access_list_extended = True
+
     # Create membership
     member = ContextMember(
         context_id=context_id,
@@ -1565,6 +1613,14 @@ async def add_context_member(
     await db.commit()
     await db.refresh(member)
 
+    if access_list_extended:
+        logger.info(
+            "member_context_access_extended",
+            workspace_id=str(context.workspace_id),
+            user_id=body.user_id,
+            context_id=str(context_id),
+            actor_user_id=user["user_id"],
+        )
     logger.info(
         "context_member_added",
         context_id=str(context_id),
@@ -1577,6 +1633,7 @@ async def add_context_member(
         user_id=member.user_id,
         role=member.role,
         added_at=to_utc_iso(member.created_at),
+        access_list_extended=access_list_extended,
     )
 
 

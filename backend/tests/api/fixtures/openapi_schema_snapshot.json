@@ -183,6 +183,10 @@
       },
       "AddContextMemberRequest": {
         "properties": {
+          "extend_access_list": {
+            "default": false,
+            "type": "boolean"
+          },
           "role": {
             "pattern": "^(owner|editor|viewer)$",
             "type": "string"
@@ -2226,6 +2230,10 @@
       },
       "ContextMemberResponse": {
         "properties": {
+          "access_list_extended": {
+            "default": false,
+            "type": "boolean"
+          },
           "added_at": {
             "anyOf": [
               {
@@ -5539,6 +5547,86 @@
           "plaintext_key",
           "revoked_at",
           "visibility_expires_at"
+        ],
+        "type": "object"
+      },
+      "MemberContextAccessContext": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "is_own_private": {
+            "default": false,
+            "type": "boolean"
+          },
+          "is_private": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "is_private",
+          "name"
+        ],
+        "type": "object"
+      },
+      "MemberContextAccessResponse": {
+        "properties": {
+          "allowed_context_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contexts": {
+            "items": {
+              "$ref": "#/components/schemas/MemberContextAccessContext"
+            },
+            "type": "array"
+          },
+          "role": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "contexts",
+          "role",
+          "user_id"
         ],
         "type": "object"
       },
@@ -27746,6 +27834,66 @@
       }
     },
     "/api/v1/workspaces/{workspace_id}/members/{user_id}/context-access": {
+      "get": {
+        "operationId": "get_member_context_access_api_v1_workspaces__workspace_id__members__user_id__context_access_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberContextAccessResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "workspaces"
+        ]
+      },
       "put": {
         "operationId": "update_member_context_access_api_v1_workspaces__workspace_id__members__user_id__context_access_put",
         "parameters": [
