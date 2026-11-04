@@ -17,9 +17,7 @@ The one definition every deletion path reads:
   write targets, in one query (``identity_link_service.private_context_takeovers``,
   ``user_deletion_service.transfer_user_ownership``);
 * :func:`reown_connector_contexts` — account erasure hands the subject's to
-  the workspace's owner before it pseudonymizes ``contexts.created_by``; the
-  admin deletion, after its workspace transfers
-  (``user_deletion_service.transfer_user_ownership``).
+  the workspace's owner before it pseudonymizes ``contexts.created_by``.
 """
 
 from __future__ import annotations

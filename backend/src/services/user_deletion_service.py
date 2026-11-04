@@ -59,7 +59,6 @@ from services.billing_contract import ensure_no_billing_contract, workspaces_und
 from services.connector_contexts import (
     connector_write_target_ids,
     connector_write_targets_among,
-    reown_connector_contexts,
 )
 from services.connector_key_ownership import settle_departing_credentials
 from services.erasure_details import locked_ids
@@ -273,11 +272,22 @@ async def transfer_user_ownership(
     which also carries what the admin's successor picker shows.
     """
     successors = set(workspace_transfers.values()) | set(context_transfers.values())
+    # The owners the user's connector write targets go to (#2420) are locked
+    # with the successors: none can then be deleted or hand its workspace on
+    # (an ownership transfer takes FOR KEY SHARE on the owner's row) before
+    # this commits. Checked against the owners read below.
+    target_owners = (
+        select(Workspace.owner_user_id)
+        .join(Context, Context.workspace_id == Workspace.id)
+        .where(Context.created_by == user_id, Context.id.in_(connector_write_target_ids()))
+    )
     users = set(
         (
             await db.execute(
                 select(User.user_id)
-                .where(User.user_id.in_(successors | {user_id}))
+                .where(
+                    or_(User.user_id.in_(successors | {user_id}), User.user_id.in_(target_owners))
+                )
                 .order_by(User.user_id)
                 .with_for_update()
             )
@@ -338,11 +348,31 @@ async def transfer_user_ownership(
     if context_transfers.keys() & personal:
         raise HTTPException(409, PRIVATE_CONTEXT_NOT_TRANSFERABLE)
     contexts = [c for c in created if c.id not in taken and c.id not in personal]
-    # A connector's write target follows its workspace's owner (#2420): the
-    # apply step below hands it over, no selection taken.
+    # A connector's write target goes to its workspace's owner (#2420), no
+    # selection taken: the successor picked for a workspace the user owns
+    # (``None`` here), the current owner elsewhere. The apply step hands over
+    # exactly these, whatever happens to the connector meanwhile.
     fixed = await connector_write_targets_among(db, [c.id for c in contexts])
     if context_transfers.keys() & fixed:
         raise HTTPException(409, CONNECTOR_CONTEXT_FOLLOWS_OWNER)
+    owned = {w.id for w in workspaces}
+    fixed_contexts = [c for c in contexts if c.id in fixed]
+    owners = dict(
+        (
+            await db.execute(
+                select(Workspace.id, Workspace.owner_user_id).where(
+                    Workspace.id.in_({c.workspace_id for c in fixed_contexts} - owned)
+                )
+            )
+        ).all()
+    )
+    fixed_successors = {
+        c.id: None if c.workspace_id in owned else owners.get(c.workspace_id)
+        for c in fixed_contexts
+    }
+    if not set(owners.values()) <= users:
+        # An owner changed (or was deleted) before the lock above.
+        raise HTTPException(409, "Context ownership changed; retry deletion")
     context_ids = {c.id for c in contexts}
     # A workspace selection is the default for the contexts created there, so
     # one naming any workspace the user created in is well-formed, even when
@@ -363,10 +393,10 @@ async def transfer_user_ownership(
             await _transfer_required(
                 db,
                 user_id,
-                owned={w.id for w in workspaces},
                 missing_ws=missing_ws,
                 missing_ctx=missing_ctx,
-                fixed=[c for c in contexts if c.id in fixed],
+                fixed=fixed_contexts,
+                fixed_successors=fixed_successors,
             ),
         )
     members = {
@@ -418,12 +448,13 @@ async def transfer_user_ownership(
         context.created_by = (
             context_transfers.get(context.id) or workspace_transfers[context.workspace_id]
         )
+    # The owner the connector's key goes to in ``delete_user_rows``: locked
+    # above, so the same one.
+    for context in fixed_contexts:
+        context.created_by = (
+            fixed_successors[context.id] or workspace_transfers[context.workspace_id]
+        )
     await db.flush()
-    # With the workspaces transferred, every live workspace the write targets
-    # are in has its owner: the successor picked where the user owned it. The
-    # owner is read by the same UPDATE, as the connector key's re-own in
-    # ``delete_user_rows`` reads it (account erasure runs the same call).
-    await reown_connector_contexts(db, user_id)
     return changed
 
 
@@ -436,10 +467,10 @@ async def _transfer_required(
     db: AsyncSession,
     user_id: str,
     *,
-    owned: set[UUID],
     missing_ws: list[UUID],
     missing_ctx: list[Context],
     fixed: list[Context],
+    fixed_successors: dict[UUID, str | None],
 ) -> dict[str, Any]:
     """The 409 "Ownership transfer required" body (#2372, #2420).
 
@@ -470,7 +501,6 @@ async def _transfer_required(
             .order_by(Workspace.id)
         )
     ).all()
-    owners = {ws_id: owner for ws_id, _, owner in rows}
     members: dict[UUID, list[Any]] = {ws_id: [] for ws_id in ws_ids}
     for row in (
         await db.execute(
@@ -528,13 +558,7 @@ async def _transfer_required(
             for c in missing_ctx
         ],
         "owner_fixed_contexts": [
-            {
-                **context_entry(c),
-                "successor_user_id": None
-                if c.workspace_id in owned
-                else owners.get(c.workspace_id),
-            }
-            for c in fixed
+            {**context_entry(c), "successor_user_id": fixed_successors[c.id]} for c in fixed
         ],
     }
 

@@ -746,3 +746,97 @@ async def test_transfer_required_payload_describes_the_picker(connector_world, d
         owned_fixed: successor,
         their_fixed: other_owner,
     }
+
+
+@pytest.mark.asyncio
+async def test_the_write_targets_owner_stays_locked_until_the_deletion_commits(
+    connector_world, db_session
+):
+    """#2420 review: the owner a connector's write target goes to is locked
+    with the successors, so it can neither be deleted nor hand its workspace
+    on (an ownership transfer takes FOR KEY SHARE on the owner's row) before
+    the deletion commits: the context never lands on a gone account."""
+    import asyncio
+
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from services.user_deletion_service import delete_user_rows
+
+    world = connector_world
+    target = await world.user("departing")
+    owner = await world.user("owner")
+    workspace = await world.workspace(owner, **{target: "admin"})
+    ctx_id, _ = await _write_target(db_session, world, workspace, target)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    gap, resume = asyncio.Event(), asyncio.Event()
+
+    async def pause_cleanup(db, subject, **kwargs):
+        gap.set()
+        await asyncio.wait_for(resume.wait(), 15)
+        return await delete_user_rows(db, subject, **kwargs)
+
+    async def remove():
+        async with maker() as db:
+            await delete_user(target, {"user_id": "operator"}, db)
+
+    with patch("services.user_deletion_service.delete_user_rows", pause_cleanup):
+        deletion = asyncio.create_task(remove())
+        try:
+            await asyncio.wait_for(gap.wait(), 15)
+            async with maker() as other:
+                with pytest.raises(DBAPIError):
+                    await other.execute(
+                        select(User.user_id)
+                        .where(User.user_id == owner)
+                        .with_for_update(key_share=True, nowait=True)
+                    )
+                await other.rollback()
+        finally:
+            resume.set()
+            await asyncio.wait_for(deletion, 15)
+    db_session.expire_all()
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == owner
+
+
+@pytest.mark.asyncio
+async def test_a_write_target_validated_as_fixed_goes_to_the_owner_even_if_unbound_meanwhile(
+    connector_world, db_session
+):
+    """#2420 review: the owner gets the contexts the validation found to be
+    write targets, whatever happens to the connector before the apply step;
+    otherwise a private one nobody else wrote in would be left to the user
+    and deleted with it."""
+    from sqlalchemy import update
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from models.resource import WorkspaceConnector
+    from services.connector_contexts import connector_write_targets_among as real_among
+
+    world = connector_world
+    target = await world.user("departing")
+    owner = await world.user("owner")
+    workspace = await world.workspace(owner, **{target: "admin"})
+    ctx_id, connector_id = await _write_target(db_session, world, workspace, target)
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+
+    async def unbind_after_the_read(db, context_ids):
+        found = await real_among(db, context_ids)
+        async with maker() as other:
+            await other.execute(
+                update(WorkspaceConnector)
+                .where(WorkspaceConnector.id == connector_id)
+                .values(context_id=None)
+            )
+            await other.commit()
+        return found
+
+    with patch(
+        "services.user_deletion_service.connector_write_targets_among", unbind_after_the_read
+    ):
+        response = await delete_user(target, {"user_id": "operator"}, db_session)
+    assert response["deleted"]["contexts"] == 0
+    db_session.expire_all()
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == owner
