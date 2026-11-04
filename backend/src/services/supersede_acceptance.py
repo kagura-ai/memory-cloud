@@ -1,9 +1,12 @@
 """Whether the caller may accept a memory's supersede suggestion (#2427).
 
-One rule, three consumers: ``reference()`` and the PATCH reply report it as
-``supersede_candidate.acceptance`` so a client can disable an action the
-server would refuse, and ``update_memory(accept_supersede_candidate=true)``
-enforces it. The rule is the accept path's:
+One rule, four consumers: ``reference()``, the PATCH reply and, #2508, every
+``recall()`` row report it as ``supersede_candidate.acceptance`` so a client
+can disable an action the server would refuse, and
+``update_memory(accept_supersede_candidate=true)`` enforces it. A recall page
+is evaluated by :func:`evaluate_many` in a bounded number of queries; the
+single-memory :func:`evaluate` is that batch over one memory, so the page and
+the single read cannot drift. The rule is the accept path's:
 
 * write access to the context: a workspace role of ``member`` or higher and a
   writable context slot (#1943) — the part of the ``POST /graph/edges`` gate
@@ -30,18 +33,19 @@ to show the action is not a denied request.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import ACCESS_WRITE, WorkspaceRole
-from models.memory import Memory
+from models.memory import EDGE_ORIGIN_DECLARED, EDGE_TYPE_SUPERSEDES, Memory
 from models.schemas import SupersedeAcceptance
-from services.memory_ownership import is_private_context, own_memory_predicate
+from services.memory_ownership import is_private_context, own_memory_clause
 from utils.exceptions import AuthorizationError, FeatureNotAvailableError
 
 AcceptanceReason = Literal["not_writable", "not_owner", "newer_candidate", "edge_exists"]
@@ -76,28 +80,52 @@ async def pair_ownership(
 
     ``context_id`` is the carrier's: it decides whether linked accounts count
     (:func:`services.memory_ownership.own_memory_predicate`). The candidate is
-    same-context by construction (``_resolve_supersede_candidates``).
+    same-context by construction (``_resolve_supersede_candidates``). The
+    accept path's read; :func:`pair_ownerships` over one pair.
     """
-    own = await own_memory_predicate(db, context_id, user_id)
+    private = await is_private_context(db, context_id)
+    pairs = await pair_ownerships(
+        db, user_id=user_id, private=private, pairs={carrier_id: target_id}
+    )
+    return pairs[carrier_id]
+
+
+async def pair_ownerships(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    private: bool,
+    pairs: Mapping[UUID, UUID],
+) -> dict[UUID, PairOwnership]:
+    """:class:`PairOwnership` of each carrier → candidate pair, in one query.
+
+    The pairs are one context's: ``private`` is that context's
+    :func:`services.memory_ownership.is_private_context`, which decides
+    whether linked accounts count, so a page spanning contexts calls this
+    once per context (#2508).
+    """
+    own = own_memory_clause(user_id, private=private)
+    ids = {*pairs, *pairs.values()}
     rows = {
         row.id: row
         for row in (
             await db.execute(
-                select(Memory.id, Memory.created_at, own.label("own")).where(
-                    Memory.id.in_([carrier_id, target_id])
-                )
+                select(Memory.id, Memory.created_at, own.label("own")).where(Memory.id.in_(ids))
             )
         ).all()
     }
-    carrier = rows.get(carrier_id)
-    target = rows.get(target_id)
-    return PairOwnership(
-        carrier_own=bool(carrier is not None and carrier.own),
-        target_own=bool(target is not None and target.own),
-        carrier_created_at=carrier.created_at if carrier is not None else None,
-        target_created_at=target.created_at if target is not None else None,
-        target_exists=target is not None,
-    )
+    owned: dict[UUID, PairOwnership] = {}
+    for carrier_id, target_id in pairs.items():
+        carrier = rows.get(carrier_id)
+        target = rows.get(target_id)
+        owned[carrier_id] = PairOwnership(
+            carrier_own=bool(carrier is not None and carrier.own),
+            target_own=bool(target is not None and target.own),
+            carrier_created_at=carrier.created_at if carrier is not None else None,
+            target_created_at=target.created_at if target is not None else None,
+            target_exists=target is not None,
+        )
+    return owned
 
 
 def acceptance_reason(pair: PairOwnership) -> AcceptanceReason | None:
@@ -150,6 +178,13 @@ async def can_write_edges(
     return await agent_binding_would_permit(db, UUID(str(context_id)), ACCESS_WRITE)
 
 
+def _edge_owner_for(author_id: str, caller_id: str, *, private: bool) -> str | frozenset[str]:
+    """:func:`edge_owner` once the context's privacy is known (#2508)."""
+    if author_id == caller_id or not private:
+        return author_id
+    return frozenset({author_id, caller_id})
+
+
 async def edge_owner(
     db: AsyncSession, *, author_id: str, caller_id: str, context_id: UUID | str | None
 ) -> str | frozenset[str]:
@@ -170,46 +205,59 @@ async def edge_owner(
     return frozenset({author_id, caller_id})
 
 
-async def conflicting_declared_edge(
-    db: AsyncSession,
-    *,
-    owner: str | frozenset[str],
-    workspace_id: UUID,
-    context_id: UUID,
-    carrier_id: UUID,
-    target_id: UUID,
-) -> bool:
-    """Whether the accept would meet a different declared edge on the pair.
+class EdgeProbe(NamedTuple):
+    """One carrier's pair for :func:`conflicting_declared_edges`."""
+
+    owner: str | frozenset[str]
+    target_id: UUID
+    workspace_id: UUID
+    context_id: UUID
+
+
+def _conflicts_with_accept(row: Any) -> bool:
+    """A declared row with other values than the accept's: its 409 (#2518)."""
+    return row.origin == EDGE_ORIGIN_DECLARED and not (
+        row.edge_type == EDGE_TYPE_SUPERSEDES
+        and row.weight == ACCEPT_WEIGHT
+        and row.confidence == ACCEPT_CONFIDENCE
+    )
+
+
+async def conflicting_declared_edges(
+    db: AsyncSession, probes: Mapping[UUID, EdgeProbe]
+) -> set[UUID]:
+    """The carriers whose accept would meet a different declared edge.
 
     The lookup ``create_declared_edge`` makes before it writes, made for each
-    account in ``owner`` (:func:`edge_owner`): the carrier author's row and
-    the caller's row, the two accounts an accept writes under (#2549). Every
-    such row from the carrier to the target is read, not only the strongest
-    one a two-account ``get_edge`` returns. A declared row with other values
-    than the accept's (another type, weight or confidence) is a ``conflict``
-    there — refused with a 409, nothing written. An identical declared
-    ``supersedes`` row is ``unchanged`` and an automatic (hebbian/semantic)
-    row is overwritten, so neither refuses.
+    account in a probe's ``owner`` (:func:`edge_owner`): the carrier author's
+    row and the caller's row, the two accounts an accept writes under (#2549).
+    Every such row from the carrier to its target is read, not only the
+    strongest one a two-account ``get_edge`` returns. A declared row with
+    other values than the accept's (another type, weight or confidence) is a
+    ``conflict`` there — refused with a 409, nothing written. An identical
+    declared ``supersedes`` row is ``unchanged`` and an automatic
+    (hebbian/semantic) row is overwritten, so neither refuses.
+
+    One query for every pair (#2508), each held to its own workspace and
+    context; nothing is read for no pairs.
     """
-    from models.memory import EDGE_ORIGIN_DECLARED, EDGE_TYPE_SUPERSEDES
     from repositories.neural_edge import NeuralEdgeRepository
 
-    rows = await NeuralEdgeRepository(db).list_pair_edges(
-        owner,
-        carrier_id,
-        target_id,
-        workspace_id=str(workspace_id),
-        context_id=str(context_id),
-    )
-    return any(
-        row.origin == EDGE_ORIGIN_DECLARED
-        and not (
-            row.edge_type == EDGE_TYPE_SUPERSEDES
-            and row.weight == ACCEPT_WEIGHT
-            and row.confidence == ACCEPT_CONFIDENCE
-        )
+    if not probes:
+        return set()
+    keys = [
+        (account, carrier_id, probe.target_id, probe.workspace_id, probe.context_id)
+        for carrier_id, probe in probes.items()
+        for account in ((probe.owner,) if isinstance(probe.owner, str) else probe.owner)
+    ]
+    rows = await NeuralEdgeRepository(db).list_pairs_edges(keys)
+    return {
+        row.src_id
         for row in rows
-    )
+        if row.src_id in probes
+        and row.dst_id == probes[row.src_id].target_id
+        and _conflicts_with_accept(row)
+    }
 
 
 async def evaluate(
@@ -217,37 +265,84 @@ async def evaluate(
 ) -> SupersedeAcceptance:
     """The ``acceptance`` for ``memory``'s current candidate ``target_id``.
 
-    Reasons in the order the accept path refuses: ``not_writable`` >
-    ``not_owner`` > ``newer_candidate`` > ``edge_exists``. Each check after
-    the first runs only when the earlier ones pass. ``edge_exists`` reads the
-    carrier author's row and the caller's row, the two accounts an accept
-    writes under (#2549): a different declared edge kept by either refuses.
+    :func:`evaluate_many` over the one memory: the single read and a recall
+    page answer from the same code.
     """
-    if not await can_write_edges(
-        db,
-        user_id=user_id,
-        workspace_id=memory.workspace_id,
-        context_id=memory.context_id,
-    ):
-        return SupersedeAcceptance(allowed=False, reason="not_writable")
-    pair = await pair_ownership(
-        db,
-        user_id=user_id,
-        context_id=memory.context_id,
-        carrier_id=memory.id,
-        target_id=target_id,
+    acceptances = await evaluate_many(
+        db, user_id=user_id, memories={memory.id: memory}, targets={memory.id: target_id}
     )
-    reason: AcceptanceReason | None = acceptance_reason(pair)
+    return acceptances[memory.id]
+
+
+async def evaluate_many(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    memories: Mapping[UUID, Any],
+    targets: Mapping[UUID, UUID],
+) -> dict[UUID, SupersedeAcceptance]:
+    """The ``acceptance`` of each carrier's current candidate, keyed by carrier id.
+
+    ``targets`` maps a carrier id to its candidate's id; each carrier among
+    ``memories`` that has one gets an answer. Reasons in the order the accept
+    path refuses: ``not_writable`` > ``not_owner`` > ``newer_candidate`` >
+    ``edge_exists``; each step after the first reads only the carriers still
+    allowed, and costs the same for one row or a hundred (#2508):
+
+    1. write access (:func:`can_write_edges`) once per distinct (workspace,
+       context) of the carriers;
+    2. ownership and creation times once per distinct context, over all its
+       carriers and their candidates: linked accounts count only in a private
+       context, read once per context too. A recall page is one context in
+       practice, so this is one ownership query per page;
+    3. the declared-edge conflicts (:func:`conflicting_declared_edges`) in one
+       query for every remaining pair. ``edge_exists`` reads the carrier
+       author's row and the caller's row, the two accounts an accept writes
+       under (#2549): a different declared edge kept by either refuses.
+    """
+    carriers = {cid: memories[cid] for cid in targets if cid in memories}
+    reasons: dict[UUID, AcceptanceReason] = {}
+
+    writable: dict[tuple[Any, Any], bool] = {}
+    for carrier_id, memory in carriers.items():
+        scope = (memory.workspace_id, memory.context_id)
+        if scope not in writable:
+            writable[scope] = await can_write_edges(
+                db, user_id=user_id, workspace_id=scope[0], context_id=scope[1]
+            )
+        if not writable[scope]:
+            reasons[carrier_id] = "not_writable"
+
+    by_context: dict[Any, dict[UUID, UUID]] = {}
+    for carrier_id, memory in carriers.items():
+        if carrier_id not in reasons:
+            by_context.setdefault(memory.context_id, {})[carrier_id] = targets[carrier_id]
+    private: dict[Any, bool] = {}
+    for context_id, pairs in by_context.items():
+        private[context_id] = await is_private_context(db, context_id)
+        owned = await pair_ownerships(db, user_id=user_id, private=private[context_id], pairs=pairs)
+        for carrier_id, pair in owned.items():
+            if (reason := acceptance_reason(pair)) is not None:
+                reasons[carrier_id] = reason
+
     # Last, as the accept path meets it last: only a pair it would write.
-    if reason is None and await conflicting_declared_edge(
-        db,
-        owner=await edge_owner(
-            db, author_id=memory.user_id, caller_id=user_id, context_id=memory.context_id
-        ),
-        workspace_id=memory.workspace_id,
-        context_id=memory.context_id,
-        carrier_id=memory.id,
-        target_id=target_id,
-    ):
-        reason = "edge_exists"
-    return SupersedeAcceptance(allowed=reason is None, reason=reason)
+    probes = {
+        carrier_id: EdgeProbe(
+            owner=_edge_owner_for(memory.user_id, user_id, private=private[memory.context_id]),
+            target_id=targets[carrier_id],
+            workspace_id=memory.workspace_id,
+            context_id=memory.context_id,
+        )
+        for carrier_id, memory in carriers.items()
+        if carrier_id not in reasons
+    }
+    if probes:
+        for carrier_id in await conflicting_declared_edges(db, probes):
+            reasons[carrier_id] = "edge_exists"
+
+    return {
+        carrier_id: SupersedeAcceptance(
+            allowed=carrier_id not in reasons, reason=reasons.get(carrier_id)
+        )
+        for carrier_id in carriers
+    }

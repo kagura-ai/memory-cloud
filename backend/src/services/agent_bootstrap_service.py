@@ -675,6 +675,9 @@ class AgentBootstrapService:
             current_workspace_id=principal.workspace_id,
             context_workspace_id=context.workspace_id,
             selection_config=params.recall_evaluation,
+            # #2013: these rows leave supersede_candidate out, so its
+            # acceptance (#2508) is not evaluated.
+            supersede_acceptance=False,
         )
         # #2013: the recall tool's own projection, so a memory has one shape on
         # both paths — an empty annotation is absent, never null / []. Always

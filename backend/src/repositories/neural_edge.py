@@ -12,10 +12,11 @@ Key Features:
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import Select, and_, case, delete, desc, func, or_, select
+from sqlalchemy import Select, and_, case, delete, desc, func, or_, select, tuple_
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import CursorResult
@@ -603,6 +604,36 @@ class NeuralEdgeRepository:
             The pair's rows, empty when there is none
         """
         stmt = _pair_rows(user_id, src_id, dst_id, workspace_id, context_id)
+        result = await self.db.execute(stmt.order_by(*_STRONGEST_FIRST))
+        return list(result.scalars().all())
+
+    async def list_pairs_edges(
+        self, keys: Collection[tuple[str, UUID, UUID, UUID, UUID]]
+    ) -> list[NeuralMemoryEdge]:
+        """:meth:`list_pair_edges` for many pairs in one statement (#2508).
+
+        Each key is ``(user_id, src_id, dst_id, workspace_id, context_id)``:
+        one account's row for one pair, held to that pair's workspace and
+        context, so a page spanning contexts is still one query. An
+        identity-link set is one key per account. Strongest first.
+
+        Args:
+            keys: The (account, pair, scope) tuples to read
+
+        Returns:
+            Every row a key names, empty when there are no keys
+        """
+        if not keys:
+            return []
+        stmt = select(NeuralMemoryEdge).where(
+            tuple_(
+                NeuralMemoryEdge.user_id,
+                NeuralMemoryEdge.src_id,
+                NeuralMemoryEdge.dst_id,
+                NeuralMemoryEdge.workspace_id,
+                NeuralMemoryEdge.context_id,
+            ).in_(list(dict.fromkeys(keys)))
+        )
         result = await self.db.execute(stmt.order_by(*_STRONGEST_FIRST))
         return list(result.scalars().all())
 

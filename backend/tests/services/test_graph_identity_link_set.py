@@ -265,6 +265,37 @@ class TestParallelEdgesForOnePair:
         assert await repo.list_pair_edges(g["owners"], m1, m2, context_id=str(uuid4())) == []
 
     @pytest.mark.asyncio
+    async def test_list_pairs_edges_reads_each_keyed_row_in_one_statement(
+        self, db_session, parallel_graph
+    ):
+        """#2508: the batched read names one account's row per key, each held
+        to its own (workspace, context); strongest first."""
+        g = parallel_graph
+        m1, m2, m3 = g["m"]
+        ws, ctx = g["ws"], g["ctx"]
+        repo = NeuralEdgeRepository(db_session)
+
+        rows = await repo.list_pairs_edges(
+            [
+                (g["a"], m1, m2, ws, ctx),
+                (g["b"], m1, m2, ws, ctx),
+                (g["a"], m1, m3, ws, ctx),
+                (g["a"], m1, m3, ws, ctx),  # a repeated key reads the row once
+                (g["b"], m1, m3, ws, ctx),  # no such row
+                (g["a"], m2, m1, ws, ctx),  # the reverse direction
+            ]
+        )
+
+        assert [(r.user_id, r.dst_id, r.weight) for r in rows] == [
+            (g["b"], m2, pytest.approx(0.9)),
+            (g["a"], m2, pytest.approx(0.4)),
+            (g["a"], m3, pytest.approx(0.2)),
+        ]
+        assert await repo.list_pairs_edges([(g["a"], m1, m2, ws, uuid4())]) == []
+        assert await repo.list_pairs_edges([(g["a"], m1, m2, uuid4(), ctx)]) == []
+        assert await repo.list_pairs_edges([]) == []
+
+    @pytest.mark.asyncio
     async def test_get_edge_breaks_a_weight_tie_by_the_latest_update(
         self, db_session, parallel_graph
     ):

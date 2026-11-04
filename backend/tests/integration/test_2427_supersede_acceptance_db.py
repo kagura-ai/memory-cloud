@@ -3,7 +3,8 @@
 ``reference()`` and the PATCH reply tell the caller whether they may accept a
 memory's supersede suggestion, from the rule the accept path enforces: write
 access to the context, both memories the caller's own (#1803/#2313) and a
-candidate not written after its carrier (#2308). Recall does not evaluate it.
+candidate not written after its carrier (#2308). Since #2508 recall rows carry
+it too (the page-level cases are in ``test_2508_recall_supersede_acceptance_db.py``).
 
 The parity matrix pins ``allowed`` against the edge writer's own refusal
 (``ensure_supersedes_owned``) over the #2313 author matrix, and the viewer
@@ -555,7 +556,9 @@ async def test_ownership_wins_over_edge_exists(db_session):
 
 
 @pytest.mark.asyncio
-async def test_patch_reply_and_mcp_reference_carry_it_recall_does_not(db_session):
+async def test_patch_reply_mcp_reference_and_recall_rows_carry_it(db_session):
+    """The single reads and, #2508, the REST recall row and the MCP recall
+    tool's row: one rule, the same answer on each."""
     a, b, ws, ctx, _ = await _seed(db_session, private=False, link=False)
     carrier, _ = await _pair(db_session, ctx, b, a)
     service = MemoryService(db_session)
@@ -601,8 +604,36 @@ async def test_patch_reply_and_mcp_reference_carry_it_recall_does_not(db_session
     )
     row = next(r for r in recalled.results if r.memory_id == carrier)
     assert row.supersede_candidate is not None
-    assert row.supersede_candidate.acceptance is None
-    assert "acceptance" not in row.model_dump(exclude_none=True)["supersede_candidate"]
+    assert row.supersede_candidate.acceptance == referenced.acceptance
+    assert row.model_dump(mode="json", exclude_none=True)["supersede_candidate"]["acceptance"] == {
+        "allowed": False,
+        "reason": "not_owner",
+    }
+
+    from mcp_server.tools.memory import handle_recall
+
+    with (
+        patch("db.base.get_db", get_db),
+        patch("mcp_server.tools.memory._log_tool_usage", AsyncMock()),
+        patch(
+            "services.search_service.SearchService.hybrid_search",
+            AsyncMock(return_value=[{"id": str(carrier), "score": 0.9}]),
+        ),
+    ):
+        tool_reply = json.loads(
+            (
+                await handle_recall(
+                    {"query": "a summary", "context_id": str(ctx.id), "k": 5},
+                    b.user_id,
+                    ws.id,
+                )
+            )[0].text
+        )
+    tool_row = next(r for r in tool_reply["results"] if r["memory_id"] == str(carrier))
+    assert tool_row["supersede_candidate"]["acceptance"] == {
+        "allowed": False,
+        "reason": "not_owner",
+    }
 
 
 @pytest.mark.asyncio
@@ -615,7 +646,7 @@ async def test_a_failing_evaluation_keeps_the_suggestion_without_acceptance(db_s
     async def failing_query(db, **_kwargs):
         await db.execute(text("SELECT 1 / 0"))
 
-    with patch("services.supersede_acceptance.pair_ownership", failing_query):
+    with patch("services.supersede_acceptance.pair_ownerships", failing_query):
         response = await MemoryService(db_session).reference(carrier, a.user_id)
 
     assert response.supersede_candidate is not None

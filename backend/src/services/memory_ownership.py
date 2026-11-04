@@ -38,6 +38,15 @@ async def own_memory_predicate(
     context keeps the caller's own memories. Callers still constrain the query
     to the authorized workspace/context and live rows.
     """
-    if await is_private_context(db, context_id):
+    return own_memory_clause(user_id, private=await is_private_context(db, context_id))
+
+
+def own_memory_clause(user_id: str, *, private: bool) -> ColumnElement[bool]:
+    """:func:`own_memory_predicate` for a caller who has probed the context.
+
+    ``private`` is :func:`is_private_context`'s answer, so a page of memories
+    in one context reads it once (#2508).
+    """
+    if private:
         return owned_by(Memory.user_id, user_id)
     return Memory.user_id == user_id

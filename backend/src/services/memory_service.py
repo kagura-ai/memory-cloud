@@ -14,7 +14,7 @@ import hashlib
 import math
 import os
 import statistics
-from collections.abc import AsyncIterator, Collection, Mapping
+from collections.abc import AsyncIterator, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -4583,13 +4583,9 @@ class MemoryService:
 
         The single-memory read surfaces (``reference`` and the PATCH reply the
         dialog adopts) both report whether the caller may accept it, so the
-        client can disable an action the server would refuse. Recall does not
-        (one ownership query per row). Fail-open like the resolver: an error
-        here returns the suggestion without ``acceptance`` — the client then
-        behaves as before, and the accept call still enforces the rule.
+        client can disable an action the server would refuse; recall rows do
+        too since #2508 (:meth:`_recall_build_responses`).
         """
-        from services.supersede_acceptance import evaluate
-
         candidate = (
             await self._resolve_supersede_candidates(
                 {memory.id: memory}, user_id=user_id, operation=operation
@@ -4597,20 +4593,47 @@ class MemoryService:
         ).get(memory.id)
         if candidate is None:
             return None
+        await self._attach_supersede_acceptance([memory], {memory.id: candidate}, user_id)
+        return candidate
+
+    async def _attach_supersede_acceptance(
+        self,
+        memories: Iterable[Memory],
+        candidates: Mapping[UUID, SupersedeCandidate],
+        user_id: str,
+    ) -> None:
+        """Set ``acceptance`` on each of ``memories``' ``candidates`` (#2427, #2508).
+
+        One :func:`services.supersede_acceptance.evaluate_many` for all of
+        them: a recall page costs the same bounded number of queries as one
+        memory. Fail-open like the resolver: an error leaves every suggestion
+        without ``acceptance`` — the client then behaves as before, and the
+        accept call still enforces the rule.
+        """
+        from services.supersede_acceptance import evaluate_many
+
+        carriers = {m.id: m for m in memories if m.id in candidates}
+        if not carriers:
+            return
         try:
             # A savepoint, so a failed query here rolls back only itself and
             # the request's later statements (audit, commit) still run.
             async with self.db.begin_nested():
-                candidate.acceptance = await evaluate(
-                    self.db, user_id=user_id, memory=memory, target_id=candidate.memory_id
+                acceptances = await evaluate_many(
+                    self.db,
+                    user_id=user_id,
+                    memories=carriers,
+                    targets={cid: candidates[cid].memory_id for cid in carriers},
                 )
         except Exception as exc:
             logger.warning(
                 "supersede_acceptance_failed",
-                memory_id=str(memory.id),
+                memory_ids=[str(cid) for cid in carriers],
                 error=str(exc),
             )
-        return candidate
+            return
+        for carrier_id, acceptance in acceptances.items():
+            candidates[carrier_id].acceptance = acceptance
 
     async def _resolve_supersede_candidates(
         self,
@@ -5800,6 +5823,7 @@ class MemoryService:
         content_trusted_only: bool = False,
         resolved_candidates: Mapping[UUID, SupersedeCandidate | None] | None = None,
         filters: Mapping[str, Any] | None = None,
+        supersede_acceptance: bool = True,
     ) -> list[MemoryResponse]:
         """Build the page that ships: supersede hints and response rows.
 
@@ -5824,6 +5848,8 @@ class MemoryService:
                 this caller, so the search already matched it), which only
                 the trusted filter, liveness, binding and the context match
                 hold. ``None`` applies no row filter, as in the fold.
+            supersede_acceptance: #2508 set each shipped suggestion's
+                ``acceptance`` (:meth:`_attach_supersede_acceptance`).
 
         Returns:
             Up to ``request.k`` MemoryResponse rows, skipping hits with no
@@ -5856,6 +5882,12 @@ class MemoryService:
                     # raw search ids — so a denied row is never exempt.
                     pool_ids={m.id for m in memories.values()},
                 )
+            )
+        if supersede_acceptance and supersede_candidates:
+            # #2508: whether the caller may accept each shipped suggestion,
+            # batched for the page (a bounded number of queries, not per row).
+            await self._attach_supersede_acceptance(
+                page_memories.values(), supersede_candidates, user_id
             )
         fold_map = fold_map or {}
         # #2124: the first ``full`` eligible shipped rows carry their content (a
@@ -6728,6 +6760,7 @@ class MemoryService:
         capacity_gate: bool = True,
         content_trusted_only: bool = False,
         llm_selector: bool = False,
+        supersede_acceptance: bool = True,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -6769,6 +6802,11 @@ class MemoryService:
                 the MCP recall tool passes True; the stage then runs when the
                 context's flag is effective (see
                 :meth:`_recall_apply_llm_selector`).
+            supersede_acceptance: #2508 each row's ``supersede_candidate``
+                carries the caller's ``acceptance``. False where nobody can
+                act on it: a share-key read (the principal is the key's
+                creator, not the reader, and the key never writes), and
+                callers that drop the suggestion (bootstrap, forget(query=)).
 
         Returns:
             RecallResponse with search results
@@ -7078,6 +7116,7 @@ class MemoryService:
                 content_trusted_only=content_trusted_only,
                 resolved_candidates=resolved_candidates,
                 filters=effective_filters,
+                supersede_acceptance=supersede_acceptance,
             )
 
         # #2144: the opt-in LLM selector over the page that would ship — after
@@ -8165,6 +8204,7 @@ class MemoryService:
                     current_workspace_id or (UUID(workspace_id_str) if workspace_id_str else None)
                 ),
                 capacity_gate=False,
+                supersede_acceptance=False,  # #2508: only the ids are used
             )
 
             # #1515: the pin above says the router must never choose the
