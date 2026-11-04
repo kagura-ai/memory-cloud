@@ -1,8 +1,9 @@
 """Migration round-trip for f22_2639_context_members_uq (#2639).
 
 1. upgrade over a database that already holds duplicate ``context_members``
-   rows keeps one row per (context_id, user_id): the oldest by ``created_at``,
-   the lowest ``id`` on a tie. Rows of other pairs are untouched;
+   rows keeps one row per (context_id, user_id): the highest role (owner >
+   editor > viewer), then the oldest by ``created_at``, then the lowest
+   ``id``. Rows of other pairs are untouched;
 2. the unique constraint is then in place: a further insert of a kept pair
    raises an ``IntegrityError`` that names it;
 3. downgrade drops the constraint only (the deleted duplicates stay deleted).
@@ -62,15 +63,20 @@ def _seed(conn: Any, workspace_id: uuid.UUID, context_id: uuid.UUID) -> dict[str
             {"ctx": context_id, "u": user_id, "role": role, "at": created_at},
         ).scalar_one()
 
-    # "dup": the older row is inserted second (higher id), so the dedupe
-    # must order by created_at, not by id.
     return {
+        # "dup": the owner row is neither the oldest nor the first inserted;
+        # the role ranks first, so it is the one kept (oldest-wins would keep
+        # the viewer row and drop the context's owner).
         "dup_newer": _member("f22-dup", "owner", "2026-01-02 00:00:00"),
         "dup_older": _member("f22-dup", "viewer", "2026-01-01 00:00:00"),
         "dup_newest": _member("f22-dup", "editor", "2026-01-03 00:00:00"),
-        # "tie": same created_at, the lowest id is kept.
+        # "age": same role, the older row is inserted second (higher id), so
+        # the dedupe must order by created_at before id.
+        "age_newer": _member("f22-age", "editor", "2026-01-05 00:00:00"),
+        "age_older": _member("f22-age", "editor", "2026-01-04 00:00:00"),
+        # "tie": same role and created_at, the lowest id is kept.
         "tie_first": _member("f22-tie", "editor", "2026-02-01 00:00:00"),
-        "tie_second": _member("f22-tie", "owner", "2026-02-01 00:00:00"),
+        "tie_second": _member("f22-tie", "editor", "2026-02-01 00:00:00"),
         "single": _member("f22-single", "viewer", "2026-03-01 00:00:00"),
     }
 
@@ -113,17 +119,18 @@ def test_f22_dedupes_then_enforces_one_row_per_pair() -> None:
         with engine.connect() as conn:
             assert _constraint_exists(conn)
             assert _rows(conn, context_id) == {
-                "f22-dup": [ids["dup_older"]],
+                "f22-age": [ids["age_older"]],
+                "f22-dup": [ids["dup_newer"]],
                 "f22-tie": [ids["tie_first"]],
                 "f22-single": [ids["single"]],
             }
-            # The kept row is the oldest one, untouched (its role included).
+            # The kept row is the owner row, untouched (its role included).
             assert (
                 conn.execute(
                     text("SELECT role FROM context_members WHERE id = :i"),
-                    {"i": ids["dup_older"]},
+                    {"i": ids["dup_newer"]},
                 ).scalar_one()
-                == "viewer"
+                == "owner"
             )
 
         with pytest.raises(IntegrityError) as raised, engine.begin() as conn:
@@ -140,7 +147,7 @@ def test_f22_dedupes_then_enforces_one_row_per_pair() -> None:
         with engine.connect() as conn:
             assert not _constraint_exists(conn)
             # The downgrade drops the constraint only.
-            assert set(_rows(conn, context_id)) == {"f22-dup", "f22-tie", "f22-single"}
+            assert set(_rows(conn, context_id)) == {"f22-age", "f22-dup", "f22-tie", "f22-single"}
             assert (
                 conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
                 == PRIOR_HEAD

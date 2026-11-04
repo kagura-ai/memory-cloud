@@ -7,9 +7,11 @@ member list showed the user twice, and the role update and the member removal
 (``scalar_one_or_none``) failed on the pair. The same shape as e47 on
 ``workspace_members``.
 
-Step 1 deletes existing duplicates, keeping the OLDEST row per pair
-(``created_at``, then the lowest ``id``): the first add is the membership the
-later duplicates repeated. Step 2 adds the constraint.
+Step 1 deletes existing duplicates, keeping the highest-privilege, then
+oldest row per pair (role owner > editor > viewer, then ``created_at``, then
+the lowest ``id``): the same rule as e47 on ``workspace_members``, so the
+migration never removes a context's only owner row (the app never removes an
+owner row either). Step 2 adds the constraint.
 
 A plain ``ALTER TABLE ... ADD CONSTRAINT`` (no ``CREATE UNIQUE INDEX
 CONCURRENTLY``) is deliberate: ``context_members`` is a small membership
@@ -48,7 +50,14 @@ USING (
     SELECT id,
            ROW_NUMBER() OVER (
                PARTITION BY context_id, user_id
-               ORDER BY created_at NULLS LAST, id
+               ORDER BY
+                   CASE role
+                       WHEN 'owner' THEN 0
+                       WHEN 'editor' THEN 1
+                       ELSE 2
+                   END,
+                   created_at,
+                   id
            ) AS rn
     FROM context_members
 ) ranked
