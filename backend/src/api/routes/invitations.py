@@ -386,7 +386,7 @@ async def get_pending_invitations(
     Issue #179: In-app invitation notifications.
 
     Returns invitations where:
-    - User's email matches (case-insensitive) OR no email restriction
+    - The invitation is addressed to the user's email (case-insensitive)
     - Not yet accepted (accepted_at IS NULL)
     - Not expired
 
