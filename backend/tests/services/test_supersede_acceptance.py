@@ -2,8 +2,8 @@
 
 The pure half of ``services.supersede_acceptance``: the reason precedence over
 a pair's ownership and order, the edge_exists predicate and the order
-``evaluate`` reports in (#2518), the wire shape, and how ``evaluate_many``
-batches a recall page's probes (#2508). The database half (the ownership
+``evaluate`` reports in (#2518), the guardrail-carrier gate (#2614), the wire
+shape, and how ``evaluate_many`` batches a recall page's probes (#2508). The database half (the ownership
 query, the write probe, reference/PATCH/MCP, recall pages) is in
 ``tests/integration/test_2427_supersede_acceptance_db.py`` and
 ``tests/integration/test_2508_recall_supersede_acceptance_db.py``.
@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -26,10 +26,14 @@ from services.supersede_acceptance import (
     PairOwnership,
     acceptance_reason,
     conflicting_declared_edges,
-    edge_owner,
     evaluate,
     evaluate_many,
+    may_author_guardrail,
 )
+from utils.tool_trigger import carries_tool_trigger
+
+# A stored guardrail marking, as normalize_tool_trigger writes it.
+_GUARDRAIL = {"tool_trigger": {"tool": "Bash", "on": "pre", "match": "gh", "action": "inform"}}
 
 _OLD = datetime(2026, 1, 1, tzinfo=UTC)
 _NEW = _OLD + timedelta(hours=1)
@@ -132,7 +136,7 @@ class TestConflictingDeclaredEdges:
     _CTX = uuid4()
 
     async def _conflicts(
-        self, *rows: SimpleNamespace, owner: str | frozenset[str] = "owner"
+        self, *rows: SimpleNamespace, owner: str = "owner"
     ) -> tuple[bool, AsyncMock]:
         listed = AsyncMock(
             return_value=[
@@ -176,20 +180,17 @@ class TestConflictingDeclaredEdges:
         assert (await self._conflicts(_edge(**overrides)))[0] is True
 
     @pytest.mark.asyncio
-    async def test_every_row_of_the_owner_filter_is_read(self):
-        """#2549: the carrier author's row and the caller's row are each read."""
-        owners = frozenset({"author", "caller"})
-        _, listed = await self._conflicts(owner=owners)
-        assert sorted(listed.await_args.args[0]) == sorted(
-            (account, self._CARRIER, self._TARGET, self._WS, self._CTX) for account in owners
-        )
+    async def test_the_rows_are_read_under_the_one_owner(self):
+        """#2614: the account the accept writes under, and no other."""
+        _, listed = await self._conflicts(owner="author")
+        assert listed.await_args.args[0] == [
+            ("author", self._CARRIER, self._TARGET, self._WS, self._CTX)
+        ]
 
     @pytest.mark.asyncio
-    async def test_a_conflict_behind_a_clean_stronger_row_is_seen(self):
-        """#2549: the strongest parallel row is the accept's own edge, the
-        caller's weaker row differs — the web dialog's click still meets it."""
+    async def test_any_conflicting_row_refuses_not_only_the_first(self):
         clean = _edge()
-        weaker = _edge(edge_type="related_to", weight=0.5, user_id="caller")
+        weaker = _edge(edge_type="related_to", weight=0.5)
         assert (await self._conflicts(clean, weaker))[0] is True
 
     @pytest.mark.asyncio
@@ -232,41 +233,98 @@ class TestConflictingDeclaredEdges:
 
 
 class TestEdgeOwner:
-    """#2549: whose declared edges on the pair the probe reads — the carrier
-    author's row and the caller's row, the two accounts an accept writes under."""
-
-    async def _owner(
-        self, *, private: bool, caller_id: str = "caller"
-    ) -> tuple[str | frozenset[str], AsyncMock]:
-        probe_private = AsyncMock(return_value=private)
-        with patch("services.supersede_acceptance.is_private_context", probe_private):
-            owner = await edge_owner(
-                MagicMock(), author_id="author", caller_id=caller_id, context_id=uuid4()
-            )
-        return owner, probe_private
-
-    @pytest.mark.asyncio
-    async def test_a_linked_caller_in_a_private_context_reads_both_rows(self):
-        owner, _ = await self._owner(private=True)
-        assert owner == frozenset({"author", "caller"})
+    """#2614 (the #2549 owner question): the probe reads the carrier author's
+    row alone. Both transports write the accept under that author since #2600,
+    so a row kept by the caller, linked or not, is never one the accept meets."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("private", [True, False], ids=["private", "shared"])
-    async def test_the_author_as_caller_reads_the_author_alone(self, private):
-        owner, probe_private = await self._owner(private=private, caller_id="author")
-        assert owner == "author"
-        assert probe_private.await_count == 0
+    @pytest.mark.parametrize("caller_id", ["author", "linked_caller"])
+    async def test_the_edge_is_read_under_the_carrier_author_alone(self, caller_id, private):
+        memory = _carrier(user_id="author")
+        probes = _Probes(private=private)
+
+        await probes.run({memory.id: memory}, {memory.id: uuid4()}, user_id=caller_id)
+
+        assert probes.edges.await_args.args[1][memory.id].owner == "author"
+
+
+class TestMayAuthorGuardrail:
+    """#2614: the probe twin of ``MemoryService._require_guardrail_author``."""
+
+    async def _probe(
+        self, *, agent: bool, can_write: bool, context_id: Any = "ctx"
+    ) -> tuple[bool, AsyncMock]:
+        if context_id == "ctx":
+            context_id = uuid4()
+        write = AsyncMock(return_value=can_write)
+        scope = SimpleNamespace(agent_id=uuid4()) if agent else None
+        with (
+            patch("auth.agent_scope.get_agent_scope", return_value=scope),
+            patch("services.permission_service.PermissionService.can_write_context", write),
+        ):
+            allowed = await may_author_guardrail(MagicMock(), user_id="u", context_id=context_id)
+        return allowed, write
 
     @pytest.mark.asyncio
-    async def test_a_shared_context_reads_the_author_alone(self):
-        owner, _ = await self._owner(private=False)
-        assert owner == "author"
+    @pytest.mark.parametrize("can_write", [True, False], ids=["editor", "below_editor"])
+    async def test_a_user_credential_is_decided_by_the_context_write_probe(self, can_write):
+        context_id = uuid4()
+        allowed, write = await self._probe(agent=False, can_write=can_write, context_id=context_id)
+        assert allowed is can_write
+        assert write.await_args.args == ("u", context_id)
+
+    @pytest.mark.asyncio
+    async def test_a_string_context_id_is_probed_as_its_uuid(self):
+        context_id = uuid4()
+        _, write = await self._probe(agent=False, can_write=True, context_id=str(context_id))
+        assert write.await_args.args[1] == context_id
+        assert isinstance(write.await_args.args[1], UUID)
+
+    @pytest.mark.asyncio
+    async def test_an_agent_credential_never_authors_and_is_not_probed(self):
+        """Answered before the context check, whose binding filter would write
+        an agent's deny-audit row: a probe is not a denied request."""
+        allowed, write = await self._probe(agent=True, can_write=True)
+        assert allowed is False
+        assert write.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_no_context_is_refused(self):
+        allowed, write = await self._probe(agent=False, can_write=True, context_id=None)
+        assert allowed is False and write.await_count == 0
+
+
+class TestCarriesToolTrigger:
+    """The one raw-``details`` spelling of "tool guardrail" (``Memory.is_tool_triggered``)."""
+
+    @pytest.mark.parametrize(
+        ("details", "carries"),
+        [
+            (_GUARDRAIL, True),
+            (None, False),
+            ({}, False),
+            ({"note": "x"}, False),
+            ({"tool_trigger": None}, False),
+            ("tool_trigger", False),
+        ],
+        ids=["marked", "none", "empty", "plain", "null_marking", "not_a_dict"],
+    )
+    def test_only_a_stored_marking_counts(self, details, carries):
+        assert carries_tool_trigger(details) is carries
+
+    def test_memory_service_reads_the_same_predicate(self):
+        from services.memory_service import MemoryService
+
+        assert MemoryService._carries_tool_trigger(_GUARDRAIL) is True
+        assert MemoryService._carries_tool_trigger({"tool_trigger": None}) is False
 
 
 class _Probes:
     """The batch's probes as mocks, answering per carrier.
 
     ``writable`` maps a context id to the write probe's answer (default True),
+    ``may_author`` a context id to the guardrail gate's (default True),
     ``pairs`` a carrier id to its :class:`PairOwnership` (default own and
     older), ``edges`` the carriers whose pair meets a different declared edge.
     """
@@ -275,11 +333,13 @@ class _Probes:
         self,
         *,
         writable: dict[Any, bool] | None = None,
+        may_author: dict[Any, bool] | None = None,
         pairs: dict[Any, PairOwnership] | None = None,
         edges: set[Any] | None = None,
         private: bool = False,
     ) -> None:
         writable = writable or {}
+        may_author = may_author or {}
         pairs = pairs or {}
         edges = edges or set()
         self.can_write = AsyncMock(
@@ -290,57 +350,126 @@ class _Probes:
         )
         self.edges = AsyncMock(side_effect=lambda _db, probes: edges & set(probes))
         self.private = AsyncMock(return_value=private)
+        self.author = AsyncMock(
+            side_effect=lambda _db, **kw: may_author.get(kw["context_id"], True)
+        )
+
+    def patched(self):
+        """The four probes and the privacy read, patched in the module."""
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        for name, mock in (
+            ("can_write_edges", self.can_write),
+            ("may_author_guardrail", self.author),
+            ("pair_ownerships", self.pairs),
+            ("conflicting_declared_edges", self.edges),
+            ("is_private_context", self.private),
+        ):
+            stack.enter_context(patch(f"services.supersede_acceptance.{name}", mock))
+        return stack
 
     async def run(self, memories, targets, *, user_id: str = "caller"):
-        with (
-            patch("services.supersede_acceptance.can_write_edges", self.can_write),
-            patch("services.supersede_acceptance.pair_ownerships", self.pairs),
-            patch("services.supersede_acceptance.conflicting_declared_edges", self.edges),
-            patch("services.supersede_acceptance.is_private_context", self.private),
-        ):
+        with self.patched():
             return await evaluate_many(
                 MagicMock(), user_id=user_id, memories=memories, targets=targets
             )
 
 
-def _carrier(*, context_id=None, workspace_id=None, user_id: str = "caller") -> SimpleNamespace:
+def _carrier(
+    *, context_id=None, workspace_id=None, user_id: str = "caller", details: Any = None
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(),
         user_id=user_id,
         workspace_id=workspace_id or uuid4(),
         context_id=context_id or uuid4(),
+        details=details,
     )
 
 
 class TestEvaluatePrecedence:
     """``not_writable`` > ``not_owner`` > ``newer_candidate`` > ``edge_exists``;
-    a later check runs only when the earlier ones pass. ``evaluate`` is
+    a later check runs only when the earlier ones pass. A guardrail carrier's
+    author gate (#2614) is part of ``not_writable``. ``evaluate`` is
     ``evaluate_many`` over one memory (#2508)."""
 
-    async def _evaluate(self, *, writable: bool, pair: PairOwnership, edge: bool):
-        memory = _carrier(user_id="owner")
+    async def _evaluate(
+        self,
+        *,
+        writable: bool,
+        pair: PairOwnership,
+        edge: bool,
+        details: Any = None,
+        may_author: bool = True,
+    ):
+        memory = _carrier(user_id="owner", details=details)
         probes = _Probes(
             writable={memory.context_id: writable},
+            may_author={memory.context_id: may_author},
             pairs={memory.id: pair},
             edges={memory.id} if edge else set(),
             private=True,
         )
-        with (
-            patch("services.supersede_acceptance.can_write_edges", probes.can_write),
-            patch("services.supersede_acceptance.pair_ownerships", probes.pairs),
-            patch("services.supersede_acceptance.conflicting_declared_edges", probes.edges),
-            patch("services.supersede_acceptance.is_private_context", probes.private),
-        ):
+        with probes.patched():
             result = await evaluate(MagicMock(), user_id="caller", memory=memory, target_id=uuid4())
         return result, probes, memory
 
     @pytest.mark.asyncio
     async def test_not_writable_wins_and_reads_nothing_else(self):
         result, probes, _ = await self._evaluate(
-            writable=False, pair=_pair(carrier_own=False), edge=True
+            writable=False, pair=_pair(carrier_own=False), edge=True, details=_GUARDRAIL
         )
         assert result.reason == "not_writable"
         assert probes.pairs.await_count == 0 and probes.edges.await_count == 0
+        assert probes.author.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_guardrail_carrier_below_editor_is_not_writable_before_the_pair(self):
+        """#2614: the gate both accept transports run before the accept."""
+        result, probes, memory = await self._evaluate(
+            writable=True,
+            pair=_pair(carrier_own=False),
+            edge=True,
+            details=_GUARDRAIL,
+            may_author=False,
+        )
+        assert result.model_dump(exclude_none=True) == {"allowed": False, "reason": "not_writable"}
+        assert probes.pairs.await_count == 0 and probes.edges.await_count == 0
+        assert probes.author.await_args.kwargs == {
+            "user_id": "caller",
+            "context_id": memory.context_id,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("pair", "edge", "expected"),
+        [
+            (_pair(), False, {"allowed": True}),
+            (_pair(target_own=False), True, {"allowed": False, "reason": "not_owner"}),
+            (_pair(), True, {"allowed": False, "reason": "edge_exists"}),
+        ],
+        ids=["allowed", "not_owner", "edge_exists"],
+    )
+    async def test_a_guardrail_author_goes_on_to_the_pair(self, pair, edge, expected):
+        result, probes, _ = await self._evaluate(
+            writable=True, pair=pair, edge=edge, details=_GUARDRAIL, may_author=True
+        )
+        assert result.model_dump(exclude_none=True) == expected
+        assert probes.author.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "details",
+        [None, {"note": "x"}, {"tool_trigger": None}],
+        ids=["none", "plain", "null_marking"],
+    )
+    async def test_a_plain_carrier_is_not_probed_for_the_guardrail_gate(self, details):
+        result, probes, _ = await self._evaluate(
+            writable=True, pair=_pair(), edge=False, details=details, may_author=False
+        )
+        assert result.model_dump(exclude_none=True) == {"allowed": True}
+        assert probes.author.await_count == 0
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -357,11 +486,11 @@ class TestEvaluatePrecedence:
 
     @pytest.mark.asyncio
     async def test_edge_exists_when_everything_else_passes(self):
-        """#2549: the edge is looked up under the carrier author and the caller."""
+        """#2614: the edge is looked up under the carrier's author alone."""
         result, probes, memory = await self._evaluate(writable=True, pair=_pair(), edge=True)
         assert result.model_dump(exclude_none=True) == {"allowed": False, "reason": "edge_exists"}
         probe = probes.edges.await_args.args[1][memory.id]
-        assert probe.owner == frozenset({"owner", "caller"})
+        assert probe.owner == "owner"
         assert (probe.workspace_id, probe.context_id) == (memory.workspace_id, memory.context_id)
 
     @pytest.mark.asyncio
@@ -496,24 +625,48 @@ class TestEvaluateManyPrecedence:
         assert probes.can_write.await_count == 0 and probes.edges.await_count == 0
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("private", "author", "owner"),
-        [
-            (True, "author", frozenset({"author", "caller"})),
-            (False, "author", "author"),
-            (True, "caller", "caller"),
-        ],
-        ids=["linked_private", "shared", "own"],
-    )
-    async def test_the_edge_owner_follows_the_contexts_privacy(self, private, author, owner):
-        """#2549: the author's row and a linked caller's row in a private
-        context, the author's elsewhere; privacy is read once per context."""
+    @pytest.mark.parametrize("private", [True, False], ids=["private", "shared"])
+    async def test_privacy_is_read_once_per_context_for_ownership(self, private):
+        """Linked accounts count as the caller's own only in a private context."""
         ctx = uuid4()
-        page = [_carrier(context_id=ctx, user_id=author) for _ in range(3)]
+        page = [_carrier(context_id=ctx, user_id="author") for _ in range(3)]
         probes = _Probes(private=private)
 
         await probes.run({m.id: m for m in page}, {m.id: uuid4() for m in page})
 
-        assert {p.owner for p in probes.edges.await_args.args[1].values()} == {owner}
         assert probes.private.await_count == 1
         assert probes.pairs.await_args.kwargs["private"] is private
+        assert {p.owner for p in probes.edges.await_args.args[1].values()} == {"author"}
+
+    @pytest.mark.asyncio
+    async def test_the_guardrail_gate_is_one_probe_per_context_for_its_carriers_only(self):
+        """#2614: a guardrail carrier below EDITOR is ``not_writable``; a plain
+        carrier beside it is not held to the gate."""
+        ws, ctx = uuid4(), uuid4()
+        guarded = [_carrier(workspace_id=ws, context_id=ctx, details=_GUARDRAIL) for _ in range(3)]
+        plain = _carrier(workspace_id=ws, context_id=ctx)
+        memories = {m.id: m for m in (*guarded, plain)}
+        probes = _Probes(may_author={ctx: False})
+
+        result = await probes.run(memories, {m: uuid4() for m in memories})
+
+        assert {cid: a.model_dump(exclude_none=True) for cid, a in result.items()} == {
+            **{m.id: {"allowed": False, "reason": "not_writable"} for m in guarded},
+            plain.id: {"allowed": True},
+        }
+        assert probes.author.await_count == 1
+        assert probes.pairs.await_args.kwargs["pairs"].keys() == {plain.id}
+
+    @pytest.mark.asyncio
+    async def test_no_guardrail_probe_without_a_writable_guardrail_carrier(self):
+        ws, closed, open_ = uuid4(), uuid4(), uuid4()
+        unwritable = _carrier(workspace_id=ws, context_id=closed, details=_GUARDRAIL)
+        plain = _carrier(workspace_id=ws, context_id=open_)
+        probes = _Probes(writable={closed: False})
+
+        await probes.run(
+            {unwritable.id: unwritable, plain.id: plain},
+            {unwritable.id: uuid4(), plain.id: uuid4()},
+        )
+
+        assert probes.author.await_count == 0

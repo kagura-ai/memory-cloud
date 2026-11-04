@@ -12,7 +12,11 @@ case against ``POST /graph/edges``. #2518 adds the agent binding (a read-only
 one is ``not_writable``, as the accept path's 404 says) and ``edge_exists``
 (a different declared edge on the pair, the accept path's 409). #2600 adds the
 web dialog's accept, ``PATCH /memory/{id}`` with ``accept_supersede_candidate``,
-to the matrix: the same accept path, so the same answers.
+to the matrix: the same accept path, so the same answers. #2614 adds the
+guardrail gate both transports run first (a carrier of ``details.tool_trigger``
+needs context EDITOR or above and a user credential, ``not_writable``
+otherwise) and reads ``edge_exists`` under the carrier's author alone, the
+account both transports write the accept under.
 """
 
 from __future__ import annotations
@@ -30,7 +34,15 @@ from api.routes.graph import CreateEdgeRequest, create_graph_edge
 from api.routes.memory import patch_memory as patch_route
 from auth.agent_scope import AgentScope, set_agent_scope
 from models.agent import Agent, AgentContextBinding
-from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
+from models.auth import (
+    Context,
+    ContextMember,
+    ContextRole,
+    User,
+    Workspace,
+    WorkspaceMember,
+    WorkspaceRole,
+)
 from models.memory import Memory
 from models.schemas import PatchMemoryRequest, RecallRequest
 from services.edge_service import create_declared_edge, ensure_supersedes_owned
@@ -42,6 +54,7 @@ from services.supersede_dismissal import build_tombstone
 from tests.integration.test_2308_accept_supersede_candidate_db import (
     _accept_as,
     _candidate,
+    _edges,
     _pair,
     _row,
     _store,
@@ -260,18 +273,28 @@ async def test_allowed_iff_the_edge_writer_accepts_the_pair(db_session, authors)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "authors",
-    ["own", "foreign_source", "foreign_target", "foreign_both", "linked_private", "linked_shared"],
+    [
+        "own",
+        "foreign_source",
+        "foreign_target",
+        "foreign_both",
+        "linked_private",
+        "linked_shared",
+        "linked_private_callers_edge",
+    ],
 )
 async def test_allowed_iff_the_web_accept_goes_through(db_session, authors):
     """#2600: the same author matrix through ``PATCH /memory/{id}``: ``allowed``
-    ⇔ a 200 with the edge under the carrier's author; a refusal is the 422."""
-    from tests.integration.test_2308_accept_supersede_candidate_db import _edges
-
-    private = authors == "linked_private"
-    a, b, _, ctx, _ = await _seed(db_session, private=private, link=authors.startswith("linked"))
-    source_author = a if authors in {"foreign_source", "foreign_both", "linked_private"} else b
+    ⇔ a 200 with the edge under the carrier's author; a refusal is the 422.
+    #2614: a different declared edge the linked caller keeps on the pair is
+    not one that accept meets."""
+    private = authors.startswith("linked_private")
+    a, b, ws, ctx, _ = await _seed(db_session, private=private, link=authors.startswith("linked"))
+    source_author = a if authors in {"foreign_source", "foreign_both"} or private else b
     target_author = b if authors in {"own", "foreign_source"} else a
     src, dst = await _pair(db_session, ctx, source_author, target_author)
+    if authors == "linked_private_callers_edge":
+        await _declare(db_session, b, ws, ctx, src, dst, **_OTHER)
 
     acceptance = await _acceptance(db_session, b, src)
     try:
@@ -284,8 +307,12 @@ async def test_allowed_iff_the_web_accept_goes_through(db_session, authors):
         accepted = False
 
     assert acceptance.allowed is accepted
-    owners = [e.user_id for e in await _edges(db_session, src, dst)]
+    edges = await _edges(db_session, src, dst)
+    owners = [e.user_id for e in edges if e.edge_type == "supersedes"]
     assert owners == ([source_author.user_id] if accepted else [])
+    if authors == "linked_private_callers_edge":
+        assert accepted
+        assert [e.user_id for e in edges if e.edge_type == "related_to"] == [b.user_id]
 
 
 async def _bind(db, owner: User, ws: Workspace, ctx: Context, *, mode: str, write_policy: str):
@@ -442,16 +469,18 @@ _OTHER = {"edge_type": "related_to", "weight": 0.5, "confidence": 1.0}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("behind", [False, True], ids=["alone", "behind_the_authors_clean_row"])
-async def test_the_linked_callers_own_edge_is_edge_exists_in_a_private_context(db_session, behind):
-    """#2549: the carrier is admin's, the caller oauth (linked). oauth's own
-    different declared edge on the pair is the one the web dialog's write (under
-    the caller) meets: reported before the click, not only as its 409. Behind
-    admin's own accept-valued row too, which a single strongest-row read
-    returns in its place."""
+@pytest.mark.parametrize("transport", sorted(_ACCEPTS))
+@pytest.mark.parametrize("beside", [False, True], ids=["alone", "beside_the_authors_clean_row"])
+async def test_a_linked_callers_own_edge_does_not_refuse_the_accept(db_session, beside, transport):
+    """#2614 (the #2549 owner question): the carrier is admin's, the caller
+    oauth (linked). Both transports write the accept under admin since #2600,
+    so oauth's own different declared edge on the pair is not one the accept
+    meets: ``allowed``, and the accept goes through and leaves it. Beside
+    admin's own accept-valued row too (the accept is then ``unchanged``).
+    ``POST /graph/edges`` writes under the caller and still meets it (409)."""
     admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
     carrier, target = await _pair(db_session, ctx, admin, admin)
-    if behind:
+    if beside:
         await _declare(
             db_session,
             admin,
@@ -469,7 +498,14 @@ async def test_the_linked_callers_own_edge_is_edge_exists_in_a_private_context(d
 
     acceptance = await _acceptance(db_session, oauth, carrier)
 
-    assert acceptance.model_dump(exclude_none=True) == {"allowed": False, "reason": "edge_exists"}
+    assert acceptance.model_dump(exclude_none=True) == {"allowed": True}
+    with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
+        await _ACCEPTS[transport](db_session, oauth, ctx, carrier)
+    await db_session.commit()
+    edges = {(e.user_id, e.edge_type) for e in await _edges(db_session, carrier, target)}
+    assert edges == {(admin.user_id, "supersedes"), (oauth.user_id, "related_to")}
+    assert (await _row(db_session, carrier)).supersede_candidate is None
+    # The generic edge writer keeps an edge under the caller and meets it.
     with pytest.raises(ConflictError):
         await _post_supersedes(db_session, oauth, ctx, carrier, target)
 
@@ -478,7 +514,8 @@ async def test_the_linked_callers_own_edge_is_edge_exists_in_a_private_context(d
 @pytest.mark.parametrize("transport", sorted(_ACCEPTS))
 async def test_the_authors_edge_is_edge_exists_for_a_linked_caller(db_session, transport):
     """#2549: admin's different declared edge is what the accept path (under
-    the carrier's author) meets when oauth accepts — from the web too (#2600)."""
+    the carrier's author) meets when oauth accepts — from the web too (#2600),
+    the one row the probe reads (#2614)."""
     admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
     carrier, target = await _pair(db_session, ctx, admin, admin)
     await _declare(db_session, admin, ws, ctx, carrier, target, **_OTHER)
@@ -514,11 +551,11 @@ async def test_a_shared_context_reads_only_the_authors_edge(db_session):
 async def test_another_linked_accounts_edge_is_allowed_in_a_private_context(
     db_session, caller, writer
 ):
-    """#2549: the probe reads the carrier author's row and the caller's row,
-    the two accounts an accept writes under. A different declared edge kept by
-    a third linked account is met by neither write: ``allowed``, and both the
-    accept (under the author; from MCP or, #2600, the web) and ``POST
-    /graph/edges`` (under the caller) go through."""
+    """#2549/#2614: the probe reads the carrier author's row, the account the
+    accept writes under. A different declared edge kept by another linked
+    account is met by neither write: ``allowed``, and both the accept (under
+    the author; from MCP or, #2600, the web) and ``POST /graph/edges`` (under
+    the caller, here not the holder) go through."""
     admin, oauth, ws, ctx, _ = await _seed(db_session, private=True, link=True)
     third = await _user(db_session, "github")
     await IdentityLinkService(db_session).link(admin.user_id, third.user_id)
@@ -654,3 +691,174 @@ async def test_a_failing_evaluation_keeps_the_suggestion_without_acceptance(db_s
     assert response.supersede_candidate.acceptance is None
     assert (await db_session.execute(text("SELECT 1"))).scalar_one() == 1
     await db_session.commit()
+
+
+# ------------------------------------------------- #2614 guardrail carriers
+
+# A stored guardrail marking, as normalize_tool_trigger writes it.
+_TOOL_TRIGGER = {"tool": "Bash", "on": "pre", "match": "gh pr merge", "action": "inform"}
+
+
+async def _mark_guardrail(db, memory_id) -> None:
+    await db.execute(
+        update(Memory)
+        .where(Memory.id == memory_id)
+        .values(details={"tool_trigger": dict(_TOOL_TRIGGER)})
+    )
+    await db.commit()
+
+
+async def _workspace_member(db, ws: Workspace, ctx: Context, *, role: ContextRole | None) -> User:
+    """A workspace member whose access list names ``ctx``, with a ContextMember
+    row of ``role`` there (none for ``None``)."""
+    member = await _user(db, "member")
+    db.add(
+        WorkspaceMember(
+            workspace_id=ws.id,
+            user_id=member.user_id,
+            role=WorkspaceRole.MEMBER,
+            allowed_context_ids=[ctx.id],
+        )
+    )
+    await db.flush()
+    if role is not None:
+        db.add(ContextMember(context_id=ctx.id, user_id=member.user_id, role=role))
+    await db.commit()
+    return member
+
+
+_CONTEXT_ROLES = {
+    "workspace_member": None,
+    "context_viewer": ContextRole.VIEWER,
+    "context_editor": ContextRole.EDITOR,
+}
+_PRIVATE = {"private_creator", "linked_admin", "linked_member"}
+
+
+async def _guardrail_scene(db, caller: str) -> tuple[Context, User, User]:
+    """``(context, author, accepter)`` for one row of the guardrail matrix."""
+    admin, oauth, ws, ctx, _ = await _seed(
+        db, private=caller in _PRIVATE, link=caller == "linked_admin"
+    )
+    if caller in _CONTEXT_ROLES:
+        member = await _workspace_member(db, ws, ctx, role=_CONTEXT_ROLES[caller])
+        return ctx, member, member
+    if caller == "workspace_admin":
+        return ctx, oauth, oauth
+    if caller == "private_creator":
+        return ctx, admin, admin
+    if caller == "linked_admin":
+        return ctx, admin, oauth
+    # linked_member: a plain workspace member linked to the context's creator.
+    linked = await _workspace_member(db, ws, ctx, role=None)
+    await IdentityLinkService(db).link(admin.user_id, linked.user_id)
+    await db.commit()
+    return ctx, admin, linked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", sorted(_ACCEPTS))
+@pytest.mark.parametrize(
+    ("caller", "allowed"),
+    [
+        ("workspace_member", False),
+        ("context_viewer", False),
+        ("context_editor", True),
+        ("workspace_admin", True),
+        ("private_creator", True),
+        ("linked_admin", True),
+        ("linked_member", True),
+    ],
+)
+async def test_a_guardrail_carrier_is_allowed_iff_its_accept_goes_through(
+    db_session, caller, allowed, transport
+):
+    """#2614: an accept on a memory carrying ``details.tool_trigger`` runs the
+    guardrail gate first (context EDITOR or above), from MCP and from the web
+    dialog alike. ``acceptance`` reports it as ``not_writable`` before the
+    click; the 403 stays the fallback and writes nothing. Shared context: a
+    workspace member needs a ContextMember editor row, a workspace admin none.
+    Private context: the creator, and an account linked to it checked as
+    itself (#1784), own it without a ContextMember row."""
+    ctx, author, accepter = await _guardrail_scene(db_session, caller)
+    carrier, target = await _pair(db_session, ctx, author, author)
+    await _mark_guardrail(db_session, carrier)
+
+    acceptance = await _acceptance(db_session, accepter, carrier)
+
+    assert acceptance.model_dump(exclude_none=True) == (
+        {"allowed": True} if allowed else {"allowed": False, "reason": "not_writable"}
+    )
+    with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
+        if allowed:
+            await _ACCEPTS[transport](db_session, accepter, ctx, carrier)
+            await db_session.commit()
+        else:
+            with pytest.raises(AuthorizationError):
+                await _ACCEPTS[transport](db_session, accepter, ctx, carrier)
+            await db_session.rollback()
+    supersedes = [
+        e.user_id for e in await _edges(db_session, carrier, target) if e.edge_type == "supersedes"
+    ]
+    assert supersedes == ([author.user_id] if allowed else [])
+    assert ((await _row(db_session, carrier)).supersede_candidate is None) is allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", sorted(_ACCEPTS))
+async def test_a_plain_carrier_needs_no_context_editor(db_session, transport):
+    """#2614: the gate is the guardrail's. The same workspace member, without a
+    ContextMember row, may accept on a plain memory, and the accept goes through."""
+    ctx, member, _ = await _guardrail_scene(db_session, "workspace_member")
+    carrier, target = await _pair(db_session, ctx, member, member)
+
+    acceptance = await _acceptance(db_session, member, carrier)
+
+    assert acceptance.model_dump(exclude_none=True) == {"allowed": True}
+    with patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()):
+        await _ACCEPTS[transport](db_session, member, ctx, carrier)
+    await db_session.commit()
+    assert [e.user_id for e in await _edges(db_session, carrier, target)] == [member.user_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", sorted(_ACCEPTS))
+async def test_an_agent_credential_is_not_writable_on_a_guardrail_carrier(db_session, transport):
+    """#2614: an agent credential never authors a guardrail, whatever its
+    binding grants: ``not_writable`` before the click, and the accept refuses
+    (``tool_trigger_requires_user_credential``, the 422) and writes nothing.
+    The probe writes no deny-audit row."""
+    a, _, ws, ctx, _ = await _seed(db_session, private=False, link=False)
+    carrier, target = await _pair(db_session, ctx, a, a)
+    await _mark_guardrail(db_session, carrier)
+    scope = await _bind(db_session, a, ws, ctx, mode="enforce", write_policy="direct")
+
+    emit = AsyncMock()
+    set_agent_scope(scope)
+    try:
+        with patch("services.memory_access_event_writer.emit_memory_access_event", emit):
+            acceptance = await _acceptance(db_session, a, carrier)
+        decisions = [call.kwargs.get("policy_decision") for call in emit.await_args_list]
+        assert not {"binding_denied", "would_deny", "rbac_denied"} & set(decisions), decisions
+        assert acceptance.model_dump(exclude_none=True) == {
+            "allowed": False,
+            "reason": "not_writable",
+        }
+
+        with (
+            patch("services.memory_service.update_memory_payload_in_qdrant", new=AsyncMock()),
+            pytest.raises((ValueError, HTTPException)) as refused,
+        ):
+            await _ACCEPTS[transport](db_session, a, ctx, carrier)
+        await db_session.rollback()
+    finally:
+        set_agent_scope(None)
+
+    if isinstance(refused.value, HTTPException):
+        assert refused.value.status_code == 422
+        message = str(refused.value.detail)
+    else:
+        message = str(refused.value)
+    assert "tool_trigger_requires_user_credential" in message
+    assert await _edges(db_session, carrier, target) == []
+    assert (await _row(db_session, carrier)).supersede_candidate is not None
