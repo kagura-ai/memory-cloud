@@ -292,6 +292,7 @@ async def test_owner_key_sets_the_list_and_is_audited(world: World) -> None:
     assert audit.user_id == w.owner
     assert audit.resource == f"workspace:{w.w}"
     assert audit.user_metadata["context_count"] == 1
+    assert audit.user_metadata["via"] == "api_key"
     assert audit.user_metadata["key_prefix"] == "kagura_test"
 
 
@@ -338,3 +339,125 @@ async def test_a_session_admin_sets_the_list(world: World) -> None:
     assert row is not None
     assert row.allowed_context_ids == []
     assert await _audit(w, "workspace_member_context_access_set", target) == []
+
+
+def _error_body(r: Any) -> dict[str, Any]:
+    """The error envelope without the per-request fields."""
+    return {k: v for k, v in r.json().items() if k not in ("request_id", "timestamp")}
+
+
+async def test_a_key_bound_to_another_workspace_gets_the_missing_workspace_404(
+    world: World,
+) -> None:
+    w = world
+    before = (await _member_row(w, w.member)).allowed_context_ids  # type: ignore[union-attr]
+    audits = len(await _audit(w, "workspace_member_context_access_set", w.member))
+    async with _rest(w, _owner_key(w.owner, w.x)) as c:
+        r = await c.put(
+            f"/api/v1/workspaces/{w.w}/members/{w.member}/context-access",
+            json={"allowed_context_ids": []},
+        )
+        missing = await c.put(
+            f"/api/v1/workspaces/{uuid4()}/members/{w.member}/context-access",
+            json={"allowed_context_ids": []},
+        )
+    assert r.status_code == 404, r.text
+    # Same answer as a workspace that does not exist: no hint that W does.
+    assert missing.status_code == 404, missing.text
+    assert _error_body(r) == _error_body(missing)
+    assert str(w.w) not in r.text
+    after = await _member_row(w, w.member)
+    assert after is not None
+    assert after.allowed_context_ids == before
+    assert len(await _audit(w, "workspace_member_context_access_set", w.member)) == audits
+
+
+async def test_an_oauth_token_is_refused(world: World) -> None:
+    w = world
+    principal = {
+        "user_id": w.owner,
+        "email": f"{w.owner}@example.test",
+        "current_workspace_id": w.w,
+        "oauth_scope": "memory:read memory:write",
+    }
+    before = (await _member_row(w, w.member)).allowed_context_ids  # type: ignore[union-attr]
+    async with _rest(w, principal) as c:
+        r = await c.put(
+            f"/api/v1/workspaces/{w.w}/members/{w.member}/context-access",
+            json={"allowed_context_ids": []},
+        )
+    assert r.status_code == 403, r.text
+    assert "OAuth access tokens cannot manage workspace members" in r.json()["message"]
+    after = await _member_row(w, w.member)
+    assert after is not None
+    assert after.allowed_context_ids == before
+
+
+async def test_the_kill_switch_refuses_the_key_but_not_a_session(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config.settings import get_settings
+
+    w = world
+    target = f"mac-t6-{w.tag}"
+    async with w.factory() as s:
+        s.add(WorkspaceMember(workspace_id=w.w, user_id=target, role=WorkspaceRole.MEMBER))
+        await s.commit()
+    monkeypatch.setattr(get_settings(), "enable_owner_key_member_management", False)
+    url = f"/api/v1/workspaces/{w.w}/members/{target}/context-access"
+    async with _rest(w, _owner_key(w.owner, w.w)) as c:
+        r = await c.put(url, json={"allowed_context_ids": [str(w.c1)]})
+    assert r.status_code == 403, r.text
+    assert "disabled on this deployment" in r.json()["message"]
+    row = await _member_row(w, target)
+    assert row is not None
+    assert row.allowed_context_ids is None
+    async with _rest(w, _session(w.owner, w.w)) as c:
+        r = await c.put(url, json={"allowed_context_ids": [str(w.c1)]})
+    assert r.status_code == 200, r.text
+    row = await _member_row(w, target)
+    assert row is not None
+    assert row.allowed_context_ids == [w.c1]
+    assert await _audit(w, "workspace_member_context_access_set", target) == []
+
+
+async def test_owner_key_put_for_a_non_member_is_404_and_leaves_no_audit_row(
+    world: World,
+) -> None:
+    # The audit row is added before the service looks the member up; the
+    # request's rollback must drop it with the 404.
+    w = world
+    target = f"mac-nobody-{w.tag}"
+    async with _rest(w, _owner_key(w.owner, w.w)) as c:
+        r = await c.put(
+            f"/api/v1/workspaces/{w.w}/members/{target}/context-access",
+            json={"allowed_context_ids": [str(w.c1)]},
+        )
+    assert r.status_code == 404, r.text
+    assert await _member_row(w, target) is None
+    assert await _audit(w, "workspace_member_context_access_set", target) == []
+
+
+async def test_a_list_on_an_admin_is_stored_with_a_warning(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import MagicMock
+
+    import services.workspace_service as ws_mod
+
+    w = world
+    log = MagicMock()
+    monkeypatch.setattr(ws_mod, "logger", log)
+    target = f"mac-t7-{w.tag}"
+    async with _rest(w, _owner_key(w.owner, w.w)) as c:
+        r = await c.post(
+            f"/api/v1/workspaces/{w.w}/members",
+            json={"user_id": target, "role": "admin", "allowed_context_ids": [str(w.c1)]},
+        )
+    assert r.status_code == 201, r.text
+    assert r.json()["allowed_context_ids"] == [str(w.c1)]
+    row = await _member_row(w, target)
+    assert row is not None
+    assert row.allowed_context_ids == [w.c1]
+    warnings = [str(call.args[0]) for call in log.warning.call_args_list]
+    assert any("privileged role (ignored)" in m and target in m for m in warnings), warnings
