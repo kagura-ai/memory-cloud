@@ -748,6 +748,17 @@ def _compile_once(pattern: str, field: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def carries_tool_trigger(details: Any) -> bool:
+    """``Memory.is_tool_triggered`` spelled on the raw ``details`` value.
+
+    For callers that hold the column value rather than a mapped row, or a row
+    built as a bare ``MagicMock`` in unit tests (the #1523 trap: a mocked
+    property is truthy, a mocked ``details`` is not a dict). A stored
+    ``tool_trigger: null`` or a non-object ``details`` is not a guardrail.
+    """
+    return isinstance(details, dict) and details.get("tool_trigger") is not None
+
+
 def normalize_tool_trigger(details: dict[str, Any] | None) -> dict[str, Any] | None:
     """Validate ``details.tool_trigger`` and write the normalized form back.
 
