@@ -3,8 +3,8 @@
 Every recall row with a suggestion carries the caller's ``acceptance``, from
 the rule ``reference()`` reports (#2427) and the accept path enforces,
 evaluated for the whole page by ``supersede_acceptance.evaluate_many``: write
-access once per context, ownership once per context, the declared-edge lookup
-once for the page. A row without a suggestion has no ``acceptance`` key, and a
+access (and, for guardrail carriers, the #2614 author gate) once per context,
+ownership once per context, the declared-edge lookup once for the page. A row without a suggestion has no ``acceptance`` key, and a
 failed evaluation leaves the page's suggestions without it (fail-open).
 
 The measurement test records the cost on a k=100 page: the statements the
@@ -29,8 +29,9 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import event, text, update
 
+import services.supersede_acceptance as supersede_acceptance
 from api.routes.share_keys import share_recall
-from models.auth import Context, User, Workspace
+from models.auth import Context, ContextRole, User, Workspace
 from models.memory import Memory
 from models.schemas import RecallRequest
 from services.memory_service import MemoryService
@@ -162,6 +163,41 @@ async def test_a_cross_context_page_evaluates_each_context(db_session):
     }
     assert len(_ownership_reads(executed)) == 2
     assert len(_edge_reads(executed)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "guarded"),
+    [(None, {"allowed": False, "reason": "not_writable"}), (ContextRole.EDITOR, {"allowed": True})],
+    ids=["workspace_member", "context_editor"],
+)
+async def test_guardrail_rows_are_held_to_the_author_gate_once_per_page(db_session, role, guarded):
+    """#2614 on a page: a carrier of ``details.tool_trigger`` needs context
+    EDITOR or above, probed once for the context however many such rows it
+    holds; a plain carrier beside them is not held to it."""
+    from tests.integration.test_2427_supersede_acceptance_db import (
+        _mark_guardrail,
+        _workspace_member,
+    )
+
+    _, _, ws, ctx, _ = await _seed(db_session, private=False, link=False)
+    member = await _workspace_member(db_session, ws, ctx, role=role)
+    guardrails = []
+    for _ in range(3):
+        carrier, _ = await _pair(db_session, ctx, member, member)
+        await _mark_guardrail(db_session, carrier)
+        guardrails.append(carrier)
+    plain, _ = await _pair(db_session, ctx, member, member)
+
+    probe = AsyncMock(wraps=supersede_acceptance.may_author_guardrail)
+    with patch("services.supersede_acceptance.may_author_guardrail", probe):
+        result = await _recall(db_session, member, ws, ctx, [*guardrails, plain])
+
+    assert _acceptances(result) == {
+        **dict.fromkeys(guardrails, guarded),
+        plain: {"allowed": True},
+    }
+    assert probe.await_count == 1
 
 
 @pytest.mark.asyncio
