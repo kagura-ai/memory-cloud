@@ -431,6 +431,16 @@ async def test_a_batch_that_wrote_nothing_has_no_notice(first_this_hour):
 # ----------------------------------------------------------------- bootstrap
 
 
+def _isolated(session):
+    """``db.base.isolated_session`` handing out ``session`` (the notice's own session)."""
+
+    @contextlib.asynccontextmanager
+    async def factory(_db):
+        yield session
+
+    return factory
+
+
 async def _bootstrap(args, *, used=8, keep_counts=False):
     from mcp_server.tools import bootstrap as module
 
@@ -451,6 +461,7 @@ async def _bootstrap(args, *, used=8, keep_counts=False):
     service.build = AsyncMock(return_value={"status": "success"})
     with ExitStack() as stack:
         stack.enter_context(patch("db.base.get_db", new=gen))
+        stack.enter_context(patch("db.base.isolated_session", new=_isolated(db)))
         stack.enter_context(
             patch.object(
                 module, "_resolve_context_for_read", new=AsyncMock(return_value=_context())
@@ -560,15 +571,15 @@ async def test_a_failed_bootstrap_read_leaves_the_lanes_session_alone(first_this
 
     main, side = AsyncMock(), AsyncMock()
     side.get = AsyncMock(side_effect=RuntimeError("statement timeout"))
-    sessions = iter([main, side])
 
     async def gen():
-        yield next(sessions)
+        yield main
 
     service = MagicMock()
     service.build = AsyncMock(return_value={"status": "success"})
     with ExitStack() as stack:
         stack.enter_context(patch("db.base.get_db", new=gen))
+        stack.enter_context(patch("db.base.isolated_session", new=_isolated(side)))
         stack.enter_context(
             patch.object(
                 module, "_resolve_context_for_read", new=AsyncMock(return_value=_context())
@@ -588,6 +599,7 @@ async def test_a_failed_bootstrap_read_leaves_the_lanes_session_alone(first_this
     main.get.assert_not_awaited()
     main.execute.assert_not_awaited()
     main.rollback.assert_not_awaited()
+    side.commit.assert_not_awaited()  # closed, never committed: its connection may be invalid
     service.build.assert_awaited_once()
 
 

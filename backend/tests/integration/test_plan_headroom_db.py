@@ -12,8 +12,9 @@ Covered: ``memories`` at 80 % on remember and on bootstrap, ``critical`` at
 95 %, nothing below 80 %, the throttle (a second write within the hour is
 quiet, one after the key expired is not, bootstrap is never throttled), the
 in-place ``update_memory`` read, ``memories_per_day`` and ``mcp_calls_per_day``
-with ``resets_at``, an add-on raising the headroom, and that the notice adds no
-SQL statement to ``remember``.
+with ``resets_at``, an add-on raising the headroom, that the notice adds no
+SQL statement to ``remember``, and that a read the timeout cancels fails
+neither bootstrap nor an update.
 Not executed in the local unit run — needs the DB container.
 """
 
@@ -337,3 +338,44 @@ async def test_the_notice_adds_no_statement_to_remember(world: World, async_engi
     assert "plan_headroom" not in quiet
     assert [n["dimension"] for n in shown["plan_headroom"]] == ["memories"]
     assert with_notice == without
+
+
+async def test_a_read_the_timeout_cancels_never_fails_the_call(world: World) -> None:
+    """A cancelled read invalidates its connection; the call still succeeds.
+
+    ``get_db`` here commits after the body, as the production one does, so a
+    session the notice read in that were committed after the cancellation
+    would raise ``PendingRollbackError`` past ``_plan_headroom_field``.
+    """
+    from sqlalchemy import text
+
+    import services.plan_headroom as ph
+
+    async def committing_get_db() -> AsyncIterator[AsyncSession]:
+        async with world.maker() as s:
+            try:
+                yield s
+                await s.commit()
+            except Exception:
+                await s.rollback()
+                raise
+
+    async def slow_count(db: AsyncSession, _workspace_id: uuid.UUID) -> int:
+        await db.execute(text("SELECT pg_sleep(1)"))
+        return 0
+
+    ids = await _seed_memories(world, 8)
+    with (
+        _limits(memory_limit=10),
+        patch("db.base.get_db", new=committing_get_db),
+        patch.object(ph, "READ_TIMEOUT_SECONDS", 0.2),
+        patch.object(ph, "count_live_memories", new=slow_count),
+    ):
+        boot = await _call(world, "bootstrap")
+        edited = await _call(
+            world, "update_memory", memory_id=str(ids[0]), summary="seeded memory, edited once"
+        )
+    assert boot["status"] == "success", boot
+    assert "plan_headroom" not in boot
+    assert edited["status"] == "success", edited
+    assert "plan_headroom" not in edited

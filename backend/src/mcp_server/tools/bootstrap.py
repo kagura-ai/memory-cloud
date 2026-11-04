@@ -174,7 +174,7 @@ async def handle_bootstrap(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Rehydrate an interactive session on one context in one call (#1851)."""
-    from db.base import get_db
+    from db.base import get_db, isolated_session
     from mcp_server.tools.context import _guardrails_field
     from services.session_bootstrap_service import SessionBootstrapService
 
@@ -207,9 +207,10 @@ async def handle_bootstrap(
             # #2615: a session start always carries the notice (no throttle).
             # Its reads run in a session of their own, so a failed one cannot
             # abort the transaction the lanes read in; its room comes off the
-            # budget like the context fields'.
-            headroom: dict[str, Any] = {}
-            async for headroom_db in get_db():
+            # budget like the context fields'. That session is closed, never
+            # committed: a read the timeout cancelled invalidates its
+            # connection, and a commit there would raise past the helper.
+            async with isolated_session(db) as headroom_db:
                 headroom = await _plan_headroom_field(
                     headroom_db, context, workspace_id, throttle=False
                 )
