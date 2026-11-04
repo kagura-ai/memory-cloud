@@ -29,6 +29,7 @@ from cli import (  # noqa: E402
     create_admin,
     delete_admin,
     migrate_context_embedding,
+    rekey_encrypted_secrets,
     reprocess_erasures,
     reset_password,
     restore_context,
@@ -146,6 +147,7 @@ _UUID = "00000000-0000-0000-0000-000000000001"
             "cli._oneshot.get_db",
         ),
         (reprocess_erasures, ["--all"], "cli._oneshot.get_db"),
+        (rekey_encrypted_secrets, [], "cli._oneshot.get_db"),
         (
             migrate_context_embedding,
             ["--context", _UUID, "--to", "any-model"],
@@ -161,6 +163,7 @@ _UUID = "00000000-0000-0000-0000-000000000001"
         "sweep_orphan_vectors",
         "transfer_context_creator",
         "reprocess_erasures",
+        "rekey_encrypted_secrets",
         "migrate_context_embedding",
         "sync_llm_pricing",
         "delete_admin",
@@ -272,8 +275,9 @@ def test_reset_password_does_not_re_enable_mfa_under_a_stale_key(monkeypatch, ca
 
 
 def _completed(name: str, returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
+    # ``printenv`` output as the helper reads it: bytes, not text.
     return subprocess.CompletedProcess(
-        ["docker", "exec", name, "printenv", "API_KEY_SECRET"], returncode, stdout, ""
+        ["docker", "exec", name, "printenv", "API_KEY_SECRET"], returncode, stdout.encode(), b""
     )
 
 
@@ -316,6 +320,51 @@ class TestGetEnvFromApiContainer:
             ],
         ):
             assert get_env_from_api_container("API_KEY_SECRET") == "dev-secret"
+
+    @pytest.mark.parametrize(
+        ("printed", "value"),
+        [
+            (" abc \n", " abc "),
+            ("abc\n\n", "abc\n"),
+            ("abc\r\n", "abc\r"),
+            ("abc", "abc"),
+        ],
+        ids=["surrounding-blanks", "own-trailing-newline", "carriage-return", "no-newline"],
+    )
+    def test_the_value_comes_back_verbatim_but_for_one_newline(self, printed, value) -> None:
+        # #2394: a stripped key would derive another Fernet key than the API's.
+        with patch(
+            "cli._env_guard.subprocess.run",
+            side_effect=[
+                _completed("kagura-api", stdout=printed),
+                _completed("kagura-api-blue", returncode=1),
+                _completed("kagura-api-green", returncode=1),
+            ],
+        ) as run:
+            assert get_env_from_api_container("API_KEY_SECRET") == value
+
+        assert "text" not in run.call_args.kwargs
+
+    def test_a_blank_current_key_reaches_the_settings_unchanged(self, monkeypatch) -> None:
+        import os
+
+        monkeypatch.delenv("API_KEY_SECRET", raising=False)
+        monkeypatch.delenv("API_KEY_SECRET_PREVIOUS", raising=False)
+        with patch(
+            "cli._env_guard.subprocess.run",
+            side_effect=[
+                _completed("kagura-api", stdout=" padded key \n"),
+                _completed("kagura-api-blue", returncode=1),
+                _completed("kagura-api-green", returncode=1),
+                _completed("kagura-api", stdout=" old key \n"),
+                _completed("kagura-api-blue", returncode=1),
+                _completed("kagura-api-green", returncode=1),
+            ],
+        ):
+            assert _env_guard.require_api_key_secrets() == " padded key "
+
+        assert os.environ["API_KEY_SECRET"] == " padded key "
+        assert os.environ["API_KEY_SECRET_PREVIOUS"] == " old key "
 
     def test_both_colors_with_the_same_value(self) -> None:
         with patch(
@@ -385,3 +434,84 @@ class TestGetEnvFromApiContainer:
             assert resolve_api_key_secret() is None
 
         assert "API_KEY_SECRET" not in os.environ
+
+
+class TestRequireApiKeySecrets:
+    """The re-key CLI takes API_KEY_SECRET_PREVIOUS from the same place (#2394)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch) -> None:
+        monkeypatch.delenv("API_KEY_SECRET", raising=False)
+        monkeypatch.delenv("API_KEY_SECRET_PREVIOUS", raising=False)
+
+    def test_the_environment_supplies_both_without_asking_docker(self, monkeypatch) -> None:
+        import os
+
+        monkeypatch.setenv("API_KEY_SECRET", "env-secret")
+        monkeypatch.setenv("API_KEY_SECRET_PREVIOUS", "env-old")
+        with patch("cli._env_guard.subprocess.run") as run:
+            assert _env_guard.require_api_key_secrets() == "env-secret"
+
+        run.assert_not_called()
+        assert os.environ["API_KEY_SECRET_PREVIOUS"] == "env-old"
+
+    def test_a_key_from_the_environment_is_not_mixed_with_the_containers_list(
+        self, monkeypatch
+    ) -> None:
+        import os
+
+        monkeypatch.setenv("API_KEY_SECRET", "env-secret")
+        lookup = MagicMock(return_value="container-old")
+        monkeypatch.setattr(_env_guard, "get_env_from_api_container", lookup)
+
+        assert _env_guard.require_api_key_secrets() == "env-secret"
+
+        lookup.assert_not_called()
+        assert "API_KEY_SECRET_PREVIOUS" not in os.environ
+
+    # The shell's own API_KEY_SECRET_PREVIOUS: unset, exported empty, or a list.
+    _SHELL_LISTS = pytest.mark.parametrize(
+        "shell_previous", [None, "", "shell-old"], ids=["unset", "empty", "shell-list"]
+    )
+
+    @staticmethod
+    def _export(monkeypatch, shell_previous: str | None) -> None:
+        if shell_previous is not None:
+            monkeypatch.setenv("API_KEY_SECRET_PREVIOUS", shell_previous)
+
+    @_SHELL_LISTS
+    def test_the_container_supplies_both(self, monkeypatch, shell_previous) -> None:
+        import os
+
+        self._export(monkeypatch, shell_previous)
+        values = {"API_KEY_SECRET": "container-secret", "API_KEY_SECRET_PREVIOUS": "container-old"}
+        monkeypatch.setattr(_env_guard, "get_env_from_api_container", values.get)
+
+        assert _env_guard.require_api_key_secrets() == "container-secret"
+
+        assert os.environ["API_KEY_SECRET"] == "container-secret"
+        assert os.environ["API_KEY_SECRET_PREVIOUS"] == "container-old"
+
+    @_SHELL_LISTS
+    def test_a_container_without_previous_keys_exports_an_empty_list(
+        self, monkeypatch, shell_previous
+    ) -> None:
+        # Empty, not unset: neither the shell's list nor a dotenv file's may
+        # pair with the container's key.
+        import os
+
+        self._export(monkeypatch, shell_previous)
+        values = {"API_KEY_SECRET": "container-secret"}
+        monkeypatch.setattr(_env_guard, "get_env_from_api_container", values.get)
+
+        assert _env_guard.require_api_key_secrets() == "container-secret"
+
+        assert os.environ["API_KEY_SECRET_PREVIOUS"] == ""
+
+    def test_no_key_anywhere_exits_1(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(_env_guard, "get_env_from_api_container", lambda key: None)
+        with pytest.raises(SystemExit) as exc_info:
+            _env_guard.require_api_key_secrets()
+
+        assert exc_info.value.code == 1
+        assert "API_KEY_SECRET not available" in capsys.readouterr().err

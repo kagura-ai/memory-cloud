@@ -627,6 +627,27 @@ class TestEnvelope:
         assert "content" not in repr(body["selection_policy"])
 
     @pytest.mark.asyncio
+    async def test_recall_query_hash_is_keyed_by_the_audit_key(self):
+        """#2394: the correlation hash uses AUDIT_HMAC_KEY like every other
+        query_hash, so rotating API_KEY_SECRET does not change it."""
+        from config.settings import get_settings
+        from utils.hashing import hmac_sha256_hex
+
+        result = SimpleNamespace(results=[], degraded=None, degraded_reason=None)
+        svc = AgentBootstrapService(MagicMock())
+        with patch("services.memory_service.MemoryService") as ms_cls:
+            ms_cls.return_value.recall = AsyncMock(return_value=result)
+            body = await svc._recall(
+                _context(),
+                BootstrapParams(agent_id=AGENT_ID, query="hi"),
+                self._principal(),
+            )
+
+        settings = get_settings()
+        assert body["query_hash"] == hmac_sha256_hex("hi", settings.audit_hmac_key)
+        assert body["query_hash"] != hmac_sha256_hex("hi", settings.api_key_secret)
+
+    @pytest.mark.asyncio
     async def test_recall_component_does_not_wrap_transaction_owner_in_savepoint(self):
         db = _savepoint_db()
         svc = AgentBootstrapService(db)

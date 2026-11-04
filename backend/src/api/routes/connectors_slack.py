@@ -55,8 +55,13 @@ def _state_key(state: str) -> str:
     return f"slack_oauth_state:{state}"
 
 
+# The pending-install bundles: ``cli.rekey_encrypted_secrets`` re-encrypts
+# their ``bot_token_enc`` after a key rotation by scanning this prefix (#2394).
+SLACK_INSTALL_PREFIX = "slack_install:"
+
+
 def _install_key(handle: str) -> str:
-    return f"slack_install:{handle}"
+    return f"{SLACK_INSTALL_PREFIX}{handle}"
 
 
 async def peek_slack_install(handle: str) -> dict[str, Any] | None:

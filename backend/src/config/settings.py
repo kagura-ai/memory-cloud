@@ -6,6 +6,7 @@ Database URLs are managed directly via os.getenv() in config/database.py.
 """
 
 import ipaddress
+import logging
 import os
 import re
 from datetime import datetime
@@ -21,6 +22,8 @@ from utils.recall_projection import RECALL_DEFAULT_FULL, RECALL_MAX_FULL
 
 if TYPE_CHECKING:
     from config.llm_pricing_overrides import PricingOverride
+
+logger = logging.getLogger(__name__)
 
 # Issue #1665: the shape of a terms-of-service version string. It rides the
 # OAuth login URL (``accepted_terms=``) and the API unescaped, so it is kept to
@@ -89,6 +92,23 @@ def is_placeholder_secret(value: str) -> bool:
     """
     folded = value.strip().lower()
     return folded in _DEV_SECRET_PLACEHOLDERS or folded.startswith(_DEV_SECRET_PREFIXES)
+
+
+def split_previous_secrets(raw: str, current: str) -> tuple[str, ...]:
+    """The keys of ``API_KEY_SECRET_PREVIOUS`` (#2394), in their order.
+
+    Comma-separated; entries are stripped, blank entries and repeats dropped,
+    and so is an entry equal to ``current`` (the current key is in the ring
+    already). A key that contains a comma or surrounding blanks therefore
+    cannot be listed as is: list its derived Fernet key
+    (``utils.encryption.derive_fernet_key``), which opens the same values.
+    """
+    keys: list[str] = []
+    for part in raw.split(","):
+        key = part.strip()
+        if key and key != current and key not in keys:
+            keys.append(key)
+    return tuple(keys)
 
 
 def _validate_handoff_base_url(value: str) -> str:
@@ -317,6 +337,24 @@ class Settings(BaseSettings):
         default="dev-secret-change-in-production",
         description="API Key encryption secret (32+ bytes)",
     )
+    # Issue #2394: the older keys of an API_KEY_SECRET rotation. Accepted for
+    # decryption only; every new value is encrypted with API_KEY_SECRET.
+    # Removed once ``python -m src.cli.rekey_encrypted_secrets`` reports every
+    # stored value under the current key (docs/deployment.md).
+    api_key_secret_previous: str = Field(
+        default="",
+        description=(
+            "Older API_KEY_SECRET values, comma-separated, still accepted for "
+            "decryption during a key rotation (#2394). Encryption always uses "
+            "API_KEY_SECRET."
+        ),
+    )
+
+    @property
+    def api_key_secret_previous_keys(self) -> tuple[str, ...]:
+        """Parsed ``api_key_secret_previous`` (see ``split_previous_secrets``)."""
+        return split_previous_secrets(self.api_key_secret_previous, self.api_key_secret)
+
     # Issue #947: throttle window (seconds) for api_keys.last_used_at writes.
     # last_used_at is updated at most once per window per key, so a hot MCP
     # client (one auth per tool call) does not trigger a row UPDATE+commit on
@@ -578,6 +616,46 @@ class Settings(BaseSettings):
                 "has side effects (stored provider keys, known devices, the "
                 "secret-store audit chain): read 'Production secrets' in "
                 "docs/deployment.md first."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_previous_api_key_secrets(self) -> "Settings":
+        """Warn about ``API_KEY_SECRET_PREVIOUS`` entries; never refuse them (#2394).
+
+        An entry equal to ``API_KEY_SECRET`` is ignored with a warning. A
+        current key with a comma or surrounding blanks warns too: the list
+        splits and strips its entries, so at the next rotation that key has to
+        be listed as its derived Fernet key. Under ENVIRONMENT=production a
+        previous key that is a shipped placeholder or shorter than the guard's
+        minimum only warns: moving the stored values off a weak key is what the
+        list is for. Counts only, never a value.
+        """
+        current = self.api_key_secret
+        if "," in current or current != current.strip():
+            logger.warning(
+                "API_KEY_SECRET contains a comma or surrounding blanks, so it cannot be "
+                "listed verbatim in API_KEY_SECRET_PREVIOUS when it is rotated: list its "
+                "derived Fernet key instead (python -m src.cli.rekey_encrypted_secrets "
+                "--derive-fernet-key; docs/deployment.md, 'Rotating API_KEY_SECRET')."
+            )
+        entries = {part.strip() for part in self.api_key_secret_previous.split(",")} - {""}
+        if current in entries:
+            logger.warning("API_KEY_SECRET_PREVIOUS repeats API_KEY_SECRET; that entry is ignored.")
+        if not self.is_production:
+            return self
+        weak = sum(
+            1
+            for key in self.api_key_secret_previous_keys
+            if is_placeholder_secret(key) or len(key) < _PRODUCTION_SECRET_MIN_LEN
+        )
+        if weak:
+            logger.warning(
+                "API_KEY_SECRET_PREVIOUS holds %d development-default or short key(s): "
+                "values still under them are readable by anyone who has them. Re-encrypt "
+                "them with python -m src.cli.rekey_encrypted_secrets --apply and remove "
+                "API_KEY_SECRET_PREVIOUS (docs/deployment.md, 'Rotating API_KEY_SECRET').",
+                weak,
             )
         return self
 

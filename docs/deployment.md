@@ -330,7 +330,7 @@ group on the host).
 
 With `ENVIRONMENT=production` (hard-coded in
 `terraform/single-server/docker-compose.prod.yml`), `Settings` refuses to load
-while any of these three is still a shipped placeholder — the built-in default,
+while any of the first three is still a shipped placeholder — the built-in default,
 or the `change-me-…` / `kagura-erasure-v1` value from `.env.example` or
 `terraform/single-server/.env.prod.example`:
 
@@ -339,6 +339,7 @@ or the `change-me-…` / `kagura-erasure-v1` value from `.env.example` or
 | `API_KEY_SECRET` | Fernet encryption of stored provider keys and connector secrets | 32 |
 | `AUDIT_HMAC_KEY` | Keyed hashes in audit rows, known-device cookies, consent CSRF token, secret-store audit chain | 32 |
 | `AUDIT_PSEUDO_SALT` | Erasure pseudonyms (`sha256(salt + identifier)`) | none (placeholder check only) |
+| `API_KEY_SECRET_PREVIOUS` | Older `API_KEY_SECRET` values, comma-separated, still accepted for decryption during a [rotation](#rotating-api_key_secret-issue-2394) (Issue #2394); unset otherwise | none: a placeholder or short entry only logs a warning, never refuses |
 
 Placeholders are matched case-insensitively. Generate each value with
 `openssl rand -hex 32`. The API loads the settings on import, so it stops
@@ -374,9 +375,75 @@ any value that is already private has side effects:
   salt is accepted. After a change, re-key the pseudonyms stored under the old
   salt with `python -m src.cli.rekey_erasure_pseudonyms` (the order of steps is
   in [the erasure runbook, section 2.5.1](ops/erasure-runbook.md)).
-- `API_KEY_SECRET`: every stored Fernet ciphertext (BYOK provider keys,
-  connector secrets, worker app identities) becomes undecryptable, so stored
-  provider keys have to be entered again.
+- `API_KEY_SECRET`: rotate it with the procedure below, which keeps every
+  stored Fernet ciphertext readable. Replacing it without keeping the old value
+  in `API_KEY_SECRET_PREVIOUS` makes every stored ciphertext (BYOK provider
+  keys, connector secrets, worker app identities, TOTP secrets) undecryptable.
+
+### Rotating `API_KEY_SECRET` (Issue #2394)
+
+Every secret the server stores in a form it can read back is a Fernet token
+under `API_KEY_SECRET`: TOTP secrets, the display copies of new API keys and
+OAuth client secrets, BYOK provider keys, workspace connector tokens, LLM
+config, KMC and resource tokens, worker app signing secrets, the signup-gate
+secrets, and the bot token of a pending Slack install (held in Redis for ten
+minutes). A token carries no key id: the server tries `API_KEY_SECRET`, then
+each key in `API_KEY_SECRET_PREVIOUS`, and writes every new value under
+`API_KEY_SECRET`. The format does not change, so no migration is involved.
+
+1. Generate the new key (`openssl rand -hex 32`). Set `API_KEY_SECRET` to the
+   new key and `API_KEY_SECRET_PREVIOUS` to the old one (comma-separated when
+   an earlier rotation is still unfinished) for **every** process that reads
+   them: the API containers (both colors while a blue/green deploy is in
+   flight; the background scheduler runs inside them), any other process
+   started from the same env file, and the shell that will run the command in
+   step 2. Restart them all. A process that still has only the old key cannot
+   read a value the command has already rewritten, nor one written since the
+   restart. Where old and new processes serve side by side during the restart
+   (a blue/green deploy drains the old color only after the new one is live),
+   close that window with two restarts: first add the new key as
+   `API_KEY_SECRET_PREVIOUS` only, leaving `API_KEY_SECRET` as it is, and
+   restart, so every process can read both keys; then swap the two values and
+   restart again.
+
+   `API_KEY_SECRET_PREVIOUS` is split on commas and each entry is stripped, so
+   an old key that contains a comma or starts or ends with a blank (the API
+   logs a warning about such an `API_KEY_SECRET` when it starts) cannot be
+   listed as it is. List its derived Fernet key instead: it opens the same
+   values, has neither, and is as secret as the key. The command derives it
+   from stdin byte for byte, so pass the value exactly as the variable holds
+   it, with `printf '%s'` rather than `echo` (which adds a newline; the
+   command notes on stderr when the input ends with one):
+
+   ```bash
+   printf '%s' "$OLD_SECRET" | python -m src.cli.rekey_encrypted_secrets --derive-fernet-key
+   ```
+2. Re-encrypt the stored values, from `backend/` in the API container (a host
+   shell without the variables reads both from the running API container):
+
+   ```bash
+   python -m src.cli.rekey_encrypted_secrets              # report: counts per column, writes nothing
+   python -m src.cli.rekey_encrypted_secrets --apply --yes
+   ```
+
+   The report counts each value once per column: `already_current`,
+   `to_re_encrypt` (`re_encrypted` after `--apply`), `undecryptable` (no
+   configured key opens it; left as it is) and `changed_concurrently` (the
+   application rewrote it between the read and the write; the newer value is
+   kept). It never prints a value, only the row ids of undecryptable values.
+   Every write is compare-and-set and each batch commits on its own, so the
+   command can be interrupted and run again at any time; a value counted
+   `changed_concurrently` is picked up by the next run. Exit code 3 means some
+   value is undecryptable: add the key it was written with to
+   `API_KEY_SECRET_PREVIOUS` and run again, or have it entered again. Exit code
+   1 with `Redis failed` means the Slack install bundles were not checked.
+3. When a report shows only `already_current` (every other column 0, exit
+   code 0), remove `API_KEY_SECRET_PREVIOUS` everywhere and restart.
+
+Under `ENVIRONMENT=production` the current key keeps the refusal above; a
+development-default or short key in `API_KEY_SECRET_PREVIOUS` only logs a
+warning, since moving the stored values off such a key is what the variable is
+for. An entry equal to `API_KEY_SECRET` is ignored with a warning.
 
 ## Frontend Environment Variables
 

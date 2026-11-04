@@ -4,14 +4,20 @@ Pure utility — no DB or external services required.
 """
 
 import base64
+import hashlib
 import logging
 from unittest.mock import patch
 
 import pytest
 
 import utils.encryption as enc_module
-from config.settings import Settings, get_settings
-from utils.encryption import APIKeyEncryption, generate_fernet_key, get_encryptor
+from config.settings import Settings, get_settings, split_previous_secrets
+from utils.encryption import (
+    APIKeyEncryption,
+    derive_fernet_key,
+    generate_fernet_key,
+    get_encryptor,
+)
 
 
 class TestAPIKeyEncryption:
@@ -76,6 +82,168 @@ class TestAPIKeyEncryption:
             assert result == "sk-proj-***"
 
 
+class TestKeyRing:
+    """``API_KEY_SECRET`` encrypts, older keys still decrypt (#2394)."""
+
+    def test_a_value_under_an_old_key_decrypts_with_the_ring(self):
+        old, new = generate_fernet_key(), generate_fernet_key()
+        token = APIKeyEncryption(old).encrypt("sk-old-secret")
+        assert APIKeyEncryption(new, previous_keys=[old]).decrypt(token) == "sk-old-secret"
+
+    def test_a_value_under_an_old_key_is_refused_without_it(self):
+        old, new = generate_fernet_key(), generate_fernet_key()
+        token = APIKeyEncryption(old).encrypt("sk-old-secret")
+        with pytest.raises(ValueError, match="Invalid encrypted value or wrong encryption key"):
+            APIKeyEncryption(new).decrypt(token)
+
+    def test_encrypt_uses_the_current_key(self):
+        old, new = generate_fernet_key(), generate_fernet_key()
+        token = APIKeyEncryption(new, previous_keys=[old]).encrypt("sk-new-secret")
+        assert APIKeyEncryption(new).decrypt(token) == "sk-new-secret"
+        with pytest.raises(ValueError, match="wrong encryption key"):
+            APIKeyEncryption(old).decrypt(token)
+
+    def test_rotate_re_encrypts_under_the_current_key(self):
+        old, new = generate_fernet_key(), generate_fernet_key()
+        token = APIKeyEncryption(old).encrypt("sk-old-secret")
+        ring = APIKeyEncryption(new, previous_keys=[old])
+        rotated = ring.rotate(token)
+        assert rotated != token
+        assert APIKeyEncryption(new).decrypt(rotated) == "sk-old-secret"
+        assert ring.is_current(rotated) is True
+
+    def test_is_current_is_false_for_a_token_only_an_old_key_opens(self):
+        old, new = generate_fernet_key(), generate_fernet_key()
+        token = APIKeyEncryption(old).encrypt("sk-old-secret")
+        assert APIKeyEncryption(new, previous_keys=[old]).is_current(token) is False
+
+    def test_is_current_is_true_for_a_token_under_the_current_key(self):
+        old, new = generate_fernet_key(), generate_fernet_key()
+        ring = APIKeyEncryption(new, previous_keys=[old])
+        assert ring.is_current(ring.encrypt("sk-new-secret")) is True
+
+    def test_is_current_raises_when_no_key_opens_the_token(self):
+        stranger = APIKeyEncryption(generate_fernet_key()).encrypt("sk-other")
+        ring = APIKeyEncryption(generate_fernet_key(), previous_keys=[generate_fernet_key()])
+        with pytest.raises(ValueError, match="Invalid encrypted value or wrong encryption key"):
+            ring.is_current(stranger)
+
+    def test_rotate_raises_when_no_key_opens_the_token(self):
+        stranger = APIKeyEncryption(generate_fernet_key()).encrypt("sk-other")
+        ring = APIKeyEncryption(generate_fernet_key(), previous_keys=[generate_fernet_key()])
+        with pytest.raises(ValueError, match="Invalid encrypted value or wrong encryption key"):
+            ring.rotate(stranger)
+
+    @pytest.mark.parametrize("method", ["rotate", "is_current"])
+    def test_empty_token_raises(self, method):
+        ring = APIKeyEncryption(generate_fernet_key())
+        with pytest.raises(ValueError, match="Cannot decrypt empty value"):
+            getattr(ring, method)("")
+
+    @pytest.mark.parametrize(
+        "old", [generate_fernet_key(), "a-plain-old-passphrase-not-a-fernet-key"]
+    )
+    def test_previous_keys_go_through_the_same_derivation(self, old):
+        token = APIKeyEncryption(old).encrypt("sk-old-secret")
+        ring = APIKeyEncryption("a-plain-new-passphrase", previous_keys=[old])
+        assert ring.decrypt(token) == "sk-old-secret"
+
+    def test_empty_duplicate_and_current_entries_are_dropped(self):
+        old, new = generate_fernet_key(), generate_fernet_key()
+        ring = APIKeyEncryption(new, previous_keys=["", "  ", old, f" {old} ", new])
+        assert ring.key_count == 2
+        token = APIKeyEncryption(old).encrypt("sk-old-secret")
+        assert ring.decrypt(token) == "sk-old-secret"
+
+    def test_a_single_key_ring_has_one_key(self):
+        assert APIKeyEncryption(generate_fernet_key()).key_count == 1
+
+
+# Tokens written by the single-key ``APIKeyEncryption`` before the key ring
+# (#2394), one per derivation: a raw 44-character Fernet key used as is, and a
+# plain string hashed with SHA-256. Test keys only. Any change to how a key is
+# derived (encoding, blanks, the hash) breaks every stored value; this fails.
+_RAW_FERNET_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+_PLAIN_STRING_KEY = "pre-key-ring-plain-secret-2394"
+_PRE_RING_TOKENS = {
+    "raw": (
+        _RAW_FERNET_KEY,
+        "gAAAAABq6uuLmbwTzcsE8cmssmh31-piXkksmVD9CgZ4OzZrDzkBCcE32aaNOtOgt3Ah6dfXcCbxntjHue8V9i7LnZI0waf37GFd_6EIIp2Yui8zdYHPs74=",
+    ),
+    "plain": (
+        _PLAIN_STRING_KEY,
+        "gAAAAABq6uuLD0mIRjgtVTvBXRptL2U1TACaCbeKUOa_z1XPrGjYPjVN9LxIRe30leJity67_eRdw_IeSyo2VGhPWjuY9N7Y8l3zMBaiFC5shzE88CsvrkJPOWi2Ob2EcuzDhyszKvjZ",
+    ),
+}
+
+
+class TestTokensWrittenBeforeTheKeyRing:
+    """Values stored before #2394 stay readable, as the current or a previous key."""
+
+    @pytest.mark.parametrize("name", sorted(_PRE_RING_TOKENS))
+    def test_the_same_key_alone_decrypts_them(self, name):
+        key, token = _PRE_RING_TOKENS[name]
+        encryptor = APIKeyEncryption(key)
+        assert encryptor.decrypt(token) == f"written-before-the-key-ring-{name}"
+        assert encryptor.is_current(token) is True
+
+    @pytest.mark.parametrize("name", sorted(_PRE_RING_TOKENS))
+    def test_the_key_as_a_previous_key_decrypts_them(self, name):
+        key, token = _PRE_RING_TOKENS[name]
+        ring = APIKeyEncryption(generate_fernet_key(), previous_keys=[key])
+        assert ring.decrypt(token) == f"written-before-the-key-ring-{name}"
+        assert ring.is_current(token) is False
+
+    @pytest.mark.parametrize("name", sorted(_PRE_RING_TOKENS))
+    def test_the_derived_fernet_key_decrypts_them(self, name):
+        key, token = _PRE_RING_TOKENS[name]
+        assert APIKeyEncryption(derive_fernet_key(key)).decrypt(token) == (
+            f"written-before-the-key-ring-{name}"
+        )
+
+
+class TestDerivedFernetKey:
+    """A key the previous list cannot hold verbatim goes in as its Fernet key (#2394)."""
+
+    def test_a_plain_string_derives_its_sha256_fernet_key(self):
+        secret = "a-plain-string-secret"
+        expected = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()).decode()
+        assert derive_fernet_key(secret) == expected
+
+    def test_a_raw_fernet_key_comes_back_unchanged(self):
+        key = generate_fernet_key()
+        assert derive_fernet_key(key) == key
+
+    @pytest.mark.parametrize("spelling", ["  {key}\t", "{head},{tail}"])
+    def test_a_raw_key_fernet_reads_leniently_comes_back_canonical(self, spelling):
+        # Fernet drops characters outside the base64 alphabet, so these
+        # spellings already opened the same values as the bare key.
+        key = generate_fernet_key()
+        secret = spelling.format(key=key, head=key[:20], tail=key[20:])
+        token = APIKeyEncryption(secret).encrypt("sk-secret")
+        assert derive_fernet_key(secret) == key
+        assert APIKeyEncryption(key).decrypt(token) == "sk-secret"
+
+    @pytest.mark.parametrize("old", [" a passphrase with blanks ", "a,passphrase,with,commas"])
+    def test_a_key_the_list_alters_rotates_through_its_derived_key(self, old):
+        new = generate_fernet_key()
+        token = APIKeyEncryption(old).encrypt("sk-old-secret")
+        # Verbatim, the list strips or splits it: the old values stay shut.
+        verbatim = APIKeyEncryption(new, split_previous_secrets(old, current=new))
+        with pytest.raises(ValueError, match="wrong encryption key"):
+            verbatim.decrypt(token)
+        listed = f"{generate_fernet_key()}, {derive_fernet_key(old)}"
+        ring = APIKeyEncryption(new, split_previous_secrets(listed, current=new))
+        assert ring.decrypt(token) == "sk-old-secret"
+        assert ring.is_current(token) is False
+        assert APIKeyEncryption(new).decrypt(ring.rotate(token)) == "sk-old-secret"
+
+    def test_the_current_key_listed_as_its_derived_key_is_not_a_second_key(self):
+        current = " a current passphrase with blanks "
+        ring = APIKeyEncryption(current, previous_keys=[derive_fernet_key(current)])
+        assert ring.key_count == 1
+
+
 class TestGetEncryptor:
     """``get_encryptor`` reads ``API_KEY_SECRET`` from the cached settings (#2239)."""
 
@@ -100,6 +268,23 @@ class TestGetEncryptor:
         monkeypatch.setenv("API_KEY_SECRET", generate_fernet_key())
         encrypted = get_encryptor().encrypt("test-secret")
         assert APIKeyEncryption(fernet_api_key_secret).decrypt(encrypted) == "test-secret"
+
+    def test_reads_the_previous_keys_from_the_settings(self, fernet_api_key_secret, monkeypatch):
+        # #2394: a value under API_KEY_SECRET_PREVIOUS stays readable, and a
+        # new one is written under API_KEY_SECRET.
+        old = generate_fernet_key()
+        monkeypatch.setattr(get_settings(), "api_key_secret_previous", f"{old}, ")
+        token = APIKeyEncryption(old).encrypt("sk-old-secret")
+        encryptor = get_encryptor()
+        assert encryptor.key_count == 2
+        assert encryptor.decrypt(token) == "sk-old-secret"
+        assert encryptor.is_current(token) is False
+        fresh = encryptor.encrypt("sk-new-secret")
+        assert APIKeyEncryption(fernet_api_key_secret).decrypt(fresh) == "sk-new-secret"
+
+    def test_no_previous_keys_is_a_single_key_ring(self, fernet_api_key_secret, monkeypatch):
+        monkeypatch.setattr(get_settings(), "api_key_secret_previous", "")
+        assert get_encryptor().key_count == 1
 
     def test_private_secret_does_not_warn(self, fernet_api_key_secret, caplog):
         with caplog.at_level(logging.WARNING, logger="utils.encryption"):
