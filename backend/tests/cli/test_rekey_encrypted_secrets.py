@@ -591,7 +591,13 @@ async def test_a_rotation_end_to_end(db_session, keys, baseline, world, monkeypa
     raced: list[bool] = []
 
     async def _racing_write(db: AsyncSession, column: Any, rows: list[Any]) -> Any:
-        if not raced and any(row_id == raced_id for row_id, _old, _new in rows):
+        # The integer ids of api_keys and external_api_keys can coincide on a
+        # fresh database, so the race must fire on the raced COLUMN's batch.
+        if (
+            not raced
+            and column is raced_column
+            and any(row_id == raced_id for row_id, _old, _new in rows)
+        ):
             raced.append(True)
             assert db_session.bind is not None
             async with AsyncSession(db_session.bind) as other:
