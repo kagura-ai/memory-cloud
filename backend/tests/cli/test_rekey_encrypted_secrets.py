@@ -352,9 +352,9 @@ async def world(db_session: AsyncSession, keys) -> AsyncIterator[dict[str, Any]]
             workspace_id=workspace.id,
         )
 
-    ext = external("openai", old.encrypt(_PLAINTEXT["external"]))
-    raced = external("anthropic", old.encrypt(_PLAINTEXT["external_raced"]))
-    unknown = external("gemini", stranger.encrypt(_PLAINTEXT["external_unknown"]))
+    ext = external("provider-a", old.encrypt(_PLAINTEXT["external"]))
+    raced = external("provider-b", old.encrypt(_PLAINTEXT["external_raced"]))
+    unknown = external("provider-c", stranger.encrypt(_PLAINTEXT["external_unknown"]))
     client = OAuth2Client(
         client_id=f"client-{tag}",
         client_secret_hash=secrets.token_hex(32),
