@@ -29,6 +29,7 @@ from cli import (  # noqa: E402
     create_admin,
     delete_admin,
     migrate_context_embedding,
+    rekey_encrypted_secrets,
     reprocess_erasures,
     reset_password,
     restore_context,
@@ -146,6 +147,7 @@ _UUID = "00000000-0000-0000-0000-000000000001"
             "cli._oneshot.get_db",
         ),
         (reprocess_erasures, ["--all"], "cli._oneshot.get_db"),
+        (rekey_encrypted_secrets, [], "cli._oneshot.get_db"),
         (
             migrate_context_embedding,
             ["--context", _UUID, "--to", "any-model"],
@@ -161,6 +163,7 @@ _UUID = "00000000-0000-0000-0000-000000000001"
         "sweep_orphan_vectors",
         "transfer_context_creator",
         "reprocess_erasures",
+        "rekey_encrypted_secrets",
         "migrate_context_embedding",
         "sync_llm_pricing",
         "delete_admin",
@@ -385,3 +388,66 @@ class TestGetEnvFromApiContainer:
             assert resolve_api_key_secret() is None
 
         assert "API_KEY_SECRET" not in os.environ
+
+
+class TestRequireApiKeySecrets:
+    """The re-key CLI takes API_KEY_SECRET_PREVIOUS from the same place (#2394)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch) -> None:
+        monkeypatch.delenv("API_KEY_SECRET", raising=False)
+        monkeypatch.delenv("API_KEY_SECRET_PREVIOUS", raising=False)
+
+    def test_the_environment_supplies_both_without_asking_docker(self, monkeypatch) -> None:
+        import os
+
+        monkeypatch.setenv("API_KEY_SECRET", "env-secret")
+        monkeypatch.setenv("API_KEY_SECRET_PREVIOUS", "env-old")
+        with patch("cli._env_guard.subprocess.run") as run:
+            assert _env_guard.require_api_key_secrets() == "env-secret"
+
+        run.assert_not_called()
+        assert os.environ["API_KEY_SECRET_PREVIOUS"] == "env-old"
+
+    def test_a_key_from_the_environment_is_not_mixed_with_the_containers_list(
+        self, monkeypatch
+    ) -> None:
+        import os
+
+        monkeypatch.setenv("API_KEY_SECRET", "env-secret")
+        lookup = MagicMock(return_value="container-old")
+        monkeypatch.setattr(_env_guard, "get_env_from_api_container", lookup)
+
+        assert _env_guard.require_api_key_secrets() == "env-secret"
+
+        lookup.assert_not_called()
+        assert "API_KEY_SECRET_PREVIOUS" not in os.environ
+
+    def test_the_container_supplies_both(self, monkeypatch) -> None:
+        import os
+
+        values = {"API_KEY_SECRET": "container-secret", "API_KEY_SECRET_PREVIOUS": "container-old"}
+        monkeypatch.setattr(_env_guard, "get_env_from_api_container", values.get)
+
+        assert _env_guard.require_api_key_secrets() == "container-secret"
+
+        assert os.environ["API_KEY_SECRET"] == "container-secret"
+        assert os.environ["API_KEY_SECRET_PREVIOUS"] == "container-old"
+
+    def test_a_container_without_previous_keys_leaves_the_list_unset(self, monkeypatch) -> None:
+        import os
+
+        values = {"API_KEY_SECRET": "container-secret"}
+        monkeypatch.setattr(_env_guard, "get_env_from_api_container", values.get)
+
+        assert _env_guard.require_api_key_secrets() == "container-secret"
+
+        assert "API_KEY_SECRET_PREVIOUS" not in os.environ
+
+    def test_no_key_anywhere_exits_1(self, monkeypatch, capsys) -> None:
+        monkeypatch.setattr(_env_guard, "get_env_from_api_container", lambda key: None)
+        with pytest.raises(SystemExit) as exc_info:
+            _env_guard.require_api_key_secrets()
+
+        assert exc_info.value.code == 1
+        assert "API_KEY_SECRET not available" in capsys.readouterr().err

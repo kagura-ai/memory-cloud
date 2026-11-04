@@ -108,6 +108,27 @@ def require_api_key_secret() -> str:
     sys.exit(1)
 
 
+def require_api_key_secrets() -> str:
+    """:func:`require_api_key_secret`, plus ``API_KEY_SECRET_PREVIOUS`` (#2394).
+
+    The re-key CLI decrypts with the older keys of a rotation, so it takes the
+    previous keys from the same place as the current one: a key set in the
+    environment uses the environment's list (unset meaning none) and is never
+    mixed with a container's; a key read from the running API container takes
+    that container's list too, exported for the settings built next.
+
+    Returns:
+        The current ``API_KEY_SECRET``.
+    """
+    from_environment = bool(os.getenv("API_KEY_SECRET"))
+    secret = require_api_key_secret()
+    if not from_environment and "API_KEY_SECRET_PREVIOUS" not in os.environ:
+        previous = get_env_from_api_container("API_KEY_SECRET_PREVIOUS")
+        if previous:
+            os.environ["API_KEY_SECRET_PREVIOUS"] = previous
+    return secret
+
+
 def require_settings(api_key_secret: str | None = None) -> Settings:
     """Build (or return the cached) ``Settings``; exit 1 when they are refused.
 
