@@ -5,6 +5,7 @@ import { ArrowRight } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 
 const credentials = "/workspace/integrations/credentials";
@@ -23,6 +24,7 @@ const management = [
 export default function IntegrationsPage() {
   const t = useTranslations("integrationEntry");
   const { currentWorkspace } = useWorkspace();
+  const features = useSystemFeatures();
   return (
     <PageContainer>
       <PageHeader title={t("title")} description={t("intro")} />
@@ -31,7 +33,7 @@ export default function IntegrationsPage() {
         <section key={group} aria-labelledby={group} className="mb-6 space-y-3">
           <h2 id={group} className="text-lg font-semibold">{t(group)}</h2>
           <ul className="grid gap-3 sm:grid-cols-2">
-            {choices.map(({ key, href }) => (
+            {choices.filter(({ key }) => key !== "provider" || features?.byok === true).map(({ key, href }) => (
               <li key={key} className="rounded-lg border p-4">
                 <Link href={href} aria-describedby={key + "-help"}
                   className="inline-flex min-h-11 items-center gap-2 font-medium text-primary underline underline-offset-4 focus-visible:outline">

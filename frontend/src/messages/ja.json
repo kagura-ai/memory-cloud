@@ -194,6 +194,7 @@
     "logout": "ログアウト"
   },
   "sidebar": {
+    "connectionGuide": "接続ガイド",
     "workspace": "ワークスペース",
     "dashboard": "ダッシュボード",
     "contexts": "コンテキスト",

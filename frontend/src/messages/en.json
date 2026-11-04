@@ -194,6 +194,7 @@
     "logout": "Logout"
   },
   "sidebar": {
+    "connectionGuide": "Connection guide",
     "workspace": "Workspace",
     "dashboard": "Dashboard",
     "contexts": "Contexts",
