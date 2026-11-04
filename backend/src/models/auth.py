@@ -46,6 +46,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql.elements import ColumnElement
 
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth_scope import client_registered_scope, granted_scope
@@ -2438,6 +2439,21 @@ class WorkspaceInvitation(Base):
         CheckConstraint(WORKSPACE_ROLE_CHECK_SQL, name="valid_invitation_role"),
         CheckConstraint("length(token) >= 20", name="valid_invitation_token"),
     )
+
+    @classmethod
+    def addressed_to(cls, email: str) -> ColumnElement[bool]:
+        """SQL predicate: the invitation is addressed to ``email``.
+
+        Invitation emails are stored as typed and matched case-insensitively.
+        An invitation without an email (link-only) never matches.
+
+        Args:
+            email: The address to match, in any casing.
+
+        Returns:
+            A boolean SQL expression for use in ``where()``.
+        """
+        return func.lower(cls.email) == email.lower()
 
     def is_expired(self) -> bool:
         """Check if invitation is expired.

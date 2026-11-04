@@ -226,7 +226,7 @@ class InvitationService:
             # Check for duplicate pending invitation
             stmt = select(WorkspaceInvitation).where(
                 WorkspaceInvitation.workspace_id == workspace_id,
-                func.lower(WorkspaceInvitation.email) == email_lower,
+                WorkspaceInvitation.addressed_to(email),
                 WorkspaceInvitation.accepted_at.is_(None),
             )
             result = await self.db.execute(stmt)
@@ -639,7 +639,7 @@ class InvitationService:
             .where(
                 and_(
                     # Addressed to this email (case-insensitive)
-                    func.lower(WorkspaceInvitation.email) == email.lower(),
+                    WorkspaceInvitation.addressed_to(email),
                     # Not accepted
                     WorkspaceInvitation.accepted_at.is_(None),
                     # Not expired (or no expiration)
