@@ -92,6 +92,7 @@ export interface UpdateWorkspaceRequest {
 export interface AddMemberRequest {
   user_id: string;
   role: WorkspaceRole;
+  allowed_context_ids?: string[] | null; // #2326: omitted or null = not set
 }
 
 export interface UpdateMemberRoleRequest {
