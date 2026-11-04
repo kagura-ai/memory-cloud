@@ -20,16 +20,18 @@ describe("first click from Integrations", () => {
     expect(screen.queryByRole("link", { name: en.integrationEntry.tasks.provider.title })).toBeNull();
     expect(screen.getByRole("link", { name: en.integrationEntry.tasks.script.title })).toBeInTheDocument();
   });
-  it.each([["en", en, /connect .*gemini.*muse/i, /call kmc from a script/i, /bring in external data/i],
-    ["ja", ja, /Gemini.*Muse.*接続/, /スクリプトからKMC/, /外部データを取り込む/]] as const)(
+  it.each([["en", en, /connect an ai client/i, /call kmc from a script/i, /bring in external data/i],
+    ["ja", ja, /AIクライアントを接続/, /スクリプトからKMC/, /外部データを取り込む/]] as const)(
     "routes the three starting tasks to their real destinations in %s", (locale, messages, connect, script, ingest) => {
       render(<NextIntlClientProvider locale={locale} messages={messages}><IntegrationsPage /></NextIntlClientProvider>);
       expect(screen.getByText(/Studio/)).toBeInTheDocument();
       expect(screen.getByRole("link", { name: connect })).toHaveAttribute("href", "/workspace/integrations/credentials?tab=api-keys#mcp-connection");
       expect(screen.getByRole("link", { name: script })).toHaveAttribute("href", "/workspace/integrations/credentials?tab=api-keys#credential-tools");
       expect(screen.getByRole("link", { name: ingest })).toHaveAttribute("href", "/workspace/resources");
+      expect(screen.getByText(/Gemini.*Muse/)).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: messages.integrationEntry.tasks.connector.title })).toHaveAttribute("href", "/workspace/integrations/connectors");
       expect(screen.getByText(/setup_resource/)).toBeInTheDocument();
-      expect(screen.getAllByRole("link")).toHaveLength(7);
+      expect(screen.getAllByRole("link")).toHaveLength(8);
     },
   );
 });

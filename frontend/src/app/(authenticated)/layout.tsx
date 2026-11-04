@@ -19,6 +19,7 @@ import { MemoryContextProvider } from "@/contexts/MemoryContextContext";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useTranslations } from "next-intl";
+import { WorkspaceSectionNavigation } from "@/components/dashboard/WorkspaceSectionNavigation";
 import { FeatureRouteBoundary } from "@/components/dashboard/FeatureRouteBoundary";
 import { Sidebar } from "@/components/dashboard/Sidebar";
 import { WorkspaceSelectionScreen } from "@/components/workspaces/WorkspaceSelectionScreen";
@@ -265,7 +266,7 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
 
               {/* Page Content */}
               <main className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-900">
-                <div className="container mx-auto p-6"><FeatureRouteBoundary>{children}</FeatureRouteBoundary></div>
+                <div className="container mx-auto p-6"><WorkspaceSectionNavigation /><FeatureRouteBoundary>{children}</FeatureRouteBoundary></div>
               </main>
             </div>
           </div>

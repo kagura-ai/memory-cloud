@@ -25,10 +25,7 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { navigationGroups, type NavItem } from "@/lib/navigation/featureNavigation";
-import {
-  useWorkspaceObjectPresence,
-} from "@/hooks/useWorkspaceObjectPresence";
+import { sidebarNavigationGroups as navigationGroups, type NavItem } from "@/lib/navigation/featureNavigation";
 import { useBetaInvites } from "@/hooks/useBetaInvites";
 import {
   hasRole,
@@ -190,19 +187,6 @@ export function Sidebar() {
       cancelled = true;
     };
   }, [currentWorkspaceId, currentWorkspaceRole, byokEnabled]);
-
-  // Issue #1616: with ENABLE_BYOK off the External Keys page is still the
-  // owner's console for keys stored earlier (list / disable / delete), so the
-  // entry stays for a workspace that has some. Probe the owner-only list
-  // route only on an explicit `false` (never while flags load, never on a
-  // BYOK-on deployment) and only for the owner — any other role is a
-  // guaranteed 403, and the page redirects them anyway.
-  const hasExternalKeys = useWorkspaceObjectPresence(
-    "externalKeys",
-    currentWorkspaceId,
-    systemFeatures?.byok === false &&
-      hasWorkspaceRole(currentWorkspaceRole, WorkspaceRole.Owner),
-  );
 
   // Issue #1582: beta invites. Off (or an older backend without the flag) →
   // no card, no menu entry, no dialog, and the hook makes no request. The one
@@ -382,11 +366,7 @@ export function Sidebar() {
                 ? [item.requiredFeature]
                 : (item.requiredFeature ?? []);
             if (
-              requiredFeatures.some((flag) => !systemFeatures?.[flag]) &&
-              !(
-                item.existingObjectsFallback &&
-                hasExternalKeys === true
-              )
+              requiredFeatures.some((flag) => !systemFeatures?.[flag])
             ) {
               return false;
             }

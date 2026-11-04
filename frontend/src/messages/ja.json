@@ -1790,6 +1790,19 @@
     "languageDescription": "希望する言語を選択してください",
     "saved": "設定を保存しました"
   },
+  "sectionNavigation": {
+    "integrations": "インテグレーション",
+    "settings": "設定",
+    "overview": "概要",
+    "apiKeys": "APIキー",
+    "oauthApps": "OAuthアプリ",
+    "connectors": "コネクタ",
+    "workspaceSettings": "ワークスペース設定",
+    "plan": "プラン",
+    "keyKinds": "APIキーの用途",
+    "kmcKeys": "KMCへ接続するキー",
+    "providerKeys": "外部AIサービスのキー"
+  },
   "integrationEntry": {
     "title": "インテグレーション",
     "intro": "何を接続したいですか？取り込みたいデータはありますか？",
@@ -1799,9 +1812,10 @@
     "back": "目的からインテグレーションを選ぶ",
     "entry": "インテグレーション：目的から選ぶ",
     "tasks": {
+      "connector": {"title":"コネクタで外部サービスを連携する","description":"Slackなどの外部サービスの更新を自動で取り込みます。コネクタ画面で接続方式と取り込み元を選びます。自作のシステムからAPIでデータを送る場合は、リソースを利用します。"},
       "client": {
-        "title": "Claude、ChatGPT、Gemini、Museなどを接続する",
-        "description": "MCPのURLをクライアントに貼り付け、画面の案内に沿ってサインインします。対応クライアントの登録は自動です。"
+        "title": "AIクライアントを接続する",
+        "description": "Claude、ChatGPT、Gemini、Museなどを接続できます。MCPのURLを追加し、画面の案内に沿ってサインインします。クライアントの登録は自動です。"
       },
       "script": {
         "title": "スクリプトからKMCを呼び出す",

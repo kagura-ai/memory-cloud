@@ -159,11 +159,11 @@ describe("Sidebar", () => {
     expect(link).toHaveAttribute("aria-label", "kaguraLogoAria");
   });
 
-  it("shows the owner Plan link wired to the settings/plan route (#1121/#1126)", () => {
+  it("shows a single Settings destination", () => {
     render(<Sidebar />);
     // next-intl is mocked to echo the key, so the nav label is "plan".
-    const planLink = screen.getByRole("link", { name: "plan" });
-    expect(planLink).toHaveAttribute("href", "/workspace/settings/plan");
+    const planLink = screen.getByRole("link", { name: "settings" });
+    expect(planLink).toHaveAttribute("href", "/workspace/settings");
   });
 
   it("hides the Plan link when the plan_page feature flag is off (#1145)", () => {
@@ -180,10 +180,8 @@ describe("Sidebar", () => {
 
   it("shows externalKeys and workspace cost links when byok is enabled (#1167)", () => {
     render(<Sidebar />);
-    expect(screen.getByRole("link", { name: "externalKeys" })).toHaveAttribute(
-      "href",
-      "/workspace/integrations/external-keys",
-    );
+    expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
+    expect(screen.getByRole("link", { name: "integrations" })).toHaveAttribute("href", "/workspace/integrations");
     expect(document.querySelector('nav a[href="/workspace/cost"]')).toHaveAttribute(
       "href",
       "/workspace/cost",
@@ -211,10 +209,8 @@ describe("Sidebar", () => {
     mockFeatures = { plan_page: true, byok: true, cost_display: false };
     render(<Sidebar />);
     expect(document.querySelector('nav a[href="/workspace/cost"]')).toBeNull();
-    expect(screen.getByRole("link", { name: "externalKeys" })).toHaveAttribute(
-      "href",
-      "/workspace/integrations/external-keys",
-    );
+    expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
+    expect(screen.getByRole("link", { name: "integrations" })).toHaveAttribute("href", "/workspace/integrations");
   });
 
   it("keeps the admin /admin/cost link for a system admin when cost_display is off (#1571)", () => {
@@ -326,8 +322,8 @@ describe("feature discoverability (#2630)", () => {
       mockFeatures = { plan_page: true, byok: true, cost_display: true };
       mockPlanFeatures = { resources: false, connectors: false, public_contexts: false };
       render(<Sidebar />);
-      for (const href of ["/workspace/resources", "/workspace/integrations/connectors",
-        "/workspace/dashboard", "/workspace/settings/plan", "/workspace/settings/general",
+      for (const href of ["/workspace/resources", "/workspace/integrations",
+        "/workspace/dashboard", "/workspace/settings",
         "/workspace/members"]) {
         expect(document.querySelector(`nav a[href="${href}"]`)).not.toBeNull();
       }
@@ -338,123 +334,7 @@ describe("feature discoverability (#2630)", () => {
   );
 });
 
-describe("External Keys nav with BYOK off (#1616)", () => {
-  /**
-   * Rule: the entry shows iff the viewer is the workspace owner AND
-   * (features.byok is true OR the workspace already stores a key). With BYOK
-   * off the page is still the owner's management console for keys stored
-   * earlier (list / disable / delete, #1613), so it needs an entry point; a
-   * workspace that never stored one gets no dead-end link. The probe fires
-   * only on an explicit `byok: false` for an owner — never while flags load,
-   * never on a BYOK-on deployment, never for a role the list route 403s.
-   *
-   * The probe answer is module-cached per workspace, so every case gets its
-   * own workspace id.
-   */
-  beforeEach(() => {
-    vi.clearAllMocks();
-    // `clearAllMocks` keeps queued `mockResolvedValueOnce` answers; a case
-    // that (correctly) never probes must not hand its answer to the next.
-    mockListExternalKeys.mockReset().mockResolvedValue([]);
-    mockFeatures = { plan_page: true, byok: false, cost_display: true };
-    mockPlanFeatures = {
-      resources: true,
-      connectors: true,
-      public_contexts: true,
-    };
-    mockWorkspaceRole = "owner";
-    mockUser.role = "user";
-  });
-
-  it("shows the entry for an owner whose workspace already stores a key", async () => {
-    mockWorkspaceId = "w-byok-off-with-key";
-    mockListExternalKeys.mockResolvedValueOnce([
-      { key_name: "OPENAI_API_KEY", provider: "openai", enabled: true },
-    ]);
-    render(<Sidebar />);
-    const link = await screen.findByRole("link", { name: "externalKeys" });
-    expect(link).toHaveAttribute(
-      "href",
-      "/workspace/integrations/external-keys",
-    );
-    expect(mockListExternalKeys).toHaveBeenCalledTimes(1);
-    // The key-status route still 404s with BYOK off: no probe, no warning.
-    expect(mockKeyStatus).not.toHaveBeenCalled();
-    expect(within(link).queryByLabelText("noExternalKeys")).toBeNull();
-  });
-
-  it("keeps the entry hidden for an owner with no stored key", async () => {
-    mockWorkspaceId = "w-byok-off-empty";
-    render(<Sidebar />);
-    await waitFor(() => expect(mockListExternalKeys).toHaveBeenCalledTimes(1));
-    // Flush the resolved `[]` answer: the entry must stay hidden on a
-    // settled `false`, not only while the probe is pending.
-    await act(async () => {});
-    expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
-  });
-
-  it.each(["admin", "member", "viewer"])(
-    "hides the entry and does not probe for a %s",
-    async (role) => {
-      // GET /external-keys is owner-only; a probe here is a guaranteed 403,
-      // and the page redirects non-owners anyway.
-      mockWorkspaceId = `w-byok-off-${role}`;
-      mockWorkspaceRole = role;
-      render(<Sidebar />);
-      await act(async () => {});
-      expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
-      expect(mockListExternalKeys).not.toHaveBeenCalled();
-    },
-  );
-
-  it("hides the entry and does not probe while feature flags are loading", async () => {
-    mockWorkspaceId = "w-byok-pending";
-    mockFeatures = null;
-    render(<Sidebar />);
-    await act(async () => {});
-    expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
-    expect(mockListExternalKeys).not.toHaveBeenCalled();
-  });
-
-  it("shows the entry at once and never probes when byok is on (unchanged)", async () => {
-    mockWorkspaceId = "w-byok-on";
-    mockFeatures = { plan_page: true, byok: true, cost_display: true };
-    render(<Sidebar />);
-    expect(screen.getByRole("link", { name: "externalKeys" })).toHaveAttribute(
-      "href",
-      "/workspace/integrations/external-keys",
-    );
-    await act(async () => {});
-    expect(mockListExternalKeys).not.toHaveBeenCalled();
-  });
-
-  it("stays hidden on a failed probe and retries on the next mount", async () => {
-    mockWorkspaceId = "w-byok-off-flaky";
-    mockListExternalKeys
-      .mockRejectedValueOnce(new Error("down"))
-      .mockResolvedValueOnce([{ key_name: "K" }]);
-    const first = render(<Sidebar />);
-    await act(async () => {});
-    expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
-    expect(mockListExternalKeys).toHaveBeenCalledTimes(1);
-    first.unmount();
-
-    render(<Sidebar />);
-    expect(
-      await screen.findByRole("link", { name: "externalKeys" }),
-    ).toBeInTheDocument();
-    expect(mockListExternalKeys).toHaveBeenCalledTimes(2);
-  });
-
-  it("leaves the workspace cost entry gated on byok AND cost_display", async () => {
-    // Its API does 404 with BYOK off; a stored key changes nothing for it.
-    mockWorkspaceId = "w-byok-off-cost";
-    mockListExternalKeys.mockResolvedValueOnce([{ key_name: "K" }]);
-    render(<Sidebar />);
-    await screen.findByRole("link", { name: "externalKeys" });
-    expect(document.querySelector('nav a[href="/workspace/cost"]')).toBeNull();
-  });
-});
+// BYOK visibility and retained-key management now live in WorkspaceSectionNavigation.test.tsx.
 
 describe("the sidebar subtree survives a state change (#1488 Phase 4)", () => {
   /**

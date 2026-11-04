@@ -1790,6 +1790,19 @@
     "languageDescription": "Select your preferred language",
     "saved": "Settings saved"
   },
+  "sectionNavigation": {
+    "integrations": "Integrations",
+    "settings": "Settings",
+    "overview": "Overview",
+    "apiKeys": "API keys",
+    "oauthApps": "OAuth apps",
+    "connectors": "Connectors",
+    "workspaceSettings": "Workspace settings",
+    "plan": "Plan",
+    "keyKinds": "API key purpose",
+    "kmcKeys": "Keys for calling KMC",
+    "providerKeys": "External AI provider keys"
+  },
   "integrationEntry": {
     "title": "Integrations",
     "intro": "What would you like to connect or bring into KMC?",
@@ -1799,9 +1812,10 @@
     "back": "Choose an integration by task",
     "entry": "Integrations – choose by task",
     "tasks": {
+      "connector": {"title":"Connect an external service with a connector","description":"Connect a service such as Slack to bring updates into KMC automatically. Choose the connection method and source in Connectors. Resources also accept data that your own system sends through the API."},
       "client": {
-        "title": "Connect Claude, ChatGPT, Gemini, Muse, or another AI client",
-        "description": "Copy the MCP URL into your client and sign in when prompted. Supported clients register automatically."
+        "title": "Connect an AI client",
+        "description": "Connect Claude, ChatGPT, Gemini, Muse or another supported client. Add the MCP URL and sign in when prompted. The client registers automatically."
       },
       "script": {
         "title": "Call KMC from a script",

@@ -221,6 +221,21 @@ export const navigationGroups: NavGroup[] = [
   },
 ];
 
+// The route catalog above keeps per-feature access metadata. The sidebar has
+// one entry for each section; its pages provide the subordinate navigation.
+export const sidebarNavigationGroups: NavGroup[] = navigationGroups.flatMap(group => {
+  if (group.titleKey === "settings") return [];
+  if (group.titleKey === "integrations") return [{
+    titleKey: "",
+    collapsible: false,
+    items: [
+      { nameKey: "integrations", href: "/workspace/integrations", icon: Plug },
+      { nameKey: "settings", href: "/workspace/settings", icon: Settings },
+    ],
+  }];
+  return [group];
+});
+
 // Match feature routes without using object IDs or data from protected APIs.
 const items = navigationGroups.flatMap((group) => group.items.flatMap((item) => [item, ...(item.children ?? [])]));
 export function navigationForPath(pathname: string): NavItem | undefined {
