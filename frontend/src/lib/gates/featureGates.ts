@@ -396,6 +396,8 @@ export interface FeatureGate {
    * re-derives it.
    */
   readonly canUpgrade: boolean;
+  /** Billing exists here, but this member needs the workspace owner to act. */
+  readonly askOwner?: true;
 
   /**
    * The server DEGRADES rather than refusing (#1648). True only together
@@ -981,33 +983,8 @@ export function resolveGate(input: {
   }
 
   // 4. plan
-  if (spec.matrix && tiers !== null) {
-    const test = matrixPredicate(spec.matrix);
-    const row = tiers.find((t) => t.name === input.planName);
-    if (!row || !test(row)) {
-      if (spec.enforcement === "degrade") {
-        return {
-          state: "allowed",
-          feature: key,
-          canUpgrade: false,
-          degraded: true,
-        };
-      }
-      const requiredPlan = requiredTierFor(tiers, test)?.name;
-      return {
-        state: "plan",
-        feature: key,
-        ...tierFields(
-          requiredPlan,
-          input.planName || undefined,
-          tiers,
-          undefined,
-          input.locale,
-        ),
-        canUpgrade: narrowCanUpgrade("plan", requiredPlan, input.canUpgrade),
-      };
-    }
-  }
+  const restriction = matrixRestriction(key, tiers, input.planName, input.locale, input.canUpgrade);
+  if (restriction) return restriction;
 
   // 5. quota — only once the feature itself is allowed.
   const { quota } = input;
@@ -1025,6 +1002,46 @@ export function resolveGate(input: {
 
   // 6. allowed
   return bareGate("allowed", key);
+}
+
+/** Evaluate only the tier condition, also used to explain a second restriction on a role-gated page. */
+export function matrixRestriction(key: GateKey, tiers: readonly PlanTierFeature[] | null,
+  planName: string | null | undefined, locale: string | undefined, canUpgrade: boolean): FeatureGate | undefined {
+  const spec: GateSpec = GATE_SPECS[key];
+  if (spec.matrix && tiers !== null) {
+    const test = matrixPredicate(spec.matrix);
+    const row = tiers.find((t) => t.name === planName);
+    if (!row || !test(row)) {
+      if (spec.enforcement === "degrade") {
+        return {
+          state: "allowed",
+          feature: key,
+          canUpgrade: false,
+          degraded: true,
+        };
+      }
+      const requiredPlan = requiredTierFor(tiers, test)?.name;
+      return {
+        state: "plan",
+        feature: key,
+        ...tierFields(
+          requiredPlan,
+          planName || undefined,
+          tiers,
+          undefined,
+          locale,
+        ),
+        canUpgrade: narrowCanUpgrade("plan", requiredPlan, canUpgrade),
+      };
+    }
+  }
+}
+
+export function withOwnerGuidance(gate: FeatureGate, role: string | null | undefined, billingEnabled: boolean): FeatureGate {
+  return billingEnabled && !gate.canUpgrade && gate.requiredPlan &&
+    (gate.state === "plan" || gate.state === "quota") &&
+    (role === WorkspaceRole.Admin || role === WorkspaceRole.Member || role === WorkspaceRole.Viewer)
+    ? { ...gate, askOwner: true } : gate;
 }
 
 // ── Producer B: page-local quota numbers ────────────────────────────────────

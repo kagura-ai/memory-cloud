@@ -15,7 +15,7 @@
  * translator shows the relative key), and it never carries a CTA.
  */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import WorkspacePlanPage from "./page";
@@ -186,6 +186,19 @@ describe("WorkspacePlanPage (#1141)", () => {
     render(<WorkspacePlanPage />);
     await screen.findByText("planPage.currentPlan");
     expect(screen.queryByText("planPage.suspended.title")).toBeNull();
+  });
+
+  it("ignores a billing handoff response after leaving the selected workspace", async () => {
+    mockWorkspace = { current_user_role: "owner", plan_name: "free" };
+    let resolveHandoff!: (value: { url: string }) => void;
+    mockMintBillingHandoff.mockImplementationOnce(() => new Promise(resolve => { resolveHandoff = resolve; }));
+    const { unmount } = render(<WorkspacePlanPage />);
+    fireEvent.click(await screen.findByText("planPage.manageBilling"));
+    unmount();
+    const before = window.location.href;
+    await act(async () => { resolveHandoff({ url: before + "#stale-billing" }); });
+    expect(window.location.href).toBe(before);
+    expect(mockToast).not.toHaveBeenCalled();
   });
 
   it("free (unsubscribed) owner keeps the change-plan wording and shows no hint", async () => {

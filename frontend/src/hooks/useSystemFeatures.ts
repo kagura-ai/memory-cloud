@@ -45,6 +45,11 @@ const FAILED_INFO: SystemInfo = {
   features: {},
 };
 
+// Route explanations must not call a transport failure a deployment decision.
+export function isSystemInfoUnavailable(info: SystemInfo | null): boolean {
+  return info === FAILED_INFO;
+}
+
 let cache: SystemInfo | null = null;
 let inflight: Promise<SystemInfo> | null = null;
 

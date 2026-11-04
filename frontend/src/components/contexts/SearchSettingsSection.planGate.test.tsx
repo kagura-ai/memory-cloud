@@ -221,7 +221,7 @@ describe("SearchSettingsSection reranker gate, CTA withheld (#1643)", () => {
     renderGate("en");
 
     expect(await screen.findByText(COPY.en.title)).toBeInTheDocument();
-    expect(screen.getByText(COPY.en.description)).toBeInTheDocument();
+    expect(screen.getByText(COPY.en.description + " Ask your workspace owner to review the available plans.")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: COPY.en.action }),
     ).not.toBeInTheDocument();

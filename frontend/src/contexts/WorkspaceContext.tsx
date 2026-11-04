@@ -9,7 +9,7 @@
  * Automatically redirects to workspace creation if user has no workspace.
  */
 
-import { createContext, useContext, useEffect, useState, useRef, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from './AuthContext';
 import {
@@ -23,6 +23,7 @@ interface WorkspaceContextType {
   currentWorkspaceId: string | null;
   workspaces: Workspace[];
   loading: boolean;
+  loadFailed: boolean;
   refreshWorkspaces: () => Promise<void>;
   switchWorkspace: (workspaceId: string) => Promise<void>;
 }
@@ -36,59 +37,66 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null);
   const [loading, setLoading] = useState(true);
-  // Ref for immediate access to workspaces
-  const workspacesRef = useRef<Workspace[]>([]);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const switchingRef = useRef(false);
+  const generation = useRef(0);
+  const userId = user?.id;
+  const userWorkspaceId = user?.current_workspace_id;
 
-  const loadWorkspaces = async (forceLoad = false) => {
-    if (!user || authLoading) return;
-
+  // Read the current confirmed selection at call time. A late save in A can
+  // still call the refresh function it captured before a switch to B.
+  const activeScope = useRef<{ userId: string; workspaceId: string | null } | null>(null);
+  const refreshWorkspaces = useCallback(async () => {
+    const scope = activeScope.current;
+    if (!scope) return;
+    const selectedId = scope.workspaceId;
+    const request = ++generation.current;
+    setLoading(true);
+    setLoadFailed(false);
     try {
-      setLoading(true);
-      const workspaces = await listWorkspaces();
-
-      setWorkspaces(workspaces);
-      workspacesRef.current = workspaces;
-
-      // Set current workspace based on user's current_workspace_id
-      const userCurrentWorkspaceId = user?.current_workspace_id;
-      if (userCurrentWorkspaceId && workspaces.length > 0) {
-        const currentWorkspaceFromBackend = workspaces.find(o => o.id === userCurrentWorkspaceId);
-        if (currentWorkspaceFromBackend) {
-          setCurrentWorkspace(currentWorkspaceFromBackend);
-        } else {
-          setCurrentWorkspace(workspaces[0]);
-        }
-      } else if (workspaces.length > 0) {
-        setCurrentWorkspace(workspaces[0]);
-      }
-      // Note: No automatic redirect - pages should handle "no workspace" case themselves
-    } catch (error) {
-      console.error('Failed to load workspaces:', error);
+      const available = await listWorkspaces();
+      if (generation.current !== request) return;
+      setWorkspaces(available);
+      setCurrentWorkspace(selectedId
+        ? available.find(w => w.id === selectedId) ?? null
+        : null);
+    } catch {
+      if (generation.current !== request) return;
+      setWorkspaces([]);
+      setCurrentWorkspace(null);
+      setLoadFailed(true);
     } finally {
-      setLoading(false);
+      if (generation.current === request) setLoading(false);
     }
-  };
-
-  const refreshWorkspaces = async () => {
-    await loadWorkspaces(true);
-  };
+  }, []);
 
   const switchWorkspace = async (workspaceId: string) => {
+    if (switchingRef.current) return;
+    switchingRef.current = true;
+    setSwitching(true);
+    activeScope.current = null;
+    ++generation.current; // Invalidate an older list response before sending the switch.
     try {
-      // Call API to update backend current_workspace_id
       await switchWorkspaceApi(workspaceId);
-
-      // Refetch user data to get updated current_workspace_id
-      await refetchUser();
-
-      // Reload workspaces which will use the updated user.current_workspace_id
-      await loadWorkspaces();
-
-      // Refresh the page to reload all data with new workspace context
+      const confirmed = await refetchUser();
+      if (!confirmed || confirmed.id !== userId || confirmed.current_workspace_id !== workspaceId) {
+        throw new Error("Could not verify the selected workspace");
+      }
+      activeScope.current = { userId: confirmed.id, workspaceId };
+      await refreshWorkspaces();
       router.refresh();
     } catch (error) {
-      console.error('Failed to switch workspace:', error);
+      activeScope.current = null;
+      // A lost response is ambiguous: the server may already have switched.
+      ++generation.current;
+      setCurrentWorkspace(null);
+      setLoadFailed(true);
+      setLoading(false);
       throw error;
+    } finally {
+      switchingRef.current = false;
+      setSwitching(false);
     }
   };
 
@@ -96,17 +104,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // on the `user` object itself re-fires on every refetchUser() — it always
   // hands back a fresh object — which flips `loading` and makes WorkspaceGuard
   // unmount the whole authenticated subtree (#1532).
-  const userId = user?.id;
-  const userWorkspaceId = user?.current_workspace_id;
   useEffect(() => {
-    loadWorkspaces();
-  }, [userId, userWorkspaceId, authLoading]);
+    if (switchingRef.current) return;
+    const scope = userId && !authLoading ? { userId, workspaceId: userWorkspaceId ?? null } : null;
+    activeScope.current = scope;
+    void refreshWorkspaces();
+    return () => {
+      // A switch can publish its confirmed scope before this effect is cleaned up.
+      if (activeScope.current === scope) {
+        activeScope.current = null;
+        ++generation.current;
+      }
+    };
+  }, [userId, userWorkspaceId, authLoading, refreshWorkspaces]);
 
   const value: WorkspaceContextType = {
     currentWorkspace,
     currentWorkspaceId: currentWorkspace?.id || null,
     workspaces,
-    loading,
+    loading: loading || switching,
+    loadFailed,
     refreshWorkspaces,
     switchWorkspace,
   };

@@ -29,6 +29,7 @@ import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import {
   resolveGate,
+  withOwnerGuidance,
   type FeatureGate,
   type GateKey,
 } from "@/lib/gates/featureGates";
@@ -73,7 +74,7 @@ export function useFeatureGates<K extends GateKey>(
     () => {
       const gates = {} as Record<K, FeatureGate>;
       for (const key of keys) {
-        gates[key] = resolveGate({
+        gates[key] = withOwnerGuidance(resolveGate({
           key,
           tiers,
           planName,
@@ -84,7 +85,7 @@ export function useFeatureGates<K extends GateKey>(
           canUpgrade,
           locale,
           quota: quotas?.[key],
-        });
+        }), role, features?.plan_page === true);
       }
       return gates;
     },
