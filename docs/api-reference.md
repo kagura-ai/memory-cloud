@@ -815,9 +815,78 @@ A context member row the member already holds but whose list does not reach the 
 
 ---
 
+## Workspace Member APIs
+
+A member's **context access list** (`allowed_context_ids`) decides which contexts a member or viewer reaches ([concepts](concepts.md#workspace)):
+
+| Role | Not set (`null`) | Empty (`[]`) | A list |
+|------|------------------|--------------|--------|
+| **Owner / Admin** | Every context (the list is ignored) | Every context | Every context |
+| **Member** | No context until one is assigned | No context | Exactly these contexts |
+| **Viewer** | Every shared context | No context | Exactly these contexts |
+
+A private context stays open only to its creator, whatever the list says, and the list is kept when the member's role changes. Every id in a list must be a live context of the workspace: an id of another workspace, a deleted context or an unknown id is `400` `Invalid context IDs: [...]`, and two spellings of one id are stored once.
+
+The endpoints below accept a session admin or owner, or a **workspace-owner API key** (#1164, #2326; a key bound to another workspace gets `404`, an admin's key `403`, and a deployment can switch owner-key member management off). OAuth access tokens are refused with `403`. A change made with an API key is written to the audit log.
+
+### POST /api/v1/workspaces/{workspace_id}/members
+
+Add an existing user as a member. An API key cannot assign `owner` (`422`).
+
+**Request Body:**
+
+```json
+{
+  "user_id": "user-123",
+  "role": "member",
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+`allowed_context_ids` is optional: left out or `null`, the list is not set (the table above; a member then reaches no context until one is assigned). Unlike an invitation, which requires at least one context for a member or viewer, a direct add does not require a list.
+
+**Response:** `201 Created`
+
+```json
+{
+  "user_id": "user-123",
+  "role": "member",
+  "joined_at": "2026-11-04T10:00:00Z",
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+---
+
+### PUT /api/v1/workspaces/{workspace_id}/members/{user_id}/context-access
+
+Replace a member's context access list.
+
+**Request Body:**
+
+```json
+{
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+`null` clears the list (not set), `[]` gives no context.
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "user_id": "user-123",
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+---
+
 ### GET /api/v1/workspaces/{workspace_id}/members/{user_id}/context-access
 
-A member's context access list and the contexts it can be given: every live shared context of the workspace plus the member's own private contexts (including those of an account linked to the member, `is_own_private`), ordered by name. Another member's private context is never listed. Session admin or owner, or a workspace-owner API key; `404` when `user_id` is not a member of the workspace. Set the list with `PUT` on the same path.
+A member's context access list and the contexts it can be given: every live shared context of the workspace plus the member's own private contexts (including those of an account linked to the member, `is_own_private`), ordered by name. Another member's private context is never listed. A read: nothing is written to the audit log. `404` when `user_id` is not a member of the workspace. Set the list with `PUT` on the same path.
 
 **Response:**
 

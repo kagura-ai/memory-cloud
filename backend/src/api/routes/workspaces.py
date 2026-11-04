@@ -326,11 +326,26 @@ class WorkspaceMemberResponse(BaseModel):
         from_attributes = True
 
 
+# One text for both requests that carry a member's context access list (#2326).
+_ALLOWED_CONTEXT_IDS_DESCRIPTION = (
+    "List of context IDs the member can access. "
+    "null = not set: a member reaches no context, a viewer every shared context. "
+    "[] = no context access. "
+    "[uuid1, uuid2, ...] = only these contexts. "
+    "Ignored for owners and admins."
+)
+
+
 class AddMemberRequest(BaseModel):
     """Request model for adding member."""
 
     user_id: str = Field(..., min_length=1)
     role: str = Field(..., pattern=r"^(owner|admin|member|viewer)$")
+    # #2326: optional, so a caller that sends no list keeps today's "not set"
+    # row (unlike an invitation, which requires one for a member or viewer).
+    allowed_context_ids: list[UUID] | None = Field(
+        None, description=_ALLOWED_CONTEXT_IDS_DESCRIPTION
+    )
 
 
 class UpdateMemberRoleRequest(BaseModel):
@@ -348,14 +363,7 @@ class UpdateMemberContextAccessRequest(BaseModel):
     # #1693: UUID-typed, so a malformed entry is a canonical 422 (VAL-001) at the
     # request boundary instead of a 500 from an unguarded ``UUID(...)``.
     allowed_context_ids: list[UUID] | None = Field(
-        None,
-        description=(
-            "List of context IDs the member can access. "
-            "null = not set: a member reaches no context, a viewer every shared context. "
-            "[] = no context access. "
-            "[uuid1, uuid2, ...] = only these contexts. "
-            "Ignored for owners and admins."
-        ),
+        None, description=_ALLOWED_CONTEXT_IDS_DESCRIPTION
     )
 
 
@@ -725,11 +733,6 @@ async def list_members(
             custom_app_count=len(custom_apps),
         )
 
-        # Issue #234: Convert allowed_context_ids to string list
-        allowed_context_ids_str = None
-        if m.allowed_context_ids is not None:
-            allowed_context_ids_str = [str(ctx_id) for ctx_id in m.allowed_context_ids]
-
         member_responses.append(
             WorkspaceMemberResponse(
                 user_id=m.user_id,
@@ -744,7 +747,8 @@ async def list_members(
                 and m.user_id != owner_user_id,
                 credentials_status=credentials_status,
                 last_login_at=to_utc_iso(user_record.last_login_at) if user_record else None,
-                allowed_context_ids=allowed_context_ids_str,
+                # Issue #234: the context access list, as strings
+                allowed_context_ids=_context_ids_str(m.allowed_context_ids),
             )
         )
 
@@ -763,6 +767,51 @@ def _reject_programmatic_owner_assignment(principal, role) -> None:
         )
 
 
+async def _validated_context_ids(
+    db: AsyncSession, workspace_id: UUID, ids: list[UUID] | None
+) -> list[UUID] | None:
+    """The context access list a request may store for a member of ``workspace_id``.
+
+    ``None`` (not set) and ``[]`` (no context) pass through. Otherwise every id
+    must be a live context of the workspace; two spellings of one id parse to
+    the same UUID (#1693) and are kept once, in order. Shared by the add and
+    the context-access routes so both answer the same (#2326).
+
+    Raises:
+        HTTPException: 400 naming the ids that are not live contexts of the
+            workspace (another workspace's, a deleted one, an unknown one).
+    """
+    if not ids:
+        return ids
+    context_result = await db.execute(
+        select(Context.id).where(
+            Context.workspace_id == workspace_id,
+            Context.id.in_(ids),
+            Context.deleted_at.is_(None),
+        )
+    )
+    valid_ids = {row[0] for row in context_result.all()}
+    # Compared as UUIDs, not strings: an uppercase / braced spelling of a
+    # context that exists is the same id (#1693).
+    invalid_ids = set(ids) - valid_ids
+    if invalid_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid context IDs: {sorted(str(i) for i in invalid_ids)}",
+        )
+    return list(dict.fromkeys(ids))
+
+
+def _context_count(ids: list[UUID] | None) -> int | str:
+    """The list size for an audit row; ``"not_set"`` (the service log's spelling) for no list."""
+    return len(ids) if ids is not None else "not_set"
+
+
+def _context_ids_str(ids: list[UUID] | None) -> list[str] | None:
+    """A stored context access list as response strings (``None`` stays ``None``)."""
+    return [str(i) for i in ids] if ids is not None else None
+
+
 @router.post("/{workspace_id}/members", response_model=WorkspaceMemberResponse, status_code=201)
 async def add_member(
     workspace_id: UUID,
@@ -770,11 +819,26 @@ async def add_member(
     user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Add a member to workspace.
+    """Add a member to the workspace, optionally with its context access list.
 
-    Issue #1164: session admin+ (unchanged) OR workspace-owner API key.
-    Programmatic principals cannot assign ``owner`` (422) — owner assignment
-    stays with the ownership-transfer flow.
+    Issue #1164: session admin+ (unchanged) OR workspace-owner API key; OAuth
+    access tokens are refused (403). Programmatic principals cannot assign
+    ``owner`` (422) — owner assignment stays with the ownership-transfer flow.
+
+    `allowed_context_ids` (#2326) is optional. Left out or `null`, the
+    member's list is not set, as before; `[]` gives no context; a list must
+    name live contexts of this workspace (else 400 `Invalid context IDs`).
+    What the list means per role:
+
+    | Role | Not set (`null`) | Empty (`[]`) | A list |
+    |------|------------------|--------------|--------|
+    | Owner / Admin | Every context (the list is ignored) | Every context | Every context |
+    | Member | No context until one is assigned | No context | Exactly these contexts |
+    | Viewer | Every shared context | No context | Exactly these contexts |
+
+    A private context stays open only to its creator, whatever the list says.
+    The list is kept across role changes; change it later with
+    `PUT /api/v1/workspaces/{workspace_id}/members/{user_id}/context-access`.
     """
     workspace_service = WorkspaceService(db)
 
@@ -782,6 +846,8 @@ async def add_member(
         user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
     )
     _reject_programmatic_owner_assignment(principal, body.role)
+
+    allowed_context_ids = await _validated_context_ids(db, workspace_id, body.allowed_context_ids)
 
     # Issue #1164: audit programmatic mutations (no-op for session). Added
     # before the service call so it commits atomically with the membership.
@@ -792,7 +858,10 @@ async def add_member(
         workspace_id,
         action="workspace_member_added",
         target=body.user_id,
-        metadata={"role": str(body.role)},
+        metadata={
+            "role": str(body.role),
+            "context_count": _context_count(allowed_context_ids),
+        },
     )
 
     member = await workspace_service.add_member(
@@ -800,12 +869,14 @@ async def add_member(
         user_id=body.user_id,
         role=body.role,
         invited_by=user["user_id"],
+        allowed_context_ids=allowed_context_ids,
     )
 
     return WorkspaceMemberResponse(
         user_id=member.user_id,
         role=member.role,
         joined_at=to_utc_iso(member.joined_at),
+        allowed_context_ids=_context_ids_str(member.allowed_context_ids),
     )
 
 
@@ -869,6 +940,8 @@ async def update_member_role(
         user_id=member.user_id,
         role=member.role,
         joined_at=to_utc_iso(member.joined_at),
+        # The list as stored: a member with none who becomes a viewer gets [].
+        allowed_context_ids=_context_ids_str(member.allowed_context_ids),
     )
 
 
@@ -877,60 +950,49 @@ async def update_member_context_access(
     workspace_id: UUID,
     user_id: str,
     body: UpdateMemberContextAccessRequest,
-    request: Request,
+    current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
-    """Update member's allowed context access.
+    """Set a member's context access list.
 
     Issue #234: Context access restriction for member/viewer.
 
-    - allowed_context_ids=null: Not set — a member reaches no context, a
-      viewer every shared context
-    - allowed_context_ids=[]: No context access
-    - allowed_context_ids=[uuid1, uuid2]: Only these contexts accessible
+    - `allowed_context_ids: null`: not set
+    - `allowed_context_ids: []`: no context
+    - `allowed_context_ids: [uuid1, uuid2]`: exactly these contexts; every id
+      must be a live context of this workspace (else 400 `Invalid context IDs`)
+
+    | Role | Not set (`null`) | Empty (`[]`) | A list |
+    |------|------------------|--------------|--------|
+    | Owner / Admin | Every context (the list is ignored) | Every context | Every context |
+    | Member | No context until one is assigned | No context | Exactly these contexts |
+    | Viewer | Every shared context | No context | Exactly these contexts |
 
     A private context stays open only to its creator, whatever the list says.
-    The list is kept across role changes.
+    The list is kept across role changes. It can also be given when the
+    member is added (`POST /api/v1/workspaces/{workspace_id}/members`).
 
-    Note: This setting only applies to member/viewer roles.
-    owner/admin roles always have full access (this setting is ignored).
-
-    Requires admin or owner role.
+    Auth: a session admin or owner, or a workspace-owner API key (#2326,
+    audited); OAuth access tokens are refused (403).
     """
-    current_user = await get_current_user(request)
     workspace_service = WorkspaceService(db)
-    perm_service = PermissionService(db)
 
-    # Check admin access
-    await perm_service.check_workspace_admin(current_user["user_id"], workspace_id)
+    principal = await authorize_workspace_management(
+        current_user, workspace_id, db, session_required_role=WorkspaceRole.ADMIN
+    )
 
-    # The request model already parsed the ids as UUIDs (#1693).
-    allowed_context_ids = None
-    if body.allowed_context_ids is not None:
-        # Validate that all context IDs exist in this workspace
-        if body.allowed_context_ids:
-            context_result = await db.execute(
-                select(Context.id).where(
-                    Context.workspace_id == workspace_id,
-                    Context.id.in_(body.allowed_context_ids),
-                    Context.deleted_at.is_(None),
-                )
-            )
-            valid_ids = {row[0] for row in context_result.all()}
-            # Compared as UUIDs, not strings: an uppercase / braced spelling of
-            # a context that exists is the same id (#1693).
-            invalid_ids = set(body.allowed_context_ids) - valid_ids
+    allowed_context_ids = await _validated_context_ids(db, workspace_id, body.allowed_context_ids)
 
-            if invalid_ids:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid context IDs: {sorted(str(i) for i in invalid_ids)}",
-                )
-
-            # Two spellings of one id parse equal; store it once, in order.
-            allowed_context_ids = list(dict.fromkeys(body.allowed_context_ids))
-        else:
-            allowed_context_ids = []  # Empty list = no access
+    # Added before the service call, which commits it with the change (#2326).
+    await audit_programmatic_workspace_action(
+        db,
+        principal,
+        current_user,
+        workspace_id,
+        action="workspace_member_context_access_set",
+        target=user_id,
+        metadata={"context_count": _context_count(allowed_context_ids)},
+    )
 
     member = await workspace_service.update_member_context_access(
         workspace_id=workspace_id,
@@ -938,15 +1000,10 @@ async def update_member_context_access(
         allowed_context_ids=allowed_context_ids,
     )
 
-    # Convert back to string list for response
-    allowed_context_ids_str = None
-    if member.allowed_context_ids is not None:
-        allowed_context_ids_str = [str(ctx_id) for ctx_id in member.allowed_context_ids]
-
     return {
         "status": "ok",
         "user_id": member.user_id,
-        "allowed_context_ids": allowed_context_ids_str,
+        "allowed_context_ids": _context_ids_str(member.allowed_context_ids),
     }
 
 

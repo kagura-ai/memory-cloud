@@ -3775,7 +3775,7 @@ Current modes:
 | `oauth` | `advertised` | Nothing checks it — OAuth login and clients work on every tier. |
 | `secret_store` | `advertised` | Nothing checks it, and every tier must keep it (invariant above), so the row can never be false. |
 | `reranking` | `degrades` | Recall still returns results, just unreranked (`reranking_disabled_by_plan_tier` at info). |
-| `team_invitations` | `enforced` | Creating an invitation is refused. |
+| `team_invitations` | `enforced` | Creating an invitation, adding a member directly and accepting an invitation (one issued before a downgrade) are refused. |
 | `shared_contexts` | `enforced` | A non-private context visibility is refused. |
 | `public_contexts` | `enforced` | Publishing a context / minting a bound public key is refused. |
 | `memory_analysis` | `enforced` | The analysis run is refused (403). |
