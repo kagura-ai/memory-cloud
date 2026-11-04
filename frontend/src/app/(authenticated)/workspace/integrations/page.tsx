@@ -13,6 +13,7 @@ const tasks = [
   { key: "client", href: credentials + "?tab=api-keys#mcp-connection" },
   { key: "script", href: credentials + "?tab=api-keys#credential-tools" },
   { key: "import", href: "/workspace/resources" },
+  { key: "connector", href: "/workspace/integrations/connectors" },
 ] as const;
 const management = [
   { key: "ownApp", href: credentials + "?tab=oauth-apps#credential-tools" },

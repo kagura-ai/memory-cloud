@@ -320,7 +320,7 @@ describe("WorkspaceMembersPage invite control notice (#1646 P9/R1)", () => {
     return screen.findByRole("button", { name: /inviteMember/ });
   }
 
-  it("plan gate, owner on a Plan-page deployment: badge, hint and a CTA to the Plan page", async () => {
+  it("plan gate for an owner shows one hint and a Plan-page CTA", async () => {
     setupWithRole("owner", "free");
     render(<WorkspaceMembersPage />);
     const invite = await findInvite();
@@ -329,7 +329,7 @@ describe("WorkspaceMembersPage invite control notice (#1646 P9/R1)", () => {
     // The label is the action alone — the old "(Pro Plan)" suffix is gone.
     expect(invite).toHaveTextContent(/^inviteMember$/);
     expect(invite).toHaveAccessibleDescription("plan.hint");
-    expect(screen.getByText("plan.badge")).toBeInTheDocument();
+    expect(screen.queryByText("plan.badge")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "plan.action" }));
     expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });

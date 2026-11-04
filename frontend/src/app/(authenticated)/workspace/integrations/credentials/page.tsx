@@ -6,12 +6,6 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { ContextualHelp } from "@/components/common/ContextualHelp";
 import { PageHeader } from "@/components/common/PageHeader";
 import { FeatureGuide } from "@/components/common/FeatureGuide";
-import {
-  CategoryTabs,
-  CategoryTabsList,
-  CategoryTabsTrigger,
-  CategoryTabsContent,
-} from "@/components/ui/tabs";
 import { useTabParam } from "@/hooks/useTabParam";
 import { APIKeysTabPanel } from "@/components/credentials/APIKeysTabPanel";
 import { McpConnectionCard } from "@/components/credentials/McpConnectionCard";
@@ -25,11 +19,12 @@ const CREDENTIAL_TABS = ["api-keys", "oauth-apps"] as const;
 export default function CredentialsPage() {
   const t = useTranslations("credentials");
   const entry = useTranslations("integrationEntry");
-  const [tab, setTab] = useTabParam("api-keys", "tab", CREDENTIAL_TABS);
+  const navigation = useTranslations("sectionNavigation");
+  const [tab] = useTabParam("api-keys", "tab", CREDENTIAL_TABS);
 
   return (
     <PageContainer>
-      <PageHeader title={t("title")} description={t("description")} />
+      <PageHeader title={navigation(tab === "oauth-apps" ? "oauthApps" : "apiKeys")} description={t("description")} />
 
       <Link href="/workspace/integrations" className="inline-block py-2 text-sm text-primary underline">{entry("back")}</Link>
       <ContextualHelp topic="credentials" />
@@ -41,30 +36,8 @@ export default function CredentialsPage() {
       <div id="mcp-connection" tabIndex={-1}><McpConnectionCard /></div>
 
       <div id="credential-tools" tabIndex={-1}>
-      <CategoryTabs value={tab} onValueChange={setTab}>
-        <CategoryTabsList>
-          <CategoryTabsTrigger value={CREDENTIAL_TABS[0]}>
-            {t("tabs.apiKeys")}
-          </CategoryTabsTrigger>
-          <CategoryTabsTrigger value={CREDENTIAL_TABS[1]}>
-            {t("tabs.oauthApps")}
-          </CategoryTabsTrigger>
-        </CategoryTabsList>
-
-        <CategoryTabsContent
-          value={CREDENTIAL_TABS[0]}
-          helpText={t("tabs.apiKeysHelp")}
-        >
-          <APIKeysTabPanel />
-        </CategoryTabsContent>
-
-        <CategoryTabsContent
-          value={CREDENTIAL_TABS[1]}
-          helpText={t("tabs.oauthAppsHelp")}
-        >
-          <OAuthAppsTabPanel />
-        </CategoryTabsContent>
-      </CategoryTabs>
+        <p className="mb-3 text-sm text-muted-foreground">{t(tab === "oauth-apps" ? "tabs.oauthAppsHelp" : "tabs.apiKeysHelp")}</p>
+        {tab === "oauth-apps" ? <OAuthAppsTabPanel /> : <APIKeysTabPanel />}
       </div>
 
       {/* #2129: the OAuth apps the user authorized, with each app's MCP

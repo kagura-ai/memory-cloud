@@ -231,17 +231,17 @@ const BRANCHES: readonly Branch[] = [
       en: {
         title: "The XL plan includes resources",
         description: "Upgrade to the XL plan to use resources.",
-        action: "Upgrade to XL",
+        action: "View plans",
         badge: "XL plan",
-        hint: "Requires the XL plan",
+        hint: "Available on the XL plan",
       },
       ja: {
         title: "リソース は XL プランで利用できます",
         description:
           "リソース を利用するには XL プランにアップグレードしてください。",
-        action: "XL にアップグレード",
+        action: "プランを見る",
         badge: "XL プラン",
-        hint: "XL プランが必要です",
+        hint: "XLプランで利用できます",
       },
     },
   },
@@ -254,17 +254,17 @@ const BRANCHES: readonly Branch[] = [
         title: "New resources require the XL plan",
         description:
           "Existing resources keep working. Creating new resources is available on the XL plan.",
-        action: "Upgrade to XL",
+        action: "View plans",
         badge: "XL plan",
-        hint: "Requires the XL plan",
+        hint: "Available on the XL plan",
       },
       ja: {
         title: "新規 リソース には XL プランが必要です",
         description:
           "既存の リソース は引き続き利用できます。新規 リソース の作成には XL プランが必要です。",
-        action: "XL にアップグレード",
+        action: "プランを見る",
         badge: "XL プラン",
-        hint: "XL プランが必要です",
+        hint: "XLプランで利用できます",
       },
     },
   },
@@ -662,7 +662,7 @@ describe("FeatureGateNotice hard rules", () => {
         canUpgrade: true,
       });
       renderIn("en", <FeatureGateNotice variant={variant} gate={gate} />);
-      fireEvent.click(screen.getByRole("button", { name: "Upgrade to XL" }));
+      fireEvent.click(screen.getByRole("button", { name: "View plans" }));
       expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
     },
   );
@@ -1000,7 +1000,7 @@ describe("FeatureGateNotice variants", () => {
     expect(
       screen.getByText("Upgrade to the XL plan to use resources."),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Requires the XL plan")).not.toBeInTheDocument();
+    expect(screen.queryByText("Available on the XL plan")).not.toBeInTheDocument();
   });
 });
 
