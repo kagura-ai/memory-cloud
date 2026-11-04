@@ -323,6 +323,8 @@ async def accept_invitation(
     Raises:
         HTTPException 400: Validation error (expired, email mismatch, already member, etc.)
         HTTPException 404: Invitation not found
+        FeatureNotAvailableError: Refused with 403 when the workspace's plan no
+            longer has team invitations (#2621)
     """
     user_id = current_user.get("user_id")
     user_email = current_user.get("email")
@@ -384,7 +386,7 @@ async def get_pending_invitations(
     Issue #179: In-app invitation notifications.
 
     Returns invitations where:
-    - User's email matches (case-insensitive) OR no email restriction
+    - The invitation is addressed to the user's email (case-insensitive)
     - Not yet accepted (accepted_at IS NULL)
     - Not expired
 

@@ -267,6 +267,28 @@ class SupersedeEdgeConflictError(ConflictError):
         self.existing = existing
 
 
+class ContextNotInAccessListError(ConflictError):
+    """A context member add for a member whose context access list misses the context (409, #2327).
+
+    Such a row would grant nothing (``check_context_access`` refuses a context
+    outside the list) and stay hidden from the context member list. Nothing
+    was written. ``details.reason`` is the discriminator the web UI keys on to
+    ask the operator whether to add the context to the member's list; the
+    request is then resent with ``extend_access_list=true``.
+    """
+
+    def __init__(self, *, user_id: str, context_id: Any) -> None:
+        super().__init__(
+            "This member's context access list does not include this context, so a "
+            "context role would give them nothing. A workspace owner or admin can add "
+            "it to the list by resending with extend_access_list=true, or edit the "
+            "member's context access first.",
+            reason="context_not_in_access_list",
+            user_id=user_id,
+            context_id=str(context_id),
+        )
+
+
 # Platform team already connected (#1753)
 #
 # Both stay ``RES-002`` / 409 — the code a client already sees for this

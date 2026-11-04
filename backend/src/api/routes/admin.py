@@ -1021,9 +1021,20 @@ async def delete_user(
 
     Returns 409 without modifying data when an owned workspace or created
     shared context lacks an eligible successor, or when an owned workspace is
-    under a running subscription (``BILLING-005``, #1940). A private context
-    passes to a linked account that wrote in it, otherwise it is deleted with
-    the user (#2417). A soft-deleted workspace the user owns takes no
+    under a running subscription (``BILLING-005``, #1940). The missing-successor
+    409's ``detail`` is ``{"message": "Ownership transfer required",
+    "workspace_ids", "context_ids"}`` (what still needs a successor) plus what
+    the successor picker shows (#2420): ``workspaces`` (``id``, ``name``,
+    ``owner_user_id``, ``members``: ``user_id``, ``name``, ``email``, ``role``,
+    the user left out), ``contexts`` (``id``, ``name``, ``display_name``,
+    ``workspace_id``, ``is_private``, ``candidate_user_ids``: the members an
+    explicit pick may name) and ``owner_fixed_contexts`` (``id``, ``name``,
+    ``display_name``, ``workspace_id``, ``successor_user_id``: the workspace's
+    owner, ``null`` when it is the workspace successor picked). A connector's
+    write target goes to the workspace's owner with the connector's key and
+    takes no selection; naming one in ``context_transfers`` is a 409. A private
+    context passes to a linked account that wrote in it, otherwise it is
+    deleted with the user (#2417). A soft-deleted workspace the user owns takes no
     successor: it is hard-deleted with the user, everything in it included,
     and listed under ``purged_workspaces`` (#2406). In a workspace someone
     else owns, the user's connector keys and the agents it registered go to

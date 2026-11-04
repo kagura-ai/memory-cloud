@@ -273,11 +273,19 @@ export interface ContextMember {
   role: WorkspaceRole | ContextRole;
   added_at: string | null; // null only for workspace owner/admin rows (viewer rows use joined_at)
   is_workspace_admin: boolean; // true if access is via workspace role
+  /** #2327: the add also put the context on the member's context access list. */
+  access_list_extended?: boolean;
 }
 
 export interface AddContextMemberRequest {
   user_id: string;
   role: ContextRole;
+  /**
+   * #2327: when the member's context access list does not include the
+   * context, add it to that list in the same step. Without it such an add is
+   * refused with 409 `details.reason` = `context_not_in_access_list`.
+   */
+  extend_access_list?: boolean;
 }
 
 export interface UpdateContextMemberRoleRequest {

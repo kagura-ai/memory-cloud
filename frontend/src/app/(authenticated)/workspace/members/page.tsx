@@ -8,7 +8,7 @@
  * Manage workspace members, roles, and invitations.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
@@ -21,8 +21,10 @@ import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { Button } from "@/components/ui/button";
 import {
   InlineSpinner,
+  LoadingState,
   TableLoadingState,
 } from "@/components/common/LoadingState";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
@@ -34,7 +36,9 @@ import {
   updateMemberRole,
   removeMember,
   updateMemberContextAccess,
+  getMemberContextAccess,
   WorkspaceMember,
+  type MemberContextAccessContext,
 } from "@/lib/api/workspaces";
 import { getContexts, Context } from "@/lib/api/contexts";
 import { ApiError } from "@/lib/api/base";
@@ -64,6 +68,7 @@ import {
   Settings,
   ChevronDown,
   ChevronUp,
+  Lock,
 } from "lucide-react";
 import {
   AlertDialog,
@@ -149,6 +154,18 @@ export default function WorkspaceMembersPage() {
   const [showContextAccessDialog, setShowContextAccessDialog] = useState(false);
   const [selectedContextIds, setSelectedContextIds] = useState<string[]>([]);
   const [contextAccessLoading, setContextAccessLoading] = useState(false);
+  // #2327: what the dialog offers for the member it is open for — the shared
+  // contexts plus that member's own private ones, from the server.
+  const [contextAccessOptions, setContextAccessOptions] = useState<
+    MemberContextAccessContext[]
+  >([]);
+  const [contextAccessOptionsLoading, setContextAccessOptionsLoading] =
+    useState(false);
+  const [contextAccessOptionsError, setContextAccessOptionsError] = useState<
+    string | null
+  >(null);
+  // The latest dialog load; an answer for an earlier opening is dropped.
+  const contextAccessRequest = useRef(0);
 
 
   // Role permissions section toggle
@@ -271,7 +288,8 @@ export default function WorkspaceMembersPage() {
     }
   };
 
-  // Issue #234: Load contexts for context access dialog (shared only)
+  // Issue #234: the shared contexts, for the invitation flow (the context
+  // access dialog loads its own list per member, #2327).
   const loadContexts = async () => {
     try {
       const response = await getContexts();
@@ -289,7 +307,44 @@ export default function WorkspaceMembersPage() {
     // Set selected contexts (empty when no list is set)
     setSelectedContextIds(member.allowed_context_ids || []);
     setShowContextAccessDialog(true);
+    void loadContextAccessOptions(member);
   };
+
+  // #2327: the contexts this member can be given, including its own private
+  // ones (which no other account can open, so the caller's own context list
+  // never holds them).
+  const loadContextAccessOptions = async (member: WorkspaceMember) => {
+    if (!currentWorkspaceId) return;
+    const request = ++contextAccessRequest.current;
+    setContextAccessOptions([]);
+    setContextAccessOptionsError(null);
+    setContextAccessOptionsLoading(true);
+    try {
+      const access = await getMemberContextAccess(
+        currentWorkspaceId,
+        member.user_id,
+      );
+      if (request !== contextAccessRequest.current) return;
+      setContextAccessOptions(access.contexts);
+      // Only what the dialog lists can be shown, unchecked or saved: an id
+      // outside it (a deleted context, another account's private one) grants
+      // nothing, so a save drops it rather than keeping it hidden.
+      const listed = new Set(access.contexts.map((c) => c.id));
+      setSelectedContextIds(
+        (access.allowed_context_ids || []).filter((id) => listed.has(id)),
+      );
+    } catch {
+      if (request !== contextAccessRequest.current) return;
+      setContextAccessOptionsError(t("contextAccessLoadFailed"));
+    } finally {
+      if (request === contextAccessRequest.current) {
+        setContextAccessOptionsLoading(false);
+      }
+    }
+  };
+
+  const contextAccessOptionsReady =
+    !contextAccessOptionsLoading && contextAccessOptionsError === null;
 
   // Issue #234: Handle context access save
   const handleSaveContextAccess = async () => {
@@ -1530,6 +1585,11 @@ export default function WorkspaceMembersPage() {
             <p className="text-sm text-gray-600 dark:text-gray-400">
               {t("contextAccessInfo")}
             </p>
+            {contextAccessOptions.some((c) => c.is_own_private) && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {t("contextAccessOwnPrivateHint")}
+              </p>
+            )}
 
             {/* Select All / Deselect All buttons */}
             <div className="flex items-center gap-2">
@@ -1537,10 +1597,13 @@ export default function WorkspaceMembersPage() {
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  const allIds = contexts.map((c) => c.id);
+                  const allIds = contextAccessOptions.map((c) => c.id);
                   setSelectedContextIds(allIds);
                 }}
-                disabled={contexts.length === 0}
+                disabled={
+                  !contextAccessOptionsReady ||
+                  contextAccessOptions.length === 0
+                }
               >
                 {t("selectAll")}
               </Button>
@@ -1548,48 +1611,72 @@ export default function WorkspaceMembersPage() {
                 variant="outline"
                 size="sm"
                 onClick={() => setSelectedContextIds([])}
-                disabled={selectedContextIds.length === 0}
+                disabled={
+                  !contextAccessOptionsReady || selectedContextIds.length === 0
+                }
               >
                 {t("deselectAll")}
               </Button>
             </div>
 
             {/* Context selection */}
-            <div className="border border-gray-200 dark:border-gray-700 rounded-lg max-h-60 overflow-y-auto">
-              {contexts.length === 0 ? (
-                <div className="p-4 text-center text-gray-500 text-sm">
-                  {t("noContextsAvailable")}
-                </div>
-              ) : (
-                <ul className="divide-y divide-gray-200 dark:divide-gray-700">
-                  {contexts.map((context) => (
-                    <li
-                      key={context.id}
-                      className="px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"
-                    >
-                      <label className="flex items-center gap-3 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={selectedContextIds.includes(context.id)}
-                          onChange={() => toggleContextSelection(context.id)}
-                          className="w-4 h-4 text-blue-600 rounded"
-                        />
-                        <div>
-                          <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                            {context.display_name || context.name}
-                          </div>
-                          {context.summary && (
-                            <div className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-xs">
-                              {context.summary}
+            {contextAccessOptionsLoading ? (
+              <LoadingState lines={3} />
+            ) : contextAccessOptionsError ? (
+              <Alert variant="destructive">
+                <AlertDescription>{contextAccessOptionsError}</AlertDescription>
+              </Alert>
+            ) : (
+              <div className="border border-gray-200 dark:border-gray-700 rounded-lg max-h-60 overflow-y-auto">
+                {contextAccessOptions.length === 0 ? (
+                  <div className="p-4 text-center text-gray-500 text-sm">
+                    {t("noContextsAvailable")}
+                  </div>
+                ) : (
+                  <ul className="divide-y divide-gray-200 dark:divide-gray-700">
+                    {contextAccessOptions.map((context) => (
+                      <li
+                        key={context.id}
+                        className="px-4 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"
+                      >
+                        <label className="flex items-center gap-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedContextIds.includes(context.id)}
+                            onChange={() => toggleContextSelection(context.id)}
+                            className="w-4 h-4 text-blue-600 rounded"
+                          />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+                              <span className="truncate">
+                                {context.display_name || context.name}
+                              </span>
+                              {context.is_own_private && (
+                                <span
+                                  className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-normal text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
+                                  title={t("contextAccessPrivateBadgeTitle")}
+                                >
+                                  <Lock
+                                    className="h-3 w-3"
+                                    aria-hidden="true"
+                                  />
+                                  {t("contextAccessPrivateBadge")}
+                                </span>
+                              )}
                             </div>
-                          )}
-                        </div>
-                      </label>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+                            {context.summary && (
+                              <div className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-xs">
+                                {context.summary}
+                              </div>
+                            )}
+                          </div>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
 
             {/* Status message */}
             {selectedContextIds.length === 0 ? (
@@ -1611,7 +1698,11 @@ export default function WorkspaceMembersPage() {
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={handleSaveContextAccess}
-              disabled={contextAccessLoading || selectedContextIds.length === 0}
+              disabled={
+                contextAccessLoading ||
+                !contextAccessOptionsReady ||
+                selectedContextIds.length === 0
+              }
               className="bg-blue-600 hover:bg-blue-700 focus:ring-blue-600"
             >
               {contextAccessLoading ? (
