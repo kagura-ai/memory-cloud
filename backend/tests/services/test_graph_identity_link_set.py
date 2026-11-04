@@ -244,32 +244,13 @@ class TestParallelEdgesForOnePair:
         assert await repo.get_edge(g["owners"], m2, m1, **scope) is None
 
     @pytest.mark.asyncio
-    async def test_list_pair_edges_reads_every_row_strongest_first(
-        self, db_session, parallel_graph
-    ):
-        """#2549: the rows ``get_edge`` stands one in for, each account's."""
-        g = parallel_graph
-        m1, m2, m3 = g["m"]
-        repo = NeuralEdgeRepository(db_session)
-        scope = {"workspace_id": str(g["ws"]), "context_id": str(g["ctx"])}
-
-        rows = await repo.list_pair_edges(g["owners"], m1, m2, **scope)
-
-        assert [(r.user_id, r.weight) for r in rows] == [
-            (g["b"], pytest.approx(0.9)),
-            (g["a"], pytest.approx(0.4)),
-        ]
-        assert [r.user_id for r in await repo.list_pair_edges(g["a"], m1, m2, **scope)] == [g["a"]]
-        assert [r.dst_id for r in await repo.list_pair_edges(g["owners"], m1, m3)] == [m3]
-        assert await repo.list_pair_edges(g["owners"], m2, m1, **scope) == []
-        assert await repo.list_pair_edges(g["owners"], m1, m2, context_id=str(uuid4())) == []
-
-    @pytest.mark.asyncio
     async def test_list_pairs_edges_reads_each_keyed_row_in_one_statement(
         self, db_session, parallel_graph
     ):
-        """#2508: the batched read names one account's row per key, each held
-        to its own (workspace, context); strongest first."""
+        """#2508: one account's row per key, each held to its own (workspace,
+        context); both accounts' rows for one pair when both are keyed
+        (#2549's read, behind the strongest ``get_edge`` returns); strongest
+        first."""
         g = parallel_graph
         m1, m2, m3 = g["m"]
         ws, ctx = g["ws"], g["ctx"]

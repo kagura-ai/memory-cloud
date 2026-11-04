@@ -111,7 +111,7 @@ def _pair_rows(
     context_id: str | None,
 ) -> Select[NeuralMemoryEdge]:
     """The rows ``user_id`` keeps from ``src_id`` to ``dst_id``, scoped to the
-    workspace/context when given (``get_edge`` / ``list_pair_edges``)."""
+    workspace/context when given (``get_edge``)."""
     conditions = [
         owner_condition(user_id),
         NeuralMemoryEdge.src_id == src_id,
@@ -577,45 +577,17 @@ class NeuralEdgeRepository:
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_pair_edges(
-        self,
-        user_id: str | frozenset[str],
-        src_id: UUID,
-        dst_id: UUID,
-        *,
-        workspace_id: str | None = None,
-        context_id: str | None = None,
-    ) -> list[NeuralMemoryEdge]:
-        """Every row ``user_id`` keeps from ``src_id`` to ``dst_id`` (#2549).
-
-        :meth:`get_edge` stands the strongest row in for an identity-link
-        set's parallel rows (#1867); a check that must see each account's row
-        — a differing declared edge behind a stronger one — reads them all
-        here. At most one per account (``unique_edge``), strongest first.
-
-        Args:
-            user_id: User identifier, or the identity-link set of a read
-            src_id: Source node ID
-            dst_id: Destination node ID
-            workspace_id: Workspace ID (for isolation)
-            context_id: Context ID (for isolation)
-
-        Returns:
-            The pair's rows, empty when there is none
-        """
-        stmt = _pair_rows(user_id, src_id, dst_id, workspace_id, context_id)
-        result = await self.db.execute(stmt.order_by(*_STRONGEST_FIRST))
-        return list(result.scalars().all())
-
     async def list_pairs_edges(
         self, keys: Collection[tuple[str, UUID, UUID, UUID, UUID]]
     ) -> list[NeuralMemoryEdge]:
-        """:meth:`list_pair_edges` for many pairs in one statement (#2508).
+        """Every row each key names, for many pairs in one statement (#2508).
 
         Each key is ``(user_id, src_id, dst_id, workspace_id, context_id)``:
-        one account's row for one pair, held to that pair's workspace and
-        context, so a page spanning contexts is still one query. An
-        identity-link set is one key per account. Strongest first.
+        one account's row for one pair (at most one, ``unique_edge``), held to
+        that pair's workspace and context, so a page spanning contexts is
+        still one query. Several accounts' rows for one pair are one key per
+        account; :meth:`get_edge` would stand the strongest in for them
+        (#1867). Strongest first.
 
         Args:
             keys: The (account, pair, scope) tuples to read
