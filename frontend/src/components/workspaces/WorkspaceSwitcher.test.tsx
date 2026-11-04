@@ -16,7 +16,7 @@ vi.mock("@/contexts/WorkspaceContext", () => ({ useWorkspace: () => ({ currentWo
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 describe("workspace switcher", () => {
-  it.each([["ja", ja, "現在のワークスペース", "所有", "共有"], ["en", en, "Current workspace", "Owned", "Shared"]] as const)(
+  it.each([["ja", ja, "現在のワークスペース", "所有", "共有"], ["en", en, "Current workspace", "Owned by you", "Shared with you"]] as const)(
     "shows the active name and relationship before opening the %s switcher", (locale, messages, current, owned, shared) => {
       render(<NextIntlClientProvider locale={locale} messages={messages}><WorkspaceSwitcher /></NextIntlClientProvider>);
       const trigger = screen.getByRole("button", { name: new RegExp(current) });
