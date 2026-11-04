@@ -1100,9 +1100,11 @@
     "failedToUpdateProfile": "プロフィールの更新に失敗しました"
   },
   "workspace": {
+    "ownedGroup": "自分のワークスペース",
+    "sharedGroup": "共有されたワークスペース",
     "currentWorkspaceCaption": "現在のワークスペース",
-    "ownedBadge": "所有",
-    "sharedBadge": "共有",
+    "ownedBadge": "自分が所有",
+    "sharedBadge": "共有された",
     "loadingWorkspaces": "ワークスペースを読み込み中…",
     "title": "ワークスペース",
     "settings": "ワークスペース設定",
@@ -4584,9 +4586,9 @@
       "newDescription": "既存の {feature} は引き続き利用できます。新規 {feature} の作成には {plan} プランが必要です。",
       "titleNoTier": "{feature} は利用できません",
       "descriptionNoTier": "この環境では {feature} はどのプランでも利用できません。",
-      "action": "{plan} にアップグレード",
+      "action": "プランを見る",
       "badge": "{plan} プラン",
-      "hint": "{plan} プランが必要です",
+      "hint": "{plan}プランで利用できます",
       "hintNoTier": "どのプランでも利用できません"
     },
     "quota": {

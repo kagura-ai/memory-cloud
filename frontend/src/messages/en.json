@@ -1100,9 +1100,11 @@
     "failedToUpdateProfile": "Failed to update profile"
   },
   "workspace": {
+    "ownedGroup": "Your workspaces",
+    "sharedGroup": "Shared workspaces",
     "currentWorkspaceCaption": "Current workspace",
-    "ownedBadge": "Owned",
-    "sharedBadge": "Shared",
+    "ownedBadge": "Owned by you",
+    "sharedBadge": "Shared with you",
     "loadingWorkspaces": "Loading workspaces…",
     "title": "Workspace",
     "settings": "Workspace Settings",
@@ -4584,9 +4586,9 @@
       "newDescription": "Existing {feature} keep working. Creating new {feature} is available on the {plan} plan.",
       "titleNoTier": "No plan includes {feature}",
       "descriptionNoTier": "No plan on this deployment includes {feature}.",
-      "action": "Upgrade to {plan}",
+      "action": "View plans",
       "badge": "{plan} plan",
-      "hint": "Requires the {plan} plan",
+      "hint": "Available on the {plan} plan",
       "hintNoTier": "Not available on any plan"
     },
     "quota": {
