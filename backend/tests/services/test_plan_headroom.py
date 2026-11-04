@@ -9,6 +9,7 @@ Redis is needed; the quota checks are driven with the mocked sessions
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,7 +17,7 @@ from uuid import uuid4
 
 import pytest
 
-from config.plan_tiers import PLAN_ORDER
+from config.plan_tiers import PLAN_ORDER, PLAN_TIERS
 from services import plan_headroom as ph
 from services.plan_headroom import (
     MCP_CALLS_PER_DAY,
@@ -90,6 +91,23 @@ def test_percentage_is_rounded_to_one_decimal():
     assert notice["percentage"] == 83.3
 
 
+@pytest.mark.parametrize(
+    ("used", "level", "percentage"),
+    [
+        (9497, "warning", 94.9),
+        (9500, "critical", 95.0),
+        (7999, None, None),
+        (8000, "warning", 80.0),
+    ],
+)
+def test_percentage_never_reaches_a_threshold_the_level_has_not(used, level, percentage):
+    """Rounded down: 94.97 % is a warning and reads 94.9, not 95.0."""
+    notices = headroom_notices({MEMORIES: _reading(used, 10_000)})
+    assert [(n["level"], n["percentage"]) for n in notices] == (
+        [(level, percentage)] if level else []
+    )
+
+
 @pytest.mark.parametrize("dimension", [MEMORIES, MEMORIES_PER_DAY, MCP_CALLS_PER_DAY])
 def test_a_zero_limit_never_produces_a_notice(dimension):
     """0 is a dimension the tier excludes (#569 zero floor), not one that is full."""
@@ -142,6 +160,25 @@ def test_the_top_tier_offers_no_upgrade():
     notices = headroom_notices(readings)
     assert [n["remedies"] for n in notices] == [["cleanup"], ["wait"], ["wait"]]
     assert all("upgrade" not in n["help"].lower() for n in notices)
+
+
+def test_upgrade_is_offered_only_where_a_higher_tier_raises_that_limit():
+    """The tier below the top shares the top's memory_limit: no upgrade for that cap."""
+    below_top, top = PLAN_ORDER[-2], PLAN_ORDER[-1]
+    tier = dataclasses.replace(
+        PLAN_TIERS[below_top],
+        memory_limit=PLAN_TIERS[top].memory_limit,
+        memories_per_day=PLAN_TIERS[top].memories_per_day - 1,
+    )
+    readings = {
+        MEMORIES: _reading(9, 10, plan=str(below_top)),
+        MEMORIES_PER_DAY: _reading(9, 10, plan=str(below_top), resets_at=RESETS_AT),
+    }
+    with patch.dict(PLAN_TIERS, {below_top: tier}):
+        memories, per_day = headroom_notices(readings)
+    assert memories["remedies"] == ["cleanup"]
+    assert "upgrade" not in memories["help"].lower()
+    assert per_day["remedies"] == ["wait", "upgrade"]
 
 
 @pytest.mark.parametrize("plan", list(PLAN_ORDER))

@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from config.plan_tiers import PLAN_ORDER, plan_rank
+from config.plan_tiers import PLAN_ORDER, get_plan_tier, plan_rank
 from db.redis import set_if_absent
 from services.memory_counts import count_live_memories
 from utils.datetime import next_utc_midnight_iso, utcnow
@@ -55,6 +55,12 @@ MEMORIES_PER_DAY = "memories_per_day"
 MCP_CALLS_PER_DAY = "mcp_calls_per_day"
 # Wire order of the entries.
 DIMENSIONS = (MEMORIES, MEMORIES_PER_DAY, MCP_CALLS_PER_DAY)
+# The ``PlanTier`` field each dimension's effective limit is built on.
+_TIER_LIMIT = {
+    MEMORIES: "memory_limit",
+    MEMORIES_PER_DAY: "memories_per_day",
+    MCP_CALLS_PER_DAY: "mcp_calls_per_day",
+}
 
 WARNING = "warning"
 CRITICAL = "critical"
@@ -68,10 +74,11 @@ READ_TIMEOUT_SECONDS = 2.0
 # Remedies, in the order the help text names them. Deleting memories frees
 # the total cap only: the day counters count creations and calls, which a
 # forget does not give back, so their remedy is the reset. ``upgrade`` needs
-# a tier above the plan and a deployment whose plan page can upgrade (the
-# billing handoff is configured); without billing the administrator raises
-# the tier's limit (``admin``). Add-ons are not on sale; when they are, an
-# "addon" remedy joins here behind a plan-feature or settings switch.
+# a tier above the plan that raises this dimension's limit and a deployment
+# whose plan page can upgrade (the billing handoff is configured); without
+# billing the administrator raises the tier's limit (``admin``). Add-ons are
+# not on sale; when they are, an "addon" remedy joins here behind a
+# plan-feature or settings switch.
 _CLEANUP = "cleanup"
 _WAIT = "wait"
 _UPGRADE = "upgrade"
@@ -222,11 +229,23 @@ def _level(reading: QuotaReading) -> str | None:
     return None
 
 
+def _upgrade_raises(dimension: str, plan: str | None) -> bool:
+    """Whether a tier above ``plan`` has a higher base limit for ``dimension``.
+
+    Bases, not effective limits: an add-on or referral bonus stays on top of
+    the new tier's base, so the upgrade helps exactly when the base grows.
+    """
+    attr = _TIER_LIMIT[dimension]
+    rank = plan_rank(plan)
+    own = getattr(get_plan_tier(PLAN_ORDER[rank]), attr)
+    return any(getattr(get_plan_tier(name), attr) > own for name in PLAN_ORDER[rank + 1 :])
+
+
 def _remedies(dimension: str, plan: str | None, *, billing: bool) -> list[str]:
     remedies = [_CLEANUP if dimension == MEMORIES else _WAIT]
     if not billing:
         remedies.append(_ADMIN)
-    elif plan_rank(plan) < len(PLAN_ORDER) - 1:
+    elif _upgrade_raises(dimension, plan):
         remedies.append(_UPGRADE)
     return remedies
 
@@ -258,7 +277,9 @@ def _notice(dimension: str, reading: QuotaReading, *, billing: bool) -> dict[str
         "level": level,
         "used": reading.used,
         "limit": reading.limit,
-        "percentage": round(reading.used * 100 / reading.limit, 1),
+        # Rounded down to one decimal: 94.97 % reads 94.9, never a 95.0 that
+        # ``level`` (the exact ratio) calls a warning.
+        "percentage": reading.used * 1000 // reading.limit / 10,
         **({"resets_at": reading.resets_at} if reading.resets_at else {}),
         **({"plan": reading.plan} if reading.plan else {}),
         "remedies": remedies,
