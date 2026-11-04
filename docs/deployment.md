@@ -1076,9 +1076,12 @@ pseudonymous creator. Administrative and CLI deletion instead delete a
 private context nobody else wrote in with the account, files included: it was
 readable by its creator alone, so it is never handed to a third party. A
 private context another account wrote in (a linked author the hand-over could
-not pick, or a soft-deleted context) and a connector's write target
-(connectors create theirs private) keep other people's data, so they change
-hands like a shared context. The `delete_admin` CLI uses the same handover and file cleanup as
+not pick, or a soft-deleted context) keeps other people's data, so it changes
+hands like a shared context. A connector's write target (connectors create
+theirs private) goes to its workspace's owner, who also takes the connector's
+key, on every path (#2420): administrative deletion hands it to the successor
+picked for a workspace the user owns and to the current owner elsewhere, and
+takes no selection for it. The `delete_admin` CLI uses the same handover and file cleanup as
 administrative user deletion. Every other context the admin created in a
 surviving workspace passes to its live workspace owner; sole-owned
 workspaces are deleted. Shared workspace transfers commit before final CLI cleanup, so if
@@ -1109,8 +1112,12 @@ Administrative `DELETE /api/v1/admin/users/{user_id}` requires explicit
 successors for every owned workspace and every shared context the user
 created, including deleted contexts. With no selection it returns `409` and
 the missing `workspace_ids` and `context_ids`; the user and their data remain
-intact. A selection naming a private context of the user's own is refused with
-`409` (see the rule above). An owned workspace under a running subscription refuses the
+intact. The same `409` also carries what a successor picker needs (#2420):
+`workspaces` (each with its `members`, the user left out), `contexts` (each
+with the `candidate_user_ids` an explicit selection may name) and
+`owner_fixed_contexts` (the connector write targets and the owner each goes
+to). A selection naming a private context of the user's own, or a connector's
+write target, is refused with `409` (see the rule above). An owned workspace under a running subscription refuses the
 deletion with `409` `BILLING-005` naming the workspaces, before anything is
 transferred: the subscription is the user's, so it ends first, as for account
 erasure and the CLI (#1940). Send this JSON body:
@@ -1132,10 +1139,13 @@ A soft-deleted owned workspace takes no successor: it is hard-deleted with the
 user (see above), and a selection naming it or a context in it is refused with
 `409`. Concurrent ownership changes return `409`; refresh the selections and retry.
 
-The admin users screen currently sends a bodyless DELETE and shows the `409`
-reason (how many workspaces and shared contexts still need a successor, or
-the subscription refusal). Use the API for successor selections when retiring
-an account with owned resources. API user
+The admin users screen confirms first, then on that `409` opens a successor
+picker: a member for each owned workspace, a successor for each shared
+context (by default the successor of its workspace when that workspace is
+handed over), and the connector write targets shown fixed to their owner. It
+then sends the DELETE with the selections. A workspace no other member is in
+cannot be handed over: add a member, or delete the workspace first (a deleted
+workspace is removed with the user). API user
 deletion and the CLI both remove the account's OAuth clients, personal memories,
 keys and memberships, preserve live connector keys under the workspace owner,
 and remove its identity link. Its agent-bound keys are deleted, never handed
