@@ -508,6 +508,22 @@ Since #2088 a Memory Analysis run also writes a `sleep_reports` row (`source='an
 |------|------------|---------------|
 | `get_usage` | Get current workspace usage (memories, contexts, members, MCP calls/day) | Viewer+ |
 
+### Plan headroom — `plan_headroom`
+
+Before a plan limit refuses a call ([#2615](https://github.com/kagura-ai/memory-cloud/issues/2615)), the success envelope of `remember`, `remember_batch` (once per call, not per item), `update_memory` and `bootstrap` carries `plan_headroom`: one entry per dimension at or above 80 % (`level: "warning"`) or 95 % (`"critical"`) of its effective limit — the plan tier plus the add-on and referral bonuses, the limits `get_usage` reports. Below 80 % the field is absent (never `[]` or `null`).
+
+```json
+{"dimension": "memories", "level": "warning", "used": 800, "limit": 1000, "percentage": 80.0, "plan": "free", "remedies": ["cleanup", "upgrade"], "help": "Free capacity: forget memories the user no longer needs (memory_ids takes up to 50) or delete unused contexts, or upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan). At 100 % remember will be refused."}
+```
+
+| `dimension` | Counts | At 100 % |
+|-------------|--------|----------|
+| `memories` | Live memories against `memory_limit` | `remember` answers `quota_exceeded` |
+| `memories_per_day` | Memories created today (UTC) against `memories_per_day`; carries `resets_at` | `remember` answers `quota_exceeded` until `resets_at` |
+| `mcp_calls_per_day` | MCP calls today (UTC) against `mcp_calls_per_day`; carries `resets_at` | The metered tools answer `rate_limit_exceeded` until `resets_at`; `get_usage`, the listings and the session-start reads stay callable |
+
+`remedies` lists, in the order `help` names them: `cleanup` (forget memories or delete unused contexts — the total cap only, since deleting does not give back a day's creations or calls), `wait` (the daily reset, on the two daily dimensions) and `upgrade` (the workspace plan page in the web UI; absent on the top tier). On a self-hosted deployment the administrator raises a tier's limit with `PLAN_<KEY>_MEMORY_LIMIT`, `PLAN_<KEY>_MEMORIES_PER_DAY` or `PLAN_<KEY>_MCP_CALLS_PER_DAY` instead. A write shows a notice at most once an hour per workspace, dimension and level (crossing into `critical` shows it again at once); `bootstrap` always carries it. Tell the user its `help` once; deleting memories still needs the user's approval.
+
 ## API-Key Bindings (2)
 
 | Tool | Description | Required Role |
@@ -532,7 +548,7 @@ Branch on `error`; it is stable. `message` is written for people and may change.
 | `invalid_argument`, `validation_error`, `invalid_arguments`, `missing_fields`, `invalid_context_id_format`, `invalid_memory_id_format` | An argument is missing, malformed or out of range; `message` names it | Fix the argument |
 | `context_not_found`, `memory_not_found`, `not_found` | The id does not exist or is not visible to you (the two cases are deliberately indistinguishable) | `list_contexts`, `recall` or the matching `list_*` tool |
 | `permission_denied` | Your workspace or context role does not allow the operation | Ask a workspace owner for a higher role |
-| `quota_exceeded`, `rate_limit_exceeded` | A plan quota or the daily MCP call limit is used up; `quota_type`, `limit`, `resets_at` and similar fields say which | `get_usage`; wait for the reset |
+| `quota_exceeded`, `rate_limit_exceeded` | A plan quota or the daily MCP call limit is used up; `quota_type`, `limit`, `resets_at` and similar fields say which ([`plan_headroom`](#plan-headroom--plan_headroom) warns at 80 %) | `get_usage`; wait for the reset |
 | `payload_too_large` | One memory's text (summary + context_summary + content + details) is over 1,000,000 characters; `limit` and `actual` give the numbers | Split the material into several memories, one topic each, or shorten it |
 | `plan_required`, `feature_not_available` | The workspace's plan or an operator switch does not include the feature (`gate`, `required_plan`) | None from the model; the workspace owner decides |
 | `conflict` | The target's current state conflicts with the request, for example a locked context | Read the current state before calling again |

@@ -28,6 +28,7 @@ from mcp_server.tools._helpers import (
     _lint_response_field,
     _log_tool_usage,
     _persistence_response_field,
+    _plan_headroom_field,
     _resolve_context,
     _resolve_context_for_read,
     _resolve_context_id,
@@ -48,6 +49,7 @@ from services.memory_service import (
     DuplicateCandidateError,
 )
 from services.permission_service import VIEWER_READ_ONLY_REASON
+from services.plan_headroom import MEMORIES, drop_quota_reading
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     AuthorizationError,
@@ -335,6 +337,8 @@ async def handle_remember(
             # commit time — see the helper's contract).
             await _touch_context_last_used(db, current_context)
             await db.commit()
+            # #2615: after the commit, from the counts the quota checks recorded.
+            headroom = await _plan_headroom_field(db, current_context, workspace_id)
 
             return [
                 TextContent(
@@ -354,6 +358,9 @@ async def handle_remember(
                             # The summary was over the cap and cut at a sentence
                             # boundary; the full text went into content.
                             **summary_fit,
+                            # #2615: a dimension at 80 %+ of its plan limit;
+                            # absent below it, and hourly per level.
+                            **headroom,
                             **_session_response_field(),  # #2044
                             **_context_response_fields(current_context),
                         }
@@ -559,6 +566,11 @@ async def handle_update_memory(
             # alive purely by external_id upserts must not sort as never-used.
             await _touch_context_last_used(db, current_context)
             await db.commit()
+            # #2615: an external_id replacement deleted the row it replaced, so
+            # remember's recorded count + 1 is one too many: count again.
+            if result.operation == "replaced":
+                drop_quota_reading(MEMORIES)
+            headroom = await _plan_headroom_field(db, current_context, workspace_id)
 
             return [
                 TextContent(
@@ -592,6 +604,7 @@ async def handle_update_memory(
                                 else {}
                             ),
                             **_lint_response_field(result.lint),  # #1502
+                            **headroom,  # #2615
                             **_session_response_field(),  # #2044
                             **_context_response_fields(current_context),
                         }

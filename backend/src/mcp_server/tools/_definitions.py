@@ -59,7 +59,7 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
             "name": "remember",
             "description": """Store a new memory (a decision, fix, pattern, fact or note) for later recall. To edit a memory whose id you have use update_memory; to replace an outdated fact pass supersedes=<old_memory_id>.
 Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, scope, version, persistence?, lint?, session_id?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_{id, name, display_name, is_private, is_locked}}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (over 1,000,000 chars — split it), validation_error.
+Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?, session_id?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_{id, name, display_name, is_private, is_locked}}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (over 1,000,000 chars: split it), validation_error.
 Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
@@ -154,8 +154,8 @@ Manual: guide(["remember"]).""",
         },
         {
             "name": "remember_batch",
-            "description": """Store up to 50 memories in one call — the end-of-session save. Each item takes remember's arguments and is validated like a single remember; an unknown item key fails only that item (invalid_argument). atomic=false (default): items are written independently and reported per item. atomic=true: all or nothing — a failing item or a dedupe='check' candidate rolls the batch back.
-Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, session_id?, context_{id, name, display_name, is_private, is_locked}}.
+            "description": """Store up to 50 memories in one call (the end-of-session save). Each item takes remember's arguments and limits; an unknown item key fails only that item (invalid_argument). atomic=false (default): each item is written and reported on its own. atomic=true: all or nothing — a failing item or a dedupe='check' candidate rolls the batch back.
+Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["remember_batch"]).""",
             "inputSchema": {
                 "type": "object",
@@ -197,7 +197,7 @@ Manual: guide(["remember_batch"]).""",
             "name": "update_memory",
             "description": """Update a memory in place (memory_id) or upsert by external_id (new if not found, else replaced under a NEW memory_id; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
 SECURITY: never store secrets, credentials or PII: refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, superseded_memory_id?, lint?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict, edge_exists.
+Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, superseded_memory_id?, lint?, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict, edge_exists.
 Manual: guide(["update_memory"]).""",
             "inputSchema": {
                 "type": "object",
@@ -2133,9 +2133,9 @@ Manual: guide(["changes_since"]).""",
         {
             "name": "bootstrap",
             "readOnly": True,
-            "description": """Start an interactive session on one context in ONE call: the context block, guardrails, pinned memories, upcoming Time Memories and what changed since a time — fail-soft per component (degraded: true when one failed). Deterministic: no recall; search by topic afterwards if the change list does not answer it.
+            "description": """Start an interactive session on one context in ONE call: the context block, guardrails, pinned memories, upcoming Time Memories and what changed since a time; fail-soft per component (degraded: true when one failed). Deterministic (no recall): search by topic if the change list does not answer it.
 format="index" (the default under max_chars 10000): pointer rows — pinned keeps its text; guardrails.items, upcoming.results and changes.changes carry {memory_id, summary (at most 80 chars), summary_cut?, …}; no instructions.
-Returns: {status, format?, degraded, context, instructions?, guardrails?, components: {pinned, upcoming, changes}, since, generated_at, context_summary_omitted?, context_{id, name, display_name, is_private, is_locked}}.
+Returns: {status, format?, degraded, context, instructions?, guardrails?, components: {pinned, upcoming, changes}, since, generated_at, context_summary_omitted?, plan_headroom?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["bootstrap"]).""",
             "inputSchema": {
                 "type": "object",

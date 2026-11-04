@@ -28,6 +28,7 @@ from mcp_server.tools._helpers import (
     _dumps,
     _error_response,
     _log_tool_usage,
+    _plan_headroom_field,
     _resolve_context_for_read,
     _resolve_context_id,
     execute_with_timeout,
@@ -179,6 +180,12 @@ async def handle_bootstrap(
             # Read before any lane runs: the guardrails read and the lanes roll
             # the session back when they fail, which expires this instance.
             context_fields = _context_response_fields(context)
+            # #2615: a session start always carries the notice (no throttle);
+            # its room comes off the budget like the context fields'.
+            headroom = await _plan_headroom_field(db, context, workspace_id, throttle=False)
+            budget = envelope_budget(max_chars, reply_format, context_fields)
+            if headroom:
+                budget -= json_chars(headroom)
             envelope = await execute_with_timeout(
                 SessionBootstrapService(db).build(
                     user_id=user_id,
@@ -186,7 +193,7 @@ async def handle_bootstrap(
                     context=context,
                     since=since,
                     include=include,
-                    max_chars=envelope_budget(max_chars, reply_format, context_fields),
+                    max_chars=budget,
                     guardrails_provider=partial(_guardrails_field, db, user_id, context),
                     format=reply_format,
                 ),
@@ -194,6 +201,7 @@ async def handle_bootstrap(
             )
             await _log_tool_usage(db, user_id, "bootstrap", start, 200, context_id, workspace_id)
             envelope.update(context_fields)
+            envelope.update(headroom)
             return [TextContent(type="text", text=_dumps(envelope))]
         except _ContextNotFoundError as e:
             await _log_tool_usage(db, user_id, "bootstrap", start, 404, context_id, workspace_id)

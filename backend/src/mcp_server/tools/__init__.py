@@ -31,6 +31,12 @@ from mcp_server.tools._helpers import (
     reset_mcp_capacity_policy,
     set_mcp_capacity_policy,
 )
+from services.plan_headroom import (
+    QuotaReading,
+    close_plan_headroom_counts,
+    mcp_calls_reading,
+    open_plan_headroom_counts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -626,6 +632,7 @@ async def execute_tool_call(
     args = coerce_mcp_arguments(tool_name, args)
 
     # Rate limit check (exempt read-only info tools)
+    mcp_calls: QuotaReading | None = None
     if workspace_id and tool_name not in _RATE_LIMIT_EXEMPT_TOOLS:
         try:
             allowed, used, limit = await _check_rate_limit(workspace_id)
@@ -638,6 +645,8 @@ async def execute_tool_call(
                     help="Use get_usage() to check your current quota. "
                     "Upgrade your plan for higher limits.",
                 )
+            # #2615: the count the plan headroom notice reuses.
+            mcp_calls = mcp_calls_reading(workspace_id, used, limit)
         except Exception as e:
             # Don't block tool execution if rate limit check fails
             logger.warning(f"rate_limit_check_failed: {e}")
@@ -690,6 +699,9 @@ async def execute_tool_call(
     # for the tools ``_capacity_gate`` classifies as resolver-gated. Reset in
     # ``finally`` so the policy never outlives this call.
     capacity_token = set_mcp_capacity_policy(capacity_policy_for(tool_name))
+    # #2615: the quota checks the handler's writes run record what they count
+    # here, for the plan headroom notice; reset in ``finally`` with the policy.
+    headroom_token = open_plan_headroom_counts(mcp_calls)
     try:
         result = await handler(args, user_id, workspace_id)
         return _with_manual_help(
@@ -724,6 +736,7 @@ async def execute_tool_call(
         # ``{"error": str(e)}``; the exception text stays in the server log.
         return _tool_exception_response(tool_name, e)
     finally:
+        close_plan_headroom_counts(headroom_token)
         reset_mcp_capacity_policy(capacity_token)
 
 

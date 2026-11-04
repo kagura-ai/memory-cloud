@@ -160,6 +160,32 @@ async def set_cache(key: str, value: str, ttl: int | None = None) -> None:
         raise RedisError(f"Failed to set cache: {e}") from e
 
 
+async def set_if_absent(key: str, value: str, ttl: int) -> bool:
+    """``SET key value NX EX ttl``: claim a key for ``ttl`` seconds.
+
+    For once-per-window markers (the #2615 plan headroom throttle): the
+    first caller in the window gets True, every other caller False until the
+    key expires.
+
+    Args:
+        key: Marker key
+        value: Value to store
+        ttl: Time-to-live in seconds
+
+    Returns:
+        True when this call created the key, False when it already existed
+
+    Raises:
+        RedisError: The command failed (callers decide whether to fail open)
+    """
+    client = get_redis_client()
+    try:
+        return bool(await client.set(key, value, nx=True, ex=ttl))
+    except Exception as e:
+        logger.error("redis_set_nx_failed", key=key, error=str(e))
+        raise RedisError(f"Failed to set cache: {e}") from e
+
+
 async def delete_cache(key: str) -> None:
     """Delete key from Redis cache.
 
