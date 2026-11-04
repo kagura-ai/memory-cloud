@@ -1613,6 +1613,18 @@ async def add_context_member(
                 "context access list.",
                 reason="role_too_low",
             ) from None
+        # A repaired hidden row takes the requested role: the last-owner
+        # guard of update_context_member_role applies, before anything is
+        # written.
+        if (
+            existing is not None
+            and existing.role == ContextRole.OWNER
+            and body.role != ContextRole.OWNER
+            and await perm_service.count_context_owners(context_id) <= 1
+        ):
+            raise BadRequestError(
+                "Cannot demote the last context owner. Promote another member to owner first."
+            )
         # Only an extend rewrites the row: lock it and decide on what is
         # committed now.
         target = await workspace_service.get_member(

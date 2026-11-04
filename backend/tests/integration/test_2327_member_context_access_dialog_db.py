@@ -408,6 +408,34 @@ async def test_a_hidden_context_member_row_is_repaired_through_the_add(world) ->
     assert {m["user_id"]: m["role"] for m in listed.json()}[w.u["m_null"]] == "viewer"
 
 
+@pytest.mark.parametrize(("other_owner", "status"), [(False, 400), (True, 201)])
+async def test_repairing_a_hidden_row_keeps_a_context_owner(world, other_owner, status) -> None:
+    """The repair sets the requested role on the existing row; like a role
+    update it may not demote the context's last explicit owner."""
+    w: mca.World = world
+    s = w.session
+    # m_empty (an empty list) holds the only owner row of B: hidden.
+    s.add(ContextMember(context_id=w.ctx["B"], user_id=w.u["m_empty"], role=ContextRole.OWNER))
+    if other_owner:
+        s.add(ContextMember(context_id=w.ctx["B"], user_id=w.u["mA"], role=ContextRole.OWNER))
+    await s.commit()
+    async with _client(w, "owner") as c:
+        r = await c.post(
+            f"/api/v1/contexts/{w.ctx['B']}/members",
+            json={"user_id": w.u["m_empty"], "role": "editor", "extend_access_list": True},
+        )
+    assert r.status_code == status, r.text
+    rows = await _context_member_rows(w, "m_empty", "B")
+    if other_owner:
+        assert [row.role for row in rows] == [ContextRole.EDITOR]
+        assert (await _member(w, "m_empty")).allowed_context_ids == [w.ctx["B"]]
+    else:
+        assert "last context owner" in r.json()["message"]
+        # Nothing was written: the row keeps its role, the list stays empty.
+        assert [row.role for row in rows] == [ContextRole.OWNER]
+        assert (await _member(w, "m_empty")).allowed_context_ids == []
+
+
 @pytest.mark.parametrize("flag", [False, True])
 async def test_a_row_that_grants_the_context_is_a_duplicate(world, flag) -> None:
     """mA's list reaches A and it holds an editor row there: a real duplicate."""
