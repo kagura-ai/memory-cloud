@@ -39,6 +39,8 @@ from services.identity_link_service import linked_user_ids
 from services.plan_seats import writes_paused_context_ids
 from utils.datetime import to_utc_iso
 from utils.exceptions import (
+    AuthorizationError,
+    BadRequestError,
     ContextNotInAccessListError,
     FeatureNotAvailableError,
     NotFoundException,
@@ -1533,7 +1535,11 @@ async def add_context_member(
     include the context answers 409 (``details.reason`` =
     ``context_not_in_access_list``) unless ``extend_access_list`` is sent, in
     which case a workspace owner or admin adds the context to that list in the
-    same transaction (``access_list_extended`` in the response).
+    same transaction (``access_list_extended`` in the response). The same holds
+    for a member's existing context member row the list does not reach (it
+    grants nothing and is hidden from the member list): the extend keeps that
+    row at the requested role. A row that already grants the context is a
+    duplicate (400).
     """
     from sqlalchemy import func, select
 
@@ -1579,16 +1585,13 @@ async def add_context_member(
     result = await db.execute(stmt)
     existing = result.scalar_one_or_none()
 
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"User {body.user_id} is already a context member",
-        )
-
     # #2327: a member or viewer whose context access list does not reach this
     # context gets nothing from a context member row (check_context_access
     # refuses the context before the row is read) and the row stays hidden
     # from the member list. Refused unless the caller asks to extend the list.
+    # An existing row of such a member is that hidden row: the add is handled
+    # as a new one, so extending the list makes the row count; only a row
+    # that already grants the context is a duplicate.
     workspace_service = WorkspaceService(db)
     access_list_extended = False
     target = await workspace_service.get_member(
@@ -1598,8 +1601,18 @@ async def add_context_member(
         if not body.extend_access_list:
             raise ContextNotInAccessListError(user_id=body.user_id, context_id=context_id)
         # The list is the workspace admin's (PUT …/context-access); a context
-        # owner below admin manages this context's members only.
-        await perm_service.check_workspace_admin(user["user_id"], context.workspace_id)
+        # owner below admin manages this context's members only. The caller
+        # already manages this context, so the refusal can say why.
+        try:
+            await perm_service.check_workspace_admin(user["user_id"], context.workspace_id)
+        except AuthorizationError as exc:
+            if exc.reason != "role_too_low":
+                raise
+            raise AuthorizationError(
+                "Only a workspace owner or admin can add a context to a member's "
+                "context access list.",
+                reason="role_too_low",
+            ) from None
         # Only an extend rewrites the row: lock it and decide on what is
         # committed now.
         target = await workspace_service.get_member(
@@ -1615,21 +1628,27 @@ async def add_context_member(
             access_list_extended = True
     if target is None:
         # Removed from the workspace since the membership check above.
+        raise BadRequestError("User is not a member of this workspace.")
+    if existing is not None and not access_list_extended:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User is not a member of this workspace.",
+            detail=f"User {body.user_id} is already a context member",
         )
 
-    # Create membership
-    member = ContextMember(
-        context_id=context_id,
-        user_id=body.user_id,
-        role=body.role,
-        invited_by=user["user_id"],
-        invited_at=func.now(),
-    )
-
-    db.add(member)
+    if existing is not None:
+        # The hidden row counts from now on: keep it, at the requested role.
+        member = existing
+        member.role = cast(ContextRole, body.role)
+        member.updated_at = func.now()
+    else:
+        member = ContextMember(
+            context_id=context_id,
+            user_id=body.user_id,
+            role=body.role,
+            invited_by=user["user_id"],
+            invited_at=func.now(),
+        )
+        db.add(member)
     await db.commit()
     await db.refresh(member)
 

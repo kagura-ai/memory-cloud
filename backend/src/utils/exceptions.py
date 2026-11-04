@@ -279,8 +279,10 @@ class ContextNotInAccessListError(ConflictError):
 
     def __init__(self, *, user_id: str, context_id: Any) -> None:
         super().__init__(
-            "This member's context access list does not include this context; send "
-            "extend_access_list=true to add it, or edit the member's context access first.",
+            "This member's context access list does not include this context, so a "
+            "context role would give them nothing. A workspace owner or admin can add "
+            "it to the list by resending with extend_access_list=true, or edit the "
+            "member's context access first.",
             reason="context_not_in_access_list",
             user_id=user_id,
             context_id=str(context_id),

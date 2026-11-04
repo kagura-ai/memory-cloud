@@ -26,7 +26,8 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+import structlog
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import ContextRole
@@ -40,10 +41,18 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 @contextlib.asynccontextmanager
-async def _client(w: mca.World, caller: str, *, api_key: bool = False):
-    """An HTTP client as ``caller``: a session principal, or the caller's
-    workspace-scoped API key (``authorize_workspace_management`` tells the two
-    apart by ``sub`` / ``api_key_workspace_id``)."""
+async def _client(
+    w: mca.World,
+    caller: str,
+    *,
+    api_key: bool = False,
+    key_workspace: str = "w",
+    oauth: bool = False,
+):
+    """An HTTP client as ``caller``: a session principal, the caller's API key
+    bound to workspace ``key_workspace``, or an OAuth token
+    (``authorize_workspace_management`` tells them apart by ``sub`` /
+    ``api_key_workspace_id`` / ``oauth_scope``)."""
     import httpx
 
     import api.routes.contexts as contexts_routes
@@ -71,8 +80,10 @@ async def _client(w: mca.World, caller: str, *, api_key: bool = False):
         "current_workspace_id": w.ws["w"],
     }
     if api_key:
-        principal["api_key_workspace_id"] = w.ws["w"]
+        principal["api_key_workspace_id"] = w.ws[key_workspace]
         principal["api_key_prefix"] = "kgr_test"
+    elif oauth:
+        principal["oauth_scope"] = "memory:read memory:write"
     else:
         principal["sub"] = uid
     app.dependency_overrides[get_user_from_api_key_or_session] = lambda: principal
@@ -206,6 +217,26 @@ async def test_dialog_read_needs_admin_or_an_owner_key(world, caller, api_key, s
     assert r.status_code == status, r.text
 
 
+async def test_dialog_read_refuses_an_oauth_token(world) -> None:
+    w: mca.World = world
+    async with _client(w, "owner", oauth=True) as c:
+        r = await c.get(_access_url(w, w.u["m_null_creator"]))
+    assert r.status_code == 403, r.text
+
+
+async def test_dialog_read_with_a_key_bound_elsewhere_is_a_uniform_404(world) -> None:
+    """The workspace owner's key bound to another workspace learns nothing:
+    the same 404 for this workspace as for one that does not exist."""
+    w: mca.World = world
+    member = w.u["m_null_creator"]
+    async with _client(w, "owner", api_key=True, key_workspace="x") as c:
+        here = await c.get(_access_url(w, member))
+        missing = await c.get(f"/api/v1/workspaces/{uuid4()}/members/{member}/context-access")
+    assert here.status_code == 404, here.text
+    assert missing.status_code == 404, missing.text
+    assert here.json() == missing.json()
+
+
 # --------------------------------------------- POST /contexts/{id}/members
 
 
@@ -228,24 +259,38 @@ async def test_adding_a_member_outside_its_list_needs_the_flag(world, target, af
     body = refused.json()
     assert body["error"] == "RES-002"
     assert "extend_access_list" in body["message"]
+    # The flag is an owner's or admin's (a context owner below admin gets the
+    # same 409), so the message says who may send it.
+    assert "owner or admin" in body["message"]
     assert body["details"] == {
         "reason": "context_not_in_access_list",
         "user_id": w.u[target],
         "context_id": str(w.ctx["B"]),
     }
     # Nothing was written.
-    assert (await _member(w, target)).allowed_context_ids == _ids(w, before)
+    unchanged = await _member(w, target)
+    assert unchanged.allowed_context_ids == _ids(w, before)
+    updated_before = unchanged.updated_at
     assert await _context_member(w, target, "B") is None
 
-    async with _client(w, "owner") as c:
-        added = await c.post(
-            url, json={"user_id": w.u[target], "role": "editor", "extend_access_list": True}
-        )
-        listed = await c.get(url)
+    with structlog.testing.capture_logs() as logs:
+        async with _client(w, "owner") as c:
+            added = await c.post(
+                url, json={"user_id": w.u[target], "role": "editor", "extend_access_list": True}
+            )
+            listed = await c.get(url)
     assert added.status_code == 201, added.text
     assert added.json()["access_list_extended"] is True
     assert added.json()["user_id"] == w.u[target]
-    assert (await _member(w, target)).allowed_context_ids == _ids(w, after)
+    extended = await _member(w, target)
+    assert extended.allowed_context_ids == _ids(w, after)
+    assert extended.updated_at is not None
+    assert updated_before is None or extended.updated_at > updated_before
+    assert [
+        (e["user_id"], e["context_id"], e["actor_user_id"])
+        for e in logs
+        if e["event"] == "member_context_access_extended"
+    ] == [(w.u[target], str(w.ctx["B"]), w.u["owner"])]
     row = await _context_member(w, target, "B")
     assert row is not None and row.role == ContextRole.EDITOR
     # The row now grants the context, so the context member list shows it.
@@ -302,6 +347,98 @@ async def test_only_a_workspace_admin_may_extend_a_list(world) -> None:
         )
     assert refused.status_code == 409, refused.text
     assert refused.json()["details"]["reason"] == "context_not_in_access_list"
+    assert "owner or admin" in refused.json()["message"]
     assert forbidden.status_code == 403, forbidden.text
+    # The caller already manages this context, so the refusal can say why;
+    # the web UI shows this message after its confirm dialog.
+    assert "owner or admin" in forbidden.json()["message"]
     assert (await _member(w, "m_empty")).allowed_context_ids == []
     assert await _context_member(w, "m_empty", "B") is None
+
+
+async def _context_member_rows(w: mca.World, caller: str, ctx: str) -> list[ContextMember]:
+    w.session.expunge_all()
+    return list(
+        (
+            await w.session.execute(
+                select(ContextMember).where(
+                    ContextMember.context_id == w.ctx[ctx], ContextMember.user_id == w.u[caller]
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def test_a_hidden_context_member_row_is_repaired_through_the_add(world) -> None:
+    """m_null (a member with no list) holds an editor row in A that grants
+    nothing and is hidden from the context member list. The add treats it as
+    a new add: 409 without the flag; with it the list is extended and the
+    existing row kept at the requested role."""
+    w: mca.World = world
+    url = f"/api/v1/contexts/{w.ctx['A']}/members"
+    assert [r.role for r in await _context_member_rows(w, "m_null", "A")] == [ContextRole.EDITOR]
+    async with _client(w, "owner") as c:
+        hidden = await c.get(url)
+        refused = await c.post(url, json={"user_id": w.u["m_null"], "role": "viewer"})
+    assert hidden.status_code == 200, hidden.text
+    assert w.u["m_null"] not in {m["user_id"] for m in hidden.json()}
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["details"] == {
+        "reason": "context_not_in_access_list",
+        "user_id": w.u["m_null"],
+        "context_id": str(w.ctx["A"]),
+    }
+    assert (await _member(w, "m_null")).allowed_context_ids is None
+    assert [r.role for r in await _context_member_rows(w, "m_null", "A")] == [ContextRole.EDITOR]
+
+    async with _client(w, "owner") as c:
+        added = await c.post(
+            url, json={"user_id": w.u["m_null"], "role": "viewer", "extend_access_list": True}
+        )
+        listed = await c.get(url)
+    assert added.status_code == 201, added.text
+    assert added.json()["access_list_extended"] is True
+    assert added.json()["role"] == "viewer"
+    assert (await _member(w, "m_null")).allowed_context_ids == [w.ctx["A"]]
+    # The same row, now at the requested role; no second row.
+    assert [r.role for r in await _context_member_rows(w, "m_null", "A")] == [ContextRole.VIEWER]
+    assert listed.status_code == 200, listed.text
+    assert {m["user_id"]: m["role"] for m in listed.json()}[w.u["m_null"]] == "viewer"
+
+
+@pytest.mark.parametrize("flag", [False, True])
+async def test_a_row_that_grants_the_context_is_a_duplicate(world, flag) -> None:
+    """mA's list reaches A and it holds an editor row there: a real duplicate."""
+    w: mca.World = world
+    payload: dict[str, Any] = {"user_id": w.u["mA"], "role": "viewer"}
+    if flag:
+        payload["extend_access_list"] = True
+    async with _client(w, "owner") as c:
+        r = await c.post(f"/api/v1/contexts/{w.ctx['A']}/members", json=payload)
+    assert r.status_code == 400, r.text
+    assert "already a context member" in r.text
+    assert (await _member(w, "mA")).allowed_context_ids == [w.ctx["A"]]
+    assert [r.role for r in await _context_member_rows(w, "mA", "A")] == [ContextRole.EDITOR]
+
+
+async def test_the_list_and_the_row_are_one_commit(world) -> None:
+    """A failure writing the context member row leaves the list as it was."""
+    w: mca.World = world
+
+    def _fail(*_args: Any) -> None:
+        raise RuntimeError("context member insert failed")
+
+    event.listen(ContextMember, "before_insert", _fail)
+    try:
+        async with _client(w, "owner") as c:
+            with pytest.raises(RuntimeError, match="context member insert failed"):
+                await c.post(
+                    f"/api/v1/contexts/{w.ctx['B']}/members",
+                    json={"user_id": w.u["mA"], "role": "editor", "extend_access_list": True},
+                )
+    finally:
+        event.remove(ContextMember, "before_insert", _fail)
+    assert (await _member(w, "mA")).allowed_context_ids == [w.ctx["A"]]
+    assert await _context_member(w, "mA", "B") is None
