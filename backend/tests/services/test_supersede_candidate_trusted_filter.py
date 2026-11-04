@@ -113,6 +113,9 @@ async def _page_sql(request: RecallRequest) -> str:
         # recall() hands the page its (widened) filters; trust_tier is
         # never widened, so request.filters carries the same reading.
         filters=request.filters,
+        # #2508: the acceptance step's queries would follow the resolver's;
+        # this reads the resolver's target query, the last one without them.
+        supersede_acceptance=False,
     )
     return _where(service)
 

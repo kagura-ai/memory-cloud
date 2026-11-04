@@ -458,9 +458,9 @@ class SupersedeCandidate(TZAwareBaseModel):
     # Both hold only while the verdict is about both memories' current texts
     # (#2059): after an edit of either, the candidate surfaces unverified.
     verified: bool | None = None
-    # #2427: whether the caller may accept this suggestion. Set on reference()
-    # and the PATCH reply only; absent (None) on recall, where it is not
-    # evaluated.
+    # #2427: whether the caller may accept this suggestion. Set on reference(),
+    # the PATCH reply and, #2508, recall rows; absent (None) where it was not
+    # evaluated (a failed evaluation, a share-key read).
     acceptance: SupersedeAcceptance | None = None
 
 

@@ -282,6 +282,10 @@ async def share_recall(
             user_id=principal["user_id"],
             current_context_id=bound_context_id,
             current_workspace_id=principal["current_workspace_id"],
+            # #2508: the principal is the key's creator, and a share key never
+            # writes: whether the creator could accept a suggestion is neither
+            # the reader's to act on nor theirs to learn.
+            supersede_acceptance=False,
         )
     except ValueError as e:
         raise ValidationError(str(e)) from e
