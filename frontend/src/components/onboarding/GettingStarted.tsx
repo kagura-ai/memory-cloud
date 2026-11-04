@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
@@ -52,8 +52,9 @@ function GuideSearch({ contextId }: { contextId: string }) {
   </>;
 }
 
-export function GettingStarted({ scope, contexts, owner }: {
-  scope: string; contexts: AccessibleContext[]; owner: boolean;
+export function GettingStarted({ scope, contexts, owner, admin, onCreateShared, onCreated }: {
+  scope: string; contexts: AccessibleContext[]; owner: boolean; admin?: boolean;
+  onCreateShared?: () => void; onCreated?: (context: Context) => void;
 }) {
   const t = useTranslations("gettingStarted");
   const panelId = useId();
@@ -64,8 +65,14 @@ export function GettingStarted({ scope, contexts, owner }: {
   });
   const [selected, setSelected] = useState("");
   const [practice, setPractice] = useState(false);
+  const launcher = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
+  useEffect(() => {
+    if (!practice && returnFocus.current) { (launcher.current ?? button.current)?.focus(); returnFocus.current = false; }
+  }, [practice]);
   const current = contexts.find(ctx => ctx.id === selected) ?? contexts[0];
-  const canPractice = owner && (contexts.length === 0 || readProgress(scope).step !== "context");
+  const savedStep = readProgress(scope).step;
+  const canPractice = owner && savedStep !== "ended" && (contexts.length === 0 || savedStep !== "context");
   const toggle = (next: boolean) => {
     setOpen(next);
     try { localStorage.setItem(scope + ":guide", next ? "open" : "closed"); } catch { /* Session-only fallback. */ }
@@ -82,10 +89,10 @@ export function GettingStarted({ scope, contexts, owner }: {
           {contexts.map(ctx => <option key={ctx.id} value={ctx.id}>{ctx.display_name || ctx.name}</option>)}
         </select>
         <GuideSearch key={current.id} contextId={current.id} />
-      </div> : <p>{t("noContexts")}</p>}
+      </div> : admin ? <div><p>{t("adminEmpty")}</p>{onCreateShared && <Button variant="link" onClick={onCreateShared}>{t("createShared")}</Button>}</div> : <p>{t(owner ? "ownerEmpty" : "noContexts")}</p>}
       <ContextualHelp topic="search" />
-      {canPractice && <div>{practice ? <OnboardingCard replay /> :
-        <Button type="button" variant="outline" onClick={() => setPractice(true)}>{t("practice")}</Button>}</div>}
+      {canPractice && <div>{practice ? <OnboardingCard replay onCreated={onCreated} onClose={() => { returnFocus.current = true; setPractice(false); }} /> :
+        <Button ref={launcher} type="button" variant="outline" onClick={() => setPractice(true)}>{t("practice")}</Button>}</div>}
       <Button type="button" variant="ghost" onClick={() => toggle(false)}>{t("skip")}</Button>
     </div>}
   </section>;

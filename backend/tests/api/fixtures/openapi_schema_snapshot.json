@@ -2133,6 +2133,17 @@
               }
             ]
           },
+          "expected_workspace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "is_private": {
             "default": true,
             "type": "boolean"
@@ -8389,6 +8400,17 @@
             "anyOf": [
               {
                 "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "private_workspace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
                 "type": "string"
               },
               {

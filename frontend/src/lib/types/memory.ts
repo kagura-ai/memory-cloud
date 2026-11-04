@@ -127,6 +127,7 @@ export interface MemoryReference {
 // memories (everything else writes via MCP tools), so this carries just the
 // fields onboarding needs — the backend defaults the rest.
 export interface RememberMemoryRequest {
+  private_workspace_id?: string;
   /** Layer 1 search summary. Backend requires 10–500 chars. */
   summary: string;
   /** Layer 3 full content. Backend requires ≥1 char. */

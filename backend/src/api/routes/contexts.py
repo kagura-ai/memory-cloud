@@ -127,6 +127,9 @@ class ContextCreate(BaseModel):
     Issue #146: Now requires embedding model selection (immutable after creation).
     """
 
+    expected_workspace_id: UUID | None = Field(
+        None, description="If supplied, refuse creation when a different workspace is selected."
+    )
     name: str = Field(
         ...,
         min_length=1,
@@ -528,6 +531,11 @@ async def create_context(
             raise HTTPException(
                 status_code=400, detail="No workspace found. Please create an workspace first."
             )
+
+        if request.expected_workspace_id is not None and str(request.expected_workspace_id) != str(
+            workspace_id
+        ):
+            raise HTTPException(status_code=409, detail="The selected workspace changed.")
 
         # Issue #149: Check if workspace can create another context (Free plan: max 1 context)
         from services.quota_service import QuotaService

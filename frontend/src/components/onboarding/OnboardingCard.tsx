@@ -27,7 +27,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { onboardingScope, readProgress, writeProgress } from "./progress";
+import { claimPractice, onboardingScope, readProgress, writeProgress } from "./progress";
 import { ApiError } from "@/lib/api/base";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -47,6 +47,7 @@ import { getContexts, createContext } from "@/lib/api/contexts";
 import { rememberMemory, recallMemories } from "@/lib/api/memory";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import type { Context } from "@/lib/types/context";
 import type { RecallResultItem } from "@/lib/types/memory";
 
 import {
@@ -65,16 +66,22 @@ import { InlineSpinner } from "@/components/common/LoadingState";
 
 type Step = "context" | "memory" | "recall" | "done" | "recovery";
 
-export function OnboardingCard({ replay = false }: { replay?: boolean }) {
+interface PracticeOptions {
+  replay?: boolean;
+  onClose?: () => void;
+  onCreated?: (context: Context) => void;
+}
+
+export function OnboardingCard({ replay = false, onClose, onCreated }: PracticeOptions) {
   const { user } = useAuth();
   const { currentWorkspace, loading } = useWorkspace();
   // Only owners can create a private practice context. Others use the read-only guide.
   if (!user?.id || loading || !currentWorkspace || currentWorkspace.current_user_role !== "owner") return null;
   const scope = onboardingScope(user.id, currentWorkspace.id);
-  return <PracticeCard key={scope} scope={scope} userId={user.id} replay={replay} />;
+  return <PracticeCard key={scope} scope={scope} userId={user.id} replay={replay} onClose={onClose} onCreated={onCreated} />;
 }
 
-function PracticeCard({ scope, userId, replay }: { scope: string; userId: string; replay: boolean }) {
+function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOptions & { scope: string; userId: string }) {
   const t = useTranslations("onboarding");
   const router = useRouter();
   const { toast } = useToast();
@@ -119,7 +126,7 @@ function PracticeCard({ scope, userId, replay }: { scope: string; userId: string
     if (systemFeatures === null) return;
 
     const saved = readProgress(scope);
-    if (saved.dismissed && !replay) {
+    if (saved.step === "ended" || (saved.dismissed && !replay)) {
       setReady(true);
       return;
     }
@@ -128,7 +135,7 @@ function PracticeCard({ scope, userId, replay }: { scope: string; userId: string
         const { contexts } = await getContexts();
         if (!alive) return;
         // The server lists only this user's accessible contexts in the selected workspace.
-        const sample = contexts.find(ctx => ctx.id === saved.contextId && ctx.is_private && ctx.created_by === userId);
+        const sample = contexts.find(ctx => ctx.id === saved.contextId && ctx.is_private && !ctx.is_public && ctx.workspace_id === currentWorkspaceId && ctx.created_by === userId);
         if (saved.step === "creating" || saved.step === "saving" || (saved.contextId && !sample)) {
           setStep("recovery");
           setVisible(true);
@@ -141,7 +148,7 @@ function PracticeCard({ scope, userId, replay }: { scope: string; userId: string
         }
         const status = byokEnabled ? await checkOpenAIKeyStatus(currentWorkspaceId).catch(() => null) : null;
         if (!alive) return;
-        if (status) setHasKey(status.embedding_available ?? status.has_key);
+        if (status) setHasKey(status.embedding_available !== false);
         setVisible(true);
       } catch {
         // Best-effort: a failed probe just leaves the card hidden rather than
@@ -161,21 +168,26 @@ function PracticeCard({ scope, userId, replay }: { scope: string; userId: string
   const dismiss = useCallback(() => {
     writeProgress(scope, { ...readProgress(scope), dismissed: true });
     setVisible(false);
-  }, [scope]);
+    onClose?.();
+  }, [scope, onClose]);
 
   const handleCreateContext = async () => {
     const name = contextName.trim();
-    if (!name || writing.current) return;
-    if (readProgress(scope).step !== "context" || !writeProgress(scope, { step: "creating" })) { setStep("recovery"); return; }
+    if (!name || !currentWorkspaceId || writing.current) return;
     writing.current = true;
     setBusy(true);
     try {
-      const ctx = await createContext({ name, is_private: true });
+      if (!await claimPractice(scope, "context", { step: "creating" })) { setStep("recovery"); return; }
+      const ctx = await createContext({ name, is_private: true, expected_workspace_id: currentWorkspaceId });
+      if (ctx.workspace_id !== currentWorkspaceId || !ctx.is_private || ctx.is_public || ctx.created_by !== userId) {
+        setStep("recovery"); return;
+      }
       if (!writeProgress(scope, { step: "memory", contextId: ctx.id })) { setStep("recovery"); return; }
+      onCreated?.(ctx);
       setContextId(ctx.id);
       setStep("memory");
     } catch (error) {
-      if (error instanceof ApiError && error.status >= 400 && error.status < 500) writeProgress(scope, { step: "context" });
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) writeProgress(scope, { step: "context" });
       else setStep("recovery");
       toast({ variant: "destructive", title: t("errors.createFailed") });
     } finally {
@@ -185,13 +197,13 @@ function PracticeCard({ scope, userId, replay }: { scope: string; userId: string
   };
 
   const handleSaveMemory = async () => {
-    if (!contextId || writing.current) return;
-    const previous = readProgress(scope);
-    if (previous.step !== "memory" || previous.contextId !== contextId || !writeProgress(scope, { step: "saving", contextId })) { setStep("recovery"); return; }
+    if (!contextId || !currentWorkspaceId || writing.current) return;
     writing.current = true;
     setBusy(true);
     try {
+      if (!await claimPractice(scope, "memory", { step: "saving", contextId })) { setStep("recovery"); return; }
       await rememberMemory({
+        private_workspace_id: currentWorkspaceId,
         summary: summary.trim(),
         content: content.trim(),
         type: "note",
@@ -201,7 +213,7 @@ function PracticeCard({ scope, userId, replay }: { scope: string; userId: string
       if (!writeProgress(scope, { step: "recall", contextId })) { setStep("recovery"); return; }
       setStep("recall");
     } catch (error) {
-      if (error instanceof ApiError && error.status >= 400 && error.status < 500) writeProgress(scope, { step: "memory", contextId });
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) writeProgress(scope, { step: "memory", contextId });
       else setStep("recovery");
       toast({ variant: "destructive", title: t("errors.saveFailed") });
     } finally {
@@ -272,8 +284,10 @@ function PracticeCard({ scope, userId, replay }: { scope: string; userId: string
             <p>{t("recovery")}</p>
             <Button variant="link" onClick={() => router.push("/workspace/contexts")}>{t("openContexts")}</Button>
             <Button variant="ghost" onClick={() => {
-              writeProgress(scope, { step: "context", dismissed: true });
+              writeProgress(scope, { step: "ended", dismissed: true });
               setVisible(false);
+              if (onClose) onClose();
+              else router.push("/workspace/contexts");
             }}>{t("endPractice")}</Button>
           </AlertDescription></Alert>
         ) : !hasKey ? (

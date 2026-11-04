@@ -419,6 +419,7 @@ export default function ContextsPage() {
       setQuickCreating(true);
       setQuickCreateError(null);
       await createContext({
+        expected_workspace_id: currentWorkspace?.id,
         name: quickCreateName.trim(),
         is_private: isPrivate, // Issue #182: Privacy control
       });
@@ -472,6 +473,7 @@ export default function ContextsPage() {
       setCreating(true);
       setCreateError(null);
       await createContext({
+        expected_workspace_id: currentWorkspace?.id,
         name: newContextName.trim(),
         display_name: newContextDisplayName.trim() || undefined,
         description: newContextDescription.trim() || undefined,
@@ -689,10 +691,12 @@ export default function ContextsPage() {
           quota dialog the create controls used to open; the notice names the
           workspace's tier by its label, and offers the Plan page only where
           the descriptor's narrowed canUpgrade does (#1643 / #1645). */}
-      {!loading && currentWorkspace && user && (
+      {!loading && !error && currentWorkspace && user && (
         <GettingStarted key={onboardingScope(user.id, currentWorkspace.id)}
-          scope={onboardingScope(user.id, currentWorkspace.id)} contexts={contexts}
-          owner={currentWorkspace.current_user_role === "owner"} />
+          scope={onboardingScope(user.id, currentWorkspace.id)} contexts={contexts.filter(ctx => ctx.workspace_id === currentWorkspace.id)}
+          owner={currentWorkspace.current_user_role === "owner"} admin={currentWorkspace.current_user_role === "admin"}
+          onCreated={ctx => setContexts(list => list.some(item => item.id === ctx.id) ? list : [...list, ctx])}
+          onCreateShared={shared.state === "allowed" && !isQuotaReached ? () => { setIsPrivate(false); setCreateDialogOpen(true); } : undefined} />
       )}
       <FeatureGateNotice
         gate={contextCapGate}

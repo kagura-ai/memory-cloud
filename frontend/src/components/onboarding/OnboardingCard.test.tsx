@@ -74,6 +74,7 @@ function setWorkspace(role: string = "owner") {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.defineProperty(navigator, "locks", { configurable: true, value: { request: async (_key: string, run: () => boolean) => run() } });
   window.localStorage.clear();
   mockUserId = "u1";
   setWorkspace("owner");
@@ -127,9 +128,20 @@ describe("OnboardingCard trigger gating", () => {
     expect(await screen.findByText("context.createButton")).toBeInTheDocument();
   });
 
+  it("does not block an older server that knows only whether the workspace has a key", async () => {
+    mockCheckKey.mockResolvedValue({ has_key: false });
+    render(<OnboardingCard />); expect(await screen.findByText("context.createButton")).toBeInTheDocument();
+  });
+  it("withholds the save step when a create response belongs to another workspace", async () => {
+    mockCreateContext.mockResolvedValue({ id: "other", workspace_id: "ws-B", created_by: "u1", is_private: true });
+    render(<OnboardingCard />); fireEvent.click(await screen.findByText("context.createButton"));
+    expect(await screen.findByText("recovery")).toBeInTheDocument();
+    expect(mockRemember).not.toHaveBeenCalled();
+  });
+
   it("resumes Recall only for a still-visible practice context without saving a sample twice", async () => {
     window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "recall", contextId: "c1" }));
-    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", is_private: true, created_by: "u1" }] });
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", workspace_id: "ws-1", is_private: true, created_by: "u1" }] });
     render(<OnboardingCard />);
     expect(await screen.findByText("recall.searchButton")).toBeInTheDocument();
     expect(mockCreateContext).not.toHaveBeenCalled(); expect(mockRemember).not.toHaveBeenCalled();
@@ -137,11 +149,22 @@ describe("OnboardingCard trigger gating", () => {
 
   it("shows a recovery path for a lost write response without repeating the write", async () => {
     window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "saving", contextId: "c1" }));
-    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", is_private: true, created_by: "u1" }] });
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", workspace_id: "ws-1", is_private: true, created_by: "u1" }] });
     render(<OnboardingCard />);
     expect(await screen.findByText("recovery")).toBeInTheDocument();
     expect(screen.queryByText("memory.saveButton")).toBeNull();
     expect(mockRemember).not.toHaveBeenCalled();
+  });
+
+  it("ends an uncertain practice and keeps manual replay read-only", async () => {
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "creating" }));
+    const first = render(<OnboardingCard replay />);
+    fireEvent.click(await screen.findByText("endPractice"));
+    first.unmount();
+    const again = render(<OnboardingCard replay />);
+    await waitFor(() => expect(again.container).toBeEmptyDOMElement());
+    expect(JSON.parse(localStorage.getItem("onboarding:u1:ws-1:wizard")!).step).toBe("ended");
+    expect(mockCreateContext).not.toHaveBeenCalled(); expect(mockRemember).not.toHaveBeenCalled();
   });
 
   it("does not resume a sample after access is removed or owner is demoted", async () => {
@@ -151,6 +174,19 @@ describe("OnboardingCard trigger gating", () => {
     expect(screen.queryByText("memory.saveButton")).toBeNull();
     setWorkspace("admin"); page.rerender(<OnboardingCard replay />);
     expect(page.container).toBeEmptyDOMElement(); expect(mockRemember).not.toHaveBeenCalled();
+  });
+
+  it("two resumed forms can claim the same sample write only once", async () => {
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "memory", contextId: "c1" }));
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", workspace_id: "ws-1", is_private: true, created_by: "u1" }] });
+    mockRemember.mockResolvedValue({ status: "success" });
+    render(<><OnboardingCard /><OnboardingCard /></>);
+    const [first, second] = await screen.findAllByText("memory.saveButton");
+    fireEvent.click(first); fireEvent.click(second);
+    expect(await screen.findByText("recall.searchButton")).toBeInTheDocument();
+    expect(await screen.findByText("recovery")).toBeInTheDocument();
+    expect(mockRemember).toHaveBeenCalledTimes(1);
+    expect(mockRemember).toHaveBeenCalledWith(expect.objectContaining({ private_workspace_id: "ws-1" }));
   });
 
   it("skips the key probe and shows the normal flow when byok is off (#1167)", async () => {
@@ -168,6 +204,7 @@ describe("OnboardingCard trigger gating", () => {
   it("shows the embedding-key notice (not the flow) when no key is configured, and its CTA uses the real /workspace route (not the backend value)", async () => {
     mockCheckKey.mockResolvedValue({
       has_key: false,
+      embedding_available: false,
       can_configure: true,
       // The backend returns this prefix-less (404-ing) value; the card must NOT use it.
       external_keys_url: "/integrations/external-keys",
@@ -187,7 +224,7 @@ describe("OnboardingCard trigger gating", () => {
 
 describe("OnboardingCard value-moment happy path", () => {
   it("walks create → save → recall and shows the recalled hit", async () => {
-    mockCreateContext.mockResolvedValue({ id: "ctx-1", name: "x" });
+    mockCreateContext.mockResolvedValue({ id: "ctx-1", name: "x", workspace_id: "ws-1", is_private: true, created_by: "u1" });
     mockRemember.mockResolvedValue({
       status: "success",
       memory_id: "m1",
@@ -227,6 +264,7 @@ describe("OnboardingCard value-moment happy path", () => {
     expect(mockCreateContext).toHaveBeenCalledWith({
       name: "context.sampleName",
       is_private: true,
+      expected_workspace_id: "ws-1",
     });
     fireEvent.click(screen.getByText("memory.saveButton"));
 
@@ -260,7 +298,7 @@ describe("OnboardingCard value-moment happy path", () => {
   });
 
   it("shows a fallback (not a blank screen) when recall returns no results", async () => {
-    mockCreateContext.mockResolvedValue({ id: "ctx-1", name: "x" });
+    mockCreateContext.mockResolvedValue({ id: "ctx-1", name: "x", workspace_id: "ws-1", is_private: true, created_by: "u1" });
     mockRemember.mockResolvedValue({
       status: "success",
       memory_id: "m1",

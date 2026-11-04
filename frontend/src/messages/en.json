@@ -1,5 +1,8 @@
 {
   "gettingStarted": {
+    "ownerEmpty": "Connect a client now, or create a private practice context below to save your first memory.",
+    "adminEmpty": "As a workspace admin, you can create a shared context when the workspace plan allows it. Members with access will be able to see its memories.",
+    "createShared": "Create a shared context",
     "title": "Getting started",
     "intro": "Connect an AI client or find a memory in a context you can access.",
     "connect": "Connect an AI client",
@@ -52,9 +55,9 @@
     "deployment": "This feature is not enabled on this deployment. Changing your workspace plan will not enable it."
   },
   "onboarding": {
-    "recovery": "We couldn’t verify the last practice step. Open Contexts and check what was saved before starting another sample.",
+    "recovery": "The last practice write could not be confirmed. Review your contexts to see what was saved, or continue with the read-only guide.",
     "openContexts": "Review my contexts",
-    "endPractice": "End this practice session",
+    "endPractice": "Continue with the read-only guide",
     "title": "Welcome to Kagura Memory",
     "subtitle": "Let's get you to your first recall in under 5 minutes.",
     "dismiss": "Dismiss onboarding",
