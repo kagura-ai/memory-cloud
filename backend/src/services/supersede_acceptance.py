@@ -7,15 +7,19 @@ enforces it. The rule is the accept path's:
 
 * write access to the context: a workspace role of ``member`` or higher and a
   writable context slot (#1943) — the part of the ``POST /graph/edges`` gate
-  that a caller who has already read the memory has not proven yet;
+  that a caller who has already read the memory has not proven yet. On a
+  memory that carries a tool guardrail (``details.tool_trigger``) also a user
+  credential and context EDITOR or above (#2614): the gate both accept
+  transports run first, as on any edit of a guardrail;
 * both memories the caller's own (#1803/#2313): in a private context a linked
   account counts, in a shared one only the caller;
 * a candidate not written after the memory carrying it (#2308): accepting it
   would hide the newer memory behind the older one;
-* no different declared edge already on the pair (#2518): the edge writer's
-  duplicate contract (#1321) refuses to retype it, the accept path's 409. In a
-  private context the carrier author's row and the caller's row count, the
-  two accounts an accept writes under (#2549).
+* no different declared edge on the pair kept by the carrier's author
+  (#2518): the edge writer's duplicate contract (#1321) refuses to retype it,
+  the accept path's 409. Both transports write the accept under that author
+  (#2600), so a row kept by any other account, the caller's included, is not
+  one the accept meets (#2614, settling #2549's two-account read).
 
 The edge writer (``edge_service.ensure_supersedes_owned``) stays the
 authority on click and keeps its own uniform refusal; the reason reported
@@ -41,8 +45,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import ACCESS_WRITE, WorkspaceRole
 from models.memory import Memory
 from models.schemas import SupersedeAcceptance
-from services.memory_ownership import is_private_context, own_memory_predicate
+from services.memory_ownership import own_memory_predicate
 from utils.exceptions import AuthorizationError, FeatureNotAvailableError
+from utils.tool_trigger import carries_tool_trigger
 
 AcceptanceReason = Literal["not_writable", "not_owner", "newer_candidate", "edge_exists"]
 
@@ -150,30 +155,32 @@ async def can_write_edges(
     return await agent_binding_would_permit(db, UUID(str(context_id)), ACCESS_WRITE)
 
 
-async def edge_owner(
-    db: AsyncSession, *, author_id: str, caller_id: str, context_id: UUID | str | None
-) -> str | frozenset[str]:
-    """Whose edges on the pair the accept can meet (#2549).
+async def may_author_guardrail(
+    db: AsyncSession, *, user_id: str, context_id: UUID | str | None
+) -> bool:
+    """Whether the caller passes the guardrail author gate in the context (#2614).
 
-    The carrier author's row and the caller's row, the two accounts an
-    accept writes under: ``update_memory(accept_supersede_candidate=true)``
-    writes under the carrier's author (#1784), the web dialog's
-    ``POST /graph/edges`` under the caller, and ``unique_edge`` is per
-    account, so each of them can keep a row for the pair. They differ only
-    in a private context, where a linked account's memory counts as the
-    caller's own (:func:`services.memory_ownership.own_memory_predicate`);
-    elsewhere ``not_owner`` has already made the author the caller. Another
-    linked account's row is never one an accept meets, so it does not count.
+    The probe twin of ``MemoryService._require_guardrail_author``, which
+    ``update_memory`` and ``PATCH /memory/{id}`` run before the accept on a
+    memory carrying ``details.tool_trigger``: a user credential and context
+    EDITOR or above (workspace owner/admin, a ContextMember editor/owner, the
+    creator of a private context or an account linked to it). An agent
+    credential is answered before the context check, whose binding filter
+    would audit an agent's deny; the user-credential refusal a reader of the
+    memory meets there is the RBAC core's 403, which logs nothing.
     """
-    if author_id == caller_id or not await is_private_context(db, context_id):
-        return author_id
-    return frozenset({author_id, caller_id})
+    from auth.agent_scope import get_agent_scope
+    from services.permission_service import PermissionService
+
+    if get_agent_scope() is not None or context_id is None:
+        return False
+    return await PermissionService(db).can_write_context(user_id, UUID(str(context_id)))
 
 
 async def conflicting_declared_edge(
     db: AsyncSession,
     *,
-    owner: str | frozenset[str],
+    owner: str,
     workspace_id: UUID,
     context_id: UUID,
     carrier_id: UUID,
@@ -181,13 +188,11 @@ async def conflicting_declared_edge(
 ) -> bool:
     """Whether the accept would meet a different declared edge on the pair.
 
-    The lookup ``create_declared_edge`` makes before it writes, made for each
-    account in ``owner`` (:func:`edge_owner`): the carrier author's row and
-    the caller's row, the two accounts an accept writes under (#2549). Every
-    such row from the carrier to the target is read, not only the strongest
-    one a two-account ``get_edge`` returns. A declared row with other values
-    than the accept's (another type, weight or confidence) is a ``conflict``
-    there — refused with a 409, nothing written. An identical declared
+    The lookup ``create_declared_edge`` makes before it writes, under
+    ``owner``: the carrier's author, the account both accept transports
+    write under (#2600, #2614). A declared row with other values than the
+    accept's (another type, weight or confidence) is a ``conflict`` there —
+    refused with a 409, nothing written. An identical declared
     ``supersedes`` row is ``unchanged`` and an automatic (hebbian/semantic)
     row is overwritten, so neither refuses.
     """
@@ -219,15 +224,21 @@ async def evaluate(
 
     Reasons in the order the accept path refuses: ``not_writable`` >
     ``not_owner`` > ``newer_candidate`` > ``edge_exists``. Each check after
-    the first runs only when the earlier ones pass. ``edge_exists`` reads the
-    carrier author's row and the caller's row, the two accounts an accept
-    writes under (#2549): a different declared edge kept by either refuses.
+    the first runs only when the earlier ones pass. ``not_writable`` covers a
+    guardrail carrier the caller may not edit (:func:`may_author_guardrail`,
+    #2614). ``edge_exists`` reads the carrier author's row, the account both
+    transports write the accept under.
     """
     if not await can_write_edges(
         db,
         user_id=user_id,
         workspace_id=memory.workspace_id,
         context_id=memory.context_id,
+    ):
+        return SupersedeAcceptance(allowed=False, reason="not_writable")
+    # The accept transports gate a guardrail carrier before the accept.
+    if carries_tool_trigger(memory.details) and not await may_author_guardrail(
+        db, user_id=user_id, context_id=memory.context_id
     ):
         return SupersedeAcceptance(allowed=False, reason="not_writable")
     pair = await pair_ownership(
@@ -241,9 +252,7 @@ async def evaluate(
     # Last, as the accept path meets it last: only a pair it would write.
     if reason is None and await conflicting_declared_edge(
         db,
-        owner=await edge_owner(
-            db, author_id=memory.user_id, caller_id=user_id, context_id=memory.context_id
-        ),
+        owner=memory.user_id,
         workspace_id=memory.workspace_id,
         context_id=memory.context_id,
         carrier_id=memory.id,

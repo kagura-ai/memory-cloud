@@ -2,8 +2,9 @@
 
 The pure half of ``services.supersede_acceptance``: the reason precedence over
 a pair's ownership and order, the edge_exists predicate and the order
-``evaluate`` reports in (#2518), and the wire shape. The database half (the
-ownership query, the write probe, reference/PATCH/MCP) is in
+``evaluate`` reports in (#2518), the guardrail-carrier gate (#2614), and the
+wire shape. The database half (the ownership query, the write probe,
+reference/PATCH/MCP) is in
 ``tests/integration/test_2427_supersede_acceptance_db.py``.
 """
 
@@ -11,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -23,9 +24,13 @@ from services.supersede_acceptance import (
     PairOwnership,
     acceptance_reason,
     conflicting_declared_edge,
-    edge_owner,
     evaluate,
+    may_author_guardrail,
 )
+from utils.tool_trigger import carries_tool_trigger
+
+# A stored guardrail marking, as normalize_tool_trigger writes it.
+_GUARDRAIL = {"tool_trigger": {"tool": "Bash", "on": "pre", "match": "gh", "action": "inform"}}
 
 _OLD = datetime(2026, 1, 1, tzinfo=UTC)
 _NEW = _OLD + timedelta(hours=1)
@@ -122,7 +127,7 @@ class TestConflictingDeclaredEdge:
     """#2518: the edge writer's duplicate contract, read before the click."""
 
     async def _conflicts(
-        self, *rows: SimpleNamespace, owner: str | frozenset[str] = "owner"
+        self, *rows: SimpleNamespace, owner: str = "owner"
     ) -> tuple[bool, AsyncMock]:
         listed = AsyncMock(return_value=list(rows))
         with patch("repositories.neural_edge.NeuralEdgeRepository.list_pair_edges", listed):
@@ -158,18 +163,15 @@ class TestConflictingDeclaredEdge:
         assert (await self._conflicts(_edge(**overrides)))[0] is True
 
     @pytest.mark.asyncio
-    async def test_every_row_of_the_owner_filter_is_read(self):
-        """#2549: the carrier author's row and the caller's row are each read."""
-        owners = frozenset({"author", "caller"})
-        _, listed = await self._conflicts(owner=owners)
-        assert listed.await_args.args[0] == owners
+    async def test_the_rows_are_read_under_the_one_owner(self):
+        """#2614: the account the accept writes under, and no other."""
+        _, listed = await self._conflicts(owner="author")
+        assert listed.await_args.args[0] == "author"
 
     @pytest.mark.asyncio
-    async def test_a_conflict_behind_a_clean_stronger_row_is_seen(self):
-        """#2549: the strongest parallel row is the accept's own edge, the
-        caller's weaker row differs — the web dialog's click still meets it."""
+    async def test_any_conflicting_row_refuses_not_only_the_first(self):
         clean = _edge()
-        weaker = _edge(edge_type="related_to", weight=0.5, user_id="caller")
+        weaker = _edge(edge_type="related_to", weight=0.5)
         assert (await self._conflicts(clean, weaker))[0] is True
 
     @pytest.mark.asyncio
@@ -179,68 +181,184 @@ class TestConflictingDeclaredEdge:
 
 
 class TestEdgeOwner:
-    """#2549: whose declared edges on the pair the probe reads — the carrier
-    author's row and the caller's row, the two accounts an accept writes under."""
-
-    async def _owner(
-        self, *, private: bool, caller_id: str = "caller"
-    ) -> tuple[str | frozenset[str], AsyncMock]:
-        probe_private = AsyncMock(return_value=private)
-        with patch("services.supersede_acceptance.is_private_context", probe_private):
-            owner = await edge_owner(
-                MagicMock(), author_id="author", caller_id=caller_id, context_id=uuid4()
-            )
-        return owner, probe_private
+    """#2614 (the #2549 owner question): the probe reads the carrier author's
+    row alone. Both transports write the accept under that author since #2600,
+    so a row kept by the caller, linked or not, is never one the accept meets."""
 
     @pytest.mark.asyncio
-    async def test_a_linked_caller_in_a_private_context_reads_both_rows(self):
-        owner, _ = await self._owner(private=True)
-        assert owner == frozenset({"author", "caller"})
+    @pytest.mark.parametrize("caller_id", ["author", "linked_caller"])
+    async def test_the_edge_is_read_under_the_carrier_author_alone(self, caller_id):
+        memory = SimpleNamespace(
+            id=uuid4(), user_id="author", workspace_id=uuid4(), context_id=uuid4(), details=None
+        )
+        probe_edge = AsyncMock(return_value=False)
+        with (
+            patch("services.supersede_acceptance.can_write_edges", AsyncMock(return_value=True)),
+            patch("services.supersede_acceptance.pair_ownership", AsyncMock(return_value=_pair())),
+            patch("services.supersede_acceptance.conflicting_declared_edge", probe_edge),
+        ):
+            await evaluate(MagicMock(), user_id=caller_id, memory=memory, target_id=uuid4())
+        assert probe_edge.await_args.kwargs["owner"] == "author"
+
+
+class TestMayAuthorGuardrail:
+    """#2614: the probe twin of ``MemoryService._require_guardrail_author``."""
+
+    async def _probe(
+        self, *, agent: bool, can_write: bool, context_id: Any = "ctx"
+    ) -> tuple[bool, AsyncMock]:
+        if context_id == "ctx":
+            context_id = uuid4()
+        write = AsyncMock(return_value=can_write)
+        scope = SimpleNamespace(agent_id=uuid4()) if agent else None
+        with (
+            patch("auth.agent_scope.get_agent_scope", return_value=scope),
+            patch("services.permission_service.PermissionService.can_write_context", write),
+        ):
+            allowed = await may_author_guardrail(MagicMock(), user_id="u", context_id=context_id)
+        return allowed, write
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("private", [True, False], ids=["private", "shared"])
-    async def test_the_author_as_caller_reads_the_author_alone(self, private):
-        owner, probe_private = await self._owner(private=private, caller_id="author")
-        assert owner == "author"
-        assert probe_private.await_count == 0
+    @pytest.mark.parametrize("can_write", [True, False], ids=["editor", "below_editor"])
+    async def test_a_user_credential_is_decided_by_the_context_write_probe(self, can_write):
+        context_id = uuid4()
+        allowed, write = await self._probe(agent=False, can_write=can_write, context_id=context_id)
+        assert allowed is can_write
+        assert write.await_args.args == ("u", context_id)
 
     @pytest.mark.asyncio
-    async def test_a_shared_context_reads_the_author_alone(self):
-        owner, _ = await self._owner(private=False)
-        assert owner == "author"
+    async def test_a_string_context_id_is_probed_as_its_uuid(self):
+        context_id = uuid4()
+        _, write = await self._probe(agent=False, can_write=True, context_id=str(context_id))
+        assert write.await_args.args[1] == context_id
+        assert isinstance(write.await_args.args[1], UUID)
+
+    @pytest.mark.asyncio
+    async def test_an_agent_credential_never_authors_and_is_not_probed(self):
+        """Answered before the context check, whose binding filter would write
+        an agent's deny-audit row: a probe is not a denied request."""
+        allowed, write = await self._probe(agent=True, can_write=True)
+        assert allowed is False
+        assert write.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_no_context_is_refused(self):
+        allowed, write = await self._probe(agent=False, can_write=True, context_id=None)
+        assert allowed is False and write.await_count == 0
+
+
+class TestCarriesToolTrigger:
+    """The one raw-``details`` spelling of "tool guardrail" (``Memory.is_tool_triggered``)."""
+
+    @pytest.mark.parametrize(
+        ("details", "carries"),
+        [
+            (_GUARDRAIL, True),
+            (None, False),
+            ({}, False),
+            ({"note": "x"}, False),
+            ({"tool_trigger": None}, False),
+            ("tool_trigger", False),
+        ],
+        ids=["marked", "none", "empty", "plain", "null_marking", "not_a_dict"],
+    )
+    def test_only_a_stored_marking_counts(self, details, carries):
+        assert carries_tool_trigger(details) is carries
+
+    def test_memory_service_reads_the_same_predicate(self):
+        from services.memory_service import MemoryService
+
+        assert MemoryService._carries_tool_trigger(_GUARDRAIL) is True
+        assert MemoryService._carries_tool_trigger({"tool_trigger": None}) is False
 
 
 class TestEvaluatePrecedence:
     """``not_writable`` > ``not_owner`` > ``newer_candidate`` > ``edge_exists``;
-    a later check runs only when the earlier ones pass."""
+    a later check runs only when the earlier ones pass. A guardrail carrier's
+    author gate (#2614) is part of ``not_writable``."""
 
-    _OWNERS = frozenset({"owner", "caller"})
-
-    async def _evaluate(self, *, writable: bool, pair: PairOwnership, edge: bool):
+    async def _evaluate(
+        self,
+        *,
+        writable: bool,
+        pair: PairOwnership,
+        edge: bool,
+        details: Any = None,
+        may_author: bool = True,
+    ):
         memory = SimpleNamespace(
-            id=uuid4(), user_id="owner", workspace_id=uuid4(), context_id=uuid4()
+            id=uuid4(), user_id="owner", workspace_id=uuid4(), context_id=uuid4(), details=details
         )
         probe_pair = AsyncMock(return_value=pair)
         probe_edge = AsyncMock(return_value=edge)
-        self.probe_owner = AsyncMock(return_value=self._OWNERS)
+        self.probe_author = AsyncMock(return_value=may_author)
         with (
             patch(
                 "services.supersede_acceptance.can_write_edges", AsyncMock(return_value=writable)
             ),
+            patch("services.supersede_acceptance.may_author_guardrail", self.probe_author),
             patch("services.supersede_acceptance.pair_ownership", probe_pair),
-            patch("services.supersede_acceptance.edge_owner", self.probe_owner),
             patch("services.supersede_acceptance.conflicting_declared_edge", probe_edge),
         ):
             result = await evaluate(MagicMock(), user_id="caller", memory=memory, target_id=uuid4())
+        self.memory = memory
         return result, probe_pair, probe_edge
 
     @pytest.mark.asyncio
     async def test_not_writable_wins_and_reads_nothing_else(self):
         result, probe_pair, probe_edge = await self._evaluate(
-            writable=False, pair=_pair(carrier_own=False), edge=True
+            writable=False, pair=_pair(carrier_own=False), edge=True, details=_GUARDRAIL
         )
         assert result.reason == "not_writable"
         assert probe_pair.await_count == 0 and probe_edge.await_count == 0
+        assert self.probe_author.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_guardrail_carrier_below_editor_is_not_writable_before_the_pair(self):
+        """#2614: the gate both accept transports run before the accept."""
+        result, probe_pair, probe_edge = await self._evaluate(
+            writable=True,
+            pair=_pair(carrier_own=False),
+            edge=True,
+            details=_GUARDRAIL,
+            may_author=False,
+        )
+        assert result.model_dump(exclude_none=True) == {"allowed": False, "reason": "not_writable"}
+        assert probe_pair.await_count == 0 and probe_edge.await_count == 0
+        assert self.probe_author.await_args.kwargs == {
+            "user_id": "caller",
+            "context_id": self.memory.context_id,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("pair", "edge", "expected"),
+        [
+            (_pair(), False, {"allowed": True}),
+            (_pair(target_own=False), True, {"allowed": False, "reason": "not_owner"}),
+            (_pair(), True, {"allowed": False, "reason": "edge_exists"}),
+        ],
+        ids=["allowed", "not_owner", "edge_exists"],
+    )
+    async def test_a_guardrail_author_goes_on_to_the_pair(self, pair, edge, expected):
+        result, _, _ = await self._evaluate(
+            writable=True, pair=pair, edge=edge, details=_GUARDRAIL, may_author=True
+        )
+        assert result.model_dump(exclude_none=True) == expected
+        assert self.probe_author.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "details",
+        [None, {"note": "x"}, {"tool_trigger": None}],
+        ids=["none", "plain", "null_marking"],
+    )
+    async def test_a_plain_carrier_is_not_probed_for_the_guardrail_gate(self, details):
+        result, _, _ = await self._evaluate(
+            writable=True, pair=_pair(), edge=False, details=details, may_author=False
+        )
+        assert result.model_dump(exclude_none=True) == {"allowed": True}
+        assert self.probe_author.await_count == 0
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -253,16 +371,14 @@ class TestEvaluatePrecedence:
     async def test_the_pair_wins_over_edge_exists(self, pair, reason):
         result, _, probe_edge = await self._evaluate(writable=True, pair=pair, edge=True)
         assert result.model_dump(exclude_none=True) == {"allowed": False, "reason": reason}
-        assert probe_edge.await_count == 0 and self.probe_owner.await_count == 0
+        assert probe_edge.await_count == 0
 
     @pytest.mark.asyncio
     async def test_edge_exists_when_everything_else_passes(self):
-        """#2549: the edge is looked up under the carrier author and the caller."""
+        """#2614: the edge is looked up under the carrier's author alone."""
         result, _, probe_edge = await self._evaluate(writable=True, pair=_pair(), edge=True)
         assert result.model_dump(exclude_none=True) == {"allowed": False, "reason": "edge_exists"}
-        assert self.probe_owner.await_args.kwargs["author_id"] == "owner"
-        assert self.probe_owner.await_args.kwargs["caller_id"] == "caller"
-        assert probe_edge.await_args.kwargs["owner"] == self._OWNERS
+        assert probe_edge.await_args.kwargs["owner"] == "owner"
 
     @pytest.mark.asyncio
     async def test_allowed_when_nothing_refuses(self):

@@ -144,6 +144,7 @@ from utils.tag_normalize import (
     tag_filter_groups,
     tag_filter_groups_any,
 )
+from utils.tool_trigger import carries_tool_trigger
 
 logger = get_logger(__name__)
 
@@ -1076,16 +1077,9 @@ class MemoryService:
             return True
         return details_supplied and isinstance(new_details, dict) and "tool_trigger" in new_details
 
-    @staticmethod
-    def _carries_tool_trigger(details: Any) -> bool:
-        """``Memory.is_tool_triggered`` spelled on the raw ``details`` value.
-
-        For callers that hold the column value rather than a mapped row — and
-        for the write-response paths, where unit tests build the row as a bare
-        ``MagicMock`` (the #1523 trap: a mocked property is truthy, a mocked
-        ``details`` is not a dict).
-        """
-        return isinstance(details, dict) and details.get("tool_trigger") is not None
+    # ``utils.tool_trigger.carries_tool_trigger``: the write-response paths and
+    # the guardrail gate here, and the supersede acceptance probe (#2614).
+    _carries_tool_trigger = staticmethod(carries_tool_trigger)
 
     async def _require_guardrail_author(self, user_id: str, context_id: UUID | str | None) -> None:
         """Authorize a guardrail write: context EDITOR or above, user credential only.
@@ -2404,7 +2398,8 @@ class MemoryService:
             # The carrier's author: the caller, or in a private context a linked
             # account (#1784). Detection looks the pair's edge up under that
             # owner, so an edge kept under another account would let the next
-            # re-embed resurface the suggestion next to it.
+            # re-embed resurface the suggestion next to it. Acceptance's
+            # edge_exists reads this one account's row too (#2614).
             user_id=memory.user_id,
             source_id=memory.id,
             target_id=target_id,
