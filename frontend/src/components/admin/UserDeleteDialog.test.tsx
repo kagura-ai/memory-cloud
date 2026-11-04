@@ -304,7 +304,7 @@ describe("UserDeleteDialog (#2420)", () => {
     );
   });
 
-  it("closes and toasts a refusal at the confirm step", async () => {
+  it("shows a refusal at the confirm step inside the dialog, not as a toast", async () => {
     mockDeleteUser.mockRejectedValueOnce(
       new ApiError({
         error: "BILLING-005",
@@ -315,13 +315,18 @@ describe("UserDeleteDialog (#2420)", () => {
     );
     const { onClose } = renderDialog();
     fireEvent.click(screen.getByTestId(IDS.confirm));
-    await waitFor(() => expect(onClose).toHaveBeenCalled());
-    expect(mockToast).toHaveBeenCalledWith(
-      expect.objectContaining({
-        variant: "destructive",
-        description: `${NS}.messages.deleteErrorWithReason:{"reason":"A paid subscription is active for this workspace."}`,
-      }),
-    );
+    const alert = await screen.findByTestId(IDS.error);
+    expect(
+      within(alert).getByText(
+        `${NS}.messages.deleteErrorWithReason:{"reason":"A paid subscription is active for this workspace."}`,
+      ),
+    ).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(mockToast).not.toHaveBeenCalled();
+    expect(screen.queryByTestId(IDS.submit)).toBeNull();
+    expect(
+      (screen.getByTestId(IDS.confirm) as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 
   it("keeps the picker and its picks on a refusal after it, saying why", async () => {
@@ -372,19 +377,20 @@ describe("UserDeleteDialog (#2420)", () => {
     expect(mockDeleteUser).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to the counts toast when an older API sends ids only", async () => {
+  it("falls back to the counts when an older API sends ids only", async () => {
     mockDeleteUser.mockRejectedValueOnce(
       transferRequired({ workspace_ids: ["ws-1"], context_ids: [] }),
     );
     const { onClose } = renderDialog();
     fireEvent.click(screen.getByTestId(IDS.confirm));
-    await waitFor(() => expect(onClose).toHaveBeenCalled());
-    expect(mockToast).toHaveBeenCalledWith(
-      expect.objectContaining({
-        variant: "destructive",
-        description: `${NS}.messages.deleteTransferRequired:{"workspaces":1,"contexts":0}`,
-      }),
-    );
+    const alert = await screen.findByTestId(IDS.error);
+    expect(
+      within(alert).getByText(
+        `${NS}.messages.deleteTransferRequired:{"workspaces":1,"contexts":0}`,
+      ),
+    ).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(mockToast).not.toHaveBeenCalled();
     expect(screen.queryByTestId(IDS.submit)).toBeNull();
   });
 

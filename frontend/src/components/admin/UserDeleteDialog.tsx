@@ -10,8 +10,7 @@
  * and, read-only, the connector write targets, which go to the workspace's
  * owner. The DELETE is then sent again with the selections. Another 409 with
  * the picker (the user's resources changed meanwhile) refreshes it; any other
- * refusal of that DELETE is shown in the dialog with the picks kept. A refusal
- * at the confirm step closes the dialog with a toast.
+ * refusal, at either step, is shown in the dialog (the picks are kept).
  */
 
 import { useMemo, useState } from "react";
@@ -53,7 +52,7 @@ export interface UserDeleteTarget {
 
 interface UserDeleteDialogProps {
   user: UserDeleteTarget;
-  /** Closed without deleting (cancel, or a refusal already toasted). */
+  /** Closed without deleting (cancel). */
   onClose: () => void;
   /** The user was deleted (the success toast is shown). */
   onDeleted: () => void;
@@ -111,7 +110,7 @@ export function UserDeleteDialog({
   const [picker, setPicker] = useState<TransferPicker | null>(null);
   const [changed, setChanged] = useState(false);
   const [busy, setBusy] = useState(false);
-  // A refusal of the picker's DELETE, shown in the dialog (#2420 review).
+  // A refusal of the DELETE, shown in the dialog (#2420 review).
   const [error, setError] = useState<string | null>(null);
   const [workspacePicks, setWorkspacePicks] = useState<Picks>({});
   const [contextPicks, setContextPicks] = useState<Picks>({});
@@ -222,18 +221,21 @@ export function UserDeleteDialog({
           : failure.kind === "message"
             ? t("messages.deleteErrorWithReason", { reason: failure.message })
             : t("messages.deleteError");
-      if (picker !== null) {
-        // The picks stay: a successor that lost access can be changed, or
-        // the dialog cancelled and opened again for a fresh list.
-        setError(description);
-        return;
-      }
-      onClose();
-      toast({ title: tCommon("error"), description, variant: "destructive" });
+      // Shown in the dialog, not as a toast behind it (frontend error-surface
+      // rule). The picks stay: a successor that lost access can be changed,
+      // or the dialog cancelled and opened again for a fresh list.
+      setError(description);
     } finally {
       setBusy(false);
     }
   };
+
+  const errorAlert = error && (
+    <Alert variant="destructive" data-testid={IDS.error}>
+      <AlertCircle className="h-4 w-4" />
+      <AlertDescription>{error}</AlertDescription>
+    </Alert>
+  );
 
   const confirmStep = (
     <>
@@ -245,6 +247,7 @@ export function UserDeleteDialog({
         <AlertCircle className="h-4 w-4" />
         <AlertDescription>{t("deleteDialog.deleted")}</AlertDescription>
       </Alert>
+      {errorAlert}
       <DialogFooter>
         <Button variant="outline" onClick={onClose} disabled={busy}>
           {tCommon("cancel")}
@@ -275,12 +278,7 @@ export function UserDeleteDialog({
           <AlertDescription>{t("deleteDialog.changed")}</AlertDescription>
         </Alert>
       )}
-      {error && (
-        <Alert variant="destructive" data-testid={IDS.error}>
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
+      {errorAlert}
 
       {workspaceRows.length > 0 && (
         <section className="space-y-3">
