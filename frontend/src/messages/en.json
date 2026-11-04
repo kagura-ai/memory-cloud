@@ -5,7 +5,6 @@
     "createShared": "Create a shared context",
     "title": "Getting started",
     "intro": "Connect an AI client or find a memory in a context you can access.",
-    "connect": "Connect an AI client",
     "connections": "See all connection options",
     "choose": "Choose a context to search",
     "openContext": "Open this context",
@@ -26,7 +25,7 @@
       "credentials": {
         "title": "Which credential do I need?",
         "short": "Sign in for an AI client, or create a KMC key for a script.",
-        "description": "Supported AI clients sign in with the MCP URL. Register a custom OAuth app when building your own client. Scripts use KMC API keys. External provider keys pay for calls to the provider. Secrets control which recipients can retrieve a value. Resources hold data sent by an external source."
+        "description": "Claude, ChatGPT, Gemini and Muse sign in using the MCP URL. Register a custom OAuth app when building your own client. Scripts use KMC API keys. External provider keys pay for calls to the provider. Secrets control which recipients can retrieve a value. Resources hold data sent by an external source."
       }
     }
   },

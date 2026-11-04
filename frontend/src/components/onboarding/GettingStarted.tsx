@@ -57,6 +57,7 @@ export function GettingStarted({ scope, contexts, owner, admin, onCreateShared, 
   onCreateShared?: () => void; onCreated?: (context: Context) => void;
 }) {
   const t = useTranslations("gettingStarted");
+  const integration = useTranslations("integrationEntry");
   const panelId = useId();
   const selectId = useId();
   const button = useRef<HTMLButtonElement>(null);
@@ -82,7 +83,7 @@ export function GettingStarted({ scope, contexts, owner, admin, onCreateShared, 
     <Button ref={button} type="button" variant="outline" aria-expanded={open} aria-controls={panelId} onClick={() => toggle(!open)}>{t("title")}</Button>
     {open && <div id={panelId} className="mt-3 space-y-3">
       <p>{t("intro")}</p>
-      <Link href="/workspace/integrations/credentials?tab=api-keys#mcp-connection" className="text-primary underline">{t("connect")}</Link>
+      <Link href="/workspace/integrations/credentials?tab=api-keys#mcp-connection" className="text-primary underline">{integration("tasks.client.title")}</Link>
       {current ? <div className="space-y-2">
         <label htmlFor={selectId}>{t("choose")}</label>
         <select id={selectId} className="block max-w-full rounded border p-2" value={current.id} onChange={e => setSelected(e.target.value)}>
