@@ -161,6 +161,7 @@ describe("ProfilePage section links", () => {
     fireEvent.click(screen.getByRole("button", { name: "edit" }));
     fireEvent.change(screen.getByLabelText("fullName"), { target: { value: "Unsaved draft" } });
     fireEvent.click(screen.getByRole("link", { name: "sections.appearance" }));
+    expect(screen.getByRole("link", { name: "sections.appearance" })).toHaveAttribute("aria-current", "location");
     expect(screen.getByLabelText("fullName")).toHaveValue("Unsaved draft");
     expect(mockApiPut).not.toHaveBeenCalled();
   });
@@ -789,6 +790,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
     const originalLocation = window.location;
     Object.defineProperty(window, "location", {
       value: new Proxy(originalLocation, {
+        get(target, prop) { return Reflect.get(target, prop, target); },
         set(target, prop, value) {
           if (prop === "href") {
             hrefSetter(value);
