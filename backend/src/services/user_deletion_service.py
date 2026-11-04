@@ -11,11 +11,14 @@ keeps such a context under a pseudonymous creator instead). Before that, a
 linked account that wrote in a private context takes it over
 (``hand_over_private_contexts``, #1784). A private context someone else wrote
 in that the hand-over did not take (no eligible linked author, or the context
-is soft-deleted), and a connector's write target (connectors create theirs
-private; it is the workspace's, and the hand-over never takes one, #2422),
-keep another account's data, so they take a successor like a shared context:
-the API requires one, the CLI hands them to the surviving workspace owner
-(#2417).
+is soft-deleted) keeps another account's data, so it takes a successor like
+a shared context: the API requires one, the CLI hands it to the surviving
+workspace owner (#2417). A connector's write target (connectors create theirs
+private; it is the workspace's, and the hand-over never takes one, #2422)
+goes to the workspace's owner on both paths, who also takes the connector's
+key: on the API path the successor picked for a workspace the user owns, the
+current owner elsewhere; it takes no selection (#2420, the rule account
+erasure applies).
 
 A soft-deleted workspace the user owns goes with the user on both paths
 (#2406): its owner already deleted it, so it is never handed to a successor.
@@ -40,7 +43,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from auth.workspace_roles import WorkspaceRole, reaches_context
+from auth.workspace_roles import WORKSPACE_ROLE_WEIGHTS, WorkspaceRole, reaches_context
 from models.auth import (
     APIKey,
     AuditLog,
@@ -53,7 +56,11 @@ from models.auth import (
 )
 from models.memory import Memory
 from services.billing_contract import ensure_no_billing_contract, workspaces_under_contract
-from services.connector_contexts import connector_write_target_ids
+from services.connector_contexts import (
+    connector_write_target_ids,
+    connector_write_targets_among,
+    reown_connector_contexts,
+)
 from services.connector_key_ownership import settle_departing_credentials
 from services.erasure_details import locked_ids
 from services.file_storage_service import FileStorageService
@@ -75,6 +82,10 @@ PRIVATE_CONTEXT_NOT_TRANSFERABLE = (
 PRIVATE_CONTEXT_HANDED_OVER = (
     "A private context a linked account wrote in cannot be transferred: that account takes it over"
 )
+CONNECTOR_CONTEXT_FOLLOWS_OWNER = (
+    "A connector's write target goes to the workspace owner; it takes no successor selection"
+)
+OWNERSHIP_TRANSFER_REQUIRED = "Ownership transfer required"
 
 
 def _contextless_in(m: Any, workspaces: list[UUID] | Select[Any] | Any) -> ColumnElement[bool]:
@@ -250,10 +261,16 @@ async def transfer_user_ownership(
     the contexts in it take no successor, and a selection naming one is
     refused as no longer matching. A private
     context of the user's own is not transferable (see the module docstring); a
-    selection naming one is refused. An owned workspace under a running
+    selection naming one is refused. A connector's write target goes to its
+    workspace's owner once the workspace transfers are applied (the successor
+    picked for a workspace the user owns), with the connector's key; a
+    selection naming one is refused (#2420). An owned workspace under a running
     subscription refuses the whole deletion (``BILLING-005``): the subscription
     is the user's, so it ends first, as account erasure and ``cli.delete_admin``
     require (#1940).
+
+    A missing selection raises 409 with :func:`_transfer_required`'s body,
+    which also carries what the admin's successor picker shows.
     """
     successors = set(workspace_transfers.values()) | set(context_transfers.values())
     users = set(
@@ -321,6 +338,11 @@ async def transfer_user_ownership(
     if context_transfers.keys() & personal:
         raise HTTPException(409, PRIVATE_CONTEXT_NOT_TRANSFERABLE)
     contexts = [c for c in created if c.id not in taken and c.id not in personal]
+    # A connector's write target follows its workspace's owner (#2420): the
+    # apply step below hands it over, no selection taken.
+    fixed = await connector_write_targets_among(db, [c.id for c in contexts])
+    if context_transfers.keys() & fixed:
+        raise HTTPException(409, CONNECTOR_CONTEXT_FOLLOWS_OWNER)
     context_ids = {c.id for c in contexts}
     # A workspace selection is the default for the contexts created there, so
     # one naming any workspace the user created in is well-formed, even when
@@ -328,20 +350,24 @@ async def transfer_user_ownership(
     workspace_ids = {w.id for w in workspaces} | {c.workspace_id for c in created}
     if set(context_transfers) - context_ids or set(workspace_transfers) - workspace_ids:
         raise HTTPException(409, "Transfer selections no longer match the user's resources")
-    missing_ws = [str(w.id) for w in workspaces if w.id not in workspace_transfers]
+    selectable = [c for c in contexts if c.id not in fixed]
+    missing_ws = [w.id for w in workspaces if w.id not in workspace_transfers]
     missing_ctx = [
-        str(c.id)
-        for c in contexts
+        c
+        for c in selectable
         if c.id not in context_transfers and c.workspace_id not in workspace_transfers
     ]
     if missing_ws or missing_ctx:
         raise HTTPException(
             409,
-            {
-                "message": "Ownership transfer required",
-                "workspace_ids": missing_ws,
-                "context_ids": missing_ctx,
-            },
+            await _transfer_required(
+                db,
+                user_id,
+                owned={w.id for w in workspaces},
+                missing_ws=missing_ws,
+                missing_ctx=missing_ctx,
+                fixed=[c for c in contexts if c.id in fixed],
+            ),
         )
     members = {
         (m.workspace_id, m.user_id): m
@@ -360,7 +386,7 @@ async def transfer_user_ownership(
     for workspace in workspaces:
         if (workspace.id, workspace_transfers[workspace.id]) not in members:
             raise HTTPException(409, "Workspace successor must be an existing member")
-    for context in contexts:
+    for context in selectable:
         successor = context_transfers.get(context.id) or workspace_transfers[context.workspace_id]
         member = members.get((context.workspace_id, successor))
         becoming_owner = workspace_transfers.get(context.workspace_id) == successor and any(
@@ -388,12 +414,129 @@ async def transfer_user_ownership(
             commit=False,
         )
         changed[workspace.id] = successor
-    for context in contexts:
+    for context in selectable:
         context.created_by = (
             context_transfers.get(context.id) or workspace_transfers[context.workspace_id]
         )
     await db.flush()
+    # With the workspaces transferred, every live workspace the write targets
+    # are in has its owner: the successor picked where the user owned it. The
+    # owner is read by the same UPDATE, as the connector key's re-own in
+    # ``delete_user_rows`` reads it (account erasure runs the same call).
+    await reown_connector_contexts(db, user_id)
     return changed
+
+
+def _member_order(row: Any) -> tuple[int, str, str]:
+    """Owner first, then admins, members, viewers; by name within a role."""
+    return (-WORKSPACE_ROLE_WEIGHTS.get(row.role, 0), (row.name or "").lower(), row.email or "")
+
+
+async def _transfer_required(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    owned: set[UUID],
+    missing_ws: list[UUID],
+    missing_ctx: list[Context],
+    fixed: list[Context],
+) -> dict[str, Any]:
+    """The 409 "Ownership transfer required" body (#2372, #2420).
+
+    ``workspace_ids`` / ``context_ids`` are the resources still lacking a
+    successor (the CLI and older clients read only these). The rest is what
+    the admin's successor picker shows:
+
+    * ``workspaces``: each workspace in ``workspace_ids`` or holding a listed
+      context, with its ``owner_user_id`` and its ``members`` (``user_id``,
+      ``name``, ``email``, ``role``; the user being deleted left out);
+    * ``contexts``: each context in ``context_ids`` with its
+      ``candidate_user_ids``: the members the validation accepts as an
+      explicit pick (not a viewer, and the context is open to them). The
+      successor picked for its workspace, where the user owns it, is accepted
+      too: it becomes the owner;
+    * ``owner_fixed_contexts``: the connector write targets, which take no
+      selection, with the ``successor_user_id`` they go to: the workspace's
+      owner, or ``None`` where that is the successor picked for a workspace the
+      user owns.
+
+    Read-only, under the locks the caller already holds.
+    """
+    ws_ids = sorted({*missing_ws, *(c.workspace_id for c in (*missing_ctx, *fixed))})
+    rows = (
+        await db.execute(
+            select(Workspace.id, Workspace.name, Workspace.owner_user_id)
+            .where(Workspace.id.in_(ws_ids))
+            .order_by(Workspace.id)
+        )
+    ).all()
+    owners = {ws_id: owner for ws_id, _, owner in rows}
+    members: dict[UUID, list[Any]] = {ws_id: [] for ws_id in ws_ids}
+    for row in (
+        await db.execute(
+            select(
+                WorkspaceMember.workspace_id,
+                WorkspaceMember.user_id,
+                WorkspaceMember.role,
+                WorkspaceMember.allowed_context_ids,
+                User.name,
+                User.email,
+            )
+            .join(User, User.user_id == WorkspaceMember.user_id)
+            .where(WorkspaceMember.workspace_id.in_(ws_ids), WorkspaceMember.user_id != user_id)
+        )
+    ).all():
+        members[row.workspace_id].append(row)
+    for listed in members.values():
+        listed.sort(key=_member_order)
+
+    def context_entry(c: Context) -> dict[str, Any]:
+        return {
+            "id": str(c.id),
+            "name": c.name,
+            "display_name": c.display_name,
+            "workspace_id": str(c.workspace_id),
+        }
+
+    return {
+        "message": OWNERSHIP_TRANSFER_REQUIRED,
+        "workspace_ids": [str(ws_id) for ws_id in missing_ws],
+        "context_ids": [str(c.id) for c in missing_ctx],
+        "workspaces": [
+            {
+                "id": str(ws_id),
+                "name": name,
+                "owner_user_id": owner,
+                "members": [
+                    {"user_id": m.user_id, "name": m.name, "email": m.email, "role": m.role}
+                    for m in members[ws_id]
+                ],
+            }
+            for ws_id, name, owner in rows
+        ],
+        "contexts": [
+            {
+                **context_entry(c),
+                "is_private": c.is_private,
+                "candidate_user_ids": [
+                    m.user_id
+                    for m in members[c.workspace_id]
+                    if m.role != WorkspaceRole.VIEWER
+                    and reaches_context(m.role, m.allowed_context_ids, c.id)
+                ],
+            }
+            for c in missing_ctx
+        ],
+        "owner_fixed_contexts": [
+            {
+                **context_entry(c),
+                "successor_user_id": None
+                if c.workspace_id in owned
+                else owners.get(c.workspace_id),
+            }
+            for c in fixed
+        ],
+    }
 
 
 async def delete_user_rows(

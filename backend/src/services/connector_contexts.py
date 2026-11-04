@@ -4,19 +4,22 @@
 worker writes into. Connectors create theirs private, yet it serves the
 workspace, not the account that created it: whatever its privacy flag, it is
 never that account's own context, and it never passes to a linked account
-through the identity-link hand-over. When its creator leaves it follows the
-workspace: the successor the admin picks, or the workspace's owner, who also
-holds the connector's write key from then on
-(``services.connector_key_ownership``).
+through the identity-link hand-over. When its creator leaves it goes to the
+workspace's owner, who also holds the connector's write key from then on
+(``services.connector_key_ownership``): on every deletion path, so the key and
+the context it writes into keep one owner (#2557, #2420).
 
 The one definition every deletion path reads:
 
 * :func:`connector_write_target_ids` — the ids, as a sub-select for SQL
   predicates (``user_deletion_service._personal``);
 * :func:`connector_write_targets_among` — which of a list of contexts are
-  write targets, in one query (``identity_link_service.private_context_takeovers``);
+  write targets, in one query (``identity_link_service.private_context_takeovers``,
+  ``user_deletion_service.transfer_user_ownership``);
 * :func:`reown_connector_contexts` — account erasure hands the subject's to
-  the workspace's owner before it pseudonymizes ``contexts.created_by``.
+  the workspace's owner before it pseudonymizes ``contexts.created_by``; the
+  admin deletion, after its workspace transfers
+  (``user_deletion_service.transfer_user_ownership``).
 """
 
 from __future__ import annotations
