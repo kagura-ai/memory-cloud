@@ -253,8 +253,13 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
       await finishAdd(extendTarget.userId, added.access_list_extended === true);
     } catch (err) {
       const apiError = err instanceof ApiError ? err : null;
+      // The refusals here (403 for a caller below workspace admin, a 409)
+      // carry their reason in `message`, not in the legacy `details.detail`.
+      const serverMessage =
+        apiError && apiError.status > 0 ? apiError.message : undefined;
       toast({
-        title: apiError?.details?.detail || t("addMemberFailed"),
+        title:
+          apiError?.details?.detail || serverMessage || t("addMemberFailed"),
         variant: "destructive",
       });
     } finally {

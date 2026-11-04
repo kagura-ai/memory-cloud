@@ -431,6 +431,35 @@ describe("MembersSection — member outside the context access list (#2327)", ()
     });
   });
 
+  it("shows the server's reason when the resend is refused", async () => {
+    // A context owner below workspace admin may not extend a member's list.
+    mockAddContextMember.mockRejectedValueOnce(notInList()).mockRejectedValueOnce(
+      new ApiError({
+        status: 403,
+        error: "AUTH-101",
+        message:
+          "Only a workspace owner or admin can add a context to a member's context access list.",
+        details: {},
+      }),
+    );
+
+    const confirm = await submitAdd();
+    fireEvent.click(
+      within(confirm).getByRole("button", { name: "extendAccessListConfirm" }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            "Only a workspace owner or admin can add a context to a member's context access list.",
+          variant: "destructive",
+        }),
+      );
+    });
+    expect(mockAddContextMember).toHaveBeenCalledTimes(2);
+  });
+
   it("cancel sends nothing more", async () => {
     mockAddContextMember.mockRejectedValueOnce(notInList());
 
