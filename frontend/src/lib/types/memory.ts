@@ -65,9 +65,9 @@ export interface SupersedeCandidate {
   // #2016: true when the deployment's judge confirmed the update; absent / null otherwise.
   verified?: boolean | null;
   // #2427: whether the caller may accept the suggestion, computed by the
-  // server on reference and the PATCH reply. Absent on recall rows and on an
-  // older backend — the UI then keeps the action enabled and the server
-  // decides on click.
+  // server on reference and the PATCH reply, and on recall rows since #2508.
+  // Absent on an older backend or when the evaluation failed — the UI then
+  // keeps the action enabled and the server decides on click.
   acceptance?: SupersedeAcceptance | null;
 }
 
