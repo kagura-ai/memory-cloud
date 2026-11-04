@@ -30,7 +30,7 @@ from config.constants import (
 )
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import Workspace
+from models.auth import Workspace, WorkspaceMember
 from models.schemas import ContextExportResponse, RelatedTagItem
 from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
@@ -1505,6 +1505,15 @@ async def list_context_members(
     return response
 
 
+def _outside_access_list(member: WorkspaceMember, context_id: UUID) -> bool:
+    """A member or viewer whose context access list does not reach ``context_id``
+    (#2327): a context member row would grant it nothing. Owners and admins
+    reach every context."""
+    return member.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER) and not reaches_context(
+        member.role, member.allowed_context_ids, context_id
+    )
+
+
 @router.post(
     "/{context_id}/members",
     response_model=ContextMemberResponse,
@@ -1579,26 +1588,37 @@ async def add_context_member(
     # #2327: a member or viewer whose context access list does not reach this
     # context gets nothing from a context member row (check_context_access
     # refuses the context before the row is read) and the row stays hidden
-    # from the member list. Refused unless the caller asks to extend the list;
-    # the row is locked because an extend rewrites it.
-    target = await WorkspaceService(db).get_member(
-        context.workspace_id, body.user_id, with_lock=True, populate_existing=True
-    )
-    if target is None:  # is_workspace_member above saw the row; narrows the type
-        raise NotFoundException("Member")
+    # from the member list. Refused unless the caller asks to extend the list.
+    workspace_service = WorkspaceService(db)
     access_list_extended = False
-    if target.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER) and not reaches_context(
-        target.role, target.allowed_context_ids, context_id
-    ):
+    target = await workspace_service.get_member(
+        context.workspace_id, body.user_id, raise_if_not_found=False
+    )
+    if target is not None and _outside_access_list(target, context_id):
         if not body.extend_access_list:
             raise ContextNotInAccessListError(user_id=body.user_id, context_id=context_id)
         # The list is the workspace admin's (PUT …/context-access); a context
         # owner below admin manages this context's members only.
         await perm_service.check_workspace_admin(user["user_id"], context.workspace_id)
-        # Not reached, so the context is not on the list yet.
-        target.allowed_context_ids = [*(target.allowed_context_ids or []), context_id]
-        target.updated_at = func.now()
-        access_list_extended = True
+        # Only an extend rewrites the row: lock it and decide on what is
+        # committed now.
+        target = await workspace_service.get_member(
+            context.workspace_id,
+            body.user_id,
+            raise_if_not_found=False,
+            with_lock=True,
+            populate_existing=True,
+        )
+        if target is not None and _outside_access_list(target, context_id):
+            target.allowed_context_ids = [*(target.allowed_context_ids or []), context_id]
+            target.updated_at = func.now()
+            access_list_extended = True
+    if target is None:
+        # Removed from the workspace since the membership check above.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is not a member of this workspace.",
+        )
 
     # Create membership
     member = ContextMember(

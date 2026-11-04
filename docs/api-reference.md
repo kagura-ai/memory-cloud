@@ -815,7 +815,7 @@ A context role does nothing for a member whose context access list does not incl
 
 ### GET /api/v1/workspaces/{workspace_id}/members/{user_id}/context-access
 
-A member's context access list and the contexts it can be given: every live shared context of the workspace plus the member's own private contexts, ordered by name. Another member's private context is never listed. Session admin or owner, or a workspace-owner API key; `404` when `user_id` is not a member of the workspace. Set the list with `PUT` on the same path.
+A member's context access list and the contexts it can be given: every live shared context of the workspace plus the member's own private contexts (including those of an account linked to the member, `is_own_private`), ordered by name. Another member's private context is never listed. Session admin or owner, or a workspace-owner API key; `404` when `user_id` is not a member of the workspace. Set the list with `PUT` on the same path.
 
 **Response:**
 

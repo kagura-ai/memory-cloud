@@ -127,7 +127,7 @@ def _ids(w: mca.World, keys: list[str] | None) -> list[UUID] | None:
 # ------------------------------------------------- GET …/context-access
 
 
-@pytest.mark.parametrize("target", ["m_null_creator", "v_null", "mA", "owner", "admin"])
+@pytest.mark.parametrize("target", ["m_null_creator", "v_null", "mA", "owner", "admin", "linked_m"])
 async def test_dialog_lists_shared_and_the_members_own_private_contexts(world, target) -> None:
     w: mca.World = world
     s = w.session
@@ -159,8 +159,13 @@ async def test_dialog_lists_shared_and_the_members_own_private_contexts(world, t
 
     by_id = {str(w.ctx[k]): k for k in mca.CONTEXTS}
     listed = [by_id.get(row["id"], row["id"]) for row in body["contexts"]]
+    # Shared contexts, plus the private ones the member owns: its own, or
+    # one of an account linked to it (#1784; linked_m is linked to the owner,
+    # so it is offered pO).
     expected = {
-        key for key, (private, creator) in mca.CONTEXTS.items() if not private or creator == target
+        key
+        for key, (private, _) in mca.CONTEXTS.items()
+        if not private or mca._owns_privately(target, key)
     }
     assert set(listed) == expected, listed
     # Ordered by name (the World names a context after its key).
@@ -168,9 +173,9 @@ async def test_dialog_lists_shared_and_the_members_own_private_contexts(world, t
         row["name"] for row in body["contexts"]
     )
     for row in body["contexts"]:
-        private, creator = mca.CONTEXTS[by_id[row["id"]]]
+        private, _ = mca.CONTEXTS[by_id[row["id"]]]
         assert row["is_private"] is private
-        assert row["is_own_private"] is (private and creator == target)
+        assert row["is_own_private"] is mca._owns_privately(target, by_id[row["id"]])
         assert set(row) == {"id", "name", "display_name", "summary", "is_private", "is_own_private"}
 
 

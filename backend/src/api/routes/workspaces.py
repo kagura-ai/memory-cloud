@@ -36,6 +36,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Context, ExternalAPIKey, User, Workspace, WorkspaceMember
 from models.schemas import OpenAIKeyStatusResponse
+from services.identity_link_service import linked_user_ids
 from services.ownership_notifications import (
     notify_new_owner_best_effort as _notify_new_owner_best_effort,
 )
@@ -957,7 +958,8 @@ class MemberContextAccessContext(BaseModel):
     display_name: str | None = None
     summary: str | None = None
     is_private: bool
-    # The member's own private context: assignable to them, to nobody else.
+    # The member's own private context (or one of an account linked to the
+    # member, #1784): assignable to them, to nobody else.
     is_own_private: bool = False
 
 
@@ -985,8 +987,8 @@ async def get_member_context_access(
     #2327: the members page's context access dialog. ``contexts`` holds every
     live shared context of the workspace and the member's own private ones
     (``is_own_private``), by name; another account's private context is never
-    listed. A private context stays open to its creator only, so it is
-    offered to that member alone.
+    listed. A private context stays open to its creator and the accounts
+    linked to it (#1784) only, so it is offered to them alone.
 
     Session admin+ or a workspace-owner API key (OAuth 403); 404 when
     ``user_id`` is not a member of the workspace.
@@ -998,12 +1000,13 @@ async def get_member_context_access(
     if member is None:
         raise NotFoundException("Member")
 
+    owners = await linked_user_ids(db, user_id)
     result = await db.execute(
         select(Context)
         .where(
             Context.workspace_id == workspace_id,
             Context.deleted_at.is_(None),
-            or_(Context.is_private.is_(False), Context.created_by == user_id),
+            or_(Context.is_private.is_(False), Context.created_by.in_(owners)),
         )
         .order_by(Context.name)
     )
@@ -1014,7 +1017,7 @@ async def get_member_context_access(
             display_name=c.display_name,
             summary=c.summary,
             is_private=c.is_private,
-            is_own_private=c.is_private and c.created_by == user_id,
+            is_own_private=c.is_private and c.created_by in owners,
         )
         for c in result.scalars().all()
     ]
