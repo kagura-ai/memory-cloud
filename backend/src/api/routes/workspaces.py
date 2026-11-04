@@ -939,6 +939,8 @@ async def update_member_role(
         user_id=member.user_id,
         role=member.role,
         joined_at=to_utc_iso(member.joined_at),
+        # The list as stored: a member with none who becomes a viewer gets [].
+        allowed_context_ids=_context_ids_str(member.allowed_context_ids),
     )
 
 

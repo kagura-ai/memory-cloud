@@ -461,3 +461,20 @@ async def test_a_list_on_an_admin_is_stored_with_a_warning(
     assert row.allowed_context_ids == [w.c1]
     warnings = [str(call.args[0]) for call in log.warning.call_args_list]
     assert any("privileged role (ignored)" in m and target in m for m in warnings), warnings
+
+
+async def test_member_to_viewer_role_change_reports_the_stored_list(world: World) -> None:
+    # A member with no list becomes a viewer with [] (the service closes it);
+    # the role response must say so, not report null ("every shared context").
+    w = world
+    target = f"mac-t8-{w.tag}"
+    async with w.factory() as s:
+        s.add(WorkspaceMember(workspace_id=w.w, user_id=target, role=WorkspaceRole.MEMBER))
+        await s.commit()
+    async with _rest(w, _session(w.owner, w.w)) as c:
+        r = await c.put(f"/api/v1/workspaces/{w.w}/members/{target}", json={"role": "viewer"})
+    assert r.status_code == 200, r.text
+    row = await _member_row(w, target)
+    assert row is not None
+    assert row.allowed_context_ids == []
+    assert r.json()["allowed_context_ids"] == []
