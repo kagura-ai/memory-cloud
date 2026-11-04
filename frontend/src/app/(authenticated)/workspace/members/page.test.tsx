@@ -1085,6 +1085,38 @@ describe("WorkspaceMembersPage context access dialog (#2327)", () => {
     );
   });
 
+  it("keeps only listed contexts selected, so a save drops ids the dialog cannot show", async () => {
+    // A deleted context, or another account's private one set through the
+    // API, grants nothing and has no checkbox here.
+    mockGetMemberContextAccess.mockResolvedValue({
+      user_id: "user-2",
+      role: "member",
+      allowed_context_ids: ["ctx-a", "ctx-gone"],
+      contexts: [ctx("ctx-a", "shared-a")],
+    });
+    vi.mocked(updateMemberContextAccess).mockResolvedValue({
+      status: "ok",
+      user_id: "user-2",
+      allowed_context_ids: ["ctx-a"],
+    });
+
+    const dialog = await openDialog();
+    await within(dialog).findByText("shared-a");
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "saveContextAccess" }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(vi.mocked(updateMemberContextAccess)).toHaveBeenCalledWith(
+        WORKSPACE_ID,
+        "user-2",
+        ["ctx-a"],
+      ),
+    );
+  });
+
   it("shows no private hint when the member owns no private context", async () => {
     mockGetMemberContextAccess.mockResolvedValue({
       user_id: "user-2",

@@ -326,7 +326,13 @@ export default function WorkspaceMembersPage() {
       );
       if (request !== contextAccessRequest.current) return;
       setContextAccessOptions(access.contexts);
-      setSelectedContextIds(access.allowed_context_ids || []);
+      // Only what the dialog lists can be shown, unchecked or saved: an id
+      // outside it (a deleted context, another account's private one) grants
+      // nothing, so a save drops it rather than keeping it hidden.
+      const listed = new Set(access.contexts.map((c) => c.id));
+      setSelectedContextIds(
+        (access.allowed_context_ids || []).filter((id) => listed.has(id)),
+      );
     } catch {
       if (request !== contextAccessRequest.current) return;
       setContextAccessOptionsError(t("contextAccessLoadFailed"));
