@@ -596,31 +596,35 @@ class InvitationService:
 
         return count
 
-    async def get_pending_invitations_for_email(self, email: str) -> list[WorkspaceInvitation]:
-        """Get pending invitations for email address.
+    async def get_pending_invitations_for_email(
+        self, email: str | None
+    ) -> list[WorkspaceInvitation]:
+        """Get pending invitations addressed to an email address.
 
         Issue #179: In-app invitation notifications.
 
-        Returns all pending, non-expired invitations that match the user's email
-        (case-insensitive) or have no email restriction.
+        Returns the pending, non-expired invitations addressed to this email
+        (case-insensitive). An invitation without an email is not addressed to
+        anyone: it is reachable through its link only and never listed here.
 
         Args:
-            email: User email address (case-insensitive)
+            email: User email address (case-insensitive). Empty or None
+                returns an empty list without a query.
 
         Returns:
             List of pending, non-expired invitations sorted by creation date (newest first)
         """
+        if not email:
+            return []
+
         from sqlalchemy import and_, or_
 
         stmt = (
             select(WorkspaceInvitation)
             .where(
                 and_(
-                    # Email match (case-insensitive) OR no email restriction
-                    or_(
-                        func.lower(WorkspaceInvitation.email) == email.lower(),
-                        WorkspaceInvitation.email.is_(None),
-                    ),
+                    # Addressed to this email (case-insensitive)
+                    func.lower(WorkspaceInvitation.email) == email.lower(),
                     # Not accepted
                     WorkspaceInvitation.accepted_at.is_(None),
                     # Not expired (or no expiration)

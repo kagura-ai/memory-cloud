@@ -237,7 +237,7 @@ async def _check_registration_allowed(
         if settings.allow_registration:
             return None
 
-        # Invited users bypass gate
+        # Invited users bypass gate (invitations addressed to this email only)
         invitation_service = InvitationService(session)
         pending_invites = await invitation_service.get_pending_invitations_for_email(email=email)
         if pending_invites:
