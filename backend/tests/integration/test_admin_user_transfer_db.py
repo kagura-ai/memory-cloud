@@ -840,3 +840,73 @@ async def test_a_write_target_validated_as_fixed_goes_to_the_owner_even_if_unbou
     assert response["deleted"]["contexts"] == 0
     db_session.expire_all()
     assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == owner
+
+
+@pytest.mark.asyncio
+async def test_a_target_unbound_before_the_resend_takes_a_successor_again(
+    connector_world, db_session
+):
+    """#2420 review: a connector unbound from its write target between the 409
+    and the resend leaves an ordinary shared context: the resend lists it as
+    needing a successor instead of handing it to the owner or deleting it."""
+    from sqlalchemy import update
+
+    from models.resource import WorkspaceConnector
+
+    world = connector_world
+    target = await world.user("departing")
+    successor = await world.user("successor")
+    owner = await world.user("owner")
+    member = await world.user("member")
+    owned = await world.workspace(target, **{successor: "admin"})
+    theirs = await world.workspace(owner, **{target: "admin", member: "admin"})
+    owned_id = owned.id
+    ctx_id = await _context(db_session, theirs, target)
+    connector_id = (await world.connector(theirs, by=target)).connector.id
+    await db_session.execute(
+        update(WorkspaceConnector)
+        .where(WorkspaceConnector.id == connector_id)
+        .values(context_id=ctx_id)
+    )
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await delete_user(target, {"user_id": "operator"}, db_session)
+    detail = error.value.detail
+    assert detail["context_ids"] == []
+    assert [(c["id"], c["successor_user_id"]) for c in detail["owner_fixed_contexts"]] == [
+        (str(ctx_id), owner)
+    ]
+    await db_session.rollback()
+
+    await db_session.execute(
+        update(WorkspaceConnector)
+        .where(WorkspaceConnector.id == connector_id)
+        .values(context_id=None)
+    )
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as error:
+        await delete_user(
+            target,
+            {"user_id": "operator"},
+            db_session,
+            UserDeleteRequest(workspace_transfers={owned_id: successor}),
+        )
+    detail = error.value.detail
+    assert detail["context_ids"] == [str(ctx_id)]
+    assert detail["owner_fixed_contexts"] == []
+    assert set(detail["contexts"][0]["candidate_user_ids"]) == {owner, member}
+    await db_session.rollback()
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == target
+
+    await delete_user(
+        target,
+        {"user_id": "operator"},
+        db_session,
+        UserDeleteRequest(
+            workspace_transfers={owned_id: successor}, context_transfers={ctx_id: member}
+        ),
+    )
+    db_session.expire_all()
+    assert await db_session.scalar(select(Context.created_by).where(Context.id == ctx_id)) == member
