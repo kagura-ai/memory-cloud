@@ -9,6 +9,14 @@ Security:
 - Encrypted values are base64-encoded strings
 - Decryption verifies integrity (prevents tampering)
 
+Key rotation (#2394): the encryptor is a key ring (``MultiFernet``).
+``API_KEY_SECRET`` is the current key, used for every new value; the keys in
+``API_KEY_SECRET_PREVIOUS`` are still accepted for decryption. The ciphertext
+format is unchanged (a Fernet token carries no key id: decryption tries each
+key in turn), so values written before a rotation need no migration.
+``python -m src.cli.rekey_encrypted_secrets`` re-encrypts the stored values
+under the current key, after which the previous keys can be dropped.
+
 Example:
     >>> encryptor = get_encryptor()
     >>> encrypted = encryptor.encrypt("sk-proj-abc123...")
@@ -22,46 +30,74 @@ Example:
 import base64
 import hashlib
 import logging
+from collections.abc import Iterable
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from config.settings import get_settings, is_placeholder_secret
 
 logger = logging.getLogger(__name__)
 
 
-class APIKeyEncryption:
-    """Fernet-based symmetric encryption for API keys.
+_DECRYPT_ERROR = "Invalid encrypted value or wrong encryption key"
 
-    The caller passes the key; ``get_encryptor`` passes ``API_KEY_SECRET``.
-    Provides encrypt/decrypt methods with error handling.
+
+def _fernet(secret: str) -> Fernet:
+    """The Fernet for one configured key.
+
+    A base64-encoded 32-byte Fernet key is used as is; any other string is
+    hashed with SHA-256 into one, so ``API_KEY_SECRET`` can be any string.
+    """
+    try:
+        return Fernet(secret.encode())
+    except Exception:
+        key_hash = hashlib.sha256(secret.encode()).digest()
+        return Fernet(base64.urlsafe_b64encode(key_hash))
+
+
+class APIKeyEncryption:
+    """Fernet-based symmetric encryption for API keys, over a key ring.
+
+    The caller passes the keys; ``get_encryptor`` passes ``API_KEY_SECRET``
+    and ``API_KEY_SECRET_PREVIOUS``. New values are encrypted with the current
+    key; a value under any key of the ring decrypts (#2394).
     """
 
-    def __init__(self, secret_key: str):
-        """Initialize encryption with secret key.
+    def __init__(self, secret_key: str, previous_keys: Iterable[str] = ()):
+        """Initialize encryption with the current key and the older ones.
 
         Args:
-            secret_key: Base64-encoded Fernet key or raw secret (will be hashed to 32 bytes)
+            secret_key: The current key: a base64-encoded Fernet key or a raw
+                secret (hashed to 32 bytes).
+            previous_keys: Older keys, accepted for decryption only, derived
+                the same way. Blank entries, repeats and the current key are
+                ignored; surrounding blanks are stripped.
 
         Raises:
-            ValueError: If secret_key is empty or invalid
+            ValueError: If secret_key is empty
         """
         if not secret_key:
             msg = "Encryption secret key is required"
             raise ValueError(msg)
 
-        # Check if it's already a valid Fernet key (base64-encoded 32-byte key)
-        try:
-            # Try to use as-is first (if it's already a Fernet key)
-            self.cipher = Fernet(secret_key.encode() if isinstance(secret_key, str) else secret_key)
-        except Exception:
-            # If not valid Fernet key, derive one from the secret using SHA256
-            # This allows using any string as API_KEY_SECRET
-            key_hash = hashlib.sha256(secret_key.encode()).digest()
-            fernet_key = base64.urlsafe_b64encode(key_hash)
-            self.cipher = Fernet(fernet_key)
+        self._current = _fernet(secret_key)
+        ring = [self._current]
+        seen = {secret_key}
+        for key in previous_keys:
+            key = key.strip()
+            if key and key not in seen:
+                seen.add(key)
+                ring.append(_fernet(key))
+        # MultiFernet encrypts with the first key and decrypts with any.
+        self.cipher = MultiFernet(ring)
+        self._key_count = len(ring)
 
         logger.debug("APIKeyEncryption initialized successfully")
+
+    @property
+    def key_count(self) -> int:
+        """How many distinct keys the ring holds (the current one included)."""
+        return self._key_count
 
     def encrypt(self, plaintext: str) -> str:
         """Encrypt plaintext value.
@@ -86,7 +122,7 @@ class APIKeyEncryption:
             raise ValueError(msg)
 
         try:
-            encrypted_bytes = self.cipher.encrypt(plaintext.encode())
+            encrypted_bytes = self._current.encrypt(plaintext.encode())
             return encrypted_bytes.decode()
         except Exception as e:
             logger.error(f"Encryption failed: {e}")
@@ -120,10 +156,62 @@ class APIKeyEncryption:
             return decrypted_bytes.decode()
         except InvalidToken as e:
             logger.error(f"Decryption failed: Invalid token (tampered or wrong key): {e}")
-            raise ValueError("Invalid encrypted value or wrong encryption key") from e
+            raise ValueError(_DECRYPT_ERROR) from e
         except Exception as e:
             logger.error(f"Decryption failed: {e}")
             raise
+
+    def is_current(self, encrypted: str) -> bool:
+        """Whether the current key opens ``encrypted`` (#2394).
+
+        Args:
+            encrypted: Base64-encoded encrypted string
+
+        Returns:
+            True when the current key opens it, False when only a previous
+            key does.
+
+        Raises:
+            ValueError: ``encrypted`` is empty, or no key of the ring opens it
+                (the same errors as :meth:`decrypt`).
+        """
+        if not encrypted:
+            msg = "Cannot decrypt empty value"
+            raise ValueError(msg)
+        token = encrypted.encode()
+        try:
+            self._current.decrypt(token)
+            return True
+        except InvalidToken:
+            pass
+        try:
+            self.cipher.decrypt(token)
+        except InvalidToken as e:
+            raise ValueError(_DECRYPT_ERROR) from e
+        return False
+
+    def rotate(self, encrypted: str) -> str:
+        """Re-encrypt ``encrypted`` under the current key (#2394).
+
+        The plaintext is unchanged; the token is new (and different from the
+        input even when the current key already opened it).
+
+        Args:
+            encrypted: Base64-encoded encrypted string under any key of the ring
+
+        Returns:
+            Base64-encoded encrypted string under the current key
+
+        Raises:
+            ValueError: ``encrypted`` is empty, or no key of the ring opens it
+        """
+        if not encrypted:
+            msg = "Cannot decrypt empty value"
+            raise ValueError(msg)
+        try:
+            return self.cipher.rotate(encrypted.encode()).decode()
+        except InvalidToken as e:
+            raise ValueError(_DECRYPT_ERROR) from e
 
     def mask_value(self, plaintext: str, show_chars: int = 8) -> str:
         """Mask sensitive value for display.
@@ -157,7 +245,8 @@ def get_encryptor() -> APIKeyEncryption:
     one the production secret guard checked (#2239). Outside production an
     unset ``API_KEY_SECRET`` falls back to the public development default; that
     or any shipped placeholder logs a warning. Production refuses them when the
-    settings load.
+    settings load. ``API_KEY_SECRET_PREVIOUS`` adds the older keys of a
+    rotation, for decryption only (#2394).
 
     Returns:
         APIKeyEncryption instance
@@ -172,7 +261,8 @@ def get_encryptor() -> APIKeyEncryption:
     global _encryptor
 
     if _encryptor is None:
-        secret = get_settings().api_key_secret
+        settings = get_settings()
+        secret = settings.api_key_secret
         if not secret.strip():
             msg = "API_KEY_SECRET is empty. Required for API key encryption."
             raise ValueError(msg)
@@ -184,8 +274,11 @@ def get_encryptor() -> APIKeyEncryption:
                 "Set a private value (python -m src.cli.setup_env, or openssl rand -hex 32)."
             )
 
-        _encryptor = APIKeyEncryption(secret)
-        logger.info("Global encryption instance initialized")
+        _encryptor = APIKeyEncryption(secret, settings.api_key_secret_previous_keys)
+        logger.info(
+            "Global encryption instance initialized (%d previous key(s))",
+            _encryptor.key_count - 1,
+        )
 
     return _encryptor
 
