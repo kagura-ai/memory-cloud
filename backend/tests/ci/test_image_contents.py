@@ -52,7 +52,13 @@ _API_PRODUCTION_COMPOSE = (
     "terraform/single-server/docker-compose.prod.yml",
     "terraform/single-server/docker-compose.app.yml",
 )
-_COMPILERS = ("build-essential", "gcc", "g++", "clang")
+_COMPILER_PACKAGES = frozenset(
+    {"build-essential", "gcc", "g++", "cc", "c++", "clang", "make", "libc6-dev", "python3-dev"}
+)
+# What would put more than the locked runtime dependencies into the shipped stage.
+_EXTRA_INSTALLS = re.compile(
+    r"--(extra|all-extras|group|all-groups|only-group|dev)\b|\buv (pip install|add)\b|\bpip install\b"
+)
 
 
 def _read(rel: str) -> str:
@@ -70,8 +76,8 @@ def _stages(rel: str) -> dict[str, tuple[str, list[str]]]:
     """A Dockerfile's stages in order: name -> (what it starts FROM, its instructions)."""
     stages: dict[str, tuple[str, list[str]]] = {}
     for line in _instructions(rel):
-        if line.startswith("FROM "):
-            match = re.fullmatch(r"FROM (\S+) AS (\S+)", line)
+        if re.match(r"\s*FROM\s", line, re.IGNORECASE):
+            match = re.fullmatch(r"\s*FROM\s+(\S+)\s+AS\s+(\S+)\s*", line, re.IGNORECASE)
             assert match, f"{rel}: every stage needs a name: {line}"
             stages[match.group(2)] = (match.group(1), [])
         elif stages:
@@ -181,18 +187,24 @@ def test_production_compose_builds_the_api_default_target(rel: str) -> None:
         assert "target" not in build, f"{rel} must ship the last stage, not {build['target']!r}"
 
 
-def test_api_image_installs_no_extra_in_the_shipped_stage() -> None:
-    syncs = [line for line in _api_stage(_API_SHIPPED) if "uv sync" in line]
-    assert syncs
-    for sync in syncs:
-        assert "--extra" not in sync and "--all-extras" not in sync, sync
+def test_api_image_installs_only_the_locked_runtime_in_the_shipped_stage() -> None:
+    instructions = _api_stage(_API_SHIPPED)
+    assert any("uv sync --locked" in line for line in instructions)
+    for line in instructions:
+        assert not _EXTRA_INSTALLS.search(line), line
+    # Nor does it take an environment that another stage installed.
+    copied = {m.group(1) for line in instructions if (m := re.match(r"COPY --from=(\S+)", line))}
+    assert "dev" not in copied
 
 
 def test_api_image_installs_no_compiler() -> None:
-    for target in _stages("backend/Dockerfile"):
-        installs = [line for line in _api_stage(target) if "apt-get install" in line]
-        packages = {word for line in installs for word in line.split()}
-        assert not packages & set(_COMPILERS), f"{target}: every locked package has a wheel"
+    for name, (_, instructions) in _stages("backend/Dockerfile").items():
+        for line in instructions:
+            if not re.match(r"RUN\b.*\b(apt-get|apt|apk)\b", line):
+                continue
+            # gcc-12, g++=4:12.2 and the like name a compiler too.
+            packages = {re.sub(r"(-\d[\w.]*)?(=\S*)?$", "", word) for word in line.split()}
+            assert not packages & _COMPILER_PACKAGES, f"{name}: every locked package has a wheel"
 
 
 def test_dev_compose_builds_the_api_dev_stage_with_the_dev_extra() -> None:

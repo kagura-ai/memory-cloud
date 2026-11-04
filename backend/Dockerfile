@@ -1,12 +1,15 @@
 # Kagura Memory Cloud v5.0 - Backend Dockerfile
 #
-# Three stages (#2620):
-#   app      the runtime dependencies and the application
-#   dev      app plus the dev extra, for the tests (docker-compose.yml builds it)
-#   runtime  app as it ships; the last stage, so the default target
-# The production compose files build without a `target` and get `runtime`.
+# Stages (#2620):
+#   base     system packages, the user, and the runtime dependencies from the lock
+#   source   the application files, listed once for both images below
+#   dev      base plus the dev extra and the application, for the tests
+#            (docker-compose.yml builds it)
+#   runtime  base plus the application: the image that ships. It is the last
+#            stage, so the default target; the production compose files build
+#            without a `target`.
 
-FROM python:3.11-slim AS app
+FROM python:3.11-slim AS base
 
 # uv, pinned in lockstep with pyproject.toml [tool.uv] required-version,
 # .github/workflows/*.yml and setup.sh (#1706); tests/test_uv_version_lockstep.py
@@ -29,11 +32,11 @@ WORKDIR /app
 
 # The project environment is /app/.venv; putting it first on PATH keeps the
 # uvicorn / alembic / python invocations (CMD, compose `command:` overrides,
-# `docker exec kagura-api python -m pytest`) unchanged. Copy mode avoids
-# hard-link warnings across layers; --no-cache keeps uv's download cache out
-# of the image. Bytecode is not precompiled (UV_COMPILE_BYTECODE): with uv
-# 0.11.19 the precompiled sqlalchemy .pyc files failed to load ("bad marshal
-# data"), so Python compiles lazily at first import, as it did before.
+# `docker exec kagura-api python -m pytest` in the dev stage) unchanged. Copy
+# mode avoids hard-link warnings across layers; --no-cache keeps uv's download
+# cache out of the image. Bytecode is not precompiled (UV_COMPILE_BYTECODE):
+# with uv 0.11.19 the precompiled sqlalchemy .pyc files failed to load ("bad
+# marshal data"), so Python compiles lazily at first import, as it did before.
 ENV UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:$PATH"
 
@@ -42,22 +45,6 @@ ENV UV_LINK_MODE=copy \
 # when the lock is out of date with pyproject.toml.
 COPY --chown=kagura:kagura pyproject.toml uv.lock README.md ./
 RUN uv sync --locked --no-install-project --no-cache
-
-# Copy source code
-COPY --chown=kagura:kagura src/ ./src/
-
-# Copy alembic (database migrations)
-COPY --chown=kagura:kagura alembic.ini ./alembic.ini
-COPY --chown=kagura:kagura alembic/ ./alembic/
-
-# Copy scripts
-COPY --chown=kagura:kagura scripts/ ./scripts/
-
-# Copy templates (OAuth2, etc.)
-COPY --chown=kagura:kagura templates/ ./templates/
-
-# Now the project itself (editable, as `-e .` was), dependencies untouched.
-RUN uv sync --locked --no-cache
 
 # Expose port
 EXPOSE 8080
@@ -70,9 +57,25 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8080"]
 
 
-FROM app AS dev
+FROM scratch AS source
+
+# Source code, alembic (database migrations), scripts and templates (OAuth2, etc.)
+COPY src/ /app/src/
+COPY alembic.ini /app/alembic.ini
+COPY alembic/ /app/alembic/
+COPY scripts/ /app/scripts/
+COPY templates/ /app/templates/
+
+
+FROM base AS dev
 
 # pytest and the rest of the dev extra, for `make test` inside the container.
+# Before the application, so this layer too only changes with the lock.
+RUN uv sync --locked --extra dev --no-install-project --no-cache
+
+COPY --from=source --chown=kagura:kagura /app/ ./
+
+# Now the project itself (editable, as `-e .` was), dependencies untouched.
 RUN uv sync --locked --extra dev --no-cache
 
 # uv only builds the image. It lives in root's /bin, hence the step back to root.
@@ -82,7 +85,13 @@ RUN rm /bin/uv /bin/uvx
 USER kagura
 
 
-FROM app AS runtime
+FROM base AS runtime
+
+COPY --from=source --chown=kagura:kagura /app/ ./
+
+# Now the project itself (editable, as `-e .` was), dependencies untouched.
+# Without an extra: the dev packages stay in the dev stage.
+RUN uv sync --locked --no-cache
 
 # As in dev: uv only builds the image.
 USER root
