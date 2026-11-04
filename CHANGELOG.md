@@ -4,6 +4,21 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.143.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.143.0) — 2026-11-04
+
+Operator hygiene: the shipped API image carries neither the dev extra nor a compiler, and the key that encrypts stored secrets can be rotated without re-entering them.
+
+### Added
+- **Rotatable encryption keys for stored secrets** ([#2394](https://github.com/kagura-ai/memory-cloud/issues/2394)): `API_KEY_SECRET` stays the current key and the new `API_KEY_SECRET_PREVIOUS` (comma-separated) lists the older ones; new values are encrypted with the current key and any key of the ring decrypts, with the ciphertext format unchanged, so no call site and no stored value changes at the upgrade. The one-shot command `python -m src.cli.rekey_encrypted_secrets` (report by default, `--apply [--yes]`) re-encrypts every registered column — TOTP secrets, display copies of API keys, BYOK provider keys, OAuth client secrets, connector tokens and LLM configs, worker app secrets, the reserved signup-gate columns — and the pending Slack install bundles in Redis under the current key, with a compare-and-set write per row (a row the application rewrote meanwhile is counted and left to the next run), `updated_at` untouched, counts only in the output, and exit code 3 while any value is undecryptable with every key of the ring. A registry guard test fails when an encrypted column is added without being registered. A previous key that contains a comma or surrounding blanks is listed as its derived Fernet key (`--derive-fernet-key` prints it from stdin); settings warn at load when the current key would need that. `docs/deployment.md` replaces "every stored value must be entered again" with the procedure: both keys on every process and a restart (two restarts when old and new processes overlap), the report, `--apply`, then drop the previous key.
+- **Runtime and dev image targets** ([#2620](https://github.com/kagura-ai/memory-cloud/issues/2620)): `backend/Dockerfile` is split into `base` (runtime dependencies from `uv.lock`), `source`, `dev` (adds the dev extra; `docker-compose.yml` builds it so `make test` keeps running inside the container) and `runtime`, the last stage and so the default target of every production compose file. `build-essential` is gone from every stage (every locked package has a cp311 wheel for x86_64 and aarch64); the shipped image drops from 1.63 GB to 1.11 GB and carries no pytest, fakeredis, playwright, pyright, ruff or compiler. `backend/tests/ci/test_image_contents.py` reads the Dockerfile by stage: the last stage is `runtime`, it installs nothing beyond the locked runtime and copies nothing from `dev`, no stage installs a compiler, both images remove `uv` and end as `kagura`.
+
+### Fixed
+- **Bootstrap `query_hash` keyed with `AUDIT_HMAC_KEY`** ([#2394](https://github.com/kagura-ai/memory-cloud/issues/2394)): the correlation hash in the `bootstrap` recall component was keyed with `API_KEY_SECRET`, so rotating the encryption key would have changed it; it now uses `AUDIT_HMAC_KEY` like `memory_access_events.query_hash`. The value changes once at this upgrade.
+
+### Notes
+- No migration. One new optional environment variable, `API_KEY_SECRET_PREVIOUS` (empty = no previous keys; nothing to do unless rotating). One new one-shot command, `rekey_encrypted_secrets`.
+- Images: the default build of `backend/Dockerfile` no longer contains pytest or a compiler; a workflow that ran tests inside the shipped image needs the `dev` target (`docker build --target dev`). The root `docker-compose.yml` builds `dev`, so a self-hosted `./setup.sh` deployment keeps the image it had.
+
 ## [v0.142.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.142.0) — 2026-11-04
 
 Supersede acceptance made consistent (the guardrail gate is reported before the click, the edge check reads the author's row only, every recall row carries `acceptance`), and a plan headroom notice on MCP writes and `bootstrap` before a quota locks the workspace.
