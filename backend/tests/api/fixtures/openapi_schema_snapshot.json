@@ -2379,6 +2379,7 @@
           "updated_at": {},
           "usage_guide": {},
           "use_rerank": {},
+          "workspace_id": {},
           "writes_paused": {}
         },
         "required": [

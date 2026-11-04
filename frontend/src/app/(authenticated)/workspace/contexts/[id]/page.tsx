@@ -8,11 +8,12 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { PageContainer } from "@/components/common/PageContainer";
+import { RoleGuidance } from "@/components/common/RoleGuidance";
 import { PageHeader } from "@/components/common/PageHeader";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { Button } from "@/components/ui/button";
@@ -78,9 +79,16 @@ const OWNER_CONTEXT_TABS = [
   "analyses",
   "settings",
 ] as const;
-const NON_ADMIN_CONTEXT_TABS = ["overview"] as const;
 
 export default function ContextDetailPage() {
+  const params = useParams();
+  const id = params.id as string;
+  const { currentWorkspace } = useWorkspace();
+  // A navigation or workspace switch cannot reuse another target's loaded data.
+  return <ScopedContextDetail key={JSON.stringify([currentWorkspace?.id, id])} />;
+}
+
+function ScopedContextDetail() {
   const params = useParams();
   const contextId = params.id as string;
   const t = useTranslations("contextDetail");
@@ -92,11 +100,7 @@ export default function ContextDetailPage() {
   const { currentContext } = useMemoryContext();
   const { currentWorkspace } = useWorkspace();
 
-  // Issue #398: member/viewer only see Overview. Admin+ see all four tabs.
-  // Issue #497: owner additionally sees the Analyses tab.
-  // hasWorkspaceRole returns false while currentWorkspace hydrates — the
-  // admin tabs stay hidden until role is known, preventing a flash where
-  // a member briefly sees admin-only triggers.
+  // All roles can discover a tab; only authorized roles mount its panel.
   const canSeeAdminTabs = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
     WorkspaceRole.Admin,
@@ -110,16 +114,7 @@ export default function ContextDetailPage() {
       currentWorkspace?.current_user_role,
       WorkspaceRole.Owner,
     ) && currentWorkspace?.analyses_enabled === true;
-  const visibleTabs = canSeeAnalysesTab
-    ? OWNER_CONTEXT_TABS
-    : canSeeAdminTabs
-      ? ADMIN_CONTEXT_TABS
-      : NON_ADMIN_CONTEXT_TABS;
-
-  // Passing visibleTabs as allowedValues makes useTabParam clamp unknown
-  // URL values (e.g. member lands on ?tab=settings via deep-link) back to
-  // "overview" — no separate redirect effect needed for the display. We
-  // still snap the URL below so the address bar matches what's rendered.
+  const visibleTabs = canSeeAnalysesTab ? OWNER_CONTEXT_TABS : ADMIN_CONTEXT_TABS;
   const [tab, setTab] = useTabParam("overview", "tab", visibleTabs);
   const [context, setContext] = useState<Context | null>(null);
   const [loading, setLoading] = useState(true);
@@ -129,38 +124,25 @@ export default function ContextDetailPage() {
     try {
       setLoading(true);
       setError(null);
+      if (!currentWorkspace?.id) return;
       const ctx = await getContext(contextId);
+      if (!ctx.workspace_id || ctx.workspace_id !== currentWorkspace.id) {
+        setContext(null);
+        setError(t("failedToLoad"));
+        return;
+      }
       setContext(ctx);
     } catch {
       setError(t("failedToLoad"));
     } finally {
       setLoading(false);
     }
-  }, [contextId, t]);
+  }, [contextId, currentWorkspace?.id, t]);
 
   useEffect(() => {
     fetchContext();
   }, [fetchContext]);
 
-  // Snap the URL to ?tab=overview when a member/viewer arrives on an
-  // admin-only tab via deep-link. useTabParam's allowedValues already clamps
-  // the *rendered* value to overview, but only auto-promotes the URL when the
-  // param is absent — not when it's present-but-invalid. Compare the raw URL
-  // value here; reading `tab` would always see "overview" for non-admins so
-  // the snap would never fire.
-  //
-  // The `!currentWorkspace` guard is load-bearing: during WorkspaceContext
-  // hydration `currentWorkspace` is null, which collapses canSeeAdminTabs to
-  // false. Without the guard, an admin hard-reloading ?tab=settings would
-  // have their URL snapped back to overview before the role resolved.
-  const searchParams = useSearchParams();
-  const rawTab = searchParams.get("tab");
-  useEffect(() => {
-    if (!currentWorkspace) return;
-    if (!canSeeAdminTabs && rawTab && rawTab !== "overview") {
-      setTab("overview");
-    }
-  }, [currentWorkspace, canSeeAdminTabs, rawTab, setTab]);
 
   useEffect(() => {
     const title = context?.display_name || context?.name || t("title");
@@ -289,29 +271,16 @@ export default function ContextDetailPage() {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
-          {/* Issue #398: memories/connections/graph tabs are admin-only.
-              Settings is rendered separately below so the analyses tab
-              (owner-only, #497) can land between graph and settings —
-              matching the ordering in OWNER_CONTEXT_TABS. */}
-          {canSeeAdminTabs && (
-            <>
-              <TabsTrigger value="memories">{t("tabs.memories")}</TabsTrigger>
-              <TabsTrigger value="connections">
-                {t("tabs.connections")}
-              </TabsTrigger>
-              <TabsTrigger value="graph">{t("tabs.graph")}</TabsTrigger>
-            </>
-          )}
+          <TabsTrigger value="memories">{t("tabs.memories")}</TabsTrigger>
+          <TabsTrigger value="connections">{t("tabs.connections")}</TabsTrigger>
+          <TabsTrigger value="graph">{t("tabs.graph")}</TabsTrigger>
           {/* Analyses tab is owner-only AND requires allowlist membership.
               Owners whose workspace is not on the allowlist do not see
               the tab at all (#497 — operator preference). */}
           {canSeeAnalysesTab && (
             <TabsTrigger value="analyses">{tAnalyses("tabLabel")}</TabsTrigger>
           )}
-          {/* Settings stays last — admin-only. */}
-          {canSeeAdminTabs && (
-            <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
-          )}
+          <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview">
@@ -322,7 +291,7 @@ export default function ContextDetailPage() {
             render for member/viewer (eliminates one-frame flash on direct
             ?tab=settings deep-link before the URL snap effect fires, and
             keeps GraphTabPanel's d3 bundle out of non-admin sessions). */}
-        {canSeeAdminTabs && (
+        {canSeeAdminTabs ? (
           <>
             <TabsContent value="memories">
               <MemoriesTabPanel contextId={contextId} />
@@ -354,6 +323,12 @@ export default function ContextDetailPage() {
               <ProtectionSection context={context} />
             </TabsContent>
           </>
+        ) : (
+          ADMIN_CONTEXT_TABS.filter((value) => value !== "overview").map((value) => (
+            <TabsContent key={value} value={value}>
+              <RoleGuidance required={WorkspaceRole.Admin} />
+            </TabsContent>
+          ))
         )}
         {/* Analyses TabsContent gated on tab visibility so the scatter
             bundle never enters non-owner / non-allowlisted sessions. */}

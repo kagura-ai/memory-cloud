@@ -298,7 +298,7 @@ describe("WorkspaceMembersPage invite gate", () => {
       name: /inviteMember/,
     });
     expect(invite).toBeDisabled();
-    expect(invite).toHaveAccessibleDescription("plan.hint");
+    expect(invite).toHaveAccessibleDescription("plan.hint plan.askOwner");
     expect(screen.queryByText("role.admin.hint")).toBeNull();
   });
 });
@@ -331,7 +331,7 @@ describe("WorkspaceMembersPage invite control notice (#1646 P9/R1)", () => {
     render(<WorkspaceMembersPage />);
     const invite = await findInvite();
 
-    expect(invite).toHaveAccessibleDescription("plan.hint");
+    expect(invite).toHaveAccessibleDescription("plan.hint plan.askOwner");
     expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
@@ -421,11 +421,13 @@ describe("WorkspaceMembersPage invite gate — the whole truth table (#1645)", (
       // An admin passes the role half; the plan half speaks only once the
       // matrix has answered — never a plan hint while it is pending.
       expect(screen.queryByText("role.admin.hint")).toBeNull();
-      expect(screen.queryByText("plan.hint") !== null).toBe(
+      expect(screen.queryByText(/^plan\.hint(?: plan\.askOwner)?$/) !== null).toBe(
         known && plan === "free",
       );
       expect(invite).toHaveAccessibleDescription(
-        known && plan === "free" ? "plan.hint" : "",
+        known && plan === "free"
+          ? (role === "admin" && i === "plan_page on" ? "plan.hint plan.askOwner" : "plan.hint")
+          : "",
       );
     },
   );

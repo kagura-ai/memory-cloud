@@ -92,6 +92,7 @@ export type GateMessageKey =
   | "plan.newDescription"
   | "plan.titleNoTier"
   | "plan.descriptionNoTier"
+  | "plan.askOwner"
   | "plan.action"
   | "plan.badge"
   | "plan.hint"
@@ -152,6 +153,7 @@ export const GATE_NOUN_FORM: Readonly<
   "plan.titleNoTier": "plural",
   "plan.descriptionNoTier": "plural",
   "plan.action": null,
+  "plan.askOwner": null,
   "plan.badge": null,
   "plan.hint": null,
   "plan.hintNoTier": null,
@@ -402,7 +404,8 @@ export function featureGateText(
     );
   };
 
-  const description = format(keys.description);
+  const base = format(keys.description);
+  const description = gate.askOwner ? joinSentences(base, t("plan.askOwner")) : base;
   // Never promise an upgrade the reader cannot act on.
   const upsell =
     keys.upsell !== null && gate.canUpgrade === true
@@ -418,7 +421,7 @@ export function featureGateText(
     action:
       keys.action !== null && mayOfferUpgrade ? format(keys.action) : null,
     badge: keys.badge === null ? null : format(keys.badge),
-    hint: format(keys.hint),
+    hint: gate.askOwner ? joinSentences(format(keys.hint), t("plan.askOwner")) : format(keys.hint),
   };
 }
 

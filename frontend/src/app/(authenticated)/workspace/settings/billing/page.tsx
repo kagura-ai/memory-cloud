@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
 
 export default function BillingRedirect() {
-  redirect('/workspace/dashboard');
+  redirect('/workspace/settings/plan');
 }

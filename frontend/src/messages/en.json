@@ -1,4 +1,28 @@
 {
+  "featureAccess": {
+    "about": {
+      "dashboard": "Review activity and memory statistics for this workspace.",
+      "resources": "Inspect data ingested from external systems.",
+      "secrets": "Manage who can use workspace secrets without displaying their values.",
+      "members": "Manage membership, invitations and context access.",
+      "sleepReports": "Review background memory maintenance reports.",
+      "cost": "Review usage and cost reporting.",
+      "connectors": "Connect external tools to this workspace.",
+      "plan": "Review the workspace plan and manage billing.",
+      "workspaceSettings": "Manage the selected workspace's settings.",
+      "externalKeys": "Configure provider keys used by this workspace.",
+      "admin": "Manage platform-wide settings and records."
+    },
+    "workspaceLoadFailed": "We could not load your workspace. Try again before continuing.",
+    "workspace": "Workspace: {name}",
+    "owner": "Only the workspace owner can manage this feature.",
+    "admin": "You need the workspace owner or administrator role to manage this feature.",
+    "member": "You need at least the member role to use this feature.",
+    "systemAdmin": "This feature requires a system administrator. Changing the workspace plan will not grant access.",
+    "lookupFailed": "We could not check whether this feature is enabled.",
+    "retry": "Try again",
+    "deployment": "This feature is not enabled on this deployment. Changing your workspace plan will not enable it."
+  },
   "onboarding": {
     "title": "Welcome to Kagura Memory",
     "subtitle": "Let's get you to your first recall in under 5 minutes.",
@@ -4501,6 +4525,7 @@
   },
   "gate": {
     "plan": {
+      "askOwner": "Ask your workspace owner to review the available plans.",
       "title": "The {plan} plan includes {feature}",
       "description": "Upgrade to the {plan} plan to use {feature}.",
       "newTitle": "New {feature} require the {plan} plan",
