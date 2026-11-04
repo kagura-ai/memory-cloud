@@ -205,6 +205,31 @@ class TestAddMember:
         member = await service.add_member(ws.id, "u5", role=WorkspaceRole.MEMBER)
         assert member.user_id == "u5"
         assert member.role == "member"
+        # No list given: the row keeps "not set" (#2326 leaves this default).
+        assert member.allowed_context_ids is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("given", ["list", "empty"])
+    async def test_add_member_stores_the_context_access_list(self, db_session, given) -> None:
+        """#2326: the list given at add time lands on the new row."""
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="W3b", owner_user_id="u4b", plan_name="pro")
+        db_session.add(ws)
+        await db_session.flush()
+        ctx = Context(id=uuid4(), workspace_id=ws.id, name="c-2326", created_by="u4b")
+        db_session.add(ctx)
+        await db_session.flush()
+        allowed = [ctx.id] if given == "list" else []
+
+        member = await service.add_member(
+            ws.id, f"u5b-{given}", role=WorkspaceRole.MEMBER, allowed_context_ids=allowed
+        )
+
+        assert member.allowed_context_ids == allowed
+        db_session.expunge_all()
+        stored = await service.get_member(ws.id, f"u5b-{given}")
+        assert stored is not None
+        assert stored.allowed_context_ids == allowed
 
     @pytest.mark.asyncio
     async def test_free_plan_cannot_add_members(self, db_session) -> None:

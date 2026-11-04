@@ -22,7 +22,7 @@ A **Workspace** is the top-level organizational unit — think of it as a team o
 | **Member** | Read/write memories in assigned contexts |
 | **Viewer** | Read-only access to assigned contexts |
 
-**Context access list** (`allowed_context_ids`, set per member and viewer on the members page):
+**Context access list** (`allowed_context_ids`, set per member and viewer on the members page or in the invitation; through the API it can be given when the member is added, `POST /api/v1/workspaces/{id}/members`, and changed with `PUT …/members/{user_id}/context-access`, both open to a workspace-owner API key — see [Workspace Member APIs](api-reference.md#workspace-member-apis)):
 
 | Role | Not set (`null`) | Empty (`[]`) | A list |
 |------|------------------|--------------|--------|
