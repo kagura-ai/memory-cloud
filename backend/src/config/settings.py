@@ -1576,7 +1576,8 @@ class Settings(BaseSettings):
         default=True,
         description=(
             "v0.42 review #33: gate for owner-API-key member/credential management "
-            "(#1164/#1165 — POST /workspaces/{id}/members, invitations, and "
+            "(#1164/#1165 — POST /workspaces/{id}/members, invitations, "
+            "member context-access lists (#2326), and "
             "owner-provisioned member API keys). ON by default preserves the "
             "shipped behavior. Set false on deployments that do not want an "
             "owner's ordinary read/write API key to ALSO carry member-management "

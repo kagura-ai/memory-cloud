@@ -348,6 +348,164 @@ describe("MembersSection — add member flow", () => {
   });
 });
 
+describe("MembersSection — member outside the context access list (#2327)", () => {
+  // The body the API answers (pinned against the real ApiClient in
+  // lib/api/base.test.ts): RES-002 with details.reason.
+  const notInList = () =>
+    new ApiError({
+      status: 409,
+      error: "RES-002",
+      message:
+        "This member's context access list does not include this context",
+      details: {
+        reason: "context_not_in_access_list",
+        user_id: "cand-1",
+        context_id: CONTEXT_ID,
+      },
+    });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setWorkspace("admin");
+    setAuth("admin-user");
+    mockListContextMembers.mockResolvedValue([]);
+    mockListWorkspaceMembers.mockResolvedValue([
+      makeWorkspaceMember({ user_id: "cand-1", user_email: "c1@ex.com" }),
+    ]);
+  });
+
+  async function submitAdd() {
+    render(<MembersSection contextId={CONTEXT_ID} context={makeContext()} />);
+    await waitFor(() => {
+      expect(screen.getByText("contextMembers")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "addMember" })[0]);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("selectWorkspaceMember"), {
+      target: { value: "cand-1" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "addMember" }));
+    return screen.findByRole("alertdialog");
+  }
+
+  it("asks to extend the list, then resends with the flag", async () => {
+    mockAddContextMember
+      .mockRejectedValueOnce(notInList())
+      .mockResolvedValueOnce(
+        makeMember({ user_id: "cand-1", access_list_extended: true }),
+      );
+
+    const confirm = await submitAdd();
+    expect(
+      within(confirm).getByText("extendAccessListTitle"),
+    ).toBeInTheDocument();
+    expect(
+      within(confirm).getByText("extendAccessListDesc:c1@ex.com"),
+    ).toBeInTheDocument();
+    // The refusal is a question, not an error toast.
+    expect(mockToast).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(confirm).getByRole("button", { name: "extendAccessListConfirm" }),
+    );
+
+    await waitFor(() => {
+      expect(mockAddContextMember).toHaveBeenLastCalledWith(CONTEXT_ID, {
+        user_id: "cand-1",
+        role: ContextRole.Editor,
+        extend_access_list: true,
+      });
+    });
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "addMemberSuccessListExtended" }),
+      );
+    });
+    expect(mockAddContextMember).toHaveBeenCalledTimes(2);
+    expect(mockAddContextMember).toHaveBeenNthCalledWith(1, CONTEXT_ID, {
+      user_id: "cand-1",
+      role: ContextRole.Editor,
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+    });
+  });
+
+  it("shows the server's reason when the resend is refused", async () => {
+    // A context owner below workspace admin may not extend a member's list.
+    mockAddContextMember.mockRejectedValueOnce(notInList()).mockRejectedValueOnce(
+      new ApiError({
+        status: 403,
+        error: "AUTH-101",
+        message:
+          "Only a workspace owner or admin can add a context to a member's context access list.",
+        details: {},
+      }),
+    );
+
+    const confirm = await submitAdd();
+    fireEvent.click(
+      within(confirm).getByRole("button", { name: "extendAccessListConfirm" }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            "Only a workspace owner or admin can add a context to a member's context access list.",
+          variant: "destructive",
+        }),
+      );
+    });
+    expect(mockAddContextMember).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancel sends nothing more", async () => {
+    mockAddContextMember.mockRejectedValueOnce(notInList());
+
+    const confirm = await submitAdd();
+    fireEvent.click(within(confirm).getByRole("button", { name: "cancel" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+    });
+    expect(mockAddContextMember).toHaveBeenCalledTimes(1);
+    expect(mockToast).not.toHaveBeenCalled();
+  });
+
+  it("keeps the toast for any other failure", async () => {
+    mockAddContextMember.mockRejectedValueOnce(
+      new ApiError({
+        status: 409,
+        error: "RES-002",
+        message: "Resource conflict",
+        details: { reason: "something_else" },
+      }),
+    );
+
+    render(<MembersSection contextId={CONTEXT_ID} context={makeContext()} />);
+    await waitFor(() => {
+      expect(screen.getByText("contextMembers")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "addMember" })[0]);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("selectWorkspaceMember"), {
+      target: { value: "cand-1" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "addMember" }));
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "addMemberFailed",
+          variant: "destructive",
+        }),
+      );
+    });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+});
+
 describe("MembersSection — remove flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();

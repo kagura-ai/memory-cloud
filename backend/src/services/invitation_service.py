@@ -19,11 +19,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
+from config.plan_tiers import has_feature
 from models.auth import User, Workspace, WorkspaceInvitation, WorkspaceMember
 from services.email_service import EmailService, get_email_service
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import NotFoundException, QuotaExceededError, ValidationError
+from utils.exceptions import (
+    FeatureNotAvailableError,
+    NotFoundException,
+    QuotaExceededError,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -390,6 +396,9 @@ class InvitationService:
             ValidationError: If validation fails (expired, email mismatch, already member, etc.)
             NotFoundException: If the invitation, the workspace or the accepter's
                 ``users`` row is not found
+            FeatureNotAvailableError: If the workspace's plan no longer has
+                ``team_invitations`` (403, #2621); nothing is written and the
+                invitation stays pending
         """
         # Get invitation
         invitation = await self.get_invitation(token)
@@ -422,6 +431,12 @@ class InvitationService:
         # #2564: the workspace row first, as in add_member, held to the commit.
         # Raises NotFoundException for a missing / soft-deleted workspace.
         workspace = await lock_workspace_for_update(self.db, invitation.workspace_id)
+
+        # #2621: the plan gate of creating an invitation and of add_member. An
+        # invitation issued before a downgrade admits no one once the plan has
+        # no team invitations; refused before anything else is locked or written.
+        if not has_feature(workspace.plan_name, "team_invitations"):
+            raise FeatureNotAvailableError.for_feature(workspace.plan_name, "team_invitations")
 
         # #2601: the accepter's users row (its current workspace is set below)
         # right after the workspace row and before any row in it, as in
@@ -596,31 +611,35 @@ class InvitationService:
 
         return count
 
-    async def get_pending_invitations_for_email(self, email: str) -> list[WorkspaceInvitation]:
-        """Get pending invitations for email address.
+    async def get_pending_invitations_for_email(
+        self, email: str | None
+    ) -> list[WorkspaceInvitation]:
+        """Get pending invitations addressed to an email address.
 
         Issue #179: In-app invitation notifications.
 
-        Returns all pending, non-expired invitations that match the user's email
-        (case-insensitive) or have no email restriction.
+        Returns the pending, non-expired invitations addressed to this email
+        (case-insensitive). An invitation without an email is not addressed to
+        anyone: it is reachable through its link only and never listed here.
 
         Args:
-            email: User email address (case-insensitive)
+            email: User email address (case-insensitive). Empty or None
+                returns an empty list without a query.
 
         Returns:
             List of pending, non-expired invitations sorted by creation date (newest first)
         """
+        if not email:
+            return []
+
         from sqlalchemy import and_, or_
 
         stmt = (
             select(WorkspaceInvitation)
             .where(
                 and_(
-                    # Email match (case-insensitive) OR no email restriction
-                    or_(
-                        func.lower(WorkspaceInvitation.email) == email.lower(),
-                        WorkspaceInvitation.email.is_(None),
-                    ),
+                    # Addressed to this email (case-insensitive)
+                    func.lower(WorkspaceInvitation.email) == email.lower(),
                     # Not accepted
                     WorkspaceInvitation.accepted_at.is_(None),
                     # Not expired (or no expiration)

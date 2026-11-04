@@ -158,3 +158,205 @@ class TestProgrammaticOwnerRoleRejected:
             json={"user_id": "target", "role": "owner"},
         )
         assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# #2326: the context access list at add time, and the owner key on the PUT
+# ---------------------------------------------------------------------------
+
+_CTX = uuid.uuid4()
+MEMBERS_URL = f"/api/v1/workspaces/{_WS}/members"
+ACCESS_URL = f"/api/v1/workspaces/{_WS}/members/target/context-access"
+
+
+def _session_user(user_id: str = "admin-1") -> dict:
+    return {"user_id": user_id, "sub": user_id, "email": f"{user_id}@test", "role": "user"}
+
+
+@pytest.fixture
+def fake_db():
+    """A DB session that knows exactly one live context of _WS (``_CTX``).
+
+    ``events`` records the audit row being added and the service write, in
+    order, so a test can prove the audit row is in the session before the
+    service commits.
+    """
+    from db.base import get_db
+
+    result = MagicMock()
+    result.all.return_value = [(_CTX,)]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    db.commit = AsyncMock()
+    db.events = []
+    db.add.side_effect = lambda row: db.events.append(("add", type(row).__name__))
+
+    async def _get_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _get_db
+    return db
+
+
+@pytest.fixture
+def ws_service(monkeypatch, fake_db):
+    """WorkspaceService stub: add_member / update_member_context_access echo their input."""
+    from api.routes import workspaces as mod
+
+    svc = MagicMock()
+
+    async def _add(*, workspace_id, user_id, role, invited_by, allowed_context_ids=None):
+        fake_db.events.append(("service", "add_member"))
+        return MagicMock(
+            user_id=user_id, role=role, joined_at=None, allowed_context_ids=allowed_context_ids
+        )
+
+    async def _update(*, workspace_id, user_id, allowed_context_ids):
+        fake_db.events.append(("service", "update_member_context_access"))
+        return MagicMock(user_id=user_id, allowed_context_ids=allowed_context_ids)
+
+    svc.add_member = AsyncMock(side_effect=_add)
+    svc.update_member_context_access = AsyncMock(side_effect=_update)
+    monkeypatch.setattr(mod, "WorkspaceService", lambda db: svc)
+    return svc
+
+
+def _audit_rows(db) -> list:
+    from models.auth import AuditLog
+
+    return [c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], AuditLog)]
+
+
+class TestAddMemberContextAccessProgrammatic:
+    def test_owner_key_with_a_list_is_201_and_audited_with_the_count(
+        self, client, perm, fake_db, ws_service
+    ):
+        _override_user(_api_key_user(workspace_id=None))
+        r = client.post(
+            MEMBERS_URL,
+            json={"user_id": "target", "role": "member", "allowed_context_ids": [str(_CTX)]},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["allowed_context_ids"] == [str(_CTX)]
+        assert ws_service.add_member.await_args.kwargs["allowed_context_ids"] == [_CTX]
+        rows = _audit_rows(fake_db)
+        assert len(rows) == 1
+        assert rows[0].action == "workspace_member_added"
+        assert rows[0].user_metadata["target"] == "target"
+        assert rows[0].user_metadata["role"] == "member"
+        assert rows[0].user_metadata["context_count"] == 1
+        assert fake_db.events.index(("add", "AuditLog")) < fake_db.events.index(
+            ("service", "add_member")
+        )
+
+    @pytest.mark.parametrize(
+        ("payload", "count"),
+        [
+            ({}, "not_set"),
+            ({"allowed_context_ids": None}, "not_set"),
+            ({"allowed_context_ids": []}, 0),
+        ],
+        ids=["absent", "null", "empty"],
+    )
+    def test_owner_key_audit_counts_not_set_and_empty(
+        self, client, perm, fake_db, ws_service, payload, count
+    ):
+        _override_user(_api_key_user(workspace_id=None))
+        r = client.post(MEMBERS_URL, json={"user_id": "target", "role": "member", **payload})
+        assert r.status_code == 201, r.text
+        assert _audit_rows(fake_db)[0].user_metadata["context_count"] == count
+
+    def test_oauth_with_a_list_is_403(self, client, fake_db, ws_service):
+        _override_user(_oauth_user())
+        r = client.post(
+            MEMBERS_URL,
+            json={"user_id": "target", "role": "member", "allowed_context_ids": [str(_CTX)]},
+        )
+        assert r.status_code == 403
+        _assert_oauth_refusal(r)
+        ws_service.add_member.assert_not_called()
+
+
+class TestMemberContextAccessProgrammatic:
+    """PUT …/context-access goes through authorize_workspace_management (#2326)."""
+
+    def test_owner_key_is_200_and_audited(self, client, perm, fake_db, ws_service):
+        _override_user(_api_key_user(workspace_id=None))
+        r = client.put(ACCESS_URL, json={"allowed_context_ids": [str(_CTX)]})
+        assert r.status_code == 200, r.text
+        assert r.json() == {
+            "status": "ok",
+            "user_id": "target",
+            "allowed_context_ids": [str(_CTX)],
+        }
+        perm.check_workspace_owner.assert_awaited_once_with("owner-key", _WS)
+        rows = _audit_rows(fake_db)
+        assert len(rows) == 1
+        assert rows[0].action == "workspace_member_context_access_set"
+        assert rows[0].resource == f"workspace:{_WS}"
+        assert rows[0].user_metadata["target"] == "target"
+        assert rows[0].user_metadata["via"] == "api_key"
+        assert rows[0].user_metadata["context_count"] == 1
+        # Added before the service call, which commits it with the change.
+        assert fake_db.events.index(("add", "AuditLog")) < fake_db.events.index(
+            ("service", "update_member_context_access")
+        )
+
+    def test_owner_key_audit_says_not_set_for_null(self, client, perm, fake_db, ws_service):
+        _override_user(_api_key_user(workspace_id=None))
+        r = client.put(ACCESS_URL, json={"allowed_context_ids": None})
+        assert r.status_code == 200, r.text
+        assert _audit_rows(fake_db)[0].user_metadata["context_count"] == "not_set"
+
+    def test_admin_key_is_403(self, client, perm, fake_db, ws_service):
+        # An API key is owner-gated whatever role its user holds.
+        perm.check_workspace_owner.side_effect = AuthorizationError("Insufficient permissions")
+        _override_user(_api_key_user(workspace_id=None, user_id="admin-key"))
+        r = client.put(ACCESS_URL, json={"allowed_context_ids": []})
+        assert r.status_code == 403
+        ws_service.update_member_context_access.assert_not_called()
+        assert _audit_rows(fake_db) == []
+
+    def test_key_bound_to_another_workspace_is_404(self, client, perm, fake_db, ws_service):
+        _override_user(_api_key_user(workspace_id=uuid.uuid4()))
+        r = client.put(ACCESS_URL, json={"allowed_context_ids": []})
+        assert r.status_code == 404
+        perm.check_workspace_owner.assert_not_called()
+        ws_service.update_member_context_access.assert_not_called()
+
+    def test_oauth_is_403(self, client, perm, fake_db, ws_service):
+        _override_user(_oauth_user())
+        r = client.put(ACCESS_URL, json={"allowed_context_ids": []})
+        assert r.status_code == 403
+        _assert_oauth_refusal(r)
+        ws_service.update_member_context_access.assert_not_called()
+
+    def test_kill_switch_off_is_403(self, client, perm, fake_db, ws_service, monkeypatch):
+        from config.settings import get_settings
+
+        monkeypatch.setattr(get_settings(), "enable_owner_key_member_management", False)
+        _override_user(_api_key_user(workspace_id=None))
+        r = client.put(ACCESS_URL, json={"allowed_context_ids": []})
+        assert r.status_code == 403
+        assert "disabled on this deployment" in r.json()["message"]
+        perm.check_workspace_owner.assert_not_called()
+        ws_service.update_member_context_access.assert_not_called()
+
+    def test_session_admin_is_200_and_not_audited(self, client, perm, fake_db, ws_service):
+        from auth.workspace_roles import WorkspaceRole
+
+        perm.check_workspace_access.return_value = MagicMock(role="admin")
+        _override_user(_session_user())
+        r = client.put(ACCESS_URL, json={"allowed_context_ids": [str(_CTX)]})
+        assert r.status_code == 200, r.text
+        perm.check_workspace_access.assert_awaited_once_with(
+            "admin-1", _WS, required_role=WorkspaceRole.ADMIN
+        )
+        assert _audit_rows(fake_db) == []
+
+    def test_session_member_is_403(self, client, perm, fake_db, ws_service):
+        perm.check_workspace_access.side_effect = AuthorizationError("Insufficient permissions")
+        _override_user(_session_user("member-1"))
+        r = client.put(ACCESS_URL, json={"allowed_context_ids": []})
+        assert r.status_code == 403
+        ws_service.update_member_context_access.assert_not_called()

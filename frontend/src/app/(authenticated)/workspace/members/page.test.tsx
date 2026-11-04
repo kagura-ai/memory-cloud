@@ -15,12 +15,16 @@ import {
   waitFor,
   cleanup,
   fireEvent,
+  within,
 } from "@testing-library/react";
 
 import WorkspaceMembersPage from "./page";
 import { ApiError } from "@/lib/api/base";
 import { createInvitation } from "@/lib/api/invitations";
-import { updateMemberRole } from "@/lib/api/workspaces";
+import {
+  updateMemberContextAccess,
+  updateMemberRole,
+} from "@/lib/api/workspaces";
 import type { PlanTierFeature } from "@/lib/api/workspaces";
 import { normalizeGate } from "@/lib/gates/featureGates";
 
@@ -30,6 +34,7 @@ const mockListMembers = vi.fn();
 const mockListInvitations = vi.fn();
 const mockGetMemberQuota = vi.fn();
 const mockGetContexts = vi.fn();
+const mockGetMemberContextAccess = vi.fn();
 
 vi.mock("@/lib/api/workspaces", () => ({
   listMembers: (...a: unknown[]) => mockListMembers(...a),
@@ -37,6 +42,7 @@ vi.mock("@/lib/api/workspaces", () => ({
   updateMemberRole: vi.fn(),
   removeMember: vi.fn(),
   updateMemberContextAccess: vi.fn(),
+  getMemberContextAccess: (...a: unknown[]) => mockGetMemberContextAccess(...a),
 }));
 vi.mock("@/lib/api/invitations", () => ({
   listInvitations: (...a: unknown[]) => mockListInvitations(...a),
@@ -145,6 +151,8 @@ beforeEach(() => {
   mockListInvitations.mockReset();
   mockGetMemberQuota.mockReset();
   mockGetContexts.mockReset();
+  mockGetMemberContextAccess.mockReset();
+  vi.mocked(updateMemberContextAccess).mockReset();
   mockPush.mockReset();
   mockToast.mockReset();
   vi.mocked(createInvitation).mockReset();
@@ -996,5 +1004,151 @@ describe("WorkspaceMembersPage context access column", () => {
       ),
     );
     expect(screen.queryByText("roleChangeConfirmTitle")).toBeNull();
+  });
+});
+
+describe("WorkspaceMembersPage context access dialog (#2327)", () => {
+  const BOB = {
+    user_id: "user-2",
+    user_name: "Bob",
+    user_email: "bob@example.com",
+    role: "member",
+    joined_at: null,
+    allowed_context_ids: ["ctx-a"],
+  };
+
+  function ctx(id: string, name: string, ownPrivate = false) {
+    return {
+      id,
+      name,
+      display_name: null,
+      summary: null,
+      is_private: ownPrivate,
+      is_own_private: ownPrivate,
+    };
+  }
+
+  async function openDialog() {
+    setupWithRole("owner", "pro");
+    mockListMembers.mockResolvedValue([BOB]);
+    render(<WorkspaceMembersPage />);
+    fireEvent.click(await screen.findByText("contextsSelected"));
+    return screen.findByRole("alertdialog");
+  }
+
+  it("lists the member's own private context with a badge; select all includes it", async () => {
+    mockGetMemberContextAccess.mockResolvedValue({
+      user_id: "user-2",
+      role: "member",
+      allowed_context_ids: ["ctx-a"],
+      contexts: [ctx("ctx-a", "shared-a"), ctx("ctx-p", "bob-notes", true)],
+    });
+    vi.mocked(updateMemberContextAccess).mockResolvedValue({
+      status: "ok",
+      user_id: "user-2",
+      allowed_context_ids: ["ctx-a", "ctx-p"],
+    });
+
+    const dialog = await openDialog();
+    expect(mockGetMemberContextAccess).toHaveBeenCalledWith(
+      WORKSPACE_ID,
+      "user-2",
+    );
+    // The dialog no longer builds its list from the caller's own contexts.
+    const own = await within(dialog).findByText("bob-notes");
+    expect(within(dialog).getByText("shared-a")).toBeInTheDocument();
+    const ownRow = own.closest("li") as HTMLElement;
+    expect(
+      within(ownRow).getByText("contextAccessPrivateBadge"),
+    ).toBeInTheDocument();
+    const sharedRow = within(dialog)
+      .getByText("shared-a")
+      .closest("li") as HTMLElement;
+    expect(
+      within(sharedRow).queryByText("contextAccessPrivateBadge"),
+    ).toBeNull();
+    expect(
+      within(dialog).getByText("contextAccessOwnPrivateHint"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "selectAll" }));
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "saveContextAccess" }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(vi.mocked(updateMemberContextAccess)).toHaveBeenCalledWith(
+        WORKSPACE_ID,
+        "user-2",
+        ["ctx-a", "ctx-p"],
+      ),
+    );
+  });
+
+  it("keeps only listed contexts selected, so a save drops ids the dialog cannot show", async () => {
+    // A deleted context, or another account's private one set through the
+    // API, grants nothing and has no checkbox here.
+    mockGetMemberContextAccess.mockResolvedValue({
+      user_id: "user-2",
+      role: "member",
+      allowed_context_ids: ["ctx-a", "ctx-gone"],
+      contexts: [ctx("ctx-a", "shared-a")],
+    });
+    vi.mocked(updateMemberContextAccess).mockResolvedValue({
+      status: "ok",
+      user_id: "user-2",
+      allowed_context_ids: ["ctx-a"],
+    });
+
+    const dialog = await openDialog();
+    await within(dialog).findByText("shared-a");
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "saveContextAccess" }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(vi.mocked(updateMemberContextAccess)).toHaveBeenCalledWith(
+        WORKSPACE_ID,
+        "user-2",
+        ["ctx-a"],
+      ),
+    );
+  });
+
+  it("shows no private hint when the member owns no private context", async () => {
+    mockGetMemberContextAccess.mockResolvedValue({
+      user_id: "user-2",
+      role: "member",
+      allowed_context_ids: ["ctx-a"],
+      contexts: [ctx("ctx-a", "shared-a")],
+    });
+
+    const dialog = await openDialog();
+    await within(dialog).findByText("shared-a");
+    expect(
+      within(dialog).queryByText("contextAccessOwnPrivateHint"),
+    ).toBeNull();
+    expect(within(dialog).queryByText("contextAccessPrivateBadge")).toBeNull();
+  });
+
+  it("shows a load failure inside the dialog and blocks the save", async () => {
+    mockGetMemberContextAccess.mockRejectedValue(
+      refusal(500, "INT-001", "Internal server error"),
+    );
+
+    const dialog = await openDialog();
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("contextAccessLoadFailed");
+    expect(
+      within(dialog).getByRole("button", { name: "saveContextAccess" }),
+    ).toBeDisabled();
+    expect(
+      within(dialog).getByRole("button", { name: "selectAll" }),
+    ).toBeDisabled();
+    expect(mockToast).not.toHaveBeenCalled();
   });
 });

@@ -243,6 +243,14 @@ REFUSALS: list[Refusal] = [
         site_literal="team_invitations",
         carries_counts=False,
     ),
+    # #2621: accepting an invitation issued before a downgrade.
+    Refusal(
+        id="plan/team_invitations-accept",
+        site="services.invitation_service:InvitationService.accept_invitation",
+        exc=FeatureNotAvailableError.for_feature(_FREE, "team_invitations"),
+        site_literal="team_invitations",
+        carries_counts=False,
+    ),
     # #1939: paid-only ingest suspended (not revoked) on a plan without it.
     Refusal(
         id="plan/connectors-suspended",
@@ -1682,6 +1690,7 @@ MCP_ROUTES: dict[str, tuple[McpRoute, ...]] = {
 NOT_ON_MCP = {
     "plan/team_invitations": "REST route only; no MCP tool invites members",
     "plan/team_invitations-direct-add": "REST route only; no MCP tool adds members",
+    "plan/team_invitations-accept": "REST route only; no MCP tool accepts invitations",
     "quota/api_public_daily-suspended": "anonymous public REST routes only",
     "plan/shared_contexts-rest": "the REST route's own pre-check",
     "plan/public_contexts-api-key": "REST route only",

@@ -14,7 +14,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
 import { apiClient } from "@/lib/api";
-import { adminUserPath, userDeleteFailure } from "@/lib/api/admin";
+import { adminUserPath } from "@/lib/api/admin";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import {
   Table,
@@ -48,6 +48,10 @@ import {
   InlineSpinner,
   TableLoadingState,
 } from "@/components/common/LoadingState";
+import {
+  UserDeleteDialog,
+  type UserDeleteTarget,
+} from "@/components/admin/UserDeleteDialog";
 import {
   WorkspacePlanBadges,
   type WorkspaceMembership,
@@ -98,6 +102,11 @@ export default function AdminUsersPage() {
 
   // Issue #165 Phase 5: Search and filter state
   const [searchQuery, setSearchQuery] = useState("");
+
+  // #2420: the user the deletion dialog is open for.
+  const [deleteTarget, setDeleteTarget] = useState<UserDeleteTarget | null>(
+    null,
+  );
 
   // Issue #166: Count admin users for protection logic
   const adminCount = users.filter((u) => u.role === "admin").length;
@@ -163,39 +172,10 @@ export default function AdminUsersPage() {
     }
   };
 
-  const handleDeleteUser = async (userId: string, userName: string) => {
-    if (!confirm(t("messages.deleteConfirm", { name: userName }))) {
-      return;
-    }
-
-    try {
-      await apiClient.delete(`/api/v1/admin/users/${userId}`);
-      toast({
-        title: tCommon("success"),
-        description: t("messages.deleteSuccess", { name: userName }),
-      });
-      loadUsers();
-    } catch (error) {
-      // #2417: the API refuses with 409 while the user owns a workspace or a
-      // shared context (successors go in the request body, which this screen
-      // does not send yet) or a running subscription — say which.
-      const failure = userDeleteFailure(error);
-      toast({
-        title: tCommon("error"),
-        description:
-          failure.kind === "transfer_required"
-            ? t("messages.deleteTransferRequired", {
-                workspaces: failure.workspaces,
-                contexts: failure.contexts,
-              })
-            : failure.kind === "message"
-              ? t("messages.deleteErrorWithReason", {
-                  reason: failure.message,
-                })
-              : t("messages.deleteError"),
-        variant: "destructive",
-      });
-    }
+  // #2420: the dialog confirms, then on the API's 409 asks for a successor
+  // for each owned workspace and shared context, and resends the DELETE.
+  const handleDeleteUser = (userId: string, userName: string) => {
+    setDeleteTarget({ id: userId, name: userName });
   };
 
   if (loading) {
@@ -472,6 +452,17 @@ export default function AdminUsersPage() {
           </Table>
         </div>
       </Section>
+      {deleteTarget && (
+        <UserDeleteDialog
+          key={deleteTarget.id}
+          user={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={() => {
+            setDeleteTarget(null);
+            loadUsers();
+          }}
+        />
+      )}
     </PageContainer>
   );
 }
