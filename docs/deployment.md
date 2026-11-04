@@ -399,7 +399,12 @@ each key in `API_KEY_SECRET_PREVIOUS`, and writes every new value under
    started from the same env file, and the shell that will run the command in
    step 2. Restart them all. A process that still has only the old key cannot
    read a value the command has already rewritten, nor one written since the
-   restart.
+   restart. Where old and new processes serve side by side during the restart
+   (a blue/green deploy drains the old color only after the new one is live),
+   close that window with two restarts: first add the new key as
+   `API_KEY_SECRET_PREVIOUS` only, leaving `API_KEY_SECRET` as it is, and
+   restart, so every process can read both keys; then swap the two values and
+   restart again.
 2. Re-encrypt the stored values, from `backend/` in the API container (a host
    shell without the variables reads both from the running API container):
 
