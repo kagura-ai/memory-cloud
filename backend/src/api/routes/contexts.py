@@ -38,7 +38,12 @@ from services.context_service import ContextService, TagSortMode
 from services.identity_link_service import linked_user_ids
 from services.plan_seats import writes_paused_context_ids
 from utils.datetime import to_utc_iso
-from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
+from utils.exceptions import (
+    ConflictError,
+    FeatureNotAvailableError,
+    NotFoundException,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -535,7 +540,7 @@ async def create_context(
         if request.expected_workspace_id is not None and str(request.expected_workspace_id) != str(
             workspace_id
         ):
-            raise HTTPException(status_code=409, detail="The selected workspace changed.")
+            raise ConflictError("The selected workspace changed.")
 
         # Issue #149: Check if workspace can create another context (Free plan: max 1 context)
         from services.quota_service import QuotaService
@@ -1273,8 +1278,6 @@ async def delete_context(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
     except Exception as e:
-        from utils.exceptions import ConflictError
-
         if isinstance(e, ConflictError):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from e
         raise

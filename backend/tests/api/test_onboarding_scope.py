@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 
 from api.routes.contexts import ContextCreate, create_context
 from models.schemas import RememberRequest
@@ -15,7 +14,7 @@ from utils.exceptions import ConflictError
 @pytest.mark.asyncio
 async def test_stale_create_rejected_before_quota_or_insertion():
     service = MagicMock()
-    with pytest.raises(HTTPException) as error:
+    with pytest.raises(ConflictError) as error:
         await create_context(
             ContextCreate(name="practice", expected_workspace_id=uuid4()),
             {"user_id": "owner", "current_workspace_id": uuid4()},
