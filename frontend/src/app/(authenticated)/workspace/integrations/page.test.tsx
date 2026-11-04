@@ -11,8 +11,8 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
 afterEach(cleanup);
 
 describe("first click from Integrations", () => {
-  it.each([["en", en, /connect claude/i, /call kmc from a script/i, /bring in external data/i],
-    ["ja", ja, /Claudeを接続/, /スクリプトからKMC/, /外部データを取り込む/]] as const)(
+  it.each([["en", en, /connect .*gemini.*muse/i, /call kmc from a script/i, /bring in external data/i],
+    ["ja", ja, /Gemini.*Muse.*接続/, /スクリプトからKMC/, /外部データを取り込む/]] as const)(
     "routes the three starting tasks to their real destinations in %s", (locale, messages, connect, script, ingest) => {
       render(<NextIntlClientProvider locale={locale} messages={messages}><IntegrationsPage /></NextIntlClientProvider>);
       expect(screen.getByText(/Studio/)).toBeInTheDocument();
