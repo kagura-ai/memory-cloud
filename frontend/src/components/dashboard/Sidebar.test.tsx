@@ -328,9 +328,10 @@ describe("feature discoverability (#2630)", () => {
       render(<Sidebar />);
       for (const href of ["/workspace/resources", "/workspace/integrations/connectors",
         "/workspace/dashboard", "/workspace/settings/plan", "/workspace/settings/general",
-        "/workspace/members", "/admin/users"]) {
+        "/workspace/members"]) {
         expect(document.querySelector(`nav a[href="${href}"]`)).not.toBeNull();
       }
+      expect(document.querySelector('nav a[href^="/admin/"]')).toBeNull();
       expect(mockListResources).not.toHaveBeenCalled();
       expect(mockListConnectors).not.toHaveBeenCalled();
     },

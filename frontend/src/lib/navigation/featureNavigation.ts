@@ -1,10 +1,11 @@
 import type { ElementType } from "react";
 import { Role, WorkspaceRole } from "@/lib/auth/rbac";
-import { Activity, Brain, Key, Settings, Puzzle, Database, Sliders, KeyRound, Users, BarChart, CreditCard, Lock, Gauge, Moon, ShieldCheck, DollarSign, Plug, HardDrive } from "lucide-react";
+import { Compass, Activity, Brain, Key, Settings, Puzzle, Database, Sliders, KeyRound, Users, BarChart, CreditCard, Lock, Gauge, Moon, ShieldCheck, DollarSign, Plug, HardDrive } from "lucide-react";
 
 export interface NavItem {
   nameKey: string; // Translation key
   href: string;
+  exact?: boolean;
   icon: ElementType;
   requiredRole?: Role; // System admin role
   requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
@@ -100,6 +101,7 @@ export const navigationGroups: NavGroup[] = [
     titleKey: "integrations",
     collapsible: false,
     items: [
+      { nameKey: "connectionGuide", href: "/workspace/integrations", icon: Compass, exact: true },
       {
         nameKey: "apiKeys",
         href: "/workspace/integrations/credentials?tab=api-keys",
@@ -222,8 +224,8 @@ export const navigationGroups: NavGroup[] = [
 // Match feature routes without using object IDs or data from protected APIs.
 const items = navigationGroups.flatMap((group) => group.items.flatMap((item) => [item, ...(item.children ?? [])]));
 export function navigationForPath(pathname: string): NavItem | undefined {
-  return items.find(({ href }) => {
+  return items.find(({ href, exact }) => {
     const path = href.split("?")[0];
-    return pathname === path || pathname.startsWith(path + "/");
+    return pathname === path || (!exact && pathname.startsWith(path + "/"));
   });
 }

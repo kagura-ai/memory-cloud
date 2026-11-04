@@ -31,6 +31,7 @@ import {
 } from "@/hooks/useWorkspaceObjectPresence";
 import { useBetaInvites } from "@/hooks/useBetaInvites";
 import {
+  hasRole,
   hasWorkspaceRole,
   WorkspaceRole,
 } from "@/lib/auth/rbac";
@@ -80,7 +81,6 @@ export function Sidebar() {
   const [canEmbed, setCanEmbed] = useState<boolean | null>(null);
   const t = useTranslations("sidebar");
   const tNav = useTranslations("navigation");
-  const integration = useTranslations("integrationEntry");
   const tInvite = useTranslations("betaInvites");
 
   const [collapsedSections, setCollapsedSections] = useState<
@@ -368,6 +368,7 @@ export function Sidebar() {
         {navigationGroups.map((group) => {
           // Filter items based on user role
           const visibleItems = group.items.filter((item) => {
+            if (item.requiredRole && !hasRole(user, item.requiredRole)) return false;
             // Issue #1145: gate behind backend feature flag(s). Default-off:
             // hidden while features load (null) and unless EVERY listed flag
             // is true (#1571: the workspace cost entry needs byok AND
@@ -389,7 +390,7 @@ export function Sidebar() {
             ) {
               return false;
             }
-            // Plan and role govern the destination, not the presence of a link.
+            // Workspace roles and plan limits are explained at the destination.
             return true;
           });
 
@@ -449,11 +450,7 @@ export function Sidebar() {
                       "uppercase tracking-wider",
                     )}
                   >
-                    {group.titleKey === "integrations" ? (
-                      <Link href="/workspace/integrations" aria-label={integration("entry")}
-                        className="inline-flex min-h-11 items-center gap-1 underline underline-offset-4"
-                        onClick={() => setIsOpen(false)}>{groupTitle}<span aria-hidden="true">→</span></Link>
-                    ) : groupTitle}
+                    {groupTitle}
                   </h3>
                 ) : null}
                 <div
@@ -584,7 +581,7 @@ export function Sidebar() {
                     const isActive = itemTab
                       ? pathname === itemPath && currentTab === itemTab
                       : pathname === item.href ||
-                        (item.href !== "/dashboard" &&
+                        (!item.exact && item.href !== "/dashboard" &&
                           pathname.startsWith(item.href + "/"));
 
                     // Issue #115: Disabled items show as "Coming Soon"
