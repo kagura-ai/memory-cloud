@@ -323,6 +323,8 @@ async def accept_invitation(
     Raises:
         HTTPException 400: Validation error (expired, email mismatch, already member, etc.)
         HTTPException 404: Invitation not found
+        FeatureNotAvailableError: Refused with 403 when the workspace's plan no
+            longer has team invitations (#2621)
     """
     user_id = current_user.get("user_id")
     user_email = current_user.get("email")

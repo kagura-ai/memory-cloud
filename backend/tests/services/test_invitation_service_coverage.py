@@ -16,7 +16,8 @@ These tests exercise ``InvitationService`` end-to-end against a real
 - ``list_invitations`` (pending-only vs include-accepted ordering)
 - ``accept_invitation`` happy path + already-accepted, expired, email
   mismatch, already-member, workspace-missing, soft-deleted workspace,
-  quota-exceeded branches, and the workspace row lock taken first (#2564)
+  quota-exceeded branches, the workspace row lock taken first (#2564), and
+  the ``team_invitations`` plan gate (#2621)
 - ``delete_invitation`` (found + not-found)
 - ``cleanup_expired_invitations`` (scoped + global + nothing-to-do)
 - ``get_pending_invitations_for_email`` (email match, NULL-email match,
@@ -41,7 +42,7 @@ from models.auth import (
 )
 from services.invitation_service import InvitationService, build_invitation_url
 from utils.datetime import utcnow
-from utils.exceptions import NotFoundException, ValidationError
+from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
 
 # ---------------------------------------------------------------------------
 # Row builders (unique UUIDs / IDs to avoid collisions across parallel tests)
@@ -691,6 +692,47 @@ class TestAcceptInvitation:
         )
         assert members == 0
         assert inv.accepted_at is None
+        assert accepter.current_workspace_id is None
+
+    async def test_a_plan_without_team_invitations_refuses_the_accept(self, db_session):
+        """#2621: the invitation was issued on a plan with ``team_invitations``
+        and the workspace has since moved to one without it. The accept gets
+        the same refusal as creating an invitation (``FEAT-001``, 403), taken
+        right after the workspace row lock and before the accepter's ``users``
+        row is locked; nothing is written and the invitation stays pending."""
+        owner, ws, inv = await self._seed_pending(db_session)
+        accepter = await _make_user(db_session, email="invitee@example.com")
+        ws.plan_name = "free"
+        await db_session.flush()
+        svc = _service(db_session)
+        statements: list[str] = []
+
+        def _statement(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()))
+
+        engine = db_session.bind.sync_engine
+        event.listen(engine, "before_cursor_execute", _statement)
+        try:
+            with pytest.raises(FeatureNotAvailableError) as exc_info:
+                await svc.accept_invitation(
+                    token=inv.token, user_id=accepter.user_id, user_email="invitee@example.com"
+                )
+        finally:
+            event.remove(engine, "before_cursor_execute", _statement)
+
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.error_code == "FEAT-001"
+        assert exc_info.value.details["feature"] == "team_invitations"
+        assert not [s for s in statements if s.startswith("SELECT users.")]
+        members = await db_session.scalar(
+            select(func.count())
+            .select_from(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == ws.id)
+        )
+        assert members == 0
+        await db_session.refresh(inv)
+        assert inv.accepted_at is None
+        assert inv.accepted_by is None
         assert accepter.current_workspace_id is None
 
     async def test_workspace_row_is_locked_before_the_membership_is_written(self, db_session):
