@@ -192,9 +192,15 @@ def test_api_image_installs_only_the_locked_runtime_in_the_shipped_stage() -> No
     assert any("uv sync --locked" in line for line in instructions)
     for line in instructions:
         assert not _EXTRA_INSTALLS.search(line), line
-    # Nor does it take an environment that another stage installed.
-    copied = {m.group(1) for line in instructions if (m := re.match(r"COPY --from=(\S+)", line))}
-    assert "dev" not in copied
+    # Nor does it take an environment that another stage installed: `--from=`
+    # in any flag position of a COPY, or `from=` in a RUN mount.
+    taken = {
+        m.group(1).lower()
+        for line in instructions
+        if re.match(r"(COPY|RUN)\s", line, re.IGNORECASE)
+        for m in re.finditer(r"\bfrom=([^\s,]+)", line, re.IGNORECASE)
+    }
+    assert "dev" not in taken, taken
 
 
 def test_api_image_installs_no_compiler() -> None:
