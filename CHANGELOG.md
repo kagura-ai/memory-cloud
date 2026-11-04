@@ -4,6 +4,20 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.142.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.142.0) — 2026-11-04
+
+Supersede acceptance made consistent (the guardrail gate is reported before the click, the edge check reads the author's row only, every recall row carries `acceptance`), and a plan headroom notice on MCP writes and `bootstrap` before a quota locks the workspace.
+
+### Added
+- **Plan headroom notice on MCP writes and `bootstrap`** ([#2615](https://github.com/kagura-ai/memory-cloud/issues/2615)): the success envelope of `remember`, `remember_batch`, `update_memory` and `bootstrap` carries `plan_headroom` when a dimension — live memories against `memory_limit`, the day's memory creations, the day's MCP calls — is at 80 % (`warning`) or 95 % (`critical`) of its effective limit (add-on and referral bonuses included): one entry per dimension with `dimension`, `level`, `used`, `limit`, `percentage`, `resets_at` (daily caps), `plan`, `remedies` and a `help` sentence. Remedies: free capacity (total cap) or wait for the UTC reset (daily caps), plus `upgrade` when the deployment's plan page can upgrade and a higher tier raises that cap, else `admin`; the help names what starts failing at 100 %. A write shows a notice once per (workspace, dimension, level) per hour (Redis `SET NX`, fails open); `bootstrap` always carries it, in its own session and within a quarter of its budget. The numbers are the ones the write's quota checks already counted, so `remember` issues no extra SQL statement. The field is absent below the thresholds.
+- **`acceptance` on recall rows** ([#2508](https://github.com/kagura-ai/memory-cloud/issues/2508)): every `recall()` row (REST and MCP) that carries a `supersede_candidate` reports whether the caller may accept it, as `reference()` and the PATCH reply do, evaluated for the whole page in a bounded number of queries (write access and the guardrail probe once per context, one ownership query per context, one declared-edge query per page: 8 statements for k=1 and for k=100, about 10–21 ms at k=100). Absent where it is not evaluated (a share-key read, whose principal is the key's creator; a failed evaluation). `docs/mcp-tools.md` now records the direction asymmetry: `update_memory(accept_supersede_candidate=true)` refuses a candidate written after its carrier, while `create_edge`, `update_edge` and `POST /api/v1/graph/edges` apply no direction check — the caller owns the direction.
+
+### Fixed
+- **Guardrail gate reported in supersede acceptance** ([#2614](https://github.com/kagura-ai/memory-cloud/issues/2614)): a memory carrying `details.tool_trigger` needs context EDITOR or above and a user credential to be edited, and both accept transports (`update_memory`, `PATCH /api/v1/memory/{id}`) run that gate before the accept; `acceptance` now reports it as `not_writable`, so the web dialog disables the accept button instead of answering 403 on click. `edge_exists` reads only the carrier author's declared edge — both transports write the accept under that author since #2600 — so a linked caller's own different edge no longer disables an accept that goes through.
+
+### Notes
+- No migration, no new environment variables, no operator action. The headroom throttle uses the existing Redis; a self-hosted deployment without the billing handoff sees `admin` instead of `upgrade` in the remedies.
+
 ## [v0.141.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.141.0) — 2026-11-03
 
 Users-row lock order (four deadlocks around referral redemption, invitation accept, role changes and pending-grant apply), a re-key command for erasure pseudonyms after a salt rotation, the web supersede accept under the memory's author, and two storage follow-ups (LanceDB vectors, FIPS-mode Postgres).
