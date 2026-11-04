@@ -249,6 +249,7 @@ class TestContextCreateShared:
 
         created = SimpleNamespace(
             id=uuid.uuid4(),
+            workspace_id=_WS,
             name="ctx",
             display_name=None,
             description=None,
