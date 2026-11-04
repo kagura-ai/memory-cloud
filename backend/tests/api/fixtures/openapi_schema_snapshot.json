@@ -10813,6 +10813,13 @@
             },
             "type": "object"
           },
+          "delete_workspaces": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
           "workspace_transfers": {
             "additionalProperties": {
               "type": "string"

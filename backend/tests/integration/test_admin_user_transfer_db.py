@@ -452,6 +452,18 @@ async def test_a_running_subscription_refuses_the_delete_before_any_transfer(
     assert error.value.error_code == "BILLING-005"
     assert error.value.details["workspace_ids"] == [str(ws_id)]
     await db_session.rollback()
+
+    # #2640: naming it for deletion with the user is refused the same way,
+    # before the selection itself is checked.
+    with pytest.raises(BillingContractActiveError) as error:
+        await delete_user(
+            target,
+            {"user_id": "operator"},
+            db_session,
+            UserDeleteRequest(delete_workspaces=[ws_id]),
+        )
+    assert error.value.error_code == "BILLING-005"
+    await db_session.rollback()
     assert (
         await db_session.scalar(select(Workspace.owner_user_id).where(Workspace.id == ws_id))
         == target
