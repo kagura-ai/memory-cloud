@@ -12,7 +12,7 @@ A signed-in user can follow a feature link without having permission to use the 
 | Storage, API keys and custom OAuth apps | Retain existing per-object and per-action checks | Do not reveal another user's records |
 | Plan and workspace settings | Only the selected workspace owner can manage them | Billing must be enabled for an actionable upgrade link; workspace creation remains available separately |
 | External provider keys and workspace cost | Owner for keys, admin/owner for cost | Respect deployment flags. The owner can still manage existing external keys when provisioning is disabled |
-| System administration, including unlisted direct/detail routes | System admin, independent of workspace role | An upgrade does not confer system privileges |
+| System administration, including unlisted direct/detail routes | Only system admins see this section. Other users receive a generic denial on direct URLs | An upgrade does not confer system privileges |
 
 For mixed restrictions, use the tier matrix and the role of the current workspace. A billing-capable owner can compare plans; other roles should be directed to their workspace owner when a plan change would help. Pending checks, request errors and a disabled deployment are not plan restrictions. Keep explanations in the page and make them accessible to keyboard and touch users.
 

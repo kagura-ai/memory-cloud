@@ -67,6 +67,7 @@ describe("feature routes", () => {
       fixture.path = path; fixture.role = "owner";
       render(view());
       expect(screen.getByText(/system administrator/i)).toBeInTheDocument();
+      expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Access denied");
       expect(fixture.request).not.toHaveBeenCalled();
     },
   );
