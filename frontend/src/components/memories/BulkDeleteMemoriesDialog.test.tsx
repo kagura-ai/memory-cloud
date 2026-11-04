@@ -1,6 +1,6 @@
 /** Tests for delete-by-filter (#1941), with the real translator. */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -16,18 +16,26 @@ vi.mock("@/lib/api/memory", () => ({
   forgetBulk: (p: unknown) => forgetBulk(p),
 }));
 
-function renderDialog(onDeleted = vi.fn(), onPartial = vi.fn()) {
-  render(
+function dialogInContext(
+  contextId: string,
+  onDeleted = vi.fn(),
+  onPartial = vi.fn(),
+) {
+  return (
     <NextIntlClientProvider locale="en" messages={en}>
       <BulkDeleteMemoriesDialog
-        contextId="ctx-1"
+        contextId={contextId}
         open
         onOpenChange={vi.fn()}
         onDeleted={onDeleted}
         onPartial={onPartial}
       />
-    </NextIntlClientProvider>,
+    </NextIntlClientProvider>
   );
+}
+
+function renderDialog(onDeleted = vi.fn(), onPartial = vi.fn()) {
+  render(dialogInContext("ctx-1", onDeleted, onPartial));
   return onDeleted;
 }
 
@@ -101,6 +109,7 @@ describe("BulkDeleteMemoriesDialog", () => {
     expect(forgetBulk).toHaveBeenLastCalledWith({
       context_id: "ctx-1",
       type: "note",
+      created_before: expect.any(String),
       dry_run: true,
     });
 
@@ -137,6 +146,68 @@ describe("BulkDeleteMemoriesDialog", () => {
     expect(
       screen.getByRole("button", { name: "Count matches" }),
     ).toBeInTheDocument();
+  });
+
+  it("requires a fresh count when filters change during the preview", async () => {
+    let finishCount!: (response: { matched: number }) => void;
+    forgetBulk.mockImplementationOnce(
+      () => new Promise((resolve) => { finishCount = resolve; }),
+    );
+    renderDialog();
+    const type = screen.getByLabelText("Type");
+    fireEvent.change(type, { target: { value: "draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Count matches" }));
+    fireEvent.change(type, { target: { value: "decision" } });
+    await act(async () => {
+      finishCount({ matched: 1 });
+    });
+
+    expect(screen.queryByRole("button", { name: "Delete 1 memory" })).toBeNull();
+    expect(forgetBulk).toHaveBeenCalledTimes(1);
+    forgetBulk
+      .mockResolvedValueOnce({ matched: 3 })
+      .mockResolvedValueOnce({ deleted: 3 });
+    fireEvent.click(screen.getByRole("button", { name: "Count matches" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete 3 memories" }));
+    await waitFor(() => expect(forgetBulk).toHaveBeenCalledTimes(3));
+    expect(forgetBulk.mock.calls[1][0]).toMatchObject({
+      dry_run: true,
+      type: "decision",
+      context_id: "ctx-1",
+    });
+    expect(forgetBulk.mock.calls[2][0]).toEqual({
+      ...forgetBulk.mock.calls[1][0],
+      dry_run: false,
+    });
+  });
+
+  it("does not offer a pending preview from a previous context", async () => {
+    let finishCount!: (response: { matched: number }) => void;
+    forgetBulk.mockImplementationOnce(
+      () => new Promise((resolve) => { finishCount = resolve; }),
+    );
+    const { rerender } = render(dialogInContext("ctx-1"));
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Count matches" }));
+    rerender(dialogInContext("ctx-2"));
+    await act(async () => {
+      finishCount({ matched: 2 });
+    });
+    expect(screen.queryByRole("button", { name: "Delete 2 memories" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Count matches" })).toBeEnabled();
+    expect(forgetBulk).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a future start date as zero matches at the preview cutoff", async () => {
+    renderDialog();
+    fireEvent.change(screen.getByLabelText("Created from"), {
+      target: { value: "2999-01-01" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Count matches" }));
+    expect(
+      await screen.findByRole("button", { name: "Nothing to delete" }),
+    ).toBeDisabled();
+    expect(forgetBulk).not.toHaveBeenCalled();
   });
 
   it("cannot delete when nothing matches", async () => {
@@ -190,8 +261,10 @@ describe("BulkDeleteMemoriesDialog", () => {
     await waitFor(() => expect(onDeleted).toHaveBeenCalledWith(4500));
     expect(forgetBulk).toHaveBeenCalledTimes(4);
     expect(forgetBulk.mock.calls[1][0].cursor).toBeUndefined();
-    expect(forgetBulk.mock.calls[2][0]).toMatchObject({ cursor: "c1" });
-    expect(forgetBulk.mock.calls[3][0]).toMatchObject({ cursor: "c2" });
+    const target = { ...forgetBulk.mock.calls[0][0], dry_run: false };
+    expect(forgetBulk.mock.calls[1][0]).toEqual(target);
+    expect(forgetBulk.mock.calls[2][0]).toEqual({ ...target, cursor: "c1" });
+    expect(forgetBulk.mock.calls[3][0]).toEqual({ ...target, cursor: "c2" });
   });
 
   it("keeps the dialog and the error when a later batch fails", async () => {
@@ -224,6 +297,7 @@ describe("BulkDeleteMemoriesDialog", () => {
     // No success path: the parent refreshes quietly instead.
     expect(onDeleted).not.toHaveBeenCalled();
     expect(onPartial).toHaveBeenCalledWith(2000);
+    expect(screen.getByRole("button", { name: "Count matches" })).toBeEnabled();
     // The second request resumed at the first one's cursor.
     expect(forgetBulk.mock.calls[2][0]).toMatchObject({ cursor: "c1" });
   });
