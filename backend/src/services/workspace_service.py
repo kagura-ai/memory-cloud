@@ -28,6 +28,25 @@ logger = get_logger(__name__)
 ANONYMOUS_USER_ID = "anonymous"  # P2: Magic string constant for anonymous users
 
 
+def _warn_list_on_privileged_role(
+    workspace_id: UUID,
+    user_id: str,
+    role: WorkspaceRole | str,
+    allowed_context_ids: list[UUID] | None,
+) -> None:
+    """Log that a context access list given to an owner or admin has no effect.
+
+    The list is still stored (it is kept across role changes); owners and
+    admins reach every context whatever it says. Shared by ``add_member`` and
+    ``update_member_context_access`` (#2326).
+    """
+    if role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN) and allowed_context_ids is not None:
+        logger.warning(
+            f"allowed_context_ids set on privileged role (ignored): "
+            f"workspace={workspace_id}, user={user_id}, role={role}"
+        )
+
+
 class WorkspaceService:
     """Service for managing workspaces and memberships.
 
@@ -664,6 +683,7 @@ class WorkspaceService:
         user_id: str,
         role: WorkspaceRole | str = WorkspaceRole.MEMBER,
         invited_by: str | None = None,
+        allowed_context_ids: list[UUID] | None = None,
     ) -> WorkspaceMember:
         """Add a member to workspace.
 
@@ -672,6 +692,10 @@ class WorkspaceService:
             user_id: User ID to add
             role: Member role (owner/admin/member/viewer)
             invited_by: User ID who invited this member
+            allowed_context_ids: The context access list of the new row
+                (#2326), already validated by the caller: ``None`` = not set
+                (a member reaches no context, a viewer every shared one),
+                ``[]`` = no context, a list = exactly these contexts.
 
         Returns:
             Created membership
@@ -706,11 +730,14 @@ class WorkspaceService:
 
         await QuotaService(self.db).check_member_quota(workspace_id, raise_on_exceeded=True)
 
+        _warn_list_on_privileged_role(workspace_id, user_id, role, allowed_context_ids)
+
         # Create membership
         member = WorkspaceMember(
             workspace_id=workspace_id,
             user_id=user_id,
             role=role,
+            allowed_context_ids=allowed_context_ids,
             invited_by=invited_by,
             invited_at=func.now(),
             joined_at=func.now(),
@@ -936,15 +963,7 @@ class WorkspaceService:
             # call site that passes raise_if_not_found=False.
             raise NotFoundException("Member", f"{user_id} in workspace {workspace_id}")
 
-        # Warn if setting on owner/admin (no effect)
-        if (
-            member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN)
-            and allowed_context_ids is not None
-        ):
-            logger.warning(
-                f"allowed_context_ids set on privileged role (ignored): "
-                f"workspace={workspace_id}, user={user_id}, role={member.role}"
-            )
+        _warn_list_on_privileged_role(workspace_id, user_id, member.role, allowed_context_ids)
 
         member.allowed_context_ids = allowed_context_ids
         member.updated_at = func.now()

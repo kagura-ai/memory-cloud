@@ -92,6 +92,7 @@ export interface UpdateWorkspaceRequest {
 export interface AddMemberRequest {
   user_id: string;
   role: WorkspaceRole;
+  allowed_context_ids?: string[] | null; // #2326: omitted or null = not set
 }
 
 export interface UpdateMemberRoleRequest {
@@ -295,6 +296,40 @@ export async function updateMemberContextAccess(
     {
       allowed_context_ids: allowedContextIds,
     },
+  );
+}
+
+/** A context the context access dialog offers for one member (#2327). */
+export interface MemberContextAccessContext {
+  id: string;
+  name: string;
+  display_name: string | null;
+  summary: string | null;
+  is_private: boolean;
+  /** The member's own private context: assignable to them, to nobody else. */
+  is_own_private: boolean;
+}
+
+/** A member's context access list and the contexts it may hold (#2327). */
+export interface MemberContextAccess {
+  user_id: string;
+  role: string;
+  allowed_context_ids: string[] | null;
+  /** Every shared context of the workspace plus the member's own private ones. */
+  contexts: MemberContextAccessContext[];
+}
+
+/**
+ * The contexts the context access dialog offers for a member (#2327): the
+ * workspace's shared contexts and the member's own private ones, with the
+ * member's current list. Admin or owner only.
+ */
+export async function getMemberContextAccess(
+  workspaceId: string,
+  userId: string,
+): Promise<MemberContextAccess> {
+  return apiClient.get<MemberContextAccess>(
+    `/api/v1/workspaces/${workspaceId}/members/${userId}/context-access`,
   );
 }
 
