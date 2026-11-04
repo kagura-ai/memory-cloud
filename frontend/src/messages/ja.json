@@ -1065,7 +1065,7 @@
       "appearance": "表示",
       "deletion": "アカウント削除"
     },
-    "title": "設定",
+    "title": "アカウント設定",
     "subtitle": "ユーザープロフィール、環境設定、セキュリティ設定を管理します。",
     "profileInfo": "プロフィール情報",
     "profileInfoDesc": "基本的なプロフィール情報",
