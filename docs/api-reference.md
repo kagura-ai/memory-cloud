@@ -775,6 +775,75 @@ Soft-delete a context. The context row is marked deleted (sets `deleted_at`) so 
 
 ---
 
+## Workspace Member APIs
+
+A member's **context access list** (`allowed_context_ids`) decides which contexts a member or viewer reaches ([concepts](concepts.md#workspace)):
+
+| Role | Not set (`null`) | Empty (`[]`) | A list |
+|------|------------------|--------------|--------|
+| **Owner / Admin** | Every context (the list is ignored) | Every context | Every context |
+| **Member** | No context until one is assigned | No context | Exactly these contexts |
+| **Viewer** | Every shared context | No context | Exactly these contexts |
+
+A private context stays open only to its creator, whatever the list says, and the list is kept when the member's role changes. Every id in a list must be a live context of the workspace: an id of another workspace, a deleted context or an unknown id is `400` `Invalid context IDs: [...]`, and two spellings of one id are stored once.
+
+Both endpoints below accept a session admin or owner, or a **workspace-owner API key** (#1164, #2326; a key bound to another workspace gets `404`, an admin's key `403`, and a deployment can switch owner-key member management off). OAuth access tokens are refused with `403`. A change made with an API key is written to the audit log.
+
+### POST /api/v1/workspaces/{workspace_id}/members
+
+Add an existing user as a member. An API key cannot assign `owner` (`422`).
+
+**Request Body:**
+
+```json
+{
+  "user_id": "user-123",
+  "role": "member",
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+`allowed_context_ids` is optional: left out or `null`, the list is not set (the table above; a member then reaches no context until one is assigned). Unlike an invitation, which requires at least one context for a member or viewer, a direct add does not require a list.
+
+**Response:** `201 Created`
+
+```json
+{
+  "user_id": "user-123",
+  "role": "member",
+  "joined_at": "2026-11-04T10:00:00Z",
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+---
+
+### PUT /api/v1/workspaces/{workspace_id}/members/{user_id}/context-access
+
+Replace a member's context access list.
+
+**Request Body:**
+
+```json
+{
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+`null` clears the list (not set), `[]` gives no context.
+
+**Response:**
+
+```json
+{
+  "status": "ok",
+  "user_id": "user-123",
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
+```
+
+---
+
 ## Agent Control Plane APIs (v0.49.0 preview)
 
 Agents are workspace-scoped registry resources, not principals. Registry and binding mutations require workspace `Owner` or `Admin`. Agent-bound member keys keep their existing RBAC ceiling; bindings are purely subtractive.
