@@ -1,15 +1,22 @@
-"""Tests for utils.datetime — to_utc_iso, utcnow, parse_iso8601_to_aware, to_naive_utc.
+"""Tests for utils.datetime — to_utc_iso, utcnow, parse_iso8601_to_aware, to_naive_utc,
+next_utc_midnight_iso.
 
 Issue #489: serialization helpers must produce JS-parseable Z-suffixed ISO 8601
 strings regardless of input shape (None, naive, tz-aware, double-Z avoidance).
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from utils.datetime import parse_iso8601_to_aware, to_naive_utc, to_utc_iso, utcnow
+from utils.datetime import (
+    next_utc_midnight_iso,
+    parse_iso8601_to_aware,
+    to_naive_utc,
+    to_utc_iso,
+    utcnow,
+)
 
 
 class TestToUtcIso:
@@ -88,3 +95,14 @@ class TestToNaiveUtc:
         result = to_naive_utc(dt)
         assert result.tzinfo is None
         assert result == datetime(2026, 4, 28, 8, 50, 22)
+
+
+class TestNextUtcMidnightIso:
+    """``resets_at`` of the daily counters (#2615; moved from quota_service)."""
+
+    def test_is_the_next_day_at_midnight_with_z(self):
+        assert next_utc_midnight_iso(date(2026, 11, 4)) == "2026-11-05T00:00:00Z"
+
+    def test_crosses_month_and_year_ends(self):
+        assert next_utc_midnight_iso(date(2026, 2, 28)) == "2026-03-01T00:00:00Z"
+        assert next_utc_midnight_iso(date(2026, 12, 31)) == "2027-01-01T00:00:00Z"

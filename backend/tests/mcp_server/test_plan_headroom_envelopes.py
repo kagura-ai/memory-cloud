@@ -659,6 +659,57 @@ async def test_an_exempt_tool_gets_no_mcp_count(dispatched):
     assert dispatched["bootstrap"] is None
 
 
+@pytest.mark.asyncio
+async def test_two_calls_in_flight_never_share_a_collector(monkeypatch):
+    """The collector is per call: each concurrent call reads only its own readings.
+
+    Both handlers record, then wait until the other has recorded too, then read.
+    """
+    import asyncio
+
+    ws_a, ws_b = uuid4(), uuid4()
+    both_recorded = asyncio.Event()
+    recorded: list[object] = []
+    seen: dict[object, dict] = {}
+
+    async def handler(_args, _user_id, workspace_id):
+        used = 8 if workspace_id == ws_a else 9
+        record_quota_reading(MEMORIES, QuotaReading(workspace_id, used, 10, "free"))
+        recorded.append(workspace_id)
+        if len(recorded) == 2:
+            both_recorded.set()
+        await both_recorded.wait()
+        counts = current_plan_headroom_counts()
+        assert counts is not None
+        seen[workspace_id] = {k: (r.workspace_id, r.used) for k, r in counts.readings.items()}
+        return [tools_mod.TextContent(type="text", text='{"status":"success"}')]
+
+    async def no_lock(_tool_name, _args, _workspace_id):
+        return None
+
+    async def rate_limit(workspace_id):
+        return True, (10 if workspace_id == ws_a else 20), 100
+
+    monkeypatch.setattr(capacity_gate, "capacity_lock_refusal", no_lock)
+    monkeypatch.setattr(
+        tools_mod, "_TOOL_REGISTRY", {d["name"]: handler for d in get_tool_definitions()}
+    )
+    args = {"summary": "a summary long enough", "content": "c", "type": "note"}
+    with patch.object(tools_mod, "_check_rate_limit", new=AsyncMock(side_effect=rate_limit)):
+        await asyncio.wait_for(
+            asyncio.gather(
+                execute_tool_call("remember", {**args, "context_id": str(uuid4())}, "u-a", ws_a),
+                execute_tool_call("remember", {**args, "context_id": str(uuid4())}, "u-b", ws_b),
+            ),
+            timeout=5,
+        )
+    assert seen == {
+        ws_a: {MCP_CALLS_PER_DAY: (ws_a, 11), MEMORIES: (ws_a, 8)},
+        ws_b: {MCP_CALLS_PER_DAY: (ws_b, 21), MEMORIES: (ws_b, 9)},
+    }
+    assert current_plan_headroom_counts() is None
+
+
 # --------------------------------------------------------------------- docs
 
 
