@@ -139,6 +139,30 @@ def envelope_budget(max_chars: int, reply_format: str, context_fields: dict[str,
     return max_chars - json_chars(context_fields)
 
 
+# #2615: the plan headroom notice takes at most this share of bootstrap's budget.
+_HEADROOM_SHARE = 4
+
+
+def fit_headroom(headroom: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Hold the ``plan_headroom`` field to a quarter of ``max_chars``.
+
+    Past it (three entries against the 2,000 floor), ``help`` stays on the
+    most severe entry only (the first ``critical``, else the first); past it
+    still, that entry alone stays. The lanes keep the rest of the budget.
+    """
+    cap = max_chars // _HEADROOM_SHARE
+    if not headroom or json_chars(headroom) <= cap:
+        return headroom
+    notices = headroom["plan_headroom"]
+    lead = next((n for n in notices if n["level"] == "critical"), notices[0])
+    trimmed = {
+        "plan_headroom": [
+            n if n is lead else {k: v for k, v in n.items() if k != "help"} for n in notices
+        ]
+    }
+    return trimmed if json_chars(trimmed) <= cap else {"plan_headroom": [lead]}
+
+
 _FULL_TOO_SMALL_HELP = (
     'format="index" returns one short row per memory (an 80-character summary head, '
     "summary_cut when cut; pinned keeps its text) and no instructions; read a row "
@@ -180,9 +204,16 @@ async def handle_bootstrap(
             # Read before any lane runs: the guardrails read and the lanes roll
             # the session back when they fail, which expires this instance.
             context_fields = _context_response_fields(context)
-            # #2615: a session start always carries the notice (no throttle);
-            # its room comes off the budget like the context fields'.
-            headroom = await _plan_headroom_field(db, context, workspace_id, throttle=False)
+            # #2615: a session start always carries the notice (no throttle).
+            # Its reads run in a session of their own, so a failed one cannot
+            # abort the transaction the lanes read in; its room comes off the
+            # budget like the context fields'.
+            headroom: dict[str, Any] = {}
+            async for headroom_db in get_db():
+                headroom = await _plan_headroom_field(
+                    headroom_db, context, workspace_id, throttle=False
+                )
+            headroom = fit_headroom(headroom, max_chars)
             budget = envelope_budget(max_chars, reply_format, context_fields)
             if headroom:
                 budget -= json_chars(headroom)

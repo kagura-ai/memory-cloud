@@ -373,17 +373,25 @@ async def _plan_headroom_field(
     Returns:
         ``{"plan_headroom": [...]}``, or ``{}`` when no dimension is at 80 %
         — absent, never ``[]`` or ``null``. The notice is advisory: a failed
-        read is logged and leaves the field out, it never fails the call.
+        read, or one slower than ``READ_TIMEOUT_SECONDS``, is logged and
+        leaves the field out; it never fails the call.
     """
-    from services.plan_headroom import current_plan_headroom_counts, plan_headroom
+    from services.plan_headroom import (
+        READ_TIMEOUT_SECONDS,
+        current_plan_headroom_counts,
+        plan_headroom,
+    )
 
     try:
-        notices = await plan_headroom(
-            db,
-            workspace_id=context.workspace_id,
-            session_workspace_id=session_workspace_id,
-            counts=current_plan_headroom_counts(),
-            throttle=throttle,
+        notices = await asyncio.wait_for(
+            plan_headroom(
+                db,
+                workspace_id=context.workspace_id,
+                session_workspace_id=session_workspace_id,
+                counts=current_plan_headroom_counts(),
+                throttle=throttle,
+            ),
+            timeout=READ_TIMEOUT_SECONDS,
         )
     except Exception:
         logger.warning("plan_headroom_failed", exc_info=True)

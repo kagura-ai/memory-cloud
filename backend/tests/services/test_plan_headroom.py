@@ -162,6 +162,46 @@ def test_help_is_short_names_the_failing_call_and_has_no_url(plan):
     assert "forget" in memories["help"]
 
 
+@pytest.mark.parametrize("plan", [*PLAN_ORDER])
+def test_without_billing_the_administrator_is_named_instead_of_upgrade(plan):
+    """No billing handoff: the plan page cannot upgrade; PLAN_<KEY>_* is the admin's."""
+    readings = {
+        MEMORIES: _reading(9, 10, plan=plan),
+        MEMORIES_PER_DAY: _reading(9, 10, plan=plan, resets_at=RESETS_AT),
+        MCP_CALLS_PER_DAY: _reading(10, 10, plan=plan, resets_at=RESETS_AT),
+    }
+    notices = headroom_notices(readings, billing=False)
+    assert [n["remedies"] for n in notices] == [
+        ["cleanup", "admin"],
+        ["wait", "admin"],
+        ["wait", "admin"],
+    ]
+    for notice in notices:
+        assert "administrator" in notice["help"]
+        assert "upgrade" not in notice["help"].lower()
+        assert len(notice["help"]) <= 300 and "http" not in notice["help"]
+
+
+async def test_plan_headroom_reads_the_billing_switch(first_this_hour):
+    counts = _counts(**{MEMORIES: _reading(8, 10, plan="free")})
+    with patch.object(ph, "billing_configured", return_value=False):
+        (notice,) = await plan_headroom(MagicMock(), workspace_id=None, counts=counts)
+    assert notice["remedies"] == ["cleanup", "admin"]
+    with patch.object(ph, "billing_configured", return_value=True):
+        first_this_hour.return_value = True
+        (notice,) = await plan_headroom(MagicMock(), workspace_id=None, counts=counts)
+    assert notice["remedies"] == ["cleanup", "upgrade"]
+
+
+def test_billing_configured_is_the_plan_pages_switch():
+    signer = MagicMock(is_configured=True)
+    with patch("auth.billing_handoff.BillingHandoffSigner", return_value=signer):
+        assert ph.billing_configured() is True
+    signer.is_configured = False
+    with patch("auth.billing_handoff.BillingHandoffSigner", return_value=signer):
+        assert ph.billing_configured() is False
+
+
 def test_upgrade_help_names_the_relative_plan_page():
     (notice,) = headroom_notices({MEMORIES: _reading(9, 10, plan="free")})
     assert "Workspace settings → Plan" in notice["help"]

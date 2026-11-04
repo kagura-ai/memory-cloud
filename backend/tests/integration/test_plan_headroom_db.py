@@ -108,6 +108,8 @@ async def world(async_engine: AsyncEngine, monkeypatch) -> AsyncIterator[World]:
         with (
             patch("db.base.get_db", new=_get_db),
             patch("services.memory_service.process_pending_embedding", new=AsyncMock()),
+            # A deployment whose plan page can upgrade: the remedies name "upgrade".
+            patch("services.plan_headroom.billing_configured", return_value=True),
             patch("db.qdrant.update_memory_payload_in_qdrant", AsyncMock()),
             patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
             patch("services.plan_seats.ensure_member_seated", AsyncMock()),

@@ -30,6 +30,7 @@ the notice). A Redis failure fails open: the notice is shown.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -60,15 +61,21 @@ CRITICAL = "critical"
 WARNING_PERCENT = 80
 CRITICAL_PERCENT = 95
 THROTTLE_TTL_SECONDS = 3600
+# The notice is advisory: its reads and throttle round trips give up after
+# this long and leave the field out (``_plan_headroom_field``).
+READ_TIMEOUT_SECONDS = 2.0
 
 # Remedies, in the order the help text names them. Deleting memories frees
 # the total cap only: the day counters count creations and calls, which a
-# forget does not give back, so their remedy is the reset. Add-ons are not on
-# sale; when they are, an "addon" remedy joins here behind a plan-feature or
-# settings switch.
+# forget does not give back, so their remedy is the reset. ``upgrade`` needs
+# a tier above the plan and a deployment whose plan page can upgrade (the
+# billing handoff is configured); without billing the administrator raises
+# the tier's limit (``admin``). Add-ons are not on sale; when they are, an
+# "addon" remedy joins here behind a plan-feature or settings switch.
 _CLEANUP = "cleanup"
 _WAIT = "wait"
 _UPGRADE = "upgrade"
+_ADMIN = "admin"
 _REMEDY_TEXT = {
     _CLEANUP: (
         "free capacity: forget memories the user no longer needs (memory_ids takes up to 50) "
@@ -78,6 +85,7 @@ _REMEDY_TEXT = {
     _UPGRADE: (
         "upgrade the plan from the workspace plan page in the web UI (Workspace settings → Plan)"
     ),
+    _ADMIN: "ask the deployment's administrator to raise the plan's limit",
 }
 # What starts failing at 100 %.
 _AT_LIMIT = {
@@ -214,11 +222,24 @@ def _level(reading: QuotaReading) -> str | None:
     return None
 
 
-def _remedies(dimension: str, plan: str | None) -> list[str]:
+def _remedies(dimension: str, plan: str | None, *, billing: bool) -> list[str]:
     remedies = [_CLEANUP if dimension == MEMORIES else _WAIT]
-    if plan_rank(plan) < len(PLAN_ORDER) - 1:
+    if not billing:
+        remedies.append(_ADMIN)
+    elif plan_rank(plan) < len(PLAN_ORDER) - 1:
         remedies.append(_UPGRADE)
     return remedies
+
+
+def billing_configured() -> bool:
+    """Whether the plan page can upgrade: the billing handoff it uses is configured.
+
+    The same switch the page's upgrade action reads (``BillingHandoffSigner``);
+    a deployment without it changes a plan's limits through ``PLAN_<KEY>_*``.
+    """
+    from auth.billing_handoff import BillingHandoffSigner
+
+    return BillingHandoffSigner().is_configured
 
 
 def _help(dimension: str, remedies: list[str], resets_at: str | None) -> str:
@@ -227,11 +248,11 @@ def _help(dimension: str, remedies: list[str], resets_at: str | None) -> str:
     return f"{text[0].upper()}{text[1:]}. {_AT_LIMIT[dimension]}"
 
 
-def _notice(dimension: str, reading: QuotaReading) -> dict[str, Any] | None:
+def _notice(dimension: str, reading: QuotaReading, *, billing: bool) -> dict[str, Any] | None:
     level = _level(reading)
     if level is None:
         return None
-    remedies = _remedies(dimension, reading.plan)
+    remedies = _remedies(dimension, reading.plan, billing=billing)
     return {
         "dimension": dimension,
         "level": level,
@@ -245,16 +266,23 @@ def _notice(dimension: str, reading: QuotaReading) -> dict[str, Any] | None:
     }
 
 
-def headroom_notices(readings: Mapping[str, QuotaReading]) -> list[dict[str, Any]]:
+def headroom_notices(
+    readings: Mapping[str, QuotaReading], *, billing: bool = True
+) -> list[dict[str, Any]]:
     """The entries for the dimensions at or above 80 %, in wire order.
 
     Pure over the numbers. Each entry is ``{dimension, level, used, limit,
     percentage, resets_at?, plan, remedies, help}``.
+
+    Args:
+        readings: One reading per dimension.
+        billing: Whether the deployment's plan page can upgrade
+            (``billing_configured``); False names the administrator instead.
     """
     notices = []
     for dimension in DIMENSIONS:
         reading = readings.get(dimension)
-        notice = _notice(dimension, reading) if reading is not None else None
+        notice = _notice(dimension, reading, billing=billing) if reading is not None else None
         if notice is not None:
             notices.append(notice)
     return notices
@@ -371,15 +399,13 @@ async def plan_headroom(
         turns that into an absent field.
     """
     readings = await _complete_readings(db, workspace_id, session_workspace_id, counts)
-    notices = []
-    for dimension in DIMENSIONS:
-        reading = readings.get(dimension)
-        notice = _notice(dimension, reading) if reading is not None else None
-        if notice is None:
-            continue
-        if throttle and not await _first_this_hour(
-            reading.workspace_id, dimension, notice["level"]
-        ):
-            continue
-        notices.append(notice)
-    return notices
+    notices = headroom_notices(readings, billing=billing_configured())
+    if not throttle or not notices:
+        return notices
+    first = await asyncio.gather(
+        *(
+            _first_this_hour(readings[n["dimension"]].workspace_id, n["dimension"], n["level"])
+            for n in notices
+        )
+    )
+    return [notice for notice, shown in zip(notices, first, strict=True) if shown]

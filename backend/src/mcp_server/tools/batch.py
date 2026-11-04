@@ -58,6 +58,7 @@ from services.memory_service import (
     DuplicateCandidateError,
 )
 from services.permission_service import VIEWER_READ_ONLY_REASON
+from services.plan_headroom import MEMORIES, drop_quota_reading
 from utils.exceptions import (
     AuthorizationError,
     ContentSizeExceededError,
@@ -430,6 +431,8 @@ async def handle_remember_batch(
                     except Exception as exc:  # per item: the batch goes on
                         await db.rollback()
                         rolled_back = True
+                        # #2615: its quota check recorded a row that was rolled back.
+                        drop_quota_reading(MEMORIES)
                         results.append(_finish(i, item_error(exc)))
                     else:
                         results.append(

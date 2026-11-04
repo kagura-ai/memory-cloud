@@ -83,6 +83,13 @@ def first_this_hour():
         yield m
 
 
+@pytest.fixture(autouse=True)
+def billing():
+    """A deployment whose plan page can upgrade (the remedies name ``upgrade``)."""
+    with patch.object(ph, "billing_configured", return_value=True):
+        yield
+
+
 @contextlib.contextmanager
 def _handlers(service, *, module="mcp_server.tools.memory", db=None):
     db = db if db is not None else AsyncMock()
@@ -296,6 +303,28 @@ async def test_an_external_id_replacement_counts_again(first_this_hour):
     live.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_a_slow_read_leaves_the_field_out(first_this_hour):
+    import asyncio
+
+    async def slow(*_a, **_k):
+        await asyncio.sleep(1)
+
+    service = MagicMock()
+    service.update_memory = AsyncMock(return_value=_update_result())
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=slow)
+    with _handlers(service, db=db), patch.object(ph, "READ_TIMEOUT_SECONDS", 0.01):
+        (block,) = await handle_update_memory(
+            {"memory_id": str(uuid4()), "summary": "edited summary", "context_id": str(uuid4())},
+            user_id="u1",
+            workspace_id=None,
+        )
+    payload = json.loads(block.text)
+    assert payload["status"] == "success"
+    assert "plan_headroom" not in payload
+
+
 # ------------------------------------------------------------ remember_batch
 
 
@@ -326,6 +355,44 @@ async def test_remember_batch_carries_one_notice_set_for_the_call(first_this_hou
     assert (notice["used"], notice["level"]) == (9, "warning")
     assert all("plan_headroom" not in item for item in payload["results"])
     first_this_hour.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_last_item_failing_after_its_quota_check_is_recounted(first_this_hour):
+    """Item 1 recorded count + 1, then failed and was rolled back: count again."""
+    from utils.exceptions import ContentSizeExceededError
+
+    calls = iter(["ok", "fail"])
+
+    async def remember(*_a, **_k):
+        if next(calls) == "ok":
+            _record(8)
+            return _remember_result()
+        _record(9)
+        raise ContentSizeExceededError(actual=2_000_000, limit=1_000_000)
+
+    service = MagicMock()
+    service.remember = AsyncMock(side_effect=remember)
+    db = AsyncMock()
+    db.get = AsyncMock(
+        return_value=SimpleNamespace(
+            plan_name="free",
+            effective_memory_limit=10,
+            effective_memories_per_day=50,
+            effective_mcp_calls_per_day=1000,
+        )
+    )
+    live = AsyncMock(return_value=8)
+    with (
+        _handlers(service, module="mcp_server.tools.batch", db=db),
+        patch.object(ph, "count_live_memories", new=live),
+    ):
+        (block,) = await handle_remember_batch(_batch_args(2), "u1", None)
+    payload = json.loads(block.text)
+    assert payload["status"] == "partial"
+    (notice,) = payload["plan_headroom"]
+    assert (notice["used"], notice["level"]) == (8, "warning")
+    live.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -364,7 +431,7 @@ async def test_a_batch_that_wrote_nothing_has_no_notice(first_this_hour):
 # ----------------------------------------------------------------- bootstrap
 
 
-async def _bootstrap(args, *, used=8):
+async def _bootstrap(args, *, used=8, keep_counts=False):
     from mcp_server.tools import bootstrap as module
 
     db = AsyncMock()
@@ -399,18 +466,19 @@ async def _bootstrap(args, *, used=8):
         stack.enter_context(
             patch.object(ph, "count_live_memories", new=AsyncMock(return_value=used))
         )
-        stack.enter_context(
-            patch(
-                "services.quota_service.QuotaService.count_memories_created_today",
-                new=AsyncMock(return_value=0),
+        if not keep_counts:
+            stack.enter_context(
+                patch(
+                    "services.quota_service.QuotaService.count_memories_created_today",
+                    new=AsyncMock(return_value=0),
+                )
             )
-        )
-        stack.enter_context(
-            patch(
-                "services.quota_service.QuotaService.count_mcp_calls_today",
-                new=AsyncMock(return_value=0),
+            stack.enter_context(
+                patch(
+                    "services.quota_service.QuotaService.count_mcp_calls_today",
+                    new=AsyncMock(return_value=0),
+                )
             )
-        )
         stack.enter_context(collect_plan_headroom_counts())
         (block,) = await module.handle_bootstrap({"context_id": str(uuid4()), **args}, "user-1", WS)
     return service.build.await_args.kwargs, json.loads(block.text)
@@ -432,6 +500,95 @@ async def test_bootstrap_holds_max_chars_with_the_notice(first_this_hour):
     field = {"plan_headroom": reply["plan_headroom"]}
     assert kwargs["format"] == "index"
     assert kwargs["max_chars"] == 3_000 - json_chars({}) - json_chars(field)
+
+
+def test_fit_headroom_holds_a_quarter_of_the_budget():
+    from mcp_server.tools.bootstrap import fit_headroom
+
+    def entry(dimension, level):
+        return {
+            "dimension": dimension,
+            "level": level,
+            "used": 9,
+            "limit": 10,
+            "percentage": 90.0,
+            "plan": "free",
+            "remedies": ["wait", "upgrade"],
+            "help": "x" * 250,
+        }
+
+    three = {
+        "plan_headroom": [
+            entry("memories", "warning"),
+            entry("memories_per_day", "critical"),
+            entry("mcp_calls_per_day", "warning"),
+        ]
+    }
+    assert fit_headroom({}, 2_000) == {}
+    assert fit_headroom(three, 20_000) is three
+    trimmed = fit_headroom(three, 4_000)  # 1,000: help stays on the critical entry
+    assert [("help" in n) for n in trimmed["plan_headroom"]] == [False, True, False]
+    assert json_chars(trimmed) <= 1_000
+    lead_only = fit_headroom(three, 2_000)  # 500: the critical entry alone
+    assert [n["dimension"] for n in lead_only["plan_headroom"]] == ["memories_per_day"]
+    assert "help" in lead_only["plan_headroom"][0]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_at_the_floor_keeps_room_for_the_lanes(first_this_hour):
+    """Three dimensions at 80 %+ against max_chars 2,000: one entry, the rest for the lanes."""
+    with (
+        patch(
+            "services.quota_service.QuotaService.count_memories_created_today",
+            new=AsyncMock(return_value=45),
+        ),
+        patch(
+            "services.quota_service.QuotaService.count_mcp_calls_today",
+            new=AsyncMock(return_value=990),
+        ),
+    ):
+        kwargs, reply = await _bootstrap({"max_chars": 2_000}, keep_counts=True)
+    assert [n["dimension"] for n in reply["plan_headroom"]] == ["mcp_calls_per_day"]
+    assert json_chars({"plan_headroom": reply["plan_headroom"]}) <= 500
+    assert kwargs["max_chars"] >= 2_000 - json_chars({}) - 500
+
+
+@pytest.mark.asyncio
+async def test_a_failed_bootstrap_read_leaves_the_lanes_session_alone(first_this_hour):
+    """The notice reads in a session of its own: the lanes' transaction is untouched."""
+    from mcp_server.tools import bootstrap as module
+
+    main, side = AsyncMock(), AsyncMock()
+    side.get = AsyncMock(side_effect=RuntimeError("statement timeout"))
+    sessions = iter([main, side])
+
+    async def gen():
+        yield next(sessions)
+
+    service = MagicMock()
+    service.build = AsyncMock(return_value={"status": "success"})
+    with ExitStack() as stack:
+        stack.enter_context(patch("db.base.get_db", new=gen))
+        stack.enter_context(
+            patch.object(
+                module, "_resolve_context_for_read", new=AsyncMock(return_value=_context())
+            )
+        )
+        stack.enter_context(patch.object(module, "_log_tool_usage", new=AsyncMock()))
+        stack.enter_context(patch.object(module, "_context_response_fields", return_value={}))
+        stack.enter_context(
+            patch(
+                "services.session_bootstrap_service.SessionBootstrapService", return_value=service
+            )
+        )
+        stack.enter_context(collect_plan_headroom_counts())
+        (block,) = await module.handle_bootstrap({"context_id": str(uuid4())}, "user-1", WS)
+    reply = json.loads(block.text)
+    assert reply["status"] == "success" and "plan_headroom" not in reply
+    main.get.assert_not_awaited()
+    main.execute.assert_not_awaited()
+    main.rollback.assert_not_awaited()
+    service.build.assert_awaited_once()
 
 
 @pytest.mark.asyncio
