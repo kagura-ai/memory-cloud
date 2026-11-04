@@ -1752,6 +1752,45 @@
     "languageDescription": "Select your preferred language",
     "saved": "Settings saved"
   },
+  "integrationEntry": {
+    "title": "Integrations",
+    "intro": "What would you like to connect or bring into KMC?",
+    "workspace": "Selected workspace: {name}",
+    "start": "Get connected",
+    "manage": "Manage apps and credentials",
+    "back": "Choose an integration by task",
+    "entry": "Integrations – choose by task",
+    "tasks": {
+      "client": {
+        "title": "Connect Claude or another AI client",
+        "description": "Copy the MCP URL into your client and sign in when prompted. Supported clients register automatically."
+      },
+      "script": {
+        "title": "Call KMC from a script",
+        "description": "Create a KMC API key to send requests from your code. It authenticates your script to KMC."
+      },
+      "import": {
+        "title": "Bring in external data",
+        "description": "Inspect existing sources in the owner’s Resources console. To add a source, an eligible owner or admin enables All tools on the MCP connection, reconnects, and calls setup_resource to create a public context. An external writer uses its scoped token with the ingestion API. In MCP, send records with ingest_events using your signed-in session."
+      },
+      "ownApp": {
+        "title": "Build my own OAuth client",
+        "description": "Register a custom app and its redirect URL if you are developing the client yourself. Keep its client secret with that app."
+      },
+      "connected": {
+        "title": "Review apps I have authorized",
+        "description": "See apps connected to your account and choose their default context. To revoke a token, use the connected client’s revocation flow. Clearing a default context only changes where requests go."
+      },
+      "provider": {
+        "title": "Use my provider’s API key",
+        "description": "Workspace owners can manage keys for an external AI provider. These keys pay for provider calls. Availability depends on this deployment."
+      },
+      "secrets": {
+        "title": "Review or revoke access to a secret",
+        "description": "Workspace owners and admins can inspect recipient grants and revoke access here. Use the CLI or SDK to grant new access."
+      }
+    }
+  },
   "credentials": {
     "title": "Credentials & Integrations",
     "description": "Manage authentication methods for connecting clients to your workspace",

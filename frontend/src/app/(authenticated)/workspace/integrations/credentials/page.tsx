@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -22,19 +23,22 @@ const CREDENTIAL_TABS = ["api-keys", "oauth-apps"] as const;
 
 export default function CredentialsPage() {
   const t = useTranslations("credentials");
+  const entry = useTranslations("integrationEntry");
   const [tab, setTab] = useTabParam("api-keys", "tab", CREDENTIAL_TABS);
 
   return (
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
 
+      <Link href="/workspace/integrations" className="inline-block py-2 text-sm text-primary underline">{entry("back")}</Link>
       <FeatureGuide storageKey="credentials" title={t("featureGuide.title")}>
         <p>{t("featureGuide.overview")}</p>
         <p>{t("featureGuide.choosingMethod")}</p>
       </FeatureGuide>
 
-      <McpConnectionCard />
+      <div id="mcp-connection" tabIndex={-1}><McpConnectionCard /></div>
 
+      <div id="credential-tools" tabIndex={-1}>
       <CategoryTabs value={tab} onValueChange={setTab}>
         <CategoryTabsList>
           <CategoryTabsTrigger value={CREDENTIAL_TABS[0]}>
@@ -59,11 +63,12 @@ export default function CredentialsPage() {
           <OAuthAppsTabPanel />
         </CategoryTabsContent>
       </CategoryTabs>
+      </div>
 
       {/* #2129: the OAuth apps the user authorized, with each app's MCP
           default context. Per user, not a credential kind, so it sits
           below the tabs rather than in one. */}
-      <ConnectedAppsSection />
+      <div id="connected-apps" tabIndex={-1}><ConnectedAppsSection /></div>
     </PageContainer>
   );
 }

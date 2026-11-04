@@ -337,6 +337,7 @@ export function Sidebar() {
   const [canEmbed, setCanEmbed] = useState<boolean | null>(null);
   const t = useTranslations("sidebar");
   const tNav = useTranslations("navigation");
+  const integration = useTranslations("integrationEntry");
   const tInvite = useTranslations("betaInvites");
 
   const [collapsedSections, setCollapsedSections] = useState<
@@ -751,7 +752,11 @@ export function Sidebar() {
                       "uppercase tracking-wider",
                     )}
                   >
-                    {groupTitle}
+                    {group.titleKey === "integrations" ? (
+                      <Link href="/workspace/integrations" aria-label={integration("entry")}
+                        className="inline-flex min-h-11 items-center gap-1 underline underline-offset-4"
+                        onClick={() => setIsOpen(false)}>{groupTitle}<span aria-hidden="true">→</span></Link>
+                    ) : groupTitle}
                   </h3>
                 ) : null}
                 <div
