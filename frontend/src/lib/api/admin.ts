@@ -17,34 +17,183 @@ export function adminUserPath(userId: string): string {
   return `/admin/users/${encodeURIComponent(userId)}`;
 }
 
+/** A member of a workspace in the successor picker (the user being deleted left out). */
+export interface TransferMember {
+  user_id: string;
+  name: string | null;
+  email: string | null;
+  role: string;
+}
+
+/** A workspace the picker lists: one the user owns, or one holding a listed context. */
+export interface TransferWorkspace {
+  id: string;
+  name: string;
+  owner_user_id: string;
+  members: TransferMember[];
+}
+
 /**
- * Why `DELETE /api/v1/admin/users/{user_id}` failed, for the users screen's
- * toast (#2417). Since #2372 the route answers 409 with the owned workspaces
- * and shared contexts that still need a successor (`details.detail`); other
- * refusals, such as a running subscription (`BILLING-005`) or admin
- * protection, carry their reason in `message`.
+ * A context the user created that needs a successor. `candidate_user_ids` are
+ * the members an explicit pick may name; the successor picked for its
+ * workspace (where the user owns it) is accepted too.
+ */
+export interface TransferContext {
+  id: string;
+  name: string;
+  display_name: string | null;
+  workspace_id: string;
+  is_private: boolean;
+  candidate_user_ids: string[];
+}
+
+/**
+ * A connector's write target: it goes to the workspace's owner and takes no
+ * selection. `successor_user_id` is that owner, or `null` when it is the
+ * successor picked for a workspace the user owns.
+ */
+export interface OwnerFixedContext {
+  id: string;
+  name: string;
+  display_name: string | null;
+  workspace_id: string;
+  successor_user_id: string | null;
+}
+
+/** What the successor picker shows, from the 409 (#2420). */
+export interface TransferPicker {
+  workspaceIds: string[];
+  contextIds: string[];
+  workspaces: TransferWorkspace[];
+  contexts: TransferContext[];
+  ownerFixedContexts: OwnerFixedContext[];
+}
+
+/**
+ * Why `DELETE /api/v1/admin/users/{user_id}` failed (#2417). Since #2372 the
+ * route answers 409 with the owned workspaces and shared contexts that still
+ * need a successor (`details.detail`); since #2420 that 409 also carries the
+ * successor picker (`picker`, absent from an older API, which leaves the
+ * counts). Other refusals, such as a running subscription (`BILLING-005`) or
+ * admin protection, carry their reason in `message`.
  */
 export type UserDeleteFailure =
-  | { kind: "transfer_required"; workspaces: number; contexts: number }
+  | {
+      kind: "transfer_required";
+      workspaces: number;
+      contexts: number;
+      picker?: TransferPicker;
+    }
   | { kind: "message"; message: string }
   | { kind: "unknown" };
+
+type Json = Record<string, unknown>;
+
+function isObject(value: unknown): value is Json {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function str(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((v): v is string => typeof v === "string")
+    : [];
+}
+
+/** The entries of `value` that `parse` accepts; a malformed one is dropped. */
+function entries<T>(value: unknown, parse: (entry: Json) => T | null): T[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const parsed = isObject(entry) ? parse(entry) : null;
+    return parsed === null ? [] : [parsed];
+  });
+}
+
+function parseMember(m: Json): TransferMember | null {
+  const userId = str(m.user_id);
+  return userId === null
+    ? null
+    : {
+        user_id: userId,
+        name: str(m.name),
+        email: str(m.email),
+        role: str(m.role) ?? "",
+      };
+}
+
+function parseWorkspace(w: Json): TransferWorkspace | null {
+  const id = str(w.id);
+  return id === null
+    ? null
+    : {
+        id,
+        name: str(w.name) ?? id,
+        owner_user_id: str(w.owner_user_id) ?? "",
+        members: entries(w.members, parseMember),
+      };
+}
+
+function contextBase(c: Json) {
+  const id = str(c.id);
+  const workspaceId = str(c.workspace_id);
+  return id === null || workspaceId === null
+    ? null
+    : {
+        id,
+        name: str(c.name) ?? id,
+        display_name: str(c.display_name),
+        workspace_id: workspaceId,
+      };
+}
+
+function parseContext(c: Json): TransferContext | null {
+  const base = contextBase(c);
+  return base === null
+    ? null
+    : {
+        ...base,
+        is_private: c.is_private === true,
+        candidate_user_ids: strings(c.candidate_user_ids),
+      };
+}
+
+function parseOwnerFixed(c: Json): OwnerFixedContext | null {
+  const base = contextBase(c);
+  return base === null
+    ? null
+    : { ...base, successor_user_id: str(c.successor_user_id) };
+}
 
 export function userDeleteFailure(error: unknown): UserDeleteFailure {
   if (!(error instanceof ApiError)) {
     return { kind: "unknown" };
   }
   const detail: unknown = error.details?.detail;
-  if (detail && typeof detail === "object") {
-    const { workspace_ids, context_ids } = detail as {
-      workspace_ids?: unknown;
-      context_ids?: unknown;
-    };
+  if (isObject(detail)) {
+    const { workspace_ids, context_ids } = detail;
     if (Array.isArray(workspace_ids) || Array.isArray(context_ids)) {
-      return {
+      const failure: UserDeleteFailure = {
         kind: "transfer_required",
         workspaces: Array.isArray(workspace_ids) ? workspace_ids.length : 0,
         contexts: Array.isArray(context_ids) ? context_ids.length : 0,
       };
+      // An API before #2420 sends the ids only: no picker, the counts stay.
+      if (Array.isArray(detail.workspaces) && Array.isArray(detail.contexts)) {
+        failure.picker = {
+          workspaceIds: strings(workspace_ids),
+          contextIds: strings(context_ids),
+          workspaces: entries(detail.workspaces, parseWorkspace),
+          contexts: entries(detail.contexts, parseContext),
+          ownerFixedContexts: entries(
+            detail.owner_fixed_contexts,
+            parseOwnerFixed,
+          ),
+        };
+      }
+      return failure;
     }
   }
   // Only a refusal (4xx) carries a reason worth showing; a 5xx or a dropped
@@ -420,6 +569,31 @@ export interface UserDetail {
   accessible_contexts: UserContext[];
   stats: UserStats;
   workspace_summary?: WorkspaceSummary | null; // #676 (optional during rollout)
+}
+
+/**
+ * Successors for an admin user deletion (#2372): resource id → surviving
+ * user_id. A workspace's successor also takes the contexts the user created
+ * there unless `context_transfers` names another one.
+ */
+export interface UserDeleteTransfers {
+  workspace_transfers: Record<string, string>;
+  context_transfers: Record<string, string>;
+}
+
+/**
+ * Delete a user (Admin only). Without `transfers` the DELETE has no body; a
+ * user who still owns a workspace or created a shared context is then refused
+ * with the 409 `userDeleteFailure` reads (#2420).
+ */
+export async function deleteUser(
+  userId: string,
+  transfers?: UserDeleteTransfers,
+): Promise<unknown> {
+  return apiClient.delete<unknown>(
+    `/api/v1/admin/users/${encodeURIComponent(userId)}`,
+    transfers ? { body: JSON.stringify(transfers) } : {},
+  );
 }
 
 /**
