@@ -14,7 +14,7 @@ import { navigationForPath, type NavItem } from "@/lib/navigation/featureNavigat
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { PageContainer } from "@/components/common/PageContainer";
-import { PageHeader } from "@/components/common/PageHeader";
+import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 
