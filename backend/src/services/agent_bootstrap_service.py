@@ -685,8 +685,10 @@ class AgentBootstrapService:
         # start, with no follow-up reference() per hit; max_chars already
         # drops context_summary, then rows, when the envelope runs over.
         results_data = [_bootstrap_recall_row(r) for r in result.results]
-        # query_hash never leaks the raw query — correlation only.
-        query_hash = hmac_sha256_hex(params.query or "", get_settings().api_key_secret)
+        # query_hash never leaks the raw query — correlation only. Keyed by
+        # AUDIT_HMAC_KEY like memory_access_events.query_hash, so a rotation of
+        # API_KEY_SECRET (#2394) leaves it unchanged.
+        query_hash = hmac_sha256_hex(params.query or "", get_settings().audit_hmac_key)
         body = {
             "query_hash": query_hash,
             "results": results_data,
