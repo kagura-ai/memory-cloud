@@ -162,6 +162,35 @@ describe("ApiClient error normalization (#992 canonical 422 envelope)", () => {
     expect(details).toEqual({ limit: 100 });
     expect(details.detail).toBeUndefined();
   });
+
+  it("keeps a conflict's discriminator at err.details.reason (#2327)", async () => {
+    // The global MemoryCloudException handler's body for
+    // ContextNotInAccessListError; MembersSection keys on this exact path.
+    mockFetchOnce(409, {
+      error: "RES-002",
+      message:
+        "This member's context access list does not include this context; send extend_access_list=true to add it, or edit the member's context access first.",
+      details: {
+        reason: "context_not_in_access_list",
+        user_id: "user-2",
+        context_id: "ctx-1",
+      },
+    });
+
+    const client = new ApiClient("http://test");
+    const caught = await client.post("/x", {}).catch((e: unknown) => e);
+
+    expect(caught).toBeInstanceOf(ApiError);
+    const err = caught as ApiError;
+    expect(err.status).toBe(409);
+    expect(err.error).toBe("RES-002");
+    expect(err.details).toEqual({
+      reason: "context_not_in_access_list",
+      user_id: "user-2",
+      context_id: "ctx-1",
+    });
+    expect(err.details?.detail).toBeUndefined();
+  });
 });
 
 describe("ApiClient gate normalization (#1644)", () => {
