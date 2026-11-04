@@ -13,7 +13,7 @@ export function WorkspaceSectionNavigation() {
   const t = useTranslations("sectionNavigation");
   const features = useSystemFeatures();
   const { currentWorkspace: ws } = useWorkspace();
-  const integrations = path === "/workspace/integrations" || path.startsWith("/workspace/integrations/");
+  const integrations = ["/workspace/integrations", "/workspace/resources", "/workspace/secrets"].some(prefix => path === prefix || path.startsWith(prefix + "/"));
   const settings = path === "/workspace/settings" || path.startsWith("/workspace/settings/");
   const apiKeys = integrations && (path.endsWith("/external-keys") ||
     (path.endsWith("/credentials") && params.get("tab") !== "oauth-apps"));
@@ -23,9 +23,11 @@ export function WorkspaceSectionNavigation() {
 
   const links = integrations ? [
     { label: "overview", href: "/workspace/integrations", active: path === "/workspace/integrations" },
+    { label: "connectors", href: "/workspace/integrations/connectors", active: path.includes("/integrations/connectors") },
+    { label: "resources", href: "/workspace/resources", active: path === "/workspace/resources" || path.startsWith("/workspace/resources/") },
     { label: "apiKeys", href: "/workspace/integrations/credentials?tab=api-keys", active: apiKeys },
     { label: "oauthApps", href: "/workspace/integrations/credentials?tab=oauth-apps", active: path.endsWith("/credentials") && params.get("tab") === "oauth-apps" },
-    { label: "connectors", href: "/workspace/integrations/connectors", active: path.includes("/integrations/connectors") },
+    { label: "secrets", href: "/workspace/secrets", active: path === "/workspace/secrets" || path.startsWith("/workspace/secrets/") },
   ] : [
     ...(features?.plan_page === true ? [{ label: "plan", href: "/workspace/settings/plan", active: path.endsWith("/plan") || path.endsWith("/billing") }] : []),
     { label: "workspaceSettings", href: "/workspace/settings/general", active: path.endsWith("/general") },

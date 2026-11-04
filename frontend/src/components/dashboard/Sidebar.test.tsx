@@ -247,9 +247,7 @@ describe("Sidebar", () => {
     const expected = [
       "/workspace/dashboard",
       "/workspace/contexts",
-      "/workspace/resources",
       "/workspace/storage",
-      "/workspace/secrets",
       "/workspace/members",
       "/workspace/sleep-reports",
       "/workspace/cost",
@@ -322,12 +320,14 @@ describe("feature discoverability (#2630)", () => {
       mockFeatures = { plan_page: true, byok: true, cost_display: true };
       mockPlanFeatures = { resources: false, connectors: false, public_contexts: false };
       render(<Sidebar />);
-      for (const href of ["/workspace/resources", "/workspace/integrations",
+      for (const href of ["/workspace/integrations",
         "/workspace/dashboard", "/workspace/settings",
         "/workspace/members"]) {
         expect(document.querySelector(`nav a[href="${href}"]`)).not.toBeNull();
       }
       expect(document.querySelector('nav a[href^="/admin/"]')).toBeNull();
+      expect(document.querySelector('nav a[href="/workspace/resources"]')).toBeNull();
+      expect(document.querySelector('nav a[href="/workspace/secrets"]')).toBeNull();
       expect(mockListResources).not.toHaveBeenCalled();
       expect(mockListConnectors).not.toHaveBeenCalled();
     },

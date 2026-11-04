@@ -146,6 +146,26 @@ beforeEach(() => {
   mockSearchParamsValue = new URLSearchParams("");
 });
 
+describe("ProfilePage section links", () => {
+  it("links to each mounted section and keeps an unsaved edit while jumping", () => {
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    const navigation = screen.getByRole("navigation", { name: "sections.label" });
+    const links = navigation.querySelectorAll("a");
+    expect(links).toHaveLength(6);
+    for (const link of links) {
+      const id = link.getAttribute("href")!.slice(1);
+      expect(document.getElementById(id)).not.toBeNull();
+      expect(document.getElementById(id)).toHaveAttribute("tabindex", "-1");
+    }
+    fireEvent.click(screen.getByRole("button", { name: "edit" }));
+    fireEvent.change(screen.getByLabelText("fullName"), { target: { value: "Unsaved draft" } });
+    fireEvent.click(screen.getByRole("link", { name: "sections.appearance" }));
+    expect(screen.getByLabelText("fullName")).toHaveValue("Unsaved draft");
+    expect(mockApiPut).not.toHaveBeenCalled();
+  });
+});
+
 // ---------- getSignInMethodLabel (#514) -------------------------------------
 
 describe("getSignInMethodLabel", () => {

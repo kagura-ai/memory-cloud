@@ -1023,6 +1023,15 @@
     "unsearchableSubtext": "うち {count} 件は検索不可"
   },
   "profile": {
+    "sections": {
+      "label": "このページ内を移動",
+      "info": "基本情報",
+      "signIn": "ログイン方法",
+      "linkedAccounts": "アカウント連携",
+      "password": "パスワード",
+      "appearance": "表示",
+      "deletion": "アカウント削除"
+    },
     "title": "設定",
     "subtitle": "ユーザープロフィール、環境設定、セキュリティ設定を管理します。",
     "profileInfo": "プロフィール情報",
@@ -1793,6 +1802,8 @@
     "saved": "設定を保存しました"
   },
   "sectionNavigation": {
+    "resources": "リソース",
+    "secrets": "シークレット",
     "integrations": "インテグレーション",
     "settings": "設定",
     "overview": "概要",

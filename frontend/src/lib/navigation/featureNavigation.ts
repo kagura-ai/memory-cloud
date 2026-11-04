@@ -6,6 +6,7 @@ export interface NavItem {
   nameKey: string; // Translation key
   href: string;
   exact?: boolean;
+  activePaths?: string[];
   icon: ElementType;
   requiredRole?: Role; // System admin role
   requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
@@ -229,8 +230,8 @@ export const sidebarNavigationGroups: NavGroup[] = navigationGroups.flatMap(grou
     ...group,
     titleKey: "",
     items: [
-      ...group.items,
-      { nameKey: "integrations", href: "/workspace/integrations", icon: Plug },
+      ...group.items.filter(item => item.nameKey !== "resources" && item.nameKey !== "secrets"),
+      { nameKey: "integrations", href: "/workspace/integrations", icon: Plug, activePaths: ["/workspace/resources", "/workspace/secrets"] },
       { nameKey: "settings", href: "/workspace/settings", icon: Settings },
     ],
   }];

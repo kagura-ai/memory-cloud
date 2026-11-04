@@ -558,11 +558,11 @@ export function Sidebar() {
                     const itemTab = itemQuery
                       ? new URLSearchParams(itemQuery).get("tab")
                       : null;
-                    const isActive = itemTab
+                    const isActive = item.activePaths?.some(path => pathname === path || pathname.startsWith(path + "/")) || (itemTab
                       ? pathname === itemPath && currentTab === itemTab
                       : pathname === item.href ||
                         (!item.exact && item.href !== "/dashboard" &&
-                          pathname.startsWith(item.href + "/"));
+                          pathname.startsWith(item.href + "/")));
 
                     // Issue #115: Disabled items show as "Coming Soon"
                     if (item.disabled) {
@@ -589,6 +589,7 @@ export function Sidebar() {
                       <Link
                         key={item.nameKey}
                         href={item.href}
+                        aria-current={isActive ? "page" : undefined}
                         onClick={() => setIsOpen(false)}
                         className={utilCn(
                           "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium",

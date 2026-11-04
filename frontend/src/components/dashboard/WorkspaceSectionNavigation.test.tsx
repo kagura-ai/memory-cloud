@@ -73,6 +73,11 @@ describe("workspace section navigation", () => {
     state.workspaceId = "new-" + state.workspaceId; page.rerender(<WorkspaceSectionNavigation />);
     expect(screen.queryByRole("link", { name: "providerKeys" })).toBeNull();
   });
+  it.each(["/workspace/resources", "/workspace/resources/item", "/workspace/secrets"])("shows the integration tabs for %s", path => {
+    state.path = path; render(<WorkspaceSectionNavigation />);
+    expect(screen.getByRole("navigation", { name: "integrations" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: path.includes("resources") ? "resources" : "secrets" })).toHaveAttribute("aria-current", "page");
+  });
   it("keeps the settings tab available while the environment hides Plan", () => {
     state.path = "/workspace/settings/general"; state.features = { plan_page: false };
     render(<WorkspaceSectionNavigation />);

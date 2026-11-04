@@ -15,7 +15,7 @@ import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { ChevronRight, Database } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
-import { PageHeader } from "@/components/common/PageHeader";
+import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
