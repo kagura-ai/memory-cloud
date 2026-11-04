@@ -775,6 +775,78 @@ Soft-delete a context. The context row is marked deleted (sets `deleted_at`) so 
 
 ---
 
+### POST /api/v1/contexts/{context_id}/members
+
+Give a workspace member a role in a shared context. Session only; the caller owns the context or is a workspace owner or admin.
+
+**Request Body:**
+
+```json
+{
+  "user_id": "member-user-id",
+  "role": "editor",
+  "extend_access_list": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `user_id` | string | Yes | A member of the context's workspace |
+| `role` | string | Yes | `owner`, `editor` or `viewer` |
+| `extend_access_list` | boolean | No | Default `false`. When the member's (or viewer's) context access list does not include this context, add the context to that list in the same transaction. Workspace owner or admin only (`403` otherwise) |
+
+A context role does nothing for a member whose context access list does not include the context (see [Concepts](concepts.md)). Without `extend_access_list` such an add answers `409`:
+
+```json
+{
+  "error": "RES-002",
+  "message": "This member's context access list does not include this context; send extend_access_list=true to add it, or edit the member's context access first.",
+  "details": {
+    "reason": "context_not_in_access_list",
+    "user_id": "member-user-id",
+    "context_id": "550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+**Response:** `201 Created` with `user_id`, `role`, `added_at` and `access_list_extended` (`true` when the context was added to the member's list).
+
+---
+
+### GET /api/v1/workspaces/{workspace_id}/members/{user_id}/context-access
+
+A member's context access list and the contexts it can be given: every live shared context of the workspace plus the member's own private contexts, ordered by name. Another member's private context is never listed. Session admin or owner, or a workspace-owner API key; `404` when `user_id` is not a member of the workspace. Set the list with `PUT` on the same path.
+
+**Response:**
+
+```json
+{
+  "user_id": "member-user-id",
+  "role": "member",
+  "allowed_context_ids": ["550e8400-e29b-41d4-a716-446655440000"],
+  "contexts": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "team-notes",
+      "display_name": "Team Notes",
+      "summary": null,
+      "is_private": false,
+      "is_own_private": false
+    },
+    {
+      "id": "6fa459ea-ee8a-4ca4-894e-db77e160355e",
+      "name": "drafts",
+      "display_name": null,
+      "summary": null,
+      "is_private": true,
+      "is_own_private": true
+    }
+  ]
+}
+```
+
+---
+
 ## Agent Control Plane APIs (v0.49.0 preview)
 
 Agents are workspace-scoped registry resources, not principals. Registry and binding mutations require workspace `Owner` or `Admin`. Agent-bound member keys keep their existing RBAC ceiling; bindings are purely subtractive.
