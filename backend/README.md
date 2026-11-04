@@ -85,6 +85,10 @@ pyright src/
 docker build -t kagura-backend:latest .
 ```
 
+This builds the `runtime` stage, the image that ships: no dev extra, no compiler.
+For running the tests inside the container, build the `dev` stage
+(`--target dev`), as `docker-compose.yml` does.
+
 ### Run
 
 ```bash

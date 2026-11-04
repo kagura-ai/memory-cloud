@@ -1,15 +1,20 @@
 # Kagura Memory Cloud v5.0 - Backend Dockerfile
+#
+# Three stages (#2620):
+#   app      the runtime dependencies and the application
+#   dev      app plus the dev extra, for the tests (docker-compose.yml builds it)
+#   runtime  app as it ships; the last stage, so the default target
+# The production compose files build without a `target` and get `runtime`.
 
-FROM python:3.11-slim
+FROM python:3.11-slim AS app
 
 # uv, pinned in lockstep with pyproject.toml [tool.uv] required-version,
 # .github/workflows/*.yml and setup.sh (#1706); tests/test_uv_version_lockstep.py
 # enforces it. The lock is the only thing this image installs from.
 COPY --from=ghcr.io/astral-sh/uv:0.11.19 /uv /uvx /bin/
 
-# Install system dependencies
+# Install system dependencies. No compiler: every locked package ships a wheel.
 RUN apt-get update && apt-get install -y \
-    build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -36,7 +41,7 @@ ENV UV_LINK_MODE=copy \
 # only changes when pyproject.toml / uv.lock change. --locked fails the build
 # when the lock is out of date with pyproject.toml.
 COPY --chown=kagura:kagura pyproject.toml uv.lock README.md ./
-RUN uv sync --locked --extra dev --no-install-project --no-cache
+RUN uv sync --locked --no-install-project --no-cache
 
 # Copy source code
 COPY --chown=kagura:kagura src/ ./src/
@@ -52,13 +57,7 @@ COPY --chown=kagura:kagura scripts/ ./scripts/
 COPY --chown=kagura:kagura templates/ ./templates/
 
 # Now the project itself (editable, as `-e .` was), dependencies untouched.
-RUN uv sync --locked --extra dev --no-cache
-
-# uv only builds the image. It lives in root's /bin, hence the step back to root.
-# A plain rm: if uv moves, the build fails instead of quietly keeping it.
-USER root
-RUN rm /bin/uv /bin/uvx
-USER kagura
+RUN uv sync --locked --no-cache
 
 # Expose port
 EXPOSE 8080
@@ -69,3 +68,23 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Run application
 CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+
+FROM app AS dev
+
+# pytest and the rest of the dev extra, for `make test` inside the container.
+RUN uv sync --locked --extra dev --no-cache
+
+# uv only builds the image. It lives in root's /bin, hence the step back to root.
+# A plain rm: if uv moves, the build fails instead of quietly keeping it.
+USER root
+RUN rm /bin/uv /bin/uvx
+USER kagura
+
+
+FROM app AS runtime
+
+# As in dev: uv only builds the image.
+USER root
+RUN rm /bin/uv /bin/uvx
+USER kagura
