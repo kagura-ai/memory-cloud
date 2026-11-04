@@ -46,20 +46,23 @@ vi.mock("next-intl", () => ({
   useTranslations: () => (k: string) => k,
 }));
 
+let mockPathname = "/workspace/dashboard";
+const mockPush = vi.fn();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
-  usePathname: () => "/workspace/dashboard",
+  useRouter: () => ({ push: mockPush, replace: vi.fn() }),
+  usePathname: () => mockPathname,
   useSearchParams: () => new URLSearchParams(),
 }));
 
+let mockWorkspaces: { id: string; current_user_role?: string }[] = [];
 // The app behind the gate — must not mount while the gate is up.
 vi.mock("@/contexts/WorkspaceContext", () => ({
   WorkspaceProvider: ({ children }: { children: React.ReactNode }) => (
     <div data-testid="app">{children}</div>
   ),
   useWorkspace: () => ({
-    workspaces: [{ id: "w1" }],
-    currentWorkspace: { id: "w1" },
+    workspaces: mockWorkspaces,
+    currentWorkspace: mockWorkspaces[0] ?? null,
     loading: false,
     switchWorkspace: vi.fn(),
   }),
@@ -77,6 +80,9 @@ beforeEach(() => {
   mockRefetchUser.mockReset();
   mockLogout.mockReset();
   mockAcceptTerms.mockReset();
+  mockPathname = "/workspace/dashboard";
+  mockWorkspaces = [{ id: "w1", current_user_role: "member" }];
+  mockPush.mockClear();
   mockUser = null;
 });
 
@@ -117,6 +123,15 @@ describe("(authenticated) layout — terms re-acceptance gate (#1665)", () => {
 
     await waitFor(() => expect(mockRefetchUser).toHaveBeenCalledTimes(1));
     expect(mockAcceptTerms).toHaveBeenCalledWith("2026-09");
+  });
+
+  it("allows a system admin to open platform users without any workspace", async () => {
+    mockUser = { id: "u1", role: "admin" };
+    mockPathname = "/admin/users";
+    mockWorkspaces = [];
+    render(<DashboardLayout><p>platform users</p></DashboardLayout>);
+    expect(await screen.findByText("platform users")).toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalled();
   });
 
   it("renders the app when no re-acceptance is required", async () => {

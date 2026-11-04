@@ -215,6 +215,7 @@ class ContextResponse(TZAwareBaseModel):
     """Response model for context data."""
 
     id: UUID = Field(..., description="Context UUID")
+    workspace_id: UUID | None = Field(default=None, description="Workspace that owns this context")
     name: str = Field(..., description="Context name")
     display_name: str | None = Field(default=None, description="Human-readable display name")
     description: str | None = Field(default=None, description="Context description")
@@ -455,6 +456,7 @@ async def list_contexts(
         context_responses.append(
             ContextResponse(
                 id=context.id,
+                workspace_id=context.workspace_id,
                 name=context.name,
                 display_name=context.display_name,
                 description=context.description,
@@ -602,6 +604,7 @@ async def create_context(
 
         return ContextResponse(
             id=context.id,
+            workspace_id=context.workspace_id,
             name=context.name,
             display_name=context.display_name,
             description=context.description,
@@ -693,6 +696,7 @@ async def get_context(
 
         return ContextResponse(
             id=context.id,
+            workspace_id=context.workspace_id,
             name=context.name,
             display_name=context.display_name,
             description=context.description,
@@ -1064,6 +1068,7 @@ async def update_context(
 
         return ContextResponse(
             id=context.id,
+            workspace_id=context.workspace_id,
             name=context.name,
             display_name=context.display_name,
             description=context.description,

@@ -252,6 +252,7 @@ class TestContextSleepModeReadRoundTrip:
     def _build_mock_context(self, sleep_mode: str, is_private: bool = True):
         ctx = MagicMock()
         ctx.id = uuid4()
+        ctx.workspace_id = uuid4()
         ctx.name = "test-ctx"
         ctx.display_name = None
         ctx.description = None
@@ -294,6 +295,7 @@ class TestContextSleepModeReadRoundTrip:
 
         assert response.status_code == 200, response.text
         assert response.json()["sleep_mode"] == mode
+        assert response.json()["workspace_id"] == str(ctx.workspace_id)
 
     @pytest.mark.parametrize("mode", ["full", "edges_only", "skip"])
     def test_list_contexts_returns_sleep_mode(self, mode: str):

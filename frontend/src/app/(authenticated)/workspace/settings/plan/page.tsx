@@ -14,7 +14,7 @@
  *   unconfigured the handoff returns 503 and we surface "not available".
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Sparkles } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -46,6 +46,7 @@ import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 export default function WorkspacePlanPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
+  const access = useTranslations("featureAccess");
   const { locale } = useLocale();
   const { currentWorkspaceId, currentWorkspace } = useWorkspace();
   const { toast } = useToast();
@@ -58,7 +59,9 @@ export default function WorkspacePlanPage() {
   const [plan, setPlan] = useState<WorkspacePlanInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
-  const [upgrading, setUpgrading] = useState(false);
+  const [pendingWorkspace, setPendingWorkspace] = useState<string | null>(null);
+  const handoffRequest = useRef<symbol | null>(null);
+  const upgrading = pendingWorkspace !== null && pendingWorkspace === currentWorkspaceId;
 
   const isOwner = currentWorkspace?.current_user_role === "owner";
 
@@ -83,11 +86,18 @@ export default function WorkspacePlanPage() {
     loadPlan();
   }, [loadPlan, systemFeatures]);
 
+  useEffect(() => {
+    return () => { handoffRequest.current = null; };
+  }, [currentWorkspaceId, isOwner]);
+
   const handleManageBilling = async () => {
-    if (!currentWorkspaceId) return;
+    if (!isOwner || !currentWorkspaceId || handoffRequest.current !== null) return;
+    const request = Symbol();
+    handoffRequest.current = request;
     try {
-      setUpgrading(true);
+      setPendingWorkspace(currentWorkspaceId);
       const res = await mintBillingHandoff(currentWorkspaceId);
+      if (handoffRequest.current !== request) return;
       if (res.url) {
         window.location.href = res.url;
         return;
@@ -100,6 +110,7 @@ export default function WorkspacePlanPage() {
         description: t("planPage.unavailable"),
       });
     } catch (e) {
+      if (handoffRequest.current !== request) return;
       // 503 (BILLING-002) = handoff signing key unconfigured → billing disabled.
       const description =
         e instanceof ApiError && e.status === 503
@@ -109,7 +120,10 @@ export default function WorkspacePlanPage() {
             : t("planPage.upgradeError");
       toast({ variant: "destructive", title: tCommon("error"), description });
     } finally {
-      setUpgrading(false);
+      if (handoffRequest.current === request) {
+        handoffRequest.current = null;
+        setPendingWorkspace(null);
+      }
     }
   };
 
@@ -126,7 +140,7 @@ export default function WorkspacePlanPage() {
       <PageContainer>
         <PageHeader
           title={t("planPage.title")}
-          description={t("planPage.description")}
+          description={currentWorkspace?.name ? access("workspace", { name: currentWorkspace.name }) : t("planPage.description")}
         />
         <FeatureGateNotice variant="page" gate={planPage} />
       </PageContainer>
@@ -142,7 +156,7 @@ export default function WorkspacePlanPage() {
       <PageContainer>
         <PageHeader
           title={t("planPage.title")}
-          description={t("planPage.description")}
+          description={currentWorkspace?.name ? access("workspace", { name: currentWorkspace.name }) : t("planPage.description")}
         />
         <ErrorBanner error={error.message} />
       </PageContainer>
@@ -167,7 +181,7 @@ export default function WorkspacePlanPage() {
     <PageContainer>
       <PageHeader
         title={t("planPage.title")}
-        description={t("planPage.description")}
+        description={currentWorkspace?.name ? access("workspace", { name: currentWorkspace.name }) : t("planPage.description")}
       />
 
       {/* #1939: back on Free with paid-only objects left — say what paused. */}

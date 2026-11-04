@@ -10,12 +10,16 @@
  * Issue #1665: blocking terms re-acceptance step
  */
 
-import { Suspense, useEffect, useState } from "react";
+import { Fragment, Suspense, useEffect } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLocale } from "@/i18n";
 import { WorkspaceProvider, useWorkspace } from "@/contexts/WorkspaceContext";
 import { MemoryContextProvider } from "@/contexts/MemoryContextContext";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { useTranslations } from "next-intl";
+import { FeatureRouteBoundary } from "@/components/dashboard/FeatureRouteBoundary";
 import { Sidebar } from "@/components/dashboard/Sidebar";
 import { WorkspaceSelectionScreen } from "@/components/workspaces/WorkspaceSelectionScreen";
 import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
@@ -36,7 +40,7 @@ function TermsReacceptanceGate() {
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
       <TermsReacceptanceDialog
         termsVersion={termsVersion}
-        onAccepted={refetchUser}
+        onAccepted={async () => { await refetchUser(); }}
         onSignOut={() => void logout()}
       />
     </div>
@@ -51,9 +55,11 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const { workspaces, currentWorkspace, loading, switchWorkspace } =
+  const t = useTranslations("featureAccess");
+  const { workspaces, currentWorkspace, loading, loadFailed, switchWorkspace } =
     useWorkspace();
-  const [showSelection, setShowSelection] = useState(false);
+  // A stale or removed workspace must not silently send a billing action to another.
+  const needsSelection = workspaces.length > 0 && !workspaces.some(w => w.id === currentWorkspace?.id);
 
   // Pages that don't require an workspace. /workspace/settings is a
   // compatibility-only route that immediately redirects to
@@ -65,15 +71,16 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
     (pathname === "/workspace/settings" ||
       pathname === "/workspace/settings/general") &&
     searchParams.get("create") === "true";
+  const isSystemRoute = pathname === "/admin" || pathname.startsWith("/admin/");
   const isPublicPage =
     pathname === "/pricing" || pathname === "/login" || pathname === "/";
 
   useEffect(() => {
     // Wait for loading to complete
-    if (loading) return;
+    if (loading || loadFailed) return;
 
     // Skip check for workspace creation page and public pages
-    if (isWorkspaceCreationPage || isPublicPage) return;
+    if (isWorkspaceCreationPage || isPublicPage || isSystemRoute) return;
 
     // Issue #246 / #660: When the user has zero workspaces, send them
     // directly to the canonical create-form route. /workspace/settings
@@ -85,45 +92,18 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    // Issue #276: Handle workspace selection logic
-    // Edge case: currentWorkspace is set but doesn't exist in workspaces list (deleted)
-    const currentWorkspaceExists =
-      currentWorkspace && workspaces.some((w) => w.id === currentWorkspace.id);
-
-    if (!currentWorkspaceExists && workspaces.length > 0) {
-      // Current workspace was deleted or invalid - reset selection
-      if (workspaces.length > 1) {
-        setShowSelection(true);
-      } else if (workspaces.length === 1) {
-        // Auto-switch to the only available workspace
-        switchWorkspace(workspaces[0].id).catch((error) => {
-          console.error(
-            "Failed to auto-switch after current workspace invalidated:",
-            error,
-          );
-          router.push("/workspace/dashboard");
-        });
-      }
-    } else if (workspaces.length > 1 && !currentWorkspace) {
-      // Multiple workspaces but no current selection
-      setShowSelection(true);
-    } else if (workspaces.length === 1 && !currentWorkspace) {
-      // Single workspace but not selected - auto-switch
-      switchWorkspace(workspaces[0].id).catch((error) => {
-        console.error("Failed to auto-switch to only workspace:", error);
-        router.push("/workspace/dashboard");
-      });
-    } else {
-      setShowSelection(false);
-    }
   }, [
     loading,
+    loadFailed,
     workspaces,
-    currentWorkspace,
     isWorkspaceCreationPage,
     isPublicPage,
+    isSystemRoute,
     router,
   ]);
+
+  // Platform administration depends on system role, never workspace membership.
+  if (isSystemRoute) return <>{children}</>;
 
   // Always show loading spinner while checking workspaces (prevents flash of main page)
   if (loading) {
@@ -132,6 +112,12 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
         <div className="h-10 w-10 rounded-full border-4 border-slate-200 border-t-slate-600 animate-spin" />
       </div>
     );
+  }
+
+  if (loadFailed && !isWorkspaceCreationPage) {
+    return <Alert><AlertDescription>{t("workspaceLoadFailed")}{" "}
+      <Button variant="outline" onClick={() => window.location.reload()}>{t("retry")}</Button>
+    </AlertDescription></Alert>;
   }
 
   // If no workspaces and not on create page, show loading (redirect will happen)
@@ -144,20 +130,29 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
   }
 
   // Issue #276: Show workspace selection screen
-  if (showSelection && workspaces.length > 1) {
+  if (needsSelection && !isWorkspaceCreationPage && !isPublicPage) {
     return (
       <WorkspaceSelectionScreen
         workspaces={workspaces}
-        onSelect={async (workspaceId) => {
-          await switchWorkspace(workspaceId);
-          setShowSelection(false);
-        }}
+        onSelect={switchWorkspace}
         onCreateNew={() => router.push("/workspace/settings?create=true")}
       />
     );
   }
 
   return <>{children}</>;
+}
+
+// System routes do not need a workspace, but their surrounding chrome does.
+function ScopedSidebar() {
+  const { currentWorkspaceId, loading, loadFailed } = useWorkspace();
+  return loading || loadFailed ? null : <Sidebar key={currentWorkspaceId ?? "unselected"} />;
+}
+
+function WorkspaceBanners() {
+  const { currentWorkspaceId, loading, loadFailed } = useWorkspace();
+  if (!currentWorkspaceId || loading || loadFailed) return null;
+  return <Fragment key={currentWorkspaceId}><CapacityLockBanner /><WorkspaceSuspensionNotice /></Fragment>;
 }
 
 function DashboardContent({ children }: { children: React.ReactNode }) {
@@ -252,7 +247,7 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
         <MemoryContextProvider>
           <div className="flex h-screen overflow-hidden">
             {/* Sidebar */}
-            <Sidebar />
+            <ScopedSidebar />
 
             {/* Main Content Area */}
             <div className="flex flex-col flex-1 overflow-hidden">
@@ -266,14 +261,11 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
                 </div>
               )}
 
-              {/* #1941: a Free workspace over its capacity */}
-              <CapacityLockBanner />
-              {/* #1939: paid-only features paused (back on Free) — owner-only */}
-              <WorkspaceSuspensionNotice />
+              <WorkspaceBanners />
 
               {/* Page Content */}
               <main className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-900">
-                <div className="container mx-auto p-6">{children}</div>
+                <div className="container mx-auto p-6"><FeatureRouteBoundary>{children}</FeatureRouteBoundary></div>
               </main>
             </div>
           </div>
