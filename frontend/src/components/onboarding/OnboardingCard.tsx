@@ -9,7 +9,7 @@
  * management UI, memories are normally written by AI clients via MCP tools).
  *
  * Design decisions (gate1 green, PM-reviewed — see issue #952):
- *  - Trigger: workspace role >= Admin AND zero contexts AND not dismissed
+ *  - Trigger: workspace owner with no contexts, or a verified practice checkpoint
  *    (localStorage). No server-side "seen" flag — re-showing on a fresh device
  *    or after deleting all contexts is acceptable for 1.0.
  *  - Hybrid value moment: a minimal in-app remember()/recall() makes the first
@@ -21,11 +21,14 @@
  *  - The `?context=<id>` navigation (URL-driven current context, #246) is
  *    deferred to the final "Finish" CTA: navigating mid-flow would remount this
  *    card and (with 1 context now) hide it, killing the stepper.
- *  - remember/recall need a workspace embedding key; if absent we show a
+ *  - remember/recall need available embeddings; if absent we show a
  *    non-error "set up embeddings" notice instead of a guaranteed-to-fail flow.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useAuth } from "@/contexts/AuthContext";
+import { onboardingScope, readProgress, writeProgress } from "./progress";
+import { ApiError } from "@/lib/api/base";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
@@ -40,7 +43,6 @@ import {
 
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useToast } from "@/hooks/use-toast";
-import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { getContexts, createContext } from "@/lib/api/contexts";
 import { rememberMemory, recallMemories } from "@/lib/api/memory";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
@@ -61,10 +63,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { InlineSpinner } from "@/components/common/LoadingState";
 
-const DISMISS_KEY = "onboarding:dismissed";
-type Step = "context" | "memory" | "recall" | "done";
+type Step = "context" | "memory" | "recall" | "done" | "recovery";
 
-export function OnboardingCard() {
+export function OnboardingCard({ replay = false }: { replay?: boolean }) {
+  const { user } = useAuth();
+  const { currentWorkspace, loading } = useWorkspace();
+  // Only owners can create a private practice context. Others use the read-only guide.
+  if (!user?.id || loading || !currentWorkspace || currentWorkspace.current_user_role !== "owner") return null;
+  const scope = onboardingScope(user.id, currentWorkspace.id);
+  return <PracticeCard key={scope} scope={scope} userId={user.id} replay={replay} />;
+}
+
+function PracticeCard({ scope, userId, replay }: { scope: string; userId: string; replay: boolean }) {
   const t = useTranslations("onboarding");
   const router = useRouter();
   const { toast } = useToast();
@@ -92,6 +102,7 @@ export function OnboardingCard() {
   const [query, setQuery] = useState(() => t("recall.sampleQuery"));
   const [results, setResults] = useState<RecallResultItem[]>([]);
   const [busy, setBusy] = useState(false);
+  const writing = useRef(false);
 
   // Issue #1167: with BYOK off the key-status probe 404s and env keys serve
   // embeddings — skip the probe (hasKey keeps its default true → normal
@@ -107,33 +118,31 @@ export function OnboardingCard() {
     if (workspaceLoading || !currentWorkspace || !currentWorkspaceId) return;
     if (systemFeatures === null) return;
 
-    const dismissed =
-      typeof window !== "undefined" &&
-      window.localStorage.getItem(DISMISS_KEY) === "true";
-    const canCreate = hasWorkspaceRole(
-      currentWorkspace.current_user_role,
-      WorkspaceRole.Admin,
-    );
-    if (dismissed || !canCreate) {
+    const saved = readProgress(scope);
+    if (saved.dismissed && !replay) {
       setReady(true);
       return;
     }
-
     (async () => {
       try {
-        const ctx = await getContexts();
+        const { contexts } = await getContexts();
         if (!alive) return;
-        if (ctx.contexts.length === 0) {
-          // Only probe the embedding key when the card will actually show —
-          // users with contexts (the vast majority of loads) never see it.
-          // #1167: skip the probe entirely when BYOK is off (API 404s).
-          const keyStatus = byokEnabled
-            ? await checkOpenAIKeyStatus(currentWorkspaceId).catch(() => null)
-            : null;
-          if (!alive) return;
-          if (keyStatus) setHasKey(keyStatus.has_key);
+        // The server lists only this user's accessible contexts in the selected workspace.
+        const sample = contexts.find(ctx => ctx.id === saved.contextId && ctx.is_private && ctx.created_by === userId);
+        if (saved.step === "creating" || saved.step === "saving" || (saved.contextId && !sample)) {
+          setStep("recovery");
           setVisible(true);
+          return;
         }
+        if (contexts.length > 0 && !sample) return;
+        if (sample) {
+          setContextId(sample.id);
+          setStep(saved.step === "recall" ? "recall" : "memory");
+        }
+        const status = byokEnabled ? await checkOpenAIKeyStatus(currentWorkspaceId).catch(() => null) : null;
+        if (!alive) return;
+        if (status) setHasKey(status.embedding_available ?? status.has_key);
+        setVisible(true);
       } catch {
         // Best-effort: a failed probe just leaves the card hidden rather than
         // risking a broken onboarding over the user's real dashboard.
@@ -147,32 +156,39 @@ export function OnboardingCard() {
     };
     // byokEnabled is derived from systemFeatures, so listing systemFeatures
     // alone covers both.
-  }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures]);
+  }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures, scope, userId, replay, byokEnabled]);
 
   const dismiss = useCallback(() => {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(DISMISS_KEY, "true");
-    }
+    writeProgress(scope, { ...readProgress(scope), dismissed: true });
     setVisible(false);
-  }, []);
+  }, [scope]);
 
   const handleCreateContext = async () => {
     const name = contextName.trim();
-    if (!name) return;
+    if (!name || writing.current) return;
+    if (readProgress(scope).step !== "context" || !writeProgress(scope, { step: "creating" })) { setStep("recovery"); return; }
+    writing.current = true;
     setBusy(true);
     try {
       const ctx = await createContext({ name, is_private: true });
+      if (!writeProgress(scope, { step: "memory", contextId: ctx.id })) { setStep("recovery"); return; }
       setContextId(ctx.id);
       setStep("memory");
-    } catch {
+    } catch (error) {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500) writeProgress(scope, { step: "context" });
+      else setStep("recovery");
       toast({ variant: "destructive", title: t("errors.createFailed") });
     } finally {
+      writing.current = false;
       setBusy(false);
     }
   };
 
   const handleSaveMemory = async () => {
-    if (!contextId) return;
+    if (!contextId || writing.current) return;
+    const previous = readProgress(scope);
+    if (previous.step !== "memory" || previous.contextId !== contextId || !writeProgress(scope, { step: "saving", contextId })) { setStep("recovery"); return; }
+    writing.current = true;
     setBusy(true);
     try {
       await rememberMemory({
@@ -182,10 +198,14 @@ export function OnboardingCard() {
         importance: 0.7,
         context: { context_id: contextId },
       });
+      if (!writeProgress(scope, { step: "recall", contextId })) { setStep("recovery"); return; }
       setStep("recall");
-    } catch {
+    } catch (error) {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500) writeProgress(scope, { step: "memory", contextId });
+      else setStep("recovery");
       toast({ variant: "destructive", title: t("errors.saveFailed") });
     } finally {
+      writing.current = false;
       setBusy(false);
     }
   };
@@ -204,6 +224,7 @@ export function OnboardingCard() {
     } catch {
       toast({ variant: "destructive", title: t("errors.recallFailed") });
     } finally {
+      writing.current = false;
       setBusy(false);
     }
   };
@@ -236,6 +257,7 @@ export function OnboardingCard() {
           <Button
             variant="ghost"
             size="icon"
+            disabled={busy}
             onClick={dismiss}
             aria-label={t("dismiss")}
           >
@@ -245,7 +267,16 @@ export function OnboardingCard() {
       </CardHeader>
 
       <CardContent>
-        {!hasKey ? (
+        {step === "recovery" ? (
+          <Alert><AlertDescription>
+            <p>{t("recovery")}</p>
+            <Button variant="link" onClick={() => router.push("/workspace/contexts")}>{t("openContexts")}</Button>
+            <Button variant="ghost" onClick={() => {
+              writeProgress(scope, { step: "context", dismissed: true });
+              setVisible(false);
+            }}>{t("endPractice")}</Button>
+          </AlertDescription></Alert>
+        ) : !hasKey ? (
           // Informational gating notice (not an error): remember/recall need a
           // workspace embedding key. Point at the existing key-setup surface.
           <Alert>

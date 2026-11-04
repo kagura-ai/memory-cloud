@@ -14,6 +14,8 @@ import {
   cleanup,
 } from "@testing-library/react";
 
+let mockUserId = "u1";
+vi.mock("@/contexts/AuthContext", () => ({ useAuth: () => ({ user: { id: mockUserId } }) }));
 const mockPush = vi.fn();
 const mockToast = vi.fn();
 const mockGetContexts = vi.fn();
@@ -73,6 +75,7 @@ function setWorkspace(role: string = "owner") {
 beforeEach(() => {
   vi.clearAllMocks();
   window.localStorage.clear();
+  mockUserId = "u1";
   setWorkspace("owner");
   mockFeatures = { byok: true };
   mockGetContexts.mockResolvedValue({ contexts: [], total: 0 });
@@ -112,10 +115,42 @@ describe("OnboardingCard trigger gating", () => {
   });
 
   it("renders nothing when previously dismissed", async () => {
-    window.localStorage.setItem("onboarding:dismissed", "true");
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "context", dismissed: true }));
     const { container } = render(<OnboardingCard />);
     await waitFor(() => expect(container).toBeEmptyDOMElement());
     expect(mockGetContexts).not.toHaveBeenCalled();
+  });
+
+  it("lets the platform-supplied embedding credential power the sample", async () => {
+    mockCheckKey.mockResolvedValue({ has_key: false, embedding_available: true });
+    render(<OnboardingCard />);
+    expect(await screen.findByText("context.createButton")).toBeInTheDocument();
+  });
+
+  it("resumes Recall only for a still-visible practice context without saving a sample twice", async () => {
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "recall", contextId: "c1" }));
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", is_private: true, created_by: "u1" }] });
+    render(<OnboardingCard />);
+    expect(await screen.findByText("recall.searchButton")).toBeInTheDocument();
+    expect(mockCreateContext).not.toHaveBeenCalled(); expect(mockRemember).not.toHaveBeenCalled();
+  });
+
+  it("shows a recovery path for a lost write response without repeating the write", async () => {
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "saving", contextId: "c1" }));
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", is_private: true, created_by: "u1" }] });
+    render(<OnboardingCard />);
+    expect(await screen.findByText("recovery")).toBeInTheDocument();
+    expect(screen.queryByText("memory.saveButton")).toBeNull();
+    expect(mockRemember).not.toHaveBeenCalled();
+  });
+
+  it("does not resume a sample after access is removed or owner is demoted", async () => {
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "memory", contextId: "gone" }));
+    const page = render(<OnboardingCard replay />);
+    expect(await screen.findByText("recovery")).toBeInTheDocument();
+    expect(screen.queryByText("memory.saveButton")).toBeNull();
+    setWorkspace("admin"); page.rerender(<OnboardingCard replay />);
+    expect(page.container).toBeEmptyDOMElement(); expect(mockRemember).not.toHaveBeenCalled();
   });
 
   it("skips the key probe and shows the normal flow when byok is off (#1167)", async () => {
@@ -260,6 +295,6 @@ describe("OnboardingCard value-moment happy path", () => {
     );
     fireEvent.click(screen.getByLabelText("dismiss"));
     await waitFor(() => expect(container).toBeEmptyDOMElement());
-    expect(window.localStorage.getItem("onboarding:dismissed")).toBe("true");
+    expect(JSON.parse(window.localStorage.getItem("onboarding:u1:ws-1:wizard")!).dismissed).toBe(true);
   });
 });

@@ -1,5 +1,36 @@
 {
+  "gettingStarted": {
+    "title": "Getting started",
+    "intro": "Connect an AI client or find a memory in a context you can access.",
+    "connect": "Connect an AI client",
+    "connections": "See all connection options",
+    "choose": "Choose a context to search",
+    "openContext": "Open this context",
+    "queryLabel": "What would you like to remember?",
+    "example": "For example, what did we decide about the launch?",
+    "find": "Find a memory",
+    "searchFailed": "Couldn’t search this context. Check your access or try again.",
+    "noHits": "No memories matched. Try another phrase or context.",
+    "noContexts": "You can connect a client now. Ask your workspace owner to share a context so you can search its memories.",
+    "practice": "Open the private practice guide",
+    "skip": "Skip for now",
+    "help": {
+      "search": {
+        "title": "How does search work?",
+        "short": "Text matches words. Recall searches by meaning.",
+        "description": "Text filters the list by the words you enter. Recall looks for memories about the same idea in the selected context. Try a question in your own words."
+      },
+      "credentials": {
+        "title": "Which credential do I need?",
+        "short": "Sign in for an AI client, or create a KMC key for a script.",
+        "description": "Supported AI clients sign in with the MCP URL. Register a custom OAuth app when building your own client. Scripts use KMC API keys. External provider keys pay for calls to the provider. Secrets control which recipients can retrieve a value. Resources hold data sent by an external source."
+      }
+    }
+  },
   "onboarding": {
+    "recovery": "We couldn’t verify the last practice step. Open Contexts and check what was saved before starting another sample.",
+    "openContexts": "Review my contexts",
+    "endPractice": "End this practice session",
     "title": "Welcome to Kagura Memory",
     "subtitle": "Let's get you to your first recall in under 5 minutes.",
     "dismiss": "Dismiss onboarding",

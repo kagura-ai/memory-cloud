@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
+import { ContextualHelp } from "@/components/common/ContextualHelp";
 import { PageHeader } from "@/components/common/PageHeader";
 import { FeatureGuide } from "@/components/common/FeatureGuide";
 import {
@@ -31,6 +32,7 @@ export default function CredentialsPage() {
       <PageHeader title={t("title")} description={t("description")} />
 
       <Link href="/workspace/integrations" className="inline-block py-2 text-sm text-primary underline">{entry("back")}</Link>
+      <ContextualHelp topic="credentials" />
       <FeatureGuide storageKey="credentials" title={t("featureGuide.title")}>
         <p>{t("featureGuide.overview")}</p>
         <p>{t("featureGuide.choosingMethod")}</p>

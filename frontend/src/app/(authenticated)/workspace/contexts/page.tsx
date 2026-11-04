@@ -66,6 +66,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { GettingStarted } from "@/components/onboarding/GettingStarted";
+import { onboardingScope } from "@/components/onboarding/progress";
 import { PageHeader } from "@/components/common/PageHeader";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -687,6 +689,11 @@ export default function ContextsPage() {
           quota dialog the create controls used to open; the notice names the
           workspace's tier by its label, and offers the Plan page only where
           the descriptor's narrowed canUpgrade does (#1643 / #1645). */}
+      {!loading && currentWorkspace && user && (
+        <GettingStarted key={onboardingScope(user.id, currentWorkspace.id)}
+          scope={onboardingScope(user.id, currentWorkspace.id)} contexts={contexts}
+          owner={currentWorkspace.current_user_role === "owner"} />
+      )}
       <FeatureGateNotice
         gate={contextCapGate}
         id={CONTEXT_QUOTA_NOTICE_ID}
