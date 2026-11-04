@@ -100,6 +100,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # The dev extra (pytest for `make test`) is only in this stage (#2620).
+      target: dev
     container_name: kagura-api
     env_file:
       - .env.local
