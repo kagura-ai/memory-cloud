@@ -410,8 +410,10 @@ each key in `API_KEY_SECRET_PREVIOUS`, and writes every new value under
    an old key that contains a comma or starts or ends with a blank (the API
    logs a warning about such an `API_KEY_SECRET` when it starts) cannot be
    listed as it is. List its derived Fernet key instead: it opens the same
-   values, has neither, and is as secret as the key. Pass the value exactly
-   as the variable holds it:
+   values, has neither, and is as secret as the key. The command derives it
+   from stdin byte for byte, so pass the value exactly as the variable holds
+   it, with `printf '%s'` rather than `echo` (which adds a newline; the
+   command notes on stderr when the input ends with one):
 
    ```bash
    printf '%s' "$OLD_SECRET" | python -m src.cli.rekey_encrypted_secrets --derive-fernet-key

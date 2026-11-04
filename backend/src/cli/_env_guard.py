@@ -36,6 +36,16 @@ if TYPE_CHECKING:
 API_CONTAINERS: tuple[str, ...] = ("kagura-api", "kagura-api-blue", "kagura-api-green")
 
 
+def _printenv_value(stdout: bytes) -> str:
+    """The value ``printenv`` printed, verbatim but for the newline it appends.
+
+    Never stripped (#2394): a key with surrounding blanks is the key the API
+    process uses, and a stripped copy would derive a different one. Decoded as
+    Python decodes ``os.environ``.
+    """
+    return os.fsdecode(stdout[:-1] if stdout.endswith(b"\n") else stdout)
+
+
 def get_env_from_api_container(key: str) -> str | None:
     """Read ``key`` from the running API container (#2264).
 
@@ -47,7 +57,9 @@ def get_env_from_api_container(key: str) -> str | None:
     When the running containers disagree, nothing is returned (the key is
     named on stderr, never the values) rather than guessing which color
     serves. No ``docker`` on ``PATH`` (the CLI runs inside a container) or a
-    timeout stops the lookup: the other names would fail the same way.
+    timeout stops the lookup: the other names would fail the same way. The
+    value comes back as the container holds it: only the newline ``printenv``
+    appends is removed (#2394).
 
     Returns:
         The value the running containers agree on, or ``None``.
@@ -58,12 +70,11 @@ def get_env_from_api_container(key: str) -> str | None:
             result = subprocess.run(  # noqa: S603 — argv list, no shell, operator CLI
                 ["docker", "exec", name, "printenv", key],  # noqa: S607 — docker is resolved from the operator's PATH
                 capture_output=True,
-                text=True,
                 timeout=10,
             )
         except (OSError, subprocess.SubprocessError):
             break  # Docker not installed, not reachable or not answering
-        value = result.stdout.strip()
+        value = _printenv_value(result.stdout)
         if result.returncode == 0 and value:
             found[name] = value
     if len(set(found.values())) > 1:

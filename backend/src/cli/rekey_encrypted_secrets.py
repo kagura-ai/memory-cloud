@@ -40,10 +40,10 @@ ciphertext.
 
 ``--derive-fernet-key`` is a separate helper for a key that contains a comma
 or surrounding blanks, which ``API_KEY_SECRET_PREVIOUS`` (split on commas,
-stripped) cannot hold verbatim: it reads the secret from stdin exactly as the
-variable holds it (one trailing newline dropped) and prints the Fernet key it
-stands for, which opens the same values and can be listed instead. It touches
-no database, Redis or settings::
+stripped) cannot hold verbatim: it reads the secret from stdin verbatim
+(nothing stripped; input that ends with a newline gets a note on stderr) and
+prints the Fernet key it stands for, which opens the same values and can be
+listed instead. It touches no database, Redis or settings::
 
     printf '%s' "$OLD_SECRET" | python -m src.cli.rekey_encrypted_secrets --derive-fernet-key
 
@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -399,15 +400,22 @@ def _summary(report: RekeyReport) -> str:
 def _derive_fernet_key_from_stdin() -> int:
     """Print the Fernet key the secret on stdin stands for (``--derive-fernet-key``).
 
-    The secret is read as bytes, exactly as the variable holds it; only one
-    trailing newline (``printenv``, ``echo``) is dropped. No logging, no
+    The secret is read verbatim, as bytes, and decoded as ``os.environ`` is;
+    nothing is stripped (a trailing newline may be part of the key). Input that
+    ends with a newline gets a note on stderr, since ``echo`` adds one and
+    ``printf '%s'`` does not. Only the key goes to stdout. No logging, no
     settings, no database or Redis.
     """
-    raw = sys.stdin.buffer.read().decode()
-    secret = raw[:-1] if raw.endswith("\n") else raw
+    secret = os.fsdecode(sys.stdin.buffer.read())
     if not secret:
         print("error: --derive-fernet-key reads the secret from stdin", file=sys.stderr)
         return 2
+    if secret.endswith("\n"):
+        print(
+            "note: the input ends with a newline, which is derived as part of the key; "
+            "echo adds one, printf '%s' does not",
+            file=sys.stderr,
+        )
     print(derive_fernet_key(secret))
     return 0
 

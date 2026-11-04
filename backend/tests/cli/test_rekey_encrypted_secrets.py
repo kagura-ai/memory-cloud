@@ -201,18 +201,15 @@ def _stdin(monkeypatch, data: bytes) -> None:
 
 
 @pytest.mark.parametrize(
-    ("data", "secret"),
-    [
-        (b"a,b", "a,b"),
-        (b" with blanks \n", " with blanks "),
-        (b"two-newlines\n\n", "two-newlines\n"),
-    ],
-    ids=["comma", "blanks-and-one-newline", "only-one-newline-dropped"],
+    "secret",
+    ["a,b", " with blanks ", "carriage\r"],
+    ids=["comma", "blanks", "carriage-return"],
 )
-async def test_derive_fernet_key_prints_the_key_the_secret_stands_for(
-    no_backends, monkeypatch, capsys, caplog, data, secret
+async def test_derive_fernet_key_reads_stdin_verbatim(
+    no_backends, monkeypatch, capsys, caplog, secret
 ) -> None:
-    _stdin(monkeypatch, data)
+    # ``printf '%s' "$OLD_SECRET" | ...``: no newline, nothing stripped.
+    _stdin(monkeypatch, secret.encode())
     assert await cli._main(cli._parse(["--derive-fernet-key"])) == 0
     out = capsys.readouterr()
     assert out.out == f"{derive_fernet_key(secret)}\n"
@@ -222,11 +219,30 @@ async def test_derive_fernet_key_prints_the_key_the_secret_stands_for(
     assert APIKeyEncryption(out.out.strip()).decrypt(token) == "sk-under-the-old-key"
 
 
+@pytest.mark.parametrize("data", ["echoed-secret\n", "two-newlines\n\n", "\n"])
+async def test_derive_fernet_key_keeps_a_trailing_newline_and_says_so(
+    no_backends, monkeypatch, capsys, caplog, data
+) -> None:
+    _stdin(monkeypatch, data.encode())
+    assert await cli._main(cli._parse(["--derive-fernet-key"])) == 0
+    out = capsys.readouterr()
+    # Derived from the bytes as given, newline included.
+    assert out.out == f"{derive_fernet_key(data)}\n"
+    assert out.out != f"{derive_fernet_key(data[:-1])}\n"
+    note = out.err.splitlines()
+    assert len(note) == 1
+    assert "ends with a newline" in note[0] and "printf '%s'" in note[0]
+    # Nothing about the input beyond that: not the secret, not in the logs.
+    stem = data.strip()
+    assert not stem or stem not in out.err
+    assert caplog.records == []
+
+
 async def test_derive_fernet_key_passes_a_raw_fernet_key_through(
     no_backends, monkeypatch, capsys
 ) -> None:
     key = generate_fernet_key()
-    _stdin(monkeypatch, f"{key}\n".encode())
+    _stdin(monkeypatch, key.encode())
     assert await cli._main(cli._parse(["--derive-fernet-key"])) == 0
     assert capsys.readouterr().out == f"{key}\n"
 
@@ -235,10 +251,9 @@ async def test_derive_fernet_key_passes_a_raw_fernet_key_through(
     ("data", "argv"),
     [
         (b"", ["--derive-fernet-key"]),
-        (b"\n", ["--derive-fernet-key"]),
         (b"k", ["--derive-fernet-key", "--yes"]),
     ],
-    ids=["empty", "newline-only", "with-yes"],
+    ids=["empty", "with-yes"],
 )
 async def test_derive_fernet_key_usage_errors(no_backends, monkeypatch, capsys, data, argv) -> None:
     _stdin(monkeypatch, data)

@@ -275,8 +275,9 @@ def test_reset_password_does_not_re_enable_mfa_under_a_stale_key(monkeypatch, ca
 
 
 def _completed(name: str, returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
+    # ``printenv`` output as the helper reads it: bytes, not text.
     return subprocess.CompletedProcess(
-        ["docker", "exec", name, "printenv", "API_KEY_SECRET"], returncode, stdout, ""
+        ["docker", "exec", name, "printenv", "API_KEY_SECRET"], returncode, stdout.encode(), b""
     )
 
 
@@ -319,6 +320,51 @@ class TestGetEnvFromApiContainer:
             ],
         ):
             assert get_env_from_api_container("API_KEY_SECRET") == "dev-secret"
+
+    @pytest.mark.parametrize(
+        ("printed", "value"),
+        [
+            (" abc \n", " abc "),
+            ("abc\n\n", "abc\n"),
+            ("abc\r\n", "abc\r"),
+            ("abc", "abc"),
+        ],
+        ids=["surrounding-blanks", "own-trailing-newline", "carriage-return", "no-newline"],
+    )
+    def test_the_value_comes_back_verbatim_but_for_one_newline(self, printed, value) -> None:
+        # #2394: a stripped key would derive another Fernet key than the API's.
+        with patch(
+            "cli._env_guard.subprocess.run",
+            side_effect=[
+                _completed("kagura-api", stdout=printed),
+                _completed("kagura-api-blue", returncode=1),
+                _completed("kagura-api-green", returncode=1),
+            ],
+        ) as run:
+            assert get_env_from_api_container("API_KEY_SECRET") == value
+
+        assert "text" not in run.call_args.kwargs
+
+    def test_a_blank_current_key_reaches_the_settings_unchanged(self, monkeypatch) -> None:
+        import os
+
+        monkeypatch.delenv("API_KEY_SECRET", raising=False)
+        monkeypatch.delenv("API_KEY_SECRET_PREVIOUS", raising=False)
+        with patch(
+            "cli._env_guard.subprocess.run",
+            side_effect=[
+                _completed("kagura-api", stdout=" padded key \n"),
+                _completed("kagura-api-blue", returncode=1),
+                _completed("kagura-api-green", returncode=1),
+                _completed("kagura-api", stdout=" old key \n"),
+                _completed("kagura-api-blue", returncode=1),
+                _completed("kagura-api-green", returncode=1),
+            ],
+        ):
+            assert _env_guard.require_api_key_secrets() == " padded key "
+
+        assert os.environ["API_KEY_SECRET"] == " padded key "
+        assert os.environ["API_KEY_SECRET_PREVIOUS"] == " old key "
 
     def test_both_colors_with_the_same_value(self) -> None:
         with patch(
