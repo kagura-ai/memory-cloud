@@ -13,7 +13,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import { ChevronsUpDown, Plus } from 'lucide-react';
-import { WorkspaceRelationship } from './WorkspaceRelationship';
+import { WorkspaceMark, WorkspaceRelationship } from './WorkspaceRelationship';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { PlanBadge } from '@/components/common/PlanBadge';
 import type { PlanTier } from '@/lib/utils/planLabel';
@@ -38,9 +38,9 @@ export function WorkspaceSwitcher() {
   }, [isOpen]);
   const { toast } = useToast();
   const groups = [
-    { title: 'ownedGroup', items: workspaces.filter(ws => ws.current_user_role === 'owner') },
-    { title: 'sharedGroup', items: workspaces.filter(ws => ['admin', 'member', 'viewer'].includes(ws.current_user_role ?? '')) },
-    { title: 'title', items: workspaces.filter(ws => !['owner', 'admin', 'member', 'viewer'].includes(ws.current_user_role ?? '')) },
+    { title: t('ownedGroup'), items: workspaces.filter(ws => ws.current_user_role === 'owner') },
+    { title: t('sharedGroup'), items: workspaces.filter(ws => ['admin', 'member', 'viewer'].includes(ws.current_user_role ?? '')) },
+    { title: t('title'), items: workspaces.filter(ws => !['owner', 'admin', 'member', 'viewer'].includes(ws.current_user_role ?? '')) },
   ];
 
   const handleSwitchWorkspace = async (workspaceId: string) => {
@@ -94,7 +94,8 @@ export function WorkspaceSwitcher() {
         onClick={() => setIsOpen(!isOpen)}
         className="w-full px-3 py-2.5 text-sm text-left bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-700 flex items-center justify-between"
       >
-        <div className="min-w-0 flex-1 space-y-1">
+        <WorkspaceMark role={currentWorkspace?.current_user_role} />
+        <div className="min-w-0 flex-1 space-y-1 ml-2">
           <span className="sr-only">{t('currentWorkspaceCaption')}</span>
           <span className="block break-words text-sm font-semibold leading-5" title={currentWorkspace?.name}>{currentWorkspace?.name ?? t('selectWorkspace')}</span>
           {currentWorkspace && <span className="flex flex-wrap items-center gap-1.5">
@@ -114,7 +115,7 @@ export function WorkspaceSwitcher() {
 
           {/* Workspace List */}
           {groups.filter(group => group.items.length > 0).map(group => <div key={group.title}>
-            <div className="px-3 pb-1 pt-3 text-xs font-medium text-muted-foreground">{t(group.title)}</div>
+            <div className="px-3 pb-1 pt-3 text-xs font-medium text-muted-foreground">{group.title}</div>
             {group.items.map(workspace => <WorkspaceCard
               key={workspace.id} workspace={workspace} isSelected={currentWorkspace?.id === workspace.id}
               variant="compact" onClick={() => handleSwitchWorkspace(workspace.id)}

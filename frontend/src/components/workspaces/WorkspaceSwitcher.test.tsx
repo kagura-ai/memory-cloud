@@ -12,11 +12,12 @@ const { switchWorkspace, workspaces } = vi.hoisted(() => ({
     { id: "two", name: "Partners", current_user_role: "admin", plan_name: "free", context_count: 1, member_count: 3 },
   ],
 }));
+vi.mock("@/contexts/AuthContext", () => ({ useAuth: () => ({ user: { id: "u1", name: "Owner" } }) }));
 vi.mock("@/contexts/WorkspaceContext", () => ({ useWorkspace: () => ({ currentWorkspace: workspaces[1], workspaces, loading: false, switchWorkspace }) }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 describe("workspace switcher", () => {
-  it.each([["ja", ja, "現在のワークスペース", "所有", "共有"], ["en", en, "Current workspace", "Owned by you", "Shared with you"]] as const)(
+  it.each([["ja", ja, "現在のワークスペース", "オーナー", "共有"], ["en", en, "Current workspace", "Owner", "Shared"]] as const)(
     "shows the active name and relationship before opening the %s switcher", (locale, messages, current, owned, shared) => {
       render(<NextIntlClientProvider locale={locale} messages={messages}><WorkspaceSwitcher /></NextIntlClientProvider>);
       const trigger = screen.getByRole("button", { name: new RegExp(current) });
