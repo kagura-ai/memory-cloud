@@ -42,17 +42,29 @@ logger = logging.getLogger(__name__)
 _DECRYPT_ERROR = "Invalid encrypted value or wrong encryption key"
 
 
-def _fernet(secret: str) -> Fernet:
-    """The Fernet for one configured key.
+def derive_fernet_key(secret: str) -> str:
+    """The Fernet key a configured secret stands for (#2394).
 
-    A base64-encoded 32-byte Fernet key is used as is; any other string is
-    hashed with SHA-256 into one, so ``API_KEY_SECRET`` can be any string.
+    A base64-encoded 32-byte Fernet key is used as is (returned in its
+    canonical form, so a canonical key comes back unchanged); any other
+    string is hashed with SHA-256 into one, so ``API_KEY_SECRET`` can be any
+    string. The result opens exactly what ``secret`` opens and holds no comma
+    or blank, so it can be listed in ``API_KEY_SECRET_PREVIOUS`` where a
+    secret with either cannot be listed verbatim. It is as secret as the key.
     """
     try:
-        return Fernet(secret.encode())
+        Fernet(secret.encode())
     except Exception:
         key_hash = hashlib.sha256(secret.encode()).digest()
-        return Fernet(base64.urlsafe_b64encode(key_hash))
+        return base64.urlsafe_b64encode(key_hash).decode()
+    # Fernet decodes leniently (characters outside the alphabet are dropped):
+    # re-encode the 32 bytes it uses.
+    return base64.urlsafe_b64encode(base64.urlsafe_b64decode(secret.encode())).decode()
+
+
+def _fernet(secret: str) -> Fernet:
+    """The Fernet for one configured key (see :func:`derive_fernet_key`)."""
+    return Fernet(derive_fernet_key(secret).encode())
 
 
 class APIKeyEncryption:
@@ -70,8 +82,10 @@ class APIKeyEncryption:
             secret_key: The current key: a base64-encoded Fernet key or a raw
                 secret (hashed to 32 bytes).
             previous_keys: Older keys, accepted for decryption only, derived
-                the same way. Blank entries, repeats and the current key are
-                ignored; surrounding blanks are stripped.
+                the same way. Surrounding blanks are stripped; blank entries
+                and keys already in the ring (the current one included, in
+                either spelling: the secret or its derived Fernet key) are
+                ignored.
 
         Raises:
             ValueError: If secret_key is empty
@@ -82,12 +96,15 @@ class APIKeyEncryption:
 
         self._current = _fernet(secret_key)
         ring = [self._current]
-        seen = {secret_key}
+        seen = {derive_fernet_key(secret_key)}
         for key in previous_keys:
             key = key.strip()
-            if key and key not in seen:
-                seen.add(key)
-                ring.append(_fernet(key))
+            if not key:
+                continue
+            derived = derive_fernet_key(key)
+            if derived not in seen:
+                seen.add(derived)
+                ring.append(Fernet(derived.encode()))
         # MultiFernet encrypts with the first key and decrypts with any.
         self.cipher = MultiFernet(ring)
         self._key_count = len(ring)

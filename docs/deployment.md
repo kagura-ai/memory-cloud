@@ -405,6 +405,17 @@ each key in `API_KEY_SECRET_PREVIOUS`, and writes every new value under
    `API_KEY_SECRET_PREVIOUS` only, leaving `API_KEY_SECRET` as it is, and
    restart, so every process can read both keys; then swap the two values and
    restart again.
+
+   `API_KEY_SECRET_PREVIOUS` is split on commas and each entry is stripped, so
+   an old key that contains a comma or starts or ends with a blank (the API
+   logs a warning about such an `API_KEY_SECRET` when it starts) cannot be
+   listed as it is. List its derived Fernet key instead: it opens the same
+   values, has neither, and is as secret as the key. Pass the value exactly
+   as the variable holds it:
+
+   ```bash
+   printf '%s' "$OLD_SECRET" | python -m src.cli.rekey_encrypted_secrets --derive-fernet-key
+   ```
 2. Re-encrypt the stored values, from `backend/` in the API container (a host
    shell without the variables reads both from the running API container):
 

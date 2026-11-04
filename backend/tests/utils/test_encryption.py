@@ -4,14 +4,20 @@ Pure utility — no DB or external services required.
 """
 
 import base64
+import hashlib
 import logging
 from unittest.mock import patch
 
 import pytest
 
 import utils.encryption as enc_module
-from config.settings import Settings, get_settings
-from utils.encryption import APIKeyEncryption, generate_fernet_key, get_encryptor
+from config.settings import Settings, get_settings, split_previous_secrets
+from utils.encryption import (
+    APIKeyEncryption,
+    derive_fernet_key,
+    generate_fernet_key,
+    get_encryptor,
+)
 
 
 class TestAPIKeyEncryption:
@@ -187,6 +193,55 @@ class TestTokensWrittenBeforeTheKeyRing:
         ring = APIKeyEncryption(generate_fernet_key(), previous_keys=[key])
         assert ring.decrypt(token) == f"written-before-the-key-ring-{name}"
         assert ring.is_current(token) is False
+
+    @pytest.mark.parametrize("name", sorted(_PRE_RING_TOKENS))
+    def test_the_derived_fernet_key_decrypts_them(self, name):
+        key, token = _PRE_RING_TOKENS[name]
+        assert APIKeyEncryption(derive_fernet_key(key)).decrypt(token) == (
+            f"written-before-the-key-ring-{name}"
+        )
+
+
+class TestDerivedFernetKey:
+    """A key the previous list cannot hold verbatim goes in as its Fernet key (#2394)."""
+
+    def test_a_plain_string_derives_its_sha256_fernet_key(self):
+        secret = "a-plain-string-secret"
+        expected = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()).decode()
+        assert derive_fernet_key(secret) == expected
+
+    def test_a_raw_fernet_key_comes_back_unchanged(self):
+        key = generate_fernet_key()
+        assert derive_fernet_key(key) == key
+
+    @pytest.mark.parametrize("spelling", ["  {key}\t", "{head},{tail}"])
+    def test_a_raw_key_fernet_reads_leniently_comes_back_canonical(self, spelling):
+        # Fernet drops characters outside the base64 alphabet, so these
+        # spellings already opened the same values as the bare key.
+        key = generate_fernet_key()
+        secret = spelling.format(key=key, head=key[:20], tail=key[20:])
+        token = APIKeyEncryption(secret).encrypt("sk-secret")
+        assert derive_fernet_key(secret) == key
+        assert APIKeyEncryption(key).decrypt(token) == "sk-secret"
+
+    @pytest.mark.parametrize("old", [" a passphrase with blanks ", "a,passphrase,with,commas"])
+    def test_a_key_the_list_alters_rotates_through_its_derived_key(self, old):
+        new = generate_fernet_key()
+        token = APIKeyEncryption(old).encrypt("sk-old-secret")
+        # Verbatim, the list strips or splits it: the old values stay shut.
+        verbatim = APIKeyEncryption(new, split_previous_secrets(old, current=new))
+        with pytest.raises(ValueError, match="wrong encryption key"):
+            verbatim.decrypt(token)
+        listed = f"{generate_fernet_key()}, {derive_fernet_key(old)}"
+        ring = APIKeyEncryption(new, split_previous_secrets(listed, current=new))
+        assert ring.decrypt(token) == "sk-old-secret"
+        assert ring.is_current(token) is False
+        assert APIKeyEncryption(new).decrypt(ring.rotate(token)) == "sk-old-secret"
+
+    def test_the_current_key_listed_as_its_derived_key_is_not_a_second_key(self):
+        current = " a current passphrase with blanks "
+        ring = APIKeyEncryption(current, previous_keys=[derive_fernet_key(current)])
+        assert ring.key_count == 1
 
 
 class TestGetEncryptor:

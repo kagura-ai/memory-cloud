@@ -93,6 +93,47 @@ class TestSettingsField:
             Settings(_env_file=None, api_key_secret_previous="change-me-api-key-secret")
         assert "API_KEY_SECRET_PREVIOUS" not in caplog.text
 
+    def test_an_exported_empty_list_wins_over_the_env_file(self, monkeypatch, tmp_path):
+        # The re-key CLI exports "" when the API container has no list, so a
+        # dotenv list never pairs with the container's key.
+        env_file = tmp_path / ".env.test"
+        env_file.write_text("API_KEY_SECRET_PREVIOUS=old-key-from-a-dotenv-file\n")
+        assert Settings(_env_file=env_file).api_key_secret_previous_keys == (
+            "old-key-from-a-dotenv-file",
+        )
+        monkeypatch.setenv("API_KEY_SECRET_PREVIOUS", "")
+        assert Settings(_env_file=env_file).api_key_secret_previous_keys == ()
+
+
+class TestCurrentKeyThatCannotBeListedVerbatim:
+    """A current key with a comma or blanks needs its derived Fernet key later."""
+
+    _MESSAGE = "--derive-fernet-key"
+
+    @pytest.mark.parametrize(
+        ("current", "environment"),
+        [
+            (" s3cret-with-blanks-around-it-for-the-guard-test ", "development"),
+            ("s3cret-with,a-comma-in-it-for-the-guard-test-2394", "development"),
+            (f"\t{secrets.token_hex(32)}", "production"),
+        ],
+        ids=["blanks", "comma", "production"],
+    )
+    def test_warns_once_without_the_value(self, caplog, current, environment):
+        values = _private() | {"api_key_secret": current}
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            Settings(_env_file=None, environment=environment, **values)
+        warnings = [r for r in caplog.records if self._MESSAGE in r.getMessage()]
+        assert len(warnings) == 1
+        assert warnings[0].levelno == logging.WARNING
+        for part in current.split(","):
+            assert part.strip() not in caplog.text
+
+    def test_a_clean_key_does_not_warn(self, caplog):
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            Settings(_env_file=None, environment="production", **_private())
+        assert self._MESSAGE not in caplog.text
+
 
 class TestProductionGuard:
     @pytest.mark.parametrize(

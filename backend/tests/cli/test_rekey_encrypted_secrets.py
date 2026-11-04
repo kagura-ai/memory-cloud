@@ -12,6 +12,7 @@ not know, so the counts are compared with a report taken before seeding.
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import pkgutil
 import secrets
@@ -34,7 +35,7 @@ from db.base import Base
 from models.auth import APIKey, ExternalAPIKey, OAuth2Client, User, Workspace
 from models.resource import Resource, WorkspaceConnector
 from models.worker_app import WorkerAppIdentity
-from utils.encryption import APIKeyEncryption, generate_fernet_key
+from utils.encryption import APIKeyEncryption, derive_fernet_key, generate_fernet_key
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -178,6 +179,76 @@ def test_the_report_lists_undecryptable_ids_but_caps_them(capsys) -> None:
     out = capsys.readouterr().out
     assert "0, 1, 2" in out
     assert "and 10 more" in out
+
+
+# ---------------------------------------------------------------------------
+# --derive-fernet-key (no database, Redis or settings)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_backends(monkeypatch):
+    """Fail the test if the helper resolves keys, builds settings or opens a store."""
+    refuse = MagicMock(side_effect=AssertionError("--derive-fernet-key touched a backend"))
+    for name in ("require_api_key_secrets", "require_settings", "get_redis_client"):
+        monkeypatch.setattr(cli, name, refuse)
+    with patch("cli._oneshot.get_db", refuse):
+        yield
+
+
+def _stdin(monkeypatch, data: bytes) -> None:
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
+
+
+@pytest.mark.parametrize(
+    ("data", "secret"),
+    [
+        (b"a,b", "a,b"),
+        (b" with blanks \n", " with blanks "),
+        (b"two-newlines\n\n", "two-newlines\n"),
+    ],
+    ids=["comma", "blanks-and-one-newline", "only-one-newline-dropped"],
+)
+async def test_derive_fernet_key_prints_the_key_the_secret_stands_for(
+    no_backends, monkeypatch, capsys, caplog, data, secret
+) -> None:
+    _stdin(monkeypatch, data)
+    assert await cli._main(cli._parse(["--derive-fernet-key"])) == 0
+    out = capsys.readouterr()
+    assert out.out == f"{derive_fernet_key(secret)}\n"
+    assert out.err == ""
+    assert caplog.records == []
+    token = APIKeyEncryption(secret).encrypt("sk-under-the-old-key")
+    assert APIKeyEncryption(out.out.strip()).decrypt(token) == "sk-under-the-old-key"
+
+
+async def test_derive_fernet_key_passes_a_raw_fernet_key_through(
+    no_backends, monkeypatch, capsys
+) -> None:
+    key = generate_fernet_key()
+    _stdin(monkeypatch, f"{key}\n".encode())
+    assert await cli._main(cli._parse(["--derive-fernet-key"])) == 0
+    assert capsys.readouterr().out == f"{key}\n"
+
+
+@pytest.mark.parametrize(
+    ("data", "argv"),
+    [
+        (b"", ["--derive-fernet-key"]),
+        (b"\n", ["--derive-fernet-key"]),
+        (b"k", ["--derive-fernet-key", "--yes"]),
+    ],
+    ids=["empty", "newline-only", "with-yes"],
+)
+async def test_derive_fernet_key_usage_errors(no_backends, monkeypatch, capsys, data, argv) -> None:
+    _stdin(monkeypatch, data)
+    assert await cli._main(cli._parse(argv)) == 2
+    assert capsys.readouterr().out == ""
+
+
+def test_derive_fernet_key_excludes_apply() -> None:
+    with pytest.raises(SystemExit):
+        cli._parse(["--derive-fernet-key", "--apply"])
 
 
 # ---------------------------------------------------------------------------

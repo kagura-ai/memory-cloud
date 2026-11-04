@@ -38,9 +38,18 @@ A re-encryption is not an edit: ``updated_at`` (any column with an
 interrupted and rerun at any time. Nothing prints or logs a plaintext or a
 ciphertext.
 
+``--derive-fernet-key`` is a separate helper for a key that contains a comma
+or surrounding blanks, which ``API_KEY_SECRET_PREVIOUS`` (split on commas,
+stripped) cannot hold verbatim: it reads the secret from stdin exactly as the
+variable holds it (one trailing newline dropped) and prints the Fernet key it
+stands for, which opens the same values and can be listed instead. It touches
+no database, Redis or settings::
+
+    printf '%s' "$OLD_SECRET" | python -m src.cli.rekey_encrypted_secrets --derive-fernet-key
+
 Exit codes: 0 ok · 1 error (Redis unreachable included; what was committed
-stays) · 2 usage (``--yes`` without ``--apply``) · 3 some value is
-undecryptable.
+stays) · 2 usage (``--yes`` without ``--apply``; nothing on stdin for
+``--derive-fernet-key``) · 3 some value is undecryptable.
 """
 
 from __future__ import annotations
@@ -70,7 +79,7 @@ from models.auth import APIKey, ExternalAPIKey, OAuth2Client, User  # noqa: E402
 from models.resource import WorkspaceConnector  # noqa: E402
 from models.signup_gate import SignupGateConfig  # noqa: E402
 from models.worker_app import WorkerAppIdentity  # noqa: E402
-from utils.encryption import APIKeyEncryption, get_encryptor  # noqa: E402
+from utils.encryption import APIKeyEncryption, derive_fernet_key, get_encryptor  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
@@ -387,7 +396,28 @@ def _summary(report: RekeyReport) -> str:
     return f"{report.re_encrypted} encrypted value(s) to the current key"
 
 
+def _derive_fernet_key_from_stdin() -> int:
+    """Print the Fernet key the secret on stdin stands for (``--derive-fernet-key``).
+
+    The secret is read as bytes, exactly as the variable holds it; only one
+    trailing newline (``printenv``, ``echo``) is dropped. No logging, no
+    settings, no database or Redis.
+    """
+    raw = sys.stdin.buffer.read().decode()
+    secret = raw[:-1] if raw.endswith("\n") else raw
+    if not secret:
+        print("error: --derive-fernet-key reads the secret from stdin", file=sys.stderr)
+        return 2
+    print(derive_fernet_key(secret))
+    return 0
+
+
 async def _main(args: argparse.Namespace) -> int:
+    if args.derive_fernet_key:
+        if args.yes:
+            print("error: --yes needs --apply", file=sys.stderr)
+            return 2
+        return _derive_fernet_key_from_stdin()
     configure_logging(args.log_level)
     # Both keys before the settings are cached (#2239): the encryptor reads
     # them from the settings.
@@ -431,6 +461,14 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         help="report the counts, write nothing (default)",
     )
     mode.add_argument("--apply", action="store_true", help="re-encrypt under the current key")
+    mode.add_argument(
+        "--derive-fernet-key",
+        action="store_true",
+        help=(
+            "print the Fernet key of the secret on stdin, to list a key with a comma "
+            "or surrounding blanks in API_KEY_SECRET_PREVIOUS"
+        ),
+    )
     parser.add_argument("--yes", action="store_true", help="no confirmation prompt")
     add_log_level_argument(parser)
     return parser.parse_args(argv)

@@ -99,7 +99,9 @@ def split_previous_secrets(raw: str, current: str) -> tuple[str, ...]:
 
     Comma-separated; entries are stripped, blank entries and repeats dropped,
     and so is an entry equal to ``current`` (the current key is in the ring
-    already).
+    already). A key that contains a comma or surrounding blanks therefore
+    cannot be listed as is: list its derived Fernet key
+    (``utils.encryption.derive_fernet_key``), which opens the same values.
     """
     keys: list[str] = []
     for part in raw.split(","):
@@ -621,13 +623,24 @@ class Settings(BaseSettings):
     def _check_previous_api_key_secrets(self) -> "Settings":
         """Warn about ``API_KEY_SECRET_PREVIOUS`` entries; never refuse them (#2394).
 
-        An entry equal to ``API_KEY_SECRET`` is ignored with a warning. Under
-        ENVIRONMENT=production a previous key that is a shipped placeholder or
-        shorter than the guard's minimum only warns: moving the stored values
-        off a weak key is what the list is for. Counts only, never a value.
+        An entry equal to ``API_KEY_SECRET`` is ignored with a warning. A
+        current key with a comma or surrounding blanks warns too: the list
+        splits and strips its entries, so at the next rotation that key has to
+        be listed as its derived Fernet key. Under ENVIRONMENT=production a
+        previous key that is a shipped placeholder or shorter than the guard's
+        minimum only warns: moving the stored values off a weak key is what the
+        list is for. Counts only, never a value.
         """
+        current = self.api_key_secret
+        if "," in current or current != current.strip():
+            logger.warning(
+                "API_KEY_SECRET contains a comma or surrounding blanks, so it cannot be "
+                "listed verbatim in API_KEY_SECRET_PREVIOUS when it is rotated: list its "
+                "derived Fernet key instead (python -m src.cli.rekey_encrypted_secrets "
+                "--derive-fernet-key; docs/deployment.md, 'Rotating API_KEY_SECRET')."
+            )
         entries = {part.strip() for part in self.api_key_secret_previous.split(",")} - {""}
-        if self.api_key_secret in entries:
+        if current in entries:
             logger.warning("API_KEY_SECRET_PREVIOUS repeats API_KEY_SECRET; that entry is ignored.")
         if not self.is_production:
             return self
