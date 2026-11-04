@@ -1133,11 +1133,11 @@
     "failedToUpdateProfile": "Failed to update profile"
   },
   "workspace": {
-    "ownedGroup": "Your workspaces",
+    "ownedGroup": "Owned workspaces",
     "sharedGroup": "Shared workspaces",
     "currentWorkspaceCaption": "Current workspace",
-    "ownedBadge": "Owned by you",
-    "sharedBadge": "Shared with you",
+    "ownedBadge": "Owner",
+    "sharedBadge": "Shared",
     "loadingWorkspaces": "Loading workspaces…",
     "title": "Workspace",
     "settings": "Workspace Settings",
@@ -1832,7 +1832,7 @@
     "apiKeys": "API keys",
     "oauthApps": "OAuth apps",
     "connectors": "Connectors",
-    "workspaceSettings": "Workspace settings",
+    "workspaceSettings": "General",
     "plan": "Plan",
     "keyKinds": "API key purpose",
     "kmcKeys": "Keys for calling KMC",
@@ -1879,7 +1879,6 @@
     }
   },
   "credentials": {
-    "title": "Credentials & Integrations",
     "description": "Manage authentication methods for connecting clients to your workspace",
     "featureGuide": {
       "title": "Choosing an Authentication Method",
@@ -1887,8 +1886,6 @@
       "choosingMethod": "Claude, ChatGPT, Gemini, Muse, Cursor and Claude Code connect with the MCP URL below and sign in with OAuth — nothing to create. Use an API key for Codex CLI, the Python SDK, CI pipelines or a .mcp.json file. Create a custom OAuth app only for an OAuth2 client you build yourself."
     },
     "tabs": {
-      "apiKeys": "API Keys",
-      "oauthApps": "Custom OAuth Apps",
       "apiKeysHelp": "For Codex CLI, the Python SDK, CI pipelines and .mcp.json — clients that send a Bearer key instead of signing in",
       "oauthAppsHelp": "For an OAuth2 client you build yourself — Claude, ChatGPT, Gemini, Muse, Cursor and Claude Code register themselves and need no app here"
     }

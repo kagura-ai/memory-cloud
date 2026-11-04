@@ -19,7 +19,7 @@ export function WorkspaceSectionNavigation() {
     (path.endsWith("/credentials") && params.get("tab") !== "oauth-apps"));
   const existingKeys = useWorkspaceObjectPresence("externalKeys", ws?.id,
     apiKeys && features?.byok === false && ws?.current_user_role === "owner");
-  if (!integrations && !settings) return null;
+  if ((!integrations && !settings) || (settings && params.get("create") === "true")) return null;
 
   const links = integrations ? [
     { label: "overview", href: "/workspace/integrations", active: path === "/workspace/integrations" },
@@ -27,8 +27,8 @@ export function WorkspaceSectionNavigation() {
     { label: "oauthApps", href: "/workspace/integrations/credentials?tab=oauth-apps", active: path.endsWith("/credentials") && params.get("tab") === "oauth-apps" },
     { label: "connectors", href: "/workspace/integrations/connectors", active: path.includes("/integrations/connectors") },
   ] : [
-    { label: "workspaceSettings", href: "/workspace/settings/general", active: path.endsWith("/general") || path === "/workspace/settings" },
     ...(features?.plan_page === true ? [{ label: "plan", href: "/workspace/settings/plan", active: path.endsWith("/plan") || path.endsWith("/billing") }] : []),
+    { label: "workspaceSettings", href: "/workspace/settings/general", active: path.endsWith("/general") },
   ];
   const keys = [
     { label: "kmcKeys", href: "/workspace/integrations/credentials?tab=api-keys", active: path.endsWith("/credentials") },

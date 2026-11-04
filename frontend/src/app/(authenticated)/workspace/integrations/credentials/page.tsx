@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { ContextualHelp } from "@/components/common/ContextualHelp";
-import { PageHeader } from "@/components/common/PageHeader";
+import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { FeatureGuide } from "@/components/common/FeatureGuide";
 import { useTabParam } from "@/hooks/useTabParam";
 import { APIKeysTabPanel } from "@/components/credentials/APIKeysTabPanel";

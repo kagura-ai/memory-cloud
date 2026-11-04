@@ -1133,11 +1133,11 @@
     "failedToUpdateProfile": "プロフィールの更新に失敗しました"
   },
   "workspace": {
-    "ownedGroup": "自分のワークスペース",
-    "sharedGroup": "共有されたワークスペース",
+    "ownedGroup": "オーナーワークスペース",
+    "sharedGroup": "共有ワークスペース",
     "currentWorkspaceCaption": "現在のワークスペース",
-    "ownedBadge": "自分が所有",
-    "sharedBadge": "共有された",
+    "ownedBadge": "オーナー",
+    "sharedBadge": "共有",
     "loadingWorkspaces": "ワークスペースを読み込み中…",
     "title": "ワークスペース",
     "settings": "ワークスペース設定",
@@ -1832,7 +1832,7 @@
     "apiKeys": "APIキー",
     "oauthApps": "OAuthアプリ",
     "connectors": "コネクタ",
-    "workspaceSettings": "ワークスペース設定",
+    "workspaceSettings": "基本情報",
     "plan": "プラン",
     "keyKinds": "APIキーの用途",
     "kmcKeys": "KMCへ接続するキー",
@@ -1879,7 +1879,6 @@
     }
   },
   "credentials": {
-    "title": "認証情報・連携",
     "description": "ワークスペースへの接続に使用する認証方法を管理します",
     "featureGuide": {
       "title": "認証方法の選び方",
@@ -1887,8 +1886,6 @@
       "choosingMethod": "Claude、ChatGPT、Gemini、Muse、Cursor、Claude Code は下の MCP URL を貼るだけで、OAuth でログインして接続します（作成するものはありません）。Codex CLI、Python SDK、CI、.mcp.json には API キーを使います。カスタム OAuth アプリは、自作の OAuth2 クライアントを繋ぐ場合だけ作成してください。"
     },
     "tabs": {
-      "apiKeys": "APIキー",
-      "oauthApps": "カスタム OAuth アプリ",
       "apiKeysHelp": "Codex CLI、Python SDK、CI、.mcp.json 用 — ログインの代わりに Bearer キーを送るクライアント",
       "oauthAppsHelp": "自作の OAuth2 クライアント用 — Claude、ChatGPT、Gemini、Muse、Cursor、Claude Code は自動登録されるため、ここでの作成は不要です"
     }
