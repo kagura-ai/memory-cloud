@@ -9,10 +9,11 @@
  * Allows users to switch between workspaces and create new ones.
  */
 
-import { useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
-import { Plus } from 'lucide-react';
+import { ChevronsUpDown, Plus } from 'lucide-react';
+import { WorkspaceRelationship } from './WorkspaceRelationship';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { PlanBadge } from '@/components/common/PlanBadge';
 import type { PlanTier } from '@/lib/utils/planLabel';
@@ -23,8 +24,24 @@ export function WorkspaceSwitcher() {
   const t = useTranslations('workspace');
   const { currentWorkspace, workspaces, loading, switchWorkspace } = useWorkspace();
   const [isOpen, setIsOpen] = useState(false);
+  const menuId = useId();
+  const container = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   const router = useRouter();
+  useEffect(() => {
+    if (!isOpen) return;
+    function closeOutside(event: PointerEvent) {
+      if (event.target instanceof Node && !container.current?.contains(event.target)) setIsOpen(false);
+    }
+    document.addEventListener('pointerdown', closeOutside);
+    return () => document.removeEventListener('pointerdown', closeOutside);
+  }, [isOpen]);
   const { toast } = useToast();
+  const groups = [
+    { title: t('ownedGroup'), items: workspaces.filter(ws => ws.current_user_role === 'owner') },
+    { title: t('sharedGroup'), items: workspaces.filter(ws => ['admin', 'member', 'viewer'].includes(ws.current_user_role ?? '')) },
+    { title: t('title'), items: workspaces.filter(ws => !['owner', 'admin', 'member', 'viewer'].includes(ws.current_user_role ?? '')) },
+  ];
 
   const handleSwitchWorkspace = async (workspaceId: string) => {
     try {
@@ -48,7 +65,7 @@ export function WorkspaceSwitcher() {
   if (loading) {
     return (
       <div className="px-3 py-2 text-sm text-gray-500">
-        Loading workspaces...
+        {t("loadingWorkspaces")}
       </div>
     );
   }
@@ -67,45 +84,42 @@ export function WorkspaceSwitcher() {
   }
 
   return (
-    <div className="px-3 py-2 relative">
+    <div ref={container} className="px-3 py-2 relative" onKeyDown={event => {
+      if (event.key === "Escape" && isOpen) { event.stopPropagation(); setIsOpen(false); trigger.current?.focus(); }
+    }}>
       <button
+        ref={trigger}
+        aria-expanded={isOpen}
+        aria-controls={menuId}
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full px-3 py-2 text-sm text-left bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 flex items-center justify-between"
+        className="w-full px-3 py-2.5 text-sm text-left bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-700 flex items-center justify-between"
       >
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <div className="w-6 h-6 rounded bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold">
-            {currentWorkspace?.name.charAt(0).toUpperCase()}
-          </div>
-          <span className="font-medium truncate">{currentWorkspace?.name}</span>
-          {currentWorkspace && <PlanBadge planName={currentWorkspace.plan_name as PlanTier} size="sm" />}
+        <div className="min-w-0 flex-1 space-y-1">
+          <span className="sr-only">{t('currentWorkspaceCaption')}</span>
+          <span className="block break-words text-sm font-semibold leading-5" title={currentWorkspace?.name}>{currentWorkspace?.name ?? t('selectWorkspace')}</span>
+          {currentWorkspace && <span className="flex flex-wrap items-center gap-1.5">
+            <WorkspaceRelationship role={currentWorkspace.current_user_role} />
+            <PlanBadge planName={currentWorkspace.plan_name as PlanTier} size="sm" />
+          </span>}
         </div>
-        <svg
-          className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
+        <ChevronsUpDown aria-hidden="true" className="ml-2 h-4 w-4 shrink-0 text-muted-foreground" />
       </button>
 
       {isOpen && (
-        <div className="absolute left-3 right-3 mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded shadow-lg z-50 max-h-80 overflow-y-auto">
+        <div role="group" aria-label={t("title")} id={menuId} className="absolute left-3 right-3 mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded shadow-lg z-50 max-h-80 overflow-y-auto">
           {/* Dropdown Header */}
           <div className="px-3 py-2 text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide border-b border-gray-200 dark:border-gray-700">
             {t('title')}
           </div>
 
           {/* Workspace List */}
-          {workspaces.map((workspace) => (
-            <WorkspaceCard
-              key={workspace.id}
-              workspace={workspace}
-              isSelected={currentWorkspace?.id === workspace.id}
-              variant="compact"
-              onClick={() => handleSwitchWorkspace(workspace.id)}
-            />
-          ))}
+          {groups.filter(group => group.items.length > 0).map(group => <div key={group.title}>
+            <div className="px-3 pb-1 pt-3 text-xs font-medium text-muted-foreground">{group.title}</div>
+            {group.items.map(workspace => <WorkspaceCard
+              key={workspace.id} workspace={workspace} isSelected={currentWorkspace?.id === workspace.id}
+              variant="compact" onClick={() => handleSwitchWorkspace(workspace.id)}
+            />)}
+          </div>)}
 
           {/* Issue #276: Create Workspace Button */}
           <div className="border-t border-gray-200 dark:border-gray-700">

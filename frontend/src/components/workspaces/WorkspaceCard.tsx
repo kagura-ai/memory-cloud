@@ -11,6 +11,7 @@ import { PlanBadge } from '@/components/common/PlanBadge';
 import type { PlanTier } from '@/lib/utils/planLabel';
 import { useTranslations } from 'next-intl';
 import { Brain, Users } from 'lucide-react';
+import { WorkspaceMark, WorkspaceRelationship } from './WorkspaceRelationship';
 
 export interface WorkspaceInfo {
   id: string;
@@ -49,32 +50,18 @@ export function WorkspaceCard({
       <button
         onClick={onClick}
         disabled={disabled}
+        aria-current={isSelected ? true : undefined}
         className={`
           ${baseClasses}
           px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2
           ${isSelected ? 'bg-blue-50 dark:bg-blue-900' : ''}
         `}
       >
-        <div className="w-6 h-6 rounded bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-          {workspace.name.charAt(0).toUpperCase()}
-        </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <div className="font-medium truncate">{workspace.name}</div>
+          <div className="truncate font-medium" title={workspace.name}>{workspace.name}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            <WorkspaceRelationship role={workspace.current_user_role} />
             <PlanBadge planName={workspace.plan_name as PlanTier} size="sm" />
-            {workspace.current_user_role === 'owner' && (
-              <span className="text-xs text-amber-500" title="Owner">👤</span>
-            )}
-          </div>
-          <div className="text-xs text-gray-500 flex items-center gap-2">
-            <span className="flex items-center gap-1">
-              <Brain className="h-3 w-3" />
-              {workspace.context_count}
-            </span>
-            <span className="flex items-center gap-1">
-              <Users className="h-3 w-3" />
-              {workspace.member_count}
-            </span>
           </div>
         </div>
         {isSelected && (
@@ -95,6 +82,7 @@ export function WorkspaceCard({
     <button
       onClick={onClick}
       disabled={disabled}
+      aria-current={isSelected ? true : undefined}
       className={`
         ${baseClasses}
         p-4 rounded-lg border-2 transition-all
@@ -107,18 +95,14 @@ export function WorkspaceCard({
     >
       <div className="flex items-start justify-between">
         <div className="flex items-start gap-3">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white text-lg font-bold flex-shrink-0">
-            {workspace.name.charAt(0).toUpperCase()}
-          </div>
+          <WorkspaceMark role={workspace.current_user_role} className="h-10 w-10" />
           <div className="text-left min-w-0">
             <div className="flex items-center gap-2 mb-1">
               <h3 className="font-semibold text-slate-900 dark:text-white truncate">
                 {workspace.name}
               </h3>
               <PlanBadge planName={workspace.plan_name as PlanTier} size="sm" />
-              {workspace.current_user_role === 'owner' && (
-                <span className="text-xs text-amber-500" title="Owner">👤</span>
-              )}
+              <WorkspaceRelationship role={workspace.current_user_role} />
             </div>
             {workspace.description && (
               <p className="text-sm text-slate-600 dark:text-slate-400 mb-2 line-clamp-2">

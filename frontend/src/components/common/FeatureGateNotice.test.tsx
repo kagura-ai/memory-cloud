@@ -231,17 +231,17 @@ const BRANCHES: readonly Branch[] = [
       en: {
         title: "The XL plan includes resources",
         description: "Upgrade to the XL plan to use resources.",
-        action: "Upgrade to XL",
+        action: "View plans",
         badge: "XL plan",
-        hint: "Requires the XL plan",
+        hint: "Available on the XL plan",
       },
       ja: {
         title: "リソース は XL プランで利用できます",
         description:
           "リソース を利用するには XL プランにアップグレードしてください。",
-        action: "XL にアップグレード",
+        action: "プランを見る",
         badge: "XL プラン",
-        hint: "XL プランが必要です",
+        hint: "XL プランで利用できます",
       },
     },
   },
@@ -254,17 +254,17 @@ const BRANCHES: readonly Branch[] = [
         title: "New resources require the XL plan",
         description:
           "Existing resources keep working. Creating new resources is available on the XL plan.",
-        action: "Upgrade to XL",
+        action: "View plans",
         badge: "XL plan",
-        hint: "Requires the XL plan",
+        hint: "Available on the XL plan",
       },
       ja: {
         title: "新規 リソース には XL プランが必要です",
         description:
           "既存の リソース は引き続き利用できます。新規 リソース の作成には XL プランが必要です。",
-        action: "XL にアップグレード",
+        action: "プランを見る",
         badge: "XL プラン",
-        hint: "XL プランが必要です",
+        hint: "XL プランで利用できます",
       },
     },
   },
@@ -662,7 +662,7 @@ describe("FeatureGateNotice hard rules", () => {
         canUpgrade: true,
       });
       renderIn("en", <FeatureGateNotice variant={variant} gate={gate} />);
-      fireEvent.click(screen.getByRole("button", { name: "Upgrade to XL" }));
+      fireEvent.click(screen.getByRole("button", { name: "View plans" }));
       expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
     },
   );
@@ -1000,7 +1000,7 @@ describe("FeatureGateNotice variants", () => {
     expect(
       screen.getByText("Upgrade to the XL plan to use resources."),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Requires the XL plan")).not.toBeInTheDocument();
+    expect(screen.queryByText("Available on the XL plan")).not.toBeInTheDocument();
   });
 });
 
@@ -1054,4 +1054,41 @@ describe("GATE_NOUN_FORM", () => {
       }
     },
   );
+});
+
+// ── A member who cannot upgrade gets one instruction (#2630) ───────────────
+
+describe("featureGateText for a member who must ask the owner", () => {
+  const member = (scope: FeatureGateScope) =>
+    featureGateText(
+      gateOf({ state: "plan", planLabel: "XL", requiredPlan: "xl", askOwner: true }),
+      gateT("en"),
+      scope,
+    );
+
+  it("replaces the upgrade sentence instead of adding to it", () => {
+    const text = member("all");
+    expect(text?.description).toBe(
+      "Ask your workspace owner to upgrade to the XL plan to use resources.",
+    );
+    expect(text?.hint).toBe("Ask your workspace owner to upgrade to the XL plan");
+    expect(text?.action).toBeNull();
+  });
+
+  it("keeps the existing-objects sentence and asks the owner on a create gate", () => {
+    expect(member("create")?.description).toBe(
+      "Existing resources keep working. Creating new resources is available on the XL plan. Ask your workspace owner to upgrade to the XL plan.",
+    );
+  });
+
+  it("reads the same way in Japanese", () => {
+    const text = featureGateText(
+      gateOf({ state: "plan", planLabel: "XL", requiredPlan: "xl", askOwner: true }),
+      gateT("ja"),
+    );
+    expect(text?.description).toBe(
+      "リソース を利用するには、XL プランへのアップグレードをワークスペースのオーナーに依頼してください。",
+    );
+    expect(text?.hint).toBe("XL プランへのアップグレードはワークスペースのオーナーに依頼してください");
+  });
 });

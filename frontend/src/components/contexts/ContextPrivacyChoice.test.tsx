@@ -142,7 +142,7 @@ describe("ContextPrivacyChoice — the shared option", () => {
     renderChoice({ shared: REFUSED });
 
     // Named by its own text: inside a <label> it would take the whole card's.
-    fireEvent.click(screen.getByRole("button", { name: "Upgrade to L" }));
+    fireEvent.click(screen.getByRole("button", { name: "View plans" }));
     expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });
 

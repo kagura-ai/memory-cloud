@@ -37,6 +37,7 @@ import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { ApiError } from "@/lib/api/base";
 import {
   gateFromFacts,
+  withOwnerGuidance,
   type FeatureGate,
   type GateKey,
 } from "@/lib/gates/featureGates";
@@ -60,10 +61,11 @@ export function useErrorGate(
       loading === true,
       currentWorkspace?.current_user_role,
     ) === true;
-  return gateFromFacts(err.gate, {
+  const gate = gateFromFacts(err.gate, {
     fallbackKey,
     canUpgrade: raw,
     locale,
     tiers,
   });
+  return gate && withOwnerGuidance(gate, currentWorkspace?.current_user_role, features?.plan_page === true);
 }

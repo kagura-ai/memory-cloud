@@ -306,7 +306,7 @@ describe("WorkspaceMembersPage invite gate", () => {
       name: /inviteMember/,
     });
     expect(invite).toBeDisabled();
-    expect(invite).toHaveAccessibleDescription("plan.hint");
+    expect(invite).toHaveAccessibleDescription("plan.askOwnerHint");
     expect(screen.queryByText("role.admin.hint")).toBeNull();
   });
 });
@@ -320,7 +320,7 @@ describe("WorkspaceMembersPage invite control notice (#1646 P9/R1)", () => {
     return screen.findByRole("button", { name: /inviteMember/ });
   }
 
-  it("plan gate, owner on a Plan-page deployment: badge, hint and a CTA to the Plan page", async () => {
+  it("plan gate for an owner shows one hint and a Plan-page CTA", async () => {
     setupWithRole("owner", "free");
     render(<WorkspaceMembersPage />);
     const invite = await findInvite();
@@ -329,7 +329,7 @@ describe("WorkspaceMembersPage invite control notice (#1646 P9/R1)", () => {
     // The label is the action alone — the old "(Pro Plan)" suffix is gone.
     expect(invite).toHaveTextContent(/^inviteMember$/);
     expect(invite).toHaveAccessibleDescription("plan.hint");
-    expect(screen.getByText("plan.badge")).toBeInTheDocument();
+    expect(screen.queryByText("plan.badge")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "plan.action" }));
     expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });
@@ -339,7 +339,7 @@ describe("WorkspaceMembersPage invite control notice (#1646 P9/R1)", () => {
     render(<WorkspaceMembersPage />);
     const invite = await findInvite();
 
-    expect(invite).toHaveAccessibleDescription("plan.hint");
+    expect(invite).toHaveAccessibleDescription("plan.askOwnerHint");
     expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
@@ -429,11 +429,13 @@ describe("WorkspaceMembersPage invite gate — the whole truth table (#1645)", (
       // An admin passes the role half; the plan half speaks only once the
       // matrix has answered — never a plan hint while it is pending.
       expect(screen.queryByText("role.admin.hint")).toBeNull();
-      expect(screen.queryByText("plan.hint") !== null).toBe(
+      expect(screen.queryByText(/^plan\.(?:hint|askOwnerHint)$/) !== null).toBe(
         known && plan === "free",
       );
       expect(invite).toHaveAccessibleDescription(
-        known && plan === "free" ? "plan.hint" : "",
+        known && plan === "free"
+          ? (role === "admin" && i === "plan_page on" ? "plan.askOwnerHint" : "plan.hint")
+          : "",
       );
     },
   );

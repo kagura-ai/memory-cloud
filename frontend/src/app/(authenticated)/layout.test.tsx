@@ -46,20 +46,24 @@ vi.mock("next-intl", () => ({
   useTranslations: () => (k: string) => k,
 }));
 
+let mockPathname = "/workspace/dashboard";
+const mockPush = vi.fn();
+const mockReplace = vi.fn();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
-  usePathname: () => "/workspace/dashboard",
+  useRouter: () => ({ push: mockPush, replace: mockReplace }),
+  usePathname: () => mockPathname,
   useSearchParams: () => new URLSearchParams(),
 }));
 
+let mockWorkspaces: { id: string; current_user_role?: string }[] = [];
 // The app behind the gate — must not mount while the gate is up.
 vi.mock("@/contexts/WorkspaceContext", () => ({
   WorkspaceProvider: ({ children }: { children: React.ReactNode }) => (
     <div data-testid="app">{children}</div>
   ),
   useWorkspace: () => ({
-    workspaces: [{ id: "w1" }],
-    currentWorkspace: { id: "w1" },
+    workspaces: mockWorkspaces,
+    currentWorkspace: mockWorkspaces[0] ?? null,
     loading: false,
     switchWorkspace: vi.fn(),
   }),
@@ -77,6 +81,10 @@ beforeEach(() => {
   mockRefetchUser.mockReset();
   mockLogout.mockReset();
   mockAcceptTerms.mockReset();
+  mockPathname = "/workspace/dashboard";
+  mockWorkspaces = [{ id: "w1", current_user_role: "member" }];
+  mockPush.mockClear();
+  mockReplace.mockClear();
   mockUser = null;
 });
 
@@ -119,6 +127,15 @@ describe("(authenticated) layout — terms re-acceptance gate (#1665)", () => {
     expect(mockAcceptTerms).toHaveBeenCalledWith("2026-09");
   });
 
+  it("allows a system admin to open platform users without any workspace", async () => {
+    mockUser = { id: "u1", role: "admin" };
+    mockPathname = "/admin/users";
+    mockWorkspaces = [];
+    render(<DashboardLayout><p>platform users</p></DashboardLayout>);
+    expect(await screen.findByText("platform users")).toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
   it("renders the app when no re-acceptance is required", async () => {
     mockUser = {
       id: "u1",
@@ -136,5 +153,36 @@ describe("(authenticated) layout — terms re-acceptance gate (#1665)", () => {
 
     expect(await screen.findByText("page")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("(authenticated) layout — viewer landing (#2630)", () => {
+  const signedIn = { id: "u1", email: "u@example.test", name: "U", terms_acceptance_required: false };
+
+  it("sends a viewer who signs in to contexts, and explains the dashboard on a later menu click", async () => {
+    mockUser = signedIn;
+    mockWorkspaces = [{ id: "w1", current_user_role: "viewer" }];
+    const { rerender } = render(<DashboardLayout><p>dashboard stats</p></DashboardLayout>);
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/workspace/contexts"));
+    expect(screen.queryByText("dashboard stats")).toBeNull();
+
+    mockPathname = "/workspace/contexts";
+    rerender(<DashboardLayout><p>contexts list</p></DashboardLayout>);
+    expect(await screen.findByText("contexts list")).toBeInTheDocument();
+
+    // The sidebar's Dashboard link is a navigation inside the app, not a landing.
+    mockReplace.mockClear();
+    mockPathname = "/workspace/dashboard";
+    rerender(<DashboardLayout><p>dashboard stats</p></DashboardLayout>);
+    expect(await screen.findByText("member")).toBeInTheDocument();
+    expect(screen.queryByText("dashboard stats")).toBeNull();
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("keeps a member's sign-in landing on the dashboard", async () => {
+    mockUser = signedIn;
+    render(<DashboardLayout><p>dashboard stats</p></DashboardLayout>);
+    expect(await screen.findByText("dashboard stats")).toBeInTheDocument();
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 });

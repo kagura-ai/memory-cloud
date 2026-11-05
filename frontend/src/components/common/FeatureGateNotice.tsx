@@ -92,6 +92,9 @@ export type GateMessageKey =
   | "plan.newDescription"
   | "plan.titleNoTier"
   | "plan.descriptionNoTier"
+  | "plan.askOwner"
+  | "plan.askOwnerDescription"
+  | "plan.askOwnerHint"
   | "plan.action"
   | "plan.badge"
   | "plan.hint"
@@ -152,6 +155,9 @@ export const GATE_NOUN_FORM: Readonly<
   "plan.titleNoTier": "plural",
   "plan.descriptionNoTier": "plural",
   "plan.action": null,
+  "plan.askOwner": null,
+  "plan.askOwnerDescription": "plural",
+  "plan.askOwnerHint": null,
   "plan.badge": null,
   "plan.hint": null,
   "plan.hintNoTier": null,
@@ -402,7 +408,14 @@ export function featureGateText(
     );
   };
 
-  const description = format(keys.description);
+  // A member cannot upgrade: one instruction to ask the owner, never "Upgrade
+  // to …" followed by "ask your owner".
+  const askOwner = gate.askOwner === true && hasRequiredPlan;
+  const description = !askOwner
+    ? format(keys.description)
+    : keys.description === "plan.description"
+      ? format("plan.askOwnerDescription")
+      : joinSentences(format(keys.description), format("plan.askOwner"));
   // Never promise an upgrade the reader cannot act on.
   const upsell =
     keys.upsell !== null && gate.canUpgrade === true
@@ -418,7 +431,7 @@ export function featureGateText(
     action:
       keys.action !== null && mayOfferUpgrade ? format(keys.action) : null,
     badge: keys.badge === null ? null : format(keys.badge),
-    hint: format(keys.hint),
+    hint: askOwner ? format("plan.askOwnerHint") : format(keys.hint),
   };
 }
 

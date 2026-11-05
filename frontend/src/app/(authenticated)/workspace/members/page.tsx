@@ -676,12 +676,12 @@ export default function WorkspaceMembersPage() {
         }
         headerActions={
           inviteBlocked ? (
-            // A role gate's badge and hint are the same words; show them once.
+            // Explain the restriction once under the disabled control.
             <FeatureGateNotice
               variant="control"
               gate={invite}
               id={INVITE_GATE_HINT_ID}
-              showBadge={invite.state !== "role"}
+              showBadge={false}
             >
               {inviteButton}
             </FeatureGateNotice>

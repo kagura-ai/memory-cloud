@@ -8,6 +8,7 @@ export type SleepMode = "full" | "edges_only" | "skip";
 
 export interface Context {
   id: string;
+  workspace_id?: string | null;
   name: string;
   display_name: string | null;
   description: string | null;

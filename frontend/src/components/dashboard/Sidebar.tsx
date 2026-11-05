@@ -8,7 +8,7 @@
  * Issue #31: Frontend Redesign Phase 5
  */
 
-import { useState, useEffect, useRef, Fragment } from "react";
+import { useState, useEffect, useRef, useSyncExternalStore, Fragment } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -24,16 +24,15 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
-import { usePlanFeatures, type PlanFeature } from "@/hooks/usePlanFeatures";
+import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { navigationGroups, type NavItem } from "@/lib/navigation/featureNavigation";
 import {
   useWorkspaceObjectPresence,
-  type WorkspaceObjectKind,
 } from "@/hooks/useWorkspaceObjectPresence";
 import { useBetaInvites } from "@/hooks/useBetaInvites";
 import {
   hasRole,
   hasWorkspaceRole,
-  Role,
   WorkspaceRole,
 } from "@/lib/auth/rbac";
 import type { LogoutScope } from "@/lib/auth/auth";
@@ -52,283 +51,28 @@ import {
   DropdownMenuSubContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Activity,
-  Brain,
-  Key,
-  Settings,
-  Puzzle,
-  Database,
-  Sliders,
-  KeyRound,
-  LogOut,
-  UserCircle,
-  Menu,
-  X,
-  Users,
-  BarChart,
-  CreditCard,
-  Lock,
-  Gauge,
-  ChevronDown,
-  AlertTriangle,
-  Moon,
-  ShieldCheck,
-  DollarSign,
-  Info,
-  ExternalLink,
-  Plug,
-  HardDrive,
-  UserPlus,
-  MailPlus,
-  Check,
-} from "lucide-react";
+
 import { apiClient } from "@/lib/api/base";
+import { LogOut, UserCircle, Menu, ChevronDown, AlertTriangle, Info, ExternalLink, UserPlus, MailPlus, Check } from "lucide-react";
 // Issue #246: ContextSelector removed - use /contexts link instead
 import { WorkspaceSwitcher } from "@/components/workspaces/WorkspaceSwitcher";
 import { InviteFriendCard } from "@/components/beta-invites/InviteFriendCard";
 import { BetaInviteDialog } from "@/components/beta-invites/BetaInviteDialog";
 
-interface NavItem {
-  nameKey: string; // Translation key
-  href: string;
-  icon: React.ElementType;
-  requiredRole?: Role; // System admin role
-  requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
-  requiredFeature?: string | string[]; // Issue #1145: gate on GET /system/info features flag(s); every listed flag must be true (#1571)
-  existingObjectsFallback?: WorkspaceObjectKind; // Issue #1616: a requiredFeature miss is overridden while the workspace already owns such objects
-  requiredPlanFeature?: PlanFeature; // Issue #1571: gate on the plan's create gate, with an existing-objects fallback
-  disabled?: boolean; // Issue #115: Support for "Coming Soon" items
-  showMemberCount?: boolean; // Issue #223: Show dynamic member count
-  showContextCount?: boolean; // Show dynamic context count
-  children?: NavItem[]; // NEW: Support for nested items
+const mobileQuery = "(max-width: 767px)";
+function watchViewport(notify: () => void) {
+  const query = window.matchMedia(mobileQuery);
+  query.addEventListener("change", notify);
+  return () => query.removeEventListener("change", notify);
 }
-
-interface NavGroup {
-  titleKey: string; // Translation key (empty string for Context Switcher section)
-  items: NavItem[];
-  collapsible?: boolean; // Issue #139: Support collapsible sections
-  defaultCollapsed?: boolean;
-}
-
-// Issue #317: Task-based menu structure for OSS
-// Groups: Workspace, Integrations, Settings, Admin
-const navigationGroups: NavGroup[] = [
-  {
-    titleKey: "workspace",
-    collapsible: false,
-    items: [
-      {
-        nameKey: "dashboard",
-        href: "/workspace/dashboard",
-        icon: BarChart,
-        requiredWorkspaceRole: WorkspaceRole.Member, // Issue #398: hide from viewer (read-only role)
-      },
-      {
-        nameKey: "contexts",
-        href: "/workspace/contexts",
-        icon: Brain,
-        showContextCount: true,
-      },
-      {
-        nameKey: "resources",
-        href: "/workspace/resources",
-        icon: Database,
-        requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #389: Owner-only (resource tokens + schema decisions)
-        // Issue #1571: XL-only since #1551 — hidden for a plan without it
-        // unless the workspace already owns a resource (see the nav filter).
-        requiredPlanFeature: "resources",
-      },
-      {
-        // Issue #955: workspace-scoped file objects (R2 storage). Backend
-        // lists/downloads at viewer+, so the entry is visible to every
-        // workspace role; delete is gated to member+ inside the page.
-        nameKey: "storage",
-        href: "/workspace/storage",
-        icon: HardDrive,
-      },
-      {
-        // Issue #1134: owner/admin secret store console. Lives in the Workspace
-        // group (not Settings) because it is a workspace-scoped store, like
-        // resources/storage — not a configuration surface. The list APIs
-        // (GET /config/secrets, /pubkeys) are owner/admin and approve/revoke of
-        // recipient keys is owner-only inside the page, so gate the nav to admin+
-        // so member/viewer don't see a link that would 403 on click.
-        nameKey: "secrets",
-        href: "/workspace/secrets",
-        icon: Lock,
-        requiredWorkspaceRole: WorkspaceRole.Admin,
-      },
-      {
-        nameKey: "members",
-        href: "/workspace/members",
-        icon: Users,
-        showMemberCount: true,
-        requiredWorkspaceRole: WorkspaceRole.Admin, // Issue #398: hide from member/viewer
-      },
-      {
-        // Issue #526: workspace-scoped sleep reports view.
-        // Backend gates owner/admin; sidebar mirrors so member/viewer
-        // don't see a nav entry that would 403 on click.
-        nameKey: "sleepReports",
-        href: "/workspace/sleep-reports",
-        icon: Moon,
-        requiredWorkspaceRole: WorkspaceRole.Admin,
-      },
-      {
-        // Issue #473: workspace-scoped cost dashboard.
-        // Backend gates owner/admin via check_workspace_admin (#472);
-        // mirror that here so member/viewer don't see a nav entry that
-        // would 403 on click.
-        // Issue #1167: part of the BYOK surface — hidden when ENABLE_BYOK
-        // is off (the backing API 404s). Issue #1571: also hidden when the
-        // deployment hides money (ENABLE_COST_DISPLAY=false) — both flags
-        // must be on. Reporting entries stay last in the group:
-        // sleepReports, then cost.
-        nameKey: "cost",
-        href: "/workspace/cost",
-        icon: DollarSign,
-        requiredWorkspaceRole: WorkspaceRole.Admin,
-        requiredFeature: ["byok", "cost_display"],
-      },
-    ],
-  },
-  {
-    titleKey: "integrations",
-    collapsible: false,
-    items: [
-      {
-        nameKey: "apiKeys",
-        href: "/workspace/integrations/credentials?tab=api-keys",
-        icon: Key,
-      },
-      {
-        nameKey: "oauthApps",
-        href: "/workspace/integrations/credentials?tab=oauth-apps",
-        icon: Puzzle,
-      },
-      {
-        nameKey: "connectors",
-        href: "/workspace/integrations/connectors",
-        icon: Plug,
-        requiredWorkspaceRole: WorkspaceRole.Admin,
-        // Issue #1571: XL-only since #1551 — hidden for a plan without it
-        // unless the workspace already owns a connector (see the nav filter).
-        requiredPlanFeature: "connectors",
-      },
-    ],
-  },
-  {
-    titleKey: "settings",
-    collapsible: false,
-    items: [
-      {
-        // Issue #1121: owner plan view + billing handoff. The page's data API
-        // (getWorkspacePlan) is owner-only (#246), so gate the nav entry to
-        // owner too — mirrors the other settings items and avoids a link that
-        // would 403 on click for member/viewer.
-        nameKey: "plan",
-        href: "/workspace/settings/plan",
-        icon: CreditCard,
-        requiredWorkspaceRole: WorkspaceRole.Owner,
-        // Issue #1145: also gated behind the backend ENABLE_PLAN_PAGE flag
-        // (default-off in OSS) — hidden until /system/info confirms plan_page.
-        requiredFeature: "plan_page",
-      },
-      {
-        nameKey: "workspaceSettings",
-        href: "/workspace/settings/general",
-        icon: Sliders,
-        requiredWorkspaceRole: WorkspaceRole.Owner,
-      },
-      {
-        nameKey: "externalKeys",
-        href: "/workspace/integrations/external-keys",
-        icon: KeyRound,
-        requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #381: Owner-only (workspace-level secrets)
-        // Issue #1167: the BYOK console. With ENABLE_BYOK off only
-        // provisioning (create / update) 404s; list, toggle and delete stay
-        // open to the owner as a management console for keys stored earlier
-        // (#1613). Issue #1616: so the entry stays for a workspace that
-        // already stores a key, and is hidden only where it would be a
-        // dead end (no keys, no Add) — see the nav filter.
-        requiredFeature: "byok",
-        existingObjectsFallback: "externalKeys",
-      },
-    ],
-  },
-  {
-    titleKey: "admin",
-    items: [
-      {
-        nameKey: "users",
-        href: "/admin/users",
-        icon: Users,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        nameKey: "quotas",
-        href: "/admin/plans",
-        icon: Gauge,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        nameKey: "neuralConfig",
-        href: "/admin/neural-config",
-        icon: Brain,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        nameKey: "sleepReports",
-        href: "/admin/sleep-reports",
-        icon: Moon,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        // Issue #1211: consolidated memory-health report
-        nameKey: "memoryHealth",
-        href: "/admin/memory-health",
-        icon: Activity,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        // Issue #473: cost dashboard
-        nameKey: "cost",
-        href: "/admin/cost",
-        icon: DollarSign,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        nameKey: "environment",
-        href: "/admin/environment",
-        icon: Settings,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        nameKey: "workerApps",
-        href: "/admin/worker-apps",
-        icon: Puzzle,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        // Issue #358: admin-configurable signup gate
-        nameKey: "signupGate",
-        href: "/admin/signup-gate",
-        icon: ShieldCheck,
-        requiredRole: Role.ADMIN,
-      },
-    ],
-  },
-];
+const isMobileViewport = () => window.matchMedia(mobileQuery).matches;
 
 export function Sidebar() {
+  const isMobile = useSyncExternalStore(watchViewport, isMobileViewport, () => false);
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
   // Issue #1145: backend feature flags (e.g. plan_page). null while loading →
   // feature-gated items stay hidden (default-off).
   const systemFeatures = useSystemFeatures();
-  // Issue #1571: the plan's create gates for the resources / connectors
-  // entries. null while resolving → those entries stay hidden.
-  const planFeatures = usePlanFeatures();
   const [isOpen, setIsOpen] = useState(false);
   const [contextCount, setContextCount] = useState<number | null>(null);
   // #1495: whether embeddings WORK, not whether this workspace owns a key.
@@ -447,23 +191,6 @@ export function Sidebar() {
     };
   }, [currentWorkspaceId, currentWorkspaceRole, byokEnabled]);
 
-  // Issue #1571: when the plan refuses NEW resources / connectors, the entry
-  // still has to stay for a workspace that already owns some (#1551 keeps
-  // them working). Probe the list APIs only in that case, and only for a
-  // role that may list them (resources: owner, connectors: admin+ — the same
-  // roles the entries require, so a member never triggers a 403).
-  const hasResources = useWorkspaceObjectPresence(
-    "resources",
-    currentWorkspaceId,
-    planFeatures?.resources === false &&
-      hasWorkspaceRole(currentWorkspaceRole, WorkspaceRole.Owner),
-  );
-  const hasConnectors = useWorkspaceObjectPresence(
-    "connectors",
-    currentWorkspaceId,
-    planFeatures?.connectors === false &&
-      hasWorkspaceRole(currentWorkspaceRole, WorkspaceRole.Admin),
-  );
   // Issue #1616: with ENABLE_BYOK off the External Keys page is still the
   // owner's console for keys stored earlier (list / disable / delete), so the
   // entry stays for a workspace that has some. Probe the owner-only list
@@ -476,13 +203,6 @@ export function Sidebar() {
     systemFeatures?.byok === false &&
       hasWorkspaceRole(currentWorkspaceRole, WorkspaceRole.Owner),
   );
-  const existingObjects: Partial<
-    Record<PlanFeature | WorkspaceObjectKind, boolean | null>
-  > = {
-    resources: hasResources,
-    connectors: hasConnectors,
-    externalKeys: hasExternalKeys,
-  };
 
   // Issue #1582: beta invites. Off (or an older backend without the flag) →
   // no card, no menu entry, no dialog, and the hook makes no request. The one
@@ -539,6 +259,7 @@ export function Sidebar() {
     }
     if (
       item.showMemberCount &&
+      hasWorkspaceRole(currentWorkspaceRole, WorkspaceRole.Admin) &&
       currentWorkspace?.member_count &&
       currentWorkspace.member_count >= 2
     ) {
@@ -647,6 +368,7 @@ export function Sidebar() {
         {navigationGroups.map((group) => {
           // Filter items based on user role
           const visibleItems = group.items.filter((item) => {
+            if (item.requiredRole && !hasRole(user, item.requiredRole)) return false;
             // Issue #1145: gate behind backend feature flag(s). Default-off:
             // hidden while features load (null) and unless EVERY listed flag
             // is true (#1571: the workspace cost entry needs byok AND
@@ -663,35 +385,12 @@ export function Sidebar() {
               requiredFeatures.some((flag) => !systemFeatures?.[flag]) &&
               !(
                 item.existingObjectsFallback &&
-                existingObjects[item.existingObjectsFallback] === true
+                hasExternalKeys === true
               )
             ) {
               return false;
             }
-            // Issue #1571: plan-gated entries (resources / connectors). Shown
-            // when the plan includes the feature OR the workspace already owns
-            // such objects (they keep working after a downgrade, #1551; the
-            // page carries the upsell for new ones, #1560). Hidden while
-            // either answer is pending — a low tier never sees a
-            // flash-then-hide, and an entitled tier never flashes an upsell.
-            if (
-              item.requiredPlanFeature &&
-              planFeatures?.[item.requiredPlanFeature] !== true &&
-              existingObjects[item.requiredPlanFeature] !== true
-            ) {
-              return false;
-            }
-            // Check system admin role
-            if (item.requiredRole && !hasRole(user, item.requiredRole)) {
-              return false;
-            }
-            // Check workspace role (Issue #59: uses hierarchy-based check)
-            if (item.requiredWorkspaceRole) {
-              return hasWorkspaceRole(
-                currentWorkspace?.current_user_role,
-                item.requiredWorkspaceRole,
-              );
-            }
+            // Workspace roles and plan limits are explained at the destination.
             return true;
           });
 
@@ -787,22 +486,7 @@ export function Sidebar() {
                       const childKey = `item-${item.nameKey}`;
                       const isChildrenCollapsed = collapsedSections[childKey];
 
-                      // Filter visible children based on roles
-                      const visibleChildren = item.children.filter((child) => {
-                        if (
-                          child.requiredRole &&
-                          !hasRole(user, child.requiredRole)
-                        ) {
-                          return false;
-                        }
-                        if (child.requiredWorkspaceRole) {
-                          return hasWorkspaceRole(
-                            currentWorkspace?.current_user_role,
-                            child.requiredWorkspaceRole,
-                          );
-                        }
-                        return true;
-                      });
+                      const visibleChildren = item.children;
 
                       // Don't render parent if no children visible
                       if (visibleChildren.length === 0) return null;
@@ -1260,43 +944,23 @@ export function Sidebar() {
 
   return (
     <>
-      {/* Mobile: Hamburger Button */}
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className={cn(
-          "fixed top-2 left-2 z-[100] p-1.5 rounded-lg md:hidden",
-          "text-slate-700 dark:text-slate-200",
-          colors.bg.card,
-          colors.border.default,
-          "border shadow-lg",
-        )}
-        aria-label={t("toggleMenu")}
-      >
-        {isOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-      </button>
-
-      {/* Mobile: Overlay */}
-      {isOpen && (
-        <div
-          className="fixed inset-0 bg-black/50 z-[60] md:hidden"
-          onClick={() => setIsOpen(false)}
-        />
+      {isMobile ? (
+        <Dialog open={isOpen} onOpenChange={setIsOpen}>
+          <DialogTrigger asChild>
+            <button type="button" className={cn("fixed top-2 left-2 z-40 rounded-lg border p-2", colors.bg.card)}
+              aria-label={t("toggleMenu")}><Menu className="h-5 w-5" /></button>
+          </DialogTrigger>
+          <DialogContent aria-describedby={undefined}
+            className="inset-y-0 left-0 top-0 flex h-dvh w-64 max-w-full translate-x-0 translate-y-0 flex-col gap-0 rounded-none p-0 sm:rounded-none">
+            <DialogTitle className="sr-only">{t("toggleMenu")}</DialogTitle>
+            {sidebarContent}
+          </DialogContent>
+        </Dialog>
+      ) : (
+        <aside className={utilCn("relative hidden w-64 flex-col border-r md:flex", colors.bg.card, colors.border.default)}>
+          {sidebarContent}
+        </aside>
       )}
-
-      {/* Sidebar */}
-      <aside
-        className={utilCn(
-          "fixed inset-y-0 left-0 z-[70] w-64 flex flex-col",
-          "md:relative md:z-0",
-          colors.bg.card,
-          colors.border.default,
-          "border-r",
-          transitions.all,
-          isOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
-        )}
-      >
-        {sidebarContent}
-      </aside>
 
       {betaInvitesEnabled && (
         <BetaInviteDialog

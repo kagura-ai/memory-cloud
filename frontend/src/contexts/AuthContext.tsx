@@ -28,7 +28,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   /** Defaults to "all" — see the implementation for the two outcomes. */
   logout: (scope?: LogoutScope) => Promise<void>;
-  refetchUser: () => Promise<void>;
+  refetchUser: () => Promise<User | null | undefined>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -148,16 +148,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    */
   const refetchUser = async () => {
     if (useMockAuth) {
-      return;
+      return user;
     }
     try {
       const currentUser = await getCurrentUser();
       setUser(currentUser);
+      return currentUser;
     } catch (error) {
       const status = (error as { status?: number } | null | undefined)?.status;
       if (status === 401) {
         // Definitive auth failure — fall through the normal logout path.
         setUser(null);
+        return null;
       } else {
         // Transient (5xx, network, etc.) — preserve current user state.
         console.error("Failed to refetch user (silent, transient):", error);

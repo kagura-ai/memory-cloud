@@ -1,4 +1,4 @@
-import { render, screen, within, act, waitFor } from "@testing-library/react";
+import { render, screen, within, act, waitFor, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Hoisted so the vi.mock factory below can reference it (vi.mock is hoisted).
@@ -184,7 +184,7 @@ describe("Sidebar", () => {
       "href",
       "/workspace/integrations/external-keys",
     );
-    expect(screen.getByRole("link", { name: "cost" })).toHaveAttribute(
+    expect(document.querySelector('nav a[href="/workspace/cost"]')).toHaveAttribute(
       "href",
       "/workspace/cost",
     );
@@ -194,9 +194,9 @@ describe("Sidebar", () => {
     mockFeatures = { plan_page: true, byok: false };
     render(<Sidebar />);
     expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "cost" })).toBeNull();
+    expect(document.querySelector('nav a[href="/workspace/cost"]')).toBeNull();
     expect(
-      screen.getByRole("link", { name: "sleepReports" }),
+      document.querySelector('nav a[href="/workspace/sleep-reports"]'),
     ).toBeInTheDocument();
   });
 
@@ -204,13 +204,13 @@ describe("Sidebar", () => {
     mockFeatures = null;
     render(<Sidebar />);
     expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "cost" })).toBeNull();
+    expect(document.querySelector('nav a[href="/workspace/cost"]')).toBeNull();
   });
 
   it("hides the workspace cost link when cost_display is off; externalKeys stays (#1571)", () => {
     mockFeatures = { plan_page: true, byok: true, cost_display: false };
     render(<Sidebar />);
-    expect(screen.queryByRole("link", { name: "cost" })).toBeNull();
+    expect(document.querySelector('nav a[href="/workspace/cost"]')).toBeNull();
     expect(screen.getByRole("link", { name: "externalKeys" })).toHaveAttribute(
       "href",
       "/workspace/integrations/external-keys",
@@ -293,77 +293,49 @@ describe("Sidebar", () => {
   });
 });
 
-describe("plan-gated Resources / Connectors nav (#1571)", () => {
-  /**
-   * Rule (Sidebar nav filter): show the entry when the plan includes the
-   * feature OR the workspace already owns such objects; hide while either
-   * answer is pending. The existing-objects probe fires only when the plan
-   * says no — an included plan never pays the list request.
-   */
-  const noPlanFeatures = {
-    resources: false,
-    connectors: false,
-    public_contexts: false,
-  };
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockFeatures = { plan_page: true, byok: true, cost_display: true };
-    mockUser.role = "user";
-  });
-
-  it("hides both for a plan without them and no existing objects", async () => {
-    mockWorkspaceId = "w-starter-empty";
-    mockPlanFeatures = noPlanFeatures;
-    render(<Sidebar />);
-    await waitFor(() => {
-      expect(mockListResources).toHaveBeenCalledTimes(1);
-      expect(mockListConnectors).toHaveBeenCalledTimes(1);
+describe("mobile navigation", () => {
+  it("keeps the closed drawer out of the tab order and returns focus on Escape", async () => {
+    const original = window.matchMedia;
+    window.matchMedia = (q: string) => ({ ...original.call(window, q), matches: true,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(),
     });
-    expect(screen.queryByRole("link", { name: "resources" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "connectors" })).toBeNull();
+    try {
+      render(<Sidebar />);
+      expect(screen.queryByRole("navigation")).toBeNull();
+      const trigger = screen.getByRole("button", { name: "toggleMenu" });
+      fireEvent.click(trigger);
+      const drawer = await screen.findByRole("dialog");
+      expect(within(drawer).getByRole("navigation")).toBeInTheDocument();
+      fireEvent.keyDown(drawer, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      await waitFor(() => expect(trigger).toHaveFocus());
+    } finally {
+      window.matchMedia = original;
+    }
   });
+});
 
-  it("keeps the connectors entry when the workspace already has a connector", async () => {
-    mockWorkspaceId = "w-starter-with-connector";
-    mockPlanFeatures = noPlanFeatures;
-    mockListConnectors.mockResolvedValueOnce([{ id: "conn-1" }]);
-    render(<Sidebar />);
-    expect(
-      await screen.findByRole("link", { name: "connectors" }),
-    ).toHaveAttribute("href", "/workspace/integrations/connectors");
-    expect(screen.queryByRole("link", { name: "resources" })).toBeNull();
-  });
-
-  it("shows both without probing when the plan includes them", () => {
-    mockWorkspaceId = "w-xl";
-    mockPlanFeatures = {
-      resources: true,
-      connectors: true,
-      public_contexts: true,
-    };
-    render(<Sidebar />);
-    expect(screen.getByRole("link", { name: "resources" })).toHaveAttribute(
-      "href",
-      "/workspace/resources",
-    );
-    expect(screen.getByRole("link", { name: "connectors" })).toHaveAttribute(
-      "href",
-      "/workspace/integrations/connectors",
-    );
-    expect(mockListResources).not.toHaveBeenCalled();
-    expect(mockListConnectors).not.toHaveBeenCalled();
-  });
-
-  it("hides both and does not probe while the plan is still resolving", () => {
-    mockWorkspaceId = "w-pending";
-    mockPlanFeatures = null;
-    render(<Sidebar />);
-    expect(screen.queryByRole("link", { name: "resources" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "connectors" })).toBeNull();
-    expect(mockListResources).not.toHaveBeenCalled();
-    expect(mockListConnectors).not.toHaveBeenCalled();
-  });
+describe("feature discoverability (#2630)", () => {
+  it.each(["owner", "admin", "member", "viewer"])(
+    "keeps feature destinations available to %s without probing restricted lists",
+    (role) => {
+      vi.clearAllMocks();
+      mockWorkspaceId = "discoverability-" + role;
+      mockWorkspaceRole = role;
+      mockUser.role = "user";
+      mockFeatures = { plan_page: true, byok: true, cost_display: true };
+      mockPlanFeatures = { resources: false, connectors: false, public_contexts: false };
+      render(<Sidebar />);
+      for (const href of ["/workspace/resources", "/workspace/integrations/connectors",
+        "/workspace/dashboard", "/workspace/settings/plan", "/workspace/settings/general",
+        "/workspace/members"]) {
+        expect(document.querySelector(`nav a[href="${href}"]`)).not.toBeNull();
+      }
+      expect(document.querySelector('nav a[href^="/admin/"]')).toBeNull();
+      expect(mockListResources).not.toHaveBeenCalled();
+      expect(mockListConnectors).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("External Keys nav with BYOK off (#1616)", () => {
@@ -480,7 +452,7 @@ describe("External Keys nav with BYOK off (#1616)", () => {
     mockListExternalKeys.mockResolvedValueOnce([{ key_name: "K" }]);
     render(<Sidebar />);
     await screen.findByRole("link", { name: "externalKeys" });
-    expect(screen.queryByRole("link", { name: "cost" })).toBeNull();
+    expect(document.querySelector('nav a[href="/workspace/cost"]')).toBeNull();
   });
 });
 

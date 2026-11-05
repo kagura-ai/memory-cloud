@@ -46,6 +46,7 @@ import { ApiError } from "@/lib/api/base";
 export default function WorkspaceSettingsPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
+  const access = useTranslations("featureAccess");
   const router = useRouter();
   const searchParams = useSearchParams();
   const {
@@ -254,7 +255,7 @@ export default function WorkspaceSettingsPage() {
     <PageContainer>
       <PageHeader
         title={t("workspaceSettings")}
-        description={t("settingsDesc")}
+        description={currentWorkspace?.name ? access("workspace", { name: currentWorkspace.name }) : t("settingsDesc")}
       />
 
       <Section>
