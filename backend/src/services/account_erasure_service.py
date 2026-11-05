@@ -2502,10 +2502,12 @@ class AccountErasureService:
         counts["workspace_members"] = await self._count_and_delete(
             WorkspaceMember, WorkspaceMember.user_id == user_id
         )
+        # Invitation emails are stored as typed and matched case-insensitively
+        # (#2641). ``User.email`` is NOT NULL.
         counts["workspace_invitations"] = await self._count_and_delete(
             WorkspaceInvitation,
             (WorkspaceInvitation.invited_by == user_id)
-            | (WorkspaceInvitation.email == target.email),
+            | WorkspaceInvitation.addressed_to(target.email),
         )
         # #1365 review sweep (F8): per-context ACL grants. The subject's own
         # memberships are dead after erasure — delete them (mirrors

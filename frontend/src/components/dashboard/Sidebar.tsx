@@ -50,7 +50,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 import { apiClient } from "@/lib/api/base";
-import { Settings, LogOut, UserCircle, Menu, Users, ChevronDown, AlertTriangle, Info, ExternalLink, UserPlus, MailPlus, Check } from "lucide-react";
+import { LogOut, UserCircle, Menu, ChevronDown, AlertTriangle, Info, ExternalLink, UserPlus, MailPlus, Check } from "lucide-react";
 // Issue #246: ContextSelector removed - use /contexts link instead
 import { WorkspaceSwitcher } from "@/components/workspaces/WorkspaceSwitcher";
 import { InviteFriendCard } from "@/components/beta-invites/InviteFriendCard";

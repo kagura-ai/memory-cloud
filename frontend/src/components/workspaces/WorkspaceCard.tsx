@@ -57,7 +57,6 @@ export function WorkspaceCard({
           ${isSelected ? 'bg-blue-50 dark:bg-blue-900' : ''}
         `}
       >
-        <WorkspaceMark role={workspace.current_user_role} className="h-7 w-7" />
         <div className="min-w-0 flex-1">
           <div className="truncate font-medium" title={workspace.name}>{workspace.name}</div>
           <div className="mt-1 flex flex-wrap items-center gap-1.5">

@@ -46,6 +46,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql.elements import ColumnElement
 
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth_scope import client_registered_scope, granted_scope
@@ -56,6 +57,7 @@ from auth.workspace_roles import (
     WorkspaceRole,
 )
 from db.base import Base
+from db.constraint_names import CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE
 from models.json_types import NullableJSON
 from utils.datetime import utcnow
 from utils.public_id import PublicIdPrefix, public_id_column
@@ -2439,6 +2441,21 @@ class WorkspaceInvitation(Base):
         CheckConstraint("length(token) >= 20", name="valid_invitation_token"),
     )
 
+    @classmethod
+    def addressed_to(cls, email: str) -> ColumnElement[bool]:
+        """SQL predicate: the invitation is addressed to ``email``.
+
+        Invitation emails are stored as typed and matched case-insensitively.
+        An invitation without an email (link-only) never matches.
+
+        Args:
+            email: The address to match, in any casing.
+
+        Returns:
+            A boolean SQL expression for use in ``where()``.
+        """
+        return func.lower(cls.email) == email.lower()
+
     def is_expired(self) -> bool:
         """Check if invitation is expired.
 
@@ -2535,6 +2552,10 @@ class ContextMember(Base):
         Index("idx_context_members_context", "context_id"),
         Index("idx_context_members_user", "user_id"),
         CheckConstraint(CONTEXT_ROLE_CHECK_SQL, name="valid_context_member_role"),
+        # #2639: documented above but only enforced since migration f22. The
+        # add route checks then inserts, so two concurrent adds of one user
+        # could both insert; the second now fails at commit.
+        UniqueConstraint("context_id", "user_id", name=CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE),
     )
 
     def __repr__(self) -> str:

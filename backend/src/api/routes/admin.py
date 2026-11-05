@@ -1008,6 +1008,16 @@ class UserDeleteRequest(BaseModel):
 
     workspace_transfers: dict[UUID, str] = Field(default_factory=dict)
     context_transfers: dict[UUID, str] = Field(default_factory=dict)
+    delete_workspaces: list[UUID] = Field(
+        default_factory=list,
+        description=(
+            "Owned workspaces to delete with the user instead of handing them over "
+            "(#2640). Accepted only for a workspace with no other member (its "
+            "`members` in the 409 is empty). Purged like a soft-deleted owned "
+            "workspace, everything in it included, and listed under "
+            "`purged_workspaces`; the running-subscription check still comes first."
+        ),
+    )
 
 
 @router.delete("/users/{user_id}")
@@ -1036,9 +1046,13 @@ async def delete_user(
     context passes to a linked account that wrote in it, otherwise it is
     deleted with the user (#2417). A soft-deleted workspace the user owns takes no
     successor: it is hard-deleted with the user, everything in it included,
-    and listed under ``purged_workspaces`` (#2406). In a workspace someone
-    else owns, the user's connector keys and the agents it registered go to
-    that owner (``reowned``), its agent-bound keys are deleted
+    and listed under ``purged_workspaces`` (#2406). A ``workspaces[]`` entry
+    of the 409 with empty ``members`` (nobody else is in it) may be named in
+    ``delete_workspaces`` instead of taking a successor: it goes the same way
+    and comes back under ``purged_workspaces`` (#2640); naming one with
+    another member, or one also in ``workspace_transfers``, is a 409. In a
+    workspace someone else owns, the user's connector keys and the agents it
+    registered go to that owner (``reowned``), its agent-bound keys are deleted
     (``deleted.agent_api_keys``) and an agent left without a key is suspended
     (``suspended``, #2373). Initial/last admin and self-deletion protections
     remain in force. The transfer and deletion commit together.
@@ -1067,10 +1081,13 @@ async def delete_user(
             context_transfers=request.context_transfers,
             actor_email=admin.get("email") or "admin@local",
             actor_user_id=admin_id,
+            delete_workspaces=set(request.delete_workspaces),
         )
+        # Validated above, in this transaction and under its locks.
         result = await delete_user_rows(
             db,
             user_id,
+            delete_workspace_ids=sorted(set(request.delete_workspaces)),
             actor_email=admin.get("email") or "admin@local",
             actor_user_id=admin_id,
         )

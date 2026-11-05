@@ -645,6 +645,9 @@ async def toggle_external_key(
         # Update enabled state
         key.enabled = request.enabled
         key.updated_by = user_email
+        # Read before the commit: a rollback expires ``key``, and reloading an
+        # attribute afterwards fails on an AsyncSession (#2639).
+        provider = key.provider
 
         try:
             await db.commit()
@@ -660,7 +663,7 @@ async def toggle_external_key(
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
-                        f"Another enabled {key.provider} API key already exists in "
+                        f"Another enabled {provider} API key already exists in "
                         "this workspace (concurrent toggle). Disable it first "
                         "before enabling this one."
                     ),

@@ -13,7 +13,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import { ChevronsUpDown, Plus } from 'lucide-react';
-import { WorkspaceMark, WorkspaceRelationship } from './WorkspaceRelationship';
+import { WorkspaceRelationship } from './WorkspaceRelationship';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { PlanBadge } from '@/components/common/PlanBadge';
 import type { PlanTier } from '@/lib/utils/planLabel';
@@ -94,8 +94,7 @@ export function WorkspaceSwitcher() {
         onClick={() => setIsOpen(!isOpen)}
         className="w-full px-3 py-2.5 text-sm text-left bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-700 flex items-center justify-between"
       >
-        <WorkspaceMark role={currentWorkspace?.current_user_role} />
-        <div className="min-w-0 flex-1 space-y-1 ml-2">
+        <div className="min-w-0 flex-1 space-y-1">
           <span className="sr-only">{t('currentWorkspaceCaption')}</span>
           <span className="block break-words text-sm font-semibold leading-5" title={currentWorkspace?.name}>{currentWorkspace?.name ?? t('selectWorkspace')}</span>
           {currentWorkspace && <span className="flex flex-wrap items-center gap-1.5">

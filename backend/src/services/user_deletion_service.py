@@ -85,6 +85,11 @@ CONNECTOR_CONTEXT_FOLLOWS_OWNER = (
     "A connector's write target goes to the workspace owner; it takes no successor selection"
 )
 OWNERSHIP_TRANSFER_REQUIRED = "Ownership transfer required"
+SELECTIONS_NO_LONGER_MATCH = "Transfer selections no longer match the user's resources"
+WORKSPACE_DELETE_AND_TRANSFER = (
+    "A workspace is either handed over or deleted with the user, not both"
+)
+WORKSPACE_HAS_OTHER_MEMBERS = "Workspace has other members; pick a successor instead"
 
 
 def _contextless_in(m: Any, workspaces: list[UUID] | Select[Any] | Any) -> ColumnElement[bool]:
@@ -251,6 +256,7 @@ async def transfer_user_ownership(
     context_transfers: dict[UUID, str],
     actor_email: str,
     actor_user_id: str,
+    delete_workspaces: frozenset[UUID] | set[UUID] = frozenset(),
 ) -> dict[UUID, str]:
     """Require an explicit successor for each owned workspace and shared context.
 
@@ -267,6 +273,18 @@ async def transfer_user_ownership(
     subscription refuses the whole deletion (``BILLING-005``): the subscription
     is the user's, so it ends first, as account erasure and ``cli.delete_admin``
     require (#1940).
+
+    ``delete_workspaces`` names live owned workspaces nobody else is in (the
+    409 lists them with empty ``members``) that go with the user instead of
+    to a successor (#2640): the caller passes them to ``delete_user_rows`` as
+    ``delete_workspace_ids``, which purges them like a soft-deleted owned
+    workspace, everything in them included. The billing refusal comes first;
+    then an id also in ``workspace_transfers`` is refused, one that is not a
+    live owned workspace no longer matches, and one with another member is
+    refused. The contexts in them take no successor (a selection naming one
+    no longer matches). The member check runs under the workspace row locks
+    taken here, which a member add (``WorkspaceService.add_member``, an
+    accepted invitation) takes first, so nobody joins before the commit.
 
     A missing selection raises 409 with :func:`_transfer_required`'s body,
     which also carries what the admin's successor picker shows.
@@ -310,6 +328,21 @@ async def transfer_user_ownership(
         ).scalars()
     )
     ensure_no_billing_contract(workspaces)
+    if delete_workspaces & workspace_transfers.keys():
+        raise HTTPException(409, WORKSPACE_DELETE_AND_TRANSFER)
+    if delete_workspaces - {w.id for w in workspaces}:
+        raise HTTPException(409, SELECTIONS_NO_LONGER_MATCH)
+    if delete_workspaces:
+        other_member = await db.scalar(
+            select(WorkspaceMember.id)
+            .where(
+                WorkspaceMember.workspace_id.in_(delete_workspaces),
+                WorkspaceMember.user_id != user_id,
+            )
+            .limit(1)
+        )
+        if other_member is not None:
+            raise HTTPException(409, WORKSPACE_HAS_OTHER_MEMBERS)
     # The soft-deleted ones go with the user, everything in them included
     # (``delete_user_rows`` locks them). With the live ones locked, none can
     # join this set before that.
@@ -338,7 +371,12 @@ async def transfer_user_ownership(
     # locks); of the rest, one of the user's own goes with it and everything
     # else needs a successor. Read-only here: the common 409 must not lock or
     # write more than the rows above.
-    created = [c for c in created if c.workspace_id not in purged]
+    # Contexts in a workspace deleted with the user take no successor either.
+    created = [
+        c
+        for c in created
+        if c.workspace_id not in purged and c.workspace_id not in delete_workspaces
+    ]
     taken = await predict_private_context_takeovers(db, user_id, created)
     personal = set(
         (await db.execute(select(Context.id).where(_personal(Context, user_id)))).scalars()
@@ -379,9 +417,13 @@ async def transfer_user_ownership(
     # nothing there needs a successor any more.
     workspace_ids = {w.id for w in workspaces} | {c.workspace_id for c in created}
     if set(context_transfers) - context_ids or set(workspace_transfers) - workspace_ids:
-        raise HTTPException(409, "Transfer selections no longer match the user's resources")
+        raise HTTPException(409, SELECTIONS_NO_LONGER_MATCH)
     selectable = [c for c in contexts if c.id not in fixed]
-    missing_ws = [w.id for w in workspaces if w.id not in workspace_transfers]
+    missing_ws = [
+        w.id
+        for w in workspaces
+        if w.id not in workspace_transfers and w.id not in delete_workspaces
+    ]
     missing_ctx = [
         c
         for c in selectable
@@ -413,7 +455,8 @@ async def transfer_user_ownership(
             )
         ).scalars()
     }
-    for workspace in workspaces:
+    kept = [w for w in workspaces if w.id not in delete_workspaces]
+    for workspace in kept:
         if (workspace.id, workspace_transfers[workspace.id]) not in members:
             raise HTTPException(409, "Workspace successor must be an existing member")
     for context in selectable:
@@ -433,7 +476,7 @@ async def transfer_user_ownership(
 
     # Validation finished. Keep all transfers in the deletion transaction.
     changed: dict[UUID, str] = {}
-    for workspace in workspaces:
+    for workspace in kept:
         successor = workspace_transfers[workspace.id]
         await WorkspaceOwnershipService(db).transfer_ownership(
             workspace_id=workspace.id,

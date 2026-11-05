@@ -460,6 +460,77 @@ class TestAddMemberHappyPath:
             app.dependency_overrides.clear()
 
 
+class TestAddMemberCommitRace:
+    """#2639: the insert losing a concurrent add at commit (the pre-check saw
+    no row) answers the pre-check's 400; any other IntegrityError is not
+    turned into it."""
+
+    def _post(self, client, constraint_name: str):
+        from sqlalchemy.exc import IntegrityError
+
+        no_row = MagicMock()
+        no_row.scalar_one_or_none.return_value = None
+        fake_session = MagicMock()
+        fake_session.execute = AsyncMock(return_value=no_row)
+        fake_session.commit = AsyncMock(
+            side_effect=IntegrityError(
+                "INSERT INTO context_members ...",
+                {},
+                MagicMock(constraint_name=constraint_name),
+            )
+        )
+        fake_session.rollback = AsyncMock()
+        target = MagicMock(role="owner", allowed_context_ids=None)
+
+        async def override_db():
+            yield fake_session
+
+        from db.base import get_db
+
+        app.dependency_overrides[get_db] = override_db
+        try:
+            with (
+                patch(
+                    "api.routes.contexts.get_current_user",
+                    AsyncMock(return_value=_mock_user(OWNER_USER_ID)),
+                ),
+                patch(
+                    "services.permission_service.PermissionService.check_context_owner",
+                    _owner_allows(),
+                ),
+                patch(
+                    "services.permission_service.PermissionService.is_workspace_member",
+                    AsyncMock(return_value=True),
+                ),
+                patch(
+                    "services.workspace_service.WorkspaceService.get_member",
+                    AsyncMock(return_value=target),
+                ),
+            ):
+                response = client.post(
+                    f"/api/v1/contexts/{CONTEXT_ID}/members",
+                    json={"user_id": MEMBER_USER_ID, "role": "editor"},
+                )
+        finally:
+            app.dependency_overrides.clear()
+        return response, fake_session
+
+    def test_unique_violation_answers_the_duplicate_400(self, client):
+        from db.constraint_names import CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE
+
+        response, session = self._post(client, CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE)
+        assert response.status_code == 400
+        assert response.json()["message"] == f"User {MEMBER_USER_ID} is already a context member"
+        session.rollback.assert_awaited()
+
+    def test_other_integrity_error_is_not_the_duplicate_400(self, client):
+        response, session = self._post(client, "context_members_context_id_fkey")
+        # Re-raised as is: the global SQLAlchemyError handler's 503.
+        assert response.status_code == 503
+        assert "already a context member" not in response.text
+        session.rollback.assert_awaited()
+
+
 class TestRemoveMemberHappyPath:
     def test_cannot_remove_context_owner_role(self, client):
         """Existing role-is-owner guard remains functional."""
