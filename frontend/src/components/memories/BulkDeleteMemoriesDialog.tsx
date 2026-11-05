@@ -8,7 +8,7 @@
  * realistic way to get a workspace back under its Free capacity.
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { AlertTriangle } from "lucide-react";
 import {
@@ -90,14 +90,9 @@ interface BulkDeleteMemoriesDialogProps {
   onPartial?: (deleted: number) => void;
 }
 
-export function BulkDeleteMemoriesDialog(props: BulkDeleteMemoriesDialogProps) {
-  // A preview belongs to one context, including while its response is pending.
-  return <ContextBulkDeleteDialog key={props.contextId} {...props} />;
-}
-
 type DeleteTarget = Omit<ForgetBulkParams, "dry_run" | "cursor">;
 
-function ContextBulkDeleteDialog({
+export function BulkDeleteMemoriesDialog({
   contextId,
   open,
   onOpenChange,
@@ -119,10 +114,28 @@ function ContextBulkDeleteDialog({
   const [partial, setPartial] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  /** Drop a count still in flight; the dialog is free again at once. */
+  const discardPendingCount = () => {
+    if (pendingCount.current) {
+      pendingCount.current = null;
+      setBusy(false);
+    }
+  };
+
+  // A preview belongs to one context. A delete already running keeps its own
+  // captured target and its progress; only the count state is reset.
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
+    discardPendingCount();
+    setPreview(null);
+    setError(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [contextId]);
+
   const update = (key: keyof BulkDeleteFilters, value: string) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
     // A changed filter is a different set: the old count no longer applies.
-    pendingCount.current = null;
+    discardPendingCount();
     setPreview(null);
     setError(null);
   };
@@ -146,7 +159,7 @@ function ContextBulkDeleteDialog({
     setPartial(null);
     try {
       // A valid future range has no intersection with the cutoff. Don't send an
-      // inverted range to the API; genuinely invalid user ranges still fail there.
+      // inverted range to the API (it would 422 on created_after >= created_before); genuinely invalid user ranges still fail there.
       if (
         request.created_after &&
         request.created_after >= cutoff &&
@@ -164,7 +177,11 @@ function ContextBulkDeleteDialog({
         setError(err instanceof Error ? err.message : t("failed"));
       }
     } finally {
-      setBusy(false);
+      // A superseded count must not unlock a newer count that is still pending.
+      if (pendingCount.current === target) {
+        pendingCount.current = null;
+        setBusy(false);
+      }
     }
   };
 
