@@ -140,7 +140,14 @@ class FileObject(Base):
             "workspace_id",
             text("lower(sha256)"),
             unique=True,
-            postgresql_where="deleted_at IS NULL AND status <> 'failed'",
+            postgresql_where=(
+                "deleted_at IS NULL AND status <> 'failed' AND created_by NOT LIKE 'migration:attachment:%'"
+            ),
+        ),
+        Index(
+            "ix_file_objects_legacy_creator",
+            "created_by",
+            postgresql_where="created_by LIKE 'migration:attachment:%'",
         ),
         # Orphan sweep helper: only matters for in-flight reservations.
         Index(

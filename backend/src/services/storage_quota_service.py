@@ -322,6 +322,16 @@ async def release_storage_bytes(
             )
 
 
+async def expire_erased_attachment_quota(workspace_id: UUID) -> None:
+    """Schedule the usual DB reseed without replaying a decrement on worker retries.
+
+    Keep concurrent reservations intact. LT also sets an expiry on an
+    unbounded counter, but never extends an already scheduled reseed.
+    The caller keeps its durable outbox marker when Redis is unavailable.
+    """
+    await get_redis_client().expire(_build_key(workspace_id), 60, lt=True)
+
+
 async def reseed_storage_counter(workspace_id: UUID, db: AsyncSession) -> int | None:
     """Rewrite the Redis counter from the database aggregate, with the seed TTL.
 

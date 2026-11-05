@@ -350,6 +350,26 @@
       }
     }
   },
+  "mfaSettings": {
+    "title": "Two-factor authentication",
+    "enabled": "Your password sign-ins require a second factor.",
+    "disabled": "Two-factor authentication is off.",
+    "setup": "Set up",
+    "disable": "Turn off",
+    "enable": "Enable two-factor authentication",
+    "setupHint": "Enter your current password to start setup.",
+    "verifyHint": "Scan the QR code with your authenticator, then enter its six-digit code.",
+    "disableHint": "Enter your current password and an authenticator or recovery code.",
+    "codesTitle": "Save your recovery codes",
+    "codesHint": "Keep these codes somewhere safe. Each works once and you can only view them here.",
+    "saved": "I saved my codes",
+    "password": "Current password",
+    "code": "Authenticator code",
+    "codeOrRecovery": "Authenticator or recovery code",
+    "qr": "Authenticator setup QR code",
+    "manual": "Manual setup key",
+    "error": "Could not update two-factor authentication."
+  },
   "auth": {
     "signIn": "Sign In",
     "signOut": "Sign Out",
@@ -396,7 +416,7 @@
     "orContinueWith": "Or continue with",
     "mfaRequired": "Two-Factor Authentication",
     "enterTotpCode": "Enter the 6-digit code from your authenticator app",
-    "totpCode": "Verification Code",
+    "totpCode": "Authenticator or recovery code",
     "verify": "Verify",
     "verifying": "Verifying...",
     "passwordLogin": "Sign in with password",

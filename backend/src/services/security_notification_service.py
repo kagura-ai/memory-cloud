@@ -208,6 +208,8 @@ class SecurityEvent(StrEnum):
     PASSKEY_ADDED = "passkey_added"
     PASSKEY_REMOVED = "passkey_removed"
     SECOND_FACTOR_LOCKED = "second_factor_locked"
+    MFA_ENABLED = "mfa_enabled"
+    MFA_DISABLED = "mfa_disabled"
 
 
 # The label of the sign-in method line, per event.
@@ -239,6 +241,14 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
     SecurityEvent.PASSKEY_REMOVED: (
         "A passkey was removed from your Kagura account",
         "A passkey was removed.",
+    ),
+    SecurityEvent.MFA_ENABLED: (
+        "Two-factor authentication enabled",
+        "Two-factor authentication was enabled on your account.",
+    ),
+    SecurityEvent.MFA_DISABLED: (
+        "Two-factor authentication disabled",
+        "Two-factor authentication was disabled on your account.",
     ),
     SecurityEvent.PASSWORD_SET: (
         "A password was added to your Kagura account",

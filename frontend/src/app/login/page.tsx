@@ -285,9 +285,10 @@ function LoginContent() {
     }
   };
 
+  const codeComplete = /^(?:\d{6}|(?:[\da-f]{8}-){3}[\da-f]{8})$/i.test(totpCode);
   const handleMfaVerify = (e: React.FormEvent) => {
     e.preventDefault();
-    if (totpCode.length !== 6 || loadingAction !== null) {
+    if (!codeComplete || loadingAction !== null) {
       return;
     }
     void submitMfa();
@@ -443,9 +444,7 @@ function LoginContent() {
                   <Input
                     id="totpCode"
                     type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    maxLength={6}
+                    maxLength={35}
                     value={totpCode}
                     onChange={(e) => setTotpCode(e.target.value)}
                     onKeyDown={(e) => {
@@ -454,7 +453,7 @@ function LoginContent() {
                       // explicitly once the TOTP code is complete.
                       if (
                         e.key === "Enter" &&
-                        totpCode.length === 6 &&
+                        codeComplete &&
                         loadingAction === null
                       ) {
                         e.preventDefault();
@@ -469,7 +468,7 @@ function LoginContent() {
                 </div>
                 <Button
                   type="submit"
-                  disabled={loadingAction !== null || totpCode.length !== 6}
+                  disabled={loadingAction !== null || !codeComplete}
                   className="h-12 w-full rounded-full bg-kagura-accent text-base font-semibold text-white shadow-sm transition-colors hover:bg-[#a8380a] disabled:opacity-50"
                 >
                   {loadingAction === "mfa" ? t("verifying") : t("verify")}
