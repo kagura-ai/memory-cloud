@@ -1,5 +1,7 @@
 {
   "passkeys": {
+    "confirmGoogle": "Confirm with Google",
+    "setupPassword": "Set up a password by email",
     "title": "Passkeys",
     "signIn": "Sign in with a passkey",
     "signInError": "Could not sign in with that passkey. Try again.",

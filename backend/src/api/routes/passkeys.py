@@ -26,6 +26,7 @@ from webauthn import (
 )
 from webauthn.helpers import (
     parse_authentication_credential_json,
+    parse_client_data_json,
     parse_registration_credential_json,
 )
 from webauthn.helpers.exceptions import WebAuthnException
@@ -102,15 +103,15 @@ def _binding(request: Request, user_id: str, action: str) -> str:
     return hashlib.sha256(json.dumps([sid, user_id, action]).encode()).hexdigest()
 
 
-async def _issue(options: Any, binding: str) -> dict[str, Any]:
+async def _issue(options: Any, binding: str, state: str = "1") -> dict[str, Any]:
     public_key = json.loads(options_to_json(options))
     challenge = public_key["challenge"]
-    await get_redis_client().setex(f"webauthn:{binding}:{challenge}", _TTL, "1")
+    await get_redis_client().setex(f"webauthn:{binding}:{challenge}", _TTL, state)
     return public_key
 
 
-async def _consume(challenge: str, binding: str) -> bytes:
-    if not await get_redis_client().getdel(f"webauthn:{binding}:{challenge}"):
+async def _consume(challenge: str, binding: str, state: str = "1") -> bytes:
+    if await get_redis_client().getdel(f"webauthn:{binding}:{challenge}") != state:
         raise HTTPException(401, "Invalid or expired passkey challenge")
     return base64url_to_bytes(challenge)
 
@@ -132,6 +133,23 @@ async def _keys(db: AsyncSession, user_id: str) -> list[WebAuthnCredential]:
     )
 
 
+async def _registration_state(db: AsyncSession, user: User, keys: list[WebAuthnCredential]) -> str:
+    """Bind the pending proof to the account's security methods across both requests."""
+    providers = await db.scalars(
+        select(UserOAuthProvider.id)
+        .where(UserOAuthProvider.user_id == user.user_id)
+        .order_by(UserOAuthProvider.id)
+    )
+    state = [
+        user.id,
+        user.password_hash,
+        user.mfa_generation,
+        list(providers),
+        sorted(str(k.id) for k in keys),
+    ]
+    return hashlib.sha256(json.dumps(state).encode()).hexdigest()
+
+
 async def _assertion(
     db: AsyncSession,
     raw: dict[str, Any],
@@ -142,6 +160,8 @@ async def _assertion(
 ) -> tuple[User, WebAuthnCredential]:
     try:
         credential = parse_authentication_credential_json(raw)
+        if parse_client_data_json(credential.response.client_data_json).cross_origin:
+            raise HTTPException(401, "Cross-origin passkey assertions are not accepted")
     except (ValueError, TypeError, WebAuthnException, KeyError) as exc:
         raise HTTPException(401, "Invalid passkey") from exc
     query = select(WebAuthnCredential).where(WebAuthnCredential.credential_id == credential.raw_id)
@@ -265,7 +285,11 @@ async def register_options(
             user_verification=UserVerificationRequirement.REQUIRED,
         ),
     )
-    return await _issue(options, _binding(request, account.user_id, "register"))
+    return await _issue(
+        options,
+        _binding(request, account.user_id, "register"),
+        await _registration_state(db, account, keys),
+    )
 
 
 def _audit(db: AsyncSession, user: User, event: SecurityEvent) -> None:
@@ -286,12 +310,19 @@ async def register_verify(
 ):
     """Verify registration and persist the attested public key."""
     account = await _owner(db, user["user_id"])
-    expected = await _consume(body.challenge, _binding(request, account.user_id, "register"))
-    if len(await _keys(db, account.user_id)) >= _LIMIT:
+    keys = await _keys(db, account.user_id)
+    expected = await _consume(
+        body.challenge,
+        _binding(request, account.user_id, "register"),
+        await _registration_state(db, account, keys),
+    )
+    if len(keys) >= _LIMIT:
         raise HTTPException(409, "Passkey limit reached")
     rp, origins = _rp()
     try:
         registration = parse_registration_credential_json(body.credential)
+        if parse_client_data_json(registration.response.client_data_json).cross_origin:
+            raise HTTPException(400, "Cross-origin passkey registration is not accepted")
         result = verify_registration_response(
             credential=registration,
             expected_challenge=expected,
@@ -335,14 +366,31 @@ async def authenticate_options(request: Request, response: Response):
     ip = auth._login_client_ip(request)
     if await increment_counter(f"webauthn_options:{ip}", ttl=60) > 60:
         raise HTTPException(429, "Too many sign-in requests")
-    binding = secrets.token_urlsafe(32)
+    redis = get_redis_client()
+    binding = request.cookies.get(_BROWSER_COOKIE, "")
+    known = len(binding) == 43 and await redis.get(f"webauthn_browser:{binding}")
+    if not known:
+        binding = secrets.token_urlsafe(32)
+    # Refresh only server-issued bindings. Each challenge has its own GETDEL.
+    await redis.setex(f"webauthn_browser:{binding}", _TTL, "1")
     response.set_cookie(_BROWSER_COOKIE, binding, max_age=_TTL, **browser_cookie_attrs())
-    return await _issue(
+    options = await _issue(
         generate_authentication_options(
             rp_id=_rp()[0], user_verification=UserVerificationRequirement.REQUIRED
         ),
         binding,
     )
+    if not known:
+        # Two tabs can both start before the first cookie arrives. Keep the
+        # first challenge's own cookie until its one-shot check or its expiry.
+        response.set_cookie(
+            _first_cookie(options["challenge"]), binding, max_age=_TTL, **browser_cookie_attrs()
+        )
+    return options
+
+
+def _first_cookie(challenge: str) -> str:
+    return f"{_BROWSER_COOKIE}_{challenge[:16]}"
 
 
 @router.post("/authenticate/verify")
@@ -354,7 +402,8 @@ async def authenticate_verify(
     db: AsyncSession = Depends(get_db),
 ):
     """Verify user presence, verification, RP, origin, signature and counter before sign-in."""
-    binding = request.cookies.get(_BROWSER_COOKIE)
+    first_cookie = _first_cookie(body.challenge)
+    binding = request.cookies.get(first_cookie) or request.cookies.get(_BROWSER_COOKIE)
     if not binding or not auth._session_manager:
         raise HTTPException(401, "Invalid passkey sign-in")
     challenge = await _consume(body.challenge, binding)
@@ -376,6 +425,8 @@ async def authenticate_verify(
             source="login",
             request=request,
         )
+        if first_cookie in request.cookies:
+            response.delete_cookie(first_cookie, **browser_cookie_attrs())
         auth._set_session_cookie(response, sid)
         await note_browser_sign_in(
             request, response, user_id=account.user_id, sign_in_method="Passkey"

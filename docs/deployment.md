@@ -867,6 +867,31 @@ owner's is a reason to reset the account's password (which signs it out
 everywhere and revokes its OAuth / MCP grants, see above) and to review its
 API keys and OAuth clients in Settings.
 
+## Browser passkeys (WebAuthn)
+
+Set `FRONTEND_URL` to the canonical HTTPS origin of the web UI. Local development on
+`http://localhost:3000` also works. The browser authenticates the UI origin even when
+the API is on another host. Configure the following on the API before enrolling users.
+
+| Environment setting | Default | Meaning |
+|---|---|---|
+| `WEBAUTHN_RP_ID` | Hostname from `FRONTEND_URL` | Stable domain without scheme, path or port. It must equal the UI host or its registrable parent domain. |
+| `WEBAUTHN_RP_NAME` | `Kagura Memory Cloud` | Display name shown by the authenticator. |
+| `WEBAUTHN_ORIGINS` | `FRONTEND_URL` | Comma-separated, exact trusted UI origins including scheme and non-default port. Include only origins that run the sign-in UI. |
+
+For UI `https://app.example.com` with API `https://api.example.com`, use RP ID
+`app.example.com` and origin `https://app.example.com`. Changing the RP ID after
+enrollment requires users to register new passkeys. Redis stores one-use challenges
+for five minutes. The browser and authenticator must support discoverable credentials
+and local user verification. Apply the database migration before serving the new API.
+
+Users enroll from Profile → Passkeys. The first registration requires a current
+password or a recent verified sign-in. OAuth-only users can use Confirm with Google
+on deployments that receive a verified authentication time, or set up a password
+via the verified mailbox. GitHub sign-in alone supplies no authentication time under
+the default proof policy. A verified passkey can then authorize another registration.
+Removing a key requires the current password or a different key.
+
 ## Which sign-in provider syncs the account's email (Issues #1811, #1875)
 
 `users.auth_provider` names the account's **primary** sign-in provider. Only

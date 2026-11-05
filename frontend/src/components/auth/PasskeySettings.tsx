@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
+import { startAddAccount } from "@/hooks/useAccountSwitcher";
 import { useAuth } from "@/contexts/AuthContext";
 import { hasPasswordSignIn } from "@/lib/auth/auth";
 import { apiClient } from "@/lib/api/base";
@@ -68,6 +69,10 @@ export default function PasskeySettings({ onAvailabilityChange }: { onAvailabili
         </div>}
       </div>)}
       <p className="text-sm">{t("proof")}</p>
+      {!hasPasswordSignIn(user) && keys.length === 0 && <div className="flex flex-wrap items-center gap-3">
+        {user?.auth_provider === "google" && <Button variant="outline" onClick={() => startAddAccount("google", { returnTo: "/profile", linkProof: true })}>{t("confirmGoogle")}</Button>}
+        <a href="#profile-password" className="underline">{t("setupPassword")}</a>
+      </div>}
       {hasPasswordSignIn(user) && <div><Label htmlFor="passkey-password">{t("password")}</Label>
         <Input id="passkey-password" type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} /></div>}
       <Button disabled={!ready || busy} onClick={() => void change(async () => {

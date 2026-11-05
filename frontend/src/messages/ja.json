@@ -1,5 +1,7 @@
 {
   "passkeys": {
+    "confirmGoogle": "Google で本人確認",
+    "setupPassword": "メールでパスワードを設定",
     "title": "パスキー",
     "signIn": "パスキーでサインイン",
     "signInError": "パスキーでサインインできませんでした。もう一度お試しください。",
