@@ -9,6 +9,8 @@ export const USER_DELETE_DIALOG_TEST_IDS = {
   submit: "user-delete-submit",
   /** A workspace row of the picker (its successor select). */
   workspaceRow: (id: string) => `user-delete-workspace-${id}`,
+  /** The "delete with the user" tick of a workspace nobody else is in (#2640). */
+  deleteWorkspace: (id: string) => `user-delete-delete-workspace-${id}`,
   /** A context row of the picker (its successor select). */
   contextRow: (id: string) => `user-delete-context-${id}`,
   /** A connector write target's read-only row. */

@@ -172,3 +172,56 @@ async def referral_world(db_session, connector_world):
         )
     )
     await db_session.commit()
+
+
+# The #2406 / #2640 purge tests (``test_soft_deleted_workspace_purge_db``,
+# ``test_admin_delete_only_member_workspace_db``). Imports stay inside the
+# fixtures: this module must not import ``src`` before the env steering above.
+@pytest_asyncio.fixture
+async def purge_audits(db_session):
+    """Workspace ids whose purge audit rows are deleted afterwards."""
+    from sqlalchemy import delete
+
+    from models.auth import AuditLog
+    from services.user_deletion_service import WORKSPACE_PURGED_ACTION
+
+    workspace_ids: list = []
+    yield workspace_ids
+    await db_session.rollback()
+    await db_session.execute(
+        delete(AuditLog).where(
+            AuditLog.action == WORKSPACE_PURGED_ACTION,
+            AuditLog.resource.in_([f"workspace:{ws_id}" for ws_id in workspace_ids]),
+        )
+    )
+    await db_session.commit()
+
+
+@pytest_asyncio.fixture
+async def storage_keys(db_session):
+    """Storage keys whose deletion-queue rows (#2395, queued by the
+    ``file_objects`` delete trigger where it is installed) are removed
+    afterwards, so the queue other tests drain starts empty."""
+    from sqlalchemy import delete
+
+    from models.file_objects import StorageObjectDeletion
+
+    keys: list[str] = []
+    yield keys
+    await db_session.rollback()
+    await db_session.execute(
+        delete(StorageObjectDeletion).where(StorageObjectDeletion.storage_key.in_(keys))
+    )
+    await db_session.commit()
+
+
+@pytest.fixture
+def vectors():
+    """The vector store calls made after the commit."""
+    from unittest.mock import AsyncMock, patch
+
+    with (
+        patch("db.qdrant.list_memory_collections", AsyncMock(return_value=["kagura_memories"])),
+        patch("db.qdrant.delete_context_points_everywhere", AsyncMock(return_value={})) as points,
+    ):
+        yield points

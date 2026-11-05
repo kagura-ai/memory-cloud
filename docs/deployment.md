@@ -1125,9 +1125,19 @@ erasure and the CLI (#1940). Send this JSON body:
 ```json
 {
   "workspace_transfers": {"WORKSPACE_UUID": "SUCCESSOR_USER_ID"},
-  "context_transfers": {"CONTEXT_UUID": "SUCCESSOR_USER_ID"}
+  "context_transfers": {"CONTEXT_UUID": "SUCCESSOR_USER_ID"},
+  "delete_workspaces": ["WORKSPACE_UUID"]
 }
 ```
+
+`delete_workspaces` names owned workspaces no other member is in (their
+`members` in the `409` is empty) to delete with the user instead of handing
+them over (#2640). Each is purged like a soft-deleted owned workspace, its
+contexts, memories and files included, with a `workspace_purged` audit row,
+and listed under `purged_workspaces` in the response; its vector points are
+deleted after the commit. Naming a workspace with another member, one also in
+`workspace_transfers`, or a context in it in `context_transfers` is refused
+with `409`; the subscription check above still comes first.
 
 A workspace selection also supplies its contexts' default successor; a
 context selection overrides it. Workspace successors must already be members.
@@ -1144,8 +1154,8 @@ picker: a member for each owned workspace, a successor for each shared
 context (by default the successor of its workspace when that workspace is
 handed over), and the connector write targets shown fixed to their owner. It
 then sends the DELETE with the selections. A workspace no other member is in
-cannot be handed over: add a member, or delete the workspace first (a deleted
-workspace is removed with the user). API user
+cannot be handed over: the picker offers to delete it with the user instead,
+an explicit opt-in per workspace (`delete_workspaces`). API user
 deletion and the CLI both remove the account's OAuth clients, personal memories,
 keys and memberships, preserve live connector keys under the workspace owner,
 and remove its identity link. Its agent-bound keys are deleted, never handed
