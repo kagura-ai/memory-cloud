@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, SecretStr
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,7 +29,9 @@ from utils.exceptions import (
     RateLimitError,
 )
 from utils.hashing import sha256_hex
+from utils.logger import get_logger
 
+logger = get_logger(__name__)
 router = APIRouter(prefix="/auth/mfa", tags=["authentication"])
 
 
@@ -105,7 +108,11 @@ async def _commit_change(
         _session_revoker(request.cookies.get(SESSION_COOKIE_NAME)), account.user_id
     )
     await db.commit()
-    auth._clear_login_failures(auth._account_rate_key(account.user_id))
+    try:
+        await asyncio.to_thread(auth._clear_login_failures, auth._account_rate_key(account.user_id))
+    except RedisError:
+        # The change has committed: deliver the one-time codes and notification.
+        logger.warning("mfa_change_budget_clear_failed", user_id=account.user_id)
     schedule_security_notification(tasks, user_id=account.user_id, event=event, request=request)
 
 
@@ -126,7 +133,12 @@ async def setup_mfa(
     pending = json.dumps(
         [secret, credential_fingerprint(account.password_hash, account.mfa_generation)]
     )
-    _manager()._redis.setex(_pending_key(account, request), 300, get_encryptor().encrypt(pending))
+    await asyncio.to_thread(
+        _manager()._redis.setex,
+        _pending_key(account, request),
+        300,
+        get_encryptor().encrypt(pending),
+    )
     response.headers["Cache-Control"] = "no-store"
     return Enrollment(secret=secret, provisioning_uri=get_provisioning_uri(secret, account.email))
 
@@ -146,19 +158,21 @@ async def enable_mfa(
         raise ConflictError("Two-factor authentication is already enabled")
     manager = _manager()
     key = _pending_key(account, request)
-    encrypted = manager._redis.get(key)
+    encrypted = await asyncio.to_thread(manager._redis.get, key)
     if not encrypted:
         raise ConflictError("Enrollment expired. Start setup again.")
     secret, fingerprint = json.loads(get_encryptor().decrypt(encrypted))
     if fingerprint != credential_fingerprint(account.password_hash, account.mfa_generation):
         raise ConflictError("Credentials changed. Start setup again.")
-    auth._reserve_login_attempt(auth._account_rate_key(account.user_id))
-    if not verify_totp(secret, body.code) or not auth._claim_totp_code(account.user_id, body.code):
+    await asyncio.to_thread(auth._reserve_login_attempt, auth._account_rate_key(account.user_id))
+    if not verify_totp(secret, body.code) or not await asyncio.to_thread(
+        auth._claim_totp_code, account.user_id, body.code
+    ):
         raise AuthenticationError("Invalid or already used verification code")
     codes, account.totp_recovery_hashes = issue_codes()
     account.totp_secret = get_encryptor().encrypt(secret)
     account.totp_enabled = True
-    manager._redis.delete(key)
+    await asyncio.to_thread(manager._redis.delete, key)
     await _commit_change(account, db, request, tasks, SecurityEvent.MFA_ENABLED)
     response.headers["Cache-Control"] = "no-store"
     return RecoveryCodes(recovery_codes=codes)
@@ -178,11 +192,11 @@ async def disable_mfa(
     if not account.totp_enabled or not account.totp_secret:
         raise ConflictError("Two-factor authentication is not enabled")
     _manager()
-    auth._reserve_login_attempt(auth._account_rate_key(account.user_id))
+    await asyncio.to_thread(auth._reserve_login_attempt, auth._account_rate_key(account.user_id))
     if not take_locked_code(account, body.code):
         secret = get_encryptor().decrypt(account.totp_secret)
-        if not verify_totp(secret, body.code) or not auth._claim_totp_code(
-            account.user_id, body.code
+        if not verify_totp(secret, body.code) or not await asyncio.to_thread(
+            auth._claim_totp_code, account.user_id, body.code
         ):
             raise AuthenticationError("Invalid or already used verification code")
     account.totp_enabled = False
