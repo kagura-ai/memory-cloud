@@ -1977,6 +1977,19 @@
         ],
         "type": "object"
       },
+      "CodeBody": {
+        "properties": {
+          "code": {
+            "maxLength": 35,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
       "ConfigBatchRequest": {
         "properties": {
           "updates": {
@@ -3382,6 +3395,25 @@
         ],
         "type": "object"
       },
+      "DisableBody": {
+        "properties": {
+          "code": {
+            "maxLength": 35,
+            "minLength": 1,
+            "type": "string"
+          },
+          "current_password": {
+            "format": "password",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "code",
+          "current_password"
+        ],
+        "type": "object"
+      },
       "DowngradeBlocker": {
         "properties": {
           "cleanup": {
@@ -3663,6 +3695,21 @@
           "count",
           "endpoint",
           "percentage"
+        ],
+        "type": "object"
+      },
+      "Enrollment": {
+        "properties": {
+          "provisioning_uri": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provisioning_uri",
+          "secret"
         ],
         "type": "object"
       },
@@ -8234,6 +8281,20 @@
         ],
         "type": "object"
       },
+      "RecoveryCodes": {
+        "properties": {
+          "recovery_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "recovery_codes"
+        ],
+        "type": "object"
+      },
       "RedeemRequest": {
         "properties": {
           "code": {
@@ -9636,6 +9697,19 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "SetupBody": {
+        "properties": {
+          "current_password": {
+            "format": "password",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "current_password"
         ],
         "type": "object"
       },
@@ -16511,6 +16585,163 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/mfa/disable": {
+      "post": {
+        "operationId": "disable_mfa_api_v1_auth_mfa_disable_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisableBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/mfa/enable": {
+      "post": {
+        "operationId": "enable_mfa_api_v1_auth_mfa_enable_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodes"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/mfa/setup": {
+      "post": {
+        "operationId": "setup_mfa_api_v1_auth_mfa_setup_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Enrollment"
+                }
               }
             }
           },

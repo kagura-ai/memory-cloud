@@ -94,7 +94,9 @@ _AUDIT_ACTOR_LINK = "email-link"
 _PASSWORD_LINK_PURPOSES = PASSWORD_LINK_PURPOSES
 
 
-def credential_fingerprint(password_hash: str | None) -> str | None:
+def credential_fingerprint(
+    password_hash: str | None, mfa_generation: str | None = None
+) -> str | None:
     """A stand-in for a stored password hash that says only whether it changed.
 
     A sign-in records the fingerprint of the hash it verified, and re-checks
@@ -105,7 +107,7 @@ def credential_fingerprint(password_hash: str | None) -> str | None:
     """
     if password_hash is None:
         return None
-    return sha256_hex(password_hash)
+    return sha256_hex(f"{password_hash}:{mfa_generation}" if mfa_generation else password_hash)
 
 
 async def password_unchanged(db: AsyncSession, user_id: str, fingerprint: str | None) -> bool:
@@ -127,10 +129,14 @@ async def password_unchanged(db: AsyncSession, user_id: str, fingerprint: str | 
     """
     if fingerprint is None:
         return False
-    current = await db.scalar(
-        select(User.password_hash).where(User.user_id == user_id).with_for_update(read=True)
-    )
-    current_fingerprint = credential_fingerprint(current)
+    row = (
+        await db.execute(
+            select(User.password_hash, User.mfa_generation)
+            .where(User.user_id == user_id)
+            .with_for_update(read=True)
+        )
+    ).one_or_none()
+    current_fingerprint = credential_fingerprint(*row) if row else None
     return current_fingerprint is not None and hmac.compare_digest(current_fingerprint, fingerprint)
 
 
@@ -510,6 +516,8 @@ class PasswordAccountService:
         # refuses instead of both removing a method.
         user = await self._load_user(user_id, for_update=True)
         await self._verify_current(user, current_password)
+        if user.totp_enabled:
+            raise ConflictError("Turn off two-factor authentication before removing the password")
         linked = await self.db.scalar(
             select(func.count())
             .select_from(UserOAuthProvider)

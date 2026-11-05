@@ -45,5 +45,6 @@ from sqlalchemy.dialects.postgresql import JSONB
 # Postgres ``json`` column whose Python ``None`` is SQL NULL.
 NullableJSON = JSON(none_as_null=True)
 
-# Postgres ``jsonb`` column whose Python ``None`` is SQL NULL.
-NullableJSONB = JSONB(none_as_null=True)
+# PostgreSQL JSONB supports equality in DISTINCT queries. SQLite-backed OAuth
+# tests create the users table too, so use its native JSON representation there.
+NullableJSONB = JSONB(none_as_null=True).with_variant(NullableJSON, "sqlite")

@@ -1,0 +1,55 @@
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MfaSettings } from "./MfaSettings";
+
+const { user, post, refetchUser } = vi.hoisted(() => ({
+  user: { has_password: true, mfa_enabled: false }, post: vi.fn(), refetchUser: vi.fn(),
+}));
+vi.mock("@/contexts/AuthContext", () => ({ useAuth: () => ({ user, refetchUser }) }));
+vi.mock("@/lib/api/base", () => ({ apiClient: { post } }));
+vi.mock("next-intl", () => ({ useTranslations: () => (key: string) => key }));
+
+beforeEach(() => {
+  user.has_password = true;
+  user.mfa_enabled = false;
+  post.mockReset();
+  refetchUser.mockReset();
+});
+
+describe("MfaSettings", () => {
+  it("hides enrollment for an account without a password", () => {
+    user.has_password = false;
+    const { container } = render(<MfaSettings />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("confirms the local QR, then shows recovery codes once", async () => {
+    post.mockResolvedValueOnce({ secret: "manual-key", provisioning_uri: "otpauth://totp/test?secret=test" })
+      .mockResolvedValueOnce({ recovery_codes: ["save-once"] });
+    render(<MfaSettings />);
+    fireEvent.click(screen.getByRole("button", { name: "setup" }));
+    const dialog = within(screen.getByRole("dialog"));
+    fireEvent.change(dialog.getByLabelText("password"), { target: { value: "current" } });
+    fireEvent.click(dialog.getByRole("button", { name: "setup" }));
+    expect(await dialog.findByText("manual-key")).toBeInTheDocument();
+    fireEvent.change(dialog.getByLabelText("code"), { target: { value: "123456" } });
+    fireEvent.click(dialog.getByRole("button", { name: "enable" }));
+    expect(await dialog.findByText("save-once")).toBeInTheDocument();
+    expect(post).toHaveBeenCalledWith("/api/v1/auth/mfa/setup", { current_password: "current" });
+    expect(post).toHaveBeenCalledWith("/api/v1/auth/mfa/enable", { code: "123456" });
+    fireEvent.click(dialog.getByRole("button", { name: "saved" }));
+    expect(screen.queryByText("save-once")).toBeNull();
+  });
+
+  it("keeps a failed removal inside the dialog", async () => {
+    user.mfa_enabled = true;
+    post.mockRejectedValueOnce(new Error("Invalid code"));
+    render(<MfaSettings />);
+    fireEvent.click(screen.getByRole("button", { name: "disable" }));
+    const dialog = within(screen.getByRole("dialog"));
+    fireEvent.change(dialog.getByLabelText("password"), { target: { value: "current" } });
+    fireEvent.change(dialog.getByLabelText("codeOrRecovery"), { target: { value: "123456" } });
+    fireEvent.click(dialog.getByRole("button", { name: "disable" }));
+    expect(await dialog.findByRole("alert")).toHaveTextContent("Invalid code");
+  });
+});

@@ -223,6 +223,15 @@ describe("LoginPage MFA form — Enter key submit (#484)", () => {
     );
   });
 
+  it("accepts a full single-use recovery code on the MFA form", async () => {
+    mockVerifyMfa.mockResolvedValue({ redirect_url: null });
+    const input = await reachMfaForm();
+    const code = "deadbeef-cafebabe-12345678-a0123456";
+    fireEvent.change(input, { target: { value: code } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(mockVerifyMfa).toHaveBeenCalledWith(SESSION_TOKEN, code, undefined));
+  });
+
   it("does NOT submit when Enter is pressed with fewer than 6 digits", async () => {
     mockVerifyMfa.mockResolvedValue({ redirect_url: null });
 

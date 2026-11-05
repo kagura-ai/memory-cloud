@@ -206,6 +206,8 @@ class SecurityEvent(StrEnum):
     ACCOUNT_LINKED = "account_linked"
     ACCOUNT_UNLINKED = "account_unlinked"
     SECOND_FACTOR_LOCKED = "second_factor_locked"
+    MFA_ENABLED = "mfa_enabled"
+    MFA_DISABLED = "mfa_disabled"
 
 
 # The label of the sign-in method line, per event.
@@ -230,6 +232,14 @@ PROVIDER_SIGN_IN_LABELS = {"google": "Google sign-in", "github": "GitHub sign-in
 
 # (subject, one-line description of one occurrence)
 _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
+    SecurityEvent.MFA_ENABLED: (
+        "Two-factor authentication enabled",
+        "Two-factor authentication was enabled on your account.",
+    ),
+    SecurityEvent.MFA_DISABLED: (
+        "Two-factor authentication disabled",
+        "Two-factor authentication was disabled on your account.",
+    ),
     SecurityEvent.PASSWORD_SET: (
         "A password was added to your Kagura account",
         "A password was added to your account.",
