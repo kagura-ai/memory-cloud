@@ -223,6 +223,18 @@ describe("OnboardingCard trigger gating", () => {
 });
 
 describe("OnboardingCard value-moment happy path", () => {
+  it("closes a recovery replay before opening the contexts list", async () => {
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "creating" }));
+    const onClose = vi.fn();
+    render(<OnboardingCard replay onClose={onClose} />);
+    fireEvent.click(await screen.findByText("openContexts"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(mockPush).toHaveBeenCalledWith("/workspace/contexts");
+    expect(mockCreateContext).not.toHaveBeenCalled();
+    expect(mockRemember).not.toHaveBeenCalled();
+  });
+
   it("walks create → save → recall and shows the recalled hit", async () => {
     mockCreateContext.mockResolvedValue({ id: "ctx-1", name: "x", workspace_id: "ws-1", is_private: true, created_by: "u1" });
     mockRemember.mockResolvedValue({
@@ -251,10 +263,12 @@ describe("OnboardingCard value-moment happy path", () => {
 
     render(<OnboardingCard />);
 
-    // Step 1: create context
+    // Step 1: create the default context without entering a name
     await waitFor(() =>
       expect(screen.getByText("context.createButton")).toBeInTheDocument(),
     );
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(screen.queryByLabelText("context.nameLabel")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("context.createButton"));
 
     // Step 2: save memory
@@ -262,7 +276,8 @@ describe("OnboardingCard value-moment happy path", () => {
       expect(screen.getByText("memory.saveButton")).toBeInTheDocument(),
     );
     expect(mockCreateContext).toHaveBeenCalledWith({
-      name: "context.sampleName",
+      name: expect.stringMatching(/^my-first-context-[0-9a-f-]{36}$/),
+      display_name: "My First Context",
       is_private: true,
       expected_workspace_id: "ws-1",
     });
@@ -326,13 +341,22 @@ describe("OnboardingCard value-moment happy path", () => {
     expect(screen.getByText("done.title")).toBeInTheDocument();
   });
 
+  it("shows a failed creation inside the dialog", async () => {
+    mockCreateContext.mockRejectedValueOnce(new Error("offline"));
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByText("context.createButton"));
+    expect(await screen.findByText("errors.createFailed")).toBeVisible();
+    expect(screen.getByRole("dialog")).toContainElement(screen.getByText("errors.createFailed"));
+    expect(mockToast).not.toHaveBeenCalled();
+  });
+
   it("dismiss persists to localStorage and hides the card", async () => {
-    const { container } = render(<OnboardingCard />);
+    render(<OnboardingCard />);
     await waitFor(() =>
-      expect(screen.getByLabelText("dismiss")).toBeInTheDocument(),
+      expect(screen.getByRole("button", { name: "dismiss" })).toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByLabelText("dismiss"));
-    await waitFor(() => expect(container).toBeEmptyDOMElement());
+    fireEvent.click(screen.getByRole("button", { name: "dismiss" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(JSON.parse(window.localStorage.getItem("onboarding:u1:ws-1:wizard")!).dismissed).toBe(true);
   });
 });

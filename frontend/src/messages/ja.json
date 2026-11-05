@@ -58,16 +58,13 @@
     "recovery": "前回の練習で何が保存されたか確認できません。コンテキスト画面で内容を確認するか、読み取り専用のガイドに進んでください。",
     "openContexts": "コンテキストを確認する",
     "endPractice": "読み取り専用のガイドに進む",
-    "title": "Kagura Memory へようこそ",
+    "title": "Kagura AIへようこそ",
     "subtitle": "5分以内に最初の recall まで案内します。",
     "dismiss": "オンボーディングを閉じる",
     "finish": "コンテキストへ移動",
     "stepOf": "ステップ {current} / {total}",
     "context": {
       "title": "1. 最初のコンテキストを作成",
-      "body": "コンテキストは記憶をまとめる名前付きのコレクションです（プロジェクトやトピックのようなもの）。",
-      "nameLabel": "コンテキスト名",
-      "sampleName": "my-first-context",
       "createButton": "コンテキストを作成"
     },
     "memory": {

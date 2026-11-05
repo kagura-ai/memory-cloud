@@ -16,8 +16,7 @@
  *    recall return a recognizable hit, WITHOUT pulling in the #951 importer.
  *  - recall-vs-explore explainer is COPY ONLY: recall does NOT auto-trigger
  *    explore (mixing graph signals into recall degrades precision, #120/#216).
- *  - Non-modal dismissible card on the dashboard — OUT of the auth critical
- *    path, so an onboarding bug can't block users from their data.
+ *  - Dismissible modal on the dashboard, outside the authentication flow.
  *  - The `?context=<id>` navigation (URL-driven current context, #246) is
  *    deferred to the final "Finish" CTA: navigating mid-flow would remount this
  *    card and (with 1 context now) hide it, killing the stepper.
@@ -33,7 +32,6 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
   Sparkles,
-  X,
   ArrowRight,
   Check,
   Search,
@@ -42,7 +40,6 @@ import {
 } from "lucide-react";
 
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { useToast } from "@/hooks/use-toast";
 import { getContexts, createContext } from "@/lib/api/contexts";
 import { rememberMemory, recallMemories } from "@/lib/api/memory";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
@@ -51,12 +48,8 @@ import type { Context } from "@/lib/types/context";
 import type { RecallResultItem } from "@/lib/types/memory";
 
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -84,7 +77,6 @@ export function OnboardingCard({ replay = false, onClose, onCreated }: PracticeO
 function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOptions & { scope: string; userId: string }) {
   const t = useTranslations("onboarding");
   const router = useRouter();
-  const { toast } = useToast();
   const {
     currentWorkspace,
     currentWorkspaceId,
@@ -103,12 +95,12 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   // Seed the editable sample copy from i18n ONCE via lazy initializers — never
   // in an effect keyed on `t`, which would clobber the user's edits whenever the
   // `t` identity changes (locale switch / provider re-render).
-  const [contextName, setContextName] = useState(() => t("context.sampleName"));
   const [summary, setSummary] = useState(() => t("memory.sampleSummary"));
   const [content, setContent] = useState(() => t("memory.sampleContent"));
   const [query, setQuery] = useState(() => t("recall.sampleQuery"));
   const [results, setResults] = useState<RecallResultItem[]>([]);
   const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const writing = useRef(false);
 
   // Issue #1167: with BYOK off the key-status probe 404s and env keys serve
@@ -172,13 +164,13 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   }, [scope, onClose]);
 
   const handleCreateContext = async () => {
-    const name = contextName.trim();
-    if (!name || !currentWorkspaceId || writing.current) return;
+    if (!currentWorkspaceId || writing.current) return;
     writing.current = true;
     setBusy(true);
+    setActionError(null);
     try {
       if (!await claimPractice(scope, "context", { step: "creating" })) { setStep("recovery"); return; }
-      const ctx = await createContext({ name, is_private: true, expected_workspace_id: currentWorkspaceId });
+      const ctx = await createContext({ name: `my-first-context-${crypto.randomUUID()}`, display_name: "My First Context", is_private: true, expected_workspace_id: currentWorkspaceId });
       if (ctx.workspace_id !== currentWorkspaceId || !ctx.is_private || ctx.is_public || ctx.created_by !== userId) {
         setStep("recovery"); return;
       }
@@ -189,7 +181,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
     } catch (error) {
       if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) writeProgress(scope, { step: "context" });
       else setStep("recovery");
-      toast({ variant: "destructive", title: t("errors.createFailed") });
+      setActionError(t("errors.createFailed"));
     } finally {
       writing.current = false;
       setBusy(false);
@@ -200,6 +192,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
     if (!contextId || !currentWorkspaceId || writing.current) return;
     writing.current = true;
     setBusy(true);
+    setActionError(null);
     try {
       if (!await claimPractice(scope, "memory", { step: "saving", contextId })) { setStep("recovery"); return; }
       await rememberMemory({
@@ -215,7 +208,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
     } catch (error) {
       if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) writeProgress(scope, { step: "memory", contextId });
       else setStep("recovery");
-      toast({ variant: "destructive", title: t("errors.saveFailed") });
+      setActionError(t("errors.saveFailed"));
     } finally {
       writing.current = false;
       setBusy(false);
@@ -225,6 +218,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   const handleRecall = async () => {
     if (!contextId) return;
     setBusy(true);
+    setActionError(null);
     try {
       const res = await recallMemories({
         query: query.trim(),
@@ -234,7 +228,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
       setResults(res.results);
       setStep("done");
     } catch {
-      toast({ variant: "destructive", title: t("errors.recallFailed") });
+      setActionError(t("errors.recallFailed"));
     } finally {
       writing.current = false;
       setBusy(false);
@@ -256,33 +250,23 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   const stepIndex = step === "context" ? 1 : step === "memory" ? 2 : 3;
 
   return (
-    <Card className="mb-6 border-brand-green-300 dark:border-brand-green-800/60">
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Sparkles className="h-5 w-5 text-brand-green-600 dark:text-brand-green-400" />
-              {t("title")}
-            </CardTitle>
-            <CardDescription className="mt-1">{t("subtitle")}</CardDescription>
-          </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            disabled={busy}
-            onClick={dismiss}
-            aria-label={t("dismiss")}
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-      </CardHeader>
-
-      <CardContent>
+    <Dialog open={visible} onOpenChange={open => { if (!open && !busy) dismiss(); }}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl"
+        onEscapeKeyDown={event => { if (busy) event.preventDefault(); }}
+        onInteractOutside={event => { if (busy) event.preventDefault(); }}>
+        <DialogHeader className="pr-6">
+          <DialogTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-brand-green-600 dark:text-brand-green-400" />
+            {t("title")}
+          </DialogTitle>
+          <DialogDescription>{t("subtitle")}</DialogDescription>
+        </DialogHeader>
+        <div>
+          {actionError && <Alert variant="destructive" className="mb-4"><AlertDescription>{actionError}</AlertDescription></Alert>}
         {step === "recovery" ? (
           <Alert><AlertDescription>
             <p>{t("recovery")}</p>
-            <Button variant="link" onClick={() => router.push("/workspace/contexts")}>{t("openContexts")}</Button>
+            <Button variant="link" onClick={() => { dismiss(); router.push("/workspace/contexts"); }}>{t("openContexts")}</Button>
             <Button variant="ghost" onClick={() => {
               writeProgress(scope, { step: "ended", dismissed: true });
               setVisible(false);
@@ -324,23 +308,10 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               <div className="space-y-3">
                 <div>
                   <h3 className="font-semibold">{t("context.title")}</h3>
-                  <p className="text-sm text-muted-foreground">
-                    {t("context.body")}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="onboarding-context-name">
-                    {t("context.nameLabel")}
-                  </Label>
-                  <Input
-                    id="onboarding-context-name"
-                    value={contextName}
-                    onChange={(e) => setContextName(e.target.value)}
-                  />
                 </div>
                 <Button
                   onClick={handleCreateContext}
-                  disabled={busy || !contextName.trim()}
+                  disabled={busy}
                 >
                   {busy && <InlineSpinner />}
                   {t("context.createButton")}
@@ -501,8 +472,12 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
             )}
           </div>
         )}
-      </CardContent>
-    </Card>
+        </div>
+        <Button variant="ghost" disabled={busy} onClick={dismiss} className="justify-self-end">
+          {t("dismiss")}
+        </Button>
+      </DialogContent>
+    </Dialog>
   );
 }
 
