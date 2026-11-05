@@ -14,10 +14,11 @@ const fixture = vi.hoisted(() => ({
   planExcluded: true,
   lookupFailed: false,
   request: vi.fn(),
+  replace: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({
   usePathname: () => fixture.path,
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: fixture.replace }),
 }));
 vi.mock("@/contexts/AuthContext", () => ({ useAuth: () => ({ user: { role: fixture.systemRole } }) }));
 vi.mock("@/contexts/WorkspaceContext", () => ({ useWorkspace: () => ({
@@ -39,13 +40,42 @@ function ProtectedPage() {
   useEffect(() => { fixture.request(); }, []);
   return <p>protected contents</p>;
 }
-function view() {
-  return <NextIntlClientProvider locale="en" messages={en}><FeatureRouteBoundary><ProtectedPage /></FeatureRouteBoundary></NextIntlClientProvider>;
+function view(landing = false) {
+  return <NextIntlClientProvider locale="en" messages={en}><FeatureRouteBoundary landing={landing}><ProtectedPage /></FeatureRouteBoundary></NextIntlClientProvider>;
 }
 beforeEach(() => {
   fixture.path = "/workspace/resources"; fixture.role = "member"; fixture.systemRole = "user";
   fixture.loading = false; fixture.planExcluded = true; fixture.lookupFailed = false; fixture.flags.plan_page = true; fixture.flags.byok = true;
   fixture.request.mockClear();
+  fixture.replace.mockClear();
+});
+describe("viewer dashboard landing", () => {
+  it("sends a viewer who lands on the dashboard to contexts without loading statistics", () => {
+    fixture.path = "/workspace/dashboard"; fixture.role = "viewer";
+    render(view(true));
+    expect(fixture.replace).toHaveBeenCalledWith("/workspace/contexts");
+    expect(screen.queryByText(en.featureAccess.member)).toBeNull();
+    expect(fixture.request).not.toHaveBeenCalled();
+  });
+  it("explains the role when a viewer opens the dashboard from the menu", () => {
+    fixture.path = "/workspace/dashboard"; fixture.role = "viewer";
+    render(view(false));
+    expect(screen.getByRole("heading", { level: 1, name: en.sidebar.dashboard })).toBeInTheDocument();
+    expect(screen.getByText(en.featureAccess.member)).toBeInTheDocument();
+    expect(fixture.replace).not.toHaveBeenCalled();
+    expect(fixture.request).not.toHaveBeenCalled();
+  });
+  it("keeps the dashboard for a member who lands on it", () => {
+    fixture.path = "/workspace/dashboard"; fixture.role = "member";
+    render(view(true));
+    expect(screen.getByText("protected contents")).toBeInTheDocument();
+    expect(fixture.replace).not.toHaveBeenCalled();
+  });
+  it("does not redirect while the workspace role is still loading", () => {
+    fixture.path = "/workspace/dashboard"; fixture.role = "viewer"; fixture.loading = true;
+    render(view(true));
+    expect(fixture.replace).not.toHaveBeenCalled();
+  });
 });
 describe("feature routes", () => {
   it("explains both resource restrictions without loading a protected list or enabling billing", () => {
@@ -85,9 +115,20 @@ describe("feature routes", () => {
     expect(screen.queryByText(en.featureAccess.deployment)).toBeNull();
     expect(fixture.request).not.toHaveBeenCalled();
   });
-  it("shows an unavailable notice without mounting external keys when BYOK is disabled", () => {
+  it("keeps the owner's external-key console mounted when BYOK is disabled", () => {
+    // #1613/#1616: stored keys are still used with BYOK off, so the owner
+    // keeps the list / disable / delete console; the page hides provisioning.
     fixture.path = "/workspace/integrations/external-keys";
     fixture.role = "owner";
+    fixture.flags.byok = false;
+    render(view());
+    expect(screen.getByText("protected contents")).toBeInTheDocument();
+    expect(screen.queryByText(en.featureAccess.currentlyUnavailable)).toBeNull();
+    expect(fixture.request).toHaveBeenCalled();
+  });
+  it("shows an unavailable notice without mounting external keys for a non-owner when BYOK is disabled", () => {
+    fixture.path = "/workspace/integrations/external-keys";
+    fixture.role = "admin";
     fixture.flags.byok = false;
     render(view());
     expect(screen.getByText(en.featureAccess.currentlyUnavailable)).toBeInTheDocument();

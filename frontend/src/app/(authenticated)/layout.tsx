@@ -10,7 +10,7 @@
  * Issue #1665: blocking terms re-acceptance step
  */
 
-import { Fragment, Suspense, useEffect } from "react";
+import { Fragment, Suspense, useEffect, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLocale } from "@/i18n";
@@ -162,6 +162,10 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  // The first route this layout shows is where the user landed (sign-in, a
+  // link, a reload); any later route was navigated to inside the app.
+  const [landingPath, setLandingPath] = useState<string | null>(pathname);
+  if (landingPath !== null && landingPath !== pathname) setLandingPath(null);
 
   // The signed-in user's saved `locale` is the source of truth for the UI
   // language. The i18n provider only hydrates from localStorage, so without
@@ -266,7 +270,7 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
 
               {/* Page Content */}
               <main className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-900">
-                <div className="container mx-auto p-6"><WorkspacePageNavigationProvider><FeatureRouteBoundary>{children}</FeatureRouteBoundary></WorkspacePageNavigationProvider></div>
+                <div className="container mx-auto p-6"><WorkspacePageNavigationProvider><FeatureRouteBoundary landing={landingPath === pathname}>{children}</FeatureRouteBoundary></WorkspacePageNavigationProvider></div>
               </main>
             </div>
           </div>

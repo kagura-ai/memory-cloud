@@ -48,8 +48,9 @@ vi.mock("next-intl", () => ({
 
 let mockPathname = "/workspace/dashboard";
 const mockPush = vi.fn();
+const mockReplace = vi.fn();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush, replace: vi.fn() }),
+  useRouter: () => ({ push: mockPush, replace: mockReplace }),
   usePathname: () => mockPathname,
   useSearchParams: () => new URLSearchParams(),
 }));
@@ -83,6 +84,7 @@ beforeEach(() => {
   mockPathname = "/workspace/dashboard";
   mockWorkspaces = [{ id: "w1", current_user_role: "member" }];
   mockPush.mockClear();
+  mockReplace.mockClear();
   mockUser = null;
 });
 
@@ -151,5 +153,36 @@ describe("(authenticated) layout — terms re-acceptance gate (#1665)", () => {
 
     expect(await screen.findByText("page")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("(authenticated) layout — viewer landing (#2630)", () => {
+  const signedIn = { id: "u1", email: "u@example.test", name: "U", terms_acceptance_required: false };
+
+  it("sends a viewer who signs in to contexts, and explains the dashboard on a later menu click", async () => {
+    mockUser = signedIn;
+    mockWorkspaces = [{ id: "w1", current_user_role: "viewer" }];
+    const { rerender } = render(<DashboardLayout><p>dashboard stats</p></DashboardLayout>);
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith("/workspace/contexts"));
+    expect(screen.queryByText("dashboard stats")).toBeNull();
+
+    mockPathname = "/workspace/contexts";
+    rerender(<DashboardLayout><p>contexts list</p></DashboardLayout>);
+    expect(await screen.findByText("contexts list")).toBeInTheDocument();
+
+    // The sidebar's Dashboard link is a navigation inside the app, not a landing.
+    mockReplace.mockClear();
+    mockPathname = "/workspace/dashboard";
+    rerender(<DashboardLayout><p>dashboard stats</p></DashboardLayout>);
+    expect(await screen.findByText("member")).toBeInTheDocument();
+    expect(screen.queryByText("dashboard stats")).toBeNull();
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("keeps a member's sign-in landing on the dashboard", async () => {
+    mockUser = signedIn;
+    render(<DashboardLayout><p>dashboard stats</p></DashboardLayout>);
+    expect(await screen.findByText("dashboard stats")).toBeInTheDocument();
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 });

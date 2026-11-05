@@ -42,6 +42,14 @@ describe("quota dashboard", () => {
     expect(screen.queryByText(ja.usageStats.askOwner)).toBeNull();
     expect(screen.queryByRole("button", {name: ja.usageStats.reviewPlan})).toBeNull();
   });
+  it("reports usage against a zero allowance as reached, without a percentage", () => {
+    show(<QuotaNotice meters={[meter({id: "connectors", used: 3, limit: 0}), meter({id: "analysis", used: 0, limit: 0})]} />);
+    expect(screen.getByText(ja.usageStats.quotaReached)).toBeInTheDocument();
+    const summary = screen.getByText(new RegExp(ja.usageStats.quotaLabels.connectors));
+    expect(summary.textContent).toContain(ja.usageStats.quotaNotIncluded);
+    expect(summary.textContent).not.toContain(ja.usageStats.quotaLabels.analysis);
+    expect(document.body.textContent).not.toMatch(/NaN|Infinity/);
+  });
   it("does not apply workspace upgrade guidance to account or spending limits", () => {
     show(<QuotaNotice meters={[meter({scope:"account"}), meter({unit:"usd"})]} />);
     expect(screen.queryByRole("alert")).toBeNull();

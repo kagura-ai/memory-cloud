@@ -11,7 +11,11 @@ export interface NavItem {
   requiredRole?: Role; // System admin role
   requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
   requiredFeature?: string | string[]; // Issue #1145: gate on GET /system/info features flag(s); every listed flag must be true (#1571)
+  existingObjectsFallback?: 'externalKeys'; // Issue #1616: a requiredFeature miss still opens the page for a role that passes requiredWorkspaceRole
   planHint?: 'resources' | 'connectors' | 'team_invitations' | 'sleep_reports';
+  // Where a user without the role goes when this route is where they landed
+  // (sign-in, a link, a reload). Opening it from the menu still explains the role.
+  landingFallback?: string;
   disabled?: boolean; // Issue #115: Support for "Coming Soon" items
   showMemberCount?: boolean; // Issue #223: Show dynamic member count
   showContextCount?: boolean; // Show dynamic context count
@@ -37,6 +41,8 @@ export const navigationGroups: NavGroup[] = [
         href: "/workspace/dashboard",
         icon: BarChart,
         requiredWorkspaceRole: WorkspaceRole.Member,
+        // Issue #398: the contexts list is a viewer's only data-bearing page.
+        landingFallback: "/workspace/contexts",
       },
       {
         nameKey: "contexts",
@@ -146,8 +152,12 @@ export const navigationGroups: NavGroup[] = [
         href: "/workspace/integrations/external-keys",
         icon: KeyRound,
         requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #381: Owner-only (workspace-level secrets)
-        // The entry remains visible; the page explains a disabled deployment.
+        // The entry remains visible. With ENABLE_BYOK off only provisioning
+        // (create / update) 404s; list, toggle and delete stay open to the
+        // owner (#1613), whose console hides provisioning, so stored keys,
+        // which the services still use, can be disabled or deleted (#1616).
         requiredFeature: "byok",
+        existingObjectsFallback: "externalKeys",
       },
     ],
   },
