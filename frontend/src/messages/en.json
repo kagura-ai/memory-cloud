@@ -1,4 +1,36 @@
 {
+  "gettingStarted": {
+    "ownerEmpty": "Connect a client now, or create a private practice context below to save your first memory.",
+    "adminEmpty": "As a workspace admin, you can create a shared context when the workspace plan allows it. Members with access will be able to see its memories.",
+    "createShared": "Create a shared context",
+    "title": "Getting started",
+    "intro": "Connect an AI client or find a memory in a context you can access.",
+    "connections": "See all connection options",
+    "choose": "Choose a context to search",
+    "openContext": "Open this context",
+    "queryLabel": "What would you like to remember?",
+    "example": "For example, what did we decide about the launch?",
+    "find": "Find a memory",
+    "searchFailed": "Couldn’t search this context. Check your access or try again.",
+    "noHitsTitle": "No memories matched",
+    "noHits": "Try another phrase or context.",
+    "noContextsTitle": "No context to search yet",
+    "noContexts": "You can connect a client now. Ask your workspace owner to share a context so you can search its memories.",
+    "practice": "Open the practice guide",
+    "skip": "Skip for now",
+    "help": {
+      "search": {
+        "title": "How does search work?",
+        "short": "Text matches words. Recall searches by meaning.",
+        "description": "Text filters the list by the words you enter. Recall looks for memories about the same idea in the selected context. Try a question in your own words."
+      },
+      "credentials": {
+        "title": "Which credential do I need?",
+        "short": "Sign in for an AI client, or create a KMC key for a script.",
+        "description": "Claude, ChatGPT, Gemini and Muse sign in using the MCP URL. Register a custom OAuth app when building your own client. Scripts use KMC API keys. External provider keys pay for calls to the provider. Secrets control which recipients can retrieve a value. Resources hold data sent by an external source."
+      }
+    }
+  },
   "featureAccess": {
     "accessDenied": "Access denied",
     "about": {
@@ -26,16 +58,16 @@
     "currentlyUnavailable": "This feature is currently unavailable."
   },
   "onboarding": {
-    "title": "Welcome to Kagura Memory",
+    "recovery": "The last practice write could not be confirmed. Review your contexts to see what was saved, or continue with the read-only guide.",
+    "openContexts": "Review my contexts",
+    "endPractice": "Continue with the read-only guide",
+    "title": "Welcome to Kagura AI",
     "subtitle": "Let's get you to your first recall in under 5 minutes.",
     "dismiss": "Dismiss onboarding",
     "finish": "Go to your context",
     "stepOf": "Step {current} of {total}",
     "context": {
       "title": "1. Create your first context",
-      "body": "A context is a named collection your memories live in — like a project or a topic.",
-      "nameLabel": "Context name",
-      "sampleName": "my-first-context",
       "createButton": "Create context"
     },
     "memory": {

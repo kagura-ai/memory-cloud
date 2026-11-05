@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
+import { ContextualHelp } from "@/components/common/ContextualHelp";
 import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { useTabParam } from "@/hooks/useTabParam";
 import { McpConnectionHelp } from "@/components/credentials/McpConnectionHelp";
@@ -34,6 +35,7 @@ export default function CredentialsPage() {
   return (
     <PageContainer>
       <PageHeader title={navigation("integrations")} />
+      <ContextualHelp topic="credentials" />
       {tab === "oauth-apps" && (
         <div className="mb-4"><McpConnectionHelp /></div>
       )}

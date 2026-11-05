@@ -35,6 +35,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { ContextualHelp } from "@/components/common/ContextualHelp";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { FileText, Search, SearchX } from "lucide-react";
@@ -480,6 +481,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
             </Button>
           ))}
         </div>
+        <ContextualHelp topic="search" />
         <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}>
           {tBulk("open")}
         </Button>
