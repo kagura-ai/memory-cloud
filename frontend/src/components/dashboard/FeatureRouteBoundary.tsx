@@ -65,7 +65,9 @@ function RestrictedRoute({ item, system, children }: {
     </AlertDescription></Alert>);
   }
   const deploymentOff = flags.some(flag => !info?.features?.[flag]);
-  if (deploymentOff) {
+  // With BYOK off an owner can still manage previously stored external keys;
+  // its existing console enforces the provisioning-only deployment restriction.
+  if (deploymentOff && !(item?.existingObjectsFallback && !missingRole)) {
     return page(
       <Alert>
         <AlertDescription>

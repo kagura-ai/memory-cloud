@@ -85,9 +85,20 @@ describe("feature routes", () => {
     expect(screen.queryByText(en.featureAccess.deployment)).toBeNull();
     expect(fixture.request).not.toHaveBeenCalled();
   });
-  it("shows an unavailable notice without mounting external keys when BYOK is disabled", () => {
+  it("keeps the owner's external-key console mounted when BYOK is disabled", () => {
+    // #1613/#1616: stored keys are still used with BYOK off, so the owner
+    // keeps the list / disable / delete console; the page hides provisioning.
     fixture.path = "/workspace/integrations/external-keys";
     fixture.role = "owner";
+    fixture.flags.byok = false;
+    render(view());
+    expect(screen.getByText("protected contents")).toBeInTheDocument();
+    expect(screen.queryByText(en.featureAccess.currentlyUnavailable)).toBeNull();
+    expect(fixture.request).toHaveBeenCalled();
+  });
+  it("shows an unavailable notice without mounting external keys for a non-owner when BYOK is disabled", () => {
+    fixture.path = "/workspace/integrations/external-keys";
+    fixture.role = "admin";
     fixture.flags.byok = false;
     render(view());
     expect(screen.getByText(en.featureAccess.currentlyUnavailable)).toBeInTheDocument();
