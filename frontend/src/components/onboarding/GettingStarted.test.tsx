@@ -42,8 +42,20 @@ describe("getting started for an invited workspace member", () => {
   it("offers connection or access guidance when no context is available", () => {
     render(guide("u:empty", "en", []));
     expect(screen.getByText(en.gettingStarted.noContexts)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: en.integrationEntry.tasks.client.title })).toHaveAttribute("href", "/workspace/integrations/credentials?tab=api-keys#mcp-connection");
+    expect(screen.getByText(en.gettingStarted.noContextsTitle)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: en.integrationEntry.tasks.client.title })).toHaveAttribute("href", "/workspace/integrations#mcp-connection");
     expect(screen.queryByRole("button", { name: en.gettingStarted.find })).toBeNull();
     expect(recall).not.toHaveBeenCalled();
+  });
+  it("reports a failed search as an alert and no matches as an empty state", async () => {
+    recall.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ results: [] });
+    render(guide("u:search"));
+    fireEvent.change(screen.getByLabelText(en.gettingStarted.queryLabel), { target: { value: "launch" } });
+    fireEvent.click(screen.getByRole("button", { name: en.gettingStarted.find }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(en.gettingStarted.searchFailed);
+    fireEvent.click(screen.getByRole("button", { name: en.gettingStarted.find }));
+    expect(await screen.findByText(en.gettingStarted.noHitsTitle)).toBeInTheDocument();
+    expect(screen.getByText(en.gettingStarted.noHits)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

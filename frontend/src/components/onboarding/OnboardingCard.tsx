@@ -26,7 +26,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { claimPractice, onboardingScope, readProgress, writeProgress } from "./progress";
+import { advancePractice, claimPractice, onboardingScope, practiceContextName, readProgress, updateProgress } from "./progress";
 import { ApiError } from "@/lib/api/base";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -100,6 +100,9 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   const [query, setQuery] = useState(() => t("recall.sampleQuery"));
   const [results, setResults] = useState<RecallResultItem[]>([]);
   const [busy, setBusy] = useState(false);
+  // A pending create or save keeps the guide open (a second write must not
+  // start from a closed and replayed guide); a read-only Recall does not.
+  const [writePending, setWritePending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const writing = useRef(false);
 
@@ -158,32 +161,42 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures, scope, userId, replay, byokEnabled]);
 
   const dismiss = useCallback(() => {
-    writeProgress(scope, { ...readProgress(scope), dismissed: true });
+    void updateProgress(scope, current => ({ ...current, dismissed: true }));
     setVisible(false);
     onClose?.();
   }, [scope, onClose]);
+
+  const endPractice = async () => {
+    await updateProgress(scope, () => ({ step: "ended", dismissed: true }));
+    setVisible(false);
+    if (onClose) onClose();
+    else router.push("/workspace/contexts");
+  };
 
   const handleCreateContext = async () => {
     if (!currentWorkspaceId || writing.current) return;
     writing.current = true;
     setBusy(true);
+    setWritePending(true);
     setActionError(null);
+    const claimed = { step: "creating" } as const;
     try {
-      if (!await claimPractice(scope, "context", { step: "creating" })) { setStep("recovery"); return; }
-      const ctx = await createContext({ name: `my-first-context-${crypto.randomUUID()}`, display_name: "My First Context", is_private: true, expected_workspace_id: currentWorkspaceId });
+      if (!await claimPractice(scope, "context", claimed)) { setStep("recovery"); return; }
+      const ctx = await createContext({ name: practiceContextName(), display_name: "My First Context", is_private: true, expected_workspace_id: currentWorkspaceId });
       if (ctx.workspace_id !== currentWorkspaceId || !ctx.is_private || ctx.is_public || ctx.created_by !== userId) {
         setStep("recovery"); return;
       }
-      if (!writeProgress(scope, { step: "memory", contextId: ctx.id })) { setStep("recovery"); return; }
+      if (!await advancePractice(scope, claimed, { step: "memory", contextId: ctx.id })) { setStep("recovery"); return; }
       onCreated?.(ctx);
       setContextId(ctx.id);
       setStep("memory");
     } catch (error) {
-      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) writeProgress(scope, { step: "context" });
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) await advancePractice(scope, claimed, { step: "context" });
       else setStep("recovery");
       setActionError(t("errors.createFailed"));
     } finally {
       writing.current = false;
+      setWritePending(false);
       setBusy(false);
     }
   };
@@ -192,9 +205,11 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
     if (!contextId || !currentWorkspaceId || writing.current) return;
     writing.current = true;
     setBusy(true);
+    setWritePending(true);
     setActionError(null);
+    const claimed = { step: "saving", contextId } as const;
     try {
-      if (!await claimPractice(scope, "memory", { step: "saving", contextId })) { setStep("recovery"); return; }
+      if (!await claimPractice(scope, "memory", claimed)) { setStep("recovery"); return; }
       await rememberMemory({
         private_workspace_id: currentWorkspaceId,
         summary: summary.trim(),
@@ -203,14 +218,15 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
         importance: 0.7,
         context: { context_id: contextId },
       });
-      if (!writeProgress(scope, { step: "recall", contextId })) { setStep("recovery"); return; }
+      if (!await advancePractice(scope, claimed, { step: "recall", contextId })) { setStep("recovery"); return; }
       setStep("recall");
     } catch (error) {
-      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) writeProgress(scope, { step: "memory", contextId });
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) await advancePractice(scope, claimed, { step: "memory", contextId });
       else setStep("recovery");
       setActionError(t("errors.saveFailed"));
     } finally {
       writing.current = false;
+      setWritePending(false);
       setBusy(false);
     }
   };
@@ -230,7 +246,6 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
     } catch {
       setActionError(t("errors.recallFailed"));
     } finally {
-      writing.current = false;
       setBusy(false);
     }
   };
@@ -250,10 +265,10 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   const stepIndex = step === "context" ? 1 : step === "memory" ? 2 : 3;
 
   return (
-    <Dialog open={visible} onOpenChange={open => { if (!open && !busy) dismiss(); }}>
+    <Dialog open={visible} onOpenChange={open => { if (!open && !writePending) dismiss(); }}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl"
-        onEscapeKeyDown={event => { if (busy) event.preventDefault(); }}
-        onInteractOutside={event => { if (busy) event.preventDefault(); }}>
+        onEscapeKeyDown={event => { if (writePending) event.preventDefault(); }}
+        onInteractOutside={event => { if (writePending) event.preventDefault(); }}>
         <DialogHeader className="pr-6">
           <DialogTitle className="flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-brand-green-600 dark:text-brand-green-400" />
@@ -267,12 +282,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
           <Alert><AlertDescription>
             <p>{t("recovery")}</p>
             <Button variant="link" onClick={() => { dismiss(); router.push("/workspace/contexts"); }}>{t("openContexts")}</Button>
-            <Button variant="ghost" onClick={() => {
-              writeProgress(scope, { step: "ended", dismissed: true });
-              setVisible(false);
-              if (onClose) onClose();
-              else router.push("/workspace/contexts");
-            }}>{t("endPractice")}</Button>
+            <Button variant="ghost" onClick={endPractice}>{t("endPractice")}</Button>
           </AlertDescription></Alert>
         ) : !hasKey ? (
           // Informational gating notice (not an error): remember/recall need a
@@ -473,7 +483,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
           </div>
         )}
         </div>
-        <Button variant="ghost" disabled={busy} onClick={dismiss} className="justify-self-end">
+        <Button variant="ghost" disabled={writePending} onClick={dismiss} className="justify-self-end">
           {t("dismiss")}
         </Button>
       </DialogContent>

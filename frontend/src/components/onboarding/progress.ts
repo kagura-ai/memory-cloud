@@ -5,15 +5,41 @@ export interface PracticeProgress {
   dismissed?: boolean;
 }
 
-/** Atomically claim the next POST across tabs before sending it. */
-export async function claimPractice(scope: string, expected: "context" | "memory", pending: PracticeProgress): Promise<boolean> {
-  if (!navigator.locks) return false;
+/**
+ * Change the stored progress as one step across tabs: every mutation runs
+ * under the scope's Web Lock, so a dismissal in one tab and a claim in another
+ * never overwrite each other. `next` gets the current progress and returns the
+ * new one, or null to leave it unchanged. Web Locks exist only in secure
+ * contexts; on plain HTTP the change runs directly (this tab alone).
+ */
+export async function updateProgress(scope: string, next: (current: PracticeProgress) => PracticeProgress | null): Promise<boolean> {
+  const apply = () => {
+    const progress = next(readProgress(scope));
+    return progress !== null && writeProgress(scope, progress);
+  };
   try {
-    return await navigator.locks.request(scope, () => {
-      const previous = readProgress(scope);
-      return previous.step === expected && previous.contextId === pending.contextId && writeProgress(scope, pending);
-    });
+    return navigator.locks ? await navigator.locks.request(scope, apply) : apply();
   } catch { return false; }
+}
+
+/** Atomically claim the next POST across tabs before sending it. */
+export function claimPractice(scope: string, expected: "context" | "memory", pending: PracticeProgress): Promise<boolean> {
+  return updateProgress(scope, current => current.step === expected && current.contextId === pending.contextId ? pending : null);
+}
+
+/** Leave the step this tab claimed; false when another tab changed it meanwhile. */
+export function advancePractice(scope: string, claimed: PracticeProgress, next: PracticeProgress): Promise<boolean> {
+  return updateProgress(scope, current => current.step === claimed.step && current.contextId === claimed.contextId ? next : null);
+}
+
+/** Internal name of the practice context; `crypto.randomUUID` needs a secure context. */
+export function practiceContextName(): string {
+  if (typeof crypto.randomUUID === "function") return `my-first-context-${crypto.randomUUID()}`;
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+  return `my-first-context-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export function onboardingScope(userId: string, workspaceId: string) {
@@ -30,7 +56,7 @@ export function readProgress(scope: string): PracticeProgress {
   return { step: "context" };
 }
 
-export function writeProgress(scope: string, progress: PracticeProgress): boolean {
+function writeProgress(scope: string, progress: PracticeProgress): boolean {
   try {
     if (readProgress(scope).step === "ended" && progress.step !== "ended") return false;
     localStorage.setItem(scope + ":wizard", JSON.stringify(progress));

@@ -304,8 +304,7 @@ describe("OnboardingCard value-moment happy path", () => {
     );
     expect(screen.getByText("done.title")).toBeInTheDocument();
 
-    // The MCP pointer routes to the real credentials page, not the
-    // page-less /workspace/integrations segment (which 404s).
+    // The MCP pointer opens the API keys tab of the credentials page.
     fireEvent.click(screen.getByText("mcp.link"));
     expect(mockPush).toHaveBeenCalledWith(
       "/workspace/integrations/credentials?tab=api-keys",
@@ -348,6 +347,65 @@ describe("OnboardingCard value-moment happy path", () => {
     expect(await screen.findByText("errors.createFailed")).toBeVisible();
     expect(screen.getByRole("dialog")).toContainElement(screen.getByText("errors.createFailed"));
     expect(mockToast).not.toHaveBeenCalled();
+  });
+
+  it("lets a pending Recall be dismissed", async () => {
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "recall", contextId: "c1" }));
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", workspace_id: "ws-1", is_private: true, created_by: "u1" }] });
+    mockRecall.mockReturnValue(new Promise(() => {}));
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByText("recall.searchButton"));
+    expect(mockRecall).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "dismiss" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("keeps the guide open while a create is pending", async () => {
+    mockCreateContext.mockReturnValue(new Promise(() => {}));
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByText("context.createButton"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "dismiss" })).toBeDisabled());
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("queues a dismissal behind another tab's claim so neither is lost", async () => {
+    let tail: Promise<unknown> = Promise.resolve();
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: { request: (_name: string, run: () => unknown) => { const result = tail.then(run); tail = result.catch(() => undefined); return result; } },
+    });
+    render(<OnboardingCard />);
+    await screen.findByText("context.createButton");
+    // Another tab is inside its claim: it read "context" and is about to write "creating".
+    let claim: (() => void) | undefined;
+    void navigator.locks.request("onboarding:u1:ws-1", () => new Promise<void>(resolve => {
+      claim = () => { localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "creating" })); resolve(); };
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "dismiss" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(claim).toBeDefined());
+    claim!();
+    await waitFor(() => expect(JSON.parse(localStorage.getItem("onboarding:u1:ws-1:wizard")!)).toEqual({ step: "creating", dismissed: true }));
+  });
+
+  it("runs the practice without Web Locks or crypto.randomUUID (plain-HTTP self-hosting)", async () => {
+    Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+    const randomUUID = Object.getOwnPropertyDescriptor(crypto, "randomUUID");
+    Object.defineProperty(crypto, "randomUUID", { configurable: true, value: undefined });
+    try {
+      mockCreateContext.mockResolvedValue({ id: "ctx-1", workspace_id: "ws-1", is_private: true, created_by: "u1" });
+      render(<OnboardingCard />);
+      fireEvent.click(await screen.findByText("context.createButton"));
+      expect(await screen.findByText("memory.saveButton")).toBeInTheDocument();
+      expect(mockCreateContext).toHaveBeenCalledWith(expect.objectContaining({
+        name: expect.stringMatching(/^my-first-context-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+      }));
+      expect(JSON.parse(localStorage.getItem("onboarding:u1:ws-1:wizard")!)).toEqual({ step: "memory", contextId: "ctx-1" });
+    } finally {
+      if (randomUUID) Object.defineProperty(crypto, "randomUUID", randomUUID);
+      else Reflect.deleteProperty(crypto, "randomUUID");
+    }
   });
 
   it("dismiss persists to localStorage and hides the card", async () => {
