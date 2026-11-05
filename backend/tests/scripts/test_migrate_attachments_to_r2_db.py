@@ -653,3 +653,105 @@ async def test_duplicate_bytes_keep_each_attachment_binding(db_session, patched,
         assert {row.storage_key: row.context_id for row in rows} == expected
         snapshots.append({row.storage_key: row.id for row in rows})
     assert snapshots[0] == snapshots[1]
+
+
+@pytest_asyncio.fixture
+async def attachment_erasure_triggers(async_engine, db_session):
+    # The test DB is built from ORM metadata; install the production trigger
+    # definitions (f18 durable R2 outbox, f24 source-attachment lifetime).
+    import runpy
+
+    versions = Path(__file__).resolve().parents[2] / "alembic" / "versions"
+    outbox = runpy.run_path(str(versions / "f18_2395_file_cleanup.py"))["DDL"]
+    erasure = runpy.run_path(str(versions / "f24_2650_attachment_erasure.py"))["DDL"]
+    async with async_engine.begin() as conn:
+        for ddl in (*outbox, *erasure[1:]):
+            await conn.execute(text(ddl))
+    yield
+    await db_session.rollback()
+    async with async_engine.begin() as conn:
+        for function in (
+            "erase_attachment_copies()",
+            "erase_migrated_attachment_files(uuid[])",
+            "enqueue_deleted_file_objects()",
+            "lock_file_object_keys()",
+        ):
+            await conn.execute(text(f"DROP FUNCTION {function} CASCADE"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_shared", [False, True])
+async def test_erased_memory_reclaims_migrated_file(
+    db_session, patched, fake_storage, attachment_erasure_triggers, legacy_shared
+):
+    from api.routes.admin import delete_user
+    from models.file_objects import WorkspaceStorageUsage
+    from services.storage_cleanup import drain_storage_deletions
+    from tests.integration._admin_helpers import make_user, mock_admin
+
+    ws = await _workspace(db_session)
+    private = await _context(db_session, ws)
+    memory, att = await _attachment(db_session, ws, private)
+    target = make_user()
+    target_id = target.user_id
+    db_session.add(target)
+    await db_session.execute(update(Memory).where(Memory.id == memory).values(user_id=target_id))
+    await db_session.execute(
+        update(Context).where(Context.id == private).values(created_by=target_id)
+    )
+    await db_session.commit()
+    await mig.migrate_all(db_session, dry_run=False, batch_size=1)
+    if legacy_shared:
+        await db_session.execute(
+            update(FileObject).where(FileObject.workspace_id == ws).values(context_id=None)
+        )
+        await db_session.commit()
+    key = _legacy_key(ws, att)
+    assert key in fake_storage.objects
+
+    # The source disappears through a memory cascade, as in account erasure.
+    await db_session.execute(delete(Memory).where(Memory.id == memory))
+    await db_session.rollback()
+    assert len(await _file_rows(db_session, ws)) == 1
+    if legacy_shared:
+        # The admin erasure path must also find pre-context-binding rows.
+        with patch("services.user_deletion_service.finish_user_deletion", AsyncMock()):
+            await delete_user(target_id, mock_admin(), db_session)
+        assert await db_session.scalar(select(Context.id).where(Context.id == private)) is None
+    else:
+        await db_session.execute(delete(Memory).where(Memory.id == memory))
+        await db_session.commit()
+    assert await _file_rows(db_session, ws) == []
+    usage = await db_session.get(WorkspaceStorageUsage, ws)
+    assert (usage.used_bytes, usage.file_count) == (0, 0)
+    assert (await mig.repair_context_bindings(db_session, dry_run=True, batch_size=1))[
+        "orphan"
+    ] == 0
+    with patch.object(
+        storage_quota_service, "expire_erased_attachment_quota", AsyncMock()
+    ) as expire:
+        expire.side_effect = [ConnectionError("temporarily offline"), None]
+        first = await drain_storage_deletions(db_session, fake_storage)
+        assert first["failed"] == 1
+        retry = await drain_storage_deletions(db_session, fake_storage)
+        assert retry["deleted"] == 1
+        assert expire.await_count == 2
+        expire.assert_awaited_with(ws)
+    assert key not in fake_storage.objects
+
+
+@pytest.mark.asyncio
+async def test_purge_orphans_preserves_live_and_unparseable_rows(
+    db_session, legacy_rows, attachment_erasure_triggers
+):
+    invalid = _legacy_file(legacy_rows["ws"], uuid4(), created_by=_PREFIX + "broken")
+    db_session.add(invalid)
+    await db_session.commit()
+    before = {row.id for row in await _file_rows(db_session, legacy_rows["ws"])}
+    assert await mig.purge_orphans(db_session, dry_run=True, batch_size=1) == {"orphan": 1}
+    assert {row.id for row in await _file_rows(db_session, legacy_rows["ws"])} == before
+    assert await mig.purge_orphans(db_session, dry_run=False, batch_size=1) == {"orphan": 1}
+    assert {row.id for row in await _file_rows(db_session, legacy_rows["ws"])} == before - {
+        legacy_rows["orphan"]
+    }
+    assert await mig.purge_orphans(db_session, dry_run=False, batch_size=1) == {"orphan": 0}
