@@ -422,6 +422,14 @@ class TestSwitchWorkspace:
 class TestWorkspaceUsageCurrent:
     """Tests for get_workspace_usage_current endpoint (Issue #65 optimization)."""
 
+    @pytest.fixture(autouse=True)
+    def quota_meters(self):
+        # The additional meter queries have dedicated tests in test_workspace_quota_usage.
+        with patch(
+            "api.routes.workspace.build_workspace_quota_usage", new=AsyncMock(return_value=[])
+        ) as mock:
+            yield mock
+
     @pytest.fixture
     def mock_db(self):
         """Create mock database session."""

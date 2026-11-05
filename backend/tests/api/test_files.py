@@ -366,6 +366,35 @@ class TestDeleteFile:
 
 
 class TestListFiles:
+    @pytest.mark.parametrize("scope", ["all", "workspace", "context"])
+    def test_scope_filter_preserves_accessible_contexts(self, client, scope):
+        ws, context_id = uuid4(), uuid4()
+        query = f"&context_id={context_id}" if scope == "context" else f"&scope={scope}"
+        with (
+            patch(
+                "api.routes.files.FileStorageService.list_files", AsyncMock(return_value=[])
+            ) as service,
+            patch(
+                "api.routes.files.PermissionService.get_accessible_contexts",
+                AsyncMock(return_value=[MagicMock(id=context_id)]),
+            ),
+        ):
+            response = client.get(f"/api/v1/files?workspace_id={ws}{query}")
+        assert response.status_code == 200
+        service.assert_awaited_once_with(
+            workspace_id=ws,
+            accessible_context_ids=[context_id],
+            context_id=context_id if scope == "context" else None,
+            workspace_only=scope == "workspace",
+            limit=50,
+        )
+
+    def test_conflicting_scope_filters_are_rejected(self, client):
+        response = client.get(
+            f"/api/v1/files?workspace_id={uuid4()}&scope=workspace&context_id={uuid4()}"
+        )
+        assert response.status_code == 422
+
     def test_happy_path(self, client):
         ws = uuid4()
         files = [_file_object_mock(workspace_id=ws), _file_object_mock(workspace_id=ws)]

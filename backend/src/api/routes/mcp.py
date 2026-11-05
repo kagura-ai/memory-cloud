@@ -62,79 +62,15 @@ async def list_mcp_tools(
     Returns:
         List of MCP tools with descriptions and schemas
     """
-    # Define the 6 MCP tools
+    from mcp_server.tools._definitions import get_tool_definitions
+
     tools = [
         MCPToolInfo(
-            name="remember",
-            description="Store important information, decisions, code snippets, or context into long-term memory",
-            input_schema={
-                "type": "object",
-                "required": ["summary", "content", "type"],
-                "properties": {
-                    "summary": {"type": "string"},
-                    "content": {"type": "string"},
-                    "type": {"type": "string"},
-                    "importance": {"type": "number"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                },
-            },
-        ),
-        MCPToolInfo(
-            name="recall",
-            description="Search and retrieve memories using Hybrid Search (semantic + full-text)",
-            input_schema={
-                "type": "object",
-                "required": ["query"],
-                "properties": {
-                    "query": {"type": "string"},
-                    "k": {"type": "integer"},
-                    "use_rerank": {"type": "boolean"},
-                    "filters": {"type": "object"},
-                },
-            },
-        ),
-        MCPToolInfo(
-            name="reference",
-            description="Retrieve complete details of a specific memory by ID",
-            input_schema={
-                "type": "object",
-                "required": ["memory_id"],
-                "properties": {"memory_id": {"type": "string"}},
-            },
-        ),
-        MCPToolInfo(
-            name="forget",
-            description="Permanently delete a memory by ID or search query",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "memory_id": {"type": "string"},
-                    "query": {"type": "string"},
-                    "k": {"type": "integer"},
-                },
-            },
-        ),
-        MCPToolInfo(
-            name="explore",
-            description="Discover related memories through Neural Memory graph traversal",
-            input_schema={
-                "type": "object",
-                "required": ["memory_id"],
-                "properties": {
-                    "memory_id": {"type": "string"},
-                    "depth": {"type": "integer"},
-                    "min_weight": {"type": "number"},
-                },
-            },
-        ),
-        MCPToolInfo(
-            name="get_stats",
-            description="Get memory usage statistics for the authenticated user",
-            input_schema={
-                "type": "object",
-                "properties": {"include_details": {"type": "boolean"}},
-            },
-        ),
+            name=definition["name"],
+            description=definition["description"],
+            input_schema=definition["inputSchema"],
+        )
+        for definition in get_tool_definitions()
     ]
 
     user_id = user.get("user_id", "unknown") if user else "unknown"
