@@ -110,11 +110,12 @@ interface ConnectedAccountsProps {
    * them. Linking needs no callback: it leaves the page for the IdP and the
    * profile reloads on return.
    */
+  hasPasskey?: boolean;
   onProvidersChanged?: () => void;
 }
 
 export default function ConnectedAccounts({
-  onProvidersChanged,
+  onProvidersChanged, hasPasskey = false,
 }: ConnectedAccountsProps = {}) {
   const t = useTranslations("connectedAccounts");
   const tCommon = useTranslations("common");
@@ -158,7 +159,7 @@ export default function ConnectedAccounts({
   // 409 (which is still handled defensively in handleDisconnectConfirm).
   // #1678: an OAuth user may have added a password.
   const hasPassword = hasPasswordSignIn(user);
-  const isOnlyMethod = !hasPassword && linkedSet.size <= 1;
+  const isOnlyMethod = !hasPasskey && !hasPassword && linkedSet.size <= 1;
 
   const handleConnect = async (provider: Provider) => {
     setBusyProvider(provider);

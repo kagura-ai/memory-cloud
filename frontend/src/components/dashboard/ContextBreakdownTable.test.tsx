@@ -107,6 +107,24 @@ function captureCsvExport(): () => Promise<string> {
 }
 
 describe("ContextBreakdownTable", () => {
+  it("renders only cells inside header, context and private summary rows", () => {
+    render(
+      <ContextBreakdownTable
+        contexts={mockContexts}
+        contextStats={mockContextStats}
+        totalMemories={305}
+        privateAggregation={{ context_count: 1, memory_count: 5 }}
+      />,
+    );
+    const rows = screen.getAllByRole("row");
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(Array.from(row.childNodes).every(node =>
+        node instanceof HTMLTableCellElement
+      )).toBe(true);
+    }
+  });
+
   it("renders context data with all detail columns", () => {
     render(
       <ContextBreakdownTable

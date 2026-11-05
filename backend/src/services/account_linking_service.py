@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from models.auth import AuditLog, User, UserOAuthProvider
+from models.auth import AuditLog, User, UserOAuthProvider, WebAuthnCredential
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException
 from utils.hashing import hmac_sha256_hex
@@ -177,7 +177,9 @@ class AccountLinkingService:
         # through it, but ``RoleManager._sync_existing_user`` reads it to sync
         # email/name only from the primary provider — #1811.)
         remaining_methods = (len(rows) - 1) + (1 if has_password else 0)
-        if remaining_methods < 1:
+        if remaining_methods < 1 and not await self.db.scalar(
+            select(WebAuthnCredential.id).where(WebAuthnCredential.user_id == user_id).limit(1)
+        ):
             raise ConflictError("Cannot unlink the only remaining sign-in method")
 
         await self.db.delete(target)

@@ -39,6 +39,7 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { PageSectionNavigation } from "@/components/common/PageSectionNavigation";
 import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import LinkedAccounts from "@/components/auth/LinkedAccounts";
+import PasskeySettings from "@/components/auth/PasskeySettings";
 import PasswordSettings from "@/components/auth/PasswordSettings";
 import { MfaSettings } from "@/components/auth/MfaSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
@@ -66,6 +67,7 @@ export default function ProfilePage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   // #1678: bumped when Connected Accounts unlinks a provider, so the Password
   // section re-reads how many sign-in methods would remain.
+  const [hasPasskey, setHasPasskey] = useState(false);
   const [providersVersion, setProvidersVersion] = useState(0);
   // #1751: the linked OAuth providers, for the Sign-in method field and the
   // refresh-from-IdP block, tagged with the user they were read for. Until
@@ -490,6 +492,7 @@ export default function ProfilePage() {
           section, so removing them was judged riskier than additive mounting. */}
       <section id="profile-sign-in" tabIndex={-1} aria-label={t("sections.signIn")} className="scroll-mt-24">
       <ConnectedAccounts
+        hasPasskey={hasPasskey}
         onProvidersChanged={() => {
           setProvidersVersion((v) => v + 1);
           // Unlinking repoints `auth_provider` server-side (#1751).
@@ -503,9 +506,10 @@ export default function ProfilePage() {
       <section id="profile-linked-accounts" tabIndex={-1} aria-label={t("sections.linkedAccounts")} className="scroll-mt-24"><LinkedAccounts /></section>
 
       {/* Password (Issue #1678): set up / change / remove. */}
-      <section id="profile-password" tabIndex={-1} aria-label={t("sections.password")} className="scroll-mt-24"><PasswordSettings providersVersion={providersVersion} /></section>
+      <PasskeySettings key={`passkeys-${user?.id}`} onAvailabilityChange={setHasPasskey} />
+      <section id="profile-password" tabIndex={-1} aria-label={t("sections.password")} className="scroll-mt-24"><PasswordSettings hasPasskey={hasPasskey} providersVersion={providersVersion} /></section>
 
-      <MfaSettings key={user?.id} />
+      <MfaSettings key={`mfa-${user?.id}`} />
 
       {/* Theme & Appearance */}
       <Card id="profile-appearance" tabIndex={-1} aria-label={t("sections.appearance")} className="scroll-mt-24">

@@ -56,6 +56,26 @@ Session-based authentication for the web management interface.
 
 ---
 
+### Passkeys
+
+The prefix for these endpoints is `/api/v1/auth/passkeys`. Management uses a browser
+session. A maximum of ten passkeys may be registered per account. Public key
+credential IDs and WebAuthn binary fields travel in base64url form.
+
+| Method and path | Request and result |
+|---|---|
+| `POST /register/options` | Submit a current password, a fresh passkey proof, or an empty object for recent session proof. Returns discoverable credential creation options. |
+| `POST /register/verify` | Submit the options' `challenge` and the browser's `credential`. Returns 201 with the registered key's ID, label, and timestamps. |
+| `POST /authenticate/options` | Anonymous. Returns assertion options and sets the browser ceremony cookie. |
+| `POST /authenticate/verify` | Anonymous. Submit `challenge`, `credential`, and optional `accepted_terms`, with cookies included. Success sets the session cookie and returns `redirect_url`. The optional `return_to` query uses the ordinary sign-in redirect rules. |
+| `GET /` (prefix without trailing slash) | Lists the active account's IDs, labels and timestamps. |
+| `PATCH /{key_id}` | Supply `name` (1–100 characters). |
+| `POST /proof/options` | Obtain assertion options for another registration, or use `?removing={key_id}` to prove a different key for removal. Submit the assertion as `assertion` alongside `challenge` on the management request. |
+| `DELETE /{key_id}` | Submit `current_password` or the scoped assertion proof. Returns 204. Removing the last available sign-in method returns 409. |
+
+A passkey assertion requires local user verification and signs in an existing account
+without a subsequent TOTP prompt. Account deletion cascades to all its credentials.
+
 ## Memory APIs
 
 ### POST /api/v1/memory/remember

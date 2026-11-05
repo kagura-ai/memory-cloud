@@ -3142,6 +3142,25 @@
         ],
         "type": "object"
       },
+      "CredentialResponse": {
+        "properties": {
+          "challenge": {
+            "maxLength": 128,
+            "minLength": 16,
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "type": "string"
+          },
+          "credential": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "challenge",
+          "credential"
+        ],
+        "type": "object"
+      },
       "CredentialsStatusInfo": {
         "properties": {
           "api_key_count": {
@@ -5076,6 +5095,39 @@
         },
         "required": [
           "resource_id"
+        ],
+        "type": "object"
+      },
+      "KeyInfo": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "created_at",
+          "id",
+          "last_used_at",
+          "name"
         ],
         "type": "object"
       },
@@ -7633,6 +7685,44 @@
         ],
         "type": "object"
       },
+      "Proof": {
+        "properties": {
+          "assertion": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "challenge": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_password": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "ProviderInfo": {
         "properties": {
           "name": {
@@ -8768,6 +8858,19 @@
         ],
         "type": "object"
       },
+      "Rename": {
+        "properties": {
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "ResolvedTermEntry": {
         "properties": {
           "delta": {
@@ -9825,6 +9928,36 @@
           "as_of",
           "count",
           "sessions"
+        ],
+        "type": "object"
+      },
+      "SignIn": {
+        "properties": {
+          "accepted_terms": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "challenge": {
+            "maxLength": 128,
+            "minLength": 16,
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "type": "string"
+          },
+          "credential": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "challenge",
+          "credential"
         ],
         "type": "object"
       },
@@ -16795,6 +16928,409 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/passkeys": {
+      "get": {
+        "operationId": "list_passkeys_api_v1_auth_passkeys_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/KeyInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/passkeys/authenticate/options": {
+      "post": {
+        "operationId": "authenticate_options_api_v1_auth_passkeys_authenticate_options_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/passkeys/authenticate/verify": {
+      "post": {
+        "operationId": "authenticate_verify_api_v1_auth_passkeys_authenticate_verify_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "return_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/passkeys/proof/options": {
+      "post": {
+        "operationId": "proof_options_api_v1_auth_passkeys_proof_options_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "removing",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/passkeys/register/options": {
+      "post": {
+        "operationId": "register_options_api_v1_auth_passkeys_register_options_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Proof"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/passkeys/register/verify": {
+      "post": {
+        "operationId": "register_verify_api_v1_auth_passkeys_register_verify_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialResponse"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyInfo"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/passkeys/{key_id}": {
+      "delete": {
+        "operationId": "remove_passkey_api_v1_auth_passkeys__key_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Proof"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      },
+      "patch": {
+        "operationId": "rename_passkey_api_v1_auth_passkeys__key_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Rename"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyInfo"
+                }
               }
             }
           },

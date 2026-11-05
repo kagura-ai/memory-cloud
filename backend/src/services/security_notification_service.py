@@ -205,6 +205,8 @@ class SecurityEvent(StrEnum):
     NEW_DEVICE_SIGN_IN = "new_device_sign_in"
     ACCOUNT_LINKED = "account_linked"
     ACCOUNT_UNLINKED = "account_unlinked"
+    PASSKEY_ADDED = "passkey_added"
+    PASSKEY_REMOVED = "passkey_removed"
     SECOND_FACTOR_LOCKED = "second_factor_locked"
     MFA_ENABLED = "mfa_enabled"
     MFA_DISABLED = "mfa_disabled"
@@ -232,6 +234,14 @@ PROVIDER_SIGN_IN_LABELS = {"google": "Google sign-in", "github": "GitHub sign-in
 
 # (subject, one-line description of one occurrence)
 _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
+    SecurityEvent.PASSKEY_ADDED: (
+        "A passkey was added to your Kagura account",
+        "A passkey was registered.",
+    ),
+    SecurityEvent.PASSKEY_REMOVED: (
+        "A passkey was removed from your Kagura account",
+        "A passkey was removed.",
+    ),
     SecurityEvent.MFA_ENABLED: (
         "Two-factor authentication enabled",
         "Two-factor authentication was enabled on your account.",

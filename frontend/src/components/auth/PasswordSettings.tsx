@@ -66,11 +66,12 @@ function statusOf(err: unknown): number {
 
 interface PasswordSettingsProps {
   /** Bumped by the page when the linked providers change elsewhere. */
+  hasPasskey?: boolean;
   providersVersion?: number;
 }
 
 export default function PasswordSettings({
-  providersVersion = 0,
+  providersVersion = 0, hasPasskey = false,
 }: PasswordSettingsProps = {}) {
   const t = useTranslations("passwordSettings");
   const tCommon = useTranslations("common");
@@ -121,7 +122,7 @@ export default function PasswordSettings({
     void loadProviders();
   }, [loadProviders, providersVersion]);
 
-  const canRemove = linkedCount > 0;
+  const canRemove = linkedCount > 0 || hasPasskey;
 
   const handleSetupRequest = async () => {
     setSendingSetup(true);
