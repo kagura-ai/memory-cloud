@@ -97,8 +97,8 @@ class TestMigrateAttachment:
         assert file.storage_key == expected_key
         assert file.context_id == context_id
         db.add.assert_called_once_with(file)
-        # The workspace row is locked, and the context row too when there is one.
-        assert db.scalar.await_count == (2 if bound else 1)
+        # Lock the workspace, optional context, and source attachment before writing.
+        assert db.scalar.await_count == (3 if bound else 2)
 
         # workspace_storage_usage incremented
         upsert.assert_awaited_once()
