@@ -59,7 +59,7 @@ from auth.workspace_roles import (
 )
 from db.base import Base
 from db.constraint_names import CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE
-from models.json_types import NullableJSON
+from models.json_types import NullableJSON, NullableJSONB
 from utils.datetime import utcnow
 from utils.public_id import PublicIdPrefix, public_id_column
 from utils.redirect_uri import any_redirect_uri_matches
@@ -145,7 +145,8 @@ class User(Base):
         Boolean, nullable=False, default=False, server_default=text("false")
     )
     mfa_generation: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    totp_recovery_hashes: Mapped[list[str] | None] = mapped_column(NullableJSON, nullable=True)
+    # Admin plan filtering selects DISTINCT users; every selected column must support equality.
+    totp_recovery_hashes: Mapped[list[str] | None] = mapped_column(NullableJSONB, nullable=True)
     # Issue #1678: when ownership of ``email`` was last proven — by an IdP
     # (backfilled for users with a linked OAuth provider) or by following a
     # link sent to the address. Password sign-in by email requires it.
