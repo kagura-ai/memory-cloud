@@ -83,6 +83,7 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "memory_session_rollbacks",
         "users",
         "user_oauth_providers",
+        "webauthn_credentials",
         # Known browsers for new-device sign-in alerts (#1769): keyed hashes of
         # device cookies, deleted with the account.
         "user_known_devices",

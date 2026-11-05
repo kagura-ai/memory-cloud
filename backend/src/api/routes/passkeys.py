@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -49,6 +49,16 @@ from models.auth import AuditLog, User, UserOAuthProvider, WebAuthnCredential
 from services.known_device_service import note_browser_sign_in
 from services.security_notification_service import SecurityEvent, schedule_security_notification
 from utils.datetime import utcnow
+from utils.exceptions import (
+    AuthenticationError,
+    AuthorizationError,
+    BadRequestError,
+    ConfigurationError,
+    ConflictError,
+    NotFoundException,
+    RateLimitError,
+    ValidationError,
+)
 
 router = APIRouter(prefix="/auth/passkeys", tags=["authentication"])
 _TTL = 300
@@ -86,7 +96,7 @@ def _rp() -> tuple[str, list[str]]:
     settings = get_settings()
     host = settings.webauthn_rp_id or urlsplit(settings.frontend_url).hostname
     if not host:
-        raise HTTPException(503, "WebAuthn relying party is not configured")
+        raise ConfigurationError("WebAuthn relying party is not configured")
     origins = settings.webauthn_origins or settings.frontend_url
     return host, [item.strip().rstrip("/") for item in origins.split(",")]
 
@@ -99,7 +109,7 @@ def _handle(user: User) -> bytes:
 def _binding(request: Request, user_id: str, action: str) -> str:
     sid = request.cookies.get(SESSION_COOKIE_NAME)
     if not sid:
-        raise HTTPException(401, "A browser session is required")
+        raise AuthenticationError("A browser session is required")
     return hashlib.sha256(json.dumps([sid, user_id, action]).encode()).hexdigest()
 
 
@@ -112,14 +122,14 @@ async def _issue(options: Any, binding: str, state: str = "1") -> dict[str, Any]
 
 async def _consume(challenge: str, binding: str, state: str = "1") -> bytes:
     if await get_redis_client().getdel(f"webauthn:{binding}:{challenge}") != state:
-        raise HTTPException(401, "Invalid or expired passkey challenge")
+        raise AuthenticationError("Invalid or expired passkey challenge")
     return base64url_to_bytes(challenge)
 
 
 async def _owner(db: AsyncSession, user_id: str) -> User:
     user = await db.scalar(select(User).where(User.user_id == user_id).with_for_update())
     if not user:
-        raise HTTPException(401, "Account unavailable")
+        raise AuthenticationError("Account unavailable")
     return user
 
 
@@ -161,16 +171,16 @@ async def _assertion(
     try:
         credential = parse_authentication_credential_json(raw)
         if not 1 <= len(credential.raw_id) <= 1023:
-            raise HTTPException(401, "Invalid credential ID")
+            raise AuthenticationError("Invalid credential ID")
         if parse_client_data_json(credential.response.client_data_json).cross_origin:
-            raise HTTPException(401, "Cross-origin passkey assertions are not accepted")
+            raise AuthenticationError("Cross-origin passkey assertions are not accepted")
     except (ValueError, TypeError, WebAuthnException, KeyError) as exc:
-        raise HTTPException(401, "Invalid passkey") from exc
+        raise AuthenticationError("Invalid passkey") from exc
     query = select(WebAuthnCredential).where(WebAuthnCredential.credential_id == credential.raw_id)
     # Always lock parent before credential, like removal and account erasure.
     user_id = await db.scalar(query.with_only_columns(WebAuthnCredential.user_id))
     if not user_id or (owner is not None and owner != user_id):
-        raise HTTPException(401, "Invalid passkey")
+        raise AuthenticationError("Invalid passkey")
     user = await _owner(db, user_id)
     key = await db.scalar(query.with_for_update())
     if (
@@ -181,7 +191,7 @@ async def _assertion(
             and (owner is None or credential.response.user_handle is not None)
         )
     ):
-        raise HTTPException(401, "Invalid passkey")
+        raise AuthenticationError("Invalid passkey")
     await asyncio.to_thread(auth._reserve_login_attempt, auth._account_rate_key(user_id))
     rp, origins = _rp()
     try:
@@ -195,11 +205,11 @@ async def _assertion(
             require_user_verification=True,
         )
     except (ValueError, TypeError, WebAuthnException) as exc:
-        raise HTTPException(401, "Invalid passkey") from exc
+        raise AuthenticationError("Invalid passkey") from exc
     if (
         verified.credential_device_type == CredentialDeviceType.MULTI_DEVICE
     ) != key.backup_eligible:
-        raise HTTPException(401, "Invalid passkey")
+        raise AuthenticationError("Invalid passkey")
     key.sign_count = verified.new_sign_count
     key.backup_state = verified.credential_backed_up
     key.last_used_at = utcnow()
@@ -221,7 +231,7 @@ async def _prove(
         return
     if proof.current_password and user.password_hash:
         if await increment_counter(f"webauthn_password:{user.user_id}", ttl=_TTL) > 5:
-            raise HTTPException(429, "Too many verification attempts")
+            raise RateLimitError("Too many verification attempts")
         if await asyncio.to_thread(verify_password, proof.current_password, user.password_hash):
             # Do not refill the sign-in budget by proving only the first factor.
             return
@@ -236,8 +246,8 @@ async def _prove(
         )
     ):
         return
-    raise HTTPException(
-        403, "Verify with your current password or another passkey, or sign in again to register"
+    raise AuthorizationError(
+        "Verify with your current password or another passkey, or sign in again to register"
     )
 
 
@@ -257,7 +267,7 @@ async def proof_options(
     """Prove another passkey for adding or removing a credential in this session."""
     keys = [k for k in await _keys(db, user["user_id"]) if k.id != removing]
     if not keys:
-        raise HTTPException(409, "No other passkey is available")
+        raise ConflictError("No other passkey is available")
     options = generate_authentication_options(
         rp_id=_rp()[0],
         allow_credentials=[PublicKeyCredentialDescriptor(id=k.credential_id) for k in keys],
@@ -276,7 +286,7 @@ async def register_options(
     await _prove(db, account, request, body, "add")
     keys = await _keys(db, account.user_id)
     if len(keys) >= _LIMIT:
-        raise HTTPException(409, "Passkey limit reached")
+        raise ConflictError("Passkey limit reached")
     options = generate_registration_options(
         rp_id=_rp()[0],
         rp_name=get_settings().webauthn_rp_name,
@@ -322,14 +332,14 @@ async def register_verify(
         await _registration_state(db, account, keys),
     )
     if len(keys) >= _LIMIT:
-        raise HTTPException(409, "Passkey limit reached")
+        raise ConflictError("Passkey limit reached")
     rp, origins = _rp()
     try:
         registration = parse_registration_credential_json(body.credential)
         if not 1 <= len(registration.raw_id) <= 1023:
-            raise HTTPException(400, "Invalid credential ID")
+            raise BadRequestError("Invalid credential ID")
         if parse_client_data_json(registration.response.client_data_json).cross_origin:
-            raise HTTPException(400, "Cross-origin passkey registration is not accepted")
+            raise BadRequestError("Cross-origin passkey registration is not accepted")
         result = verify_registration_response(
             credential=registration,
             expected_challenge=expected,
@@ -338,7 +348,7 @@ async def register_verify(
             require_user_verification=True,
         )
     except (ValueError, TypeError, WebAuthnException, KeyError) as exc:
-        raise HTTPException(400, "Invalid passkey registration") from exc
+        raise BadRequestError("Invalid passkey registration") from exc
     transports = [item.value for item in registration.response.transports or []]
     key = WebAuthnCredential(
         user_id=account.user_id,
@@ -357,7 +367,7 @@ async def register_verify(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        raise HTTPException(409, "Passkey already registered") from exc
+        raise ConflictError("Passkey already registered") from exc
     schedule_security_notification(
         background_tasks,
         user_id=account.user_id,
@@ -372,7 +382,7 @@ async def authenticate_options(request: Request, response: Response):
     """Begin a discoverable passkey sign-in. No account identifier is required."""
     ip = auth._login_client_ip(request)
     if await increment_counter(f"webauthn_options:{ip}", ttl=60) > 60:
-        raise HTTPException(429, "Too many sign-in requests")
+        raise RateLimitError("Too many sign-in requests")
     redis = get_redis_client()
     binding = request.cookies.get(_BROWSER_COOKIE, "")
     known = len(binding) == 43 and await redis.get(f"webauthn_browser:{binding}")
@@ -412,7 +422,7 @@ async def authenticate_verify(
     first_cookie = _first_cookie(body.challenge)
     binding = request.cookies.get(first_cookie) or request.cookies.get(_BROWSER_COOKIE)
     if not binding or not auth._session_manager:
-        raise HTTPException(401, "Invalid passkey sign-in")
+        raise AuthenticationError("Invalid passkey sign-in")
     challenge = await _consume(body.challenge, binding)
     account, _ = await _assertion(db, body.credential, challenge)
     # Write the session while the credential and user are still locked. Removing
@@ -423,7 +433,7 @@ async def authenticate_verify(
     try:
         await db.commit()
         if not await auth._complete_password_sign_in(account.user_id, account.email, sid):
-            raise HTTPException(503, "Sign in again")
+            raise AuthenticationError("Sign in again", status_code=503, error_code="AUTH-307")
         await asyncio.to_thread(auth._clear_login_failures, auth._account_rate_key(account.user_id))
         await auth._record_terms_acceptance(
             email=account.email,
@@ -455,10 +465,10 @@ async def rename_passkey(
         .with_for_update()
     )
     if not key:
-        raise HTTPException(404, "Passkey not found")
+        raise NotFoundException("Passkey")
     key.name = body.name.strip()
     if not key.name:
-        raise HTTPException(422, "Enter a passkey name")
+        raise ValidationError("Enter a passkey name")
     await db.commit()
     return key
 
@@ -477,7 +487,7 @@ async def remove_passkey(
     keys = await _keys(db, account.user_id)
     key = next((k for k in keys if k.id == key_id), None)
     if not key:
-        raise HTTPException(404, "Passkey not found")
+        raise NotFoundException("Passkey")
     if (
         len(keys) == 1
         and not account.password_hash
@@ -487,7 +497,7 @@ async def remove_passkey(
             .where(UserOAuthProvider.user_id == account.user_id)
         )
     ):
-        raise HTTPException(409, "Cannot remove the only remaining sign-in method")
+        raise ConflictError("Cannot remove the only remaining sign-in method")
     await _prove(db, account, request, body, f"remove:{key_id}", excluding=key_id)
     await db.delete(key)
     _audit(db, account, SecurityEvent.PASSKEY_REMOVED)

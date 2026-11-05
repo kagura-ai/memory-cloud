@@ -12,7 +12,7 @@ import cbor2
 import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
-from fastapi import BackgroundTasks, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from webauthn.helpers import bytes_to_base64url
@@ -22,6 +22,7 @@ from models.auth import AuditLog, User, WebAuthnCredential
 from services.account_linking_service import AccountLinkingService
 from services.password_account_service import PasswordAccountService
 from services.user_deletion_service import delete_user_rows
+from utils.exceptions import MemoryCloudException
 
 
 class Authenticator:
@@ -140,10 +141,10 @@ def ceremony(monkeypatch):
 @pytest.mark.asyncio
 async def test_bound_challenge_cannot_cross_accounts_or_replay(ceremony):
     options = await pk._issue(pk.generate_authentication_options(rp_id="localhost"), "first")
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(MemoryCloudException, match="expired"):
         await pk._consume(options["challenge"], "second")
     assert await pk._consume(options["challenge"], "first")
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(MemoryCloudException, match="expired"):
         await pk._consume(options["challenge"], "first")
 
 
@@ -187,7 +188,7 @@ async def test_register_cap_authenticate_remove_and_erasure(db_session, ceremony
         )
 
     pk.auth._session_manager.proven_within.return_value = False
-    with pytest.raises(HTTPException, match="Verify"):
+    with pytest.raises(MemoryCloudException, match="Verify"):
         await register()
     pk.auth._session_manager.proven_within.return_value = True
     pending = await pk.register_options(pk.Proof(), req, session, db)
@@ -197,11 +198,11 @@ async def test_register_cap_authenticate_remove_and_erasure(db_session, ceremony
         challenge=pending["challenge"],
         credential=authn.response(pending["challenge"], handle, registering=True),
     )
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(MemoryCloudException, match="expired"):
         await pk.register_verify(stale, req, session, tasks, db)
     key = await register()
     monkeypatch.setattr(pk, "_LIMIT", 1)
-    with pytest.raises(HTTPException, match="limit"):
+    with pytest.raises(MemoryCloudException, match="limit"):
         await register()
 
     async def authenticate(**kwargs):
@@ -224,15 +225,15 @@ async def test_register_cap_authenticate_remove_and_erasure(db_session, ceremony
         {"count": 3, "uv": False},
         {"count": 3, "cross_origin": True},
     ]:
-        with pytest.raises(HTTPException):
+        with pytest.raises(MemoryCloudException):
             await authenticate(**bad)
     assert pk.auth._create_password_session.await_count == 1
 
-    with pytest.raises(HTTPException, match="only remaining"):
+    with pytest.raises(MemoryCloudException, match="only remaining"):
         await pk.remove_passkey(key.id, pk.Proof(), req, session, tasks, db)
     owner.password_hash = pk.auth.hash_password("test password")
     await db.commit()
-    with pytest.raises(HTTPException, match="Verify"):
+    with pytest.raises(MemoryCloudException, match="Verify"):
         await pk.remove_passkey(
             key.id, pk.Proof(current_password="incorrect"), req, session, tasks, db
         )
@@ -241,7 +242,7 @@ async def test_register_cap_authenticate_remove_and_erasure(db_session, ceremony
     await pk.remove_passkey(
         key.id, pk.Proof(current_password="test password"), req, session, tasks, db
     )
-    with pytest.raises(HTTPException):
+    with pytest.raises(MemoryCloudException):
         await authenticate(count=4)
     assert {
         row.action
@@ -291,7 +292,7 @@ async def test_two_sessions_racing_for_last_slot_and_cross_account_duplicate(
                 return await pk.register_verify(
                     body, request(), {"user_id": owner.user_id}, BackgroundTasks(), db
                 )
-            except HTTPException as exc:
+            except MemoryCloudException as exc:
                 assert exc.status_code in (401, 409)
                 return None
 
@@ -304,7 +305,7 @@ async def test_two_sessions_racing_for_last_slot_and_cross_account_duplicate(
     duplicate = Authenticator()
     duplicate.credential_id = stored.credential_id
     body = await pending_registration(db_session, other, duplicate)
-    with pytest.raises(HTTPException, match="already registered") as denied:
+    with pytest.raises(MemoryCloudException, match="already registered") as denied:
         await pk.register_verify(
             body, request(), {"user_id": other.user_id}, BackgroundTasks(), db_session
         )
@@ -353,7 +354,7 @@ async def test_different_key_proves_removal_and_remaining_key_allows_unlink(db_s
             assertion=device.response(options["challenge"], handle, count=3),
         )
 
-    with pytest.raises(HTTPException, match="Invalid passkey"):
+    with pytest.raises(MemoryCloudException, match="Invalid passkey"):
         await pk.remove_passkey(
             second.id, await removal_proof(second_device), req, user, tasks, db_session
         )
@@ -371,5 +372,5 @@ async def test_different_key_proves_removal_and_remaining_key_allows_unlink(db_s
     await PasswordAccountService(db_session).remove(
         user_id=owner.user_id, current_password="current"
     )
-    with pytest.raises(HTTPException, match="only remaining"):
+    with pytest.raises(MemoryCloudException, match="only remaining"):
         await pk.remove_passkey(first.id, pk.Proof(), req, user, tasks, db_session)
