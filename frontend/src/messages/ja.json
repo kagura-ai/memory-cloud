@@ -1485,6 +1485,7 @@
     "contextAccessPrivateBadge": "プライベート",
     "contextAccessPrivateBadgeTitle": "このメンバー自身のプライベートContext",
     "contextAccessLoadFailed": "このメンバーのContextを読み込めませんでした。ダイアログを閉じてもう一度お試しください。",
+    "switchFailed": "ワークスペースを切り替えられませんでした",
     "selectWorkspace": "ワークスペースを選択",
     "selectWorkspaceDesc": "続行するワークスペースを選択してください",
     "createNewWorkspace": "新しいワークスペースを作成",
