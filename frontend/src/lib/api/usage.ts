@@ -106,6 +106,8 @@ export interface QuotaUsage {
   unit: "count" | "bytes" | "usd";
   scope: "workspace" | "account" | "api_key";
   period: "current" | "day" | "week" | "month" | "minute" | "hour";
+  /** false: the plan serves existing objects up to the limit but cannot create new ones. */
+  creation_included?: boolean;
 }
 
 export interface UsageCurrentResponse {

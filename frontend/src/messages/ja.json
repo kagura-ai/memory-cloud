@@ -2261,6 +2261,7 @@
     "quotaLimitOnly": "上限 ",
     "quotaUnlimited": "上限なし",
     "quotaNotIncluded": "現在のプランの利用枠は0です",
+    "quotaCreationNotIncluded": "新規作成は現在のプランに含まれていません",
     "quotaNoPercentage": "利用率の対象外",
     "quotaBonus": "追加枠 +{amount}",
     "includesInvitations": "期限内の招待も枠に含みます。",
