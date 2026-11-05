@@ -18,7 +18,7 @@ from services.permission_service import PermissionService
 from services.plan_seats import live_contexts
 from services.storage_quota_service import get_current_storage_usage
 from utils.datetime import utcnow
-from utils.exceptions import AuthorizationError
+from utils.exceptions import AuthorizationError, FeatureNotAvailableError
 
 
 async def build_workspace_quota_usage(
@@ -206,10 +206,12 @@ async def build_workspace_quota_usage(
     settings = get_settings()
     if settings.enable_byok and settings.enable_cost_display:
         # Match the cost API: money aggregates include private-context activity.
-        # Ordinary workspace members still receive the non-monetary quota meters.
+        # Ordinary workspace members still receive the non-monetary quota meters,
+        # and so does an admin whose seat the plan suspended (FEAT-001): the
+        # cost API refuses that admin too, but this endpoint does not.
         try:
             await PermissionService(db).check_workspace_admin(user_id, workspace_id)
-        except AuthorizationError:
+        except (AuthorizationError, FeatureNotAvailableError):
             return meters
 
         from services.embedding_spend_cap_service import EmbeddingSpendCapService

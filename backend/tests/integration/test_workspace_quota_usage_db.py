@@ -1,6 +1,7 @@
 """Quota dashboard counts share tenant, deletion, invitation and token boundaries."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -111,3 +112,61 @@ async def test_quota_counts_stay_in_workspace_and_use_live_populations(db_sessio
     assert result["resource_tokens"].used == 1
     assert result["resource_capacity"].used == 700
     assert result["analysis"].used == 0
+
+
+@pytest.mark.asyncio
+async def test_seat_suspended_admin_reads_usage_without_cost_meters(db_session, monkeypatch):
+    """A free plan seats only the owner: the admin's seat is suspended.
+
+    The cost-meter role check refuses that admin with ``FEAT-001``; the
+    endpoint still answers 200 with the non-monetary meters, as before the
+    quota meters existed.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from api.main import app
+    from auth.dependencies import get_user_from_api_key_or_session
+    from db.base import get_db
+
+    owner, admin = make_user(), make_user()
+    db_session.add_all([owner, admin])
+    await db_session.flush()
+    workspace = make_workspace(owner_user_id=owner.user_id, plan_name="free")
+    db_session.add(workspace)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            WorkspaceMember(
+                workspace_id=workspace.id, user_id=owner.user_id, role=WorkspaceRole.OWNER
+            ),
+            WorkspaceMember(
+                workspace_id=workspace.id, user_id=admin.user_id, role=WorkspaceRole.ADMIN
+            ),
+        ]
+    )
+    await db_session.flush()
+    monkeypatch.setattr(
+        meters,
+        "get_settings",
+        lambda: SimpleNamespace(enable_byok=True, enable_cost_display=True),
+    )
+
+    async def _db():
+        yield db_session
+
+    async def _user() -> dict:
+        return {"user_id": admin.user_id, "current_workspace_id": workspace.id}
+
+    app.dependency_overrides[get_db] = _db
+    app.dependency_overrides[get_user_from_api_key_or_session] = _user
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/v1/workspace/usage/current")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_user_from_api_key_or_session, None)
+
+    assert response.status_code == 200, response.text
+    quota = response.json()["quota_usage"]
+    assert any(m["id"] == "storage" for m in quota)
+    assert not any(m["unit"] == "usd" for m in quota)
