@@ -22,7 +22,8 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, event, select
+from sqlalchemy import delete, event, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from models.auth import Context, Workspace
@@ -244,6 +245,107 @@ async def test_a_failed_row_does_not_abort_the_rest_of_the_page(db_session, patc
     assert counts == {"migrated": 1, "skipped": 0, "dry_run": 0, "failed": 1}
     assert [r.created_by for r in await _file_rows(db_session, ws)] == [f"{_PREFIX}{second_id}"]
     assert await _file_rows(db_session, ws_gone) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["soft", "hard"])
+async def test_context_deleted_after_the_page_read_is_skipped(db_session, fake_storage, how):
+    """The page read the context live; it is deleted before the row migrates.
+
+    ``migrate_attachment`` locks and re-checks the context before the R2 write,
+    so neither bytes without a registry row (hard delete: the FK check would
+    fail at flush) nor a live row in a deleted context (soft delete) result;
+    the script counts the row ``skipped``, not ``failed``.
+    """
+    ws = await _workspace(db_session)
+    ctx = await _context(db_session, ws)
+    await _attachment(db_session, ws, ctx)
+    await db_session.commit()
+
+    class _ContextGoesFirst(FileStorageService):
+        async def migrate_attachment(self, **kwargs) -> FileObject:
+            if how == "soft":
+                await self.db.execute(
+                    update(Context).where(Context.id == ctx).values(deleted_at=utcnow())
+                )
+            else:
+                await self.db.execute(delete(Context).where(Context.id == ctx))
+            return await super().migrate_attachment(**kwargs)
+
+    with (
+        patch.object(
+            mig, "FileStorageService", lambda db: _ContextGoesFirst(db, storage=fake_storage)
+        ),
+        patch.object(storage_quota_service, "bump_committed_storage_bytes", AsyncMock()),
+    ):
+        counts = await mig.migrate_all(db_session, dry_run=False, batch_size=10)
+
+    assert counts == {"migrated": 0, "skipped": 1, "dry_run": 0, "failed": 0}
+    assert await _file_rows(db_session, ws) == []
+    assert fake_storage.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_an_already_migrated_row_releases_its_context_lock(
+    db_session, async_engine: AsyncEngine, fake_storage
+):
+    """The existing-row branch returns without committing; the script ends the
+    row's transaction so a re-run does not hold every context's row lock (and
+    block a context hard delete) until the run ends."""
+    ws = await _workspace(db_session)
+    first_ctx = await _context(db_session, ws)
+    second_ctx = await _context(db_session, ws)
+    first_id, second_id = sorted([uuid4(), uuid4()])
+    await _attachment(db_session, ws, first_ctx, data=b"one", att_id=first_id)
+    await _attachment(db_session, ws, second_ctx, data=b"two", att_id=second_id)
+    db_session.add(_legacy_file(ws, first_id))  # migrated before
+    await db_session.commit()
+
+    lock_free: list[bool] = []
+
+    class _ProbesFirstContext(FileStorageService):
+        async def migrate_attachment(self, **kwargs) -> FileObject:
+            if kwargs["attachment_id"] == second_id:
+                async with async_engine.connect() as other:
+                    await other.execute(text("SET LOCAL lock_timeout = '2s'"))
+                    try:
+                        await other.execute(
+                            select(Context.id).where(Context.id == first_ctx).with_for_update()
+                        )
+                        lock_free.append(True)
+                    except DBAPIError:
+                        lock_free.append(False)
+                    await other.rollback()
+            return await super().migrate_attachment(**kwargs)
+
+    with (
+        patch.object(
+            mig, "FileStorageService", lambda db: _ProbesFirstContext(db, storage=fake_storage)
+        ),
+        patch.object(storage_quota_service, "bump_committed_storage_bytes", AsyncMock()),
+    ):
+        counts = await mig.migrate_all(db_session, dry_run=False, batch_size=10)
+
+    assert counts == {"migrated": 2, "skipped": 0, "dry_run": 0, "failed": 0}
+    assert lock_free == [True]
+
+
+@pytest.mark.asyncio
+async def test_pages_of_one_row_migrate_every_attachment_once(db_session, patched, fake_storage):
+    ws = await _workspace(db_session)
+    ctx = await _context(db_session, ws)
+    for data in (b"one", b"two", b"three"):  # distinct bytes: one live row per sha256
+        await _attachment(db_session, ws, ctx, data=data)
+    await db_session.commit()
+
+    dry = await mig.migrate_all(db_session, dry_run=True, batch_size=1)
+    counts = await mig.migrate_all(db_session, dry_run=False, batch_size=1)
+
+    assert dry == {"migrated": 0, "skipped": 0, "dry_run": 3, "failed": 0}
+    assert counts == {"migrated": 3, "skipped": 0, "dry_run": 0, "failed": 0}
+    rows = await _file_rows(db_session, ws)
+    assert len(rows) == 3
+    assert {r.context_id for r in rows} == {ctx}
 
 
 # ---------------------------------------------------------------------------

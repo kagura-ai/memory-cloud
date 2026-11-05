@@ -747,9 +747,10 @@ class FileStorageService:
         workspace-shared, so passing None for a memory that lives in a private
         or restricted context would expose its attachment to every workspace
         member. It has no default so the caller must decide; None is right only
-        for a context-less memory. The existing-row branch returns the row as
-        is; rows migrated before #2647 are re-bound by the script's
-        ``--repair-context`` mode.
+        for a context-less memory. A given context must be live and in this
+        workspace (``NotFoundException`` otherwise, before any bytes are
+        written). The existing-row branch returns the row as is; rows migrated
+        before #2647 are re-bound by the script's ``--repair-context`` mode.
 
         The legacy ``Attachment`` row stays untouched — the existing
         REST attachments route continues to serve from BYTEA until a
@@ -777,6 +778,24 @@ class FileStorageService:
         )
         if workspace_exists is None:
             raise NotFoundException("workspace", str(workspace_id))
+        if context_id is not None:
+            # Same for the context (#2647), after the workspace like the deletion
+            # paths, held to commit: a context hard-deleted after the caller read
+            # it would otherwise fail the FK check after the R2 write, and one
+            # already deleted must not get a live file. KEY SHARE does not hold
+            # off a soft delete that commits after this check; that leaves the
+            # #1966 shape, which its backfill finds.
+            context_live = await self.db.scalar(
+                select(Context.id)
+                .where(
+                    Context.id == context_id,
+                    Context.workspace_id == workspace_id,
+                    Context.deleted_at.is_(None),
+                )
+                .with_for_update(read=True, key_share=True)
+            )
+            if context_live is None:
+                raise NotFoundException("context", str(context_id))
         await lock_storage_key(self.db, storage_key)
         existing = await self.db.execute(
             select(FileObject).where(FileObject.storage_key == storage_key)

@@ -97,6 +97,8 @@ class TestMigrateAttachment:
         assert file.storage_key == expected_key
         assert file.context_id == context_id
         db.add.assert_called_once_with(file)
+        # The workspace row is locked, and the context row too when there is one.
+        assert db.scalar.await_count == (2 if bound else 1)
 
         # workspace_storage_usage incremented
         upsert.assert_awaited_once()
@@ -169,3 +171,41 @@ async def test_deleted_workspace_is_rejected_before_writing_bytes(
         )
     assert fake_storage.objects == {}
     db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_deleted_context_is_rejected_before_writing_bytes(
+    service, db, fake_storage, workspace_id, attachment_id
+):
+    """#2647: the context row is locked (KEY SHARE, live, same workspace) right
+    after the workspace row, before the storage-key lock and the R2 write. A
+    context deleted after the script read its page is refused there, so no
+    bytes land without a registry row and no live row lands in a deleted
+    context."""
+    from sqlalchemy.dialects import postgresql
+
+    from utils.exceptions import NotFoundException
+
+    context_id = uuid4()
+    db.scalar.side_effect = [workspace_id, None]  # workspace live, context gone
+    with pytest.raises(NotFoundException, match="context not found"):
+        await service.migrate_attachment(
+            workspace_id=workspace_id,
+            attachment_id=attachment_id,
+            filename="x.bin",
+            content_type="application/octet-stream",
+            size_bytes=3,
+            data=b"abc",
+            created_by="migration:test",
+            context_id=context_id,
+        )
+    assert fake_storage.objects == {}
+    db.add.assert_not_called()
+    db.execute.assert_not_awaited()  # neither the storage-key lock nor the lookup ran
+
+    context_lock = db.scalar.await_args_list[1].args[0]
+    sql = str(context_lock.compile(dialect=postgresql.dialect()))
+    assert "FROM contexts" in sql
+    assert "contexts.deleted_at IS NULL" in sql
+    assert "contexts.workspace_id" in sql
+    assert sql.rstrip().endswith("FOR KEY SHARE")

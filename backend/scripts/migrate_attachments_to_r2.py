@@ -29,6 +29,8 @@ Skips:
 - Memory whose context is soft-deleted or missing
   (``attachment_skip_deleted_context``): a file created there would be a
   live file in a deleted context, the shape the #1966 backfill cleans up.
+  ``migrate_attachment`` re-checks the context under a row lock before it
+  writes bytes, so a context deleted after the page was read is skipped too.
 
 Repair (``--repair-context``, #2647): rows migrated before the binding existed
 carry ``context_id IS NULL``. With the flag the script runs the repair instead
@@ -43,7 +45,11 @@ check, and the #1966 backfill finds it), ``unparsable`` (``created_by`` holds
 no attachment id: untouched). Re-running the migration does not re-bind old
 rows; only the repair does. Ops recipe: run ``--repair-context --dry-run``
 first and read the counts, then ``--repair-context``; a second run binds
-nothing. Read-only cross-check, before and after (0 after the repair)::
+nothing. When ``context_deleted`` is above 0, those files are now hidden but
+still count toward the workspace's storage: run
+``python -m src.cli.backfill_deleted_context_files`` (plan, then ``--apply``)
+to delete them with their context. Read-only cross-check, before and after
+(0 after the repair)::
 
     SELECT count(*) FROM file_objects f
     JOIN attachments a ON f.created_by = 'migration:attachment:' || a.id
@@ -80,6 +86,7 @@ from models.auth import Context
 from models.file_objects import FileObject
 from models.memory import Attachment, Memory
 from services.file_storage_service import FileStorageService
+from utils.exceptions import NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -137,6 +144,15 @@ def _page_query(batch_size: int, last_id: UUID | None) -> Select:
     return stmt
 
 
+def _log_skip_deleted_context(row: _PendingAttachment) -> None:
+    logger.info(
+        "attachment_skip_deleted_context",
+        attachment_id=str(row.attachment_id),
+        memory_id=str(row.memory_id),
+        context_id=str(row.context_id),
+    )
+
+
 async def _migrate_one(
     *,
     db: AsyncSession,
@@ -154,12 +170,7 @@ async def _migrate_one(
     if row.context_id is not None and (
         row.context_row_id is None or row.context_deleted_at is not None
     ):
-        logger.info(
-            "attachment_skip_deleted_context",
-            attachment_id=str(row.attachment_id),
-            memory_id=str(row.memory_id),
-            context_id=str(row.context_id),
-        )
+        _log_skip_deleted_context(row)
         return "skipped"
     if dry_run:
         logger.info(
@@ -173,16 +184,30 @@ async def _migrate_one(
         return "dry_run"
 
     service = FileStorageService(db)
-    await service.migrate_attachment(
-        workspace_id=row.workspace_id,
-        attachment_id=row.attachment_id,
-        filename=row.filename,
-        content_type=row.content_type,
-        size_bytes=row.size_bytes,
-        data=row.data,
-        created_by=f"{CREATED_BY_PREFIX}{row.attachment_id}",
-        context_id=row.context_id,
-    )
+    try:
+        await service.migrate_attachment(
+            workspace_id=row.workspace_id,
+            attachment_id=row.attachment_id,
+            filename=row.filename,
+            content_type=row.content_type,
+            size_bytes=row.size_bytes,
+            data=row.data,
+            created_by=f"{CREATED_BY_PREFIX}{row.attachment_id}",
+            context_id=row.context_id,
+        )
+    except NotFoundException as exc:
+        # The context went after the page was read: migrate_attachment re-checks
+        # it under a lock before writing bytes. Any other miss is a failure.
+        if row.context_id is None or str(exc) != str(
+            NotFoundException("context", str(row.context_id))
+        ):
+            raise
+        await db.rollback()  # release the workspace and context row locks
+        _log_skip_deleted_context(row)
+        return "skipped"
+    # An already migrated row comes back inside an open transaction that holds
+    # the row locks; end it so a re-run does not keep them until the run ends.
+    await db.commit()
     return "migrated"
 
 
