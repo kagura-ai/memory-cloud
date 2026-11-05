@@ -22,8 +22,8 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, event, select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from models.auth import Context, Workspace
 from models.file_objects import FileObject
@@ -362,6 +362,40 @@ async def test_run_picks_the_mode(db_session, legacy_rows):
     assert repair["bound"] == 2 and repair["shared"] == 1
     # (i) and (ii) would migrate; (iv)'s context is soft-deleted.
     assert migrate == {"migrated": 0, "skipped": 1, "dry_run": 2, "failed": 0}
+
+
+@pytest.mark.asyncio
+async def test_repair_binds_a_page_in_file_id_order(db_session, async_engine: AsyncEngine):
+    """The page's UPDATEs take file row locks in id order, the order
+    ``_purge_live_rows`` locks in (backend rule: multi-row writes lock rows in
+    id order); storage-key order could cross a concurrent workspace purge."""
+    ws = await _workspace(db_session)
+    ctx = await _context(db_session, ws)
+    atts = sorted([(await _attachment(db_session, ws, ctx, data=bytes([i])))[1] for i in range(3)])
+    file_ids = sorted(uuid4() for _ in range(3))
+    # Legacy keys sort by attachment id: pair them with descending file ids so
+    # key order is the reverse of id order.
+    for att, file_id in zip(atts, reversed(file_ids), strict=True):
+        row = _legacy_file(ws, att)
+        row.id = file_id
+        db_session.add(row)
+    await db_session.commit()
+
+    wanted = {str(f) for f in file_ids}
+    updated: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany) -> None:
+        if statement.lstrip().upper().startswith("UPDATE FILE_OBJECTS"):
+            updated.extend(str(p) for p in parameters if str(p) in wanted)
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", _record)
+    try:
+        counts = await mig.repair_context_bindings(db_session, dry_run=False, batch_size=10)
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", _record)
+
+    assert counts["bound"] == 3
+    assert updated == [str(f) for f in file_ids]
 
 
 @pytest.mark.asyncio

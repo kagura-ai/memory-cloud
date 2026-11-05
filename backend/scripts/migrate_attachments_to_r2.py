@@ -232,15 +232,17 @@ async def repair_context_bindings(
     Pages ``file_objects`` rows with ``created_by LIKE 'migration:attachment:%'``
     and ``context_id IS NULL`` by id, with no status or ``deleted_at`` filter
     (the binding is access metadata; ``restore_context`` relies on it for
-    soft-deleted rows too). Commits per page; ``dry_run`` writes nothing and
-    returns the same counts (``bound`` = would bind).
+    soft-deleted rows too). Binds a page's rows in file id order, the row-lock
+    order of the purges, so it cannot deadlock with them. Commits per page;
+    ``dry_run`` writes nothing and returns the same counts (``bound`` = would
+    bind).
     """
     counts = {"bound": 0, "shared": 0, "orphan": 0, "context_deleted": 0, "unparsable": 0}
     last_id: UUID | None = None
 
     while True:
         stmt = (
-            select(FileObject.id, FileObject.created_by, FileObject.storage_key)
+            select(FileObject.id, FileObject.created_by)
             .where(
                 FileObject.created_by.like(f"{CREATED_BY_PREFIX}%"),
                 FileObject.context_id.is_(None),
@@ -255,8 +257,8 @@ async def repair_context_bindings(
             break
         last_id = page[-1][0]
 
-        files_by_attachment: dict[UUID, list[tuple[UUID, str]]] = {}
-        for file_id, created_by, storage_key in page:
+        files_by_attachment: dict[UUID, list[UUID]] = {}
+        for file_id, created_by in page:
             try:
                 attachment_id = UUID((created_by or "").removeprefix(CREATED_BY_PREFIX))
             except ValueError:
@@ -265,7 +267,7 @@ async def repair_context_bindings(
                     "attachment_repair_unparsable", file_id=str(file_id), created_by=created_by
                 )
                 continue
-            files_by_attachment.setdefault(attachment_id, []).append((file_id, storage_key or ""))
+            files_by_attachment.setdefault(attachment_id, []).append(file_id)
 
         # One query per page; never select ``Attachment.data`` (BYTEA).
         parents: dict[UUID, tuple[UUID | None, UUID | None, datetime | None]] = {}
@@ -278,7 +280,7 @@ async def repair_context_bindings(
             )
             parents = {r[0]: (r[1], r[2], r[3]) for r in result.all()}
 
-        to_bind: list[tuple[str, UUID, UUID, UUID, bool]] = []
+        to_bind: list[tuple[UUID, UUID, UUID, bool]] = []
         for attachment_id, files in files_by_attachment.items():
             parent = parents.get(attachment_id)
             if parent is None or (parent[0] is not None and parent[1] is None):
@@ -288,27 +290,20 @@ async def repair_context_bindings(
                 logger.info(
                     "attachment_repair_orphan",
                     attachment_id=str(attachment_id),
-                    file_ids=[str(f) for f, _ in files],
+                    file_ids=[str(f) for f in files],
                 )
                 continue
             context_id, _, context_deleted_at = parent
             if context_id is None:
                 counts["shared"] += len(files)  # a context-less memory: workspace-wide
                 continue
-            for file_id, storage_key in files:
-                to_bind.append(
-                    (
-                        storage_key,
-                        file_id,
-                        attachment_id,
-                        context_id,
-                        context_deleted_at is not None,
-                    )
-                )
+            for file_id in files:
+                to_bind.append((file_id, attachment_id, context_id, context_deleted_at is not None))
 
-        # Storage-key order: the UPDATE trigger takes each row's key lock, and
-        # multi-key holders acquire keys in sorted order.
-        for _, file_id, attachment_id, context_id, context_deleted in sorted(to_bind):
+        # File id order: row locks in id order like every multi-row file_objects
+        # writer (``_purge_live_rows``); each row's storage-key lock (UPDATE
+        # trigger) follows its row lock, as everywhere else.
+        for file_id, attachment_id, context_id, context_deleted in sorted(to_bind):
             if not dry_run:
                 updated = await db.execute(
                     update(FileObject)
