@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
+import { KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { signInWithPasskey } from "@/lib/auth/passkeys";
 
@@ -70,10 +71,11 @@ export default function PasskeyLogin({
       <Button
         type="button"
         variant="outline"
-        className="w-full"
+        className="my-3 h-12 w-full rounded-full border-[#9abcb1] bg-[#e6f0ec] text-base font-semibold text-[#174f40] shadow-none hover:bg-[#d5e7df] hover:text-[#123e32] focus-visible:ring-kagura-tokiwa disabled:opacity-70"
         disabled={!enabled || busy}
         onClick={() => void signIn()}
       >
+        <KeyRound aria-hidden="true" />
         {t("signIn")}
       </Button>
       {error && (

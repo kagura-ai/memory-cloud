@@ -478,61 +478,70 @@ function LoginContent() {
               <>
                 {/* Password sign-in form (hidden by default when OAuth is on) */}
                 {showPasswordLogin && authConfig?.password_login_enabled && (
+                  <form onSubmit={handlePasswordLogin} className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="loginId" className="text-gray-700">
+                        {t("loginId")}
+                      </Label>
+                      <Input
+                        id="loginId"
+                        type="text"
+                        value={loginId}
+                        onChange={(e) => setLoginId(e.target.value)}
+                        autoFocus
+                        autoComplete="username webauthn"
+                        className="bg-white text-gray-900"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="password" className="text-gray-700">
+                        {t("password")}
+                      </Label>
+                      <Input
+                        id="password"
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        autoComplete="current-password"
+                        className="bg-white text-gray-900"
+                      />
+                    </div>
+
+                    {/* Terms */}
+                    <div>
+                      <TermsAgreement
+                        checked={agreedToTerms}
+                        onCheckedChange={setAgreedToTerms}
+                      />
+                    </div>
+
+                    <Button
+                      type="submit"
+                      disabled={
+                        loadingAction !== null ||
+                        !agreedToTerms ||
+                        systemInfoPending ||
+                        !loginId ||
+                        !password
+                      }
+                      className="h-12 w-full rounded-full bg-kagura-accent text-base font-semibold text-white shadow-sm transition-colors hover:bg-[#a8380a] disabled:opacity-50"
+                    >
+                      {loadingAction === "password"
+                        ? t("signingIn")
+                        : t("signIn")}
+                    </Button>
+                  </form>
+                )}
+
+                <PasskeyLogin
+                  enabled={!systemInfoPending && agreedToTerms && loadingAction === null}
+                  conditional={Boolean(showPasswordLogin)}
+                  returnTo={returnTo ?? "/workspace/dashboard"}
+                  terms={termsVersion}
+                />
+
+                {showPasswordLogin && authConfig?.password_login_enabled && (
                   <>
-                    <form onSubmit={handlePasswordLogin} className="space-y-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="loginId" className="text-gray-700">
-                          {t("loginId")}
-                        </Label>
-                        <Input
-                          id="loginId"
-                          type="text"
-                          value={loginId}
-                          onChange={(e) => setLoginId(e.target.value)}
-                          autoFocus
-                          autoComplete="username webauthn"
-                          className="bg-white text-gray-900"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="password" className="text-gray-700">
-                          {t("password")}
-                        </Label>
-                        <Input
-                          id="password"
-                          type="password"
-                          value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                          autoComplete="current-password"
-                          className="bg-white text-gray-900"
-                        />
-                      </div>
-
-                      {/* Terms */}
-                      <div>
-                        <TermsAgreement
-                          checked={agreedToTerms}
-                          onCheckedChange={setAgreedToTerms}
-                        />
-                      </div>
-
-                      <Button
-                        type="submit"
-                        disabled={
-                          loadingAction !== null ||
-                          !agreedToTerms ||
-                          systemInfoPending ||
-                          !loginId ||
-                          !password
-                        }
-                        className="h-12 w-full rounded-full bg-kagura-accent text-base font-semibold text-white shadow-sm transition-colors hover:bg-[#a8380a] disabled:opacity-50"
-                      >
-                        {loadingAction === "password"
-                          ? t("signingIn")
-                          : t("signIn")}
-                      </Button>
-                    </form>
-
                     {/* #1678: self-service reset for accounts that sign in
                         with a verified email + password. */}
                     <p className="mt-3 text-center text-sm">
@@ -557,8 +566,6 @@ function LoginContent() {
                   </>
                 )}
 
-                <PasskeyLogin enabled={!systemInfoPending && agreedToTerms && loadingAction === null}
-                  conditional={Boolean(showPasswordLogin)} returnTo={returnTo ?? "/workspace/dashboard"} terms={termsVersion} />
                 {/* Google */}
                 {authConfig?.google_oauth_enabled && (
                   <Button
