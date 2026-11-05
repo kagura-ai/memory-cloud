@@ -100,6 +100,13 @@ def _memory(s: Scope, **col: Any) -> Memory:
 # (table, column, attribute, factory, the table accepts UPDATE)
 Factory = Callable[[Scope, dict[str, Any]], Any]
 CASES: list[tuple[str, str, str, Factory, bool]] = [
+    (
+        "users",
+        "totp_recovery_hashes",
+        "totp_recovery_hashes",
+        lambda s, c: User(user_id=f"mfa-{uuid4().hex}", email=f"{uuid4().hex}@example.test", **c),
+        True,
+    ),
     ("memories", "details", "details", lambda s, c: _memory(s, **c), True),
     ("memories", "context", "context", lambda s, c: _memory(s, **c), True),
     (
