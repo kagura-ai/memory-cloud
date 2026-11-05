@@ -14,18 +14,24 @@ export function QuotaNotice({ meters, onViewUsage }: { meters: QuotaUsage[]; onV
   const canUpgrade = useCanUpgrade();
   const features = useSystemFeatures();
   const router = useRouter();
+  // A zero allowance with usage (objects kept after a downgrade) is over the
+  // limit: it has no percentage, so it is named with the no-allowance text.
   const nearing = meters.filter(meter =>
     meter.scope === "workspace" && meter.unit !== "usd" && meter.used !== null &&
-    meter.limit !== null && meter.limit > 0 && meter.used / meter.limit >= 0.8
+    meter.limit !== null && meter.limit >= 0 &&
+    (meter.limit > 0 ? meter.used / meter.limit >= 0.8 : meter.used > 0)
   );
   if (nearing.length === 0) return null;
   const exceeded = nearing.some(meter => meter.used! >= meter.limit!);
+  const share = (meter: QuotaUsage) => meter.limit! > 0
+    ? Math.floor(meter.used! / meter.limit! * 100) + "%"
+    : t("quotaNotIncluded");
   return (
     <Alert className={exceeded ? "border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950/20" : "border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/20"}>
       <AlertTitle>{t(exceeded ? "quotaReached" : "quotaNear")}</AlertTitle>
       <AlertDescription>
         <p className="mt-1 text-sm">
-          {nearing.map(meter => t(`quotaLabels.${meter.id}`) + " " + Math.floor(meter.used! / meter.limit! * 100) + "%").join(" · ")}
+          {nearing.map(meter => t(`quotaLabels.${meter.id}`) + " " + share(meter)).join(" · ")}
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           {onViewUsage && <Button variant="outline" size="sm" onClick={onViewUsage}>{t("viewAllQuotas")}</Button>}
