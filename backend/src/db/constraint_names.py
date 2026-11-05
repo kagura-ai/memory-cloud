@@ -15,7 +15,7 @@ Conventions:
 
 from __future__ import annotations
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import EmulatedDBAPIException, IntegrityError
 
 RESOURCE_EVENTS_UPSERT_UNIQUE = "ux_resource_events_upsert_version"
 
@@ -59,14 +59,27 @@ AGENTS_WORKSPACE_NAME_UNIQUE = "uq_agents_workspace_name"
 AGENT_CTX_BINDING_UNIQUE = "uq_agent_ctx_binding"
 AGENT_CTX_BINDING_DEFAULT_UNIQUE = "uq_agent_ctx_binding_default"
 
+# Issue #2639: unique constraint on context_members (context_id, user_id).
+# Created by migration f22 + mirrored in models.auth.ContextMember.__table_args__.
+# add_context_member maps a commit-time race on it (two adds of one user that
+# both passed the existing-row check) to the pre-check's 400; other
+# IntegrityErrors propagate unchanged.
+CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE = "uq_context_members_context_user"
+
 
 def integrity_error_constraint_name(error: IntegrityError) -> str | None:
     """Return the PostgreSQL constraint name for ``error``, or ``None``.
 
     Handles both driver shapes this project runs into:
 
-        - asyncpg (production): ``error.orig`` is an ``asyncpg.UniqueViolationError``
-          or similar with ``constraint_name`` as a direct attribute.
+        - asyncpg (production): SQLAlchemy's asyncpg dialect sets
+          ``error.orig`` to its emulated DBAPI error
+          (``EmulatedDBAPIException``), which carries no constraint name; the
+          ``asyncpg.UniqueViolationError`` or similar, with ``constraint_name``
+          as a direct attribute, is that error's own ``orig``. Unwrapped first
+          (#2639: reading ``error.orig`` alone returned ``None`` for every
+          asyncpg error). A driver error set directly as ``error.orig`` is
+          read the same way.
         - psycopg / psycopg2 (sync integration tests, Alembic): ``error.orig``
           exposes a ``diag`` namespace with ``constraint_name`` inside.
 
@@ -75,6 +88,8 @@ def integrity_error_constraint_name(error: IntegrityError) -> str | None:
     without structured diagnostics, or non-constraint integrity violation).
     """
     orig = getattr(error, "orig", None)
+    if isinstance(orig, EmulatedDBAPIException) and orig.orig is not None:
+        orig = orig.orig
     if orig is None:
         return None
     direct = getattr(orig, "constraint_name", None)

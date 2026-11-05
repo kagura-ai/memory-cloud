@@ -15,15 +15,11 @@ someone else owns is left alone.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-import pytest_asyncio
 from fastapi import HTTPException
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.admin import UserDeleteRequest, delete_user
 from auth.workspace_roles import WorkspaceRole
@@ -35,47 +31,6 @@ from tests.integration.test_account_erasure_integration import (  # noqa: F401 -
     patched_external_stores,
 )
 from utils.datetime import utcnow
-
-
-@pytest_asyncio.fixture
-async def purge_audits(db_session: AsyncSession) -> AsyncIterator[list[UUID]]:
-    """Workspace ids whose purge audit rows are deleted afterwards."""
-    workspace_ids: list[UUID] = []
-    yield workspace_ids
-    await db_session.rollback()
-    await db_session.execute(
-        delete(AuditLog).where(
-            AuditLog.action == WORKSPACE_PURGED_ACTION,
-            AuditLog.resource.in_([f"workspace:{ws_id}" for ws_id in workspace_ids]),
-        )
-    )
-    await db_session.commit()
-
-
-@pytest_asyncio.fixture
-async def storage_keys(db_session: AsyncSession) -> AsyncIterator[list[str]]:
-    """Storage keys whose deletion-queue rows (#2395, queued by the
-    ``file_objects`` delete trigger where it is installed) are removed
-    afterwards, so the queue other tests drain starts empty."""
-    from models.file_objects import StorageObjectDeletion
-
-    keys: list[str] = []
-    yield keys
-    await db_session.rollback()
-    await db_session.execute(
-        delete(StorageObjectDeletion).where(StorageObjectDeletion.storage_key.in_(keys))
-    )
-    await db_session.commit()
-
-
-@pytest.fixture
-def vectors():
-    """The vector store calls made after the commit."""
-    with (
-        patch("db.qdrant.list_memory_collections", AsyncMock(return_value=["kagura_memories"])),
-        patch("db.qdrant.delete_context_points_everywhere", AsyncMock(return_value={})) as points,
-    ):
-        yield points
 
 
 async def _context(db, workspace_id, creator, *, private: bool = False) -> UUID:
