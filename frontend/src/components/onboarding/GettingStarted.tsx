@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ContextualHelp } from "@/components/common/ContextualHelp";
 import { recallMemories } from "@/lib/api/memory";
 import type { Context } from "@/lib/types/context";
@@ -86,9 +87,14 @@ export function GettingStarted({ scope, contexts, owner, admin, onCreateShared, 
       <Link href="/workspace/integrations/credentials?tab=api-keys#mcp-connection" className="text-primary underline">{integration("tasks.client.title")}</Link>
       {current ? <div className="space-y-2">
         <label htmlFor={selectId}>{t("choose")}</label>
-        <select id={selectId} className="block max-w-full rounded border p-2" value={current.id} onChange={e => setSelected(e.target.value)}>
-          {contexts.map(ctx => <option key={ctx.id} value={ctx.id}>{ctx.display_name || ctx.name}</option>)}
-        </select>
+        <Select value={current.id} onValueChange={setSelected}>
+          <SelectTrigger id={selectId} className="w-full bg-background text-foreground sm:max-w-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {contexts.map(ctx => <SelectItem key={ctx.id} value={ctx.id}>{ctx.display_name || ctx.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
         <GuideSearch key={current.id} contextId={current.id} />
       </div> : admin ? <div><p>{t("adminEmpty")}</p>{onCreateShared && <Button variant="link" onClick={onCreateShared}>{t("createShared")}</Button>}</div> : <p>{t(owner ? "ownerEmpty" : "noContexts")}</p>}
       <ContextualHelp topic="search" />

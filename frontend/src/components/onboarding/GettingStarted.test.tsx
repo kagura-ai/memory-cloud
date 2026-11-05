@@ -18,13 +18,15 @@ describe("getting started for an invited workspace member", () => {
   it("recalls only in the selected accessible context without a practice write", async () => {
     recall.mockResolvedValue({ results: [{ memory_id: "m1", summary: "Decided on Friday" }] });
     render(guide("a", "ja"));
-    fireEvent.change(screen.getByLabelText(ja.gettingStarted.choose), { target: { value: "c2" } });
+    fireEvent.click(screen.getByRole("combobox", { name: ja.gettingStarted.choose }));
+    fireEvent.click(await screen.findByRole("option", { name: "Launch" }));
     fireEvent.change(screen.getByLabelText(ja.gettingStarted.queryLabel), { target: { value: "when" } });
     fireEvent.click(screen.getByRole("button", { name: ja.gettingStarted.find }));
     expect(await screen.findByText("Decided on Friday")).toBeInTheDocument();
     expect(recall).toHaveBeenCalledWith({ query: "when", k: 3, filters: { context_id: "c2" } });
     expect(screen.queryByRole("button", { name: ja.gettingStarted.practice })).toBeNull();
-    fireEvent.change(screen.getByLabelText(ja.gettingStarted.choose), { target: { value: "c1" } });
+    fireEvent.click(screen.getByRole("combobox", { name: ja.gettingStarted.choose }));
+    fireEvent.click(await screen.findByRole("option", { name: "Team" }));
     expect(screen.queryByText("Decided on Friday")).toBeNull();
   });
   it("scopes skip and replay to the current user and workspace", async () => {
