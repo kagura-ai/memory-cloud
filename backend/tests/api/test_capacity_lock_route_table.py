@@ -59,6 +59,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "mfa_settings": NOT_APPLICABLE,
     "neural_config": NOT_APPLICABLE,
     "oauth": NOT_APPLICABLE,
+    "passkeys": NOT_APPLICABLE,  # Personal sign-in credentials are independent of workspace capacity.
     "password": NOT_APPLICABLE,
     "referrals": NOT_APPLICABLE,
     "secrets": NOT_APPLICABLE,
