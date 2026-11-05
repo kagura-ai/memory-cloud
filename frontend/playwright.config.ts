@@ -83,6 +83,12 @@ export default defineConfig({
       use: { browserName: "chromium" },
     },
     {
+      name: "passkey",
+      testMatch: /passkeys\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { browserName: "chromium", storageState: STORAGE_STATE, trace: "off" },
+    },
+    {
       name: "authed",
       testMatch:
         /e2e\/(authed-a11y\/.*|admin-.*|oauth-account-linking|oauth-beta-invite-device)\.spec\.ts$/,

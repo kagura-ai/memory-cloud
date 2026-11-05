@@ -831,6 +831,7 @@ from api.routes import (  # noqa: E402
     memory,
     neural_config,
     oauth,
+    passkeys,
     password,  # Issue #1678: self-service password endpoints
     public_search,  # Issue #238: Public Search API
     referrals,  # Issue #1470: user-facing referral code + redeem
@@ -873,6 +874,7 @@ app.include_router(me_oauth_grants.router, prefix="/api/v1")
 app.include_router(me_terms.router, prefix="/api/v1")
 
 # Email + password sign-in: reset / set up / change / remove (Issue #1678)
+app.include_router(passkeys.router, prefix="/api/v1")
 app.include_router(password.router, prefix="/api/v1")
 app.include_router(password.me_router, prefix="/api/v1")
 

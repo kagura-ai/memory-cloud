@@ -62,6 +62,8 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/api/v1/auth/github/login",
         "/api/v1/auth/github/callback",
         "/api/v1/auth/login",
+        "/api/v1/auth/passkeys/authenticate/options",
+        "/api/v1/auth/passkeys/authenticate/verify",
         "/api/v1/auth/mfa/verify",
         # Issue #1678: the emailed link is the credential.
         "/api/v1/auth/password/reset-request",

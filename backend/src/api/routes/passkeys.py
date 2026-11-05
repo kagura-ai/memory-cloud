@@ -1,0 +1,443 @@
+"""Discoverable, user-verified WebAuthn credentials (#2645)."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import secrets
+from datetime import datetime, timedelta
+from typing import Any
+from urllib.parse import urlsplit
+from uuid import UUID
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from webauthn import (
+    base64url_to_bytes,
+    generate_authentication_options,
+    generate_registration_options,
+    options_to_json,
+    verify_authentication_response,
+    verify_registration_response,
+)
+from webauthn.helpers import (
+    parse_authentication_credential_json,
+    parse_registration_credential_json,
+)
+from webauthn.helpers.exceptions import WebAuthnException
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    CredentialDeviceType,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
+
+from api.routes import auth
+from auth.dependencies import SessionUser
+from auth.password import verify_password
+from auth.session import SESSION_COOKIE_NAME, browser_cookie_attrs
+from config.settings import get_settings
+from db.base import get_db
+from db.redis import get_redis_client, increment_counter
+from models.auth import AuditLog, User, UserOAuthProvider, WebAuthnCredential
+from services.known_device_service import note_browser_sign_in
+from services.security_notification_service import SecurityEvent, schedule_security_notification
+from utils.datetime import utcnow
+
+router = APIRouter(prefix="/auth/passkeys", tags=["authentication"])
+_TTL = 300
+_LIMIT = 10
+_BROWSER_COOKIE = "passkey_ceremony"
+
+
+class Proof(BaseModel):
+    current_password: str | None = Field(default=None, max_length=512)
+    assertion: dict[str, Any] | None = None
+    challenge: str | None = Field(default=None, max_length=128)
+
+
+class CredentialResponse(BaseModel):
+    challenge: str = Field(min_length=16, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    credential: dict[str, Any]
+
+
+class SignIn(CredentialResponse):
+    accepted_terms: str | None = Field(default=None, max_length=255)
+
+
+class Rename(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class KeyInfo(BaseModel):
+    id: UUID
+    name: str
+    created_at: datetime
+    last_used_at: datetime | None
+
+
+def _rp() -> tuple[str, list[str]]:
+    settings = get_settings()
+    host = settings.webauthn_rp_id or urlsplit(settings.frontend_url).hostname
+    if not host:
+        raise HTTPException(503, "WebAuthn relying party is not configured")
+    origins = settings.webauthn_origins or settings.frontend_url
+    return host, [item.strip().rstrip("/") for item in origins.split(",")]
+
+
+def _handle(user: User) -> bytes:
+    # A new account reclaiming an email or provider sub gets a new user handle.
+    return hashlib.sha256(f"kagura-passkey:{user.id}".encode()).digest()
+
+
+def _binding(request: Request, user_id: str, action: str) -> str:
+    sid = request.cookies.get(SESSION_COOKIE_NAME)
+    if not sid:
+        raise HTTPException(401, "A browser session is required")
+    return hashlib.sha256(json.dumps([sid, user_id, action]).encode()).hexdigest()
+
+
+async def _issue(options: Any, binding: str) -> dict[str, Any]:
+    public_key = json.loads(options_to_json(options))
+    challenge = public_key["challenge"]
+    await get_redis_client().setex(f"webauthn:{binding}:{challenge}", _TTL, "1")
+    return public_key
+
+
+async def _consume(challenge: str, binding: str) -> bytes:
+    if not await get_redis_client().getdel(f"webauthn:{binding}:{challenge}"):
+        raise HTTPException(401, "Invalid or expired passkey challenge")
+    return base64url_to_bytes(challenge)
+
+
+async def _owner(db: AsyncSession, user_id: str) -> User:
+    user = await db.scalar(select(User).where(User.user_id == user_id).with_for_update())
+    if not user:
+        raise HTTPException(401, "Account unavailable")
+    return user
+
+
+async def _keys(db: AsyncSession, user_id: str) -> list[WebAuthnCredential]:
+    return list(
+        await db.scalars(
+            select(WebAuthnCredential)
+            .where(WebAuthnCredential.user_id == user_id)
+            .order_by(WebAuthnCredential.created_at)
+        )
+    )
+
+
+async def _assertion(
+    db: AsyncSession,
+    raw: dict[str, Any],
+    expected: bytes,
+    *,
+    owner: str | None = None,
+    excluding: UUID | None = None,
+) -> tuple[User, WebAuthnCredential]:
+    try:
+        credential = parse_authentication_credential_json(raw)
+    except (ValueError, TypeError, WebAuthnException, KeyError) as exc:
+        raise HTTPException(401, "Invalid passkey") from exc
+    query = select(WebAuthnCredential).where(WebAuthnCredential.credential_id == credential.raw_id)
+    # Always lock parent before credential, like removal and account erasure.
+    user_id = await db.scalar(query.with_only_columns(WebAuthnCredential.user_id))
+    if not user_id or (owner is not None and owner != user_id):
+        raise HTTPException(401, "Invalid passkey")
+    user = await _owner(db, user_id)
+    key = await db.scalar(query.with_for_update())
+    if (
+        not key
+        or key.id == excluding
+        or (
+            credential.response.user_handle != _handle(user)
+            and (owner is None or credential.response.user_handle is not None)
+        )
+    ):
+        raise HTTPException(401, "Invalid passkey")
+    auth._reserve_login_attempt(auth._account_rate_key(user_id))
+    rp, origins = _rp()
+    try:
+        verified = verify_authentication_response(
+            credential=credential,
+            expected_challenge=expected,
+            expected_rp_id=rp,
+            expected_origin=origins,
+            credential_public_key=key.public_key,
+            credential_current_sign_count=key.sign_count,
+            require_user_verification=True,
+        )
+    except (ValueError, TypeError, WebAuthnException) as exc:
+        raise HTTPException(401, "Invalid passkey") from exc
+    if (
+        verified.credential_device_type == CredentialDeviceType.MULTI_DEVICE
+    ) != key.backup_eligible:
+        raise HTTPException(401, "Invalid passkey")
+    key.sign_count = verified.new_sign_count
+    key.backup_state = verified.credential_backed_up
+    key.last_used_at = utcnow()
+    return user, key
+
+
+async def _prove(
+    db: AsyncSession,
+    user: User,
+    request: Request,
+    proof: Proof,
+    action: str,
+    excluding: UUID | None = None,
+) -> None:
+    if proof.assertion and proof.challenge:
+        challenge = await _consume(proof.challenge, _binding(request, user.user_id, action))
+        await _assertion(db, proof.assertion, challenge, owner=user.user_id, excluding=excluding)
+        auth._clear_login_failures(auth._account_rate_key(user.user_id))
+        return
+    if proof.current_password and user.password_hash:
+        if await increment_counter(f"webauthn_password:{user.user_id}", ttl=_TTL) > 5:
+            raise HTTPException(429, "Too many verification attempts")
+        if await asyncio.to_thread(verify_password, proof.current_password, user.password_hash):
+            # Do not refill the sign-in budget by proving only the first factor.
+            return
+    elif (
+        excluding is None
+        and auth._session_manager
+        and auth._session_manager.proven_within(
+            request.cookies.get(SESSION_COOKIE_NAME, ""), user.user_id, timedelta(seconds=_TTL)
+        )
+    ):
+        return
+    raise HTTPException(
+        403, "Verify with your current password or another passkey, or sign in again to register"
+    )
+
+
+@router.get("", response_model=list[KeyInfo])
+async def list_passkeys(user: SessionUser, db: AsyncSession = Depends(get_db)):
+    """List personal passkeys, without key material."""
+    return await _keys(db, user["user_id"])
+
+
+@router.post("/proof/options")
+async def proof_options(
+    request: Request,
+    user: SessionUser,
+    removing: UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Prove another passkey for adding or removing a credential in this session."""
+    keys = [k for k in await _keys(db, user["user_id"]) if k.id != removing]
+    if not keys:
+        raise HTTPException(409, "No other passkey is available")
+    options = generate_authentication_options(
+        rp_id=_rp()[0],
+        allow_credentials=[PublicKeyCredentialDescriptor(id=k.credential_id) for k in keys],
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    action = f"remove:{removing}" if removing else "add"
+    return await _issue(options, _binding(request, user["user_id"], action))
+
+
+@router.post("/register/options")
+async def register_options(
+    body: Proof, request: Request, user: SessionUser, db: AsyncSession = Depends(get_db)
+):
+    """Begin registration after fresh proof of the active account."""
+    account = await _owner(db, user["user_id"])
+    await _prove(db, account, request, body, "add")
+    keys = await _keys(db, account.user_id)
+    if len(keys) >= _LIMIT:
+        raise HTTPException(409, "Passkey limit reached")
+    options = generate_registration_options(
+        rp_id=_rp()[0],
+        rp_name=get_settings().webauthn_rp_name,
+        user_id=_handle(account),
+        user_name=account.email,
+        user_display_name=account.name or account.email,
+        exclude_credentials=[PublicKeyCredentialDescriptor(id=k.credential_id) for k in keys],
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.REQUIRED,
+            require_resident_key=True,
+            user_verification=UserVerificationRequirement.REQUIRED,
+        ),
+    )
+    return await _issue(options, _binding(request, account.user_id, "register"))
+
+
+def _audit(db: AsyncSession, user: User, event: SecurityEvent) -> None:
+    db.add(
+        AuditLog(
+            user_email=user.email, user_id=user.user_id, action=event.value, resource="passkey"
+        )
+    )
+
+
+@router.post("/register/verify", response_model=KeyInfo, status_code=201)
+async def register_verify(
+    body: CredentialResponse,
+    request: Request,
+    user: SessionUser,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify registration and persist the attested public key."""
+    account = await _owner(db, user["user_id"])
+    expected = await _consume(body.challenge, _binding(request, account.user_id, "register"))
+    if len(await _keys(db, account.user_id)) >= _LIMIT:
+        raise HTTPException(409, "Passkey limit reached")
+    rp, origins = _rp()
+    try:
+        registration = parse_registration_credential_json(body.credential)
+        result = verify_registration_response(
+            credential=registration,
+            expected_challenge=expected,
+            expected_rp_id=rp,
+            expected_origin=origins,
+            require_user_verification=True,
+        )
+    except (ValueError, TypeError, WebAuthnException, KeyError) as exc:
+        raise HTTPException(400, "Invalid passkey registration") from exc
+    transports = [item.value for item in registration.response.transports or []]
+    key = WebAuthnCredential(
+        user_id=account.user_id,
+        credential_id=result.credential_id,
+        public_key=result.credential_public_key,
+        sign_count=result.sign_count,
+        transports=transports,
+        aaguid=result.aaguid,
+        backup_eligible=result.credential_device_type == CredentialDeviceType.MULTI_DEVICE,
+        backup_state=result.credential_backed_up,
+        name="Platform passkey" if "internal" in transports else "Passkey",
+    )
+    db.add(key)
+    _audit(db, account, SecurityEvent.PASSKEY_ADDED)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(409, "Passkey already registered") from exc
+    schedule_security_notification(
+        background_tasks,
+        user_id=account.user_id,
+        event=SecurityEvent.PASSKEY_ADDED,
+        request=request,
+    )
+    return key
+
+
+@router.post("/authenticate/options")
+async def authenticate_options(request: Request, response: Response):
+    """Begin a discoverable passkey sign-in. No account identifier is required."""
+    ip = auth._login_client_ip(request)
+    if await increment_counter(f"webauthn_options:{ip}", ttl=60) > 60:
+        raise HTTPException(429, "Too many sign-in requests")
+    binding = secrets.token_urlsafe(32)
+    response.set_cookie(_BROWSER_COOKIE, binding, max_age=_TTL, **browser_cookie_attrs())
+    return await _issue(
+        generate_authentication_options(
+            rp_id=_rp()[0], user_verification=UserVerificationRequirement.REQUIRED
+        ),
+        binding,
+    )
+
+
+@router.post("/authenticate/verify")
+async def authenticate_verify(
+    body: SignIn,
+    request: Request,
+    response: Response,
+    return_to: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify user presence, verification, RP, origin, signature and counter before sign-in."""
+    binding = request.cookies.get(_BROWSER_COOKIE)
+    if not binding or not auth._session_manager:
+        raise HTTPException(401, "Invalid passkey sign-in")
+    challenge = await _consume(body.challenge, binding)
+    account, _ = await _assertion(db, body.credential, challenge)
+    # Write the session while the credential and user are still locked. Removing
+    # a credential cannot race an in-flight assertion into creating a later session.
+    sid = await auth._create_password_session(
+        account.user_id, account.email, account.name, account.role, account.picture
+    )
+    try:
+        await db.commit()
+        if not await auth._complete_password_sign_in(account.user_id, account.email, sid):
+            raise HTTPException(503, "Sign in again")
+        auth._clear_login_failures(auth._account_rate_key(account.user_id))
+        await auth._record_terms_acceptance(
+            email=account.email,
+            user_id=account.user_id,
+            accepted_terms=body.accepted_terms,
+            source="login",
+            request=request,
+        )
+        auth._set_session_cookie(response, sid)
+        await note_browser_sign_in(
+            request, response, user_id=account.user_id, sign_in_method="Passkey"
+        )
+    except Exception:
+        auth._session_manager.delete_session(sid)
+        raise
+    return {"redirect_url": auth._safe_redirect_url(return_to)}
+
+
+@router.patch("/{key_id}", response_model=KeyInfo)
+async def rename_passkey(
+    key_id: UUID, body: Rename, user: SessionUser, db: AsyncSession = Depends(get_db)
+):
+    """Rename one of the active account's passkeys."""
+    key = await db.scalar(
+        select(WebAuthnCredential)
+        .where(WebAuthnCredential.id == key_id, WebAuthnCredential.user_id == user["user_id"])
+        .with_for_update()
+    )
+    if not key:
+        raise HTTPException(404, "Passkey not found")
+    key.name = body.name.strip()
+    if not key.name:
+        raise HTTPException(422, "Enter a passkey name")
+    await db.commit()
+    return key
+
+
+@router.delete("/{key_id}", status_code=204)
+async def remove_passkey(
+    key_id: UUID,
+    body: Proof,
+    request: Request,
+    user: SessionUser,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Remove a credential after proving a different method, retaining a way back in."""
+    account = await _owner(db, user["user_id"])
+    keys = await _keys(db, account.user_id)
+    key = next((k for k in keys if k.id == key_id), None)
+    if not key:
+        raise HTTPException(404, "Passkey not found")
+    if (
+        len(keys) == 1
+        and not account.password_hash
+        and not await db.scalar(
+            select(func.count())
+            .select_from(UserOAuthProvider)
+            .where(UserOAuthProvider.user_id == account.user_id)
+        )
+    ):
+        raise HTTPException(409, "Cannot remove the only remaining sign-in method")
+    await _prove(db, account, request, body, f"remove:{key_id}", excluding=key_id)
+    await db.delete(key)
+    _audit(db, account, SecurityEvent.PASSKEY_REMOVED)
+    await db.commit()
+    schedule_security_notification(
+        background_tasks,
+        user_id=account.user_id,
+        event=SecurityEvent.PASSKEY_REMOVED,
+        request=request,
+    )
+    return Response(status_code=204)

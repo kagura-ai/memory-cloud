@@ -54,6 +54,7 @@ import {
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { LanguageSelector } from "@/components/LanguageSelector";
+import PasskeyLogin from "@/components/auth/PasskeyLogin";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
 
 // #1594: how long the form waits for the session check before rendering
@@ -490,7 +491,7 @@ function LoginContent() {
                           value={loginId}
                           onChange={(e) => setLoginId(e.target.value)}
                           autoFocus
-                          autoComplete="username"
+                          autoComplete="username webauthn"
                           className="bg-white text-gray-900"
                         />
                       </div>
@@ -557,6 +558,8 @@ function LoginContent() {
                   </>
                 )}
 
+                <PasskeyLogin enabled={!systemInfoPending && agreedToTerms && loadingAction === null}
+                  conditional={Boolean(showPasswordLogin)} returnTo={returnTo ?? "/workspace/dashboard"} terms={termsVersion} />
                 {/* Google */}
                 {authConfig?.google_oauth_enabled && (
                   <Button

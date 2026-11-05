@@ -57,6 +57,7 @@ dependencies = [
     "voyageai>=0.3.0",      # Reranking (Issue #105: Voyage AI alternative)
 
     # Authentication
+    "webauthn>=2.7,<3",
     # Auth-critical dependencies carry an upper bound (#1705). CI and the image
     # install the tracked uv.lock (#1706), so the bound is what a lock refresh
     # (Dependabot's weekly lock PR, or `uv lock`) may move within: a

@@ -766,6 +766,14 @@ class Settings(BaseSettings):
         ),
     )
 
+    webauthn_rp_id: str | None = Field(
+        default=None, description="Passkey RP ID (UI host by default)"
+    )
+    webauthn_rp_name: str = Field(default="Kagura Memory Cloud", min_length=1)
+    webauthn_origins: str | None = Field(
+        default=None, description="Comma-separated trusted UI origins; defaults to FRONTEND_URL"
+    )
+
     # Logging
     log_level: str = Field(default="INFO", description="Log level")
     log_colorize: bool = Field(default=True, description="Enable colored logs")

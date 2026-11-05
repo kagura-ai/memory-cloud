@@ -51,6 +51,7 @@ from models.auth import (
     AuditLog,
     User,
     UserOAuthProvider,
+    WebAuthnCredential,
 )
 from services.email_action_token_service import (
     PASSWORD_LINK_PURPOSES,
@@ -515,7 +516,9 @@ class PasswordAccountService:
             .select_from(UserOAuthProvider)
             .where(UserOAuthProvider.user_id == user_id)
         )
-        if not linked:
+        if not linked and not await self.db.scalar(
+            select(WebAuthnCredential.id).where(WebAuthnCredential.user_id == user_id).limit(1)
+        ):
             raise ConflictError("Cannot remove the only remaining sign-in method")
         user.password_hash = None
         await self._invalidate_password_links(user.user_id)

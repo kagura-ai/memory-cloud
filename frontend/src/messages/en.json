@@ -1,4 +1,21 @@
 {
+  "passkeys": {
+    "title": "Passkeys",
+    "signIn": "Sign in with a passkey",
+    "signInError": "Could not sign in with that passkey. Try again.",
+    "proof": "Verify with your current password or another passkey. To add your first passkey, you can also use a recent verified sign-in.",
+    "password": "Current password",
+    "add": "Add a passkey",
+    "created": "Added {date}",
+    "used": "Last used {date}",
+    "unused": "Never used",
+    "remove": "Remove",
+    "rename": "Rename",
+    "save": "Save",
+    "cancel": "Cancel",
+    "name": "Passkey name",
+    "error": "Could not update passkeys."
+  },
   "gettingStarted": {
     "ownerEmpty": "Connect a client now, or create a private practice context below to save your first memory.",
     "adminEmpty": "As a workspace admin, you can create a shared context when the workspace plan allows it. Members with access will be able to see its memories.",

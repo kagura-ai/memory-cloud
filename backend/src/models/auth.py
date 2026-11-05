@@ -34,6 +34,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -204,6 +205,26 @@ class User(Base):
 
     def __repr__(self) -> str:
         return f"<User(email='{self.email}', role='{self.role}')>"
+
+
+class WebAuthnCredential(Base):
+    """Discoverable passkey bound to the immutable account, removed on erasure."""
+
+    __tablename__ = "webauthn_credentials"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    credential_id: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
+    public_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sign_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    transports: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    aaguid: Mapped[str] = mapped_column(String(36), nullable=False)
+    backup_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    backup_state: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class UserOAuthProvider(Base):

@@ -846,6 +846,9 @@ jobs:
       - name: Run OAuth E2E (account linking, beta invite hand-off)
         run: cd frontend && npm run test:e2e:oauth
 
+      - name: Run passkey E2E with a Chromium virtual authenticator
+        run: cd frontend && npx playwright test --project=passkey
+
       - name: Show API log
         # The readiness step already dumps the log when it is the one failing.
         if: ${{ failure() && steps.wait_api.outcome != 'failure' }}
