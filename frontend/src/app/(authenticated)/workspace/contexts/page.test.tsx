@@ -352,16 +352,23 @@ function setupWithRoleAndOneContext(role: Role) {
 }
 
 describe("ContextsPage New Context header button (#398)", () => {
+  it("uses quick creation in the empty state and omits the header action", async () => {
+    setupWithRole("owner");
+    render(<ContextsPage />);
+    const create = await screen.findByRole("button", { name: /^create$/i });
+    expect(screen.queryByText("newContext", { exact: false })).toBeNull();
+    expect(screen.getByRole("button", { name: /^advancedCreate$/i })).toBeInTheDocument();
+    fireEvent.click(create);
+    expect(await screen.findByRole("dialog")).toHaveTextContent("quickCreate");
+  });
   // it.each spreads each row into the test-fn args. Pass scalars (not nested
   // arrays) so the role string isn't iterated character-by-character.
   it.each(["owner", "admin"] as const)(
     "renders the New Context button for %s",
     async (role) => {
-      setupWithRole(role);
+      setupWithRoleAndOneContext(role);
       render(<ContextsPage />);
-      await waitFor(() =>
-        expect(screen.getByText("noContextsYet")).toBeInTheDocument(),
-      );
+      await screen.findByText("Test Context");
       // The dropdown trigger button contains a Plus icon + "newContext" text.
       expect(
         screen.getByText("newContext", { exact: false }),
@@ -809,7 +816,7 @@ describe("ContextsPage context cap: one notice, disabled create controls (#1646)
     expect(await screen.findByText("quickCreateContext")).toBeInTheDocument();
   });
 
-  it("below the cap: the empty state's Create opens the advanced dialog", async () => {
+  it("below the cap: the empty state's Create opens the quick dialog", async () => {
     setupCap({ cap: 20, count: 0 });
     render(<ContextsPage />);
 
@@ -817,7 +824,7 @@ describe("ContextsPage context cap: one notice, disabled create controls (#1646)
     expect(create).not.toBeDisabled();
     expect(create).not.toHaveAttribute("aria-describedby");
     fireEvent.click(create);
-    expect(await screen.findByText("createDialogTitle")).toBeInTheDocument();
+    expect(await screen.findByText("quickCreateContext")).toBeInTheDocument();
   });
 });
 
@@ -850,11 +857,11 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     requested: 1,
   };
 
-  /** Owner, empty list: the empty-state Create opens the advanced dialog. */
+  /** Advanced creation stays available beside the quick-create action. */
   async function submitAdvancedCreate() {
     setupWithRole("owner");
     render(<ContextsPage />);
-    fireEvent.click(await screen.findByRole("button", { name: /^create$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^advancedCreate$/i }));
     fireEvent.change(
       await screen.findByPlaceholderText("contextNamePlaceholder"),
       { target: { value: "my-context" } },
@@ -1023,8 +1030,7 @@ describe("ContextsPage create errors: a quota refusal is the gate notice (#1646)
       },
     });
     mockGetContexts.mockResolvedValue({ contexts: [] });
-    // No embedding → the amber empty state, whose Create opens Quick Create;
-    // otherwise the blue one, whose Create opens the advanced dialog.
+    // Exercise both empty states and their respective create entry points.
     const canEmbed = dialogOpener === "advanced";
     mockCheckOpenAIKeyStatus.mockResolvedValue({
       has_key: canEmbed,
@@ -1036,7 +1042,7 @@ describe("ContextsPage create errors: a quota refusal is the gate notice (#1646)
     });
     render(<ContextsPage />);
     if (!canEmbed) await screen.findByText("setupNeededOpenAI");
-    fireEvent.click(await screen.findByRole("button", { name: /^create$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: dialogOpener === "advanced" ? /^advancedCreate$/i : /^create$/i }));
     fireEvent.change(
       await screen.findByPlaceholderText("contextNamePlaceholder"),
       { target: { value: "my-context" } },

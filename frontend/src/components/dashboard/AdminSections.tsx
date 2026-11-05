@@ -13,12 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import { AlertCircle, Users, ChevronDown } from "lucide-react";
+import { AlertCircle, Users } from "lucide-react";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -250,21 +245,16 @@ export function AdminSections({
     currentWorkspace?.current_user_role === "admin" ||
     currentWorkspace?.current_user_role === "owner";
 
-  // Hide entirely for non-admin, or when there's nothing to show
-  // (solo workspace with no context selected = both subsections would be empty)
   const hasUserActivity = !!(selectedContextId && currentWorkspaceId);
   if (!isAdmin) return null;
 
   return (
-    <Collapsible className="mb-6">
-      <CollapsibleTrigger className="group flex items-center gap-2 w-full text-left py-3 px-1 hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-md transition-colors">
-        <ChevronDown className="h-5 w-5 text-gray-500 transition-transform -rotate-90 group-data-[state=open]:rotate-0" />
-        <Users className="h-5 w-5 text-gray-500" />
-        <span className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-          {t("adminMemberActivity")}
-        </span>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="mt-4 space-y-6">
+    <section className="mb-6 space-y-4">
+      <h2 className="flex items-center gap-2 text-xl font-semibold">
+        <Users className="h-5 w-5 text-muted-foreground" />
+        {t("adminMemberActivity")}
+      </h2>
+      <div className="space-y-6">
         {hasUserActivity ? (
           <UserActivitySection
             selectedContextId={selectedContextId!}
@@ -276,7 +266,7 @@ export function AdminSections({
           </p>
         )}
         <MemberUsageSection />
-      </CollapsibleContent>
-    </Collapsible>
+      </div>
+    </section>
   );
 }

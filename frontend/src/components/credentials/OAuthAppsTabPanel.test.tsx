@@ -79,12 +79,12 @@ beforeEach(() => {
 });
 
 describe("OAuthAppsTabPanel — custom-only (#1836)", () => {
-  it("offers no Claude / ChatGPT preset creation and explains self-registration", async () => {
+  it("offers custom app creation without preset creation or a self-registration paragraph", async () => {
     mockGetOAuth2Clients.mockResolvedValue([]);
 
     render(<OAuthAppsTabPanel />);
 
-    expect(await screen.findByText("dcrNote")).toBeInTheDocument();
+    expect(await screen.findByText("customOAuthApps")).toBeInTheDocument();
     expect(screen.queryByText("createOAuthApp")).not.toBeInTheDocument();
     expect(screen.queryByText("noOAuthApp")).not.toBeInTheDocument();
     expect(screen.queryByText("claudeSubtitle")).not.toBeInTheDocument();
@@ -96,7 +96,7 @@ describe("OAuthAppsTabPanel — custom-only (#1836)", () => {
 
     render(<OAuthAppsTabPanel />);
 
-    await screen.findByText("dcrNote");
+    await screen.findByText("customOAuthApps");
     expect(screen.queryByText(/\/mcp/)).not.toBeInTheDocument();
     expect(screen.queryByText("mcpConnection")).not.toBeInTheDocument();
   });
@@ -166,7 +166,7 @@ describe("OAuthAppsTabPanel — custom-only (#1836)", () => {
 
     render(<OAuthAppsTabPanel />);
 
-    await screen.findByText("dcrNote");
+    await screen.findByText("customOAuthApps");
     fireEvent.click(screen.getAllByText("createCustomApp")[0]);
 
     expect(await screen.findByText("custom-app-dialog")).toBeInTheDocument();

@@ -75,6 +75,12 @@ describe("ExternalKeysPage BYOK gate (#1167)", () => {
     render(<ExternalKeysPage />);
     await waitFor(() => expect(mockListKeys).toHaveBeenCalled());
     expect(screen.queryByText("provisioningDisabled")).toBeNull();
+    expect(screen.queryByRole("button", { name: "refresh" })).toBeNull();
+    const addButton = await screen.findByRole("button", { name: "addApiKey" });
+    expect(screen.getAllByRole("button", { name: "addApiKey" })).toHaveLength(1);
+    expect(addButton).toHaveClass("from-brand-green-600");
+    expect(screen.getByText("noKeysYet").compareDocumentPosition(addButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1 }).compareDocumentPosition(addButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("keeps a management console (fetches + no full block) when byok is off", async () => {
@@ -112,6 +118,16 @@ describe("ExternalKeysPage protection (#1613)", () => {
     updated_at: "2026-01-01T00:00:00Z",
     updated_by: null,
     ...overrides,
+  });
+
+  it("places the single add control before a populated key table", async () => {
+    mockListKeys.mockResolvedValue([storedKey()]);
+    render(<ExternalKeysPage />);
+    const table = await screen.findByRole("table");
+    const add = screen.getByRole("button", { name: "addApiKey" });
+    expect(screen.getAllByRole("button", { name: "addApiKey" })).toHaveLength(1);
+    expect(add.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText("noKeysYet")).toBeNull();
   });
 
   it("shows the Required badge and locks the controls only when is_protected", async () => {

@@ -111,6 +111,7 @@ export interface MCPConfigBlockProps {
    * the block then holds only the key-bearing snippets.
    */
   includeOAuthCommand?: boolean;
+  showToolSettings?: boolean;
 }
 
 function readStoredClient(): MCPClient {
@@ -260,6 +261,7 @@ export function MCPConfigBlock({
   mcpUrl,
   mcpBaseUrl,
   includeOAuthCommand = true,
+  showToolSettings = true,
 }: MCPConfigBlockProps) {
   const t = useTranslations("apiKeys");
   const tCommon = useTranslations("common");
@@ -435,23 +437,25 @@ export function MCPConfigBlock({
       {/* Issue #1609: one switch for the whole block — it applies to every
           tab, so it sits above them. Label via htmlFor, help text via
           aria-describedby (the project's Label + Switch convention). */}
-      <div className="space-y-1">
-        <div className="flex items-center gap-2">
-          <Switch
-            id={allToolsSwitchId}
-            checked={allTools}
-            onCheckedChange={setAllTools}
-            aria-describedby={allToolsHelpId}
-          />
-          <Label htmlFor={allToolsSwitchId}>{t("allToolsLabel")}</Label>
+      {showToolSettings && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Switch
+              id={allToolsSwitchId}
+              checked={allTools}
+              onCheckedChange={setAllTools}
+              aria-describedby={allToolsHelpId}
+            />
+            <Label htmlFor={allToolsSwitchId}>{t("allToolsLabel")}</Label>
+          </div>
+          <p
+            id={allToolsHelpId}
+            className="text-xs text-gray-600 dark:text-gray-400"
+          >
+            {t("allToolsHelp")}
+          </p>
         </div>
-        <p
-          id={allToolsHelpId}
-          className="text-xs text-gray-600 dark:text-gray-400"
-        >
-          {t("allToolsHelp")}
-        </p>
-      </div>
+      )}
 
       <Tabs value={client} onValueChange={(v) => setClient(v as MCPClient)}>
         <TabsList>

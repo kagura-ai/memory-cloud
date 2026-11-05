@@ -57,7 +57,6 @@ import {
   Plus,
   Trash2,
   Edit,
-  RefreshCw,
   AlertCircle,
   CheckCircle,
   AlertTriangle,
@@ -80,7 +79,6 @@ import {
 } from "@/lib/api/external-keys";
 import { ApiError } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
-import { InlineSpinner } from "@/components/common/LoadingState";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
@@ -397,7 +395,7 @@ export default function ExternalKeysPage() {
   // affordances are hidden (see byokEnabled gates in the render below).
   if (systemFeatures === null) {
     return (
-      <PageContainer>
+      <PageContainer className="space-y-4">
         <PageHeader title={t("title")} description={t("description")} />
         <LoadingState lines={3} />
       </PageContainer>
@@ -406,70 +404,60 @@ export default function ExternalKeysPage() {
 
   if (loading && keys.length === 0) {
     return (
-      <PageContainer>
+      <PageContainer className="space-y-4">
         <PageHeader title={t("title")} description={t("description")} />
         <LoadingState lines={3} />
       </PageContainer>
     );
   }
 
+  const addKeyControl = byokEnabled ? (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          size="lg"
+          className="bg-gradient-to-r from-brand-green-600 to-emerald-600 text-white shadow-lg hover:from-brand-green-700 hover:to-emerald-700"
+        >
+          <Plus className="mr-2 h-5 w-5" />
+          {t("addApiKey")}
+          <ChevronDown className="ml-2 h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        {availableProviders.length === 0 ? (
+          <div className="px-2 py-3 text-sm text-muted-foreground text-center">
+            {t("allProvidersConfigured")}
+          </div>
+        ) : (
+          availableProviders.map((provider) => (
+            <DropdownMenuItem
+              key={provider.value}
+              onClick={() => handleQuickAdd(provider)}
+            >
+              <span className="mr-3 text-lg">{provider.icon}</span>
+              <div>
+                <div className="font-medium">{provider.label}</div>
+                <div className="text-xs text-muted-foreground">
+                  {provider.description}
+                </div>
+              </div>
+            </DropdownMenuItem>
+          ))
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  ) : null;
+
   return (
-    <PageContainer>
+    <PageContainer className="space-y-4">
       <PageHeader
         title={t("title")}
         description={t("description")}
-        actions={
-          <div className="flex gap-2">
-            <Button onClick={loadKeys} variant="outline" disabled={loading}>
-              {loading ? (
-                <InlineSpinner size="sm" className="mr-2" />
-              ) : (
-                <RefreshCw className="h-4 w-4 mr-2" />
-              )}
-              {t("refresh")}
-            </Button>
-            {/* Issue #169: Dropdown for API Key creation. Hidden when BYOK
-                provisioning is off (#32): create/update are gated, but the list
-                below stays manageable. */}
-            {byokEnabled && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    size="lg"
-                    className="bg-gradient-to-r from-brand-green-600 to-emerald-600 text-white shadow-lg hover:from-brand-green-700 hover:to-emerald-700"
-                  >
-                    <Plus className="mr-2 h-5 w-5" />
-                    {t("addApiKey")}
-                    <ChevronDown className="ml-2 h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-64">
-                  {availableProviders.length === 0 ? (
-                    <div className="px-2 py-3 text-sm text-muted-foreground text-center">
-                      {t("allProvidersConfigured")}
-                    </div>
-                  ) : (
-                    availableProviders.map((provider) => (
-                      <DropdownMenuItem
-                        key={provider.value}
-                        onClick={() => handleQuickAdd(provider)}
-                      >
-                        <span className="mr-3 text-lg">{provider.icon}</span>
-                        <div>
-                          <div className="font-medium">{provider.label}</div>
-                          <div className="text-xs text-muted-foreground">
-                            {provider.description}
-                          </div>
-                        </div>
-                      </DropdownMenuItem>
-                    ))
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
-          </div>
-        }
       />
+
+      {byokEnabled && keys.length > 0 && (
+        <div className="mb-4 flex justify-end">{addKeyControl}</div>
+      )}
 
       {!byokEnabled && (
         <Alert>
@@ -477,55 +465,58 @@ export default function ExternalKeysPage() {
         </Alert>
       )}
 
-      <FeatureGuide storageKey="external-keys" title={t("featureGuide.title")}>
-        <p>{t("featureGuide.overview")}</p>
-        <p>{t("featureGuide.useCases")}</p>
-        <p className="font-medium">{t("featureGuide.howItWorks")}</p>
-      </FeatureGuide>
+      <div className="space-y-3">
+        <FeatureGuide storageKey="external-keys" title={t("featureGuide.title")}>
+          <p>{t("featureGuide.overview")}</p>
+          <p>{t("featureGuide.useCases")}</p>
+          <p className="font-medium">{t("featureGuide.howItWorks")}</p>
+        </FeatureGuide>
 
-      {/* #1495: fires on "embedding is unavailable", NOT on "you have no key
-          of your own" — with a platform credential configured those differ. */}
-      {!loading && canEmbed === false && (
-        <Alert
-          variant="destructive"
-          className="mb-6 border-red-300 bg-red-50 dark:bg-red-950/50"
-        >
-          <AlertTriangle className="h-5 w-5" />
-          <AlertDescription className="ml-2">
-            <strong className="font-semibold">{t("openAIRequired")}</strong>
-            <p className="mt-1 text-sm">{t("openAIRequiredDesc")}</p>
-          </AlertDescription>
+        {/* #1495: fires on "embedding is unavailable", NOT on "you have no key
+            of your own" — with a platform credential configured those differ. */}
+        {!loading && canEmbed === false && (
+          <Alert
+            variant="destructive"
+            className="border-red-300 bg-red-50 dark:bg-red-950/50"
+          >
+            <AlertTriangle className="h-5 w-5" />
+            <AlertDescription className="ml-2">
+              <strong className="font-semibold">{t("openAIRequired")}</strong>
+              <p className="mt-1 text-sm">{t("openAIRequiredDesc")}</p>
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* Embedding works because this workspace supplied its own key. */}
+        {!loading && canEmbed === true && hasOpenAIKey && (
+          <Alert className="border-green-300 bg-green-50 dark:bg-green-950/50">
+            <CheckCircle className="h-5 w-5 text-green-600" />
+            <AlertDescription className="ml-2 text-green-800 dark:text-green-200">
+              <strong className="font-semibold">{t("openAIConfigured")}</strong> -{" "}
+              {t("openAIConfiguredDesc")}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* #1495: embedding works, but on the platform credential rather than a
+            key of this workspace's own. Saying so is the whole point — otherwise
+            an empty key list reads as a broken workspace. */}
+        {!loading && canEmbed === true && !hasOpenAIKey && (
+          <Alert>
+            <CheckCircle className="h-5 w-5" />
+            <AlertDescription className="ml-2">
+              <strong className="font-semibold">{t("embeddingManaged")}</strong> -{" "}
+              {t("embeddingManagedDesc")}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        <Alert>
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{t("securityNotice")}</AlertDescription>
         </Alert>
-      )}
 
-      {/* Embedding works because this workspace supplied its own key. */}
-      {!loading && canEmbed === true && hasOpenAIKey && (
-        <Alert className="mb-6 border-green-300 bg-green-50 dark:bg-green-950/50">
-          <CheckCircle className="h-5 w-5 text-green-600" />
-          <AlertDescription className="ml-2 text-green-800 dark:text-green-200">
-            <strong className="font-semibold">{t("openAIConfigured")}</strong> -{" "}
-            {t("openAIConfiguredDesc")}
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* #1495: embedding works, but on the platform credential rather than a
-          key of this workspace's own. Saying so is the whole point — otherwise
-          an empty key list reads as a broken workspace. */}
-      {!loading && canEmbed === true && !hasOpenAIKey && (
-        <Alert className="mb-6">
-          <CheckCircle className="h-5 w-5" />
-          <AlertDescription className="ml-2">
-            <strong className="font-semibold">{t("embeddingManaged")}</strong> -{" "}
-            {t("embeddingManagedDesc")}
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <Alert className="mb-6">
-        <AlertCircle className="h-4 w-4" />
-        <AlertDescription>{t("securityNotice")}</AlertDescription>
-      </Alert>
+      </div>
 
       <Card>
         <CardHeader>
@@ -546,12 +537,7 @@ export default function ExternalKeysPage() {
             <div className="text-center py-12">
               <Key className="h-12 w-12 text-gray-400 mx-auto mb-4" />
               <p className="text-gray-600 mb-4">{t("noKeysYet")}</p>
-              {byokEnabled && (
-                <Button onClick={() => setCreateDialogOpen(true)}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  {t("addFirstKey")}
-                </Button>
-              )}
+              {addKeyControl}
             </div>
           ) : (
             <Table>

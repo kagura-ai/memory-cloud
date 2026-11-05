@@ -782,8 +782,8 @@ describe("ProfilePage — refresh button click (#515)", () => {
       state: "abc",
     });
 
-    // Mock window.location.href setter — jsdom's default doesn't trigger
-    // navigation, but a Proxy lets us spy on the assignment. The
+    // Observe the redirect assignment without asking happy-dom to navigate.
+    // The original hash getter remains available to the section anchors. The
     // descriptor is captured in beforeEach above and restored in
     // afterEach so this stub does not survive the test.
     const hrefSetter = vi.fn();
@@ -794,7 +794,6 @@ describe("ProfilePage — refresh button click (#515)", () => {
         set(target, prop, value) {
           if (prop === "href") {
             hrefSetter(value);
-            (target as unknown as Record<string, unknown>).href = value;
             return true;
           }
           (target as unknown as Record<string, unknown>)[prop as string] =

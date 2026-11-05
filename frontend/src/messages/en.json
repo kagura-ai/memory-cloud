@@ -22,7 +22,8 @@
     "systemAdmin": "This feature requires a system administrator. Changing the workspace plan will not grant access.",
     "lookupFailed": "We could not check whether this feature is enabled.",
     "retry": "Try again",
-    "deployment": "This feature is not enabled on this deployment. Changing your workspace plan will not enable it."
+    "deployment": "This feature is not enabled on this deployment. Changing your workspace plan will not enable it.",
+    "currentlyUnavailable": "This feature is currently unavailable."
   },
   "onboarding": {
     "title": "Welcome to Kagura Memory",
@@ -209,7 +210,7 @@
     "externalKeys": "External Keys",
     "noExternalKeys": "No API keys configured — add OpenAI key to enable memory features",
     "noContexts": "No contexts found",
-    "settings": "Settings",
+    "settings": "Workspace settings",
     "plan": "Plan",
     "secrets": "Secrets",
     "workspaceSettings": "Workspace",
@@ -267,7 +268,7 @@
         "uploaded": "Uploaded"
       },
       "scope": {
-        "workspace": "Workspace"
+        "workspace": "Shared with workspace"
       },
       "actions": {
         "download": "Download",
@@ -290,6 +291,13 @@
         "deleting": "Deleting…",
         "success": "{count, plural, one {# file deleted} other {# files deleted}}",
         "failed": "Failed to delete the context's files."
+      },
+      "filter": {
+        "label": "File location",
+        "workspace": "Shared with workspace",
+        "sharedHint": "Files that all members of this workspace can view.",
+        "contextHint": "Files belonging to the selected context. Its access permissions apply.",
+        "fetchError": "Could not load contexts. Shared files are still available."
       }
     }
   },
@@ -1016,11 +1024,16 @@
     "contextCount": "Contexts",
     "apiCallsWeek": "API Calls (7d)",
     "activeUsersWeek": "Active Users (7d)",
-    "showDetails": "Show Details",
-    "hideDetails": "Hide Details",
     "adminMemberActivity": "Admin: Member Activity",
     "selectContextForActivity": "Select a specific context to view per-user activity. Member usage appears for team workspaces.",
-    "unsearchableSubtext": "{count} not searchable"
+    "unsearchableSubtext": "{count} not searchable",
+    "sections": {
+      "label": "Dashboard sections",
+      "summary": "Summary",
+      "contexts": "Context breakdown",
+      "members": "Members",
+      "usage": "Usage"
+    }
   },
   "profile": {
     "sections": {
@@ -1337,7 +1350,7 @@
       "title": "Secrets",
       "description": "Manage the workspace's zero-knowledge secret store: recipient keys, grants, and audit integrity.",
       "notAuthorized": "Only workspace owners and admins can manage secrets.",
-      "zeroKnowledgeNote": "This console manages access only — it never displays secret values or ciphertext. Encrypting, storing, and reading secret values happen in the kagura secret CLI; the server holds only public keys and ciphertext it cannot decrypt.",
+      "zeroKnowledgeNote": "Manage secret recipients and access here. Use the kagura secret CLI or an SDK to encrypt, store and retrieve values.",
       "secretsTitle": "Secrets",
       "secretsDesc": "Names and metadata only. Values are never shown here.",
       "colName": "Name",
@@ -1346,7 +1359,7 @@
       "colGrants": "Grants",
       "colActions": "Actions",
       "noSecretsTitle": "No secrets yet",
-      "noSecretsDesc": "Store secrets with the kagura secret CLI. They will appear here for access management.",
+      "noSecretsDesc": "Secrets saved through the CLI or an SDK appear here.",
       "rotationNeeded": "Rotation needed",
       "statusOk": "Active",
       "revokeGrant": "Revoke grant",
@@ -1368,7 +1381,7 @@
       "colLabel": "Label",
       "colIdentity": "Member",
       "noPubkeysTitle": "No recipient keys",
-      "noPubkeysDesc": "Members register their age public key with the kagura secret CLI; pending keys appear here for owner approval.",
+      "noPubkeysDesc": "Register a public key using the guide above. It will appear here for owner approval.",
       "fingerprintTitle": "Verify this fingerprint out-of-band before approving (TOFU).",
       "status_pending": "Pending",
       "status_active": "Active",
@@ -1812,27 +1825,25 @@
     "connectors": "Connectors",
     "workspaceSettings": "General",
     "plan": "Plan",
-    "keyKinds": "API key purpose",
-    "kmcKeys": "Keys for calling KMC",
-    "providerKeys": "External AI provider keys"
+    "providerKeys": "External API keys",
+    "connectedApps": "Connected apps"
   },
   "integrationEntry": {
     "title": "Integrations",
-    "intro": "What would you like to connect or bring into KMC?",
     "workspace": "Selected workspace: {name}",
-    "start": "Get connected",
-    "manage": "Manage apps and credentials",
-    "back": "Choose an integration by task",
-    "entry": "Integrations – choose by task",
+    "start": "Choose a feature",
     "tasks": {
-      "connector": {"title":"Connect an external service with a connector","description":"Connect a service such as Slack to bring updates into KMC automatically. Choose the connection method and source in Connectors. Resources also accept data that your own system sends through the API."},
+      "connector": {
+        "title": "Connect an external service with a connector",
+        "description": "Connect a service such as Slack to bring updates into KMC automatically. Choose the connection method and source in Connectors. Resources also accept data that your own system sends through the API."
+      },
       "client": {
         "title": "Connect an AI client",
         "description": "Connect Claude, ChatGPT, Gemini, Muse or another supported client. Add the MCP URL and sign in when prompted. The client registers automatically."
       },
       "script": {
-        "title": "Call KMC from a script",
-        "description": "Create a KMC API key to send requests from your code. It authenticates your script to KMC."
+        "title": "Connect from a script",
+        "description": "Create an API key to use Kagura Memory Cloud from scripts or external tools."
       },
       "import": {
         "title": "Bring in external data",
@@ -1843,8 +1854,8 @@
         "description": "Register a custom app and its redirect URL if you are developing the client yourself. Keep its client secret with that app."
       },
       "connected": {
-        "title": "Review apps I have authorized",
-        "description": "See apps connected to your account and choose their default context. To revoke a token, use the connected client’s revocation flow. Clearing a default context only changes where requests go."
+        "title": "Review your connected apps",
+        "description": "Manage authorized apps and the default context each app uses."
       },
       "provider": {
         "title": "Use my provider’s API key",
@@ -1854,18 +1865,6 @@
         "title": "Review or revoke access to a secret",
         "description": "Workspace owners and admins can inspect recipient grants and revoke access here. Use the CLI or SDK to grant new access."
       }
-    }
-  },
-  "credentials": {
-    "description": "Manage authentication methods for connecting clients to your workspace",
-    "featureGuide": {
-      "title": "Choosing an Authentication Method",
-      "overview": "This page holds everything a client needs to connect: the MCP endpoint, your API keys and any custom OAuth app.",
-      "choosingMethod": "Claude, ChatGPT, Gemini, Muse, Cursor and Claude Code connect with the MCP URL below and sign in with OAuth — nothing to create. Use an API key for Codex CLI, the Python SDK, CI pipelines or a .mcp.json file. Create a custom OAuth app only for an OAuth2 client you build yourself."
-    },
-    "tabs": {
-      "apiKeysHelp": "For Codex CLI, the Python SDK, CI pipelines and .mcp.json — clients that send a Bearer key instead of signing in",
-      "oauthAppsHelp": "For an OAuth2 client you build yourself — Claude, ChatGPT, Gemini, Muse, Cursor and Claude Code register themselves and need no app here"
     }
   },
   "connectedApps": {
@@ -1889,6 +1888,17 @@
     "unavailable": "Unavailable context — clear or change it"
   },
   "mcpConnection": {
+    "quickStart": {
+      "title": "MCP connection URL",
+      "copied": "Copied",
+      "toolSettings": "Tool settings",
+      "allTools": "All tools (full)",
+      "additionalTools": "Additional tools (add_tools)",
+      "additionalHint": "Select tools to add them as tags. Remove a tag with its × button.",
+      "fullHint": "The URL includes all tools.",
+      "reconnect": "Copy the updated URL and update the connection settings in your AI client.",
+      "pinWorkspace": "Pin to this workspace"
+    },
     "title": "MCP Connection",
     "description": "The MCP endpoint every client connects to",
     "copyUrl": "Copy MCP URL",
@@ -1903,8 +1913,31 @@
     "copyPinnedUrl": "Copy pinned URL",
     "links": {
       "mcpClients": "MCP client setup guide",
+      "typescriptSdk": "TypeScript SDK",
       "pythonSdk": "Python SDK",
-      "restApi": "REST API docs"
+      "restApi": "REST API docs",
+      "label": "Connection documentation"
+    },
+    "toolPicker": {
+      "selected": "Selected additional tools",
+      "remove": "Remove {name}",
+      "search": "Search tools",
+      "loadError": "Could not load tool choices.",
+      "retry": "Reload",
+      "noMatches": "No matching tools.",
+      "presets": "Add tools by purpose",
+      "presetHint": "Templates add tools to your selected tags. Remove individual tags as needed.",
+      "preset": {
+        "exploration": "Explore related memories",
+        "ingestion": "Data ingestion",
+        "analysis": "Memory analysis",
+        "secrets": "Secret sharing"
+      }
+    },
+    "help": {
+      "title": "MCP connection URL settings",
+      "description": "Configure the AI client's endpoint, tools and workspace pinning.",
+      "apiDescription": "Choose the endpoint and tools. The selected URL also updates the SDK examples and client configurations below."
     }
   },
   "apiKeys": {
@@ -1917,8 +1950,8 @@
       "howItWorks": "Create an API key → Add it to your .mcp.json config → Your MCP client can now remember and recall memories in this workspace."
     },
     "apiKeysTitle": "API Keys",
-    "apiKeysDesc": "For Codex CLI, the Python SDK, CI and .mcp.json clients",
-    "mcpSetupGuide": "Connect with this key (.mcp.json / ChatGPT / Codex CLI)",
+    "apiKeysDesc": "Keys for connecting scripts and CLI tools to Kagura Memory Cloud.",
+    "mcpSetupGuide": "How to use API keys",
     "mcpConfigHint": "While your API key is in the visibility window, the config above is ready to copy with the live key already embedded.",
     "copyConfig": "Copy config",
     "copyCodexAddCommand": "Copy command",
@@ -1946,7 +1979,7 @@
     "createApiKey": "Create API Key",
     "noApiKeys": "No API keys configured. Click \"Create API Key\" button above to get started.",
     "noKeysTitle": "No API keys yet",
-    "noKeysDesc": "Create your first API key for Codex CLI, the Python SDK, CI or a .mcp.json file. Claude Code and the chat clients sign in with OAuth and need no key.",
+    "noKeysDesc": "Create a key to connect an external tool or script.",
     "showKey": "Show key",
     "hideKey": "Hide key",
     "keyCopied": "API key copied",
@@ -1956,8 +1989,8 @@
     "roleBadgeManageTitle": "This key acts with its owner's workspace role (admin / owner): it can also call workspace-management APIs (connectors, secrets, members).",
     "roleBadgeData": "Data only",
     "roleBadgeDataTitle": "This key acts with its owner's workspace role (member / viewer): memory read/write only.",
-    "roleHelpManage": "API keys act with their owner's workspace role. Because you are an admin / owner, the keys below can also call workspace-management APIs (connectors, secrets, members) — except public-bound keys.",
-    "roleHelpData": "API keys act with their owner's workspace role. Your keys can read and write memory but cannot call workspace-management APIs.",
+    "roleHelpManage": "Keys inherit your workspace role, including management access. Public-bound keys have their own restricted scope.",
+    "roleHelpData": "Keys access memories according to your workspace role.",
     "setupKeyHint": "Created by initial setup",
     "setupKeyHintTitle": "Default name of the key minted by create_admin during initial setup — it is wired into .mcp.json.",
     "recentUseWarning": "This key was used {time}. Clients using it (MCP / SDK / workers) will lose their connection.",
@@ -2023,7 +2056,6 @@
       "useCases": "Use cases: build your own integration with the OAuth2 authorization code flow, let team members authorize your app individually. Claude, ChatGPT, Gemini, Muse, Cursor and Claude Code register themselves and need no app here.",
       "howItWorks": "Register your app → Users authorize via the OAuth flow → The app receives access tokens → Tokens are used for MCP or REST API calls."
     },
-    "dcrNote": "Claude.ai, Claude Desktop, ChatGPT, Gemini, Muse, Cursor and Claude Code register themselves when they connect (Dynamic Client Registration) — there is nothing to create here for them. Create a custom app only for an OAuth2 client you build yourself.",
     "legacyPresetsTitle": "Earlier connector apps",
     "legacyProvider": {
       "claude": "Claude",
@@ -2045,7 +2077,7 @@
     "customOAuthApps": "Custom OAuth Apps",
     "customOAuthAppsDesc": "Your own OAuth2 clients (authorization code + PKCE)",
     "createCustomApp": "Create Custom App",
-    "noCustomApps": "No custom OAuth apps configured. Click \"Create Custom App\" button above to get started.",
+    "noCustomApps": "Register your own OAuth client to list it here.",
     "noCustomOAuthAppsTitle": "No custom OAuth apps yet",
     "appName": "Name",
     "created": "Created",
@@ -2188,7 +2220,51 @@
     "sleepContextsTier": "Plan-tier limit",
     "ownedWorkspaces": "Owned Workspaces",
     "ownedWorkspacesTier": "Owned workspace cap (joined workspaces are uncapped)",
-    "memoriesCreatedToday": "Created today: {count} / {limit} (resets at midnight UTC)"
+    "memoriesCreatedToday": "Created today: {count} / {limit} (resets at midnight UTC)",
+    "quotaLabels": {
+      "memories": "Memories",
+      "memories_daily": "Memories created per day",
+      "storage": "Storage",
+      "contexts": "Contexts",
+      "members": "Member seats",
+      "connectors": "Connectors",
+      "resource_tokens": "Resource tokens",
+      "resource_capacity": "Allocated resource events per hour",
+      "analysis": "Analyses per day",
+      "content_chunks": "Content-chunk contexts",
+      "llm_selector": "LLM-selector contexts",
+      "mcp_day": "MCP requests per day",
+      "mcp_week": "MCP requests per week",
+      "rest_day": "REST API requests per day",
+      "rest_week": "REST API requests per week",
+      "public_day": "Public API requests per day",
+      "public_week": "Public API requests per week",
+      "sleep": "Sleep-enabled contexts",
+      "workspaces": "Owned workspaces",
+      "bound_key_rate": "Bound public-key requests per minute",
+      "embedding_day": "Embedding spend per day",
+      "embedding_month": "Embedding spend per month"
+    },
+    "quotaGroups": {
+      "workspace": "Workspace capacity and features",
+      "requests": "Requests and processing",
+      "account": "Your account",
+      "apiKey": "Per-key limits",
+      "budgets": "External service spending caps"
+    },
+    "quotaReached": "Some usage limits have been reached",
+    "quotaNear": "Approaching usage limits",
+    "viewAllQuotas": "View usage",
+    "reviewPlan": "Review plan and addons",
+    "askOwner": "Contact the workspace owner to change the plan or addons.",
+    "quotaScopeHelp": "Usage is shown against effective limits, including addons and other bonuses. Daily counts use UTC; analysis counts use your account timezone.",
+    "quotaLimitOnly": "Limit ",
+    "quotaUnlimited": "No configured limit",
+    "quotaNotIncluded": "No allowance on the current plan",
+    "quotaNoPercentage": "Usage percentage does not apply",
+    "quotaBonus": "Includes +{amount} extra",
+    "includesInvitations": "Includes unexpired invitations.",
+    "perKeyHelp": "This limit applies separately to each key."
   },
   "memoryOverview": {
     "failedToLoad": "Failed to load memory overview",
@@ -2424,7 +2500,6 @@
       "useCases": "Use cases: bring your own OpenAI key for embeddings and LLM completions; bring Anthropic / Gemini / Self-hosted keys for LLM completions; configure Cohere or Voyage for reranking; use Self-hosted for local self-hosted models; and manage keys at the workspace level for shared access and cost tracking.",
       "howItWorks": "Add an API key for a supported provider → Kagura uses it only for the operations that provider supports (e.g., LLM completions, embeddings, or reranking) → Keys are encrypted at rest and never exposed after creation."
     },
-    "refresh": "Refresh",
     "addApiKey": "Add API Key",
     "allProvidersConfigured": "All providers configured",
     "openAIRequired": "OpenAI API Key Required",
@@ -2437,7 +2512,6 @@
     "keysConfiguredPlural": "{count} API keys configured",
     "loading": "Loading...",
     "noKeysYet": "No API keys configured yet",
-    "addFirstKey": "Add Your First API Key",
     "provider": "Provider",
     "keyName": "Key Name",
     "value": "Value",
@@ -4841,5 +4915,333 @@
     "removeSuccess": "Password removed.",
     "removeError": "Couldn't remove the password. Please try again.",
     "lastMethodError": "This is your only sign-in method, so it can't be removed. Link Google or GitHub first."
+  },
+  "mcpToolDescriptions": {
+    "list_my_bindings": {
+      "title": "Public-bound keys",
+      "description": "List your keys bound to public contexts."
+    },
+    "describe_binding": {
+      "title": "Key binding details",
+      "description": "Inspect a public-bound key and its context."
+    },
+    "remember": {
+      "title": "Save a memory",
+      "description": "Store information, decisions or working notes."
+    },
+    "remember_batch": {
+      "title": "Save multiple memories",
+      "description": "Store a batch of memories in one request."
+    },
+    "update_memory": {
+      "title": "Update a memory",
+      "description": "Edit a stored memory and its attributes."
+    },
+    "recall": {
+      "title": "Search memories",
+      "description": "Find memories by meaning and keywords."
+    },
+    "reference": {
+      "title": "Read memory details",
+      "description": "Read a complete memory or an earlier revision."
+    },
+    "list_revisions": {
+      "title": "Memory revisions",
+      "description": "Inspect a memory's creation and edit history."
+    },
+    "recall_upcoming": {
+      "title": "Upcoming memories",
+      "description": "Find scheduled memories in a time window."
+    },
+    "recall_nearby": {
+      "title": "Nearby memories",
+      "description": "Find memories recorded near a location."
+    },
+    "load_pinned": {
+      "title": "Pinned memories",
+      "description": "Read the memories pinned to a context."
+    },
+    "load_guardrails": {
+      "title": "Load guardrails",
+      "description": "Read pinned notes and tool-triggered rules."
+    },
+    "forget": {
+      "title": "Delete memories",
+      "description": "Soft-delete memories that are no longer needed."
+    },
+    "explore": {
+      "title": "Explore related memories",
+      "description": "Follow connections to discover related information."
+    },
+    "list_edges": {
+      "title": "List memory links",
+      "description": "Inspect links connected to a memory."
+    },
+    "create_edge": {
+      "title": "Link memories",
+      "description": "Connect related memories or superseding versions."
+    },
+    "update_edge": {
+      "title": "Update a memory link",
+      "description": "Change the type or weight of a memory link."
+    },
+    "delete_edge": {
+      "title": "Delete a memory link",
+      "description": "Remove a link between two memories."
+    },
+    "get_context_info": {
+      "title": "Context details",
+      "description": "Inspect a context's purpose, settings and counts."
+    },
+    "list_contexts": {
+      "title": "List contexts",
+      "description": "Find contexts you can access."
+    },
+    "list_tags": {
+      "title": "List tags",
+      "description": "Inspect existing tags and their usage."
+    },
+    "create_context": {
+      "title": "Create a context",
+      "description": "Create a memory space for a project or purpose."
+    },
+    "update_context": {
+      "title": "Update a context",
+      "description": "Change a context's name or settings."
+    },
+    "delete_context": {
+      "title": "Delete a context",
+      "description": "Soft-delete a context and its memories."
+    },
+    "merge_contexts": {
+      "title": "Merge contexts",
+      "description": "Copy memories into a target context."
+    },
+    "update_search_config": {
+      "title": "Search settings",
+      "description": "Configure retrieval and reranking options."
+    },
+    "get_usage": {
+      "title": "Workspace usage",
+      "description": "Check workspace usage and limits."
+    },
+    "get_sleep_history": {
+      "title": "Maintenance history",
+      "description": "List recent Sleep maintenance runs."
+    },
+    "get_sleep_report": {
+      "title": "Maintenance report",
+      "description": "Read the actions and results of a Sleep run."
+    },
+    "rollback_sleep_run": {
+      "title": "Undo maintenance",
+      "description": "Reverse the recorded actions of a Sleep run."
+    },
+    "rollback_session": {
+      "title": "Undo session changes",
+      "description": "Preview and undo writes from a session or time window."
+    },
+    "setup_resource": {
+      "title": "Create an ingestion resource",
+      "description": "Create a context and token for data ingestion."
+    },
+    "setup_connector": {
+      "title": "Set up a connector",
+      "description": "Create a connector for external service ingestion."
+    },
+    "ingest_events": {
+      "title": "Ingest data events",
+      "description": "Send resource events to add, update or delete data."
+    },
+    "get_resource_impact": {
+      "title": "Resource impact",
+      "description": "Inspect resource statistics and change impact."
+    },
+    "get_resource_schema": {
+      "title": "Resource schema",
+      "description": "Read resource fields and their data types."
+    },
+    "list_resource_tokens": {
+      "title": "Resource tokens",
+      "description": "List metadata for resource ingestion tokens."
+    },
+    "analyze_context": {
+      "title": "Analyze memories",
+      "description": "Start an analysis that groups memories by theme."
+    },
+    "get_analysis": {
+      "title": "Analysis result",
+      "description": "Read the progress and result of an analysis."
+    },
+    "list_analyses": {
+      "title": "Analysis history",
+      "description": "List analysis runs for a context."
+    },
+    "get_active_analysis": {
+      "title": "Latest analysis",
+      "description": "Read the most recent successful analysis."
+    },
+    "get_cluster": {
+      "title": "Theme details",
+      "description": "Inspect an analysis cluster and its memories."
+    },
+    "init_file_upload": {
+      "title": "Prepare a file upload",
+      "description": "Reserve storage and obtain an upload URL."
+    },
+    "complete_file_upload": {
+      "title": "Complete a file upload",
+      "description": "Verify an uploaded file and finalize storage."
+    },
+    "get_file_download_url": {
+      "title": "File download URL",
+      "description": "Get a temporary download URL for a stored file."
+    },
+    "delete_file": {
+      "title": "Delete a file",
+      "description": "Soft-delete a file and release its storage quota."
+    },
+    "list_files": {
+      "title": "List files",
+      "description": "List stored files you can access."
+    },
+    "feedback": {
+      "title": "Rate search results",
+      "description": "Record whether a retrieved memory was useful."
+    },
+    "guide": {
+      "title": "Read the tool guide",
+      "description": "Read tool usage and response guidance."
+    },
+    "describe_tools": {
+      "title": "Discover tools",
+      "description": "Inspect tool descriptions and input schemas."
+    },
+    "list": {
+      "title": "List matching memories",
+      "description": "List memories matching exact filters."
+    },
+    "changes_since": {
+      "title": "Recent changes",
+      "description": "Read memory changes since a chosen time."
+    },
+    "bootstrap": {
+      "title": "Start a session",
+      "description": "Load pinned notes, upcoming items and recent changes."
+    },
+    "set_state": {
+      "title": "Save working state",
+      "description": "Store temporary agent run state."
+    },
+    "get_state": {
+      "title": "Read working state",
+      "description": "Read temporary agent run state."
+    },
+    "record_measurement": {
+      "title": "Record a measurement",
+      "description": "Append a numeric observation to a time series."
+    },
+    "recall_series": {
+      "title": "Read a measurement series",
+      "description": "Read and aggregate measurements over time."
+    },
+    "register_agent": {
+      "title": "Register an agent",
+      "description": "Register an AI agent in the workspace."
+    },
+    "list_agents": {
+      "title": "List agents",
+      "description": "List registered agents and their status."
+    },
+    "get_agent": {
+      "title": "Agent details",
+      "description": "Read a registered agent's settings."
+    },
+    "update_agent": {
+      "title": "Update an agent",
+      "description": "Change agent settings or lifecycle status."
+    },
+    "delete_agent": {
+      "title": "Delete an agent",
+      "description": "Delete an agent and its bound API keys."
+    },
+    "bind_agent_context": {
+      "title": "Bind an agent to a context",
+      "description": "Set an agent's context binding and access limits."
+    },
+    "list_agent_bindings": {
+      "title": "List agent bindings",
+      "description": "List an agent's context bindings."
+    },
+    "update_agent_binding": {
+      "title": "Update an agent binding",
+      "description": "Change the access limits of an agent binding."
+    },
+    "unbind_agent_context": {
+      "title": "Remove an agent binding",
+      "description": "Remove an agent's context binding."
+    },
+    "get_agent_bootstrap": {
+      "title": "Resume an agent",
+      "description": "Load notes, relevant memories, upcoming items and state."
+    },
+    "secret_register_pubkey": {
+      "title": "Register a recipient key",
+      "description": "Register a public key for receiving secrets."
+    },
+    "secret_put": {
+      "title": "Store an encrypted secret",
+      "description": "Store encrypted content and its recipients."
+    },
+    "secret_get": {
+      "title": "Fetch an encrypted secret",
+      "description": "Fetch encrypted content shared with you."
+    },
+    "secret_list": {
+      "title": "List secrets",
+      "description": "List secret names and sharing metadata."
+    },
+    "secret_revoke_grant": {
+      "title": "Revoke secret sharing",
+      "description": "Remove a recipient's access grant."
+    }
+  },
+  "sdkSetup": {
+    "title": "Install and connect an SDK",
+    "language": "SDK language",
+    "apiIntro": "Install the TypeScript or Python SDK to get started.",
+    "secretsIntro": "Install the packages for storing and retrieving encrypted secrets.",
+    "credentials": "Set your API key in the KAGURA_API_KEY environment variable before running the example.",
+    "copyInstall": "Copy install command",
+    "copyExample": "Copy connection example",
+    "apiExample": "Connection example — list contexts",
+    "secretExample": "Connection example — list secret metadata",
+    "startSecrets": "Get started with secrets",
+    "keySetup": {
+      "title": "Create and register an encryption key pair",
+      "typescript": "Provide a KeyStore backed by your OS keychain or secret manager to this function. It creates a key pair once and reuses it on subsequent runs.",
+      "python": "The first run creates a key pair and stores the private key in your OS keychain. Later runs reuse that key and register its public key.",
+      "approval": "After registration, the owner verifies the fingerprint under Recipient keys and approves the key. Secrets can then be shared with that recipient.",
+      "custody": "Keep the private key in your device keychain or secret manager for decryption. Avoid pasting it into chat, logs or Git. Register only the public key with the cloud.",
+      "copy": "Copy key-pair setup example"
+    }
+  },
+  "resourceSetup": {
+    "title": "Get started with resources over MCP",
+    "connectTitle": "1. Set up your MCP connection URL",
+    "connectHelp": "Choose a URL for the tools you need and set it in your MCP client.",
+    "copyUrl": "Copy MCP URL",
+    "refreshHelp": "After changing the URL, reconnect your client and refresh its tool list.",
+    "inspectTitle": "2. Example prompt — inspect resources",
+    "inspectPrompt": "I want to inspect resources in this workspace. Discover the available resource tools and explain how to check data sources, field schemas and usage.",
+    "createTitle": "3. Example prompt — prepare ingestion",
+    "createPrompt": "I want to create a resource named project-docs for project documents. Check the inputs for setup_resource and explain the new context's visibility and ingestion method. Ask me for the required information before creating it.",
+    "copyPrompt": "Copy example prompt",
+    "availability": "Creating a resource requires a supported plan and workspace owner or administrator access.",
+    "modeLabel": "Tools to enable",
+    "ingestionMode": "Data ingestion",
+    "fullMode": "All tools (full)",
+    "ingestionHelp": "Adds the same five tools as the Data ingestion preset on Overview.",
+    "fullHelp": "Enables every MCP tool, including resource tools."
   }
 }

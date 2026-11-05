@@ -53,8 +53,10 @@ import {
 } from "lucide-react";
 import { EmptyState } from "@/components/ui/empty-state";
 import { MaskedSecretField } from "@/components/common/MaskedSecretField";
+import { McpConnectionCard, McpReferenceLinks, DEFAULT_MCP_SETTINGS, type McpConnectionSettings } from "@/components/credentials/McpConnectionCard";
+import { SdkSetupGuide } from "@/components/credentials/SdkSetupGuide";
 import { MCPConfigBlock } from "@/components/credentials/MCPConfigBlock";
-import { mcpEndpoints } from "@/lib/mcp/url";
+import { mcpEndpoints, withFullProfile, withAdditionalTools } from "@/lib/mcp/url";
 import { useAutoOpenOnFreshWindow } from "@/hooks/useAutoOpenOnFreshWindow";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
@@ -139,6 +141,7 @@ export function canSetDefaultContext(apiKey: MemberAPIKey): boolean {
 
 export function APIKeysTabPanel() {
   const t = useTranslations("apiKeys");
+  const tMcp = useTranslations("mcpConnection");
   const tCommon = useTranslations("common");
   const tDefault = useTranslations("defaultContext");
   const locale = useLocale();
@@ -149,13 +152,22 @@ export function APIKeysTabPanel() {
 
   const userId = user?.id;
 
-  // The bare MCP endpoint for the key-bearing snippets. A workspace-scoped
-  // API key carries its own workspace, so no `/w/<id>` segment is needed
-  // (#1836); lib/mcp/url is the one place the URL is derived.
-  const { mcpUrl } = mcpEndpoints(
+  const [connection, setConnection] = useState<{
+    workspaceId: string | null;
+    settings: McpConnectionSettings;
+  } | null>(null);
+  const connectionSettings = connection?.workspaceId === currentWorkspaceId
+    ? connection.settings
+    : DEFAULT_MCP_SETTINGS;
+  const endpoints = mcpEndpoints(
     process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080",
-    null,
+    currentWorkspaceId,
   );
+  const selectedUrl = connectionSettings.pinToWorkspace && endpoints.pinnedUrl
+    ? endpoints.pinnedUrl : endpoints.mcpUrl;
+  const mcpUrl = connectionSettings.allTools
+    ? withFullProfile(selectedUrl)
+    : withAdditionalTools(selectedUrl, connectionSettings.additionalTools.join(","));
 
   const [credentials, setCredentials] = useState<MemberCredentials | null>(
     null,
@@ -772,8 +784,8 @@ export function APIKeysTabPanel() {
         <div className="space-y-4">
           {/* Key-bearing client snippets (Collapsible) — controlled state so
               the auto-open useEffect can react to fresh visibility windows
-              after credentials load asynchronously. The endpoint itself and
-              the OAuth paths live in McpConnectionCard above the tabs. */}
+              after credentials load asynchronously. URL settings feed both the
+              SDK examples and the client snippets below. */}
           <Collapsible
             className="border border-blue-200 dark:border-blue-800 rounded-lg"
             open={setupGuideOpen}
@@ -789,17 +801,27 @@ export function APIKeysTabPanel() {
                 aria-hidden="true"
               />
             </CollapsibleTrigger>
-            <CollapsibleContent className="p-4 bg-blue-50 dark:bg-blue-900/20">
+            <CollapsibleContent className="space-y-4 p-4 bg-blue-50 dark:bg-blue-900/20">
+              <McpConnectionCard
+                variant="summary"
+                title={tMcp("help.title")}
+                description={tMcp("help.apiDescription")}
+                settings={connectionSettings}
+                onSettingsChange={(settings) => setConnection({ workspaceId: currentWorkspaceId, settings })}
+              />
+              <SdkSetupGuide kind="api" mcpUrl={mcpUrl} />
               <MCPConfigBlock
                 apiKey={apiKeys[0] ?? null}
                 mcpUrl={mcpUrl}
-                includeOAuthCommand={false}
+                mcpBaseUrl={mcpUrl}
+                showToolSettings={false}
               />
+              <McpReferenceLinks />
             </CollapsibleContent>
           </Collapsible>
 
-          {/* Create API Key Button */}
-          <div>
+          {/* A populated list keeps its create action above the rows. */}
+          {apiKeys.length > 0 && <div>
             <ActionButton
               onClick={() => setShowCreateKeyDialog(true)}
               icon={<Plus className="w-4 h-4" />}
@@ -807,7 +829,7 @@ export function APIKeysTabPanel() {
             >
               {t("createApiKey")}
             </ActionButton>
-          </div>
+          </div>}
 
           {/* Key-clarity Phase 1: role-derived power, spelled out once per
               panel so the badge glossary is self-explanatory. */}
@@ -824,6 +846,7 @@ export function APIKeysTabPanel() {
             <EmptyState
               icon={Key}
               title={t("noKeysTitle")}
+              compact
               description={t("noKeysDesc")}
               actionLabel={t("createApiKey")}
               onAction={() => setShowCreateKeyDialog(true)}

@@ -11,7 +11,6 @@ export interface NavItem {
   requiredRole?: Role; // System admin role
   requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
   requiredFeature?: string | string[]; // Issue #1145: gate on GET /system/info features flag(s); every listed flag must be true (#1571)
-  existingObjectsFallback?: 'externalKeys'; // Issue #1616: a requiredFeature miss is overridden while the workspace already owns such objects
   planHint?: 'resources' | 'connectors' | 'team_invitations' | 'sleep_reports';
   disabled?: boolean; // Issue #115: Support for "Coming Soon" items
   showMemberCount?: boolean; // Issue #223: Show dynamic member count
@@ -147,14 +146,8 @@ export const navigationGroups: NavGroup[] = [
         href: "/workspace/integrations/external-keys",
         icon: KeyRound,
         requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #381: Owner-only (workspace-level secrets)
-        // Issue #1167: the BYOK console. With ENABLE_BYOK off only
-        // provisioning (create / update) 404s; list, toggle and delete stay
-        // open to the owner as a management console for keys stored earlier
-        // (#1613). Issue #1616: so the entry stays for a workspace that
-        // already stores a key, and is hidden only where it would be a
-        // dead end (no keys, no Add) — see the nav filter.
+        // The entry remains visible; the page explains a disabled deployment.
         requiredFeature: "byok",
-        existingObjectsFallback: "externalKeys",
       },
     ],
   },

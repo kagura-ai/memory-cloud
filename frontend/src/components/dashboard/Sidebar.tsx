@@ -353,14 +353,7 @@ export function Sidebar() {
           // Filter items based on user role
           const visibleItems = group.items.filter((item) => {
             if (item.requiredRole && !hasRole(user, item.requiredRole)) return false;
-            // Issue #1145: gate behind backend feature flag(s). Default-off:
-            // hidden while features load (null) and unless EVERY listed flag
-            // is true (#1571: the workspace cost entry needs byok AND
-            // cost_display). Issue #1616: an entry that declares an
-            // existing-objects fallback survives the miss while the
-            // workspace already owns such objects (External Keys: keys
-            // stored before BYOK was turned off). The fallback is pending
-            // (null) while flags load, so there is no flash-then-hide.
+            // Deployment-disabled features stay hidden until every required flag is enabled.
             const requiredFeatures =
               typeof item.requiredFeature === "string"
                 ? [item.requiredFeature]

@@ -20,6 +20,7 @@ import {
   waitFor,
   fireEvent,
   cleanup,
+  act,
 } from "@testing-library/react";
 
 import StoragePage from "./page";
@@ -120,6 +121,54 @@ afterEach(() => {
 // ---------- Tests ------------------------------------------------------------
 
 describe("StoragePage", () => {
+  it("keeps shared files available and retries failed context choices", async () => {
+    mockListFiles.mockResolvedValue([file()]);
+    mockGetContexts.mockRejectedValueOnce(new Error("Offline"))
+      .mockResolvedValueOnce({ contexts: [{ id: "ctx-1", name: "Private files" }], total: 1 });
+    render(<StoragePage />);
+    await screen.findByText("list.filter.fetchError");
+    expect(screen.getByText("report.pdf")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "retry" }));
+    await waitFor(() => expect(mockGetContexts).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("combobox", { name: "list.filter.label" }));
+    expect(await screen.findByRole("option", { name: "Private files" })).toBeVisible();
+    expect(screen.queryByText("list.filter.fetchError")).not.toBeInTheDocument();
+  });
+
+  it("clears load-more state when a deletion refresh supersedes it", async () => {
+    const rows = Array.from({ length: 50 }, (_,i) => file({ id: String(i), filename: "file-" + i + ".txt" }));
+    let resolveMore!: (value: FileObject[]) => void;
+    mockListFiles.mockResolvedValueOnce(rows)
+      .mockReturnValueOnce(new Promise<FileObject[]>(resolve => { resolveMore = resolve; }))
+      .mockResolvedValueOnce(rows.map(row => ({ ...row, filename: "refreshed-" + row.filename })));
+    mockDeleteFile.mockResolvedValue(undefined);
+    render(<StoragePage />);
+    await screen.findByText("file-0.txt");
+    fireEvent.click(screen.getByRole("button", { name: "list.loadMore" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "list.actions.delete" })[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "list.deleteDialog.confirm" }));
+    await screen.findByText("refreshed-file-0.txt");
+    await act(async () => resolveMore(rows));
+    expect(screen.getByRole("button", { name: "list.loadMore" })).toBeEnabled();
+    expect(screen.queryByText("file-0.txt")).not.toBeInTheDocument();
+  });
+
+  it("switches scope on the server and ignores a late previous-scope response", async () => {
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "ctx-1", name: "private", display_name: "Private files" }], total: 1 });
+    let resolveOld!: (value: FileObject[]) => void;
+    mockListFiles.mockReturnValueOnce(new Promise<FileObject[]>(resolve => { resolveOld = resolve; }));
+    mockListFiles.mockResolvedValueOnce([file({ id: "bound", filename: "private.txt", context_id: "ctx-1" })]);
+    render(<StoragePage />);
+    await waitFor(() => expect(mockGetContexts).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("combobox", { name: "list.filter.label" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Private files" }));
+    await screen.findByText("private.txt");
+    expect(mockListFiles).toHaveBeenLastCalledWith("ws-1", 50, { contextId: "ctx-1" });
+    await act(async () => resolveOld([file({ filename: "late-shared.txt" })]));
+    expect(screen.queryByText("late-shared.txt")).not.toBeInTheDocument();
+    expect(screen.getByText("private.txt")).toBeVisible();
+  });
+
   it("renders table rows from listFiles()", async () => {
     mockListFiles.mockResolvedValue([
       file(),
@@ -133,7 +182,7 @@ describe("StoragePage", () => {
     });
     expect(screen.getByText("notes.txt")).toBeInTheDocument();
     expect(screen.getByText("application/pdf")).toBeInTheDocument();
-    expect(mockListFiles).toHaveBeenCalledWith("ws-1", 50);
+    expect(mockListFiles).toHaveBeenCalledWith("ws-1", 50, { scope: "workspace" });
   });
 
   it("shows the context name for a bound file and the workspace label otherwise (#1136)", async () => {
@@ -154,7 +203,7 @@ describe("StoragePage", () => {
     // Context-bound file resolves to the context display name; the
     // workspace-scoped file shows the scope label.
     await waitFor(() => {
-      expect(screen.getByText("Secrets")).toBeInTheDocument();
+      expect(screen.getByRole("cell", { name: "Secrets" })).toBeInTheDocument();
     });
     expect(screen.getByText("list.scope.workspace")).toBeInTheDocument();
   });
@@ -403,7 +452,7 @@ describe("StoragePage", () => {
     fireEvent.click(screen.getByRole("button", { name: "list.loadMore" }));
 
     await waitFor(() => {
-      expect(mockListFiles).toHaveBeenCalledWith("ws-1", 100);
+      expect(mockListFiles).toHaveBeenCalledWith("ws-1", 100, { scope: "workspace" });
     });
   });
 
@@ -446,7 +495,7 @@ describe("StoragePage", () => {
     // While the second page is in flight, the already-loaded rows stay
     // mounted (the page must not fall back to the full skeleton).
     await waitFor(() => {
-      expect(mockListFiles).toHaveBeenCalledWith("ws-1", 100);
+      expect(mockListFiles).toHaveBeenCalledWith("ws-1", 100, { scope: "workspace" });
     });
     expect(screen.getByText("file-0.txt")).toBeInTheDocument();
     resolveSecond(fullPage);

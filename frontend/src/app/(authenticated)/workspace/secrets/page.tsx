@@ -26,6 +26,7 @@ import {
   RotateCw,
   Trash2,
 } from "lucide-react";
+import { SecretSetupGuide } from "@/components/credentials/SecretSetupGuide";
 import { PageContainer } from "@/components/common/PageContainer";
 import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { Section } from "@/components/common/Section";
@@ -272,6 +273,8 @@ export default function WorkspaceSecretsPage() {
         title={t("secretStore.title")}
         description={t("secretStore.description")}
       />
+
+      <SecretSetupGuide />
 
       {/* Hard invariant, surfaced to the operator: this console manages access
           only — it never shows secret values. Informational notice (not an
