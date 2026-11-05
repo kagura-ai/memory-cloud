@@ -2,7 +2,7 @@
 
 import { useEffect, type ReactNode } from "react";
 import { RoleGuidance } from "@/components/common/RoleGuidance";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -34,9 +34,10 @@ function Explanation({ title, description, children }: { title: string; descript
   return <PageContainer><PageHeader title={title} description={description} />{children}</PageContainer>;
 }
 
-function RestrictedRoute({ item, system, children }: {
-  item?: NavItem; system: boolean; children: ReactNode;
+function RestrictedRoute({ item, system, landing, children }: {
+  item?: NavItem; system: boolean; landing: boolean; children: ReactNode;
 }) {
+  const router = useRouter();
   const nav = useTranslations("sidebar");
   const t = useTranslations("featureAccess");
   const common = useTranslations("common");
@@ -46,9 +47,13 @@ function RestrictedRoute({ item, system, children }: {
   const required = item?.requiredWorkspaceRole;
   const flags = item?.requiredFeature ? [item.requiredFeature].flat() : [];
   const systemDenied = system && !hasRole(user, Role.ADMIN);
-  if (systemDenied) return <Explanation title={t("accessDenied")}><RoleGuidance required="systemAdmin" /></Explanation>;
   const missingRole = required && !hasWorkspaceRole(ws?.current_user_role, required) ? required : null;
-  if ((!system && (loading || !ws)) || (flags.length > 0 && !info)) {
+  // Landing here (sign-in, a link, a reload) is not a menu click: go where this
+  // role has data. A menu click still gets the explanation below.
+  const fallback = landing && !system && !loading && ws && missingRole ? item?.landingFallback : undefined;
+  useEffect(() => { if (fallback) router.replace(fallback); }, [fallback, router]);
+  if (systemDenied) return <Explanation title={t("accessDenied")}><RoleGuidance required="systemAdmin" /></Explanation>;
+  if (fallback || (!system && (loading || !ws)) || (flags.length > 0 && !info)) {
     return <SpinnerLoading message={common("loading")} />;
   }
 
@@ -79,10 +84,11 @@ function RestrictedRoute({ item, system, children }: {
   return <>{children}</>;
 }
 
-export function FeatureRouteBoundary({ children }: { children: ReactNode }) {
+/** `landing`: this route is the first one the signed-in app shows (see the layout). */
+export function FeatureRouteBoundary({ children, landing = false }: { children: ReactNode; landing?: boolean }) {
   const path = usePathname();
   const system = path === "/admin" || path.startsWith("/admin/");
   const item = navigationForPath(path);
   if (!system && !item?.requiredWorkspaceRole && !item?.requiredFeature) return <>{children}</>;
-  return <RestrictedRoute system={system} item={item}>{children}</RestrictedRoute>;
+  return <RestrictedRoute system={system} item={item} landing={landing}>{children}</RestrictedRoute>;
 }
