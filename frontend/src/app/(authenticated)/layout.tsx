@@ -60,6 +60,7 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
   const { workspaces, currentWorkspace, loading, loadFailed, switchWorkspace } =
     useWorkspace();
   // A stale or removed workspace must not silently send a billing action to another.
+  const { user } = useAuth();
   const needsSelection = workspaces.length > 0 && !workspaces.some(w => w.id === currentWorkspace?.id);
 
   // Pages that don't require an workspace. /workspace/settings is a
@@ -75,6 +76,16 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
   const isSystemRoute = pathname === "/admin" || pathname.startsWith("/admin/");
   const isPublicPage =
     pathname === "/pricing" || pathname === "/login" || pathname === "/";
+
+  const autoSelectId = needsSelection && !user?.current_workspace_id && workspaces.length === 1 &&
+    !isWorkspaceCreationPage && !isSystemRoute && !isPublicPage ? workspaces[0].id : null;
+
+  useEffect(() => {
+    if (autoSelectId && !loading && !loadFailed) {
+      // The provider blocks protected children until /auth/me confirms the switch.
+      void switchWorkspace(autoSelectId).catch(() => {});
+    }
+  }, [autoSelectId, loading, loadFailed, switchWorkspace]);
 
   useEffect(() => {
     // Wait for loading to complete
@@ -107,7 +118,7 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
   if (isSystemRoute) return <>{children}</>;
 
   // Always show loading spinner while checking workspaces (prevents flash of main page)
-  if (loading) {
+  if (loading || (autoSelectId && !loadFailed)) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 dark:bg-slate-900">
         <div className="h-10 w-10 rounded-full border-4 border-slate-200 border-t-slate-600 animate-spin" />

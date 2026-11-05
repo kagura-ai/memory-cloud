@@ -11,6 +11,7 @@
 
 import { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
+import { ApiError } from '@/lib/api/base';
 import { useAuth } from './AuthContext';
 import {
   listWorkspaces,
@@ -75,10 +76,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     if (switchingRef.current) return;
     switchingRef.current = true;
     setSwitching(true);
+    const previous = activeScope.current;
+    let switchAccepted = false;
     activeScope.current = null;
     ++generation.current; // Invalidate an older list response before sending the switch.
     try {
       await switchWorkspaceApi(workspaceId);
+      switchAccepted = true;
       const confirmed = await refetchUser();
       if (!confirmed || confirmed.id !== userId || confirmed.current_workspace_id !== workspaceId) {
         throw new Error("Could not verify the selected workspace");
@@ -87,6 +91,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       await refreshWorkspaces();
       router.refresh();
     } catch (error) {
+      // Only the switch response itself can prove the server kept the old scope.
+      if (!switchAccepted && previous?.workspaceId && error instanceof ApiError &&
+          [403, 404, 410].includes(error.status)) {
+        // Other tabs can change the account-wide selection while B is pending.
+        const identity = await refetchUser().catch(() => undefined);
+        if (identity?.id === previous.userId && identity.current_workspace_id === previous.workspaceId) {
+          activeScope.current = previous;
+          await refreshWorkspaces();
+          throw error;
+        }
+      }
       activeScope.current = null;
       // A lost response is ambiguous: the server may already have switched.
       ++generation.current;

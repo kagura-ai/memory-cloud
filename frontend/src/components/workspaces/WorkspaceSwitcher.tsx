@@ -50,8 +50,8 @@ export function WorkspaceSwitcher() {
     } catch (error) {
       console.error('Failed to switch workspace:', error);
       toast({
-        title: 'Error',
-        description: 'Failed to switch workspace',
+        title: t('switchFailed'),
+        description: error instanceof Error ? error.message : undefined,
         variant: 'destructive',
       });
     }

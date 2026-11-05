@@ -55,6 +55,8 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
+const mockSwitchWorkspace = vi.fn();
+let mockHasSelection = true;
 let mockWorkspaces: { id: string; current_user_role?: string }[] = [];
 // The app behind the gate — must not mount while the gate is up.
 vi.mock("@/contexts/WorkspaceContext", () => ({
@@ -63,9 +65,9 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   ),
   useWorkspace: () => ({
     workspaces: mockWorkspaces,
-    currentWorkspace: mockWorkspaces[0] ?? null,
+    currentWorkspace: mockHasSelection ? mockWorkspaces[0] ?? null : null,
     loading: false,
-    switchWorkspace: vi.fn(),
+    switchWorkspace: mockSwitchWorkspace,
   }),
 }));
 vi.mock("@/contexts/MemoryContextContext", () => ({
@@ -80,6 +82,8 @@ import DashboardLayout from "./layout";
 beforeEach(() => {
   mockRefetchUser.mockReset();
   mockLogout.mockReset();
+  mockSwitchWorkspace.mockReset().mockResolvedValue(undefined);
+  mockHasSelection = true;
   mockAcceptTerms.mockReset();
   mockPathname = "/workspace/dashboard";
   mockWorkspaces = [{ id: "w1", current_user_role: "member" }];
@@ -125,6 +129,15 @@ describe("(authenticated) layout — terms re-acceptance gate (#1665)", () => {
 
     await waitFor(() => expect(mockRefetchUser).toHaveBeenCalledTimes(1));
     expect(mockAcceptTerms).toHaveBeenCalledWith("2026-09");
+  });
+
+  it("confirms a sole membership automatically before rendering the page", async () => {
+    mockUser = { id: "u1", current_workspace_id: null };
+    mockHasSelection = false;
+    render(<DashboardLayout><p>protected page</p></DashboardLayout>);
+    await waitFor(() => expect(mockSwitchWorkspace).toHaveBeenCalledWith("w1"));
+    expect(screen.queryByText("selectWorkspace")).toBeNull();
+    expect(screen.queryByText("protected page")).toBeNull();
   });
 
   it("allows a system admin to open platform users without any workspace", async () => {
