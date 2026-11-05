@@ -8,7 +8,7 @@
  * realistic way to get a workspace back under its Free capacity.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { AlertTriangle } from "lucide-react";
 import {
@@ -90,6 +90,8 @@ interface BulkDeleteMemoriesDialogProps {
   onPartial?: (deleted: number) => void;
 }
 
+type DeleteTarget = Omit<ForgetBulkParams, "dry_run" | "cursor">;
+
 export function BulkDeleteMemoriesDialog({
   contextId,
   open,
@@ -99,13 +101,12 @@ export function BulkDeleteMemoriesDialog({
 }: BulkDeleteMemoriesDialogProps) {
   const t = useTranslations("contextDetail.bulkDelete");
   const [filters, setFilters] = useState<BulkDeleteFilters>(EMPTY);
-  const [matched, setMatched] = useState<number | null>(null);
-  /**
-   * When the count was taken (ISO). The delete is pinned to rows created
-   * before it, so memories saved after the user saw the count are not
-   * swept up by the confirm.
-   */
-  const [countedAt, setCountedAt] = useState<string | null>(null);
+  const pendingCount = useRef<DeleteTarget | null>(null);
+  const [preview, setPreview] = useState<{
+    target: DeleteTarget;
+    matched: number;
+  } | null>(null);
+  const matched = preview?.matched ?? null;
   const [busy, setBusy] = useState(false);
   /** Memories deleted so far by the current confirm (the server caps a request). */
   const [progress, setProgress] = useState<number | null>(null);
@@ -113,36 +114,84 @@ export function BulkDeleteMemoriesDialog({
   const [partial, setPartial] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  /** Drop a count still in flight; the dialog is free again at once. */
+  const discardPendingCount = () => {
+    if (pendingCount.current) {
+      pendingCount.current = null;
+      setBusy(false);
+    }
+  };
+
+  // A preview belongs to one context. A delete already running keeps its own
+  // captured target and its progress; only the count state is reset.
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
+    discardPendingCount();
+    setPreview(null);
+    setError(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [contextId]);
+
   const update = (key: keyof BulkDeleteFilters, value: string) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
     // A changed filter is a different set: the old count no longer applies.
-    setMatched(null);
+    discardPendingCount();
+    setPreview(null);
     setError(null);
   };
 
-  const run = async (dryRun: boolean) => {
+  const countMatches = async () => {
     const request = toForgetBulkFilters(filters);
     if (!request) {
       setError(t("needFilter"));
       return;
     }
+    // Pin both requests to the same normalized filters and time boundary.
+    const cutoff = new Date().toISOString();
+    const target: DeleteTarget = {
+      ...request,
+      context_id: contextId,
+      created_before: pinCreatedBefore(request.created_before, cutoff),
+    };
+    pendingCount.current = target;
+    setBusy(true);
+    setError(null);
+    setPartial(null);
+    try {
+      // A valid future range has no intersection with the cutoff. Don't send an
+      // inverted range to the API (it would 422 on created_after >= created_before); genuinely invalid user ranges still fail there.
+      if (
+        request.created_after &&
+        request.created_after >= cutoff &&
+        (!request.created_before || request.created_after < request.created_before)
+      ) {
+        setPreview({ target, matched: 0 });
+        return;
+      }
+      const res = await forgetBulk({ ...target, dry_run: true });
+      if (pendingCount.current === target) {
+        setPreview({ target, matched: res.matched ?? 0 });
+      }
+    } catch (err) {
+      if (pendingCount.current === target) {
+        setError(err instanceof Error ? err.message : t("failed"));
+      }
+    } finally {
+      // A superseded count must not unlock a newer count that is still pending.
+      if (pendingCount.current === target) {
+        pendingCount.current = null;
+        setBusy(false);
+      }
+    }
+  };
+
+  const deleteMatches = async () => {
+    if (!preview || preview.matched === 0) return;
     setBusy(true);
     setError(null);
     setPartial(null);
     let deleted = 0;
     try {
-      if (dryRun) {
-        const at = new Date().toISOString();
-        const res = await forgetBulk({
-          context_id: contextId,
-          ...request,
-          dry_run: true,
-        });
-        setMatched(res.matched ?? 0);
-        setCountedAt(at);
-        return;
-      }
-      const pinned = pinCreatedBefore(request.created_before, countedAt);
       // One request deletes at most 2,000 memories; repeat until none remain.
       // Each request resumes at the previous one's cursor, so rows this
       // member may not delete are not rescanned.
@@ -150,9 +199,7 @@ export function BulkDeleteMemoriesDialog({
       let cursor: string | undefined;
       for (;;) {
         const res = await forgetBulk({
-          context_id: contextId,
-          ...request,
-          ...(pinned ? { created_before: pinned } : {}),
+          ...preview.target,
           dry_run: false,
           ...(cursor ? { cursor } : {}),
         });
@@ -163,7 +210,7 @@ export function BulkDeleteMemoriesDialog({
       }
       onDeleted(deleted);
       setFilters(EMPTY);
-      setMatched(null);
+      setPreview(null);
     } catch (err) {
       // The error stays in the dialog (frontend.md: errors in a dialog body
       // are an Alert inside it). Batches that did delete are reported beside
@@ -171,7 +218,7 @@ export function BulkDeleteMemoriesDialog({
       setError(err instanceof Error ? err.message : t("failed"));
       if (deleted > 0) {
         setPartial(deleted);
-        setMatched(null);
+        setPreview(null);
         onPartial?.(deleted);
       }
     } finally {
@@ -184,7 +231,8 @@ export function BulkDeleteMemoriesDialog({
     if (busy) return;
     if (!next) {
       setFilters(EMPTY);
-      setMatched(null);
+      pendingCount.current = null;
+      setPreview(null);
       setError(null);
       setPartial(null);
     }
@@ -202,7 +250,7 @@ export function BulkDeleteMemoriesDialog({
           <DialogDescription>{t("description")}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-3 sm:grid-cols-2">
+        <fieldset className="grid gap-3 sm:grid-cols-2" disabled={progress !== null}>
           <div className="space-y-1">
             <Label htmlFor="bulk-delete-from">{t("from")}</Label>
             <Input
@@ -239,7 +287,7 @@ export function BulkDeleteMemoriesDialog({
               onChange={(e) => update("tags", e.target.value)}
             />
           </div>
-        </div>
+        </fieldset>
 
         {matched !== null && progress === null && (
           <p className="text-sm" role="status">
@@ -273,13 +321,13 @@ export function BulkDeleteMemoriesDialog({
             {t("cancel")}
           </Button>
           {matched === null ? (
-            <Button onClick={() => void run(true)} disabled={busy}>
+            <Button onClick={() => void countMatches()} disabled={busy}>
               {t("count")}
             </Button>
           ) : (
             <Button
               variant="destructive"
-              onClick={() => void run(false)}
+              onClick={() => void deleteMatches()}
               disabled={busy || matched === 0}
             >
               {t("confirm", { count: matched })}
