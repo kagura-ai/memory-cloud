@@ -57,6 +57,7 @@ from auth.workspace_roles import (
     WorkspaceRole,
 )
 from db.base import Base
+from db.constraint_names import CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE
 from models.json_types import NullableJSON
 from utils.datetime import utcnow
 from utils.public_id import PublicIdPrefix, public_id_column
@@ -2551,6 +2552,10 @@ class ContextMember(Base):
         Index("idx_context_members_context", "context_id"),
         Index("idx_context_members_user", "user_id"),
         CheckConstraint(CONTEXT_ROLE_CHECK_SQL, name="valid_context_member_role"),
+        # #2639: documented above but only enforced since migration f22. The
+        # add route checks then inserts, so two concurrent adds of one user
+        # could both insert; the second now fails at commit.
+        UniqueConstraint("context_id", "user_id", name=CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE),
     )
 
     def __repr__(self) -> str:
