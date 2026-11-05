@@ -15,6 +15,10 @@ This script:
    matching by storage key shape ``{workspace_id}/legacy/{attachment_id}/{filename}``.
 4. Logs a per-row result and accumulates totals.
 
+Duplicate bytes (#2649): each legacy attachment keeps its own file row and R2 key.
+Equal hashes may belong to different contexts and have independent lifetimes.
+Dry-run logs groups of pending attachments with identical bytes in a workspace.
+
 Context binding (#2647): the ``file_objects`` row gets the parent memory's
 ``context_id``. A NULL ``context_id`` means workspace-shared (every workspace
 member can list and download the file), so it is kept only for a memory
@@ -80,7 +84,7 @@ from uuid import UUID
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import get_db
@@ -217,6 +221,31 @@ async def migrate_all(db: AsyncSession, *, dry_run: bool, batch_size: int) -> di
     """Walk all attachments in pages of ``batch_size`` and migrate each one."""
     counts = {"migrated": 0, "skipped": 0, "dry_run": 0, "failed": 0}
     last_id: UUID | None = None
+
+    if dry_run:
+        duplicates = await db.execute(
+            text("""
+            SELECT m.workspace_id, encode(sha256(a.data), 'hex') AS digest,
+                   array_agg(a.id ORDER BY a.id) AS attachment_ids
+            FROM attachments a JOIN memories m ON m.id = a.memory_id
+            LEFT JOIN contexts c ON c.id = m.context_id
+            WHERE m.workspace_id IS NOT NULL AND m.deleted_at IS NULL
+              AND (m.context_id IS NULL OR (c.id IS NOT NULL AND c.deleted_at IS NULL))
+              AND NOT EXISTS (
+                  SELECT 1 FROM file_objects f WHERE f.storage_key =
+                    m.workspace_id || '/legacy/' || a.id || '/' || a.filename
+              )
+            GROUP BY m.workspace_id, sha256(a.data)
+            HAVING count(*) > 1
+        """)
+        )
+        for workspace_id, digest, attachment_ids in duplicates:
+            logger.info(
+                "attachment_migration_duplicate_bytes",
+                workspace_id=str(workspace_id),
+                sha256=digest,
+                attachment_ids=[str(value) for value in attachment_ids],
+            )
 
     while True:
         result = await db.execute(_page_query(batch_size, last_id))
