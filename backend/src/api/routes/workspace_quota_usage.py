@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.routes.usage import CurrentUsage, PlanLimits, QuotaUsage
 from auth.analysis_gates import _get_user_timezone
 from auth.resource_tokens import workspace_regular_active_tokens
-from config.plan_tiers import get_plan_tier
+from config.plan_tiers import get_plan_tier, has_feature
 from config.settings import get_settings
 from models.auth import Context, Workspace, WorkspaceInvitation, WorkspaceMember
 from models.config import ContextSearchConfig
@@ -92,6 +92,10 @@ async def build_workspace_quota_usage(
     storage = await get_current_storage_usage(workspace_id, db)
     timezone = await _get_user_timezone(db, user_id)
     analyses = await get_today_analysis_count(db, workspace_id=workspace_id, user_timezone=timezone)
+    # Below XL these caps only serve objects that already exist; creating new
+    # ones is refused by the same feature checks (#1551).
+    creates_connectors = has_feature(workspace.plan_name, "connectors")
+    creates_resources = has_feature(workspace.plan_name, "resources")
 
     meters = [
         QuotaUsage(
@@ -133,17 +137,20 @@ async def build_workspace_quota_usage(
             used=counts.connectors,
             limit=workspace.effective_max_connectors,
             bonus=max(0, workspace.effective_max_connectors - tier.max_connectors),
+            creation_included=creates_connectors,
         ),
         QuotaUsage(
             id="resource_tokens",
             used=tokens.token_count,
             limit=workspace.effective_max_resource_tokens,
+            creation_included=creates_resources,
         ),
         QuotaUsage(
             id="resource_capacity",
             used=tokens.capacity,
             limit=workspace.effective_max_resource_tokens * 10000,
             period="hour",
+            creation_included=creates_resources,
         ),
         QuotaUsage(
             id="analysis",

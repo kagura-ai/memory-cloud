@@ -9,6 +9,32 @@ import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useRouter } from "next/navigation";
 import type { QuotaUsage } from "@/lib/api/usage";
 
+// The owner-only seat and the single Free context are full by design: the
+// meter shows them with its own plan link, the quota notice leaves them out.
+const STRUCTURAL_CAP_METERS = new Set(["members", "contexts"]);
+
+export function isStructuralCap(meter: QuotaUsage): boolean {
+  return STRUCTURAL_CAP_METERS.has(meter.id) && meter.limit === 1 && meter.used === 1;
+}
+
+function MeterPlanAction() {
+  const t = useTranslations("usageStats");
+  const canUpgrade = useCanUpgrade();
+  const features = useSystemFeatures();
+  const router = useRouter();
+  if (canUpgrade === true) {
+    return (
+      <Button variant="link" size="sm" className="h-auto p-0" onClick={() => router.push("/workspace/settings/plan")}>
+        {t("reviewPlan")}
+      </Button>
+    );
+  }
+  if (canUpgrade === false && features?.plan_page === true) {
+    return <p className="text-xs text-muted-foreground">{t("askOwner")}</p>;
+  }
+  return null;
+}
+
 export function QuotaNotice({ meters, onViewUsage }: { meters: QuotaUsage[]; onViewUsage?: () => void }) {
   const t = useTranslations("usageStats");
   const canUpgrade = useCanUpgrade();
@@ -17,6 +43,7 @@ export function QuotaNotice({ meters, onViewUsage }: { meters: QuotaUsage[]; onV
   // A zero allowance with usage (objects kept after a downgrade) is over the
   // limit: it has no percentage, so it is named with the no-allowance text.
   const nearing = meters.filter(meter =>
+    !isStructuralCap(meter) &&
     meter.scope === "workspace" && meter.unit !== "usd" && meter.used !== null &&
     meter.limit !== null && meter.limit >= 0 &&
     (meter.limit > 0 ? meter.used / meter.limit >= 0.8 : meter.used > 0)
@@ -83,7 +110,9 @@ export function QuotaOverview({ meters }: { meters: QuotaUsage[] }) {
                     {meter.limit === 0 ? t("quotaNotIncluded") : percentage === null ? t("quotaNoPercentage") : t("percentUsed", { percent: percentage.toFixed(1) })}
                     {meter.bonus > 0 && " · " + t("quotaBonus", { amount: format(meter.bonus, meter.unit) })}
                   </p>
+                  {meter.creation_included === false && <p className="text-xs text-muted-foreground">{t("quotaCreationNotIncluded")}</p>}
                   {meter.id === "members" && <p className="text-xs text-muted-foreground">{t("includesInvitations")}</p>}
+                  {isStructuralCap(meter) && <MeterPlanAction />}
                   {meter.id === "bound_key_rate" && <p className="text-xs text-muted-foreground">{t("perKeyHelp")}</p>}
                 </div>
               );

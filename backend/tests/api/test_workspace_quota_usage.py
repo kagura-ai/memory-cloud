@@ -108,6 +108,25 @@ async def test_effective_limits_and_all_meter_dimensions(dependencies):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("plan_name", "creates"), [("basic", False), ("promax", True)])
+async def test_xl_only_meters_say_whether_creation_is_included(dependencies, plan_name, creates):
+    """Below XL the connector / resource caps only serve existing objects (#1551)."""
+    workspace = Workspace(id=uuid4(), plan_name=plan_name)
+    plan, usage, tier = payload(workspace)
+    result = {
+        m.id: m
+        for m in await meters.build_workspace_quota_usage(
+            dependencies, workspace, "user", usage, plan
+        )
+    }
+    for meter_id in ("connectors", "resource_tokens", "resource_capacity"):
+        assert result[meter_id].creation_included is creates
+    # The retained-object cap stays visible either way.
+    assert result["connectors"].limit == tier.max_connectors > 0
+    assert result["memories"].creation_included is True
+
+
+@pytest.mark.asyncio
 async def test_ungated_context_features_have_no_ceiling(dependencies, monkeypatch):
     workspace = Workspace(id=uuid4(), plan_name="free", addon_context_bonus=9)
     monkeypatch.setattr(meters, "content_chunks_gated", lambda: False)

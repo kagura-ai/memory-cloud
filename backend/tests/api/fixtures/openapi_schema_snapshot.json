@@ -7928,6 +7928,10 @@
             ],
             "default": 0
           },
+          "creation_included": {
+            "default": true,
+            "type": "boolean"
+          },
           "id": {
             "type": "string"
           },

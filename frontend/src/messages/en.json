@@ -2293,6 +2293,7 @@
     "quotaLimitOnly": "Limit ",
     "quotaUnlimited": "No configured limit",
     "quotaNotIncluded": "No allowance on the current plan",
+    "quotaCreationNotIncluded": "Creation is not included in your plan",
     "quotaNoPercentage": "Usage percentage does not apply",
     "quotaBonus": "Includes +{amount} extra",
     "includesInvitations": "Includes unexpired invitations.",

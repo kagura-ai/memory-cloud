@@ -50,6 +50,31 @@ describe("quota dashboard", () => {
     expect(summary.textContent).not.toContain(ja.usageStats.quotaLabels.analysis);
     expect(document.body.textContent).not.toMatch(/NaN|Infinity/);
   });
+  it("leaves caps that are full by design out of the notice but keeps a real limit in it", () => {
+    const freeSeats = [meter({id: "members", used: 1, limit: 1}), meter({id: "contexts", used: 1, limit: 1})];
+    const { unmount } = show(<QuotaNotice meters={freeSeats} />);
+    expect(screen.queryByText(ja.usageStats.quotaReached)).toBeNull();
+    expect(screen.queryByRole("button", {name: ja.usageStats.reviewPlan})).toBeNull();
+    unmount();
+    show(<QuotaNotice meters={[...freeSeats, meter({used: 100, limit: 100})]} />);
+    expect(screen.getByText(ja.usageStats.quotaReached)).toBeInTheDocument();
+    const summary = screen.getByText(new RegExp(ja.usageStats.quotaLabels.memories));
+    expect(summary.textContent).not.toContain(ja.usageStats.quotaLabels.members);
+  });
+  it("keeps the plan link on a meter that is full by design", () => {
+    show(<QuotaOverview meters={[meter({id: "members", used: 1, limit: 1}), meter({id: "contexts", used: 1, limit: 3})]} />);
+    expect(screen.queryByText(ja.usageStats.quotaReached)).toBeNull();
+    expect(screen.getAllByRole("button", {name: ja.usageStats.reviewPlan})).toHaveLength(1);
+    expect(screen.getByRole("heading", {name: ja.usageStats.quotaLabels.members})).toBeInTheDocument();
+  });
+  it("notes that a below-XL plan only serves existing connectors", () => {
+    const { unmount } = show(<QuotaOverview meters={[meter({id: "connectors", used: 0, limit: 3, creation_included: false})]} />);
+    expect(screen.getByText(ja.usageStats.quotaCreationNotIncluded)).toBeInTheDocument();
+    expect(screen.getByText(/0 \/ 3/)).toBeInTheDocument();
+    unmount();
+    show(<QuotaOverview meters={[meter({id: "connectors", used: 0, limit: 50, creation_included: true})]} />);
+    expect(screen.queryByText(ja.usageStats.quotaCreationNotIncluded)).toBeNull();
+  });
   it("does not apply workspace upgrade guidance to account or spending limits", () => {
     show(<QuotaNotice meters={[meter({scope:"account"}), meter({unit:"usd"})]} />);
     expect(screen.queryByRole("alert")).toBeNull();

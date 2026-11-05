@@ -223,6 +223,13 @@ class QuotaUsage(BaseModel):
     unit: Literal["count", "bytes", "usd"] = "count"
     scope: Literal["workspace", "account", "api_key"] = "workspace"
     period: Literal["current", "day", "week", "month", "minute", "hour"] = "current"
+    creation_included: bool = Field(
+        default=True,
+        description=(
+            "False when the plan keeps serving existing objects up to the limit "
+            "but does not allow creating new ones (XL-only features, #1551)"
+        ),
+    )
 
 
 class UsageCurrentResponse(BaseModel):
