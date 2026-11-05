@@ -14,7 +14,7 @@
     "searchFailed": "Couldn’t search this context. Check your access or try again.",
     "noHits": "No memories matched. Try another phrase or context.",
     "noContexts": "You can connect a client now. Ask your workspace owner to share a context so you can search its memories.",
-    "practice": "Open the private practice guide",
+    "practice": "Open the practice guide",
     "skip": "Skip for now",
     "help": {
       "search": {
