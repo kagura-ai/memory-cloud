@@ -4,7 +4,7 @@ import asyncio
 import json
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from pydantic import BaseModel, Field, SecretStr
 from redis.exceptions import RedisError
 from sqlalchemy import select
@@ -26,6 +26,7 @@ from utils.exceptions import (
     AuthenticationError,
     ConflictError,
     CurrentPasswordMismatchError,
+    MemoryCloudException,
     RateLimitError,
 )
 from utils.hashing import sha256_hex
@@ -76,7 +77,9 @@ async def _check_password(account: User, password: SecretStr) -> None:
 
 def _manager():
     if not auth._session_manager:
-        raise HTTPException(503, "Session store unavailable")
+        raise MemoryCloudException(
+            "Session store unavailable", status_code=503, error_code="AUTH-304"
+        )
     return auth._session_manager
 
 
