@@ -1,6 +1,7 @@
 """Self-service MFA enrollment and single-use recovery codes (#2644)."""
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 
 from alembic import op
 
@@ -12,7 +13,7 @@ depends_on = None
 
 def upgrade() -> None:
     op.add_column("users", sa.Column("mfa_generation", sa.String(32)))
-    op.add_column("users", sa.Column("totp_recovery_hashes", sa.JSON()))
+    op.add_column("users", sa.Column("totp_recovery_hashes", JSONB()))
 
 
 def downgrade() -> None:
