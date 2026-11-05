@@ -684,12 +684,21 @@ async def attachment_erasure_triggers(async_engine, db_session):
 async def test_erased_memory_reclaims_migrated_file(
     db_session, patched, fake_storage, attachment_erasure_triggers, legacy_shared
 ):
+    from api.routes.admin import delete_user
     from models.file_objects import WorkspaceStorageUsage
     from services.storage_cleanup import drain_storage_deletions
+    from tests.integration._admin_helpers import make_user, mock_admin
 
     ws = await _workspace(db_session)
     private = await _context(db_session, ws)
     memory, att = await _attachment(db_session, ws, private)
+    target = make_user()
+    target_id = target.user_id
+    db_session.add(target)
+    await db_session.execute(update(Memory).where(Memory.id == memory).values(user_id=target_id))
+    await db_session.execute(
+        update(Context).where(Context.id == private).values(created_by=target_id)
+    )
     await db_session.commit()
     await mig.migrate_all(db_session, dry_run=False, batch_size=1)
     if legacy_shared:
@@ -704,9 +713,14 @@ async def test_erased_memory_reclaims_migrated_file(
     await db_session.execute(delete(Memory).where(Memory.id == memory))
     await db_session.rollback()
     assert len(await _file_rows(db_session, ws)) == 1
-    await db_session.execute(delete(Memory).where(Memory.id == memory))
-    await db_session.execute(delete(Context).where(Context.id == private))
-    await db_session.commit()
+    if legacy_shared:
+        # The admin erasure path must also find pre-context-binding rows.
+        with patch("services.user_deletion_service.finish_user_deletion", AsyncMock()):
+            await delete_user(target_id, mock_admin(), db_session)
+        assert await db_session.scalar(select(Context.id).where(Context.id == private)) is None
+    else:
+        await db_session.execute(delete(Memory).where(Memory.id == memory))
+        await db_session.commit()
     assert await _file_rows(db_session, ws) == []
     usage = await db_session.get(WorkspaceStorageUsage, ws)
     assert (usage.used_bytes, usage.file_count) == (0, 0)
