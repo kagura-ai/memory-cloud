@@ -506,10 +506,10 @@ export default function ProfilePage() {
       <section id="profile-linked-accounts" tabIndex={-1} aria-label={t("sections.linkedAccounts")} className="scroll-mt-24"><LinkedAccounts /></section>
 
       {/* Password (Issue #1678): set up / change / remove. */}
-      <PasskeySettings key={user?.id} onAvailabilityChange={setHasPasskey} />
+      <PasskeySettings key={`passkeys-${user?.id}`} onAvailabilityChange={setHasPasskey} />
       <section id="profile-password" tabIndex={-1} aria-label={t("sections.password")} className="scroll-mt-24"><PasswordSettings hasPasskey={hasPasskey} providersVersion={providersVersion} /></section>
 
-      <MfaSettings key={user?.id} />
+      <MfaSettings key={`mfa-${user?.id}`} />
 
       {/* Theme & Appearance */}
       <Card id="profile-appearance" tabIndex={-1} aria-label={t("sections.appearance")} className="scroll-mt-24">
