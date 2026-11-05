@@ -581,6 +581,7 @@ class TestAuthMe:
             auth_method="oauth",
             auth_provider="google",
             password_hash=None,
+            totp_enabled=False,
             is_initial_admin=False,
         )
         db = MagicMock()
