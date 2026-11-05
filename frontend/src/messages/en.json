@@ -4662,7 +4662,9 @@
   },
   "gate": {
     "plan": {
-      "askOwner": "Ask your workspace owner to review the available plans.",
+      "askOwner": "Ask your workspace owner to upgrade to the {plan} plan.",
+      "askOwnerDescription": "Ask your workspace owner to upgrade to the {plan} plan to use {feature}.",
+      "askOwnerHint": "Ask your workspace owner to upgrade to the {plan} plan",
       "title": "The {plan} plan includes {feature}",
       "description": "Upgrade to the {plan} plan to use {feature}.",
       "newTitle": "New {feature} require the {plan} plan",

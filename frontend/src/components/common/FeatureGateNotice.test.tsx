@@ -241,7 +241,7 @@ const BRANCHES: readonly Branch[] = [
           "リソース を利用するには XL プランにアップグレードしてください。",
         action: "プランを見る",
         badge: "XL プラン",
-        hint: "XLプランで利用できます",
+        hint: "XL プランで利用できます",
       },
     },
   },
@@ -264,7 +264,7 @@ const BRANCHES: readonly Branch[] = [
           "既存の リソース は引き続き利用できます。新規 リソース の作成には XL プランが必要です。",
         action: "プランを見る",
         badge: "XL プラン",
-        hint: "XLプランで利用できます",
+        hint: "XL プランで利用できます",
       },
     },
   },
@@ -1054,4 +1054,41 @@ describe("GATE_NOUN_FORM", () => {
       }
     },
   );
+});
+
+// ── A member who cannot upgrade gets one instruction (#2630) ───────────────
+
+describe("featureGateText for a member who must ask the owner", () => {
+  const member = (scope: FeatureGateScope) =>
+    featureGateText(
+      gateOf({ state: "plan", planLabel: "XL", requiredPlan: "xl", askOwner: true }),
+      gateT("en"),
+      scope,
+    );
+
+  it("replaces the upgrade sentence instead of adding to it", () => {
+    const text = member("all");
+    expect(text?.description).toBe(
+      "Ask your workspace owner to upgrade to the XL plan to use resources.",
+    );
+    expect(text?.hint).toBe("Ask your workspace owner to upgrade to the XL plan");
+    expect(text?.action).toBeNull();
+  });
+
+  it("keeps the existing-objects sentence and asks the owner on a create gate", () => {
+    expect(member("create")?.description).toBe(
+      "Existing resources keep working. Creating new resources is available on the XL plan. Ask your workspace owner to upgrade to the XL plan.",
+    );
+  });
+
+  it("reads the same way in Japanese", () => {
+    const text = featureGateText(
+      gateOf({ state: "plan", planLabel: "XL", requiredPlan: "xl", askOwner: true }),
+      gateT("ja"),
+    );
+    expect(text?.description).toBe(
+      "リソース を利用するには、XL プランへのアップグレードをワークスペースのオーナーに依頼してください。",
+    );
+    expect(text?.hint).toBe("XL プランへのアップグレードはワークスペースのオーナーに依頼してください");
+  });
 });
