@@ -67,6 +67,13 @@ Usage:
     python backend/scripts/migrate_attachments_to_r2.py --batch-size 100
     python backend/scripts/migrate_attachments_to_r2.py --repair-context --dry-run
     python backend/scripts/migrate_attachments_to_r2.py --repair-context
+    python backend/scripts/migrate_attachments_to_r2.py --purge-orphans --dry-run
+    python backend/scripts/migrate_attachments_to_r2.py --purge-orphans
+
+Orphan purge (#2650) lists file id, workspace and size before apply. The
+source marker must contain a canonical attachment UUID. Finish any pre-f24
+copy job before running the final inventory. Apply erases its
+registry row and queues the R2 key for the normal storage deletion worker.
 """
 
 from __future__ import annotations
@@ -202,6 +209,10 @@ async def _migrate_one(
             context_id=row.context_id,
         )
     except NotFoundException as exc:
+        if str(exc) == str(NotFoundException("attachment", str(row.attachment_id))):
+            await db.rollback()
+            logger.info("attachment_skip_missing_source", attachment_id=str(row.attachment_id))
+            return "skipped"
         # The context went after the page was read: migrate_attachment re-checks
         # it under a lock before writing bytes. Any other miss is a failure.
         if row.context_id is None or str(exc) != str(
@@ -419,10 +430,64 @@ async def repair_context_bindings(
     return counts
 
 
-async def run(*, dry_run: bool, batch_size: int, repair_context: bool = False) -> dict[str, int]:
+async def purge_orphans(db: AsyncSession, *, dry_run: bool, batch_size: int) -> dict[str, int]:
+    """Drain legacy copies whose canonical source no longer exists, in bounded transactions."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    last_id: UUID | None = None
+    count = 0
+    while True:
+        # Only cast canonical identifiers. Malformed operator data is left
+        # untouched, never interpreted as evidence of an erased attachment.
+        query = """
+            SELECT f.id, f.workspace_id, f.size_bytes
+            FROM file_objects f
+            WHERE f.created_by LIKE 'migration:attachment:%'
+              AND f.created_by ~ '^migration:attachment:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+              AND (CAST(:last_id AS uuid) IS NULL OR f.id > CAST(:last_id AS uuid))
+              AND NOT EXISTS (
+                  SELECT 1 FROM attachments a
+                  JOIN memories m ON m.id = a.memory_id
+                  LEFT JOIN contexts c ON c.id = m.context_id
+                  WHERE a.id = CASE WHEN f.created_by ~
+                      '^migration:attachment:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+                      THEN split_part(f.created_by, ':', 3)::uuid END
+                    AND (m.context_id IS NULL OR c.id IS NOT NULL)
+              )
+            ORDER BY f.id LIMIT :limit
+        """
+        if not dry_run:
+            query += " FOR UPDATE OF f"
+        rows = (await db.execute(text(query), {"last_id": last_id, "limit": batch_size})).all()
+        if not rows:
+            break
+        last_id = rows[-1].id
+        for row in rows:
+            logger.info(
+                "attachment_orphan_purge",
+                dry_run=dry_run,
+                file_id=str(row.id),
+                workspace_id=str(row.workspace_id),
+                size_bytes=row.size_bytes,
+            )
+        if not dry_run:
+            await db.execute(
+                text("SELECT erase_migrated_attachment_files(CAST(:ids AS uuid[]))"),
+                {"ids": [row.id for row in rows]},
+            )
+            await db.commit()
+        count += len(rows)
+    return {"orphan": count}
+
+
+async def run(
+    *, dry_run: bool, batch_size: int, repair_context: bool = False, purge: bool = False
+) -> dict[str, int]:
     """Open one session and run the migration, or the repair with ``repair_context``."""
     async with aclosing(get_db()) as sessions:
         async for db in sessions:
+            if purge:
+                return await purge_orphans(db, dry_run=dry_run, batch_size=batch_size)
             if repair_context:
                 return await repair_context_bindings(db, dry_run=dry_run, batch_size=batch_size)
             return await migrate_all(db, dry_run=dry_run, batch_size=batch_size)
@@ -442,7 +507,11 @@ def _parse_args() -> argparse.Namespace:
         default=50,
         help="Rows per page (default: 50)",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--purge-orphans", action="store_true", help="Reclaim copies of erased attachments"
+    )
+    mode.add_argument(
         "--repair-context",
         action="store_true",
         help=(
@@ -460,6 +529,7 @@ def main() -> int:
             dry_run=args.dry_run,
             batch_size=args.batch_size,
             repair_context=args.repair_context,
+            purge=args.purge_orphans,
         )
     )
     if counts.get("failed", 0) > 0:

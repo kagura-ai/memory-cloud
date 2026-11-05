@@ -127,6 +127,14 @@ async def drain_storage_deletions(
         else:
             try:
                 await storage.delete_object(key)
+                # A DB cascade can erase migrated files without passing through
+                # the application quota service. The same durable job retries
+                # both steps; never decrement twice or create a missing key.
+                workspace, _, suffix = key.partition("/")
+                if suffix.startswith("legacy/") and _managed_object_key(key):
+                    from services.storage_quota_service import expire_erased_attachment_quota
+
+                    await expire_erased_attachment_quota(UUID(workspace))
             except Exception as exc:  # noqa: BLE001 - durable retry, no key/exception text
                 counts["failed"] += 1
                 logger.warning("storage_cleanup_failed", error_class=type(exc).__name__)

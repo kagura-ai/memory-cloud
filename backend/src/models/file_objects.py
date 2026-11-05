@@ -144,6 +144,11 @@ class FileObject(Base):
                 "deleted_at IS NULL AND status <> 'failed' AND created_by NOT LIKE 'migration:attachment:%'"
             ),
         ),
+        Index(
+            "ix_file_objects_legacy_creator",
+            "created_by",
+            postgresql_where="created_by LIKE 'migration:attachment:%'",
+        ),
         # Orphan sweep helper: only matters for in-flight reservations.
         Index(
             "idx_file_objects_reserved_expires",

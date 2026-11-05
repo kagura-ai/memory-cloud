@@ -45,6 +45,7 @@ from sqlalchemy.orm import aliased
 from config.settings import get_settings
 from models.auth import Context, Workspace
 from models.file_objects import FileObject, WorkspaceStorageUsage
+from models.memory import Attachment
 from services import storage_quota_service
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.permission_service import PermissionService
@@ -805,6 +806,15 @@ class FileStorageService:
             )
             if context_live is None:
                 raise NotFoundException("context", str(context_id))
+        # Serialize with DELETE (including a cascading memory purge). If the
+        # source disappeared since the page read, never write the R2 object.
+        source = await self.db.scalar(
+            select(Attachment.id)
+            .where(Attachment.id == attachment_id)
+            .with_for_update(read=True, key_share=True)
+        )
+        if source is None:
+            raise NotFoundException("attachment", str(attachment_id))
         await lock_storage_key(self.db, storage_key)
         existing = await self.db.execute(
             select(FileObject).where(FileObject.storage_key == storage_key)
