@@ -10,6 +10,7 @@
 
 import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { ApiError } from "@/lib/api/base";
 import type { User } from "@/lib/auth/auth";
 import { WorkspaceProvider, useWorkspace } from "./WorkspaceContext";
 
@@ -126,6 +127,29 @@ describe("WorkspaceProvider reload trigger", () => {
     const page = renderProvider();
     await waitFor(() => expect(page.getByTestId("loadFailed").textContent).toBe("true"));
     expect(page.getByTestId("ws").textContent).toBe("none");
+  });
+
+  it.each([403, 404, 410])("retains A and refreshes memberships when B refuses the switch (%i)", async status => {
+    authHolder.current.refetchUser.mockResolvedValueOnce(baseUser);
+    mockSwitch.mockRejectedValueOnce(new ApiError({ status, message: "Membership removed" }));
+    mockListWorkspaces.mockResolvedValueOnce(workspaces).mockResolvedValueOnce([workspaces[0]]);
+    const page = renderProvider();
+    await waitFor(() => expect(page.getByTestId("ws")).toHaveTextContent("w1"));
+    fireEvent.click(page.getByRole("button", { name: "switch" }));
+    await waitFor(() => expect(mockListWorkspaces).toHaveBeenCalledTimes(2));
+    expect(page.getByTestId("loadFailed")).toHaveTextContent("false");
+    expect(page.getByTestId("ws")).toHaveTextContent("w1");
+    expect(authHolder.current.refetchUser).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed if another tab selected C before B refused the switch", async () => {
+    mockSwitch.mockRejectedValueOnce(new ApiError({ status: 403, message: "Membership removed" }));
+    authHolder.current.refetchUser.mockResolvedValueOnce({ ...baseUser, current_workspace_id: "w3" });
+    const page = renderProvider();
+    await waitFor(() => expect(page.getByTestId("ws")).toHaveTextContent("w1"));
+    fireEvent.click(page.getByRole("button", { name: "switch" }));
+    await waitFor(() => expect(page.getByTestId("loadFailed")).toHaveTextContent("true"));
+    expect(page.getByTestId("ws")).toHaveTextContent("none");
   });
 
   it.each(["switch response lost", "identity unavailable"])("fails closed: %s", async (failure) => {
