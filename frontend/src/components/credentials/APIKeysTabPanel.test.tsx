@@ -83,13 +83,14 @@ vi.mock("@/hooks/useCopyFeedback", () => ({
   useCopyFeedback: () => ({ isCopied: () => false, copyToTarget: vi.fn() }),
 }));
 
-vi.mock("@/hooks/useAutoOpenOnFreshWindow", () => ({
-  useAutoOpenOnFreshWindow: () => [false, vi.fn()],
-}));
+vi.mock("@/hooks/useAutoOpenOnFreshWindow", async () => {
+  const { useState } = await import("react");
+  return { useAutoOpenOnFreshWindow: () => useState(false) };
+});
 
-// MCPConfigBlock is unrelated to the table behavior under test.
+// Keep the URL contract visible without rendering every client configuration.
 vi.mock("@/components/credentials/MCPConfigBlock", () => ({
-  MCPConfigBlock: () => null,
+  MCPConfigBlock: ({ mcpUrl }: { mcpUrl: string }) => <code data-testid="client-url">{mcpUrl}</code>,
 }));
 
 // #2384: a create refusal's gate renders through useErrorGate +
@@ -909,5 +910,29 @@ describe("selected-row regeneration (#2379)", () => {
     await waitFor(() =>
       expect(mockRegenerate).toHaveBeenCalledWith("ws-1", "user-1", clickedId),
     );
+  });
+});
+
+describe("API key connection setup", () => {
+  it("uses one URL for settings, SDK examples and client snippets, preserving it when collapsed", async () => {
+    mockGetMemberCredentials.mockResolvedValue({ api_keys: [], target_user_role: "owner" });
+    render(<APIKeysTabPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /mcpSetupGuide/ }));
+    expect(screen.getByRole("heading", { name: "help.title" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "quickStart.toolSettings" }));
+    fireEvent.click(screen.getByRole("switch", { name: "quickStart.pinWorkspace" }));
+    fireEvent.click(screen.getByRole("switch", { name: "quickStart.allTools" }));
+    const url = screen.getByTestId("client-url").textContent!;
+    expect(url).toMatch(/\/mcp\/w\/ws-1\?profile=full$/);
+    expect(screen.getByText((text, node) => node?.tagName === "PRE" && text.includes('mcpUrl: "' + url + '"'))).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /mcpSetupGuide/ }));
+    fireEvent.click(screen.getByRole("button", { name: /mcpSetupGuide/ }));
+    expect(screen.getByTestId("client-url")).toHaveTextContent(url);
+  });
+
+  it("offers a single create action when there are no API keys", async () => {
+    mockGetMemberCredentials.mockResolvedValue({ api_keys: [], target_user_role: "owner" });
+    render(<APIKeysTabPanel />);
+    expect(await screen.findAllByRole("button", { name: "createApiKey" })).toHaveLength(1);
   });
 });

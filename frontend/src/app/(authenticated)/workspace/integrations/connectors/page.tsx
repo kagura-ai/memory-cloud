@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 
 import { PageContainer } from "@/components/common/PageContainer";
-import { PageHeader } from "@/components/common/PageHeader";
+import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import {
   FeatureGateNotice,

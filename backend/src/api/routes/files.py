@@ -13,6 +13,7 @@ from the request body or query (and is verified by the service).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -24,7 +25,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.file_storage_service import FileStorageService
 from services.permission_service import PermissionService
-from utils.exceptions import AuthorizationError, DuplicateFileError
+from utils.exceptions import AuthorizationError, DuplicateFileError, ValidationError
 from utils.hashing import SHA256_HEX_PATTERN
 from utils.logger import get_logger
 
@@ -292,9 +293,17 @@ async def list_files(
     user: APIKeyOrSessionUser,
     workspace_id: UUID = Query(..., description="Owning workspace"),
     limit: int = Query(50, ge=1, le=500),
+    scope: Literal["all", "workspace"] = Query(
+        "all", description="Use workspace for shared files without a context"
+    ),
+    context_id: UUID | None = Query(
+        None, description="Only files bound to this context; access checks still apply"
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> list[FileObjectOut]:
-    """List uploaded, non-deleted files in the workspace, newest first."""
+    """List accessible files, optionally restricted to shared storage or one context."""
+    if scope == "workspace" and context_id is not None:
+        raise ValidationError("scope=workspace cannot be combined with context_id")
     await _enforce_workspace_membership(db, user, workspace_id, required_role="viewer")
     service = FileStorageService(db)
     # Issue #1136: scope the listing to contexts the caller can access (plus
@@ -307,6 +316,8 @@ async def list_files(
     files = await service.list_files(
         workspace_id=workspace_id,
         accessible_context_ids=[c.id for c in accessible],
+        context_id=context_id,
+        workspace_only=scope == "workspace",
         limit=limit,
     )
     return [FileObjectOut.model_validate(f) for f in files]

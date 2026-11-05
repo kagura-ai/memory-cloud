@@ -1,15 +1,17 @@
 import type { ElementType } from "react";
 import { Role, WorkspaceRole } from "@/lib/auth/rbac";
-import { Activity, Brain, Key, Settings, Puzzle, Database, Sliders, KeyRound, Users, BarChart, CreditCard, Lock, Gauge, Moon, ShieldCheck, DollarSign, Plug, HardDrive } from "lucide-react";
+import { Compass, Activity, Brain, Key, Settings, Puzzle, Database, Sliders, KeyRound, Users, BarChart, CreditCard, Lock, Gauge, Moon, ShieldCheck, DollarSign, Plug, HardDrive } from "lucide-react";
 
 export interface NavItem {
   nameKey: string; // Translation key
   href: string;
+  exact?: boolean;
+  activePaths?: string[];
   icon: ElementType;
   requiredRole?: Role; // System admin role
   requiredWorkspaceRole?: Exclude<WorkspaceRole, WorkspaceRole.Viewer>; // Workspace role (minimum required)
   requiredFeature?: string | string[]; // Issue #1145: gate on GET /system/info features flag(s); every listed flag must be true (#1571)
-  existingObjectsFallback?: 'externalKeys'; // Issue #1616: a requiredFeature miss is overridden while the workspace already owns such objects
+  existingObjectsFallback?: 'externalKeys'; // Issue #1616: a requiredFeature miss still opens the page for a role that passes requiredWorkspaceRole
   planHint?: 'resources' | 'connectors' | 'team_invitations' | 'sleep_reports';
   // Where a user without the role goes when this route is where they landed
   // (sign-in, a link, a reload). Opening it from the menu still explains the role.
@@ -105,6 +107,7 @@ export const navigationGroups: NavGroup[] = [
     titleKey: "integrations",
     collapsible: false,
     items: [
+      { nameKey: "connectionGuide", href: "/workspace/integrations", icon: Compass, exact: true },
       {
         nameKey: "apiKeys",
         href: "/workspace/integrations/credentials?tab=api-keys",
@@ -149,12 +152,10 @@ export const navigationGroups: NavGroup[] = [
         href: "/workspace/integrations/external-keys",
         icon: KeyRound,
         requiredWorkspaceRole: WorkspaceRole.Owner, // Issue #381: Owner-only (workspace-level secrets)
-        // Issue #1167: the BYOK console. With ENABLE_BYOK off only
-        // provisioning (create / update) 404s; list, toggle and delete stay
-        // open to the owner as a management console for keys stored earlier
-        // (#1613). Issue #1616: so the entry stays for a workspace that
-        // already stores a key, and is hidden only where it would be a
-        // dead end (no keys, no Add) — see the nav filter.
+        // The entry remains visible. With ENABLE_BYOK off only provisioning
+        // (create / update) 404s; list, toggle and delete stay open to the
+        // owner (#1613), whose console hides provisioning, so stored keys,
+        // which the services still use, can be disabled or deleted (#1616).
         requiredFeature: "byok",
         existingObjectsFallback: "externalKeys",
       },
@@ -224,11 +225,27 @@ export const navigationGroups: NavGroup[] = [
   },
 ];
 
+// The route catalog above keeps per-feature access metadata. The sidebar has
+// one entry for each section; its pages provide the subordinate navigation.
+export const sidebarNavigationGroups: NavGroup[] = navigationGroups.flatMap(group => {
+  if (group.titleKey === "settings" || group.titleKey === "integrations") return [];
+  if (group.titleKey === "workspace") return [{
+    ...group,
+    titleKey: "",
+    items: [
+      ...group.items.filter(item => item.nameKey !== "resources" && item.nameKey !== "secrets"),
+      { nameKey: "integrations", href: "/workspace/integrations", icon: Plug, activePaths: ["/workspace/resources", "/workspace/secrets"] },
+      { nameKey: "settings", href: "/workspace/settings", icon: Settings },
+    ],
+  }];
+  return [group];
+});
+
 // Match feature routes without using object IDs or data from protected APIs.
 const items = navigationGroups.flatMap((group) => group.items.flatMap((item) => [item, ...(item.children ?? [])]));
 export function navigationForPath(pathname: string): NavItem | undefined {
-  return items.find(({ href }) => {
+  return items.find(({ href, exact }) => {
     const path = href.split("?")[0];
-    return pathname === path || pathname.startsWith(path + "/");
+    return pathname === path || (!exact && pathname.startsWith(path + "/"));
   });
 }

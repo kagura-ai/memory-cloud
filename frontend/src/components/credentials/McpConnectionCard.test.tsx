@@ -9,13 +9,13 @@
  * the workspace selected in the Web UI.
  */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { McpConnectionCard } from "./McpConnectionCard";
+import { McpConnectionCard, McpReferenceLinks } from "./McpConnectionCard";
 
 vi.mock("next-intl", () => ({
-  useTranslations: () => (key: string) => key,
+  useTranslations: () => Object.assign((key: string) => key, { has: () => false }),
 }));
 
 const mockWorkspace = {
@@ -26,6 +26,12 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => mockWorkspace,
 }));
 
+vi.mock("@/lib/api/base", () => ({
+  apiClient: { get: vi.fn().mockResolvedValue({ tools: [
+    { name: "explore", description: "Explore related memories" },
+    { name: "setup_resource", description: "Create a resource" },
+  ] }) },
+}));
 const mockCopyToTarget = vi.fn();
 vi.mock("@/hooks/useCopyFeedback", () => ({
   useCopyFeedback: () => ({
@@ -47,18 +53,35 @@ beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_API_URL", "https://memory.example.test/api/v1");
 });
 
+describe("McpConnectionCard — overview tool settings", () => {
+  it("keeps the displayed and copied URL in sync for full and added tools", async () => {
+    render(<McpConnectionCard variant="summary" />);
+    fireEvent.click(screen.getByRole("button", { name: "quickStart.toolSettings" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /explore/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /setup_resource/ }));
+    const extraUrl = "https://memory.example.test/mcp?add_tools=explore,setup_resource";
+    expect(screen.getByText(extraUrl)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "copyUrl" }));
+    expect(mockCopyToTarget).toHaveBeenLastCalledWith(extraUrl, "mcp-url");
+    fireEvent.click(screen.getByRole("switch", { name: "quickStart.allTools" }));
+    expect(screen.getByRole("checkbox", { name: /explore/ })).toBeDisabled();
+    expect(screen.getByText("https://memory.example.test/mcp?profile=full")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "copyUrl" }));
+    expect(mockCopyToTarget).toHaveBeenLastCalledWith("https://memory.example.test/mcp?profile=full", "mcp-url");
+  });
+});
+
 afterEach(() => {
   vi.unstubAllEnvs();
 });
 
 describe("McpConnectionCard — endpoint", () => {
-  it("leads with the bare /mcp URL and never shows /mcp/w/ by default", () => {
+  it("shows the bare URL and the workspace-pinned URL", () => {
     render(<McpConnectionCard />);
 
     expect(
       screen.getByText("https://memory.example.test/mcp"),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/\/mcp\/w\//)).not.toBeInTheDocument();
   });
 
   it("copies the bare URL from the copy button", () => {
@@ -107,7 +130,6 @@ describe("McpConnectionCard — endpoint", () => {
       ),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("pinToggle"));
     expect(
       screen.getByText("https://memory.example.test/mcp/w/ws-1?profile=full"),
     ).toBeInTheDocument();
@@ -115,26 +137,24 @@ describe("McpConnectionCard — endpoint", () => {
 });
 
 describe("McpConnectionCard — workspace pinning", () => {
-  it("offers the pinned URL only after expanding, when the user has several workspaces", () => {
+  it("shows the pinned URL directly for the selected workspace", () => {
     render(<McpConnectionCard />);
 
-    expect(screen.getByText("followsWorkspace")).toBeInTheDocument();
-    expect(screen.queryByText(/\/mcp\/w\/ws-1/)).not.toBeInTheDocument();
+    expect(screen.getByText("pinHint")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("pinToggle"));
 
     expect(
       screen.getByText("https://memory.example.test/mcp/w/ws-1"),
     ).toBeInTheDocument();
   });
 
-  it("hides the pinning section for a single-workspace user", () => {
+  it("shows the pinned URL for a single-workspace user", () => {
     mockWorkspace.workspaces = [{ id: "ws-1" }];
 
     render(<McpConnectionCard />);
 
-    expect(screen.queryByText("followsWorkspace")).not.toBeInTheDocument();
-    expect(screen.queryByText("pinToggle")).not.toBeInTheDocument();
+    expect(screen.getByText("pinToggle")).toBeInTheDocument();
+    expect(screen.getByText("https://memory.example.test/mcp/w/ws-1")).toBeInTheDocument();
   });
 
   it("hides the pinning section when no workspace is selected", () => {
@@ -146,5 +166,42 @@ describe("McpConnectionCard — workspace pinning", () => {
     expect(
       screen.getByText("https://memory.example.test/mcp"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("McpConnectionCard — overview summary", () => {
+  it("presents the bare URL with a labelled copy button and a guide link", () => {
+    render(<McpConnectionCard variant="summary" />);
+    expect(screen.getByRole("heading", { name: "quickStart.title" })).toBeInTheDocument();
+    expect(screen.getByText("https://memory.example.test/mcp")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "copyUrl" }));
+    expect(mockCopyToTarget).toHaveBeenCalledWith("https://memory.example.test/mcp", "mcp-url");
+    expect(screen.getByRole("link", { name: "links.mcpClients" })).toHaveAttribute(
+      "href", "https://github.com/kagura-ai/memory-cloud/blob/main/docs/mcp-clients.md",
+    );
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.queryByText(/claude mcp add/)).toBeNull();
+    expect(screen.getByText("followsWorkspace")).toBeInTheDocument();
+  });
+
+  it("offers manual copy guidance when clipboard access fails", async () => {
+    mockCopyToTarget.mockRejectedValueOnce(new Error("clipboard unavailable"));
+    render(<McpConnectionCard variant="summary" />);
+    fireEvent.click(screen.getByRole("button", { name: "copyUrl" }));
+    await waitFor(() => expect(mockToast).toHaveBeenCalledWith({
+      title: "error",
+      description: "copyFailedManualHint",
+      variant: "destructive",
+    }));
+  });
+});
+
+describe("MCP connection references", () => {
+  it("includes client setup, both SDKs and REST API documentation", () => {
+    render(<McpReferenceLinks />);
+    expect(screen.getByRole("link", { name: "links.mcpClients" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "links.typescriptSdk" })).toHaveAttribute("href", "https://github.com/kagura-ai/kagura-memory-typescript-sdk");
+    expect(screen.getByRole("link", { name: "links.pythonSdk" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "links.restApi" })).toHaveAttribute("href", "https://memory.example.test/redoc");
   });
 });

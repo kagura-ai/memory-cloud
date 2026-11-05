@@ -18,7 +18,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Sparkles } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
-import { PageHeader } from "@/components/common/PageHeader";
+import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { Section } from "@/components/common/Section";
 import {
   InlineSpinner,

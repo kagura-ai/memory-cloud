@@ -9,28 +9,29 @@
  * management UI, memories are normally written by AI clients via MCP tools).
  *
  * Design decisions (gate1 green, PM-reviewed — see issue #952):
- *  - Trigger: workspace role >= Admin AND zero contexts AND not dismissed
+ *  - Trigger: workspace owner with no contexts, or a verified practice checkpoint
  *    (localStorage). No server-side "seen" flag — re-showing on a fresh device
  *    or after deleting all contexts is acceptable for 1.0.
  *  - Hybrid value moment: a minimal in-app remember()/recall() makes the first
  *    recall return a recognizable hit, WITHOUT pulling in the #951 importer.
  *  - recall-vs-explore explainer is COPY ONLY: recall does NOT auto-trigger
  *    explore (mixing graph signals into recall degrades precision, #120/#216).
- *  - Non-modal dismissible card on the dashboard — OUT of the auth critical
- *    path, so an onboarding bug can't block users from their data.
+ *  - Dismissible modal on the dashboard, outside the authentication flow.
  *  - The `?context=<id>` navigation (URL-driven current context, #246) is
  *    deferred to the final "Finish" CTA: navigating mid-flow would remount this
  *    card and (with 1 context now) hide it, killing the stepper.
- *  - remember/recall need a workspace embedding key; if absent we show a
+ *  - remember/recall need available embeddings; if absent we show a
  *    non-error "set up embeddings" notice instead of a guaranteed-to-fail flow.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useAuth } from "@/contexts/AuthContext";
+import { advancePractice, claimPractice, onboardingScope, practiceContextName, readProgress, updateProgress } from "./progress";
+import { ApiError } from "@/lib/api/base";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
   Sparkles,
-  X,
   ArrowRight,
   Check,
   Search,
@@ -39,21 +40,16 @@ import {
 } from "lucide-react";
 
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { useToast } from "@/hooks/use-toast";
-import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { getContexts, createContext } from "@/lib/api/contexts";
 import { rememberMemory, recallMemories } from "@/lib/api/memory";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import type { Context } from "@/lib/types/context";
 import type { RecallResultItem } from "@/lib/types/memory";
 
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -61,13 +57,26 @@ import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { InlineSpinner } from "@/components/common/LoadingState";
 
-const DISMISS_KEY = "onboarding:dismissed";
-type Step = "context" | "memory" | "recall" | "done";
+type Step = "context" | "memory" | "recall" | "done" | "recovery";
 
-export function OnboardingCard() {
+interface PracticeOptions {
+  replay?: boolean;
+  onClose?: () => void;
+  onCreated?: (context: Context) => void;
+}
+
+export function OnboardingCard({ replay = false, onClose, onCreated }: PracticeOptions) {
+  const { user } = useAuth();
+  const { currentWorkspace, loading } = useWorkspace();
+  // Only owners can create a private practice context. Others use the read-only guide.
+  if (!user?.id || loading || !currentWorkspace || currentWorkspace.current_user_role !== "owner") return null;
+  const scope = onboardingScope(user.id, currentWorkspace.id);
+  return <PracticeCard key={scope} scope={scope} userId={user.id} replay={replay} onClose={onClose} onCreated={onCreated} />;
+}
+
+function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOptions & { scope: string; userId: string }) {
   const t = useTranslations("onboarding");
   const router = useRouter();
-  const { toast } = useToast();
   const {
     currentWorkspace,
     currentWorkspaceId,
@@ -86,12 +95,16 @@ export function OnboardingCard() {
   // Seed the editable sample copy from i18n ONCE via lazy initializers — never
   // in an effect keyed on `t`, which would clobber the user's edits whenever the
   // `t` identity changes (locale switch / provider re-render).
-  const [contextName, setContextName] = useState(() => t("context.sampleName"));
   const [summary, setSummary] = useState(() => t("memory.sampleSummary"));
   const [content, setContent] = useState(() => t("memory.sampleContent"));
   const [query, setQuery] = useState(() => t("recall.sampleQuery"));
   const [results, setResults] = useState<RecallResultItem[]>([]);
   const [busy, setBusy] = useState(false);
+  // A pending create or save keeps the guide open (a second write must not
+  // start from a closed and replayed guide); a read-only Recall does not.
+  const [writePending, setWritePending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const writing = useRef(false);
 
   // Issue #1167: with BYOK off the key-status probe 404s and env keys serve
   // embeddings — skip the probe (hasKey keeps its default true → normal
@@ -107,33 +120,31 @@ export function OnboardingCard() {
     if (workspaceLoading || !currentWorkspace || !currentWorkspaceId) return;
     if (systemFeatures === null) return;
 
-    const dismissed =
-      typeof window !== "undefined" &&
-      window.localStorage.getItem(DISMISS_KEY) === "true";
-    const canCreate = hasWorkspaceRole(
-      currentWorkspace.current_user_role,
-      WorkspaceRole.Admin,
-    );
-    if (dismissed || !canCreate) {
+    const saved = readProgress(scope);
+    if (saved.step === "ended" || (saved.dismissed && !replay)) {
       setReady(true);
       return;
     }
-
     (async () => {
       try {
-        const ctx = await getContexts();
+        const { contexts } = await getContexts();
         if (!alive) return;
-        if (ctx.contexts.length === 0) {
-          // Only probe the embedding key when the card will actually show —
-          // users with contexts (the vast majority of loads) never see it.
-          // #1167: skip the probe entirely when BYOK is off (API 404s).
-          const keyStatus = byokEnabled
-            ? await checkOpenAIKeyStatus(currentWorkspaceId).catch(() => null)
-            : null;
-          if (!alive) return;
-          if (keyStatus) setHasKey(keyStatus.has_key);
+        // The server lists only this user's accessible contexts in the selected workspace.
+        const sample = contexts.find(ctx => ctx.id === saved.contextId && ctx.is_private && !ctx.is_public && ctx.workspace_id === currentWorkspaceId && ctx.created_by === userId);
+        if (saved.step === "creating" || saved.step === "saving" || (saved.contextId && !sample)) {
+          setStep("recovery");
           setVisible(true);
+          return;
         }
+        if (contexts.length > 0 && !sample) return;
+        if (sample) {
+          setContextId(sample.id);
+          setStep(saved.step === "recall" ? "recall" : "memory");
+        }
+        const status = byokEnabled ? await checkOpenAIKeyStatus(currentWorkspaceId).catch(() => null) : null;
+        if (!alive) return;
+        if (status) setHasKey(status.embedding_available !== false);
+        setVisible(true);
       } catch {
         // Best-effort: a failed probe just leaves the card hidden rather than
         // risking a broken onboarding over the user's real dashboard.
@@ -147,45 +158,75 @@ export function OnboardingCard() {
     };
     // byokEnabled is derived from systemFeatures, so listing systemFeatures
     // alone covers both.
-  }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures]);
+  }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures, scope, userId, replay, byokEnabled]);
 
   const dismiss = useCallback(() => {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(DISMISS_KEY, "true");
-    }
+    void updateProgress(scope, current => ({ ...current, dismissed: true }));
     setVisible(false);
-  }, []);
+    onClose?.();
+  }, [scope, onClose]);
+
+  const endPractice = async () => {
+    await updateProgress(scope, () => ({ step: "ended", dismissed: true }));
+    setVisible(false);
+    if (onClose) onClose();
+    else router.push("/workspace/contexts");
+  };
 
   const handleCreateContext = async () => {
-    const name = contextName.trim();
-    if (!name) return;
+    if (!currentWorkspaceId || writing.current) return;
+    writing.current = true;
     setBusy(true);
+    setWritePending(true);
+    setActionError(null);
+    const claimed = { step: "creating" } as const;
     try {
-      const ctx = await createContext({ name, is_private: true });
+      if (!await claimPractice(scope, "context", claimed)) { setStep("recovery"); return; }
+      const ctx = await createContext({ name: practiceContextName(), display_name: "My First Context", is_private: true, expected_workspace_id: currentWorkspaceId });
+      if (ctx.workspace_id !== currentWorkspaceId || !ctx.is_private || ctx.is_public || ctx.created_by !== userId) {
+        setStep("recovery"); return;
+      }
+      if (!await advancePractice(scope, claimed, { step: "memory", contextId: ctx.id })) { setStep("recovery"); return; }
+      onCreated?.(ctx);
       setContextId(ctx.id);
       setStep("memory");
-    } catch {
-      toast({ variant: "destructive", title: t("errors.createFailed") });
+    } catch (error) {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) await advancePractice(scope, claimed, { step: "context" });
+      else setStep("recovery");
+      setActionError(t("errors.createFailed"));
     } finally {
+      writing.current = false;
+      setWritePending(false);
       setBusy(false);
     }
   };
 
   const handleSaveMemory = async () => {
-    if (!contextId) return;
+    if (!contextId || !currentWorkspaceId || writing.current) return;
+    writing.current = true;
     setBusy(true);
+    setWritePending(true);
+    setActionError(null);
+    const claimed = { step: "saving", contextId } as const;
     try {
+      if (!await claimPractice(scope, "memory", claimed)) { setStep("recovery"); return; }
       await rememberMemory({
+        private_workspace_id: currentWorkspaceId,
         summary: summary.trim(),
         content: content.trim(),
         type: "note",
         importance: 0.7,
         context: { context_id: contextId },
       });
+      if (!await advancePractice(scope, claimed, { step: "recall", contextId })) { setStep("recovery"); return; }
       setStep("recall");
-    } catch {
-      toast({ variant: "destructive", title: t("errors.saveFailed") });
+    } catch (error) {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) await advancePractice(scope, claimed, { step: "memory", contextId });
+      else setStep("recovery");
+      setActionError(t("errors.saveFailed"));
     } finally {
+      writing.current = false;
+      setWritePending(false);
       setBusy(false);
     }
   };
@@ -193,6 +234,7 @@ export function OnboardingCard() {
   const handleRecall = async () => {
     if (!contextId) return;
     setBusy(true);
+    setActionError(null);
     try {
       const res = await recallMemories({
         query: query.trim(),
@@ -202,7 +244,7 @@ export function OnboardingCard() {
       setResults(res.results);
       setStep("done");
     } catch {
-      toast({ variant: "destructive", title: t("errors.recallFailed") });
+      setActionError(t("errors.recallFailed"));
     } finally {
       setBusy(false);
     }
@@ -223,29 +265,27 @@ export function OnboardingCard() {
   const stepIndex = step === "context" ? 1 : step === "memory" ? 2 : 3;
 
   return (
-    <Card className="mb-6 border-brand-green-300 dark:border-brand-green-800/60">
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              <Sparkles className="h-5 w-5 text-brand-green-600 dark:text-brand-green-400" />
-              {t("title")}
-            </CardTitle>
-            <CardDescription className="mt-1">{t("subtitle")}</CardDescription>
-          </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={dismiss}
-            aria-label={t("dismiss")}
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-      </CardHeader>
-
-      <CardContent>
-        {!hasKey ? (
+    <Dialog open={visible} onOpenChange={open => { if (!open && !writePending) dismiss(); }}>
+      {/* Keep the panel opaque while it slides in so text stays legible over the backdrop. */}
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl data-[state=open]:!fade-in-100"
+        onEscapeKeyDown={event => { if (writePending) event.preventDefault(); }}
+        onInteractOutside={event => { if (writePending) event.preventDefault(); }}>
+        <DialogHeader className="pr-6">
+          <DialogTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-brand-green-600 dark:text-brand-green-400" />
+            {t("title")}
+          </DialogTitle>
+          <DialogDescription className="text-slate-600 dark:text-slate-300">{t("subtitle")}</DialogDescription>
+        </DialogHeader>
+        <div>
+          {actionError && <Alert variant="destructive" className="mb-4"><AlertDescription>{actionError}</AlertDescription></Alert>}
+        {step === "recovery" ? (
+          <Alert><AlertDescription>
+            <p>{t("recovery")}</p>
+            <Button variant="link" onClick={() => { dismiss(); router.push("/workspace/contexts"); }}>{t("openContexts")}</Button>
+            <Button variant="ghost" onClick={endPractice}>{t("endPractice")}</Button>
+          </AlertDescription></Alert>
+        ) : !hasKey ? (
           // Informational gating notice (not an error): remember/recall need a
           // workspace embedding key. Point at the existing key-setup surface.
           <Alert>
@@ -279,23 +319,10 @@ export function OnboardingCard() {
               <div className="space-y-3">
                 <div>
                   <h3 className="font-semibold">{t("context.title")}</h3>
-                  <p className="text-sm text-muted-foreground">
-                    {t("context.body")}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="onboarding-context-name">
-                    {t("context.nameLabel")}
-                  </Label>
-                  <Input
-                    id="onboarding-context-name"
-                    value={contextName}
-                    onChange={(e) => setContextName(e.target.value)}
-                  />
                 </div>
                 <Button
                   onClick={handleCreateContext}
-                  disabled={busy || !contextName.trim()}
+                  disabled={busy}
                 >
                   {busy && <InlineSpinner />}
                   {t("context.createButton")}
@@ -456,8 +483,12 @@ export function OnboardingCard() {
             )}
           </div>
         )}
-      </CardContent>
-    </Card>
+        </div>
+        <Button variant="ghost" disabled={writePending} onClick={dismiss} className="justify-self-end">
+          {t("dismiss")}
+        </Button>
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -2151,6 +2151,17 @@
               }
             ]
           },
+          "expected_workspace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "is_private": {
             "default": true,
             "type": "boolean"
@@ -7904,6 +7915,90 @@
         ],
         "type": "object"
       },
+      "QuotaUsage": {
+        "properties": {
+          "bonus": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "default": 0
+          },
+          "creation_included": {
+            "default": true,
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "period": {
+            "default": "current",
+            "enum": [
+              "current",
+              "day",
+              "week",
+              "month",
+              "minute",
+              "hour"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "default": "workspace",
+            "enum": [
+              "workspace",
+              "account",
+              "api_key"
+            ],
+            "type": "string"
+          },
+          "unit": {
+            "default": "count",
+            "enum": [
+              "count",
+              "bytes",
+              "usd"
+            ],
+            "type": "string"
+          },
+          "used": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "limit",
+          "used"
+        ],
+        "type": "object"
+      },
       "RecalibrateResponse": {
         "properties": {
           "accepted": {
@@ -8491,6 +8586,17 @@
             "anyOf": [
               {
                 "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "private_workspace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
                 "type": "string"
               },
               {
@@ -10678,6 +10784,12 @@
           },
           "plan": {
             "$ref": "#/components/schemas/PlanLimits"
+          },
+          "quota_usage": {
+            "items": {
+              "$ref": "#/components/schemas/QuotaUsage"
+            },
+            "type": "array"
           },
           "usage": {
             "$ref": "#/components/schemas/CurrentUsage"
@@ -20678,6 +20790,35 @@
               "maximum": 500,
               "minimum": 1,
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "workspace"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           {

@@ -36,6 +36,7 @@ import { User, Moon, Sun, Save, RefreshCw } from "lucide-react";
 import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { PageContainer } from "@/components/common/PageContainer";
+import { PageSectionNavigation } from "@/components/common/PageSectionNavigation";
 import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import LinkedAccounts from "@/components/auth/LinkedAccounts";
 import PasswordSettings from "@/components/auth/PasswordSettings";
@@ -45,6 +46,15 @@ import {
   getProviderName,
   getRefreshProviderName,
 } from "./signInLabels";
+
+const sections = [
+  ["profile-info", "info"],
+  ["profile-sign-in", "signIn"],
+  ["profile-linked-accounts", "linkedAccounts"],
+  ["profile-password", "password"],
+  ["profile-appearance", "appearance"],
+  ["profile-deletion", "deletion"],
+] as const;
 
 export default function ProfilePage() {
   const t = useTranslations("profile");
@@ -279,8 +289,13 @@ export default function ProfilePage() {
         </p>
       </div>
 
+      <PageSectionNavigation
+        label={t("sections.label")}
+        sections={sections.map(([id, key]) => ({ id, label: t(`sections.${key}`) }))}
+      />
+
       {/* Profile Information */}
-      <Card>
+      <Card id="profile-info" tabIndex={-1} aria-label={t("sections.info")} className="scroll-mt-24">
         <CardHeader>
           <CardTitle className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -472,6 +487,7 @@ export default function ProfilePage() {
           covered by an extensive test suite and serve a distinct purpose
           (current method display + IdP profile refresh) from this management
           section, so removing them was judged riskier than additive mounting. */}
+      <section id="profile-sign-in" tabIndex={-1} aria-label={t("sections.signIn")} className="scroll-mt-24">
       <ConnectedAccounts
         onProvidersChanged={() => {
           setProvidersVersion((v) => v + 1);
@@ -480,14 +496,16 @@ export default function ProfilePage() {
         }}
       />
 
+      </section>
+
       {/* Linked accounts (Issue #1784): two accounts of one person. */}
-      <LinkedAccounts />
+      <section id="profile-linked-accounts" tabIndex={-1} aria-label={t("sections.linkedAccounts")} className="scroll-mt-24"><LinkedAccounts /></section>
 
       {/* Password (Issue #1678): set up / change / remove. */}
-      <PasswordSettings providersVersion={providersVersion} />
+      <section id="profile-password" tabIndex={-1} aria-label={t("sections.password")} className="scroll-mt-24"><PasswordSettings providersVersion={providersVersion} /></section>
 
       {/* Theme & Appearance */}
-      <Card>
+      <Card id="profile-appearance" tabIndex={-1} aria-label={t("sections.appearance")} className="scroll-mt-24">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             {isDarkMode ? (
@@ -515,7 +533,7 @@ export default function ProfilePage() {
       </Card>
 
       {/* Danger zone: self-serve account & data deletion (Issue #953) */}
-      <DeleteAccountSection />
+      <section id="profile-deletion" tabIndex={-1} aria-label={t("sections.deletion")} className="scroll-mt-24"><DeleteAccountSection /></section>
     </PageContainer>
   );
 }

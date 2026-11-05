@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { ContextBreakdownTable } from "./ContextBreakdownTable";
 import type { ContextStatsResponse } from "@/lib/api/workspaces";
@@ -107,7 +107,7 @@ function captureCsvExport(): () => Promise<string> {
 }
 
 describe("ContextBreakdownTable", () => {
-  it("renders 3 default columns (name, memories, last activity)", () => {
+  it("renders context data with all detail columns", () => {
     render(
       <ContextBreakdownTable
         contexts={mockContexts}
@@ -124,11 +124,11 @@ describe("ContextBreakdownTable", () => {
     expect(screen.getByText("100")).toBeInTheDocument();
     expect(screen.getByText("200")).toBeInTheDocument();
 
-    // Detail columns should NOT be visible by default
-    expect(screen.queryByText("owner")).not.toBeInTheDocument();
+    expect(screen.getByText("owner")).toBeInTheDocument();
+    expect(screen.getAllByRole("columnheader")).toHaveLength(8);
   });
 
-  it("shows all 8 columns when Show Details is toggled", () => {
+  it("shows owner and usage details without a toggle", () => {
     render(
       <ContextBreakdownTable
         contexts={mockContexts}
@@ -138,8 +138,6 @@ describe("ContextBreakdownTable", () => {
       />,
     );
 
-    // Click "Show Details"
-    fireEvent.click(screen.getByText("showDetails"));
 
     // Detail columns now visible (i18n keys as text)
     expect(screen.getByText("owner")).toBeInTheDocument();
@@ -150,22 +148,6 @@ describe("ContextBreakdownTable", () => {
 
     // Owner name visible
     expect(screen.getByText("Alice")).toBeInTheDocument();
-  });
-
-  it("toggles back to 3 columns when Hide Details is clicked", () => {
-    render(
-      <ContextBreakdownTable
-        contexts={mockContexts}
-        totalMemories={300}
-        contextStats={mockContextStats}
-      />,
-    );
-
-    fireEvent.click(screen.getByText("showDetails"));
-    expect(screen.getByText("owner")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText("hideDetails"));
-    expect(screen.queryByText("owner")).not.toBeInTheDocument();
   });
 
   it("renders empty state when no contexts", () => {
@@ -191,7 +173,7 @@ describe("ContextBreakdownTable", () => {
     );
 
     expect(screen.getByText("othersPrivate")).toBeInTheDocument();
-    expect(screen.getByText("150")).toBeInTheDocument();
+    expect(within(screen.getByText("othersPrivate").closest("tr")!).getByText("150")).toBeInTheDocument();
   });
 
   it("changes sort order when clicking column headers", () => {
@@ -306,7 +288,6 @@ describe("ContextBreakdownTable", () => {
         contextStats={mockContextStats}
       />,
     );
-    fireEvent.click(screen.getByText("showDetails"));
     expect(screen.queryByText("Alice")).toBeNull();
     expect(screen.queryByText("ownerYou")).toBeNull();
   });
@@ -321,7 +302,6 @@ describe("ContextBreakdownTable", () => {
         linkedUserIds={["user-2"]}
       />,
     );
-    fireEvent.click(screen.getByText("showDetails"));
     const row = screen.getByText("prod").closest("tr") as HTMLTableRowElement;
     expect(row).toHaveTextContent("ownerYou");
   });
@@ -335,7 +315,6 @@ describe("ContextBreakdownTable", () => {
         currentUserId="user-2"
       />,
     );
-    fireEvent.click(screen.getByText("showDetails"));
     const rowOf = (name: string) =>
       screen.getByText(name).closest("tr") as HTMLTableRowElement;
     expect(rowOf("prod")).toHaveTextContent("ownerYou");

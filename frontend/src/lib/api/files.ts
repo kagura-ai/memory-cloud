@@ -52,11 +52,14 @@ interface FileDownloadUrlOut {
 export async function listFiles(
   workspaceId: string,
   limit: number = 50,
+  filter?: { scope?: "all" | "workspace"; contextId?: string },
 ): Promise<FileObject[]> {
   const params = new URLSearchParams({
     workspace_id: workspaceId,
     limit: limit.toString(),
   });
+  if (filter?.scope) params.set("scope", filter.scope);
+  if (filter?.contextId) params.set("context_id", filter.contextId);
   return apiClient.get<FileObject[]>(`/api/v1/files?${params.toString()}`);
 }
 

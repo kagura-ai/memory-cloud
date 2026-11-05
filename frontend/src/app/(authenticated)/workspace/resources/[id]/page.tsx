@@ -26,7 +26,7 @@ import {
   Layers,
 } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
-import { PageHeader } from "@/components/common/PageHeader";
+import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";

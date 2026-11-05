@@ -7,11 +7,14 @@
  * Issue #234 - Progressive disclosure (KPI above fold + collapsible admin)
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { PageContainer } from "@/components/common/PageContainer";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { QuotaNotice } from "@/components/dashboard/QuotaOverview";
+import type { QuotaUsage } from "@/lib/api/usage";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -27,7 +30,8 @@ import {
   SpinnerLoading,
 } from "@/components/common/LoadingState";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { UsageStats } from "@/components/dashboard/UsageStats";
+import { UsageStats, type UsageStatsRef } from "@/components/dashboard/UsageStats";
+import { UsageTrends, type UsageTrendsRef } from "@/components/dashboard/UsageTrends";
 import { KpiCards } from "@/components/dashboard/KpiCards";
 import { ContextBreakdownTable } from "@/components/dashboard/ContextBreakdownTable";
 import { MemoryTimelineChart } from "@/components/dashboard/MemoryTimelineChart";
@@ -48,6 +52,7 @@ import {
 export default function WorkspaceStatsPage() {
   const t = useTranslations("workspace");
   const tCommon = useTranslations("common");
+  const navigation = useTranslations("dashboard.sections");
   const router = useRouter();
   const {
     currentWorkspace,
@@ -70,6 +75,27 @@ export default function WorkspaceStatsPage() {
       router.push("/workspace/contexts");
     }
   }, [currentWorkspace, router]);
+
+  const [activeTab, setActiveTab] = useState("dashboard-summary");
+  const usageRef = useRef<UsageStatsRef>(null);
+  const trendsRef = useRef<UsageTrendsRef>(null);
+  const [quotaSummary, setQuotaSummary] = useState<{ workspaceId: string; meters: QuotaUsage[] } | null>(null);
+  const handleQuotasLoaded = useCallback((workspaceId: string, meters: QuotaUsage[]) => {
+    setQuotaSummary({ workspaceId, meters });
+  }, []);
+  useEffect(() => {
+    const syncHash = () => {
+      const hash = window.location.hash.slice(1);
+      setActiveTab(hash === "dashboard-timeline" ? "dashboard-summary" : hash || "dashboard-summary");
+    };
+    syncHash();
+    window.addEventListener("hashchange", syncHash);
+    return () => window.removeEventListener("hashchange", syncHash);
+  }, []);
+  const selectTab = (value: string) => {
+    setActiveTab(value);
+    window.history.replaceState(null, "", "#" + value);
+  };
 
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [contextStats, setContextStats] = useState<ContextStatsResponse | null>(
@@ -171,6 +197,16 @@ export default function WorkspaceStatsPage() {
     workspaceLoading,
   ]);
 
+  const isWorkspaceAdmin = hasWorkspaceRole(currentWorkspace?.current_user_role, WorkspaceRole.Admin);
+  const sections = [
+    { id: "dashboard-summary", label: navigation("summary") },
+    ...(!selectedContextId ? [{ id: "dashboard-contexts", label: navigation("contexts") }] : []),
+    ...(isWorkspaceAdmin ? [{ id: "dashboard-members", label: navigation("members") }] : []),
+    { id: "dashboard-usage", label: navigation("usage") },
+  ];
+
+  const selectedTab = sections.some(section => section.id === activeTab) ? activeTab : "dashboard-summary";
+
   return (
     <PageContainer>
       <div className="flex items-center justify-between mb-6">
@@ -221,7 +257,7 @@ export default function WorkspaceStatsPage() {
             </Select>
           )}
           <Button
-            onClick={fetchStats}
+            onClick={() => { void fetchStats(); void usageRef.current?.refresh(); void trendsRef.current?.refresh(); }}
             variant="outline"
             size="sm"
             disabled={loading}
@@ -236,9 +272,16 @@ export default function WorkspaceStatsPage() {
         </div>
       </div>
 
+      <Tabs value={selectedTab} onValueChange={selectTab}>
+      {stats && (
+        <TabsList aria-label={navigation("label")} className="mb-6 flex h-auto w-full flex-wrap justify-start gap-1 rounded-lg border bg-slate-100 p-2 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+          {sections.map(section => <TabsTrigger key={section.id} value={section.id} className="min-h-10 data-[state=active]:bg-white dark:data-[state=active]:bg-slate-600">{section.label}</TabsTrigger>)}
+        </TabsList>
+      )}
+
       {/* Issue #952: first-run onboarding — self-gates on zero contexts +
           not-dismissed + can-create; renders null otherwise. */}
-      <OnboardingCard />
+      {selectedTab === "dashboard-summary" && <OnboardingCard />}
 
       {error && (
         <Alert variant="destructive" className="mb-6">
@@ -296,13 +339,16 @@ export default function WorkspaceStatsPage() {
             </p>
           )}
 
+          <TabsContent value="dashboard-summary" forceMount hidden={selectedTab !== "dashboard-summary"}>
+          {quotaSummary?.workspaceId === currentWorkspaceId && (
+            <div className="mb-4"><QuotaNotice meters={quotaSummary.meters} onViewUsage={() => selectTab("dashboard-usage")} /></div>
+          )}
           <KpiCards
             totalMemories={stats.total_memories}
             contextCount={stats.context_count}
             contextStats={contextStats}
             unsearchableCount={stats.unsearchable_memories ?? 0}
           />
-
           {memoryTimeline && (
             <MemoryTimelineChart
               timeline={memoryTimeline}
@@ -310,8 +356,11 @@ export default function WorkspaceStatsPage() {
               onDaysChange={setTimelineDays}
             />
           )}
+          <UsageTrends ref={trendsRef} />
+          </TabsContent>
 
           {!selectedContextId && (
+            <TabsContent value="dashboard-contexts" forceMount hidden={selectedTab !== "dashboard-contexts"}>
             <ContextBreakdownTable
               contexts={stats.contexts}
               totalMemories={stats.total_memories}
@@ -321,16 +370,24 @@ export default function WorkspaceStatsPage() {
               currentUserId={user?.id}
               linkedUserIds={user?.linked_user_ids}
             />
+            </TabsContent>
           )}
 
-          <AdminSections
-            selectedContextId={selectedContextId}
-            currentWorkspaceId={currentWorkspaceId}
-          />
+          {isWorkspaceAdmin && (
+            <TabsContent value="dashboard-members" forceMount hidden={selectedTab !== "dashboard-members"}>
+              <AdminSections
+                selectedContextId={selectedContextId}
+                currentWorkspaceId={currentWorkspaceId}
+              />
+            </TabsContent>
+          )}
 
-          <UsageStats />
+          <TabsContent value="dashboard-usage" forceMount hidden={selectedTab !== "dashboard-usage"}>
+            <UsageStats ref={usageRef} onQuotasLoaded={handleQuotasLoaded} />
+          </TabsContent>
         </>
       ) : null}
+      </Tabs>
     </PageContainer>
   );
 }

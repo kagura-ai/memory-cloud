@@ -146,6 +146,27 @@ beforeEach(() => {
   mockSearchParamsValue = new URLSearchParams("");
 });
 
+describe("ProfilePage section links", () => {
+  it("links to each mounted section and keeps an unsaved edit while jumping", () => {
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    const navigation = screen.getByRole("navigation", { name: "sections.label" });
+    const links = navigation.querySelectorAll("a");
+    expect(links).toHaveLength(6);
+    for (const link of links) {
+      const id = link.getAttribute("href")!.slice(1);
+      expect(document.getElementById(id)).not.toBeNull();
+      expect(document.getElementById(id)).toHaveAttribute("tabindex", "-1");
+    }
+    fireEvent.click(screen.getByRole("button", { name: "edit" }));
+    fireEvent.change(screen.getByLabelText("fullName"), { target: { value: "Unsaved draft" } });
+    fireEvent.click(screen.getByRole("link", { name: "sections.appearance" }));
+    expect(screen.getByRole("link", { name: "sections.appearance" })).toHaveAttribute("aria-current", "location");
+    expect(screen.getByLabelText("fullName")).toHaveValue("Unsaved draft");
+    expect(mockApiPut).not.toHaveBeenCalled();
+  });
+});
+
 // ---------- getSignInMethodLabel (#514) -------------------------------------
 
 describe("getSignInMethodLabel", () => {
@@ -761,18 +782,18 @@ describe("ProfilePage — refresh button click (#515)", () => {
       state: "abc",
     });
 
-    // Mock window.location.href setter — jsdom's default doesn't trigger
-    // navigation, but a Proxy lets us spy on the assignment. The
+    // Observe the redirect assignment without asking happy-dom to navigate.
+    // The original hash getter remains available to the section anchors. The
     // descriptor is captured in beforeEach above and restored in
     // afterEach so this stub does not survive the test.
     const hrefSetter = vi.fn();
     const originalLocation = window.location;
     Object.defineProperty(window, "location", {
       value: new Proxy(originalLocation, {
+        get(target, prop) { return Reflect.get(target, prop, target); },
         set(target, prop, value) {
           if (prop === "href") {
             hrefSetter(value);
-            (target as unknown as Record<string, unknown>).href = value;
             return true;
           }
           (target as unknown as Record<string, unknown>)[prop as string] =

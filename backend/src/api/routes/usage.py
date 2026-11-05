@@ -9,6 +9,7 @@ a library: the response models and ``calculate_usage_status`` /
 ``workspace.py`` imports. It registers no routes.
 """
 
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -212,9 +213,32 @@ class CapacityLockInfo(BaseModel):
     )
 
 
+class QuotaUsage(BaseModel):
+    """One quota meter. Limits include addons and other effective bonuses."""
+
+    id: str
+    used: int | float | None
+    limit: int | float | None = Field(..., description="Null means no configured ceiling")
+    bonus: int | float = 0
+    unit: Literal["count", "bytes", "usd"] = "count"
+    scope: Literal["workspace", "account", "api_key"] = "workspace"
+    period: Literal["current", "day", "week", "month", "minute", "hour"] = "current"
+    creation_included: bool = Field(
+        default=True,
+        description=(
+            "False when the plan keeps serving existing objects up to the limit "
+            "but does not allow creating new ones (XL-only features, #1551)"
+        ),
+    )
+
+
 class UsageCurrentResponse(BaseModel):
     """Current usage vs limits response."""
 
+    quota_usage: list[QuotaUsage] = Field(
+        default_factory=list,
+        description="All plan quota meters, with effective limits including addons",
+    )
     plan: PlanLimits
     usage: CurrentUsage
     memory_usage: UsageStatus

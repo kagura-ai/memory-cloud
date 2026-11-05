@@ -14,8 +14,9 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { ChevronRight, Database } from "lucide-react";
+import { ResourceSetupGuide } from "@/components/resources/ResourceSetupGuide";
 import { PageContainer } from "@/components/common/PageContainer";
-import { PageHeader } from "@/components/common/PageHeader";
+import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
@@ -100,6 +101,8 @@ export default function ResourcesListPage() {
   return (
     <PageContainer>
       <PageHeader title={t("list.title")} description={t("list.description")} />
+
+      <ResourceSetupGuide />
 
       {/* #1646: scope "create" — existing resources keep serving (#1551), so
           the notice promises exactly that. Pending/allowed render nothing. */}

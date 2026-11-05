@@ -98,7 +98,20 @@ export interface CapacityLock {
   purge_at?: string | null;
 }
 
+export interface QuotaUsage {
+  id: string;
+  used: number | null;
+  limit: number | null;
+  bonus: number;
+  unit: "count" | "bytes" | "usd";
+  scope: "workspace" | "account" | "api_key";
+  period: "current" | "day" | "week" | "month" | "minute" | "hour";
+  /** false: the plan serves existing objects up to the limit but cannot create new ones. */
+  creation_included?: boolean;
+}
+
 export interface UsageCurrentResponse {
+  quota_usage?: QuotaUsage[];
   plan: PlanLimits;
   usage: CurrentUsage;
   memory_usage: UsageStatus;

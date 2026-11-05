@@ -10,7 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,10 +35,12 @@ from models.schemas import (
     RecallResponse,
     ReferenceRequest,
     ReferenceResponse,
-    RememberRequest,
     RememberResponse,
     decode_forget_bulk_cursor,
     encode_forget_bulk_cursor,
+)
+from models.schemas import (
+    RememberRequest as BaseRememberRequest,
 )
 from services.agent_binding_service import binding_memory_sql_predicate
 from services.capacity_lock import CapacityPolicy
@@ -79,6 +81,13 @@ MemoryServiceDep = Annotated[MemoryService, Depends(get_memory_service)]
 # ============================================================================
 # Memory API Endpoints
 # ============================================================================
+
+
+class RememberRequest(BaseRememberRequest):
+    private_workspace_id: UUID | None = Field(
+        default=None,
+        description="Require the caller's own private context in this selected workspace at commit time.",
+    )
 
 
 @router.post("/remember", response_model=RememberResponse)
@@ -163,6 +172,7 @@ async def remember(
             # Issue #963/#1281 item 2: confine a workspace-scoped key to its own
             # workspace (pure key scope; None for OAuth/session/global-key).
             key_workspace_id=user.get("api_key_workspace_id"),
+            private_workspace_id=request.private_workspace_id,
         )
     except ValueError as e:
         # MemoryService raises ValueError as its "bad request" signal (e.g. an

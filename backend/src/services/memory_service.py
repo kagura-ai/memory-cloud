@@ -1213,6 +1213,7 @@ class MemoryService:
         key_workspace_id: UUID | None = None,  # Issue #963/#1281: pure key scope
         _skip_daily_quota: bool = False,  # Issue #1549: internal, see _upsert_by_external_id
         *,
+        private_workspace_id: UUID | None = None,
         tags_normalize: bool = False,
         dedupe: str = DEDUPE_SUGGEST,
         tag_canonical: dict[str, list[tuple[str, int]]] | None = None,
@@ -1262,7 +1263,12 @@ class MemoryService:
             tags_normalize=tags_normalize,
             dedupe=dedupe,
             tag_canonical=tag_canonical,
+            private_workspace_id=private_workspace_id,
         )
+        if private_workspace_id is not None:
+            await self._check_private_target(
+                user_id, current_context_id, current_workspace_id, private_workspace_id, lock=True
+            )
         try:
             await self.memory_repo.create(prepared.memory)
             # #2043: the created event commits with the row.
@@ -1285,6 +1291,45 @@ class MemoryService:
             )
             raise
 
+    async def _check_private_target(
+        self,
+        user_id: str,
+        context_id: UUID | None,
+        selected: UUID | None,
+        expected: UUID,
+        *,
+        lock: bool = False,
+    ) -> None:
+        from models.auth import WorkspaceMember
+        from utils.exceptions import ConflictError
+
+        message = "The selected workspace or private context changed."
+        if context_id is None or str(selected) != str(expected):
+            raise ConflictError(message)
+        query = (
+            select(Context.id)
+            .join(WorkspaceMember, WorkspaceMember.workspace_id == Context.workspace_id)
+            .where(
+                Context.id == context_id,
+                Context.workspace_id == expected,
+                Context.created_by == user_id,
+                Context.is_private.is_(True),
+                Context.is_public.is_(False),
+                Context.deleted_at.is_(None),
+                WorkspaceMember.user_id == user_id,
+                WorkspaceMember.role == "owner",
+            )
+        )
+        # The last check holds the context row through commit: FOR SHARE keeps
+        # it from being shared, made public or deleted meanwhile, yet admits the
+        # FOR KEY SHARE that concurrent inserts into the context take. The
+        # owner role needs no row lock: role changes take the workspace row,
+        # which the quota check in preparation already holds.
+        if lock:
+            query = query.with_for_update(read=True, of=Context)
+        if await self.db.scalar(query) is None:
+            raise ConflictError(message)
+
     async def _prepare_remember(
         self,
         request: RememberRequest,
@@ -1297,6 +1342,7 @@ class MemoryService:
         _skip_daily_quota: bool,
         tags_normalize: bool,
         dedupe: str,
+        private_workspace_id: UUID | None = None,
         isolation: tuple[Any, str | None, str | None] | None = None,
         tag_canonical: dict[str, list[tuple[str, int]]] | None = None,
     ) -> _PreparedRemember:
@@ -1344,6 +1390,11 @@ class MemoryService:
         # Validate required parameters
         if not workspace_id_str or not context_id_str:
             raise ValueError("remember() requires current_context_id")
+
+        if private_workspace_id is not None:
+            await self._check_private_target(
+                user_id, current_context_id, current_workspace_id, private_workspace_id
+            )
 
         # #1941: after the write gate, so a context the caller cannot write
         # answers its uniform not-found, never the lock.

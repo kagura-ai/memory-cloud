@@ -14,7 +14,7 @@ import { navigationForPath, type NavItem } from "@/lib/navigation/featureNavigat
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { PageContainer } from "@/components/common/PageContainer";
-import { PageHeader } from "@/components/common/PageHeader";
+import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 
@@ -73,7 +73,13 @@ function RestrictedRoute({ item, system, landing, children }: {
   // With BYOK off an owner can still manage previously stored external keys;
   // its existing console enforces the provisioning-only deployment restriction.
   if (deploymentOff && !(item?.existingObjectsFallback && !missingRole)) {
-    return page(<Alert><AlertDescription>{t("deployment")}</AlertDescription></Alert>);
+    return page(
+      <Alert>
+        <AlertDescription>
+          {t(item?.nameKey === "externalKeys" ? "currentlyUnavailable" : "deployment")}
+        </AlertDescription>
+      </Alert>,
+    );
   }
   if (missingRole) {
     return page(<div className="space-y-3">

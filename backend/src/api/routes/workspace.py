@@ -31,6 +31,7 @@ from api.routes.usage import (
     _build_workspaces_usage,
     calculate_usage_status,
 )
+from api.routes.workspace_quota_usage import build_workspace_quota_usage
 from auth.dependencies import get_user_from_api_key_or_session
 from auth.workspace_roles import reachable_context_ids
 from db.base import get_db
@@ -484,7 +485,7 @@ async def get_workspace_usage_current(
         )
 
         # Build response with aggregated data and effective limits (base + addons)
-        return UsageCurrentResponse(
+        response = UsageCurrentResponse(
             capacity_lock=lock_info,
             plan=PlanLimits(
                 plan_name=workspace.plan_name,
@@ -525,6 +526,11 @@ async def get_workspace_usage_current(
                 memories_created_today, effective_memories_per_day
             ),
         )
+
+        response.quota_usage = await build_workspace_quota_usage(
+            db, workspace, user["user_id"], response.usage, response.plan
+        )
+        return response
 
 
 @router.get("/usage/history", response_model=UsageHistoryResponse)

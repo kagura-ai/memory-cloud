@@ -1,6 +1,6 @@
 # MCP Client Setup
 
-How to connect MCP clients (Claude Code, Claude Desktop/Chat, ChatGPT, Gemini, Gemini CLI, and any Streamable-HTTP client) to a self-hosted Kagura Memory Cloud. Start from the [README Quick Start](../README.md#quick-start) if your server isn't running yet; the full tool list is in the [MCP Tools Reference](mcp-tools.md).
+How to connect MCP clients (Claude Code, Claude Desktop/Chat, ChatGPT, Gemini, Muse, Gemini CLI, and any Streamable-HTTP client) to a self-hosted Kagura Memory Cloud. Start from the [README Quick Start](../README.md#quick-start) if your server isn't running yet; the full tool list is in the [MCP Tools Reference](mcp-tools.md).
 
 ## Which URL?
 
@@ -255,6 +255,12 @@ Gemini registers redirect URIs on Google's three OAuth redirector hosts (`oauth-
 
 > Like Claude Chat and ChatGPT, Gemini needs a public URL: Google's servers exchange the code at the token endpoint.
 
+## Muse
+
+1. Copy the public HTTPS MCP URL from the **Integrations** connection card.
+2. Add that URL as a remote MCP server in Muse.
+3. Sign in to Kagura and approve access when prompted. KMC handles OAuth client registration automatically for Muse’s supported callbacks.
+
 ## Gemini CLI
 
 Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):
@@ -390,6 +396,7 @@ Only the URL changes; the `Authorization` header stays as it is. The client sect
 | Claude Desktop / Claude Chat | `"url"` in the same `.mcp.json` shape / the endpoint URL of the custom MCP server |
 | ChatGPT | Server URL |
 | Gemini | Server URL of the custom MCP connector |
+| Muse | Remote MCP server URL |
 | Gemini CLI | `"url"` in `.gemini/settings.json` |
 | Cursor | `"url"` of the `mcpServers` entry (same shape as Claude Code) |
 | Codex CLI | `url = "http://localhost:8080/mcp?profile=full"` in `~/.codex/config.toml` |
