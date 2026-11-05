@@ -23,13 +23,12 @@ async def test_tool_catalog_matches_mcp_registry():
         assert tool.input_schema == definition["inputSchema"]
         assert tool.description == definition["description"]
 
+
 @pytest.mark.parametrize("locale", ["ja", "en"])
 def test_frontend_tool_descriptions_cover_the_registry(locale):
     root = Path(__file__).resolve().parents[3]
     messages = json.loads(
-        (root / "frontend" / "src" / "messages" / f"{locale}.json").read_text(
-            encoding="utf-8"
-        )
+        (root / "frontend" / "src" / "messages" / f"{locale}.json").read_text(encoding="utf-8")
     )
     descriptions = messages["mcpToolDescriptions"]
     assert set(descriptions) == {tool["name"] for tool in get_tool_definitions()}

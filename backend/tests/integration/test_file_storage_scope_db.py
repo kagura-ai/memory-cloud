@@ -53,7 +53,7 @@ async def test_shared_and_context_scope_filters_never_widen_access(db_session):
     db_session.add_all(rows)
     await db_session.flush()
     service = FileStorageService(db_session)
-    common = dict(workspace_id=workspace.id, accessible_context_ids=[allowed.id])
+    common = {"workspace_id": workspace.id, "accessible_context_ids": [allowed.id]}
     shared = await service.list_files(**common, workspace_only=True, limit=1)
     assert [row.id for row in shared] == [rows[1].id]
     scoped = await service.list_files(**common, context_id=allowed.id, limit=1)
