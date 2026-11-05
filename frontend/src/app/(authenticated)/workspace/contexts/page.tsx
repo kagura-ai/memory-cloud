@@ -596,6 +596,7 @@ export default function ContextsPage() {
   return (
     <PageContainer>
       <PageHeader
+        className="flex-col !items-start gap-4 lg:flex-row lg:gap-6 [&>div:first-child]:min-w-0 [&>div:last-child]:shrink-0"
         title={t("title")}
         // #1755: the list is the current workspace only; say which one.
         description={
