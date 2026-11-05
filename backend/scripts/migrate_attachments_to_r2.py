@@ -39,7 +39,8 @@ of the migration: for ``file_objects`` rows with ``created_by LIKE
 from ``created_by`` and sets ``context_id`` from that attachment's memory.
 Rows a user uploaded never match ``created_by``. Counts: ``bound`` (set, or
 would be set under ``--dry-run``), ``shared`` (the memory has no context: left
-workspace-shared), ``orphan`` (the attachment or memory is gone: untouched),
+workspace-shared), ``orphan`` (the attachment, memory or context row is gone:
+untouched),
 ``context_deleted`` (bound to a soft-deleted context: hidden by the access
 check, and the #1966 backfill finds it), ``unparsable`` (``created_by`` holds
 no attachment id: untouched). Re-running the migration does not re-bind old
@@ -69,6 +70,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from collections.abc import Iterable
 from contextlib import aclosing
 from datetime import datetime
 from pathlib import Path
@@ -249,6 +251,24 @@ async def migrate_all(db: AsyncSession, *, dry_run: bool, batch_size: int) -> di
     return counts
 
 
+async def _lock_contexts(db: AsyncSession, context_ids: Iterable[UUID]) -> set[UUID]:
+    """KEY SHARE the given contexts in id order; returns the ids that still exist.
+
+    The order user erasure locks contexts in (``locked_ids``), so a page's FK
+    checks never take them in another order and deadlock with it.
+    """
+    ids = sorted(set(context_ids))
+    if not ids:
+        return set()
+    result = await db.execute(
+        select(Context.id)
+        .where(Context.id.in_(ids))
+        .order_by(Context.id)
+        .with_for_update(read=True, key_share=True)
+    )
+    return set(result.scalars().all())
+
+
 async def repair_context_bindings(
     db: AsyncSession, *, dry_run: bool, batch_size: int
 ) -> dict[str, int]:
@@ -257,10 +277,11 @@ async def repair_context_bindings(
     Pages ``file_objects`` rows with ``created_by LIKE 'migration:attachment:%'``
     and ``context_id IS NULL`` by id, with no status or ``deleted_at`` filter
     (the binding is access metadata; ``restore_context`` relies on it for
-    soft-deleted rows too). Binds a page's rows in file id order, the row-lock
-    order of the purges, so it cannot deadlock with them. Commits per page;
-    ``dry_run`` writes nothing and returns the same counts (``bound`` = would
-    bind).
+    soft-deleted rows too). Lock order per page: the target contexts in id
+    order (KEY SHARE, as user erasure orders them), then the file rows in id
+    order (as the purges order them), so it cannot deadlock with either.
+    Commits per page; ``dry_run`` writes nothing and returns the same counts
+    (``bound`` = would bind).
     """
     counts = {"bound": 0, "shared": 0, "orphan": 0, "context_deleted": 0, "unparsable": 0}
     last_id: UUID | None = None
@@ -325,10 +346,22 @@ async def repair_context_bindings(
             for file_id in files:
                 to_bind.append((file_id, attachment_id, context_id, context_deleted_at is not None))
 
-        # File id order: row locks in id order like every multi-row file_objects
-        # writer (``_purge_live_rows``); each row's storage-key lock (UPDATE
-        # trigger) follows its row lock, as everywhere else.
+        # Contexts first, in id order: each UPDATE's FK check takes KEY SHARE
+        # on its context, and in file order that could oppose user erasure.
+        live_contexts = await _lock_contexts(db, (t[2] for t in to_bind))
+        # Then file id order: row locks in id order like every multi-row
+        # file_objects writer (``_purge_live_rows``); each row's storage-key lock
+        # (UPDATE trigger) follows its row lock, as everywhere else.
         for file_id, attachment_id, context_id, context_deleted in sorted(to_bind):
+            if context_id not in live_contexts:
+                # Hard-deleted since the parent read: nothing to bind to.
+                counts["orphan"] += 1
+                logger.info(
+                    "attachment_repair_orphan",
+                    attachment_id=str(attachment_id),
+                    file_ids=[str(file_id)],
+                )
+                continue
             if not dry_run:
                 updated = await db.execute(
                     update(FileObject)

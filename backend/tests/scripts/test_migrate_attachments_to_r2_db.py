@@ -501,6 +501,105 @@ async def test_repair_binds_a_page_in_file_id_order(db_session, async_engine: As
 
 
 @pytest.mark.asyncio
+async def test_repair_locks_target_contexts_in_id_order_first(
+    db_session, async_engine: AsyncEngine
+):
+    """Each UPDATE's FK check takes KEY SHARE on its context. In file id order
+    that could oppose user erasure, which locks contexts FOR UPDATE in id order;
+    the page locks its target contexts in id order before any file UPDATE."""
+    ws = await _workspace(db_session)
+    ctx_lo, ctx_hi = sorted([await _context(db_session, ws), await _context(db_session, ws)])
+    _, att_hi = await _attachment(db_session, ws, ctx_hi, data=b"hi")
+    _, att_lo = await _attachment(db_session, ws, ctx_lo, data=b"lo")
+    file_lo, file_hi = sorted([uuid4(), uuid4()])
+    # File id order is the reverse of context id order.
+    for att, file_id in ((att_hi, file_lo), (att_lo, file_hi)):
+        row = _legacy_file(ws, att)
+        row.id = file_id
+        db_session.add(row)
+    await db_session.commit()
+
+    ctx_ids = {str(ctx_lo), str(ctx_hi)}
+    file_ids = {str(file_lo), str(file_hi)}
+    seen: list[tuple[str, list[str]]] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany) -> None:
+        sql = " ".join(statement.split())
+        if sql.startswith("UPDATE file_objects"):
+            seen.append(("update", [str(p) for p in parameters if str(p) in file_ids]))
+        elif "FROM contexts" in sql and sql.endswith("FOR KEY SHARE"):
+            assert "ORDER BY contexts.id" in sql
+            seen.append(("lock", [str(p) for p in parameters if str(p) in ctx_ids]))
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", _record)
+    try:
+        counts = await mig.repair_context_bindings(db_session, dry_run=False, batch_size=10)
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", _record)
+
+    assert counts["bound"] == 2
+    assert seen == [
+        ("lock", [str(ctx_lo), str(ctx_hi)]),
+        ("update", [str(file_lo)]),
+        ("update", [str(file_hi)]),
+    ]
+    db_session.expire_all()
+    bound = dict(
+        (
+            await db_session.execute(
+                select(FileObject.id, FileObject.context_id).where(
+                    FileObject.id.in_([file_lo, file_hi])
+                )
+            )
+        )
+        .tuples()
+        .all()
+    )
+    assert bound == {file_lo: ctx_hi, file_hi: ctx_lo}
+
+
+@pytest.mark.asyncio
+async def test_lock_contexts_returns_the_ids_that_still_exist(db_session):
+    ws = await _workspace(db_session)
+    live = await _context(db_session, ws)
+    gone = await _context(db_session, ws, deleted=True)  # soft-deleted still binds
+    await db_session.commit()
+
+    locked = await mig._lock_contexts(db_session, [gone, uuid4(), live, live])
+
+    assert locked == {live, gone}
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_repair_counts_a_context_gone_before_the_lock_as_orphan(db_session):
+    """A target context hard-deleted between the page's parent read and its
+    lock is not bound (the UPDATE would fail the FK check): counted orphan."""
+    ws = await _workspace(db_session)
+    ctx = await _context(db_session, ws)
+    _, att = await _attachment(db_session, ws, ctx)
+    row = _legacy_file(ws, att)
+    db_session.add(row)
+    await db_session.commit()
+    row_id = row.id
+
+    real_lock = mig._lock_contexts
+
+    async def _context_goes_first(db: AsyncSession, context_ids) -> set[UUID]:
+        await db.execute(delete(Context).where(Context.id == ctx))
+        return await real_lock(db, context_ids)
+
+    with patch.object(mig, "_lock_contexts", _context_goes_first):
+        counts = await mig.repair_context_bindings(db_session, dry_run=False, batch_size=10)
+
+    assert counts["orphan"] == 1 and counts["bound"] == 0
+    db_session.expire_all()
+    assert (
+        await db_session.scalar(select(FileObject.context_id).where(FileObject.id == row_id))
+    ) is None
+
+
+@pytest.mark.asyncio
 async def test_repair_skips_an_unparsable_created_by(db_session):
     ws = await _workspace(db_session)
     row = _legacy_file(ws, uuid4(), created_by=f"{_PREFIX}not-a-uuid")
