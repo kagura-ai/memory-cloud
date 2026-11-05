@@ -29,6 +29,7 @@ from fastapi import HTTPException
 
 from api.routes import auth as auth_routes
 from auth.password import hash_password
+from auth.recovery_codes import issue_codes
 from services.security_notification_service import SecurityEvent
 from tests.redis_fake_ops import SessionFakeOps
 from utils.exceptions import AuthenticationError, InvalidCredentialsError
@@ -129,6 +130,26 @@ async def _code_step(token: str, code: str):
 def _wrong_code() -> str:
     # Five digits never equal a six-digit code: wrong in every time step.
     return "12345"
+
+
+@pytest.mark.asyncio
+async def test_recovery_code_completes_password_signin_only_once(account, monkeypatch):
+    codes, account.user.totp_recovery_hashes = issue_codes()
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=account.user)
+    lookup = MagicMock()
+    lookup.scalar_one_or_none.return_value = account.user
+    db.execute = AsyncMock(return_value=lookup)
+    db.commit = AsyncMock()
+
+    async def get_db():
+        yield db
+
+    monkeypatch.setattr(auth_routes, "get_db", get_db)
+    result = await _code_step(await _password_step(), codes[0])
+    assert result.status_code == 200
+    with pytest.raises(AuthenticationError):
+        await _code_step(await _password_step(), codes[0])
 
 
 @pytest.mark.asyncio

@@ -40,6 +40,7 @@ import { PageSectionNavigation } from "@/components/common/PageSectionNavigation
 import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import LinkedAccounts from "@/components/auth/LinkedAccounts";
 import PasswordSettings from "@/components/auth/PasswordSettings";
+import { MfaSettings } from "@/components/auth/MfaSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
 import {
   getSignInMethodLabel,
@@ -503,6 +504,8 @@ export default function ProfilePage() {
 
       {/* Password (Issue #1678): set up / change / remove. */}
       <section id="profile-password" tabIndex={-1} aria-label={t("sections.password")} className="scroll-mt-24"><PasswordSettings providersVersion={providersVersion} /></section>
+
+      <MfaSettings key={user?.id} />
 
       {/* Theme & Appearance */}
       <Card id="profile-appearance" tabIndex={-1} aria-label={t("sections.appearance")} className="scroll-mt-24">

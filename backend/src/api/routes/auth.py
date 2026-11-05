@@ -51,6 +51,7 @@ from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
 from auth.password import hash_password, verify_password
 from auth.provider_link import provider_link_established
+from auth.recovery_codes import consume_login_code, is_recovery_code
 from auth.roles import get_role_manager
 from auth.session import (
     SESSION_COOKIE_NAME,
@@ -2084,6 +2085,7 @@ async def get_current_user_info(
             # Issue #1678: ``auth_method`` is the ORIGINAL sign-in method; this
             # says whether the account can sign in with a password now.
             "has_password": bool(db_user and db_user.password_hash is not None),
+            "mfa_enabled": bool(db_user and db_user.totp_enabled),
             # Issue #1784: the other accounts counted as this owner, so the
             # web UI attributes their private contexts to the viewer.
             "linked_user_ids": (
@@ -3216,7 +3218,7 @@ async def password_login(
         _record_login_failure(rate_key)
         raise InvalidCredentialsError()
 
-    verified = credential_fingerprint(user.password_hash)
+    verified = credential_fingerprint(user.password_hash, getattr(user, "mfa_generation", None))
 
     # MFA check. The budget is NOT cleared here: the second factor draws on it
     # (see ``_refuse_totp_code``), and a correct password must not refill it —
@@ -3317,9 +3319,16 @@ async def mfa_verify(
     # A wrong code, or a code this account already signed in with, consumes
     # the pending step and is answered 401 (the attempt is already counted).
     # The fingerprint key is already gone: the single-use guard above took it.
-    if not verify_totp(totp_secret, body.totp_code):
-        _refuse_totp_code(user, body.mfa_session_token, request, attempt)
-    if not _claim_totp_code(user.user_id, body.totp_code):
+    if is_recovery_code(body.totp_code):
+        accepted = False
+        async for db in get_db():
+            accepted = await consume_login_code(db, user.user_id, body.totp_code)
+            break
+    else:
+        accepted = verify_totp(totp_secret, body.totp_code) and _claim_totp_code(
+            user.user_id, body.totp_code
+        )
+    if not accepted:
         _refuse_totp_code(user, body.mfa_session_token, request, attempt)
 
     _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")

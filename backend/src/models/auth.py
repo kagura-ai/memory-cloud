@@ -143,6 +143,8 @@ class User(Base):
     totp_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    mfa_generation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    totp_recovery_hashes: Mapped[list[str] | None] = mapped_column(NullableJSON, nullable=True)
     # Issue #1678: when ownership of ``email`` was last proven — by an IdP
     # (backfilled for users with a linked OAuth provider) or by following a
     # link sent to the address. Password sign-in by email requires it.

@@ -51,6 +51,7 @@ prints that hint.
 import getpass
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -141,7 +142,7 @@ def reset_password():
     engine = create_engine(get_sync_database_url())
 
     with Session(engine) as db:
-        login_id = input("\n  Login ID: ").strip()
+        login_id = input("\n  Login ID or user ID: ").strip()
         if not login_id:
             print("✗ Login ID cannot be empty.")
             sys.exit(1)
@@ -151,7 +152,11 @@ def reset_password():
         ).scalar_one_or_none()
 
         if not user:
-            print(f"✗ No password user found with login_id '{login_id}'.")
+            user = db.execute(
+                select(User).where(User.user_id == login_id, User.password_hash.is_not(None))
+            ).scalar_one_or_none()
+        if not user:
+            print(f"✗ No password user found for '{login_id}'.")
             sys.exit(1)
 
         print(f"\n  Current MFA: {'enabled' if user.totp_enabled else 'disabled'}")
@@ -209,6 +214,8 @@ def reset_password():
 
         # Disable MFA
         if choice in ("2", "3"):
+            user.totp_recovery_hashes = None
+            user.mfa_generation = uuid4().hex
             user.totp_enabled = False
             user.totp_secret = None
 
@@ -297,6 +304,8 @@ def reset_password():
                     if verify_totp(totp_secret, verify_code):
                         from utils.encryption import get_encryptor  # noqa: E402
 
+                        user.totp_recovery_hashes = None
+                        user.mfa_generation = uuid4().hex
                         user.totp_secret = get_encryptor().encrypt(totp_secret)
                         user.totp_enabled = True
                         db.commit()

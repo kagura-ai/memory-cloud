@@ -829,6 +829,7 @@ from api.routes import (  # noqa: E402
     me_terms,  # Issue #1665: terms-of-service re-acceptance
     member_credentials,
     memory,
+    mfa_settings,
     neural_config,
     oauth,
     password,  # Issue #1678: self-service password endpoints
@@ -873,6 +874,7 @@ app.include_router(me_oauth_grants.router, prefix="/api/v1")
 app.include_router(me_terms.router, prefix="/api/v1")
 
 # Email + password sign-in: reset / set up / change / remove (Issue #1678)
+app.include_router(mfa_settings.router, prefix="/api/v1")
 app.include_router(password.router, prefix="/api/v1")
 app.include_router(password.me_router, prefix="/api/v1")
 
