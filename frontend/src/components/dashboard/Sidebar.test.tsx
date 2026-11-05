@@ -178,7 +178,7 @@ describe("Sidebar", () => {
     expect(screen.queryByRole("link", { name: "plan" })).toBeNull();
   });
 
-  it("shows externalKeys and workspace cost links when byok is enabled (#1167)", () => {
+  it("shows the Integrations entry and deployment-enabled workspace cost", () => {
     render(<Sidebar />);
     expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
     expect(screen.getByRole("link", { name: "integrations" })).toHaveAttribute("href", "/workspace/integrations");
@@ -188,7 +188,7 @@ describe("Sidebar", () => {
     );
   });
 
-  it("hides externalKeys and workspace cost when byok is off; sleepReports stays (#1167)", () => {
+  it("hides workspace cost when BYOK is off and keeps Sleep reports", () => {
     mockFeatures = { plan_page: true, byok: false };
     render(<Sidebar />);
     expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
@@ -198,14 +198,14 @@ describe("Sidebar", () => {
     ).toBeInTheDocument();
   });
 
-  it("hides externalKeys and cost while feature flags are loading (fail closed) (#1167)", () => {
+  it("keeps deployment-gated workspace cost hidden while flags load", () => {
     mockFeatures = null;
     render(<Sidebar />);
     expect(screen.queryByRole("link", { name: "externalKeys" })).toBeNull();
     expect(document.querySelector('nav a[href="/workspace/cost"]')).toBeNull();
   });
 
-  it("hides the workspace cost link when cost_display is off; externalKeys stays (#1571)", () => {
+  it("hides workspace cost when cost display is off and keeps Integrations", () => {
     mockFeatures = { plan_page: true, byok: true, cost_display: false };
     render(<Sidebar />);
     expect(document.querySelector('nav a[href="/workspace/cost"]')).toBeNull();
@@ -330,6 +330,7 @@ describe("feature discoverability (#2630)", () => {
       expect(document.querySelector('nav a[href="/workspace/secrets"]')).toBeNull();
       expect(mockListResources).not.toHaveBeenCalled();
       expect(mockListConnectors).not.toHaveBeenCalled();
+      expect(mockListExternalKeys).not.toHaveBeenCalled();
     },
   );
 });

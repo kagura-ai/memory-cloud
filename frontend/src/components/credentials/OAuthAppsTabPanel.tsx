@@ -275,13 +275,7 @@ export function OAuthAppsTabPanel() {
       <ErrorBanner error={error} />
 
       <Section>
-        <div className="space-y-6">
-          {/* Claude / ChatGPT / Cursor / Claude Code register themselves (DCR):
-              no app to create here for them. */}
-          <p className="text-sm text-gray-600 dark:text-gray-400">
-            {t("dcrNote")}
-          </p>
-
+        <div className="space-y-4">
           {/* Custom OAuth Apps */}
           <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
             <div className="flex items-center justify-between mb-3">
@@ -296,19 +290,20 @@ export function OAuthAppsTabPanel() {
                   </p>
                 </div>
               </div>
-              <ActionButton
+              {customApps.length > 0 && <ActionButton
                 onClick={openCustomAppDialog}
                 icon={<Plus className="w-4 h-4" />}
                 variant="primary"
               >
                 {t("createCustomApp")}
-              </ActionButton>
+              </ActionButton>}
             </div>
 
             {customApps.length === 0 ? (
               <EmptyState
                 icon={KeyRound}
                 title={t("noCustomOAuthAppsTitle")}
+                compact
                 description={t("noCustomApps")}
                 actionLabel={t("createCustomApp")}
                 onAction={openCustomAppDialog}

@@ -36,6 +36,7 @@ import { User, Moon, Sun, Save, RefreshCw } from "lucide-react";
 import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { PageContainer } from "@/components/common/PageContainer";
+import { PageSectionNavigation } from "@/components/common/PageSectionNavigation";
 import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import LinkedAccounts from "@/components/auth/LinkedAccounts";
 import PasswordSettings from "@/components/auth/PasswordSettings";
@@ -61,16 +62,6 @@ export default function ProfilePage() {
   const { user, refetchUser } = useAuth();
   const { toast } = useToast();
   const [isEditMode, setIsEditMode] = useState(false);
-  const [activeSection, setActiveSection] = useState<string>("profile-info");
-  useEffect(() => {
-    const syncSection = () => {
-      const id = window.location.hash?.slice(1);
-      setActiveSection(sections.find(([section]) => section === id)?.[0] ?? "profile-info");
-    };
-    syncSection();
-    window.addEventListener("hashchange", syncSection);
-    return () => window.removeEventListener("hashchange", syncSection);
-  }, []);
   const [isRefreshing, setIsRefreshing] = useState(false);
   // #1678: bumped when Connected Accounts unlinks a provider, so the Password
   // section re-reads how many sign-in methods would remain.
@@ -298,14 +289,10 @@ export default function ProfilePage() {
         </p>
       </div>
 
-      <nav aria-label={t("sections.label")} className="sticky top-0 z-20 flex gap-1 overflow-x-auto rounded-lg border border-slate-200 bg-slate-100 p-1.5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
-        {sections.map(([id, label]) => <a key={id} href={`#${id}`} onClick={() => setActiveSection(id)} aria-current={activeSection === id ? "location" : undefined}
-          className={`inline-flex min-h-11 shrink-0 items-center whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 ${activeSection === id
-            ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-white"
-            : "text-slate-700 hover:bg-white hover:text-slate-900 dark:text-slate-200 dark:hover:bg-slate-700 dark:hover:text-white"}`}>
-          {t(`sections.${label}`)}
-        </a>)}
-      </nav>
+      <PageSectionNavigation
+        label={t("sections.label")}
+        sections={sections.map(([id, key]) => ({ id, label: t(`sections.${key}`) }))}
+      />
 
       {/* Profile Information */}
       <Card id="profile-info" tabIndex={-1} aria-label={t("sections.info")} className="scroll-mt-24">

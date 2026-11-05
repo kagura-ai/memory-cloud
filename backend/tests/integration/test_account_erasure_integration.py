@@ -36,7 +36,14 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
-from models.auth import APIKey, AuditLog, User, Workspace, WorkspaceMember
+from models.auth import (
+    APIKey,
+    AuditLog,
+    User,
+    Workspace,
+    WorkspaceInvitation,
+    WorkspaceMember,
+)
 from models.erasure import (
     REASON_USER_REQUEST_VIA_SUPPORT,
     STATUS_CANCELLED,
@@ -446,6 +453,64 @@ class TestAdminForceEraseHappyPath:
         assert audit.user_metadata["initiated_by"] == pseudonym
         assert (audit.ip_address, audit.user_agent) == (None, None)
         assert target_user_id not in repr(audit.user_metadata)
+
+
+class TestInvitationsAddressedToTheSubject:
+    """#2641: invitation emails are stored as typed, so the erasure matches
+    them case-insensitively."""
+
+    @pytest.mark.asyncio
+    async def test_a_differently_cased_address_is_deleted_with_the_subjects_own(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        target_user_id = erasure_scenario["target_user_id"]
+        workspace_id = erasure_scenario["workspace_id"]
+        other_user_id = erasure_scenario["other_user_id"]
+        target_email = erasure_scenario["target_email"]
+
+        def _invite(email: str | None, invited_by: str) -> WorkspaceInvitation:
+            return WorkspaceInvitation(
+                workspace_id=workspace_id,
+                token=f"inv_{uuid4().hex}",
+                email=email,
+                role=WorkspaceRole.MEMBER,
+                invited_by=invited_by,
+            )
+
+        cased = _invite(target_email.upper(), other_user_id)
+        unrelated = _invite(f"someone-{uuid4().hex[:6]}@example.com", other_user_id)
+        sent = _invite(f"sent-{uuid4().hex[:6]}@example.com", target_user_id)
+        link_only = _invite(None, other_user_id)
+        db_session.add_all([cased, unrelated, sent, link_only])
+        await db_session.commit()
+        all_ids = tuple(row.id for row in (cased, unrelated, sent, link_only))
+        unrelated_id, link_only_id = unrelated.id, link_only.id
+
+        try:
+            await AccountErasureService(db_session).admin_force_erase(
+                target_user_id=target_user_id,
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test (#2641)",
+                ip_address="203.0.113.9",
+                user_agent="agent",
+            )
+
+            remaining = set(
+                (
+                    await db_session.execute(
+                        select(WorkspaceInvitation.id).where(WorkspaceInvitation.id.in_(all_ids))
+                    )
+                ).scalars()
+            )
+            # the link-only one (no email) is another user's and survives (lower(NULL))
+            assert remaining == {unrelated_id, link_only_id}
+        finally:
+            await db_session.rollback()
+            await db_session.execute(
+                delete(WorkspaceInvitation).where(WorkspaceInvitation.id.in_(all_ids))
+            )
+            await db_session.commit()
 
 
 class TestAuditLogFailureRollsThePostgresStepBack:

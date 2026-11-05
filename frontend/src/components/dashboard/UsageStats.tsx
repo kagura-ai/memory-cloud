@@ -10,8 +10,9 @@
 
 import {
   useEffect,
-  useMemo,
   useState,
+  useRef,
+  useCallback,
   forwardRef,
   useImperativeHandle,
 } from "react";
@@ -20,36 +21,24 @@ import { useTranslations, useLocale } from "next-intl";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
-import {
-  LineChart,
-  Line,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-} from "recharts";
 import { Brain, Zap, TrendingUp, XCircle, Moon, Briefcase } from "lucide-react";
 import type {
   PlanLimits,
+  QuotaUsage,
   SleepContextsUsage,
   WorkspacesUsage,
 } from "@/lib/api/usage";
 import {
   getWorkspaceUsageCurrent,
-  getWorkspaceUsageHistory,
-  getWorkspaceUsageBreakdown,
 } from "@/lib/api/workspaces";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { useAuth } from "@/contexts/AuthContext";
-import { formatDate } from "@/lib/utils/datetime";
 import { isPlanTier, planLabelFromEnv } from "@/lib/utils/planLabel";
+import { QuotaOverview } from "./QuotaOverview";
 import { QuotaWarning } from "@/components/common/QuotaWarning";
 
 interface CurrentUsage {
@@ -77,6 +66,7 @@ interface UsageStatus {
 }
 
 interface UsageCurrentData {
+  quota_usage?: QuotaUsage[];
   plan: PlanLimits;
   usage: CurrentUsage;
   memory_usage: UsageStatus;
@@ -84,121 +74,50 @@ interface UsageCurrentData {
   weekly_api_usage: UsageStatus;
 }
 
-interface DailyUsage {
-  date: string;
-  count: number;
-}
-
-interface UsageHistory {
-  daily_stats: DailyUsage[];
-  total_requests: number;
-  period_start: string;
-  period_end: string;
-}
-
-interface EndpointUsage {
-  endpoint: string;
-  count: number;
-  percentage: number;
-}
-
-interface UsageBreakdown {
-  by_endpoint: EndpointUsage[];
-  total_requests: number;
-  period_days: number;
-}
-
-// Tailwind background classes for the per-endpoint color chips next to
-// each list row. Index-based cycling keeps the row chips visually
-// distinct without inline `style={{ backgroundColor }}` (which would
-// violate the "no inline styles" rule in .claude/rules/frontend.md).
-// Tailwind's JIT only retains classes that appear as static strings
-// somewhere in the source — the literal strings here are what makes
-// that work; do not switch to dynamic concatenation like
-// `bg-${color}-500`.
-const SWATCH_BG_CLASSES = [
-  "bg-emerald-500",
-  "bg-blue-500",
-  "bg-violet-500",
-  "bg-amber-500",
-  "bg-red-500",
-  "bg-cyan-500",
-];
-
 export interface UsageStatsRef {
   refresh: () => Promise<void>;
 }
 
 export interface UsageStatsProps {
   className?: string;
+  onQuotasLoaded?: (workspaceId: string, meters: QuotaUsage[]) => void;
 }
 
 export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
-  ({ className }, ref) => {
+  ({ className, onQuotasLoaded }, ref) => {
     const t = useTranslations("usageStats");
 
     const { currentWorkspaceId } = useWorkspace();
-    const { user } = useAuth();
     const locale = useLocale();
     const router = useRouter();
     const [currentUsage, setCurrentUsage] = useState<UsageCurrentData | null>(
       null,
     );
-    const [history, setHistory] = useState<UsageHistory | null>(null);
-    const [breakdown, setBreakdown] = useState<UsageBreakdown | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const requestId = useRef(0);
+    const cancelPending = useCallback(() => { requestId.current++; }, []);
+    const [loadedWorkspaceId, setLoadedWorkspaceId] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
 
-    // Top-10 + "Other" rollup for the endpoint distribution. Showing
-    // every endpoint produces a 25+-row list dominated by 0.0% entries
-    // that crowd out the signal. The rollup keeps the list percentages
-    // adding to 100% so the UI doesn't lie about scale.
-    const TOP_ENDPOINTS_LIMIT = 10;
-    const topEndpoints = useMemo<EndpointUsage[]>(() => {
-      if (!breakdown) return [];
-      const sorted = [...breakdown.by_endpoint].sort(
-        (a, b) => b.count - a.count,
-      );
-      if (sorted.length <= TOP_ENDPOINTS_LIMIT) return sorted;
-      const top = sorted.slice(0, TOP_ENDPOINTS_LIMIT);
-      const rest = sorted.slice(TOP_ENDPOINTS_LIMIT);
-      const otherCount = rest.reduce((sum, ep) => sum + ep.count, 0);
-      // Compute Other's share as the residual rather than summing the
-      // backend's pre-rounded per-endpoint percentages — that path
-      // accumulates rounding error across 15+ entries and drifts off
-      // 100%. Clamp to ≥0 in case the top-10 sum itself overflows
-      // 100% from the same artifact.
-      const topPercentageSum = top.reduce((sum, ep) => sum + ep.percentage, 0);
-      const otherPercentage = Math.max(0, 100 - topPercentageSum);
-      return [
-        ...top,
-        {
-          endpoint: t("otherEndpointsLabel", { count: rest.length }),
-          count: otherCount,
-          percentage: otherPercentage,
-        },
-      ];
-    }, [breakdown, t]);
-
     const fetchAllStats = async () => {
+      const request = ++requestId.current;
+      const workspaceId = currentWorkspaceId;
       try {
         setIsLoading(true);
 
-        const [current, hist, brkdwn] = await Promise.all([
-          getWorkspaceUsageCurrent(),
-          getWorkspaceUsageHistory(7),
-          getWorkspaceUsageBreakdown(30),
-        ]);
+        const current = await getWorkspaceUsageCurrent();
 
+        if (request !== requestId.current) return;
+        setLoadedWorkspaceId(workspaceId);
+        if (workspaceId) onQuotasLoaded?.(workspaceId, current.quota_usage ?? []);
         setCurrentUsage(current);
-        setHistory(hist);
-        setBreakdown(brkdwn);
         setError(null);
       } catch (err) {
+        if (request !== requestId.current) return;
         console.error("Failed to fetch usage stats:", err);
         setError(err instanceof Error ? err.message : t("failedToLoad"));
       } finally {
-        setIsLoading(false);
+        if (request === requestId.current) setIsLoading(false);
       }
     };
 
@@ -212,10 +131,11 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
       if (currentWorkspaceId !== null) {
         fetchAllStats();
       }
+      return cancelPending;
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [currentWorkspaceId]);
 
-    if (isLoading) {
+    if (isLoading || (!error && loadedWorkspaceId !== currentWorkspaceId)) {
       return (
         <div className="space-y-6">
           {[...Array(3)].map((_, i) => (
@@ -229,7 +149,7 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
       );
     }
 
-    if (error || !currentUsage || !history || !breakdown) {
+    if (error || !currentUsage) {
       return (
         <Alert variant="destructive">
           <XCircle className="h-4 w-4" />
@@ -248,7 +168,11 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
       typeof memoriesCreatedToday === "number" && memoriesPerDay > 0;
 
     return (
-      <div className="space-y-6">
+      <div className={"space-y-6 " + (className ?? "")}>
+        {currentUsage.quota_usage?.length ? (
+          <QuotaOverview meters={currentUsage.quota_usage} />
+        ) : (
+          <>
         {/* Quota Warnings - Issue #149 */}
         <QuotaWarning
           current={currentUsage.usage.memory_count}
@@ -508,80 +432,9 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
           </div>
         </div>
 
-        {/* Usage Trend (7 days) */}
-        <Card>
-          <CardHeader>
-            <CardTitle>{t("usageTrend")}</CardTitle>
-            <CardDescription>{t("apiCallsPerDay")}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="h-64">
-              <ResponsiveContainer width="100%" height={256}>
-                <LineChart data={history.daily_stats}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="date"
-                    tickFormatter={(date) =>
-                      formatDate(date, user?.timezone, locale)
-                    }
-                  />
-                  <YAxis />
-                  <Tooltip
-                    labelFormatter={(date) =>
-                      formatDate(date, user?.timezone, locale)
-                    }
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="count"
-                    stroke="#10b981"
-                    strokeWidth={2}
-                    dot={{ fill: "#10b981", r: 4 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
+          </>
+        )}
 
-        {/* Endpoint Breakdown — list-only. The pie chart was dropped:
-            it duplicated the list and the per-slice labels overlapped
-            once the long-tail endpoints were rolled into "Other". */}
-        <Card>
-          <CardHeader>
-            <CardTitle>{t("usageByEndpoint")}</CardTitle>
-            <CardDescription>{t("apiMcpDistribution")}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              {topEndpoints.length > 0 ? (
-                topEndpoints.map((ep, index) => (
-                  <div
-                    key={ep.endpoint}
-                    className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                  >
-                    <div className="flex items-center gap-2">
-                      <div
-                        className={`w-3 h-3 rounded-full ${SWATCH_BG_CLASSES[index % SWATCH_BG_CLASSES.length]}`}
-                      />
-                      <span className="text-sm font-medium">{ep.endpoint}</span>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-sm font-bold">{ep.count}</div>
-                      <div className="text-xs text-gray-500 dark:text-gray-400">
-                        {ep.percentage.toFixed(1)}%
-                      </div>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  {t("noUsageData")}
-                </p>
-              )}
-            </div>
-          </CardContent>
-        </Card>
       </div>
     );
   },

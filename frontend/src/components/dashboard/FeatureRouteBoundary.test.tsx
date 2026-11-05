@@ -44,7 +44,7 @@ function view() {
 }
 beforeEach(() => {
   fixture.path = "/workspace/resources"; fixture.role = "member"; fixture.systemRole = "user";
-  fixture.loading = false; fixture.planExcluded = true; fixture.lookupFailed = false; fixture.flags.plan_page = true;
+  fixture.loading = false; fixture.planExcluded = true; fixture.lookupFailed = false; fixture.flags.plan_page = true; fixture.flags.byok = true;
   fixture.request.mockClear();
 });
 describe("feature routes", () => {
@@ -85,6 +85,15 @@ describe("feature routes", () => {
     expect(screen.queryByText(en.featureAccess.deployment)).toBeNull();
     expect(fixture.request).not.toHaveBeenCalled();
   });
+  it("shows an unavailable notice without mounting external keys when BYOK is disabled", () => {
+    fixture.path = "/workspace/integrations/external-keys";
+    fixture.role = "owner";
+    fixture.flags.byok = false;
+    render(view());
+    expect(screen.getByText(en.featureAccess.currentlyUnavailable)).toBeInTheDocument();
+    expect(fixture.request).not.toHaveBeenCalled();
+  });
+
   it("withholds the plan child when switching from an owned to a joined workspace", () => {
     fixture.path = "/workspace/settings/plan"; fixture.role = "owner";
     const { rerender } = render(view()); fixture.request.mockClear();

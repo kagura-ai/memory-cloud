@@ -10,7 +10,7 @@
  * Issue #955
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations, useLocale } from "next-intl";
 import { Download, FolderMinus, HardDrive, Trash2 } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -21,6 +21,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -57,6 +58,11 @@ const PAGE_SIZE = 50;
 const MAX_LIMIT = 500;
 
 export default function StoragePage() {
+  const { currentWorkspaceId } = useWorkspace();
+  return <StorageContent key={currentWorkspaceId ?? "loading"} />;
+}
+
+function StorageContent() {
   const t = useTranslations("storage");
   const tCommon = useTranslations("common");
   const locale = useLocale();
@@ -64,10 +70,13 @@ export default function StoragePage() {
   const { toast } = useToast();
 
   const [files, setFiles] = useState<FileObject[]>([]);
-  // Issue #1136: map context_id → display name so a context-bound file shows its
-  // context, not a raw UUID. Best-effort: a fetch failure just falls back to the
-  // short id (the listing itself is unaffected).
+  const [selectedScope, setSelectedScope] = useState("workspace");
+  const requestId = useRef(0);
+  const cancelPending = useCallback(() => { requestId.current++; }, []);
+  // Accessible contexts provide both scope choices and display names.
   const [contextNames, setContextNames] = useState<Record<string, string>>({});
+  const [contextsFailed, setContextsFailed] = useState(false);
+  const [contextRetry, setContextRetry] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,6 +112,7 @@ export default function StoragePage() {
   const loadFiles = useCallback(
     async (nextLimit: number, mode: "initial" | "more" | "refresh") => {
       if (!currentWorkspaceId) return;
+      const request = ++requestId.current;
       if (mode === "initial") {
         setLoading(true);
         setError(null);
@@ -110,10 +120,13 @@ export default function StoragePage() {
         setLoadingMore(true);
       }
       try {
-        const data = await listFiles(currentWorkspaceId, nextLimit);
+        const data = await listFiles(currentWorkspaceId, nextLimit,
+          selectedScope === "workspace" ? { scope: "workspace" } : { contextId: selectedScope });
+        if (request !== requestId.current) return;
         setFiles(data);
         setLimit(nextLimit);
       } catch (e) {
+        if (request !== requestId.current) return;
         const message = e instanceof Error ? e.message : t("list.fetchError");
         if (mode === "initial") {
           // First paint failed — there are no rows to protect, so surface a
@@ -131,22 +144,25 @@ export default function StoragePage() {
           });
         }
       } finally {
-        if (mode === "initial") setLoading(false);
-        else if (mode === "more") setLoadingMore(false);
+        if (request === requestId.current) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
       }
     },
-    [currentWorkspaceId, t, toast],
+    [currentWorkspaceId, selectedScope, t, toast],
   );
 
   useEffect(() => {
     // Hold until WorkspaceContext hydrates so we don't fire a round-trip
     // with a null workspace id on first render.
     if (!currentWorkspaceId) return;
-    loadFiles(PAGE_SIZE, "initial");
-  }, [currentWorkspaceId, loadFiles]);
+    void loadFiles(PAGE_SIZE, "initial");
+    return cancelPending;
+  }, [currentWorkspaceId, loadFiles, cancelPending]);
 
   useEffect(() => {
-    // Resolve context names once per workspace for the Scope column (#1136).
+    // A failed lookup must be recoverable: these are the context scope choices.
     if (!currentWorkspaceId) return;
     let cancelled = false;
     getContexts()
@@ -156,14 +172,15 @@ export default function StoragePage() {
         // `||` (not `??`) so an empty-string display_name falls back to the name.
         for (const c of res.contexts) map[c.id] = c.display_name || c.name;
         setContextNames(map);
+        setContextsFailed(false);
       })
       .catch(() => {
-        /* non-critical: Scope cells fall back to the short context id */
+        if (!cancelled) setContextsFailed(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [currentWorkspaceId]);
+  }, [currentWorkspaceId, contextRetry]);
 
   useEffect(() => {
     document.title = `${t("list.title")} - Kagura Memory Cloud`;
@@ -255,6 +272,41 @@ export default function StoragePage() {
   return (
     <PageContainer>
       <PageHeader title={t("list.title")} description={t("list.description")} />
+      <div className="space-y-2">
+        <Select value={selectedScope} onValueChange={value => {
+          cancelPending();
+          setFiles([]);
+          setError(null);
+          setFileToDelete(null);
+          setContextToClear(null);
+          setClearError(null);
+          setLoading(true);
+          setLoadingMore(false);
+          setSelectedScope(value);
+        }} disabled={deleting || clearing}>
+          <SelectTrigger className="w-full sm:w-72" aria-label={t("list.filter.label")}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="workspace">{t("list.filter.workspace")}</SelectItem>
+            {Object.entries(contextNames).map(([id, name]) => <SelectItem key={id} value={id}>{name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <p className="text-sm text-muted-foreground">
+          {t(selectedScope === "workspace" ? "list.filter.sharedHint" : "list.filter.contextHint")}
+        </p>
+      </div>
+
+      {contextsFailed && (
+        <Alert variant="destructive">
+          <AlertDescription className="flex flex-wrap items-center gap-3">
+            {t("list.filter.fetchError")}
+            <Button variant="outline" size="sm" onClick={() => { setContextsFailed(false); setContextRetry(value => value + 1); }}>
+              {tCommon("retry")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
 
       {error && <ErrorBanner error={error} />}
 

@@ -626,6 +626,8 @@ class FileStorageService:
         *,
         workspace_id: UUID,
         accessible_context_ids: list[UUID] | None = None,
+        context_id: UUID | None = None,
+        workspace_only: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> list[FileObject]:
@@ -659,6 +661,12 @@ class FileStorageService:
         visibility = FileObject.context_id.is_(None)
         if accessible_context_ids:
             visibility = visibility | FileObject.context_id.in_(accessible_context_ids)
+
+        # Intersect the requested scope with authorization, before paging.
+        if workspace_only:
+            visibility = visibility & FileObject.context_id.is_(None)
+        if context_id is not None:
+            visibility = visibility & (FileObject.context_id == context_id)
 
         result = await self.db.execute(
             select(FileObject)

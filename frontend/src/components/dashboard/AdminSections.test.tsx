@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { AdminSections } from "./AdminSections";
 
@@ -38,7 +38,7 @@ describe("AdminSections", () => {
     expect(container.innerHTML).toBe("");
   });
 
-  it("renders collapsible trigger when user is admin", () => {
+  it("renders the activity heading for an admin", () => {
     mockUseWorkspace.mockReturnValue({
       currentWorkspace: { current_user_role: "admin" },
     });
@@ -50,30 +50,14 @@ describe("AdminSections", () => {
     expect(screen.getByText("adminMemberActivity")).toBeInTheDocument();
   });
 
-  it("is collapsed by default", () => {
+  it("shows activity immediately without an accordion", async () => {
     mockUseWorkspace.mockReturnValue({
       currentWorkspace: { current_user_role: "owner" },
     });
-
-    render(
-      <AdminSections selectedContextId="ctx-1" currentWorkspaceId="ws-1" />,
-    );
-
-    const trigger = screen.getByText("adminMemberActivity");
-    expect(trigger).toBeInTheDocument();
-    expect(screen.queryByText("userActivity")).not.toBeInTheDocument();
-  });
-
-  it("expands when trigger is clicked", () => {
-    mockUseWorkspace.mockReturnValue({
-      currentWorkspace: { current_user_role: "admin" },
-    });
-
-    render(
-      <AdminSections selectedContextId="ctx-1" currentWorkspaceId="ws-1" />,
-    );
-
-    fireEvent.click(screen.getByText("adminMemberActivity"));
-    expect(screen.getByText("userActivity")).toBeInTheDocument();
+    render(<AdminSections selectedContextId="ctx-1" currentWorkspaceId="ws-1" />);
+    expect(screen.getByRole("heading", { name: "adminMemberActivity" })).toBeVisible();
+    expect(screen.getByText("userActivity")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "adminMemberActivity" })).not.toBeInTheDocument();
+    await screen.findByText("noUserActivity");
   });
 });

@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { apiOrigin, mcpEndpoints } from "./url";
+import { apiOrigin, mcpEndpoints, withAdditionalTools } from "./url";
 
 describe("apiOrigin", () => {
   it.each([
@@ -32,5 +32,22 @@ describe("mcpEndpoints", () => {
 
   it("has no pinned form without a workspace", () => {
     expect(mcpEndpoints("https://host/api/v1", null).pinnedUrl).toBeNull();
+  });
+});
+
+describe("withAdditionalTools", () => {
+  it("normalizes and deduplicates comma-separated tool names", () => {
+    expect(withAdditionalTools("https://host/mcp", " explore, setup_resource, explore "))
+      .toBe("https://host/mcp?add_tools=explore,setup_resource");
+  });
+  it("replaces or clears additional tools without losing query options or a fragment", () => {
+    expect(withAdditionalTools("https://host/mcp?context=demo&add_tools=old#help", "explore"))
+      .toBe("https://host/mcp?context=demo&add_tools=explore#help");
+    expect(withAdditionalTools("https://host/mcp?add_tools=old#help", ""))
+      .toBe("https://host/mcp#help");
+  });
+  it("encodes names so typed text cannot inject query parameters", () => {
+    expect(withAdditionalTools("https://host/mcp", "explore&tools=other"))
+      .toBe("https://host/mcp?add_tools=explore%26tools%3Dother");
   });
 });

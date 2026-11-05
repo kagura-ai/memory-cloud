@@ -1528,6 +1528,15 @@ def _outside_access_list(member: WorkspaceMember, context_id: UUID) -> bool:
     )
 
 
+def _already_context_member(user_id: str) -> HTTPException:
+    """The 400 for an add of a user the context already has a member row for:
+    the existing-row check and the commit-time race (#2639) answer the same."""
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"User {user_id} is already a context member",
+    )
+
+
 @router.post(
     "/{context_id}/members",
     response_model=ContextMemberResponse,
@@ -1551,10 +1560,16 @@ async def add_context_member(
     for a member's existing context member row the list does not reach (it
     grants nothing and is hidden from the member list): the extend keeps that
     row at the requested role. A row that already grants the context is a
-    duplicate (400).
+    duplicate (400). A concurrent add of the same user loses at commit and
+    gets the same 400 (#2639).
     """
     from sqlalchemy import func, select
+    from sqlalchemy.exc import IntegrityError
 
+    from db.constraint_names import (
+        CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE,
+        integrity_error_constraint_name,
+    )
     from models.auth import ContextMember
     from services.permission_service import PermissionService
     from services.workspace_service import WorkspaceService
@@ -1654,10 +1669,7 @@ async def add_context_member(
         # Removed from the workspace since the membership check above.
         raise BadRequestError("User is not a member of this workspace.")
     if existing is not None and not access_list_extended:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"User {body.user_id} is already a context member",
-        )
+        raise _already_context_member(body.user_id)
 
     if existing is not None:
         # The hidden row counts from now on: keep it, at the requested role.
@@ -1673,7 +1685,15 @@ async def add_context_member(
             invited_at=func.now(),
         )
         db.add(member)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        # #2639: another add of this user committed after the existing-row
+        # check above; the unique constraint refuses this second row.
+        if integrity_error_constraint_name(exc) == CONTEXT_MEMBERS_CONTEXT_USER_UNIQUE:
+            raise _already_context_member(body.user_id) from exc
+        raise
     await db.refresh(member)
 
     if access_list_extended:

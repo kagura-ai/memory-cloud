@@ -600,6 +600,7 @@ export default function ContextsPage() {
   return (
     <PageContainer>
       <PageHeader
+        className="flex-col !items-start gap-4 lg:flex-row lg:gap-6 [&>div:first-child]:min-w-0 [&>div:last-child]:shrink-0"
         title={t("title")}
         // #1755: the list is the current workspace only; say which one.
         description={
@@ -611,7 +612,7 @@ export default function ContextsPage() {
           <div className="flex items-center gap-2">
             {/* Issue #169: Dropdown for Quick Create vs Advanced Create */}
             {/* Issue #398: admin/owner-only — hidden for member/viewer. */}
-            {canManageContexts && (
+            {canManageContexts && usedContexts > 0 && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
@@ -997,6 +998,7 @@ export default function ContextsPage() {
                       correctly hides, and a workspace at its cap would get one
                       the header correctly disables. */}
                   {canManageContexts && (
+                    <>
                     <Button
                       variant="outline"
                       size="sm"
@@ -1013,6 +1015,16 @@ export default function ContextsPage() {
                       <Plus className="h-4 w-4 mr-2" />
                       {t("create")}
                     </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={isQuotaReached}
+                    aria-describedby={isQuotaReached ? CONTEXT_QUOTA_NOTICE_ID : undefined}
+                    onClick={() => setCreateDialogOpen(true)}
+                  >
+                    {t("advancedCreate")}
+                  </Button>
+                    </>
                   )}
                 </div>
               </>
@@ -1024,10 +1036,10 @@ export default function ContextsPage() {
             ) : (
               <>
                 {t("createFirstContext")}
-                <div className="mt-3">
+                <div className="mt-3 flex flex-wrap gap-2">
                   <Button
                     size="sm"
-                    className="bg-blue-600 hover:bg-blue-700 text-white"
+                    className={colors.button.primary}
                     // Same cap gate as the amber branch above and the header
                     // items. "No contexts visible" does not mean "no contexts
                     // exist": the cap counts the workspace's contexts, and a
@@ -1039,10 +1051,19 @@ export default function ContextsPage() {
                     aria-describedby={
                       isQuotaReached ? CONTEXT_QUOTA_NOTICE_ID : undefined
                     }
-                    onClick={() => setCreateDialogOpen(true)}
+                    onClick={() => setQuickCreateDialogOpen(true)}
                   >
                     <Plus className="h-4 w-4 mr-2" />
                     {t("create")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={isQuotaReached}
+                    aria-describedby={isQuotaReached ? CONTEXT_QUOTA_NOTICE_ID : undefined}
+                    onClick={() => setCreateDialogOpen(true)}
+                  >
+                    {t("advancedCreate")}
                   </Button>
                 </div>
               </>

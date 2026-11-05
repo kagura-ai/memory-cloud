@@ -12,13 +12,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Download, ArrowUpDown, Lock, Users, Eye, EyeOff } from "lucide-react";
+import { Download, ArrowUpDown, Lock, Users } from "lucide-react";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import { contextOwnerKind, contextOwnerLabel } from "@/lib/utils/contextOwner";
 import Link from "next/link";
 import type {
   ContextStatsResponse,
-  ContextStatsItem,
   DashboardContextStats,
   PrivateContextAggregation,
 } from "@/lib/api/workspaces";
@@ -88,7 +87,6 @@ export function ContextBreakdownTable({
   linkedUserIds,
 }: ContextBreakdownTableProps) {
   const t = useTranslations("workspace");
-  const tDashboard = useTranslations("dashboard");
   const locale = useLocale();
 
   // #1755: owner as the table shows it — the rule the Contexts list uses
@@ -120,7 +118,6 @@ export function ContextBreakdownTable({
 
   const [sortBy, setSortBy] = useState<SortColumn>("memory");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
-  const [showDetails, setShowDetails] = useState(false);
 
   const handleSort = (column: SortColumn) => {
     if (sortBy === column) {
@@ -228,18 +225,6 @@ export function ContextBreakdownTable({
         </div>
         <div className="flex items-center gap-2">
           <Button
-            onClick={() => setShowDetails(!showDetails)}
-            variant="outline"
-            size="sm"
-          >
-            {showDetails ? (
-              <EyeOff className="h-4 w-4 mr-2" />
-            ) : (
-              <Eye className="h-4 w-4 mr-2" />
-            )}
-            {tDashboard(showDetails ? "hideDetails" : "showDetails")}
-          </Button>
-          <Button
             onClick={exportToCSV}
             variant="outline"
             size="sm"
@@ -275,9 +260,7 @@ export function ContextBreakdownTable({
                 >
                   {t("lastActivity")}
                 </SortableHead>
-                {showDetails && (
-                  <>
-                    <TableHead>{t("owner")}</TableHead>
+                <>                    <TableHead>{t("owner")}</TableHead>
                     <TableHead className="text-right">
                       {t("apiCallsWeek")}
                     </TableHead>
@@ -288,8 +271,8 @@ export function ContextBreakdownTable({
                     <TableHead className="text-right">
                       {t("percentOfTotal")}
                     </TableHead>
-                  </>
-                )}
+
+                </>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -298,7 +281,7 @@ export function ContextBreakdownTable({
                 privateAggregation.context_count === 0) ? (
                 <TableRow>
                   <TableCell
-                    colSpan={showDetails ? 8 : 3}
+                    colSpan={8}
                     className="text-center text-muted-foreground py-8"
                   >
                     {t("noContextsFound")}
@@ -361,9 +344,7 @@ export function ContextBreakdownTable({
                               )
                             : "Never"}
                         </TableCell>
-                        {showDetails && (
-                          <>
-                            <TableCell className="text-sm text-gray-600 dark:text-gray-400">
+                        <>                            <TableCell className="text-sm text-gray-600 dark:text-gray-400">
                               {ownerLabel(context)}
                             </TableCell>
                             <TableCell className="text-right">
@@ -399,8 +380,8 @@ export function ContextBreakdownTable({
                             <TableCell className="text-right">
                               {percentage}%
                             </TableCell>
-                          </>
-                        )}
+
+                        </>
                       </TableRow>
                     );
                   })}
@@ -428,9 +409,7 @@ export function ContextBreakdownTable({
                         <TableCell className="text-right text-gray-500 dark:text-gray-500">
                           -
                         </TableCell>
-                        {showDetails && (
-                          <>
-                            <TableCell className="text-sm text-gray-500 dark:text-gray-500 italic">
+                        <>                            <TableCell className="text-sm text-gray-500 dark:text-gray-500 italic">
                               <div className="flex items-center gap-1">
                                 <Lock
                                   className="h-3 w-3"
@@ -459,8 +438,8 @@ export function ContextBreakdownTable({
                                 : "0.0"}
                               %
                             </TableCell>
-                          </>
-                        )}
+
+                        </>
                       </TableRow>
                     )}
                 </>

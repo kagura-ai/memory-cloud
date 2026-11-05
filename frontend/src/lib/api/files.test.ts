@@ -26,6 +26,14 @@ beforeEach(() => {
 });
 
 describe("listFiles", () => {
+  it("passes explicit shared-only and context filters", async () => {
+    mockGet.mockResolvedValue([]);
+    await listFiles("ws-1", 50, { scope: "workspace" });
+    expect(mockGet).toHaveBeenLastCalledWith("/api/v1/files?workspace_id=ws-1&limit=50&scope=workspace");
+    await listFiles("ws-1", 100, { contextId: "ctx-1" });
+    expect(mockGet).toHaveBeenLastCalledWith("/api/v1/files?workspace_id=ws-1&limit=100&context_id=ctx-1");
+  });
+
   it("requests files for the workspace with the default limit", async () => {
     mockGet.mockResolvedValue([]);
     await listFiles("ws-1");

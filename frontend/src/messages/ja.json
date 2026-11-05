@@ -52,7 +52,8 @@
     "systemAdmin": "この機能にはシステム管理者の権限が必要です。ワークスペースのプランを変更しても利用できません。",
     "lookupFailed": "この環境で機能が有効かどうかを確認できませんでした。",
     "retry": "再試行",
-    "deployment": "この環境ではこの機能が有効になっていません。ワークスペースのプランを変更しても利用できません。"
+    "deployment": "この環境ではこの機能が有効になっていません。ワークスペースのプランを変更しても利用できません。",
+    "currentlyUnavailable": "この機能は現在利用できません。"
   },
   "onboarding": {
     "recovery": "前回の練習で何が保存されたか確認できません。コンテキスト画面で内容を確認するか、読み取り専用のガイドに進んでください。",
@@ -239,7 +240,7 @@
     "externalKeys": "外部APIキー",
     "noExternalKeys": "APIキー未設定 — OpenAIキーを追加してメモリ機能を有効化",
     "noContexts": "コンテキストがありません",
-    "settings": "設定",
+    "settings": "ワークスペース設定",
     "plan": "プラン",
     "secrets": "シークレット",
     "workspaceSettings": "ワークスペース",
@@ -297,7 +298,7 @@
         "uploaded": "アップロード日時"
       },
       "scope": {
-        "workspace": "ワークスペース"
+        "workspace": "全体共有"
       },
       "actions": {
         "download": "ダウンロード",
@@ -320,6 +321,13 @@
         "deleting": "削除中…",
         "success": "{count} 件のファイルを削除しました",
         "failed": "コンテキストのファイルの削除に失敗しました。"
+      },
+      "filter": {
+        "label": "ファイルの保存先",
+        "workspace": "全体共有",
+        "sharedHint": "このワークスペースのメンバー全員が閲覧できるファイルです。",
+        "contextHint": "選択したコンテキストに紐づくファイルです。アクセス権はコンテキストの設定に従います。",
+        "fetchError": "コンテキスト一覧を読み込めませんでした。全体共有のファイルは引き続き閲覧できます。"
       }
     }
   },
@@ -1046,11 +1054,16 @@
     "contextCount": "コンテキスト数",
     "apiCallsWeek": "API呼び出し (7日)",
     "activeUsersWeek": "アクティブユーザー (7日)",
-    "showDetails": "詳細を表示",
-    "hideDetails": "詳細を非表示",
     "adminMemberActivity": "管理者: メンバーアクティビティ",
     "selectContextForActivity": "特定のコンテキストを選択するとユーザー別アクティビティを表示します。メンバー使用状況はチームワークスペースで表示されます。",
-    "unsearchableSubtext": "うち {count} 件は検索不可"
+    "unsearchableSubtext": "うち {count} 件は検索不可",
+    "sections": {
+      "label": "ダッシュボード内を移動",
+      "summary": "サマリー",
+      "contexts": "コンテキストの内訳",
+      "members": "メンバー",
+      "usage": "利用状況"
+    }
   },
   "profile": {
     "sections": {
@@ -1193,7 +1206,7 @@
     "overviewDesc": "すべてのコンテキストにわたるワークスペースの統計とメモリー使用状況",
     "refresh": "更新",
     "loadingStats": "統計を読み込み中...",
-    "contextBreakdown": "コンテキスト内訳",
+    "contextBreakdown": "コンテキストの内訳",
     "memoryUsageByContext": "コンテキスト別メモリー使用状況",
     "contextName": "コンテキスト名",
     "owner": "オーナー",
@@ -1367,7 +1380,7 @@
       "title": "シークレット",
       "description": "ワークスペースのゼロ知識シークレットストアを管理します: 受信者キー・grant・監査整合性。",
       "notAuthorized": "シークレットの管理はワークスペースのオーナーと管理者のみ可能です。",
-      "zeroKnowledgeNote": "このコンソールはアクセス管理専用で、シークレットの値や ciphertext は一切表示しません。値の暗号化・保存・取得は kagura secret CLI で行います。サーバーは公開鍵と、復号できない ciphertext のみを保持します。",
+      "zeroKnowledgeNote": "この画面では、シークレットの共有先とアクセス権を管理します。値の暗号化・保存・取得には、kagura secret CLI または SDK を使います。",
       "secretsTitle": "シークレット",
       "secretsDesc": "名前とメタデータのみ。値はここには表示されません。",
       "colName": "名前",
@@ -1376,7 +1389,7 @@
       "colGrants": "grant 数",
       "colActions": "操作",
       "noSecretsTitle": "シークレットはまだありません",
-      "noSecretsDesc": "kagura secret CLI でシークレットを保存すると、アクセス管理用にここに表示されます。",
+      "noSecretsDesc": "CLIまたはSDKでシークレットを保存すると、ここに表示されます。",
       "rotationNeeded": "要ローテーション",
       "statusOk": "有効",
       "revokeGrant": "grant を revoke",
@@ -1398,7 +1411,7 @@
       "colLabel": "ラベル",
       "colIdentity": "メンバー",
       "noPubkeysTitle": "受信者キーがありません",
-      "noPubkeysDesc": "メンバーが kagura secret CLI で age 公開鍵を登録すると、承認待ちとしてここに表示されます。",
+      "noPubkeysDesc": "上のガイドから公開鍵を登録すると、オーナーの承認待ちとしてここに表示されます。",
       "fingerprintTitle": "承認前に fingerprint を別経路で確認してください (TOFU)。",
       "status_pending": "承認待ち",
       "status_active": "有効",
@@ -1842,27 +1855,25 @@
     "connectors": "コネクタ",
     "workspaceSettings": "基本情報",
     "plan": "プラン",
-    "keyKinds": "APIキーの用途",
-    "kmcKeys": "KMCへ接続するキー",
-    "providerKeys": "外部AIサービスのキー"
+    "providerKeys": "外部APIキー",
+    "connectedApps": "接続済みアプリ"
   },
   "integrationEntry": {
     "title": "インテグレーション",
-    "intro": "何を接続したいですか？取り込みたいデータはありますか？",
     "workspace": "選択中のワークスペース：{name}",
-    "start": "接続とデータの取り込み",
-    "manage": "アプリと認証情報の管理",
-    "back": "目的からインテグレーションを選ぶ",
-    "entry": "インテグレーション：目的から選ぶ",
+    "start": "目的から機能を選ぶ",
     "tasks": {
-      "connector": {"title":"コネクタで外部サービスを連携する","description":"Slackなどの外部サービスの更新を自動で取り込みます。コネクタ画面で接続方式と取り込み元を選びます。自作のシステムからAPIでデータを送る場合は、リソースを利用します。"},
+      "connector": {
+        "title": "コネクタで外部サービスを連携する",
+        "description": "Slackなどの外部サービスの更新を自動で取り込みます。コネクタ画面で接続方式と取り込み元を選びます。自作のシステムからAPIでデータを送る場合は、リソースを利用します。"
+      },
       "client": {
         "title": "AIクライアントを接続する",
         "description": "Claude、ChatGPT、Gemini、Museなどを接続できます。MCPのURLを追加し、画面の案内に沿ってサインインします。クライアントの登録は自動です。"
       },
       "script": {
-        "title": "スクリプトからKMCを呼び出す",
-        "description": "自分のコードからKMCにリクエストを送るためのAPIキーを発行します。"
+        "title": "スクリプトから接続する",
+        "description": "スクリプトや外部ツールからKagura Memory Cloudを利用するためのAPIキーを発行します。"
       },
       "import": {
         "title": "外部データを取り込む",
@@ -1873,8 +1884,8 @@
         "description": "自分でクライアントを開発するときにアプリとリダイレクト先を登録します。クライアントシークレットは、そのアプリ側で保管します。"
       },
       "connected": {
-        "title": "自分が連携を許可したアプリを確認する",
-        "description": "認可済みアプリを確認し、既定のコンテキストを選べます。トークンを失効させる場合は連携したクライアントの失効手続きを利用してください。既定コンテキストの解除で変わるのはリクエスト先だけです。"
+        "title": "接続済みのアプリを確認する",
+        "description": "連携を許可したアプリと、アプリごとの既定コンテキストを管理します。"
       },
       "provider": {
         "title": "外部AIサービスのAPIキーを使う",
@@ -1884,18 +1895,6 @@
         "title": "シークレットの共有先を確認・解除する",
         "description": "ワークスペースのオーナーと管理者は、受信者への許可を確認し、取り消せます。新しい許可はCLIまたはSDKで付与します。"
       }
-    }
-  },
-  "credentials": {
-    "description": "ワークスペースへの接続に使用する認証方法を管理します",
-    "featureGuide": {
-      "title": "認証方法の選び方",
-      "overview": "このページには、クライアントの接続に必要なものがすべてあります: MCP エンドポイント、API キー、カスタム OAuth アプリ。",
-      "choosingMethod": "Claude、ChatGPT、Gemini、Muse、Cursor、Claude Code は下の MCP URL を貼るだけで、OAuth でログインして接続します（作成するものはありません）。Codex CLI、Python SDK、CI、.mcp.json には API キーを使います。カスタム OAuth アプリは、自作の OAuth2 クライアントを繋ぐ場合だけ作成してください。"
-    },
-    "tabs": {
-      "apiKeysHelp": "Codex CLI、Python SDK、CI、.mcp.json 用 — ログインの代わりに Bearer キーを送るクライアント",
-      "oauthAppsHelp": "自作の OAuth2 クライアント用 — Claude、ChatGPT、Gemini、Muse、Cursor、Claude Code は自動登録されるため、ここでの作成は不要です"
     }
   },
   "connectedApps": {
@@ -1919,6 +1918,17 @@
     "unavailable": "利用できないコンテキスト — 解除または変更してください"
   },
   "mcpConnection": {
+    "quickStart": {
+      "title": "MCP接続URL",
+      "copied": "コピーしました",
+      "toolSettings": "ツール設定",
+      "allTools": "すべてのツール（full）",
+      "additionalTools": "追加するツール（add_tools）",
+      "additionalHint": "候補を選ぶとタグとして追加されます。「×」で外せます。",
+      "fullHint": "全ツールを含むURLになります。",
+      "reconnect": "変更したURLをコピーし、AIクライアントの接続設定を更新してください。",
+      "pinWorkspace": "このワークスペースに固定する"
+    },
     "title": "MCP 接続",
     "description": "すべてのクライアントが接続する MCP エンドポイント",
     "copyUrl": "MCP URL をコピー",
@@ -1933,8 +1943,31 @@
     "copyPinnedUrl": "固定 URL をコピー",
     "links": {
       "mcpClients": "MCP クライアント設定ガイド",
+      "typescriptSdk": "TypeScript SDK",
       "pythonSdk": "Python SDK",
-      "restApi": "REST API ドキュメント"
+      "restApi": "REST API ドキュメント",
+      "label": "接続に関するドキュメント"
+    },
+    "toolPicker": {
+      "selected": "選択した追加ツール",
+      "remove": "{name}を外す",
+      "search": "ツールを検索",
+      "loadError": "ツールの候補を読み込めませんでした。",
+      "retry": "再読み込み",
+      "noMatches": "一致するツールがありません。",
+      "presets": "用途から追加",
+      "presetHint": "テンプレートのツールを選択済みのタグに追加します。必要に応じて個別に外せます。",
+      "preset": {
+        "exploration": "関連メモリーの探索",
+        "ingestion": "データ取り込み",
+        "analysis": "メモリー分析",
+        "secrets": "シークレット共有"
+      }
+    },
+    "help": {
+      "title": "MCP接続URL設定",
+      "description": "AIクライアントの接続先URL、ツール、ワークスペース固定を設定します。",
+      "apiDescription": "接続先と使うツールを選びます。選んだURLは、下のSDK例とクライアント設定にも反映されます。"
     }
   },
   "apiKeys": {
@@ -1947,8 +1980,8 @@
       "howItWorks": "APIキーを作成 → .mcp.json設定に追加 → MCPクライアントがこのワークスペースのメモリをremember、recallできるようになります。"
     },
     "apiKeysTitle": "APIキー",
-    "apiKeysDesc": "Codex CLI、Python SDK、CI、.mcp.json クライアント用",
-    "mcpSetupGuide": "このキーで接続する (.mcp.json / ChatGPT / Codex CLI)",
+    "apiKeysDesc": "スクリプトやCLIからKagura Memory Cloudに接続するためのキーです。",
+    "mcpSetupGuide": "APIキーの使い方",
     "mcpConfigHint": "APIキーが公開期間内であれば、上記の設定は有効なキーが埋め込まれた状態でそのままコピーできます。",
     "copyConfig": "設定をコピー",
     "copyCodexAddCommand": "コマンドをコピー",
@@ -1976,7 +2009,7 @@
     "createApiKey": "APIキーを作成",
     "noApiKeys": "APIキーが設定されていません。上の「APIキーを作成」ボタンをクリックして開始してください。",
     "noKeysTitle": "APIキーがまだありません",
-    "noKeysDesc": "Codex CLI、Python SDK、CI、.mcp.json 用に最初の API キーを作成してください。Claude Code やチャットクライアントは OAuth でログインするため、キーは不要です。",
+    "noKeysDesc": "外部ツールやスクリプトから接続するためのキーを作成できます。",
     "showKey": "キーを表示",
     "hideKey": "キーを非表示",
     "keyCopied": "APIキーをコピーしました",
@@ -1986,8 +2019,8 @@
     "roleBadgeManageTitle": "このキーは所有者のワークスペースロール(admin / owner)の権限で動作し、ワークスペース管理API(コネクタ・シークレット・メンバー等)も呼び出せます。",
     "roleBadgeData": "データのみ",
     "roleBadgeDataTitle": "このキーは所有者のワークスペースロール(member / viewer)の権限で動作し、記憶の読み書きのみ可能です。",
-    "roleHelpManage": "APIキーは所有者のワークスペースロールの権限で動作します。あなたは admin / owner のため、以下のキーはワークスペース管理API(コネクタ・シークレット・メンバー等)も呼び出せます(公開バインドキーを除く)。",
-    "roleHelpData": "APIキーは所有者のワークスペースロールの権限で動作します。あなたのキーは記憶の読み書きのみ可能で、ワークスペース管理APIは呼び出せません。",
+    "roleHelpManage": "キーには所有者のワークスペース権限が適用されます。管理APIも利用できます（公開コンテキスト専用キーを除く）。",
+    "roleHelpData": "メモリー操作用のキーです。利用範囲は所有者のワークスペース権限に従います。",
     "setupKeyHint": "初期セットアップで作成",
     "setupKeyHintTitle": "初期セットアップ(create_admin)が作成したキーの既定名です。.mcp.json に設定されています。",
     "recentUseWarning": "このキーは{time}に使用されています。使用中のクライアント(MCP / SDK / ワーカー)の接続が切れます。",
@@ -2053,7 +2086,6 @@
       "useCases": "ユースケース: OAuth2認可コードフローによる自作統合の構築、チームメンバーが個別にアプリを認可。Claude、ChatGPT、Gemini、Muse、Cursor、Claude Code は自動登録されるため、ここでのアプリは不要です。",
       "howItWorks": "自作アプリを登録 → ユーザーがOAuthフローで認可 → アプリがアクセストークンを受け取り → MCP/REST API呼び出しに使用。"
     },
-    "dcrNote": "Claude.ai、Claude Desktop、ChatGPT、Gemini、Muse、Cursor、Claude Code は接続時に自動登録される（Dynamic Client Registration）ため、ここでアプリを作成する必要はありません。自作の OAuth2 クライアントを繋ぐ場合だけカスタムアプリを作成してください。",
     "legacyPresetsTitle": "以前のコネクタ用アプリ",
     "legacyProvider": {
       "claude": "Claude",
@@ -2075,7 +2107,7 @@
     "customOAuthApps": "カスタムOAuthアプリ",
     "customOAuthAppsDesc": "自作の OAuth2 クライアント（認可コード + PKCE）",
     "createCustomApp": "カスタムアプリを作成",
-    "noCustomApps": "カスタムOAuthアプリが設定されていません。上の「カスタムアプリを作成」ボタンをクリックして開始してください。",
+    "noCustomApps": "自作のOAuthクライアントを登録すると、ここに表示されます。",
     "noCustomOAuthAppsTitle": "カスタムOAuthアプリがまだありません",
     "appName": "名前",
     "created": "作成日時",
@@ -2195,10 +2227,10 @@
     "purgeScheduled": "{date}(UTC)の時点で上限を超えたままの場合、このワークスペースのメモリー・コンテキスト・ファイルはすべて削除されます。必要なものは先にエクスポートしてください。"
   },
   "usageStats": {
-    "failedToLoad": "使用状況統計の読み込みに失敗しました",
-    "workspaceUsage": "ワークスペースの使用状況",
-    "usage": "使用状況",
-    "currentUsage": "現在の使用状況",
+    "failedToLoad": "利用状況統計の読み込みに失敗しました",
+    "workspaceUsage": "ワークスペースの利用状況",
+    "usage": "利用状況",
+    "currentUsage": "現在の利用状況",
     "plan": "プラン",
     "memories": "メモリー",
     "storage": "ストレージ",
@@ -2207,7 +2239,7 @@
     "percentUsed": "{percent}% 使用中",
     "usageTrend": "使用トレンド（過去7日間）",
     "apiCallsPerDay": "1日あたりのAPI呼び出し",
-    "usageByEndpoint": "エンドポイント別使用状況（過去30日間）",
+    "usageByEndpoint": "エンドポイント別利用状況（過去30日間）",
     "apiMcpDistribution": "APIとMCPツールの使用分布",
     "noUsageData": "使用データがまだありません",
     "endpointDetails": "エンドポイント詳細",
@@ -2218,7 +2250,51 @@
     "sleepContextsTier": "プランの基本上限",
     "ownedWorkspaces": "所有 Workspace",
     "ownedWorkspacesTier": "所有ワークスペース上限（招待 join は無制限）",
-    "memoriesCreatedToday": "本日の作成: {count} / {limit}（UTC 0時にリセット）"
+    "memoriesCreatedToday": "本日の作成: {count} / {limit}（UTC 0時にリセット）",
+    "quotaLabels": {
+      "memories": "メモリー数",
+      "memories_daily": "メモリー作成数／日",
+      "storage": "ストレージ",
+      "contexts": "コンテキスト数",
+      "members": "メンバー枠",
+      "connectors": "コネクタ数",
+      "resource_tokens": "リソーストークン数",
+      "resource_capacity": "リソースの割り当て枠／時",
+      "analysis": "分析回数／日",
+      "content_chunks": "チャンク検索のコンテキスト数",
+      "llm_selector": "LLM選別のコンテキスト数",
+      "mcp_day": "MCPリクエスト／日",
+      "mcp_week": "MCPリクエスト／週",
+      "rest_day": "REST APIリクエスト／日",
+      "rest_week": "REST APIリクエスト／週",
+      "public_day": "公開APIリクエスト／日",
+      "public_week": "公開APIリクエスト／週",
+      "sleep": "Sleep対象コンテキスト数",
+      "workspaces": "所有ワークスペース数",
+      "bound_key_rate": "公開コンテキスト専用キー／分",
+      "embedding_day": "埋め込み費用／日",
+      "embedding_month": "埋め込み費用／月"
+    },
+    "quotaGroups": {
+      "workspace": "ワークスペースの容量と機能",
+      "requests": "リクエストと処理回数",
+      "account": "アカウント全体",
+      "apiKey": "キーごとの上限",
+      "budgets": "外部サービスの費用上限"
+    },
+    "quotaReached": "上限に達している項目があります",
+    "quotaNear": "利用上限に近づいています",
+    "viewAllQuotas": "利用状況を確認",
+    "reviewPlan": "プラン・追加枠を確認",
+    "askOwner": "プランや追加枠の変更は、ワークスペースのオーナーに相談してください。",
+    "quotaScopeHelp": "使用量と現在の上限を表示しています。上限にはアドオンなどの追加枠を含みます。日次の回数はUTC、分析回数はアカウントのタイムゾーンを基準に集計します。",
+    "quotaLimitOnly": "上限 ",
+    "quotaUnlimited": "上限なし",
+    "quotaNotIncluded": "現在のプランの利用枠は0です",
+    "quotaNoPercentage": "利用率の対象外",
+    "quotaBonus": "追加枠 +{amount}",
+    "includesInvitations": "期限内の招待も枠に含みます。",
+    "perKeyHelp": "キーごとに適用される上限です。"
   },
   "memoryOverview": {
     "failedToLoad": "メモリー概要の読み込みに失敗しました",
@@ -2454,7 +2530,6 @@
       "useCases": "ユースケース: OpenAIキーでエンベディング＋LLM推論、Anthropic・Gemini・セルフホストキーでLLM推論、CohereやVoyageでリランキング設定、セルフホストでローカルセルフホストモデル、ワークスペース単位のキー管理でコスト追跡。",
       "howItWorks": "プロバイダーのAPIキーを追加 → Kaguraが各プロバイダーが対応する機能のみに使用（例: LLM推論、エンベディング、リランキング） → キーは暗号化して保存され、作成後は表示されません。"
     },
-    "refresh": "更新",
     "addApiKey": "APIキーを追加",
     "allProvidersConfigured": "すべてのプロバイダーが設定済み",
     "openAIRequired": "OpenAI APIキーが必要",
@@ -2467,7 +2542,6 @@
     "keysConfiguredPlural": "{count}個のAPIキーが設定済み",
     "loading": "読み込み中...",
     "noKeysYet": "APIキーがまだ設定されていません",
-    "addFirstKey": "最初のAPIキーを追加",
     "provider": "プロバイダー",
     "keyName": "キー名",
     "value": "値",
@@ -2817,7 +2891,7 @@
         "confirm": "ユーザーを削除",
         "deleting": "削除中…",
         "pickTitle": "{name}の後継者を選択",
-        "pickDescription": "このユーザーは以下をまだ所有しています。それぞれを引き継ぐユーザーを選んでください。送信するとユーザーが削除されます。",
+        "pickDescription": "このユーザーは以下をまだ所有しています。それぞれを引き継ぐユーザーを選ぶか、他にメンバーのいない workspace はユーザーと一緒に削除してください。送信するとユーザーが削除されます。",
         "changed": "選択中にユーザーの所有物が変わりました。一覧を確認して、もう一度送信してください。",
         "workspaces": "Workspace",
         "contexts": "Context",
@@ -2831,7 +2905,8 @@
         "sameAsWorkspace": "workspace の後継者と同じ",
         "workspaceSuccessor": "workspace {workspace} の後継者",
         "contextSuccessor": "context {context} の後継者",
-        "noMembers": "この workspace を引き継げる他のメンバーがいません。先にメンバーを追加するか、workspace を削除してください（削除済みの workspace はユーザーと一緒に消去されます）。",
+        "noMembers": "この workspace を引き継げる他のメンバーがいません。ユーザーと一緒に削除するか、キャンセルして先にメンバーを追加してください。",
+        "deleteWithUser": "この workspace をユーザーと一緒に削除します。中のものはすべて完全に削除されます。",
         "noCandidates": "この context を引き継げるメンバーがいません。先にメンバーにこの context へのアクセスを付与してください。",
         "submit": "引き継いで削除"
       },
@@ -4871,5 +4946,333 @@
     "removeSuccess": "パスワードを削除しました。",
     "removeError": "パスワードを削除できませんでした。もう一度お試しください。",
     "lastMethodError": "これが唯一のサインイン方法のため削除できません。先にGoogleまたはGitHubを連携してください。"
+  },
+  "mcpToolDescriptions": {
+    "list_my_bindings": {
+      "title": "公開キーの一覧",
+      "description": "自分の公開コンテキスト専用キーを確認します。"
+    },
+    "describe_binding": {
+      "title": "公開キーの詳細",
+      "description": "キーに結び付いたコンテキストや設定を確認します。"
+    },
+    "remember": {
+      "title": "記憶を保存",
+      "description": "情報や判断、作業メモを記憶として保存します。"
+    },
+    "remember_batch": {
+      "title": "記憶をまとめて保存",
+      "description": "複数の記憶を一度に保存します。"
+    },
+    "update_memory": {
+      "title": "記憶を更新",
+      "description": "保存済みの記憶の内容や属性を変更します。"
+    },
+    "recall": {
+      "title": "記憶を検索",
+      "description": "意味やキーワードから必要な記憶を探します。"
+    },
+    "reference": {
+      "title": "記憶の詳細",
+      "description": "検索した記憶の全文や過去の版を読みます。"
+    },
+    "list_revisions": {
+      "title": "記憶の変更履歴",
+      "description": "記憶の作成・編集・削除の履歴を確認します。"
+    },
+    "recall_upcoming": {
+      "title": "予定の記憶",
+      "description": "指定した期間に予定されている記憶を確認します。"
+    },
+    "recall_nearby": {
+      "title": "近くの場所の記憶",
+      "description": "指定した場所の近くに記録した記憶を探します。"
+    },
+    "load_pinned": {
+      "title": "固定した記憶",
+      "description": "コンテキストに固定した記憶をまとめて読みます。"
+    },
+    "load_guardrails": {
+      "title": "作業ルールを読む",
+      "description": "固定メモやツール実行時のルールを読みます。"
+    },
+    "forget": {
+      "title": "記憶を削除",
+      "description": "不要になった記憶を削除状態にします。"
+    },
+    "explore": {
+      "title": "関連する記憶",
+      "description": "記憶どうしのつながりをたどって関連情報を探します。"
+    },
+    "list_edges": {
+      "title": "記憶のつながり一覧",
+      "description": "記憶に接続しているリンクを確認します。"
+    },
+    "create_edge": {
+      "title": "記憶をつなぐ",
+      "description": "関連する記憶や新旧の記憶をリンクします。"
+    },
+    "update_edge": {
+      "title": "つながりを変更",
+      "description": "記憶間のリンクの種類や強さを変更します。"
+    },
+    "delete_edge": {
+      "title": "つながりを削除",
+      "description": "二つの記憶をつなぐリンクを削除します。"
+    },
+    "get_context_info": {
+      "title": "コンテキストの詳細",
+      "description": "用途・設定・記憶数などを確認します。"
+    },
+    "list_contexts": {
+      "title": "コンテキスト一覧",
+      "description": "利用できるコンテキストを探します。"
+    },
+    "list_tags": {
+      "title": "タグ一覧",
+      "description": "使われているタグと利用状況を確認します。"
+    },
+    "create_context": {
+      "title": "コンテキストを作成",
+      "description": "プロジェクトや用途ごとに記憶の保存先を作ります。"
+    },
+    "update_context": {
+      "title": "コンテキストを変更",
+      "description": "コンテキストの名前や設定を変更します。"
+    },
+    "delete_context": {
+      "title": "コンテキストを削除",
+      "description": "コンテキストと含まれる記憶を削除状態にします。"
+    },
+    "merge_contexts": {
+      "title": "コンテキストを統合",
+      "description": "別のコンテキストへ記憶をコピーしてまとめます。"
+    },
+    "update_search_config": {
+      "title": "検索設定を変更",
+      "description": "検索方法や再ランキングなどを調整します。"
+    },
+    "get_usage": {
+      "title": "利用量を確認",
+      "description": "ワークスペースの使用量と上限を確認します。"
+    },
+    "get_sleep_history": {
+      "title": "自動整理の履歴",
+      "description": "Sleepによる記憶の整理履歴を確認します。"
+    },
+    "get_sleep_report": {
+      "title": "自動整理のレポート",
+      "description": "Sleepが行った処理と結果を確認します。"
+    },
+    "rollback_sleep_run": {
+      "title": "自動整理を取り消す",
+      "description": "完了したSleepの処理を元に戻します。"
+    },
+    "rollback_session": {
+      "title": "セッションの変更を戻す",
+      "description": "指定したセッションや期間の変更を確認して戻します。"
+    },
+    "setup_resource": {
+      "title": "リソースを作成",
+      "description": "データ取り込み用のコンテキストとトークンを作ります。"
+    },
+    "setup_connector": {
+      "title": "コネクタを設定",
+      "description": "外部サービスから取り込むコネクタを作ります。"
+    },
+    "ingest_events": {
+      "title": "データを取り込む",
+      "description": "リソースへ追加・更新・削除のイベントを送ります。"
+    },
+    "get_resource_impact": {
+      "title": "リソースの影響を確認",
+      "description": "リソースの統計や変更の影響範囲を確認します。"
+    },
+    "get_resource_schema": {
+      "title": "リソースの項目定義",
+      "description": "リソースのフィールドとデータ型を確認します。"
+    },
+    "list_resource_tokens": {
+      "title": "リソーストークン一覧",
+      "description": "データ取り込み用トークンの情報を確認します。"
+    },
+    "analyze_context": {
+      "title": "記憶を分析",
+      "description": "記憶をテーマごとに分類する分析を開始します。"
+    },
+    "get_analysis": {
+      "title": "分析結果を確認",
+      "description": "指定した分析の進捗と結果を確認します。"
+    },
+    "list_analyses": {
+      "title": "分析履歴",
+      "description": "コンテキストで実行した分析を一覧で確認します。"
+    },
+    "get_active_analysis": {
+      "title": "最新の分析結果",
+      "description": "直近で成功した分析を確認します。"
+    },
+    "get_cluster": {
+      "title": "テーマの詳細",
+      "description": "分析で分類されたテーマと含まれる記憶を確認します。"
+    },
+    "init_file_upload": {
+      "title": "ファイル送信を準備",
+      "description": "ファイルの保存枠とアップロード先URLを取得します。"
+    },
+    "complete_file_upload": {
+      "title": "ファイル送信を完了",
+      "description": "送信済みファイルを検証し、保存を確定します。"
+    },
+    "get_file_download_url": {
+      "title": "ファイルの取得URL",
+      "description": "保存したファイルのダウンロードURLを取得します。"
+    },
+    "delete_file": {
+      "title": "ファイルを削除",
+      "description": "保存ファイルを削除状態にして容量を解放します。"
+    },
+    "list_files": {
+      "title": "ファイル一覧",
+      "description": "利用できる保存ファイルを確認します。"
+    },
+    "feedback": {
+      "title": "検索結果を評価",
+      "description": "検索した記憶が役立ったかを記録します。"
+    },
+    "guide": {
+      "title": "使い方を調べる",
+      "description": "ツールの使い方やレスポンスの読み方を確認します。"
+    },
+    "describe_tools": {
+      "title": "ツールを調べる",
+      "description": "利用できるツールの概要や入力項目を確認します。"
+    },
+    "list": {
+      "title": "条件で記憶を一覧表示",
+      "description": "種類やタグなどの条件に一致する記憶を確認します。"
+    },
+    "changes_since": {
+      "title": "最近の変更",
+      "description": "指定した時点からの記憶の変更を確認します。"
+    },
+    "bootstrap": {
+      "title": "セッションを開始",
+      "description": "作業に必要な固定メモ・予定・最近の変更を読みます。"
+    },
+    "set_state": {
+      "title": "作業状態を保存",
+      "description": "エージェントの進行中の作業状態を一時保存します。"
+    },
+    "get_state": {
+      "title": "作業状態を読む",
+      "description": "エージェントが保存した作業状態を取得します。"
+    },
+    "record_measurement": {
+      "title": "数値を記録",
+      "description": "体重や売上などの測定値を時系列に追加します。"
+    },
+    "recall_series": {
+      "title": "数値の推移",
+      "description": "測定値を期間ごとに集計して取得します。"
+    },
+    "register_agent": {
+      "title": "エージェントを登録",
+      "description": "ワークスペースにAIエージェントを登録します。"
+    },
+    "list_agents": {
+      "title": "エージェント一覧",
+      "description": "登録済みエージェントと状態を確認します。"
+    },
+    "get_agent": {
+      "title": "エージェントの詳細",
+      "description": "登録済みエージェントの設定を確認します。"
+    },
+    "update_agent": {
+      "title": "エージェントを変更",
+      "description": "エージェントの設定や稼働状態を変更します。"
+    },
+    "delete_agent": {
+      "title": "エージェントを削除",
+      "description": "登録と、それに結び付いたAPIキーを削除します。"
+    },
+    "bind_agent_context": {
+      "title": "コンテキストを割り当て",
+      "description": "エージェントが利用するコンテキストと範囲を設定します。"
+    },
+    "list_agent_bindings": {
+      "title": "割り当て一覧",
+      "description": "エージェントのコンテキスト割り当てを確認します。"
+    },
+    "update_agent_binding": {
+      "title": "割り当てを変更",
+      "description": "エージェントの読み書き範囲を変更します。"
+    },
+    "unbind_agent_context": {
+      "title": "割り当てを解除",
+      "description": "エージェントとコンテキストの割り当てを削除します。"
+    },
+    "get_agent_bootstrap": {
+      "title": "エージェントの作業再開",
+      "description": "固定メモ・関連記憶・予定・作業状態をまとめて読みます。"
+    },
+    "secret_register_pubkey": {
+      "title": "公開鍵を登録",
+      "description": "シークレットを受け取るための公開鍵を登録します。"
+    },
+    "secret_put": {
+      "title": "暗号化シークレットを保存",
+      "description": "暗号化済みの値と共有先を登録します。"
+    },
+    "secret_get": {
+      "title": "暗号化シークレットを取得",
+      "description": "共有を許可された暗号化データを取得します。"
+    },
+    "secret_list": {
+      "title": "シークレット一覧",
+      "description": "シークレットの名前や共有状態を確認します。"
+    },
+    "secret_revoke_grant": {
+      "title": "シークレット共有を解除",
+      "description": "指定した受信者への共有許可を取り消します。"
+    }
+  },
+  "sdkSetup": {
+    "title": "SDKのインストールと接続",
+    "language": "SDKの言語",
+    "apiIntro": "TypeScriptまたはPythonのSDKをインストールして使い始めます。",
+    "secretsIntro": "シークレットを暗号化して保存・取得するためのパッケージをインストールします。",
+    "credentials": "APIキーを環境変数 KAGURA_API_KEY に設定してから実行します。",
+    "copyInstall": "インストールコマンドをコピー",
+    "copyExample": "接続例をコピー",
+    "apiExample": "接続例 — コンテキストを確認する",
+    "secretExample": "接続例 — シークレットの名前と情報を確認する",
+    "startSecrets": "シークレットを使い始める",
+    "keySetup": {
+      "title": "暗号化用の鍵ペアを作成・登録する",
+      "typescript": "OSキーチェーンやシークレット管理サービスに保存するKeyStoreを用意し、次の関数に渡します。初回は鍵ペアを作成し、2回目以降は保管済みの鍵を使います。",
+      "python": "初回は鍵ペアを作成して秘密鍵をOSキーチェーンに保存します。2回目以降は保管済みの鍵を使い、公開鍵を登録します。",
+      "approval": "登録後は、画面の「受信者キー」でフィンガープリントを照合し、オーナーが承認します。承認された公開鍵にシークレットを共有できます。",
+      "custody": "秘密鍵は復号に必要です。端末のキーチェーンなどで管理し、チャット・ログ・Gitへの貼り付けを避けてください。クラウドに登録するのは公開鍵です。",
+      "copy": "鍵ペアの設定例をコピー"
+    }
+  },
+  "resourceSetup": {
+    "title": "MCPでリソースを使い始める",
+    "connectTitle": "1. MCP接続URLを設定する",
+    "connectHelp": "使うツールに合わせてURLを選び、MCPクライアントに設定してください。",
+    "copyUrl": "MCP URLをコピー",
+    "refreshHelp": "URLを変更したらクライアントを再接続し、ツール一覧を更新します。",
+    "inspectTitle": "2. AIへの依頼例 — リソースを確認する",
+    "inspectPrompt": "このワークスペースのリソースを確認したいです。利用できるリソース用ツールを調べ、取り込み元、項目定義、利用状況の確認方法を案内してください。",
+    "createTitle": "3. AIへの依頼例 — 取り込みを準備する",
+    "createPrompt": "プロジェクト資料を取り込む「project-docs」というリソースを作りたいです。setup_resourceの入力項目を確認し、作成するコンテキストの公開範囲と取り込み方法を説明してください。必要な情報を私に確認してから作成してください。",
+    "copyPrompt": "プロンプト例をコピー",
+    "availability": "リソースの新規作成には、対応するプランとワークスペースのオーナーまたは管理者権限が必要です。",
+    "modeLabel": "利用するツール",
+    "ingestionMode": "データ取り込み",
+    "fullMode": "すべてのツール（full）",
+    "ingestionHelp": "概要の「データ取り込み」と同じ5つのツールを追加します。",
+    "fullHelp": "リソースを含む、すべてのMCPツールを有効にします。"
   }
 }

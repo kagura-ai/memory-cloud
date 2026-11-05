@@ -23,6 +23,23 @@ export function apiOrigin(apiUrl: string): string {
   return apiUrl.replace(/\/api\/v1\/*$/, "").replace(/\/+$/, "");
 }
 
+/** Add tool names to the default profile while preserving other query options. */
+export function withAdditionalTools(mcpUrl: string, toolNames: string): string {
+  const tools = [...new Set(toolNames.split(/[\s,]+/).filter(Boolean))];
+  const hashAt = mcpUrl.indexOf("#");
+  const beforeHash = hashAt === -1 ? mcpUrl : mcpUrl.slice(0, hashAt);
+  const hash = hashAt === -1 ? "" : mcpUrl.slice(hashAt);
+  const queryAt = beforeHash.indexOf("?");
+  const base = queryAt === -1 ? beforeHash : beforeHash.slice(0, queryAt);
+  const params = (queryAt === -1 ? "" : beforeHash.slice(queryAt + 1))
+    .split("&")
+    .filter(param => param && param !== "add_tools" && !param.startsWith("add_tools="));
+  if (tools.length > 0) {
+    params.push("add_tools=" + tools.map(encodeURIComponent).join(","));
+  }
+  return base + (params.length > 0 ? "?" + params.join("&") : "") + hash;
+}
+
 /**
  * The MCP endpoints for an API base URL: the bare `…/mcp` every client can
  * use (an API key carries its workspace; OAuth resolves it at login), and the

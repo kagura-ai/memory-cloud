@@ -428,7 +428,7 @@ describe("Privacy choice in both create dialogs (#1646)", () => {
     mockFeatures = { byok: true, plan_page: true };
     setup({ plan: "basic", maxContexts: 3, contextCount: 0 });
     render(<ContextsPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "create" }));
+    fireEvent.click(await screen.findByRole("button", { name: "advancedCreate" }));
     expect(await screen.findByText("createDialogTitle")).toBeInTheDocument();
 
     expect(sharedRadio()).toBeDisabled();
