@@ -389,6 +389,38 @@ class TestListFiles:
             limit=50,
         )
 
+    def test_requested_context_outside_the_accessible_set_lists_nothing(self, client):
+        # The accessible set comes from the caller's access, never from the
+        # requested context_id: a route that handed the client's id through as
+        # the accessible set would list the hidden context's file here.
+        ws, allowed, requested = uuid4(), uuid4(), uuid4()
+
+        async def intersect(*, accessible_context_ids, context_id, **_):
+            if context_id in accessible_context_ids:
+                return [_file_object_mock(workspace_id=ws, context_id=context_id)]
+            return []
+
+        with (
+            patch(
+                "api.routes.files.FileStorageService.list_files",
+                AsyncMock(side_effect=intersect),
+            ) as service,
+            patch(
+                "api.routes.files.PermissionService.get_accessible_contexts",
+                AsyncMock(return_value=[MagicMock(id=allowed)]),
+            ),
+        ):
+            response = client.get(f"/api/v1/files?workspace_id={ws}&context_id={requested}")
+        assert response.status_code == 200
+        assert response.json() == []
+        service.assert_awaited_once_with(
+            workspace_id=ws,
+            accessible_context_ids=[allowed],
+            context_id=requested,
+            workspace_only=False,
+            limit=50,
+        )
+
     def test_conflicting_scope_filters_are_rejected(self, client):
         response = client.get(
             f"/api/v1/files?workspace_id={uuid4()}&scope=workspace&context_id={uuid4()}"
