@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pyotp
 import pytest
 from fastapi import BackgroundTasks, HTTPException, Response
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from api.routes import auth
 from api.routes import mfa_settings as routes
@@ -103,6 +104,35 @@ async def test_enrollment_requires_password_session_and_unchanged_credentials(en
     with pytest.raises(ConflictError):
         await enable(env, code)
     assert not user.totp_enabled
+
+
+@pytest.mark.asyncio
+async def test_budget_cleanup_failure_still_delivers_recovery_codes_and_notice(env, monkeypatch):
+    enrollment = await setup(env)
+    monkeypatch.setattr(
+        auth, "_clear_login_failures", MagicMock(side_effect=RedisConnectionError())
+    )
+    response = await enable(env, pyotp.TOTP(enrollment.secret).now())
+    assert len(response.recovery_codes) == 8
+    assert env[-1].call_args.kwargs["event"] == SecurityEvent.MFA_ENABLED
+
+
+@pytest.mark.asyncio
+async def test_unicode_equivalent_cannot_replay_enrollment_code(env):
+    enrollment = await setup(env)
+    code = pyotp.TOTP(enrollment.secret).now()
+    await enable(env, code)
+    alternate = "".join(chr(ord(digit) + 0xFEE0) for digit in code)
+    user, db, req, *_ = env
+    with pytest.raises(AuthenticationError):
+        await routes.disable_mfa(
+            routes.DisableBody(current_password="pass", code=alternate),
+            req,
+            {"user_id": user.user_id},
+            BackgroundTasks(),
+            db,
+        )
+    assert user.totp_enabled
 
 
 @pytest.mark.asyncio
