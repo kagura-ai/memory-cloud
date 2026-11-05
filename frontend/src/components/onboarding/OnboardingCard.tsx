@@ -266,7 +266,8 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
 
   return (
     <Dialog open={visible} onOpenChange={open => { if (!open && !writePending) dismiss(); }}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl"
+      {/* Keep the panel opaque while it slides in so text stays legible over the backdrop. */}
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl data-[state=open]:!fade-in-100"
         onEscapeKeyDown={event => { if (writePending) event.preventDefault(); }}
         onInteractOutside={event => { if (writePending) event.preventDefault(); }}>
         <DialogHeader className="pr-6">
@@ -274,7 +275,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
             <Sparkles className="h-5 w-5 text-brand-green-600 dark:text-brand-green-400" />
             {t("title")}
           </DialogTitle>
-          <DialogDescription>{t("subtitle")}</DialogDescription>
+          <DialogDescription className="text-slate-600 dark:text-slate-300">{t("subtitle")}</DialogDescription>
         </DialogHeader>
         <div>
           {actionError && <Alert variant="destructive" className="mb-4"><AlertDescription>{actionError}</AlertDescription></Alert>}
