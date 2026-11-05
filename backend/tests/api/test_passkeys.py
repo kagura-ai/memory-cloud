@@ -1,5 +1,6 @@
 """Software authenticator and storage tests for the public passkey routes (#2645)."""
 
+import asyncio
 import hashlib
 import json
 import struct
@@ -13,10 +14,13 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import BackgroundTasks, HTTPException, Request, Response
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from webauthn.helpers import bytes_to_base64url
 
 from api.routes import passkeys as pk
 from models.auth import AuditLog, User, WebAuthnCredential
+from services.account_linking_service import AccountLinkingService
+from services.password_account_service import PasswordAccountService
 from services.user_deletion_service import delete_user_rows
 
 
@@ -251,3 +255,121 @@ async def test_register_cap_authenticate_remove_and_erasure(db_session, ceremony
         await db.scalar(select(WebAuthnCredential.id).where(WebAuthnCredential.id == key_id))
         is None
     )
+
+
+async def pending_registration(db, account, device, proof=None):
+    options = await pk.register_options(
+        proof or pk.Proof(), request(), {"user_id": account.user_id}, db
+    )
+    await db.commit()  # the request-scoped dependency ends the options transaction
+    return pk.CredentialResponse(
+        challenge=options["challenge"],
+        credential=device.response(options["challenge"], pk._handle(account), registering=True),
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_sessions_racing_for_last_slot_and_cross_account_duplicate(
+    db_session, async_engine, ceremony, monkeypatch
+):
+    accounts = [User(user_id=uuid4().hex, email=f"{uuid4().hex}@example.org") for _ in range(2)]
+    db_session.add_all(accounts)
+    await db_session.commit()
+    owner, other = accounts
+    monkeypatch.setattr(pk, "_LIMIT", 1)
+    requests = [
+        await pending_registration(db_session, owner, device)
+        for device in (ceremony, Authenticator())
+    ]
+    sessions = async_sessionmaker(async_engine, expire_on_commit=False)
+    barrier = asyncio.Barrier(2)
+
+    async def submit(body):
+        async with sessions() as db:
+            await barrier.wait()
+            try:
+                return await pk.register_verify(
+                    body, request(), {"user_id": owner.user_id}, BackgroundTasks(), db
+                )
+            except HTTPException as exc:
+                assert exc.status_code in (401, 409)
+                return None
+
+    results = await asyncio.gather(*(submit(body) for body in requests))
+    assert sum(key is not None for key in results) == 1
+    stored = (await pk._keys(db_session, owner.user_id))[0]
+
+    # A malicious second account can attest a key with the same opaque ID,
+    # but must never rebind the winning key, even to a different public key.
+    duplicate = Authenticator()
+    duplicate.credential_id = stored.credential_id
+    body = await pending_registration(db_session, other, duplicate)
+    with pytest.raises(HTTPException, match="already registered") as denied:
+        await pk.register_verify(
+            body, request(), {"user_id": other.user_id}, BackgroundTasks(), db_session
+        )
+    assert denied.value.status_code == 409
+    # A failed insert rolled the session back and expired its ORM identities.
+    bindings = list(
+        await db_session.scalars(
+            select(WebAuthnCredential).where(
+                WebAuthnCredential.credential_id == duplicate.credential_id
+            )
+        )
+    )
+    winner = next(key for key in results if key is not None)
+    assert [key.id for key in bindings] == [winner.id]
+    assert bindings[0].public_key == winner.public_key
+
+
+@pytest.mark.asyncio
+async def test_different_key_proves_removal_and_remaining_key_allows_unlink(db_session, ceremony):
+    owner = User(user_id=uuid4().hex, email=f"{uuid4().hex}@example.org", auth_provider="google")
+    db_session.add(owner)
+    await db_session.commit()
+    user = {"user_id": owner.user_id}
+    tasks = BackgroundTasks()
+    req = request()
+    handle = pk._handle(owner)
+    body = await pending_registration(db_session, owner, ceremony)
+    first = await pk.register_verify(body, req, user, tasks, db_session)
+    options = await pk.proof_options(req, user, None, db_session)
+    proof = pk.Proof(
+        challenge=options["challenge"],
+        assertion=ceremony.response(options["challenge"], handle, count=2),
+    )
+    second_device = Authenticator()
+    body = await pending_registration(db_session, owner, second_device, proof)
+    second = await pk.register_verify(body, req, user, tasks, db_session)
+    assert second.id != first.id
+
+    async def removal_proof(device):
+        options = await pk.proof_options(req, user, second.id, db_session)
+        assert [item["id"] for item in options["allowCredentials"]] == [
+            bytes_to_base64url(first.credential_id)
+        ]
+        return pk.Proof(
+            challenge=options["challenge"],
+            assertion=device.response(options["challenge"], handle, count=3),
+        )
+
+    with pytest.raises(HTTPException, match="Invalid passkey"):
+        await pk.remove_passkey(
+            second.id, await removal_proof(second_device), req, user, tasks, db_session
+        )
+    await pk.remove_passkey(second.id, await removal_proof(ceremony), req, user, tasks, db_session)
+    assert [key.id for key in await pk._keys(db_session, owner.user_id)] == [first.id]
+
+    # All three method-removal entry points use the same locked owner rule.
+    linking = AccountLinkingService(db_session)
+    await linking.link(
+        user_id=owner.user_id, provider="google", oauth_sub=uuid4().hex, email=owner.email
+    )
+    await linking.unlink(user_id=owner.user_id, provider="google")
+    owner.password_hash = pk.auth.hash_password("current")
+    await db_session.commit()
+    await PasswordAccountService(db_session).remove(
+        user_id=owner.user_id, current_password="current"
+    )
+    with pytest.raises(HTTPException, match="only remaining"):
+        await pk.remove_passkey(first.id, pk.Proof(), req, user, tasks, db_session)
