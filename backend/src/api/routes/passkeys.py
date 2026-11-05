@@ -160,6 +160,8 @@ async def _assertion(
 ) -> tuple[User, WebAuthnCredential]:
     try:
         credential = parse_authentication_credential_json(raw)
+        if not 1 <= len(credential.raw_id) <= 1023:
+            raise HTTPException(401, "Invalid credential ID")
         if parse_client_data_json(credential.response.client_data_json).cross_origin:
             raise HTTPException(401, "Cross-origin passkey assertions are not accepted")
     except (ValueError, TypeError, WebAuthnException, KeyError) as exc:
@@ -180,7 +182,7 @@ async def _assertion(
         )
     ):
         raise HTTPException(401, "Invalid passkey")
-    auth._reserve_login_attempt(auth._account_rate_key(user_id))
+    await asyncio.to_thread(auth._reserve_login_attempt, auth._account_rate_key(user_id))
     rp, origins = _rp()
     try:
         verified = verify_authentication_response(
@@ -215,7 +217,7 @@ async def _prove(
     if proof.assertion and proof.challenge:
         challenge = await _consume(proof.challenge, _binding(request, user.user_id, action))
         await _assertion(db, proof.assertion, challenge, owner=user.user_id, excluding=excluding)
-        auth._clear_login_failures(auth._account_rate_key(user.user_id))
+        await asyncio.to_thread(auth._clear_login_failures, auth._account_rate_key(user.user_id))
         return
     if proof.current_password and user.password_hash:
         if await increment_counter(f"webauthn_password:{user.user_id}", ttl=_TTL) > 5:
@@ -226,8 +228,11 @@ async def _prove(
     elif (
         excluding is None
         and auth._session_manager
-        and auth._session_manager.proven_within(
-            request.cookies.get(SESSION_COOKIE_NAME, ""), user.user_id, timedelta(seconds=_TTL)
+        and await asyncio.to_thread(
+            auth._session_manager.proven_within,
+            request.cookies.get(SESSION_COOKIE_NAME, ""),
+            user.user_id,
+            timedelta(seconds=_TTL),
         )
     ):
         return
@@ -321,6 +326,8 @@ async def register_verify(
     rp, origins = _rp()
     try:
         registration = parse_registration_credential_json(body.credential)
+        if not 1 <= len(registration.raw_id) <= 1023:
+            raise HTTPException(400, "Invalid credential ID")
         if parse_client_data_json(registration.response.client_data_json).cross_origin:
             raise HTTPException(400, "Cross-origin passkey registration is not accepted")
         result = verify_registration_response(
@@ -417,7 +424,7 @@ async def authenticate_verify(
         await db.commit()
         if not await auth._complete_password_sign_in(account.user_id, account.email, sid):
             raise HTTPException(503, "Sign in again")
-        auth._clear_login_failures(auth._account_rate_key(account.user_id))
+        await asyncio.to_thread(auth._clear_login_failures, auth._account_rate_key(account.user_id))
         await auth._record_terms_acceptance(
             email=account.email,
             user_id=account.user_id,
@@ -432,7 +439,7 @@ async def authenticate_verify(
             request, response, user_id=account.user_id, sign_in_method="Passkey"
         )
     except Exception:
-        auth._session_manager.delete_session(sid)
+        await asyncio.to_thread(auth._session_manager.delete_session, sid)
         raise
     return {"redirect_url": auth._safe_redirect_url(return_to)}
 
