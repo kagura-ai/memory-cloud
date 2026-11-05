@@ -274,7 +274,7 @@ export default function WorkspaceStatsPage() {
 
       <Tabs value={selectedTab} onValueChange={selectTab}>
       {stats && (
-        <TabsList aria-label={navigation("label")} className="mb-6 flex h-auto w-full flex-wrap justify-start gap-1 rounded-lg border bg-slate-100 p-2 dark:bg-slate-800">
+        <TabsList aria-label={navigation("label")} className="mb-6 flex h-auto w-full flex-wrap justify-start gap-1 rounded-lg border bg-slate-100 p-2 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
           {sections.map(section => <TabsTrigger key={section.id} value={section.id} className="min-h-10 data-[state=active]:bg-white dark:data-[state=active]:bg-slate-600">{section.label}</TabsTrigger>)}
         </TabsList>
       )}
