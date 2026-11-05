@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from api.routes.contexts import ContextCreate, create_context
 from models.schemas import RememberRequest
@@ -51,11 +52,15 @@ async def test_private_target_rechecked_before_insert(target_changed_during_prep
         )
     assert access.await_count == int(not target_changed_during_preparation)
     insert.assert_not_awaited()
-    query = str(db.scalar.await_args.args[0])
+    query = str(db.scalar.await_args.args[0].compile(dialect=postgresql.dialect()))
     for predicate in ("workspace_id", "created_by", "is_private", "is_public", "role"):
         assert predicate in query
     if target_changed_during_preparation:
-        assert "FOR UPDATE" in query
+        # FOR SHARE on the context row only: concurrent inserts into the
+        # context (FOR KEY SHARE) are not held up by the practice save.
+        assert query.endswith("FOR SHARE OF contexts")
+    else:
+        assert "FOR " not in query
 
 
 @pytest.mark.asyncio

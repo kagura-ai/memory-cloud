@@ -1320,8 +1320,14 @@ class MemoryService:
                 WorkspaceMember.role == "owner",
             )
         )
-        # Hold both rows from the last check through commit, after preparation.
-        if await self.db.scalar(query.with_for_update() if lock else query) is None:
+        # The last check holds the context row through commit: FOR SHARE keeps
+        # it from being shared, made public or deleted meanwhile, yet admits the
+        # FOR KEY SHARE that concurrent inserts into the context take. The
+        # owner role needs no row lock: role changes take the workspace row,
+        # which the quota check in preparation already holds.
+        if lock:
+            query = query.with_for_update(read=True, of=Context)
+        if await self.db.scalar(query) is None:
             raise ConflictError(message)
 
     async def _prepare_remember(
