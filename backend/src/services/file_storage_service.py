@@ -444,7 +444,8 @@ class FileStorageService:
                     result = await self.db.execute(
                         select(FileObject).where(
                             FileObject.workspace_id == workspace_id,
-                            FileObject.sha256 == sha256,
+                            func.lower(FileObject.sha256) == sha256,
+                            FileObject.created_by.not_like("migration:attachment:%"),
                             FileObject.deleted_at.is_(None),
                             FileObject.status != "failed",
                         )
@@ -1185,6 +1186,8 @@ class FileStorageService:
             .where(
                 twin.workspace_id == context.workspace_id,
                 func.lower(twin.sha256) == func.lower(FileObject.sha256),
+                twin.created_by.not_like("migration:attachment:%"),
+                FileObject.created_by.not_like("migration:attachment:%"),
                 twin.deleted_at.is_(None),
                 twin.status != "failed",
             )

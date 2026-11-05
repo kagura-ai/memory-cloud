@@ -614,3 +614,42 @@ async def test_repair_skips_an_unparsable_created_by(db_session):
     assert (
         await db_session.scalar(select(FileObject.context_id).where(FileObject.id == row_id))
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_bytes_keep_each_attachment_binding(db_session, patched, fake_storage):
+    ws = await _workspace(db_session)
+    other_ws = await _workspace(db_session)
+    expected = {}
+    for workspace in (ws, ws, other_ws):
+        ctx = await _context(db_session, workspace)
+        _, attachment = await _attachment(db_session, workspace, ctx)
+        expected[_legacy_key(workspace, attachment)] = ctx
+    await db_session.commit()
+
+    with patch.object(mig.logger, "info") as logged:
+        await mig.migrate_all(db_session, dry_run=True, batch_size=1)
+    groups = [
+        call.kwargs
+        for call in logged.call_args_list
+        if call.args == ("attachment_migration_duplicate_bytes",)
+    ]
+    assert len(groups) == 1
+    assert groups[0]["workspace_id"] == str(ws)
+    assert set(groups[0]["attachment_ids"]) == {
+        key.split("/")[2] for key in expected if key.startswith(f"{ws}/")
+    }
+    assert not fake_storage.objects
+
+    snapshots = []
+    for _ in range(2):
+        counts = await mig.migrate_all(db_session, dry_run=False, batch_size=1)
+        assert counts["failed"] == 0
+        rows = (
+            await db_session.scalars(
+                select(FileObject).where(FileObject.workspace_id.in_([ws, other_ws]))
+            )
+        ).all()
+        assert {row.storage_key: row.context_id for row in rows} == expected
+        snapshots.append({row.storage_key: row.id for row in rows})
+    assert snapshots[0] == snapshots[1]
