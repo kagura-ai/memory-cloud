@@ -332,7 +332,8 @@ describe("New Context control", () => {
 // the badge is `plan.badge`, the line under the option `plan.description` and
 // the CTA `plan.action` (this file's mock echoes the key and its arguments).
 const BADGE = /^plan\.badge/;
-const REFUSAL = /^plan\.description:/;
+// A member who cannot upgrade reads the ask-the-owner variant of it (#2630).
+const REFUSAL = /^plan\.(?:description|askOwnerDescription):/;
 const CTA = /^plan\.action/;
 
 describe("Shared option in the create dialog (#1645)", () => {
