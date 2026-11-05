@@ -260,19 +260,17 @@ export function ContextBreakdownTable({
                 >
                   {t("lastActivity")}
                 </SortableHead>
-                <>                    <TableHead>{t("owner")}</TableHead>
-                    <TableHead className="text-right">
-                      {t("apiCallsWeek")}
-                    </TableHead>
-                    <TableHead className="text-right">
-                      {t("activeUsersWeek")}
-                    </TableHead>
-                    <TableHead className="text-right">{t("members")}</TableHead>
-                    <TableHead className="text-right">
-                      {t("percentOfTotal")}
-                    </TableHead>
-
-                </>
+                <TableHead>{t("owner")}</TableHead>
+                <TableHead className="text-right">
+                  {t("apiCallsWeek")}
+                </TableHead>
+                <TableHead className="text-right">
+                  {t("activeUsersWeek")}
+                </TableHead>
+                <TableHead className="text-right">{t("members")}</TableHead>
+                <TableHead className="text-right">
+                  {t("percentOfTotal")}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -344,44 +342,42 @@ export function ContextBreakdownTable({
                               )
                             : "Never"}
                         </TableCell>
-                        <>                            <TableCell className="text-sm text-gray-600 dark:text-gray-400">
-                              {ownerLabel(context)}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              <span
-                                className={
-                                  contextDetail?.api_calls_week &&
-                                  contextDetail.api_calls_week > 0
-                                    ? "text-green-600 font-medium"
-                                    : "text-gray-400"
-                                }
-                              >
-                                {contextDetail?.api_calls_week?.toLocaleString() ||
-                                  "0"}
-                              </span>
-                            </TableCell>
-                            <TableCell className="text-right">
-                              <span
-                                className={
-                                  contextDetail?.active_users_week &&
-                                  contextDetail.active_users_week > 0
-                                    ? "text-blue-600 font-medium"
-                                    : "text-gray-400"
-                                }
-                              >
-                                {contextDetail?.active_users_week?.toLocaleString() ??
-                                  "0"}
-                              </span>
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {contextDetail?.member_count?.toLocaleString() ??
-                                "-"}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {percentage}%
-                            </TableCell>
-
-                        </>
+                        <TableCell className="text-sm text-gray-600 dark:text-gray-400">
+                          {ownerLabel(context)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <span
+                            className={
+                              contextDetail?.api_calls_week &&
+                              contextDetail.api_calls_week > 0
+                                ? "text-green-600 font-medium"
+                                : "text-gray-400"
+                            }
+                          >
+                            {contextDetail?.api_calls_week?.toLocaleString() ||
+                              "0"}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <span
+                            className={
+                              contextDetail?.active_users_week &&
+                              contextDetail.active_users_week > 0
+                                ? "text-blue-600 font-medium"
+                                : "text-gray-400"
+                            }
+                          >
+                            {contextDetail?.active_users_week?.toLocaleString() ??
+                              "0"}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {contextDetail?.member_count?.toLocaleString() ??
+                            "-"}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {percentage}%
+                        </TableCell>
                       </TableRow>
                     );
                   })}
@@ -409,37 +405,35 @@ export function ContextBreakdownTable({
                         <TableCell className="text-right text-gray-500 dark:text-gray-500">
                           -
                         </TableCell>
-                        <>                            <TableCell className="text-sm text-gray-500 dark:text-gray-500 italic">
-                              <div className="flex items-center gap-1">
-                                <Lock
-                                  className="h-3 w-3"
-                                  aria-label={t("hidden")}
-                                  role="img"
-                                />
-                                <span>{t("hidden")}</span>
-                              </div>
-                            </TableCell>
-                            <TableCell className="text-right text-gray-500 dark:text-gray-500">
-                              -
-                            </TableCell>
-                            <TableCell className="text-right text-gray-500 dark:text-gray-500">
-                              -
-                            </TableCell>
-                            <TableCell className="text-right text-gray-500 dark:text-gray-500">
-                              -
-                            </TableCell>
-                            <TableCell className="text-right text-gray-600 dark:text-gray-400">
-                              {totalMemories > 0
-                                ? (
-                                    (privateAggregation.memory_count /
-                                      totalMemories) *
-                                    100
-                                  ).toFixed(1)
-                                : "0.0"}
-                              %
-                            </TableCell>
-
-                        </>
+                        <TableCell className="text-sm text-gray-500 dark:text-gray-500 italic">
+                          <div className="flex items-center gap-1">
+                            <Lock
+                              className="h-3 w-3"
+                              aria-label={t("hidden")}
+                              role="img"
+                            />
+                            <span>{t("hidden")}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right text-gray-500 dark:text-gray-500">
+                          -
+                        </TableCell>
+                        <TableCell className="text-right text-gray-500 dark:text-gray-500">
+                          -
+                        </TableCell>
+                        <TableCell className="text-right text-gray-500 dark:text-gray-500">
+                          -
+                        </TableCell>
+                        <TableCell className="text-right text-gray-600 dark:text-gray-400">
+                          {totalMemories > 0
+                            ? (
+                                (privateAggregation.memory_count /
+                                  totalMemories) *
+                                100
+                              ).toFixed(1)
+                            : "0.0"}
+                          %
+                        </TableCell>
                       </TableRow>
                     )}
                 </>
