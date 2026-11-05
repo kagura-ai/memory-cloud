@@ -81,6 +81,7 @@ async def _migrate_one(
         size_bytes=attachment.size_bytes,
         data=attachment.data,
         created_by=f"migration:attachment:{attachment.id}",
+        context_id=memory.context_id,
     )
     return "migrated"
 

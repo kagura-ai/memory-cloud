@@ -734,12 +734,22 @@ class FileStorageService:
         size_bytes: int,
         data: bytes,
         created_by: str,
+        context_id: UUID | None,
     ) -> FileObject:
         """Copy a legacy ``attachments`` BYTEA row to R2 + ``file_objects``.
 
         Idempotent: if a ``file_objects`` row already exists for this
         attachment (matched by the legacy ``storage_key`` shape) the
         existing row is returned without re-uploading.
+
+        ``context_id`` is the parent memory's context and becomes the file's
+        access binding (#2647): a NULL ``context_id`` makes the file
+        workspace-shared, so passing None for a memory that lives in a private
+        or restricted context would expose its attachment to every workspace
+        member. It has no default so the caller must decide; None is right only
+        for a context-less memory. The existing-row branch returns the row as
+        is; rows migrated before #2647 are re-bound by the script's
+        ``--repair-context`` mode.
 
         The legacy ``Attachment`` row stays untouched — the existing
         REST attachments route continues to serve from BYTEA until a
@@ -791,6 +801,7 @@ class FileStorageService:
         file = FileObject(
             id=uuid4(),
             workspace_id=workspace_id,
+            context_id=context_id,
             sha256=sha256,
             size_bytes=size_bytes,
             content_type=content_type,
@@ -822,6 +833,7 @@ class FileStorageService:
             "attachment_migrated_to_r2",
             attachment_id=str(attachment_id),
             file_id=str(file.id),
+            context_id=str(context_id) if context_id else None,
             size_bytes=size_bytes,
         )
         return file
