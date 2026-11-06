@@ -61,6 +61,10 @@ which fails when the lock is out of date, and the `lint` job runs
 - `uv sync` is exact: a later sync with fewer extras (`--extra dev` alone)
   removes the provider packages again. Re-run `make install`; `setup.sh`
   installs the same set.
+- Before regenerating the lock, compare `uv --version` with the exact setup-uv
+  version in `.github/workflows/ci.yml`. Use that version for manual lock updates.
+  To check a reported drift, run `uv lock` in `backend/` and inspect `git diff -- uv.lock`.
+  An empty diff confirms the pinned tool accepts the committed resolution.
 - After editing `pyproject.toml`: `cd backend && uv lock` (or `make lock`) and
   commit `uv.lock` with the change. `make lock-check` is the CI gate.
 - Move one package inside its range: `uv lock --upgrade-package NAME`.
