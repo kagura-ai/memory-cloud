@@ -18,6 +18,9 @@ password here (choices 1 and 3) does what the emailed-link reset does
   are forgotten (#1769), so the next sign-in from each browser is reported;
 - every passkey of the account is deleted (#2660): one registered from a
   stolen session must not outlive the reset;
+- every linked Google / GitHub identity is disconnected (#2676), so after the
+  reset only the new password (and MFA) signs in; the owner connects the
+  providers again from Profile;
 - every browser session of the account is deleted from the session store
   (Redis, ``REDIS_URL``) with ``strict=True`` before the commit.
 
@@ -73,7 +76,7 @@ from auth.session import SessionManager  # noqa: E402
 from cli._env_guard import require_settings, resolve_api_key_secret  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from config.database import get_redis_url  # noqa: E402
-from models.auth import User, WebAuthnCredential  # noqa: E402
+from models.auth import User, UserOAuthProvider, WebAuthnCredential  # noqa: E402
 from services.email_action_token_service import (  # noqa: E402
     PASSWORD_LINK_PURPOSES,
     invalidation_statement,
@@ -181,6 +184,7 @@ def reset_password():
         grants: RevokedGrants | None = None
         sessions_deleted = 0
         passkeys_removed = 0
+        providers_unlinked = 0
         if session_store is not None:
             while True:
                 print("\nPassword requirements:")
@@ -227,6 +231,20 @@ def reset_password():
                 ).rowcount
                 or 0
             )
+            # #2676: and every linked Google / GitHub identity, as the
+            # emailed-link reset does. No provider row remains, so the primary
+            # pointer has nothing to point at.
+            providers_unlinked = int(
+                cast(
+                    CursorResult[Any],
+                    db.execute(
+                        delete(UserOAuthProvider).where(UserOAuthProvider.user_id == user.user_id)
+                    ),
+                ).rowcount
+                or 0
+            )
+            if providers_unlinked:
+                user.auth_provider = None
 
         # Disable MFA
         if choice in ("2", "3"):
@@ -246,8 +264,9 @@ def reset_password():
                 # revocations must not be committed without them (#1866).
                 db.rollback()
                 print(f"\n✗ Could not delete the browser sessions ({type(exc).__name__}).")
-                print("  The reset was rolled back: the password, MFA, OAuth grants and passkeys")
-                print("  are as before. Sessions the store already dropped stay signed out.")
+                print("  The reset was rolled back: the password, MFA, OAuth grants, passkeys")
+                print("  and sign-in providers are as before. Sessions the store already dropped")
+                print("  stay signed out.")
                 print("  Check the session store (REDIS_URL) and run this command again.")
                 sys.exit(1)
 
@@ -259,8 +278,8 @@ def reset_password():
             db.rollback()
             print(f"\n✗ The database commit failed ({type(exc).__name__}).")
             if session_store is not None:
-                print("  The password was NOT changed; MFA, the OAuth grants and the passkeys")
-                print("  are as before.")
+                print("  The password was NOT changed; MFA, the OAuth grants, the passkeys and")
+                print("  the sign-in providers are as before.")
                 print("  The browser sessions of the account were already signed out.")
                 print("  Run this command again to complete the reset.")
             else:
@@ -277,6 +296,10 @@ def reset_password():
             )
             print("  ✓ Known devices forgotten.")
             print(f"  ✓ Removed {passkeys_removed} passkey(s); the owner registers them again.")
+            print(
+                f"  ✓ Disconnected {providers_unlinked} Google / GitHub sign-in(s);"
+                " the owner connects them again from Profile."
+            )
             print("  ⚠ API keys and OAuth client secrets are NOT revoked. After a suspected")
             print("    compromise, review them in Settings.")
         if choice in ("2", "3"):

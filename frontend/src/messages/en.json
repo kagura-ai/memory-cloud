@@ -139,7 +139,7 @@
   },
   "connectedAccounts": {
     "title": "Connected accounts",
-    "description": "Link Google or GitHub so you can sign in with either provider.",
+    "description": "Link Google or GitHub so you can sign in with either provider. Connecting one requires fresh proof: your current password, a passkey or a recent verified sign-in.",
     "google": "Google",
     "github": "GitHub",
     "connected": "Connected",
@@ -156,7 +156,12 @@
     "disconnectError": "Couldn't disconnect {provider}. Please try again.",
     "loadError": "Couldn't load your connected accounts. Please refresh and try again.",
     "lastMethodError": "This is your only sign-in method, so it can't be disconnected. Set a password or link another provider first.",
-    "lastMethodHint": "Your only sign-in method"
+    "lastMethodHint": "Your only sign-in method",
+    "password": "Current password",
+    "connectProof": "To connect a provider, verify with your current password or a passkey, or connect it right after a verified sign-in. Without a password or passkey, set up a password by email first (Profile > Password).",
+    "connectProofRequired": "Your account could not be verified. Use one of the ways described above, then connect {provider}.",
+    "connectWrongPassword": "The current password did not match. Check it and try again.",
+    "connectTooManyAttempts": "Too many verification attempts. Try again in a few minutes."
   },
   "linkedAccounts": {
     "title": "Linked accounts",
@@ -4945,11 +4950,11 @@
     },
     "reset": {
       "title": "Choose a new password",
-      "description": "Resetting your password signs you out of every browser session, disconnects every connected app and MCP client, and removes your passkeys. You can add passkeys again from your profile.",
+      "description": "Resetting your password signs you out of every browser session, disconnects every connected app and MCP client, and removes your passkeys and your Google / GitHub sign-ins. You can add them again from your profile.",
       "submit": "Reset password",
       "submitting": "Saving…",
       "successTitle": "Password updated",
-      "successBody": "Your password was changed. Every browser session was signed out, every connected app or MCP client was disconnected, and your passkeys were removed (add them again from your profile). Sign in with your new password; if two-factor authentication is on, you still need your authenticator or a recovery code. API keys and other integration credentials keep working — if someone else may have had access, review them in Settings.",
+      "successBody": "Your password was changed. Every browser session was signed out, every connected app or MCP client was disconnected, and your passkeys and Google / GitHub sign-ins were removed (add them again from your profile). Sign in with your new password; if two-factor authentication is on, you still need your authenticator or a recovery code. API keys and other integration credentials keep working — if someone else may have had access, review them in Settings.",
       "signIn": "Sign in",
       "invalidTitle": "This link can't be used",
       "invalidBody": "The link is invalid, was already used, or has expired. Request a new one.",

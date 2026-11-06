@@ -38,8 +38,10 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
   client secrets, and public clients have no secret. Finalization cannot be
   reversed into plaintext; rollback requires a hash-compatible server binary.
 - **Linking a sign-in provider** (a Google / GitHub identity added to an
-  account from the profile page) completes only in the browser session that
-  started it: the provider callback must carry that session's cookie, and the
+  account from the profile page) starts only after fresh proof of the account
+  — the current password, a passkey, or a verified sign-in within the last
+  five minutes, as for adding a passkey — and completes only in the browser
+  session that started it: the provider callback must carry that session's cookie, and the
   session must still hold the account. Otherwise the callback refuses
   (`/profile?error=link_failed`) and attaches nothing, so the authorization
   URL the page is sent to is of no use to any other browser. During an
@@ -48,8 +50,8 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
 - **Email + password** for existing accounts. A password reset — by emailed
   link, or by an operator with the `reset_password` CLI (choices 1 and 3) —
   signs out every browser session, revokes every OAuth / MCP token and
-  pending grant (authorization code, device code) and deletes every passkey
-  of the account. The grant
+  pending grant (authorization code, device code), deletes every passkey
+  and unlinks every Google / GitHub identity of the account. The grant
   revocations are in the database transaction of the new password; the
   sessions live in Redis and are deleted just before that transaction
   commits, so the password is never committed while old sessions survive (a

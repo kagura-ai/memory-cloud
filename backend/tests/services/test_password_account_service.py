@@ -490,10 +490,73 @@ class TestResetRevokesOAuthGrants:
         )
         assert audited == 1
 
+    async def test_reset_unlinks_the_accounts_providers(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made, provider="google")
+        other = await _user(db_session, made, provider="google")
+        uid, other_uid = user.user_id, other.user_id
+        db_session.add(UserOAuthProvider(user_id=uid, provider="github", oauth_sub=f"gh-{uid}"))
+        user.auth_provider = "google"
+        await db_session.commit()
+        service = PasswordAccountService(db_session, email_service=_email())
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+
+        await service.complete_reset(raw_token=_token_from(pending.reset_url), new_password=NEW)
+
+        db_session.expire_all()
+        remaining = (
+            (
+                await db_session.execute(
+                    select(UserOAuthProvider.user_id).where(
+                        UserOAuthProvider.user_id.in_([uid, other_uid])
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert remaining == [other_uid]
+        refreshed = await _reload(db_session, uid)
+        assert refreshed.auth_provider is None
+        rows = (
+            await db_session.execute(
+                select(AuditLog.user_email, AuditLog.resource)
+                .where(AuditLog.user_id == uid, AuditLog.action == "oauth_provider_unlinked")
+                .order_by(AuditLog.resource)
+            )
+        ).all()
+        assert [tuple(row) for row in rows] == [
+            ("email-link", "oauth_provider:github"),
+            ("email-link", "oauth_provider:google"),
+        ]
+
+    async def test_setup_keeps_the_providers(self, db_session: AsyncSession, made: _Made) -> None:
+        user = await _user(db_session, made, password=None, provider="github")
+        uid = user.user_id
+        user.auth_provider = "github"
+        await db_session.commit()
+        email = _email()
+        service = PasswordAccountService(db_session, email_service=email)
+        await service.request_setup(user_id=uid)
+        token = _token_from(email.send_password_setup.await_args.kwargs["setup_url"])
+
+        await service.complete_setup(raw_token=token, new_password=NEW)
+
+        db_session.expire_all()
+        providers = await db_session.scalar(
+            select(func.count())
+            .select_from(UserOAuthProvider)
+            .where(UserOAuthProvider.user_id == uid)
+        )
+        assert providers == 1
+        assert (await _reload(db_session, uid)).auth_provider == "github"
+
     async def test_revocation_rolls_back_with_the_reset(
         self, db_session: AsyncSession, made: _Made, oauth_client: str
     ) -> None:
-        user = await _user(db_session, made)
+        user = await _user(db_session, made, provider="google")
         uid = user.user_id
         db_session.add(_passkey(uid))
         token = await _grants(db_session, oauth_client, uid)  # commits the passkey too
@@ -518,6 +581,12 @@ class TestResetRevokesOAuthGrants:
             .where(WebAuthnCredential.user_id == uid)
         )
         assert passkeys == 1
+        providers = await db_session.scalar(
+            select(func.count())
+            .select_from(UserOAuthProvider)
+            .where(UserOAuthProvider.user_id == uid)
+        )
+        assert providers == 1
 
     async def test_keeps_earlier_revocation_times(
         self, db_session: AsyncSession, made: _Made, oauth_client: str

@@ -102,8 +102,8 @@ python -m src.cli.create_admin
 
 # Reset password or disable/re-enable MFA.
 # A password reset also signs out every browser session, revokes the
-# account's OAuth / MCP tokens and removes its passkeys, so Redis (REDIS_URL)
-# must be reachable.
+# account's OAuth / MCP tokens, removes its passkeys and disconnects its
+# Google / GitHub sign-ins, so Redis (REDIS_URL) must be reachable.
 python -m src.cli.reset_password
 
 # Delete admin (for re-creation). When other users exist, a workspace the admin

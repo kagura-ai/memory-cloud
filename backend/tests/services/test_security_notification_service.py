@@ -2592,6 +2592,11 @@ class TestPasswordResetNamesLinks:
         (occurrence,) = email.send_security_notification.await_args.kwargs["occurrences"]
         assert occurrence.linked_accounts == 2
 
+    def test_the_reset_notice_names_what_the_reset_removed(self) -> None:
+        _subject, body = sns._EVENT_TEXT[SecurityEvent.PASSWORD_RESET]
+        assert "passkeys and your Google / GitHub sign-ins were removed" in body
+        assert "add them again from your profile" in body
+
     @pytest.mark.asyncio
     async def test_no_links_leaves_it_out(self, redis, deliverable, email, monkeypatch) -> None:
         monkeypatch.setattr(sns, "_linked_account_count", AsyncMock(return_value=0))

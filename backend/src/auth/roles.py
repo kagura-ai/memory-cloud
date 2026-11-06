@@ -119,10 +119,11 @@ def _adopt_primary_provider(
     an established link: a row older than the identity-link window, or
     written with the account (:func:`auth.provider_link.provider_link_established`,
     the rule an identity-link proof follows). Any other identity was attached
-    later through ``link-provider``, which needs only a live session: it
-    signs in as a linked provider does, however old its link, so a session
-    alone can never make a provider the one whose email and name are synced
-    onto the account. A younger link of the original identity signs in the
+    later through ``link-provider``, which needs fresh proof of the account
+    (the current password, a passkey or a recent verified sign-in), not of
+    the attached identity: it signs in as a linked provider does, however old
+    its link, so attaching can never make a provider the one whose email and
+    name are synced onto the account. A younger link of the original identity signs in the
     same way: no adoption, no profile sync.
     Staged only: ``_sync_existing_user`` commits it.
 

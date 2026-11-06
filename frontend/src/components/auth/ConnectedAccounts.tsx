@@ -7,7 +7,10 @@
  * Lets a signed-in user link / unlink Google and GitHub identities to a single
  * account. Backend contract (Tasks 1-6):
  *   GET  /api/v1/me/account/providers      → { providers: [{provider, ...}] }
- *   POST /api/v1/me/account/link-provider  → { authorization_url, state }
+ *   POST /api/v1/me/account/link-provider  { provider, ...proof }
+ *        → { authorization_url, state } | 403 (no fresh proof) | 429
+ *   (proof = current_password, or a passkey asserted for the provider, or
+ *   nothing right after a verified sign-in — the passkey registration policy)
  *   POST /api/v1/me/account/unlink-provider → { status: "ok" } | 409 | 404
  *
  * The "Connect" action performs a full-page browser navigation to the IdP via
@@ -27,6 +30,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -43,6 +48,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { hasPasswordSignIn } from "@/lib/auth/auth";
+import { managementProof } from "@/lib/auth/passkeys";
 import { CONNECTED_ACCOUNTS_TEST_IDS } from "@/components/auth/connected-accounts.testids";
 import { Link2, Loader2 } from "lucide-react";
 
@@ -115,7 +121,8 @@ interface ConnectedAccountsProps {
 }
 
 export default function ConnectedAccounts({
-  onProvidersChanged, hasPasskey = false,
+  onProvidersChanged,
+  hasPasskey = false,
 }: ConnectedAccountsProps = {}) {
   const t = useTranslations("connectedAccounts");
   const tCommon = useTranslations("common");
@@ -131,6 +138,7 @@ export default function ConnectedAccounts({
     null,
   );
   const [dialogError, setDialogError] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
 
   const loadProviders = useCallback(async () => {
     setIsLoading(true);
@@ -164,19 +172,41 @@ export default function ConnectedAccounts({
   const handleConnect = async (provider: Provider) => {
     setBusyProvider(provider);
     try {
+      // Fresh proof first (#2676), like registering a passkey: the current
+      // password, a passkey asserted for this provider, or — with neither —
+      // an empty proof that a recent verified sign-in satisfies.
+      const proof = await managementProof(
+        password,
+        hasPasskey,
+        undefined,
+        provider,
+      );
       const data = await apiClient.post<{
         authorization_url: string;
         state: string;
-      }>("/api/v1/me/account/link-provider", { provider });
+      }>("/api/v1/me/account/link-provider", { provider, ...proof });
       // Browser-level navigation: the OAuth link flow expects a full redirect.
       window.location.href = data.authorization_url;
-    } catch {
+    } catch (error) {
       setBusyProvider(null);
+      const status = error instanceof ApiError ? error.status : undefined;
+      // A 403 after a typed password means that password did not match; without
+      // one, no proof the server accepts was available, and the card's hint
+      // (connectProof) lists the ways to provide it.
       toast({
         title: tCommon("error"),
-        description: t("connectError", { provider: t(provider) }),
+        description:
+          status === 403
+            ? password
+              ? t("connectWrongPassword")
+              : t("connectProofRequired", { provider: t(provider) })
+            : status === 429
+              ? t("connectTooManyAttempts")
+              : t("connectError", { provider: t(provider) }),
         variant: "destructive",
       });
+    } finally {
+      setPassword("");
     }
   };
 
@@ -222,6 +252,21 @@ export default function ConnectedAccounts({
           ) : (
             <>
               <ErrorBanner error={loadError} />
+              <p className="text-sm">{t("connectProof")}</p>
+              {hasPassword && (
+                <div>
+                  <Label htmlFor="connected-accounts-password">
+                    {t("password")}
+                  </Label>
+                  <Input
+                    id="connected-accounts-password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </div>
+              )}
               {PROVIDERS.map((provider) => {
                 const isLinked = linkedSet.has(provider);
                 const isBusy = busyProvider === provider;
