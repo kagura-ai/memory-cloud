@@ -223,6 +223,10 @@ ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/observability/resources"): ALLOWED,
     ("GET", "/api/v1/observability/snapshots"): ALLOWED,
     ("GET", "/api/v1/observability/ingestion-events"): ALLOWED,
+    ("GET", "/api/v1/observability/events"): ALLOWED,
+    # reads public memory summaries: refused under a capacity lock or plan
+    # pause with 503 like the public endpoint (pinned by its DB test)
+    ("POST", "/api/v1/observability/documents/resolve"): BLOCKED,
     ("GET", "/api/v1/resource-tokens"): ALLOWED,
     ("POST", "/api/v1/resource-tokens"): ALLOWED,
     ("PATCH", "/api/v1/resource-tokens/{token_id}"): ALLOWED,

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "deployment_id": "default",
+  "as_of": "2026-11-06T09:10:00Z",
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "6c1f2a0e-3d4b-4a5c-9e8f-000000000010",
+      "kind": "gap",
+      "occurred_at": "2026-11-06T09:07:01Z",
+      "dropped_count": 37,
+      "gap_started_at": "2026-11-06T09:06:30Z",
+      "gap_ended_at": "2026-11-06T09:06:58Z",
+      "gap_reason": "queue_full"
+    },
+    {
+      "schema_version": 1,
+      "event_id": "6c1f2a0e-3d4b-4a5c-9e8f-000000000011",
+      "kind": "tool_call",
+      "occurred_at": "2026-11-06T09:07:00Z",
+      "endpoint_id": "0b6f6f0e-1111-4c1d-8a2b-000000000001",
+      "workspace_id": "0b6f6f0e-2222-4c1d-8a2b-000000000001",
+      "context_id": "0b6f6f0e-3333-4c1d-8a2b-000000000001",
+      "resource_pk": "0b6f6f0e-4444-4c1d-8a2b-000000000001",
+      "resource_id": "product-catalog",
+      "tool": "recall",
+      "outcome": "degraded",
+      "error_code": null,
+      "era": "session",
+      "protocol_version": "2025-06-18",
+      "duration_ms": 640,
+      "result_count": 1,
+      "continuation": false,
+      "documents": [
+        {
+          "doc_key": "a3f19c0b7e2d4c5a8b6e1f0d9c8b7a65",
+          "chunks": 1,
+          "rank": 1
+        }
+      ],
+      "documents_truncated": false,
+      "session_key": null,
+      "client_family": null
+    }
+  ],
+  "next_cursor": "eyJ2IjoxLCJ0Ijo3MTA0NDQsImkiOjQyfQ",
+  "has_more": false,
+  "coverage": {
+    "gaps_in_page": 1,
+    "dropped_in_page": 37,
+    "unsealed_events": 0,
+    "oldest_retained_at": "2026-08-08T00:00:00Z",
+    "retention_days": 90,
+    "writer_enabled": true
+  },
+  "client_family_verified": false
+}

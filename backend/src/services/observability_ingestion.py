@@ -37,25 +37,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from models.resource import ResourceEvent
 from services.observability_scope import ScopedResource
+from services.public_mcp_usage_events import doc_key
 from services.resource_indexer import load_indexer_state_row, recorded_failed_events
 from utils.datetime import utcnow
 from utils.exceptions import CursorExpiredError, CursorInvalidError
-from utils.hashing import hmac_sha256_hex
 
 INGESTION_PAGE_MAX = 500
 _MAX_CURSOR_CHARS = 100
 _MAX_BIGINT = 2**63 - 1
-_DOC_KEY_DOMAIN = "public-mcp-doc"
 
 
 def ingestion_doc_key(resource_pk: UUID, doc_id: str) -> str:
-    """The resource-scoped opaque document key, the same as the usage events' (#2678).
+    """The resource-scoped opaque document key, the usage events' derivation (#2678).
 
-    ``hmac_sha256_hex("public-mcp-doc\\n<resource_pk>\\n<doc_id>", audit_hmac_key)[:32]``,
-    so ingestion items and public MCP usage events join on ``doc_key``.
+    Ingestion items and public MCP usage events join on ``doc_key``.
     """
-    message = f"{_DOC_KEY_DOMAIN}\n{resource_pk}\n{doc_id}"
-    return hmac_sha256_hex(message, get_settings().audit_hmac_key)[:32]
+    return doc_key(resource_pk, doc_id, get_settings().audit_hmac_key)
 
 
 def encode_ingestion_cursor(event_id: int) -> str:

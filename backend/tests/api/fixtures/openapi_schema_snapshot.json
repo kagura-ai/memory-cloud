@@ -3514,6 +3514,58 @@
         ],
         "type": "object"
       },
+      "DocumentsResolveRequestV1": {
+        "additionalProperties": false,
+        "properties": {
+          "doc_keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "default": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "doc_keys"
+        ],
+        "type": "object"
+      },
+      "DocumentsResolveV1": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {},
+          "deployment_id": {},
+          "documents": {},
+          "publication_serving": {},
+          "resource_id": {},
+          "schema_version": {}
+        },
+        "required": [
+          "as_of",
+          "deployment_id",
+          "documents",
+          "publication_serving",
+          "resource_id"
+        ],
+        "type": "object"
+      },
       "DowngradeBlocker": {
         "properties": {
           "cleanup": {
@@ -8210,6 +8262,101 @@
         },
         "type": "object"
       },
+      "PublicMcpUsageCoverageV1": {
+        "additionalProperties": false,
+        "properties": {
+          "dropped_in_page": {},
+          "gaps_in_page": {},
+          "oldest_retained_at": {},
+          "retention_days": {},
+          "unsealed_events": {},
+          "writer_enabled": {}
+        },
+        "required": [
+          "dropped_in_page",
+          "gaps_in_page",
+          "retention_days",
+          "unsealed_events",
+          "writer_enabled"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageDocumentV1": {
+        "additionalProperties": false,
+        "properties": {
+          "chunks": {},
+          "doc_key": {},
+          "rank": {}
+        },
+        "required": [
+          "chunks",
+          "doc_key",
+          "rank"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageEventV1": {
+        "additionalProperties": false,
+        "properties": {
+          "client_family": {},
+          "context_id": {},
+          "continuation": {},
+          "documents": {},
+          "documents_truncated": {},
+          "duration_ms": {},
+          "endpoint_id": {},
+          "era": {},
+          "error_code": {},
+          "event_id": {},
+          "kind": {},
+          "occurred_at": {},
+          "outcome": {},
+          "protocol_version": {},
+          "resource_id": {},
+          "resource_pk": {},
+          "result_count": {},
+          "schema_version": {},
+          "session_key": {},
+          "tool": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "context_id",
+          "duration_ms",
+          "endpoint_id",
+          "era",
+          "event_id",
+          "occurred_at",
+          "outcome",
+          "resource_id",
+          "resource_pk",
+          "tool",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageGapV1": {
+        "additionalProperties": false,
+        "properties": {
+          "dropped_count": {},
+          "event_id": {},
+          "gap_ended_at": {},
+          "gap_reason": {},
+          "gap_started_at": {},
+          "kind": {},
+          "occurred_at": {},
+          "schema_version": {}
+        },
+        "required": [
+          "dropped_count",
+          "event_id",
+          "gap_ended_at",
+          "gap_reason",
+          "gap_started_at",
+          "occurred_at"
+        ],
+        "type": "object"
+      },
       "PublicMcpUsageGaps": {
         "properties": {
           "count": {},
@@ -8241,6 +8388,28 @@
           "retention_days",
           "window_hours",
           "writer"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsagePageV1": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {},
+          "client_family_verified": {},
+          "coverage": {},
+          "deployment_id": {},
+          "events": {},
+          "has_more": {},
+          "next_cursor": {},
+          "schema_version": {}
+        },
+        "required": [
+          "as_of",
+          "coverage",
+          "deployment_id",
+          "events",
+          "has_more",
+          "next_cursor"
         ],
         "type": "object"
       },
@@ -9323,6 +9492,17 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "ResolvedDocumentV1": {
+        "additionalProperties": false,
+        "properties": {
+          "source_url": {},
+          "title": {}
+        },
+        "required": [
+          "title"
         ],
         "type": "object"
       },
@@ -25908,6 +26088,126 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CapabilitiesV1"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observability"
+        ]
+      }
+    },
+    "/api/v1/observability/documents/resolve": {
+      "post": {
+        "operationId": "resolve_documents_api_v1_observability_documents_resolve_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentsResolveRequestV1"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentsResolveV1"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observability"
+        ]
+      }
+    },
+    "/api/v1/observability/events": {
+      "get": {
+        "operationId": "list_usage_events_api_v1_observability_events_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "resource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "schema_version",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicMcpUsagePageV1"
                 }
               }
             }

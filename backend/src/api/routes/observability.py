@@ -24,13 +24,16 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.observation_credentials import ObservationScope, get_observation_principal
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
+from models.auth import Workspace
+from services.capacity_lock import ensure_not_capacity_locked
+from services.observability_documents import resolve_doc_keys
 from services.observability_ingestion import INGESTION_PAGE_MAX, read_ingestion_page
 from services.observability_scope import (
     OBSERVABILITY_RESOURCES_MAX,
@@ -39,9 +42,20 @@ from services.observability_scope import (
     resolve_scoped_resource,
     scoped_resources,
 )
+from services.plan_suspension import ensure_public_serving_allowed
+from services.public_mcp_usage_events import (
+    PublicMcpUsagePageV1,
+    build_usage_page,
+    read_usage_events_page,
+)
 from services.resource_indexer import load_indexer_state_row, sanitized_indexer_state
 from utils.datetime import utcnow
-from utils.exceptions import UnsupportedSchemaVersionError
+from utils.exceptions import (
+    CapacityLockedError,
+    QuotaExceededError,
+    TemporarilyUnavailableError,
+    UnsupportedSchemaVersionError,
+)
 
 router = APIRouter(prefix="/observability", tags=["observability"])
 
@@ -66,15 +80,15 @@ def _check_schema_version(requested: int) -> None:
 
 
 def _deployment_id() -> str:
-    return str(getattr(get_settings(), "deployment_id", "default"))
+    return get_settings().deployment_id
 
 
 def _usage_retention_days() -> int:
-    return int(getattr(get_settings(), "mcp_public_telemetry_retention_days", 90))
+    return get_settings().mcp_public_telemetry_retention_days
 
 
 def _usage_writer_enabled() -> bool:
-    return bool(getattr(get_settings(), "mcp_public_telemetry_enabled", False))
+    return get_settings().mcp_public_telemetry_enabled
 
 
 # ============================================================================
@@ -224,6 +238,40 @@ class IngestionEventsPageV1(_Envelope):
     next_cursor: str
     has_more: bool
     coverage: IngestionCoverageV1
+
+
+class DocumentsResolveRequestV1(_V1):
+    """``POST /observability/documents/resolve`` body."""
+
+    resource_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=255,
+        description="Resource slug; optional for a resource-scoped credential",
+    )
+    doc_keys: list[str] = Field(..., min_length=1, max_length=DOCUMENTS_RESOLVE_MAX)
+    schema_version: int = 1
+
+    @field_validator("doc_keys")
+    @classmethod
+    def _keys_are_doc_keys(cls, value: list[str]) -> list[str]:
+        for key in value:
+            if len(key) != 32 or any(ch not in "0123456789abcdef" for ch in key):
+                raise ValueError("every doc key is 32 lowercase hex characters")
+        return list(dict.fromkeys(value))
+
+
+class ResolvedDocumentV1(_V1):
+    title: str
+    source_url: str | None = None
+
+
+class DocumentsResolveV1(_Envelope):
+    """``POST /observability/documents/resolve``: ``null`` for every key that does not resolve."""
+
+    resource_id: str
+    documents: dict[str, ResolvedDocumentV1 | None]
+    publication_serving: bool
 
 
 # ============================================================================
@@ -384,4 +432,72 @@ async def list_ingestion_events(
             seal_seconds=page.seal_seconds,
             oldest_event_id=str(page.oldest_event_id) if page.oldest_event_id else None,
         ),
+    )
+
+
+@router.get("/events", response_model=PublicMcpUsagePageV1)
+async def list_usage_events(
+    scope: Principal = Depends(get_observation_principal),
+    resource_id: str | None = _RESOURCE_ID,
+    cursor: str | None = Query(None, description="`next_cursor` of the previous page"),
+    limit: int = Query(100, ge=1, le=EVENTS_PAGE_MAX),
+    schema_version: int = _SCHEMA_VERSION,
+    db: AsyncSession = Depends(get_db),
+) -> PublicMcpUsagePageV1:
+    """The public MCP usage events in scope, in commit-safe order (#2678's cursor).
+
+    Gap rows (telemetry loss) are in every scope. ``cursor_invalid`` (400) and
+    ``cursor_expired`` (410, with ``oldest_cursor``) come from the reader.
+    """
+    _check_schema_version(schema_version)
+    resource_pk = scope.resource_pk
+    if resource_id is not None:
+        resource_pk = (await resolve_scoped_resource(db, scope, resource_id)).resource_pk
+    page = await read_usage_events_page(
+        db,
+        workspace_id=scope.workspace_id,
+        resource_pk=resource_pk,
+        cursor=cursor,
+        limit=limit,
+    )
+    return build_usage_page(
+        page,
+        deployment_id=_deployment_id(),
+        retention_days=_usage_retention_days(),
+        writer_enabled=_usage_writer_enabled(),
+    )
+
+
+@router.post("/documents/resolve", response_model=DocumentsResolveV1)
+async def resolve_documents(
+    body: DocumentsResolveRequestV1,
+    scope: Principal = Depends(get_observation_principal),
+    db: AsyncSession = Depends(get_db),
+) -> DocumentsResolveV1:
+    """Resolve opaque doc keys to the currently public title and source URL.
+
+    Only through a publication that serves right now; every other key is
+    ``null``. A paused or capacity-locked workspace answers 503
+    ``temporarily_unavailable`` (``Retry-After: 300``) like the public endpoint.
+    """
+    _check_schema_version(body.schema_version)
+    resource = await resolve_scoped_resource(db, scope, body.resource_id)
+    workspace = await db.get(Workspace, scope.workspace_id)
+    if workspace is None:
+        raise TemporarilyUnavailableError()
+    try:
+        ensure_public_serving_allowed(workspace)
+        await ensure_not_capacity_locked(db, workspace, outsider=True)
+    except (QuotaExceededError, CapacityLockedError):
+        raise TemporarilyUnavailableError() from None
+    resolved = await resolve_doc_keys(db, resource, body.doc_keys)
+    return DocumentsResolveV1(
+        deployment_id=_deployment_id(),
+        as_of=utcnow(),
+        resource_id=resource.resource_id,
+        documents={
+            key: ResolvedDocumentV1(**doc) if doc is not None else None  # type: ignore[arg-type]
+            for key, doc in resolved.documents.items()
+        },
+        publication_serving=resolved.publication_serving,
     )

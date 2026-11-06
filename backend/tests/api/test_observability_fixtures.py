@@ -24,6 +24,8 @@ RESPONSES = {
     "resources.json": routes.ResourcesV1,
     "snapshots.json": routes.SnapshotsV1,
     "ingestion_events.json": routes.IngestionEventsPageV1,
+    "events.json": routes.PublicMcpUsagePageV1,
+    "documents_resolve.json": routes.DocumentsResolveV1,
 }
 
 ERRORS = {
@@ -76,8 +78,15 @@ async def test_error_fixture_is_the_served_body(name: str) -> None:
         assert "retry-after" in response.headers
 
 
+def test_events_fixture_is_the_usage_page_fixture() -> None:
+    usage = json.loads(
+        (FIXTURES.parent / "public_mcp_usage_events_v1.json").read_text(encoding="utf-8")
+    )
+    assert _load("events.json") == usage["page"]
+
+
 def test_fixtures_carry_no_forbidden_fields() -> None:
-    forbidden = {"payload", "doc_id", "version", "memory_id", "details", "metrics", "summary"}
+    forbidden = {"payload", "doc_id", "memory_id", "details", "metrics", "summary"}
 
     def keys(value) -> set[str]:
         if isinstance(value, dict):
