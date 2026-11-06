@@ -3,16 +3,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PasskeyLogin from "./PasskeyLogin";
 import PasskeySettings from "./PasskeySettings";
 
-const { get, post, createCredential, getCredential } = vi.hoisted(() => ({
-  get: vi.fn(),
-  post: vi.fn(),
-  createCredential: vi.fn(),
-  getCredential: vi.fn(),
-}));
+const { user, get, post, del, createCredential, getCredential } = vi.hoisted(
+  () => ({
+    user: {
+      id: "u1",
+      has_password: true,
+      email: "user@example.org",
+      auth_provider: "google",
+    },
+    del: vi.fn(),
+    get: vi.fn(),
+    post: vi.fn(),
+    createCredential: vi.fn(),
+    getCredential: vi.fn(),
+  }),
+);
 vi.mock("@/contexts/AuthContext", () => ({
-  useAuth: () => ({ user: { id: "u1", has_password: true } }),
+  useAuth: () => ({ user }),
 }));
-vi.mock("@/lib/api/base", () => ({ apiClient: { get, post } }));
+vi.mock("@/lib/api/base", () => ({ apiClient: { get, post, delete: del } }));
 vi.mock("next-intl", () => ({ useTranslations: () => (key: string) => key }));
 
 beforeEach(() => {
@@ -23,6 +32,9 @@ beforeEach(() => {
     configurable: true,
     value: { get: getCredential, create: createCredential },
   });
+  user.has_password = true;
+  user.email = "user@example.org";
+  del.mockReset().mockResolvedValue(undefined);
   get.mockReset().mockResolvedValue([]);
   post.mockReset();
   createCredential.mockReset();
@@ -42,6 +54,48 @@ describe("browser passkeys", () => {
     expect(screen.queryByRole("button")).toBeNull();
     expect(get).not.toHaveBeenCalled();
   });
+
+  it.each(["google", "github"])(
+    "guides %s users through mailbox proof before removing their only key",
+    async (provider) => {
+      user.has_password = false;
+      user.auth_provider = provider;
+      get.mockResolvedValue([
+        {
+          id: "only",
+          name: "Hello",
+          created_at: "2026-01-01",
+          last_used_at: null,
+        },
+      ]);
+      const page = render(<PasskeySettings onAvailabilityChange={vi.fn()} />);
+      const remove = await screen.findByRole("button", { name: "remove" });
+      expect(remove).toBeDisabled();
+      expect(remove).toHaveAccessibleDescription("onlyKeyRemoval");
+      expect(
+        screen.getByRole("link", { name: "setupPassword" }),
+      ).toHaveAttribute("href", "#profile-password");
+      expect(
+        screen.queryByRole("button", { name: "confirmGoogle" }),
+      ).toBeNull();
+      fireEvent.click(remove);
+      expect(del).not.toHaveBeenCalled();
+
+      // Setup completion refreshed the provider before returning to Profile.
+      user.has_password = true;
+      page.rerender(<PasskeySettings onAvailabilityChange={vi.fn()} />);
+      fireEvent.change(screen.getByLabelText("password"), {
+        target: { value: "new-password" },
+      });
+      fireEvent.click(remove);
+      await waitFor(() =>
+        expect(del).toHaveBeenCalledWith("/api/v1/auth/passkeys/only", {
+          body: JSON.stringify({ current_password: "new-password" }),
+        }),
+      );
+      expect(await screen.findByRole("button", { name: "add" })).toBeEnabled();
+    },
+  );
 
   it("registers the platform result, and lists the key returned by the server", async () => {
     const options = {

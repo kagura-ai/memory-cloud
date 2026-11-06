@@ -1,6 +1,8 @@
 {
   "passkeys": {
     "confirmGoogle": "Confirm with Google",
+    "onlyKeyAddAnother": "To remove this passkey, add a different passkey and use it to confirm removal.",
+    "onlyKeyRemoval": "To remove this passkey, set up a password using the email link, then enter it here. You can also add a different passkey and use it to confirm removal.",
     "setupPassword": "Set up a password by email",
     "title": "Passkeys",
     "signIn": "Sign in with a passkey",
@@ -353,6 +355,9 @@
     }
   },
   "mfaSettings": {
+    "remaining": "Recovery codes remaining: {count}",
+    "regenerate": "Generate new codes",
+    "regenerateHint": "Enter your current password and a fresh authenticator or unused recovery code. This replaces all old recovery codes and signs out other browser sessions.",
     "title": "Two-factor authentication",
     "enabled": "Your password sign-ins require a second factor.",
     "disabled": "Two-factor authentication is off.",
@@ -367,6 +372,8 @@
     "saved": "I saved my codes",
     "password": "Current password",
     "code": "Authenticator code",
+    "useRecoveryCode": "Use a recovery code",
+    "useAuthenticatorCode": "Use an authenticator code",
     "codeOrRecovery": "Authenticator or recovery code",
     "qr": "Authenticator setup QR code",
     "manual": "Manual setup key",

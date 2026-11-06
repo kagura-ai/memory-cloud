@@ -54,6 +54,8 @@ import {
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { LanguageSelector } from "@/components/LanguageSelector";
+import { MfaCodeInput } from "@/components/auth/MfaCodeInput";
+import { isCompleteMfaCode, normalizeMfaCode } from "@/lib/auth/mfaCode";
 import PasskeyLogin from "@/components/auth/PasskeyLogin";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
 
@@ -264,6 +266,8 @@ function LoginContent() {
     }
   };
 
+  const normalizedCode = normalizeMfaCode(totpCode);
+  const codeComplete = isCompleteMfaCode(normalizedCode, true);
   const submitMfa = async () => {
     if (submittingMfaRef.current) return;
     submittingMfaRef.current = true;
@@ -271,7 +275,7 @@ function LoginContent() {
     setError(null);
 
     try {
-      const result = await verifyMfa(mfaSessionToken, totpCode, returnTo);
+      const result = await verifyMfa(mfaSessionToken, normalizedCode, returnTo);
 
       if (result.redirect_url) {
         window.location.href = result.redirect_url;
@@ -285,7 +289,6 @@ function LoginContent() {
     }
   };
 
-  const codeComplete = /^(?:\d{6}|(?:[\da-f]{8}-){3}[\da-f]{8})$/i.test(totpCode);
   const handleMfaVerify = (e: React.FormEvent) => {
     e.preventDefault();
     if (!codeComplete || loadingAction !== null) {
@@ -441,10 +444,9 @@ function LoginContent() {
                   <Label htmlFor="totpCode" className="text-gray-700">
                     {t("totpCode")}
                   </Label>
-                  <Input
+                  <MfaCodeInput
                     id="totpCode"
-                    type="text"
-                    maxLength={35}
+                    allowRecovery
                     value={totpCode}
                     onChange={(e) => setTotpCode(e.target.value)}
                     onKeyDown={(e) => {
@@ -453,6 +455,7 @@ function LoginContent() {
                       // explicitly once the TOTP code is complete.
                       if (
                         e.key === "Enter" &&
+                        !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 &&
                         codeComplete &&
                         loadingAction === null
                       ) {
@@ -463,7 +466,6 @@ function LoginContent() {
                     placeholder="000000"
                     className="bg-white text-gray-900 text-center text-2xl tracking-widest"
                     autoFocus
-                    autoComplete="one-time-code"
                   />
                 </div>
                 <Button

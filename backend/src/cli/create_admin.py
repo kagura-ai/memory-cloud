@@ -28,6 +28,7 @@ from auth.password_policy import (  # noqa: E402
     PasswordPolicyError,
     validate_password_policy,
 )
+from auth.recovery_codes import issue_codes  # noqa: E402
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp  # noqa: E402
 from cli import _env_guard  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
@@ -352,6 +353,9 @@ def create_admin(skip_mcp_json: bool = False):
             is_initial_admin=(admin_count == 0),
             last_login_at=utcnow(),
         )
+        recovery_codes = []
+        if totp_enabled:
+            recovery_codes, admin.totp_recovery_hashes = issue_codes()
         db.add(admin)
         db.flush()
 
@@ -386,6 +390,10 @@ def create_admin(skip_mcp_json: bool = False):
         # Commit BEFORE any best-effort file writes so a PermissionError
         # on .mcp.json can never roll back admin / workspace / API key.
         db.commit()
+
+        if recovery_codes:
+            print("Save these single-use MFA recovery codes now:")
+            print("\n".join(recovery_codes))
 
         # Best-effort .mcp.json write (never raises — falls back to stdout).
         mcp_written = False

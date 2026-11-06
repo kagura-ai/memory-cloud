@@ -22,6 +22,10 @@ vi.mock("next/navigation", () => ({
   usePathname: () => mockPathname,
 }));
 
+const mockRefetchUser = vi.fn();
+vi.mock("@/contexts/AuthContext", () => ({
+  useAuth: () => ({ refetchUser: mockRefetchUser }),
+}));
 const mockToast = vi.fn();
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
@@ -62,6 +66,7 @@ beforeEach(() => {
   mockReplace.mockReset();
   mockReset.mockReset();
   mockSetup.mockReset();
+  mockRefetchUser.mockReset();
   mockToast.mockReset();
 });
 
@@ -151,6 +156,7 @@ describe("PasswordLinkPage — setup", () => {
       expect(screen.getByText("setup.successTitle")).toBeTruthy(),
     );
     expect(mockSetup).toHaveBeenCalledWith("tok-1", GOOD);
+    expect(mockRefetchUser).toHaveBeenCalledOnce();
     expect(mockReset).not.toHaveBeenCalled();
     expect(
       screen.getByRole("link", { name: "setup.continue" }).getAttribute("href"),

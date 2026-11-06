@@ -28,6 +28,7 @@ import secrets
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Literal, NamedTuple, NoReturn, TypeVar
 
@@ -35,6 +36,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
+from redis.exceptions import RedisError
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,7 +53,7 @@ from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
 from auth.password import hash_password, verify_password
 from auth.provider_link import provider_link_established
-from auth.recovery_codes import consume_login_code, is_recovery_code
+from auth.recovery_codes import RecoveryClaim, claim_login_code, is_recovery_code, settle_login_code
 from auth.roles import get_role_manager
 from auth.session import (
     SESSION_COOKIE_NAME,
@@ -64,7 +66,7 @@ from auth.totp import verify_totp
 from config.constants import IDENTITY_LINK_SIGN_IN_WINDOW
 from config.settings import TERMS_VERSION_RE
 from db.base import get_db
-from models.auth import User
+from models.auth import AuditLog, User
 from services.account_linking_service import AccountLinkingService
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
 from services.identity_link_service import linked_user_ids
@@ -2086,6 +2088,9 @@ async def get_current_user_info(
             # says whether the account can sign in with a password now.
             "has_password": bool(db_user and db_user.password_hash is not None),
             "mfa_enabled": bool(db_user and db_user.totp_enabled),
+            "mfa_recovery_codes_remaining": len(db_user.totp_recovery_hashes or [])
+            if db_user and db_user.totp_enabled
+            else 0,
             # Issue #1784: the other accounts counted as this owner, so the
             # web UI attributes their private contexts to the viewer.
             "linked_user_ids": (
@@ -3319,11 +3324,11 @@ async def mfa_verify(
     # A wrong code, or a code this account already signed in with, consumes
     # the pending step and is answered 401 (the attempt is already counted).
     # The fingerprint key is already gone: the single-use guard above took it.
+    claim: RecoveryClaim | None = None
     if is_recovery_code(body.totp_code):
-        accepted = False
-        async for db in get_db():
-            accepted = await consume_login_code(db, user.user_id, body.totp_code)
-            break
+        async with asynccontextmanager(get_db)() as db:
+            claim = await claim_login_code(db, user.user_id, body.totp_code)
+        accepted = claim is not None
     else:
         accepted = verify_totp(totp_secret, body.totp_code) and _claim_totp_code(
             user.user_id, body.totp_code
@@ -3331,11 +3336,50 @@ async def mfa_verify(
     if not accepted:
         _refuse_totp_code(user, body.mfa_session_token, request, attempt)
 
-    _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
+    session_id: str | None = None
+    try:
+        _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
+        session_id = await _open_password_session(user, verified)
+        response = Response(
+            content=PasswordLoginResponse(
+                success=True, mfa_required=False, redirect_url=_safe_redirect_url(return_to)
+            ).model_dump_json(),
+            media_type="application/json",
+        )
+        _set_session_cookie(response, session_id)
+        if claim:
+            audit = AuditLog(
+                user_id=user.user_id,
+                user_email="self-service",
+                resource="user:mfa",
+                action=SecurityEvent.RECOVERY_CODE_USED.value,
+                ip_address=_login_client_ip(request),
+                user_agent=request.headers.get("user-agent"),
+            )
+            async with asynccontextmanager(get_db)() as db:
+                if not await settle_login_code(db, user.user_id, claim, audit=audit):
+                    raise AuthenticationError(
+                        "Recovery code expired or replaced. Please sign in again."
+                    )
+    except BaseException:
+        try:
+            if session_id:
+                _session_manager.delete_session(session_id)
+        finally:
+            if claim:
+                async with asynccontextmanager(get_db)() as db:
+                    await settle_login_code(db, user.user_id, claim, audit=None)
+        raise
 
-    session_id = await _open_password_session(user, verified)
-    # The whole sign-in stands: only now is the budget cleared.
-    _clear_login_failures(_account_rate_key(user.user_id))
+    try:
+        await asyncio.to_thread(_clear_login_failures, _account_rate_key(user.user_id))
+    except RedisError:
+        # The sign-in stands and a recovery code has already been consumed.
+        logger.warning("mfa_sign_in_budget_clear_failed", user_id=user.user_id)
+    if claim:
+        spawn_security_notification(
+            user_id=user.user_id, event=SecurityEvent.RECOVERY_CODE_USED, request=request
+        )
     await _record_terms_acceptance(
         user_id=user.user_id,
         email=user.email,
@@ -3344,13 +3388,6 @@ async def mfa_verify(
         request=request,
     )
 
-    response = Response(
-        content=PasswordLoginResponse(
-            success=True, mfa_required=False, redirect_url=_safe_redirect_url(return_to)
-        ).model_dump_json(),
-        media_type="application/json",
-    )
-    _set_session_cookie(response, session_id)
     # #1769: the second factor passed — only now is this a sign-in to record.
     await note_browser_sign_in(request, response, user_id=user.user_id, sign_in_method="Password")
 

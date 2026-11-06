@@ -68,6 +68,7 @@ from auth.password_policy import (  # noqa: E402
     PasswordPolicyError,
     validate_password_policy,
 )
+from auth.recovery_codes import issue_codes  # noqa: E402
 from auth.session import SessionManager  # noqa: E402
 from cli._env_guard import require_settings, resolve_api_key_secret  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
@@ -321,12 +322,13 @@ def reset_password():
                     if verify_totp(totp_secret, verify_code):
                         from utils.encryption import get_encryptor  # noqa: E402
 
-                        user.totp_recovery_hashes = None
+                        recovery_codes, user.totp_recovery_hashes = issue_codes()
                         user.mfa_generation = uuid4().hex
                         user.totp_secret = get_encryptor().encrypt(totp_secret)
                         user.totp_enabled = True
                         db.commit()
-                        print("  ✓ MFA re-enabled!")
+                        print("  ✓ MFA re-enabled! Save these single-use recovery codes now:")
+                        print("\n".join(recovery_codes))
                     else:
                         print("  ✗ Invalid code. MFA remains disabled.")
 

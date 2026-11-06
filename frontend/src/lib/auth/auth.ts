@@ -38,6 +38,7 @@ export interface User {
   // `auth_method` stays the ORIGINAL sign-in method.
   has_password?: boolean;
   mfa_enabled?: boolean;
+  mfa_recovery_codes_remaining?: number;
   // Issue #953: protected initial administrator — cannot self-delete
   // (backend blocks erasure with ERASURE-004 / 403). Hides the danger zone.
   is_initial_admin?: boolean;

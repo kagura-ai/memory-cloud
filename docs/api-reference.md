@@ -12,15 +12,18 @@ Kagura Memory Cloud provides both REST APIs and MCP (Model Context Protocol) too
 
 ### Password sign-in with two-factor authentication
 
-`GET /api/v1/auth/me` includes `user.mfa_enabled`. An account with a password can manage its authenticator with a signed-in browser session.
+`GET /api/v1/auth/me` includes `user.mfa_enabled` and `user.mfa_recovery_codes_remaining`. An account with a password can manage its authenticator with a signed-in browser session.
 
 | Endpoint | Request | Result |
 |---|---|---|
 | `POST /api/v1/auth/mfa/setup` | `current_password` | A base32 `secret` and `provisioning_uri` to display locally. Pending setup expires after five minutes and is bound to this session and credential state. |
 | `POST /api/v1/auth/mfa/enable` | `code` from the new authenticator | Enables TOTP and returns eight single-use `recovery_codes`. Save them before closing the dialog. |
+| `POST /api/v1/auth/mfa/recovery-codes/regenerate` | `current_password` and a fresh authenticator or unused recovery `code` | Replaces all old codes, signs out other browser sessions and returns eight new codes once. Also available to existing CLI admins with zero codes. |
 | `POST /api/v1/auth/mfa/disable` | `current_password`, plus an authenticator or recovery `code` | HTTP 204. Invalidates the secret and every remaining recovery code. |
 
 Enabling or disabling MFA signs out the account's other browser sessions and sends the owner a security notification. A password login that returns `mfa_required` finishes at `POST /api/v1/auth/mfa/verify`; its existing `totp_code` field accepts either the authenticator value or a recovery code. Failed attempts share the account's password sign-in budget. OAuth sign-in continues to use the provider's authentication. A password reset retains MFA and removes the account's passkeys (#2660), so an account with MFA still needs its authenticator or a recovery code afterwards. Disable MFA before removing the password. For lockouts, an operator can run `python -m src.cli.reset_password` with the login ID or user ID and choose “Disable MFA only”.
+
+Successful recovery-code sign-ins consume one code, append a `recovery_code_used` audit entry and notify the account owner. A failed sign-in releases its reservation. If a worker stops mid-sign-in, the reservation expires after five minutes. Code regeneration also writes an audit entry and notifies the owner. Creating an admin with MFA or re-enabling MFA in the operator CLI displays a new recovery set after the change commits.
 
 All API requests require authentication using one of the following methods:
 
@@ -72,6 +75,12 @@ credential IDs and WebAuthn binary fields travel in base64url form.
 | `PATCH /{key_id}` | Supply `name` (1–100 characters). |
 | `POST /proof/options` | Obtain assertion options for another registration, or use `?removing={key_id}` to prove a different key for removal. Submit the assertion as `assertion` alongside `challenge` on the management request. |
 | `DELETE /{key_id}` | Submit `current_password` or the scoped assertion proof. Returns 204. Removing the last available sign-in method returns 409. |
+
+An account with a linked Google or GitHub provider, one passkey and no password gets
+403 on removal until it can prove a different credential. From Profile → Passkeys,
+follow **Set up a password by email**, request the link in the Password section, and
+finish setup from that mailbox. Return to Passkeys and enter the new password to
+remove the key. Alternatively, register another passkey and confirm removal with it.
 
 A passkey assertion requires local user verification and signs in an existing account
 without a subsequent TOTP prompt. Account deletion cascades to all its credentials.

@@ -13,7 +13,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from webauthn import (
@@ -488,16 +488,19 @@ async def remove_passkey(
     key = next((k for k in keys if k.id == key_id), None)
     if not key:
         raise NotFoundException("Passkey")
-    if (
-        len(keys) == 1
-        and not account.password_hash
-        and not await db.scalar(
-            select(func.count())
-            .select_from(UserOAuthProvider)
+    if len(keys) == 1 and not account.password_hash:
+        has_provider = await db.scalar(
+            select(UserOAuthProvider.id)
             .where(UserOAuthProvider.user_id == account.user_id)
+            .limit(1)
         )
-    ):
-        raise ConflictError("Cannot remove the only remaining sign-in method")
+        if not has_provider:
+            raise ConflictError("Cannot remove the only remaining sign-in method")
+        raise AuthorizationError(
+            "Set up a password using the email link in Profile > Password, then "
+            "enter it in Profile > Passkeys to remove this key. You can also add "
+            "a different passkey and use it to confirm removal."
+        )
     await _prove(db, account, request, body, f"remove:{key_id}", excluding=key_id)
     await db.delete(key)
     _audit(db, account, SecurityEvent.PASSKEY_REMOVED)
