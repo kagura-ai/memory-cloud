@@ -837,6 +837,7 @@ from api.routes import (  # noqa: E402
     mfa_settings,
     neural_config,
     oauth,
+    observation_credentials,  # Issue #2679: read-only observability credentials
     passkeys,
     password,  # Issue #1678: self-service password endpoints
     public_mcp_endpoints,  # Issue #2675: publish a resource as a public MCP endpoint
@@ -1015,6 +1016,10 @@ app.include_router(public_mcp_endpoints.router, prefix="/api/v1")
 
 # Resource Token routes (Issue #242 - Resource Token Management)
 app.include_router(resource_tokens.router, prefix="/api/v1")
+
+# Observation credentials (Issue #2679 - owner issues read-only credentials
+# for the observability API; always mounted, works while the API is off)
+app.include_router(observation_credentials.router, prefix="/api/v1")
 
 # Workspace connector setup route (Issue #851 - ai-worker connector provisioning)
 app.include_router(workspace_connectors.router, prefix="/api/v1")

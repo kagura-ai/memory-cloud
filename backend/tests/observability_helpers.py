@@ -21,6 +21,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.workspace_roles import WorkspaceRole
+from db.base import get_db as _route_get_db
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.resource import Resource
 
@@ -150,7 +151,6 @@ async def owner_client(
     """A client whose caller is ``user_id`` in ``workspace_id`` (default A); ``None`` = anonymous."""
     from api.main import app
     from auth.dependencies import get_user_from_api_key_or_session
-    from db.base import get_db
 
     async def _user() -> dict[str, Any]:
         return {
@@ -160,7 +160,7 @@ async def owner_client(
             "current_workspace_id": workspace_id or w.ws,
         }
 
-    app.dependency_overrides[get_db] = _db_override(w)
+    app.dependency_overrides[_route_get_db] = _db_override(w)
     if user_id is not None:
         app.dependency_overrides[get_user_from_api_key_or_session] = _user
     try:
@@ -169,7 +169,7 @@ async def owner_client(
         ) as client:
             yield client
     finally:
-        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(_route_get_db, None)
         app.dependency_overrides.pop(get_user_from_api_key_or_session, None)
 
 
@@ -179,9 +179,8 @@ async def app_client(
 ) -> AsyncIterator[httpx.AsyncClient]:
     """A client with no injected caller: every credential goes through the real dependencies."""
     from api.main import app
-    from db.base import get_db
 
-    app.dependency_overrides[get_db] = _db_override(w)
+    app.dependency_overrides[_route_get_db] = _db_override(w)
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, client=client_addr),
@@ -189,7 +188,7 @@ async def app_client(
         ) as client:
             yield client
     finally:
-        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(_route_get_db, None)
 
 
 async def issue_credential(

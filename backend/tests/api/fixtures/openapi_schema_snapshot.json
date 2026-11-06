@@ -6807,6 +6807,112 @@
         ],
         "type": "object"
       },
+      "ObservationCredentialCreate": {
+        "properties": {
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "default": "workspace",
+            "enum": [
+              "workspace",
+              "resource"
+            ],
+            "type": "string"
+          },
+          "ttl_days": {
+            "default": 90,
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "ObservationCredentialCreateResponse": {
+        "properties": {
+          "created_at": {},
+          "created_by": {},
+          "expires_at": {},
+          "id": {},
+          "key_prefix": {},
+          "last_used_at": {},
+          "name": {},
+          "resource_id": {},
+          "revoked_at": {},
+          "rotated_from": {},
+          "scope": {},
+          "secret": {},
+          "status": {}
+        },
+        "required": [
+          "created_at",
+          "created_by",
+          "expires_at",
+          "id",
+          "key_prefix",
+          "name",
+          "scope",
+          "secret",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ObservationCredentialResponse": {
+        "properties": {
+          "created_at": {},
+          "created_by": {},
+          "expires_at": {},
+          "id": {},
+          "key_prefix": {},
+          "last_used_at": {},
+          "name": {},
+          "resource_id": {},
+          "revoked_at": {},
+          "rotated_from": {},
+          "scope": {},
+          "status": {}
+        },
+        "required": [
+          "created_at",
+          "created_by",
+          "expires_at",
+          "id",
+          "key_prefix",
+          "name",
+          "scope",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ObservationCredentialRotate": {
+        "properties": {
+          "grace_seconds": {
+            "default": 0,
+            "maximum": 86400.0,
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "OpenAIKeyStatusResponse": {
         "properties": {
           "can_configure": {
@@ -25462,6 +25568,223 @@
         },
         "tags": [
           "oauth2-server"
+        ]
+      }
+    },
+    "/api/v1/observation-credentials": {
+      "get": {
+        "operationId": "list_observation_credentials_api_v1_observation_credentials_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ObservationCredentialResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observation-credentials"
+        ]
+      },
+      "post": {
+        "operationId": "create_observation_credential_api_v1_observation_credentials_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ObservationCredentialCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObservationCredentialCreateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observation-credentials"
+        ]
+      }
+    },
+    "/api/v1/observation-credentials/{credential_id}": {
+      "delete": {
+        "operationId": "revoke_observation_credential_api_v1_observation_credentials__credential_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "pattern": "^obsk_[0-9A-Za-z]{22}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observation-credentials"
+        ]
+      }
+    },
+    "/api/v1/observation-credentials/{credential_id}/rotate": {
+      "post": {
+        "operationId": "rotate_observation_credential_api_v1_observation_credentials__credential_id__rotate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "pattern": "^obsk_[0-9A-Za-z]{22}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ObservationCredentialRotate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObservationCredentialCreateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observation-credentials"
         ]
       }
     },
