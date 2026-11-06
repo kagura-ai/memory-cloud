@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 # backend/tests/test_dependency_bounds.py -> tests -> backend
 _PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
@@ -97,3 +98,41 @@ def test_auth_critical_dependency_has_upper_bound(requirement: Requirement) -> N
 def test_authlib_is_pinned_to_the_verified_minor(version: str, allowed: bool) -> None:
     (authlib,) = [r for r in _runtime_requirements() if canonicalize_name(r.name) == "authlib"]
     assert authlib.specifier.contains(version, prereleases=True) is allowed
+
+
+# GHSA-3jp2-3mrg-2vxc (#2674): oauthlib's RFC 8628 server grant skips the
+# device_code check in the range below. Nothing under src/ imports oauthlib; it
+# arrives through google-auth-oauthlib -> requests-oauthlib, so the floor lives
+# in pyproject.toml as a security floor and the lock is checked against it.
+_OAUTHLIB_PATCHED = "4.0.1"
+_UV_LOCK = Path(__file__).resolve().parents[1] / "uv.lock"
+
+
+def _oauthlib_requirement() -> Requirement:
+    (oauthlib,) = [r for r in _runtime_requirements() if canonicalize_name(r.name) == "oauthlib"]
+    return oauthlib
+
+
+@pytest.mark.parametrize(
+    ("version", "allowed"),
+    [
+        ("4.0.1", True),
+        ("4.1.0", True),
+        # The advisory range is >= 3.3.0, < 4.0.1; older releases are below the floor too.
+        ("4.0.0", False),
+        ("3.3.1", False),
+        ("3.3.0", False),
+        ("3.2.2", False),
+    ],
+)
+def test_oauthlib_floor_excludes_the_vulnerable_range(version: str, allowed: bool) -> None:
+    assert _oauthlib_requirement().specifier.contains(version, prereleases=True) is allowed
+
+
+def test_locked_oauthlib_is_patched() -> None:
+    """The tracked lock is what CI and the image install, so it must not resolve below the floor."""
+    lock = tomllib.loads(_UV_LOCK.read_text(encoding="utf-8"))
+    locked = [p for p in lock["package"] if canonicalize_name(p["name"]) == "oauthlib"]
+    assert len(locked) == 1, [p["version"] for p in locked]
+    assert _oauthlib_requirement().specifier.contains(locked[0]["version"])
+    assert Version(locked[0]["version"]) >= Version(_OAUTHLIB_PATCHED)
