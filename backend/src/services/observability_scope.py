@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.observation_credentials import ObservationScope
-from mcp_server.public.publication import load_serving_endpoint
+from mcp_server.public.publication import load_serving_endpoint, serving_paused
 from models.auth import Context
 from models.public_mcp import PublicMcpEndpoint
 from models.resource import Resource
@@ -153,16 +153,20 @@ async def resolve_scoped_resource(
 async def publication_block(db: AsyncSession, resource: ScopedResource) -> dict | None:
     """The resource's live publication, or ``None`` when it has none.
 
-    ``serving`` is whether the anonymous endpoint answers right now.
+    ``serving`` is whether the anonymous endpoint answers right now: the
+    publication gate (``load_serving_endpoint``) passes and neither a plan
+    pause nor a capacity lock stops it (``serving_paused``, the transport's
+    503).
     """
     endpoint = resource.endpoint
     if endpoint is None:
         return None
+    served = await load_serving_endpoint(db, endpoint.public_id)
     return {
         "endpoint_id": endpoint.id,
         "public_id": endpoint.public_id,
         "public_name": endpoint.public_name,
         "published_at": endpoint.created_at,
         "updated_at": endpoint.updated_at,
-        "serving": await load_serving_endpoint(db, endpoint.public_id) is not None,
+        "serving": served is not None and not await serving_paused(db, served),
     }

@@ -8,6 +8,7 @@ metrics passthrough, no error text, no failed event ids.
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -18,6 +19,7 @@ from models.public_mcp import PublicMcpEndpoint
 from models.resource import IndexerState
 from tests.observability_helpers import World, app_client, bearer, issue_credential, world_rows
 from utils.datetime import utcnow
+from utils.exceptions import CapacityLockedError, QuotaExceededError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -161,3 +163,26 @@ async def test_all_in_scope_and_publication(world: World, monkeypatch) -> None:
         by_slug = {x["resource_id"]: x for x in resources["resources"]}
         assert by_slug[world.slugs["a2"]]["publication"]["serving"] is True
         assert by_slug[world.slugs["a1"]]["context_id"] == str(world.ctx["a1"])
+
+        # A plan pause or a capacity lock stops the anonymous endpoint (503),
+        # so the publication is not serving either.
+        async def locked(*args, **kwargs):
+            raise CapacityLockedError.for_outsider()
+
+        with patch("mcp_server.public.publication.ensure_not_capacity_locked", new=locked):
+            body = (await c.get(BASE, headers=bearer(secret))).json()
+            by_slug = {x["resource_id"]: x for x in body["snapshots"]}
+            assert by_slug[world.slugs["a2"]]["publication"]["serving"] is False
+            resources = (
+                await c.get("/api/v1/observability/resources", headers=bearer(secret))
+            ).json()
+            by_slug = {x["resource_id"]: x for x in resources["resources"]}
+            assert by_slug[world.slugs["a2"]]["publication"]["serving"] is False
+
+        def paused(workspace):
+            raise QuotaExceededError("paused", quota_type="api_public_daily")
+
+        with patch("mcp_server.public.publication.ensure_public_serving_allowed", new=paused):
+            body = (await c.get(BASE, headers=bearer(secret))).json()
+            by_slug = {x["resource_id"]: x for x in body["snapshots"]}
+            assert by_slug[world.slugs["a2"]]["publication"]["serving"] is False
