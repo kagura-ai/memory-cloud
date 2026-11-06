@@ -322,6 +322,7 @@ def fake_db(monkeypatch):
         yield db
 
     monkeypatch.setattr(tools, "_read_session", _session)
+    monkeypatch.setattr(tools, "_recall_session", _session)
     return db
 
 

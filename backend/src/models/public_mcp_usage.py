@@ -43,10 +43,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import CHAR, JSONB, UUID
+from sqlalchemy.dialects.postgresql import CHAR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSONB
 
 PMU_KINDS: tuple[str, ...] = ("tool_call", "gap")
 PMU_TOOLS: tuple[str, ...] = (
@@ -122,7 +123,7 @@ class PublicMcpUsageEvent(Base):
     continuation: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
-    documents: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    documents: Mapped[list | None] = mapped_column(NullableJSONB, nullable=True)
     documents_truncated: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
