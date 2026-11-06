@@ -188,7 +188,8 @@ class AccountLinkingService:
         # (``RoleManager._adopt_primary_provider``): only the identity the
         # account was created with (sub == ``user_id``) may become the one
         # whose email and name are synced; a surviving provider attached
-        # later — which needed only a live session — leaves the pointer NULL.
+        # later — through fresh proof of the account, not of that identity —
+        # leaves the pointer NULL.
         # A password account keeps its pointer semantics (next survivor).
         if user.auth_provider == provider:
             survivors = [r for r in rows if r.provider != provider]

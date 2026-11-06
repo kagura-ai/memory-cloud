@@ -1856,13 +1856,16 @@ def _identity_can_prove(owner: SessionOwner, idp_sub: str) -> bool:
     """Whether a sign-in through this identity may prove ``owner`` (#1875).
 
     Attaching a sign-in provider (``POST /me/account/link-provider``) needs
-    only a live session. A sign-in through a provider attached minutes ago
-    would therefore prove the account on the strength of that session, which
-    is what the identity-link window exists to rule out (#1803, #1818).
+    fresh proof of the account in the browser session that attaches it: the
+    current password, a passkey, or a verified sign-in within the last five
+    minutes. A sign-in through a provider attached minutes ago would therefore
+    prove the account on the strength of that session's proof, which is what
+    the identity-link window exists to rule out (#1803, #1818).
 
     Decision (#1875): the gate is here, on the proof, not on attaching — an
-    OAuth-only account has no other credential to prove before it attaches a
-    second provider. The identity counts once its link is established: see
+    OAuth-only account without a password or passkey can prove itself for
+    attaching only through that recent sign-in. The identity counts once its
+    link is established: see
     :func:`auth.provider_link.provider_link_established`, the rule
     ``RoleManager`` also reads before a provider becomes primary.
 

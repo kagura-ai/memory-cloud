@@ -934,8 +934,10 @@ sign-in through **the identity it was created with** — the Google / GitHub
 identity whose `sub` is the account's `user_id` — once that identity's link
 is older than 10 minutes or was written together with the account. A
 provider attached later through **Connected accounts** never becomes primary,
-however long ago it was attached: attaching needs only a live session, so a
-session alone can never choose whose email and name the account takes. Such
+however long ago it was attached: attaching needs fresh proof of the account
+(the current password, a passkey or a recent verified sign-in), not of the
+attached identity, so attaching can never choose whose email and name the
+account takes. Such
 a sign-in logs `oauth_primary_provider_not_adopted_attached_identity` and
 goes through as a linked sign-in. Unlinking the primary provider follows the
 same rule: the pointer moves to the identity the account was created with
@@ -1032,8 +1034,10 @@ What counts as a proof (#1818):
 - **Not** an ordinary OAuth sign-in or **Add another account**, and **never
   a GitHub sign-in**: GitHub reports no authentication time.
 - **Not a sign-in through a provider attached to the account less than
-  10 minutes ago** (#1875). Attaching a sign-in provider needs only a live
-  session, so a proof through it would be a proof by that session. A new
+  10 minutes ago** (#1875). Attaching a sign-in provider needs fresh proof of
+  the account in the attaching browser session (the current password, a
+  passkey or a recent verified sign-in), so a proof through it would rest on
+  that session's proof. A new
   account's first sign-in is not affected (the provider was not attached to
   it afterwards); the page says to retry once the 10 minutes have passed,
   and the backend logs
