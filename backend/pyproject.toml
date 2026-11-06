@@ -88,6 +88,13 @@ dependencies = [
     # Semver, used through stable API only: take minors, stop at the next major.
     "google-auth>=2.35.0,<3",  # Google OAuth2
     "google-auth-oauthlib>=1.2.0,<2",  # Google OAuth2 helpers
+    # Not imported anywhere under src/: google-auth-oauthlib -> requests-oauthlib
+    # pull it in for the Google sign-in client. This is a security floor on that
+    # transitive package so a lock refresh cannot resolve below it:
+    # GHSA-3jp2-3mrg-2vxc (oauthlib >= 3.3.0, < 4.0.1) skips the device_code check
+    # in its RFC 8628 server grant, which Memory Cloud does not use (its device
+    # grant is Authlib's). tests/test_dependency_bounds.py checks the floor and the lock.
+    "oauthlib>=4.0.1",
     "bcrypt>=4.0.0,<6",     # Password hashing (Issue #51)
     "pyotp>=2.9.0,<3",      # TOTP MFA (Issue #51)
     "qrcode[pil]>=7.4",    # QR code for MFA setup (Issue #51)

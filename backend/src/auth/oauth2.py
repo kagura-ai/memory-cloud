@@ -3,7 +3,10 @@
 import json
 import logging
 import os
+import tempfile
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
 
@@ -45,6 +48,96 @@ def _cert_request(*args: Any, **kwargs: Any) -> Any:
     """
     kwargs.setdefault("timeout", _CERT_FETCH_TIMEOUT_SECONDS)
     return Request()(*args, **kwargs)
+
+
+# A Fernet key is 32 bytes, url-safe base64: 44 characters on disk.
+_FERNET_KEY_LENGTH = 44
+# How long a reader waits for a key file that another process is still writing.
+_KEY_WAIT_SECONDS = 2.0
+_KEY_POLL_SECONDS = 0.02
+
+
+def _load_or_create_key(key_file: Path) -> bytes:
+    """Return the credential encryption key in ``key_file``, creating it once.
+
+    Every API worker builds an ``OAuth2Manager`` at startup, so on a fresh
+    config directory several processes get here at the same moment (#2673).
+    The key is written to a temporary file in the same directory and published
+    with ``os.link``, which never replaces an existing file: exactly one process
+    installs its key and the others read that one, and a crash mid-write leaves
+    a stray temporary file, never a partial key file.
+
+    Args:
+        key_file: Path of the key file (``<config dir>/.key``).
+
+    Returns:
+        The key, checked to be a valid Fernet key.
+
+    Raises:
+        ValueError: If the existing file does not hold a valid Fernet key. It
+            is not replaced: credentials encrypted with it depend on it.
+    """
+    try:
+        key = _read_key(key_file)
+    except FileNotFoundError:
+        key = _create_key(key_file)
+    try:
+        Fernet(key)
+    except ValueError as exc:
+        raise ValueError(
+            f"Encryption key file {key_file} does not hold a valid Fernet key"
+        ) from exc
+    return key
+
+
+def _read_key(key_file: Path) -> bytes:
+    """Read ``key_file``, waiting briefly while it is shorter than a key.
+
+    A file is only seen partly written on a filesystem without hard links,
+    where ``_create_key_exclusive`` writes it in place.
+    """
+    deadline = time.monotonic() + _KEY_WAIT_SECONDS
+    key = key_file.read_bytes()
+    while len(key) < _FERNET_KEY_LENGTH and time.monotonic() < deadline:
+        time.sleep(_KEY_POLL_SECONDS)
+        key = key_file.read_bytes()
+    return key
+
+
+def _create_key(key_file: Path) -> bytes:
+    """Generate a key and publish it as ``key_file`` unless another process did."""
+    key = Fernet.generate_key()
+    # mkstemp creates the file with mode 0o600; the link shares that inode.
+    fd, tmp_name = tempfile.mkstemp(dir=key_file.parent, prefix=".key.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as tmp:
+            tmp.write(key)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        try:
+            os.link(tmp_name, key_file)
+        except FileExistsError:
+            return _read_key(key_file)
+        except OSError:
+            return _create_key_exclusive(key_file, key)
+    finally:
+        Path(tmp_name).unlink(missing_ok=True)
+    logger.info(f"Generated new encryption key: {key_file}")
+    return key
+
+
+def _create_key_exclusive(key_file: Path, key: bytes) -> bytes:
+    """Fallback for a filesystem without hard links: create the file with O_EXCL."""
+    try:
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return _read_key(key_file)
+    with os.fdopen(fd, "wb") as out:
+        out.write(key)
+        out.flush()
+        os.fsync(out.fileno())
+    logger.info(f"Generated new encryption key: {key_file}")
+    return key
 
 
 class OAuth2Manager:
@@ -115,14 +208,7 @@ class OAuth2Manager:
 
     def _setup_encryption(self) -> None:
         """Setup encryption key for credential storage"""
-        if not self.key_file.exists():
-            logger.info("Generating new encryption key")
-            key = Fernet.generate_key()
-            self.key_file.write_bytes(key)
-            self.key_file.chmod(0o600)
-            logger.debug(f"Encryption key saved to {self.key_file}")
-
-        self.cipher = Fernet(self.key_file.read_bytes())
+        self.cipher = Fernet(_load_or_create_key(self.key_file))
 
     def login(self) -> None:
         """Launch browser for OAuth2 authentication
