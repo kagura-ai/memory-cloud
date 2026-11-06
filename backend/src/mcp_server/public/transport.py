@@ -231,7 +231,9 @@ async def public_mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> Non
         return
     try:
         body = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        # RecursionError: a body nested deeper than the decoder allows (it
+        # fits the size cap) is a parse error, not an unhandled 500.
         await _send_json_error(
             send,
             400,

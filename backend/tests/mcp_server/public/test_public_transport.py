@@ -421,6 +421,14 @@ async def test_parse_error(client: _Client) -> None:
     assert send.body["error"]["code"] == -32700
 
 
+@pytest.mark.parametrize("raw", [b"[" * 60_000, b'{"a":' * 12_000])
+async def test_deeply_nested_body_is_a_parse_error(client: _Client, raw: bytes) -> None:
+    # Under the size cap, but deeper than the JSON decoder's recursion limit.
+    send = await client.call(raw=raw)
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32700
+
+
 async def test_get_is_405(client: _Client) -> None:
     send = await client.call(method="GET")
     assert send.status == 405
