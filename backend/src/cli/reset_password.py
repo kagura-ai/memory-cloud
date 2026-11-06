@@ -16,6 +16,8 @@ password here (choices 1 and 3) does what the emailed-link reset does
   oauth_tokens``;
 - emailed reset / set-up links are invalidated (#1678) and the known devices
   are forgotten (#1769), so the next sign-in from each browser is reported;
+- every passkey of the account is deleted (#2660): one registered from a
+  stolen session must not outlive the reset;
 - every browser session of the account is deleted from the session store
   (Redis, ``REDIS_URL``) with ``strict=True`` before the commit.
 
@@ -51,11 +53,13 @@ prints that hint.
 import getpass
 import sys
 from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import create_engine, select  # noqa: E402
+from sqlalchemy import create_engine, delete, select  # noqa: E402
+from sqlalchemy.engine import CursorResult  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.password import hash_password  # noqa: E402
@@ -69,7 +73,7 @@ from auth.session import SessionManager  # noqa: E402
 from cli._env_guard import require_settings, resolve_api_key_secret  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from config.database import get_redis_url  # noqa: E402
-from models.auth import User  # noqa: E402
+from models.auth import User, WebAuthnCredential  # noqa: E402
 from services.email_action_token_service import (  # noqa: E402
     PASSWORD_LINK_PURPOSES,
     invalidation_statement,
@@ -176,6 +180,7 @@ def reset_password():
         session_store = _session_store_or_exit() if choice in ("1", "3") else None
         grants: RevokedGrants | None = None
         sessions_deleted = 0
+        passkeys_removed = 0
         if session_store is not None:
             while True:
                 print("\nPassword requirements:")
@@ -212,6 +217,16 @@ def reset_password():
             # #1769: forget every known browser, so the next sign-in from each
             # is a new device.
             db.execute(known_devices_delete(user.user_id))
+            # #2660: and every passkey, as the emailed-link reset does.
+            passkeys_removed = int(
+                cast(
+                    CursorResult[Any],
+                    db.execute(
+                        delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user.user_id)
+                    ),
+                ).rowcount
+                or 0
+            )
 
         # Disable MFA
         if choice in ("2", "3"):
@@ -231,8 +246,8 @@ def reset_password():
                 # revocations must not be committed without them (#1866).
                 db.rollback()
                 print(f"\n✗ Could not delete the browser sessions ({type(exc).__name__}).")
-                print("  The reset was rolled back: the password, MFA and OAuth grants are as")
-                print("  before. Sessions the store already dropped stay signed out.")
+                print("  The reset was rolled back: the password, MFA, OAuth grants and passkeys")
+                print("  are as before. Sessions the store already dropped stay signed out.")
                 print("  Check the session store (REDIS_URL) and run this command again.")
                 sys.exit(1)
 
@@ -244,7 +259,8 @@ def reset_password():
             db.rollback()
             print(f"\n✗ The database commit failed ({type(exc).__name__}).")
             if session_store is not None:
-                print("  The password was NOT changed; MFA and the OAuth grants are as before.")
+                print("  The password was NOT changed; MFA, the OAuth grants and the passkeys")
+                print("  are as before.")
                 print("  The browser sessions of the account were already signed out.")
                 print("  Run this command again to complete the reset.")
             else:
@@ -260,6 +276,7 @@ def reset_password():
                 f" {pending_codes} pending authorization / device code(s)."
             )
             print("  ✓ Known devices forgotten.")
+            print(f"  ✓ Removed {passkeys_removed} passkey(s); the owner registers them again.")
             print("  ⚠ API keys and OAuth client secrets are NOT revoked. After a suspected")
             print("    compromise, review them in Settings.")
         if choice in ("2", "3"):

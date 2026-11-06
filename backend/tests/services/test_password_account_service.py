@@ -31,6 +31,7 @@ from models.auth import (
     OAuth2Token,
     User,
     UserOAuthProvider,
+    WebAuthnCredential,
 )
 from services import password_account_service as password_service_module
 from services.email_action_token_service import EmailActionTokenService
@@ -289,6 +290,20 @@ async def oauth_client(db_session: AsyncSession) -> AsyncIterator[str]:
     await db_session.commit()
 
 
+def _passkey(user_id: str) -> WebAuthnCredential:
+    return WebAuthnCredential(
+        user_id=user_id,
+        credential_id=uuid4().bytes,
+        public_key=b"public-key",
+        sign_count=0,
+        transports=["internal"],
+        aaguid=str(uuid4()),
+        backup_eligible=False,
+        backup_state=False,
+        name="Passkey",
+    )
+
+
 async def _grants(db: AsyncSession, client_id: str, user_id: str) -> str:
     """Give ``user_id`` a live token, a pending code and an approved device code.
 
@@ -438,12 +453,50 @@ class TestResetRevokesOAuthGrants:
         )
         assert remaining == [other.user_id]
 
+    async def test_reset_removes_the_accounts_passkeys(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        # #2660: a passkey registered from a stolen session must not outlive
+        # the reset; it would still sign in, without TOTP.
+        user = await _user(db_session, made)
+        other = await _user(db_session, made)
+        for uid in (user.user_id, user.user_id, other.user_id):
+            db_session.add(_passkey(uid))
+        await db_session.flush()
+        service = PasswordAccountService(db_session, email_service=_email())
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+
+        await service.complete_reset(raw_token=_token_from(pending.reset_url), new_password=NEW)
+
+        remaining = (
+            (
+                await db_session.execute(
+                    select(WebAuthnCredential.user_id).where(
+                        WebAuthnCredential.user_id.in_([user.user_id, other.user_id])
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert remaining == [other.user_id]
+        # The deletion is audited like the profile's own removal, so an
+        # investigation sees it next to `password_reset`.
+        audited = await db_session.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.user_id == user.user_id, AuditLog.action == "passkey_removed")
+        )
+        assert audited == 1
+
     async def test_revocation_rolls_back_with_the_reset(
         self, db_session: AsyncSession, made: _Made, oauth_client: str
     ) -> None:
         user = await _user(db_session, made)
         uid = user.user_id
-        token = await _grants(db_session, oauth_client, uid)
+        db_session.add(_passkey(uid))
+        token = await _grants(db_session, oauth_client, uid)  # commits the passkey too
         service = PasswordAccountService(db_session, email_service=_email())
         pending = await service.request_reset(email=user.email)
         assert pending is not None
@@ -459,6 +512,12 @@ class TestResetRevokesOAuthGrants:
         db_session.expire_all()
         assert await find_active_oauth_token(token, db_session) is not None
         assert await _pending_grants(db_session, uid) == (1, 1)
+        passkeys = await db_session.scalar(
+            select(func.count())
+            .select_from(WebAuthnCredential)
+            .where(WebAuthnCredential.user_id == uid)
+        )
+        assert passkeys == 1
 
     async def test_keeps_earlier_revocation_times(
         self, db_session: AsyncSession, made: _Made, oauth_client: str

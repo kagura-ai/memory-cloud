@@ -20,9 +20,9 @@ write back instead of leaving a new password beside the old sessions.
 
 A **reset** is the compromise-recovery path, so it also revokes every OAuth2 /
 MCP grant of the account in the same transaction (#1738): access and refresh
-tokens, authorization codes not yet exchanged, and device codes. A change or
-set-up (the caller proves the current password or the mailbox while signed
-in) keeps them. API keys, OAuth client secrets, share keys and resource tokens
+tokens, authorization codes not yet exchanged, and device codes — and deletes
+the account's passkeys (#2660). A change or set-up (the caller proves the
+current password or the mailbox while signed in) keeps them. API keys, OAuth client secrets, share keys and resource tokens
 are integration credentials and are never revoked here; the reset page and
 email tell the user to review them.
 
@@ -38,9 +38,10 @@ import asyncio
 import hmac
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.password import hash_password, verify_password
@@ -325,8 +326,9 @@ class PasswordAccountService:
             ip_address: Client IP for the audit row.
             user_agent: Client user agent for the audit row.
             revoke_sessions: Signs the account out; run before the commit.
-                Every OAuth2 / MCP grant of the account is revoked in the same
-                transaction (#1738), so it rolls back with the password.
+                Every OAuth2 / MCP grant of the account is revoked and every
+                passkey deleted in the same transaction (#1738, #2660), so
+                they roll back with the password.
 
         Returns:
             The user_id whose password was reset.
@@ -345,10 +347,32 @@ class PasswordAccountService:
         # #1769: forget every known browser, so the next sign-in from each —
         # the attacker's included — is a new device and emails the owner.
         await self.db.execute(known_devices_delete(user.user_id))
+        # #2660: and every passkey. One registered from a stolen session would
+        # otherwise outlive the reset and still sign in, without TOTP. The
+        # account keeps the new password; one with TOTP enabled still needs its
+        # authenticator or a recovery code afterwards (the CLI's choice 3 is
+        # the operator's way out of that lockout).
+        passkeys_removed = int(
+            cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user.user_id)
+                ),
+            ).rowcount
+            or 0
+        )
+        if passkeys_removed:
+            # Same action the profile's own removal writes, so an investigation
+            # that lists `passkey_added` / `passkey_removed` sees the reset's
+            # deletion next to `password_reset` instead of a key that vanished.
+            self._audit(user.user_id, _AUDIT_ACTOR_LINK, "passkey_removed", ip_address, user_agent)
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
         await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info(
-            "password_reset_completed", user_id=user.user_id, oauth_tokens_revoked=tokens_revoked
+            "password_reset_completed",
+            user_id=user.user_id,
+            oauth_tokens_revoked=tokens_revoked,
+            passkeys_removed=passkeys_removed,
         )
         return user.user_id
 

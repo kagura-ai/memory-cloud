@@ -5,7 +5,7 @@ and 3 must do what the emailed-link reset does, in one transaction:
 
 - lock the owner and revoke the OAuth / MCP grants in the documented order
   ``users -> oauth_authorization_codes -> oauth_device_codes -> oauth_tokens``;
-- forget the known devices;
+- forget the known devices and delete the passkeys (#2660);
 - delete every browser session with ``strict=True`` BEFORE the commit;
 - change nothing when the session store cannot be reached or the delete
   fails, and never report success then.
@@ -33,6 +33,7 @@ _ROWCOUNTS = {
     "oauth_authorization_codes": 2,
     "oauth_device_codes": 1,
     "oauth_tokens": 4,
+    "webauthn_credentials": 2,
 }
 
 
@@ -158,6 +159,26 @@ def test_password_reset_forgets_known_devices_and_password_links(choice: str) ->
     assert type(by_table["email_action_tokens"]).__name__ == "Update"
     commit = run.index_of("commit")
     assert all(run.index_of(s) < commit for s in run.statements)
+
+
+@pytest.mark.parametrize("choice", ["1", "3"])
+def test_password_reset_removes_the_accounts_passkeys(choice: str, capsys) -> None:
+    run = _Run(choice)
+    run.run()
+
+    by_table = {_table_of(s): s for s in run.statements}
+    passkeys = by_table["webauthn_credentials"]
+    assert type(passkeys).__name__ == "Delete"
+    assert passkeys.compile().params == {"user_id_1": USER_ID}
+    assert run.index_of(passkeys) < run.index_of("commit")
+    assert "Removed 2 passkey(s)" in capsys.readouterr().out
+
+
+def test_disable_mfa_only_keeps_the_passkeys() -> None:
+    run = _Run("2")
+    run.run()
+
+    assert "webauthn_credentials" not in {_table_of(s) for s in run.statements}
 
 
 @pytest.mark.parametrize("choice", ["1", "3"])
