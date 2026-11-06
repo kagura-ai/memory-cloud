@@ -7924,6 +7924,58 @@
         },
         "type": "object"
       },
+      "PublicMcpUsageGaps": {
+        "properties": {
+          "count": {},
+          "dropped_events": {},
+          "last_gap_at": {}
+        },
+        "required": [
+          "count",
+          "dropped_events"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageHealthResponse": {
+        "properties": {
+          "endpoint_id": {},
+          "events": {},
+          "gaps": {},
+          "outcomes": {},
+          "resource_id": {},
+          "retention_days": {},
+          "window_hours": {},
+          "writer": {}
+        },
+        "required": [
+          "events",
+          "gaps",
+          "outcomes",
+          "resource_id",
+          "retention_days",
+          "window_hours",
+          "writer"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageWriterState": {
+        "properties": {
+          "dropped_since_start": {},
+          "enabled": {},
+          "last_flush_at": {},
+          "last_flush_ok": {},
+          "process_local": {},
+          "queue_capacity": {},
+          "queue_depth": {}
+        },
+        "required": [
+          "dropped_since_start",
+          "enabled",
+          "queue_capacity",
+          "queue_depth"
+        ],
+        "type": "object"
+      },
       "PublicSearchRequest": {
         "properties": {
           "limit": {
@@ -26559,6 +26611,62 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PublicMcpEndpointResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resources"
+        ]
+      }
+    },
+    "/api/v1/resources/{resource_id}/public-mcp/usage-health": {
+      "get": {
+        "operationId": "get_public_mcp_usage_health_api_v1_resources__resource_id__public_mcp_usage_health_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "pattern": "^[a-z0-9_-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicMcpUsageHealthResponse"
                 }
               }
             }

@@ -581,3 +581,52 @@ def build_usage_page(
             writer_enabled=writer_enabled,
         ),
     )
+
+
+# ============================================================================
+# Owner health summary
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class UsageHealthCounts:
+    """Event and gap counts of one window (owner health route)."""
+
+    events: int
+    outcomes: dict[str, int]
+    gap_count: int
+    gap_dropped: int
+    last_gap_at: datetime | None
+
+
+async def usage_health_counts(
+    db: AsyncSession, *, endpoint_id: UUID | None, since: datetime
+) -> UsageHealthCounts:
+    """Events of one endpoint and the deployment's gap rows since ``since``.
+
+    Gap rows carry no workspace (they say how much was lost, not whose), so
+    every owner sees the deployment's gaps: a hidden gap would defeat them.
+    """
+    e = PublicMcpUsageEvent
+    outcomes: dict[str, int] = {}
+    if endpoint_id is not None:
+        rows = await db.execute(
+            select(e.outcome, func.count())
+            .where(e.endpoint_id == endpoint_id, e.occurred_at >= since)
+            .group_by(e.outcome)
+        )
+        outcomes = {str(outcome): int(n) for outcome, n in rows.all()}
+    gaps = (
+        await db.execute(
+            select(
+                func.count(), func.coalesce(func.sum(e.dropped_count), 0), func.max(e.occurred_at)
+            ).where(e.kind == "gap", e.occurred_at >= since)
+        )
+    ).one()
+    return UsageHealthCounts(
+        events=sum(outcomes.values()),
+        outcomes=outcomes,
+        gap_count=int(gaps[0]),
+        gap_dropped=int(gaps[1]),
+        last_gap_at=gaps[2],
+    )
