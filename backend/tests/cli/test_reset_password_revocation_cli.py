@@ -5,7 +5,8 @@ and 3 must do what the emailed-link reset does, in one transaction:
 
 - lock the owner and revoke the OAuth / MCP grants in the documented order
   ``users -> oauth_authorization_codes -> oauth_device_codes -> oauth_tokens``;
-- forget the known devices and delete the passkeys (#2660);
+- forget the known devices, delete the passkeys (#2660) and disconnect the
+  Google / GitHub sign-ins (#2676);
 - delete every browser session with ``strict=True`` BEFORE the commit;
 - change nothing when the session store cannot be reached or the delete
   fails, and never report success then.
@@ -34,6 +35,7 @@ _ROWCOUNTS = {
     "oauth_device_codes": 1,
     "oauth_tokens": 4,
     "webauthn_credentials": 2,
+    "user_oauth_providers": 1,
 }
 
 
@@ -43,7 +45,11 @@ class _StoreDown(Exception):
 
 def _user() -> SimpleNamespace:
     return SimpleNamespace(
-        user_id=USER_ID, totp_enabled=True, totp_secret="enc", password_hash="old-hash"
+        user_id=USER_ID,
+        totp_enabled=True,
+        totp_secret="enc",
+        password_hash="old-hash",
+        auth_provider="google",
     )
 
 
@@ -179,6 +185,28 @@ def test_disable_mfa_only_keeps_the_passkeys() -> None:
     run.run()
 
     assert "webauthn_credentials" not in {_table_of(s) for s in run.statements}
+
+
+@pytest.mark.parametrize("choice", ["1", "3"])
+def test_password_reset_disconnects_the_accounts_providers(choice: str, capsys) -> None:
+    run = _Run(choice)
+    run.run()
+
+    by_table = {_table_of(s): s for s in run.statements}
+    providers = by_table["user_oauth_providers"]
+    assert type(providers).__name__ == "Delete"
+    assert providers.compile().params == {"user_id_1": USER_ID}
+    assert run.index_of(providers) < run.index_of("commit")
+    assert run.user.auth_provider is None
+    assert "Disconnected 1 Google / GitHub sign-in(s)" in capsys.readouterr().out
+
+
+def test_disable_mfa_only_keeps_the_providers() -> None:
+    run = _Run("2")
+    run.run()
+
+    assert "user_oauth_providers" not in {_table_of(s) for s in run.statements}
+    assert run.user.auth_provider == "google"
 
 
 @pytest.mark.parametrize("choice", ["1", "3"])

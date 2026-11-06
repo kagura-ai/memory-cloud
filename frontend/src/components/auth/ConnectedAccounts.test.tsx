@@ -5,8 +5,10 @@
  * Covers:
  *   - render: a linked provider (google) shows a Disconnect affordance and an
  *     unlinked provider (github) shows a Connect affordance
- *   - Connect → POST /me/account/link-provider then full-page navigation via
+ *   - Connect → fresh proof (current password or passkey, #2676) → POST
+ *     /me/account/link-provider with it, then full-page navigation via
  *     window.location.href (NOT an in-page apiClient.get fetch)
+ *   - a refused proof (403) or too many attempts (429) toasts its own text
  *   - i18n: every user-facing key the component reads exists in BOTH en.json
  *     and ja.json (no hardcoded strings)
  */
@@ -68,11 +70,20 @@ vi.mock("@/lib/api/base", () => ({
   ApiError: FakeApiError,
 }));
 
+const { mockManagementProof } = vi.hoisted(() => ({
+  mockManagementProof: vi.fn(),
+}));
+vi.mock("@/lib/auth/passkeys", () => ({
+  managementProof: (...args: unknown[]) => mockManagementProof(...args),
+}));
+
 beforeEach(() => {
   mockUser = { auth_method: "password", auth_provider: null };
   mockToast.mockClear();
   mockApiGet.mockReset();
   mockApiPost.mockReset();
+  mockManagementProof.mockReset();
+  mockManagementProof.mockResolvedValue({});
 });
 
 // ---------- render: linked vs unlinked affordances ---------------------------
@@ -133,8 +144,9 @@ describe("ConnectedAccounts — connect navigation", () => {
     }
   });
 
-  it("on Connect POSTs link-provider then sets window.location.href to authorization_url", async () => {
+  it("on Connect POSTs link-provider with the password proof then sets window.location.href to authorization_url", async () => {
     mockApiGet.mockResolvedValueOnce({ providers: [] }); // nothing linked yet
+    mockManagementProof.mockResolvedValueOnce({ current_password: "pw" });
     mockApiPost.mockResolvedValueOnce({
       authorization_url: "https://github.com/login/oauth/authorize?x=1",
       state: "st",
@@ -154,19 +166,142 @@ describe("ConnectedAccounts — connect navigation", () => {
     const connectBtn = await screen.findByRole("button", {
       name: /^connectButton\|github$/,
     });
+    fireEvent.change(screen.getByLabelText("password"), {
+      target: { value: "pw" },
+    });
     fireEvent.click(connectBtn);
 
     await waitFor(() => {
       expect(mockApiPost).toHaveBeenCalledWith(
         "/api/v1/me/account/link-provider",
-        { provider: "github" },
+        { provider: "github", current_password: "pw" },
       );
     });
+    expect(mockManagementProof).toHaveBeenCalledWith(
+      "pw",
+      false,
+      undefined,
+      "github",
+    );
     // Full-page navigation — NOT an apiClient.get consumed in-page.
     await waitFor(() => {
       expect(window.location.href).toBe(
         "https://github.com/login/oauth/authorize?x=1",
       );
+    });
+  });
+});
+
+// ---------- Connect: fresh proof (#2676) -------------------------------------
+
+describe("ConnectedAccounts — connect proof", () => {
+  it("shows the proof hint, and the password field only with a password", async () => {
+    mockApiGet.mockResolvedValueOnce({ providers: [] });
+    render(<ConnectedAccounts />);
+    await screen.findByRole("button", { name: /^connectButton\|github$/ });
+    expect(screen.getByText("connectProof")).toBeTruthy();
+    expect(screen.getByLabelText("password")).toBeTruthy();
+  });
+
+  it("has no password field for an account without a password", async () => {
+    mockUser = { auth_method: "oauth", auth_provider: "google" };
+    mockApiGet.mockResolvedValueOnce({ providers: [{ provider: "google" }] });
+    render(<ConnectedAccounts />);
+    await screen.findByRole("button", { name: /^connectButton\|github$/ });
+    expect(screen.getByText("connectProof")).toBeTruthy();
+    expect(screen.queryByLabelText("password")).toBeNull();
+  });
+
+  it("asks a passkey for the provider when there is no password", async () => {
+    mockUser = { auth_method: "oauth", auth_provider: "google" };
+    mockApiGet.mockResolvedValueOnce({ providers: [{ provider: "google" }] });
+    const assertion = { id: "key" };
+    mockManagementProof.mockResolvedValueOnce({ challenge: "c", assertion });
+    mockApiPost.mockResolvedValueOnce({
+      authorization_url: "https://github.com/login/oauth/authorize?x=1",
+      state: "st",
+    });
+    const original = Object.getOwnPropertyDescriptor(window, "location");
+    Object.defineProperty(window, "location", {
+      value: { href: "" },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      render(<ConnectedAccounts hasPasskey />);
+      fireEvent.click(
+        await screen.findByRole("button", { name: /^connectButton\|github$/ }),
+      );
+      await waitFor(() => {
+        expect(mockApiPost).toHaveBeenCalledWith(
+          "/api/v1/me/account/link-provider",
+          { provider: "github", challenge: "c", assertion },
+        );
+      });
+      expect(mockManagementProof).toHaveBeenCalledWith(
+        "",
+        true,
+        undefined,
+        "github",
+      );
+    } finally {
+      if (original) Object.defineProperty(window, "location", original);
+    }
+  });
+
+  it("toasts the proof requirement on a 403 and clears the password", async () => {
+    mockApiGet.mockResolvedValueOnce({ providers: [] });
+    mockManagementProof.mockResolvedValueOnce({ current_password: "wrong" });
+    mockApiPost.mockRejectedValueOnce(new FakeApiError(403));
+    render(<ConnectedAccounts />);
+    const connectBtn = await screen.findByRole("button", {
+      name: /^connectButton\|github$/,
+    });
+    const field = screen.getByLabelText("password") as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "wrong" } });
+    fireEvent.click(connectBtn);
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "error",
+        description: "connectProofRequired|github",
+        variant: "destructive",
+      });
+    });
+    await waitFor(() => expect(field.value).toBe(""));
+  });
+
+  it("toasts the attempt limit on a 429", async () => {
+    mockApiGet.mockResolvedValueOnce({ providers: [] });
+    mockApiPost.mockRejectedValueOnce(new FakeApiError(429));
+    render(<ConnectedAccounts />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^connectButton\|github$/ }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "error",
+        description: "connectTooManyAttempts",
+        variant: "destructive",
+      });
+    });
+  });
+
+  it("keeps the generic error for other failures", async () => {
+    mockApiGet.mockResolvedValueOnce({ providers: [] });
+    mockApiPost.mockRejectedValueOnce(new FakeApiError(500));
+    render(<ConnectedAccounts />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^connectButton\|github$/ }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "error",
+        description: "connectError|github",
+        variant: "destructive",
+      });
     });
   });
 });
@@ -361,6 +496,10 @@ describe("ConnectedAccounts — i18n key coverage", () => {
     "loadError",
     "lastMethodError",
     "lastMethodHint",
+    "password",
+    "connectProof",
+    "connectProofRequired",
+    "connectTooManyAttempts",
   ];
 
   it("defines the connectedAccounts namespace in en.json with all required keys", () => {

@@ -20,8 +20,10 @@ write back instead of leaving a new password beside the old sessions.
 
 A **reset** is the compromise-recovery path, so it also revokes every OAuth2 /
 MCP grant of the account in the same transaction (#1738): access and refresh
-tokens, authorization codes not yet exchanged, and device codes — and deletes
-the account's passkeys (#2660). A change or set-up (the caller proves the
+tokens, authorization codes not yet exchanged, and device codes — deletes
+the account's passkeys (#2660) and unlinks every Google / GitHub identity
+(#2676), each unlink audited as ``oauth_provider_unlinked``; the owner connects
+them again from Profile. A change or set-up (the caller proves the
 current password or the mailbox while signed in) keeps them. API keys, OAuth client secrets, share keys and resource tokens
 are integration credentials and are never revoked here; the reset page and
 email tell the user to review them.
@@ -54,6 +56,7 @@ from models.auth import (
     UserOAuthProvider,
     WebAuthnCredential,
 )
+from services.account_linking_service import stage_provider_audit
 from services.email_action_token_service import (
     PASSWORD_LINK_PURPOSES,
     EmailActionPurpose,
@@ -326,9 +329,10 @@ class PasswordAccountService:
             ip_address: Client IP for the audit row.
             user_agent: Client user agent for the audit row.
             revoke_sessions: Signs the account out; run before the commit.
-                Every OAuth2 / MCP grant of the account is revoked and every
-                passkey deleted in the same transaction (#1738, #2660), so
-                they roll back with the password.
+                Every OAuth2 / MCP grant of the account is revoked, every
+                passkey deleted and every Google / GitHub identity unlinked in
+                the same transaction (#1738, #2660, #2676), so they roll back
+                with the password.
 
         Returns:
             The user_id whose password was reset.
@@ -366,6 +370,34 @@ class PasswordAccountService:
             # that lists `passkey_added` / `passkey_removed` sees the reset's
             # deletion next to `password_reset` instead of a key that vanished.
             self._audit(user.user_id, _AUDIT_ACTOR_LINK, "passkey_removed", ip_address, user_agent)
+        # And every linked Google / GitHub identity: after a reset only the new
+        # password (and TOTP) signs in; the owner connects them again from
+        # Profile. The users row lock taken by `_consume_for_user` orders this
+        # against a concurrent unlink, which locks the same row.
+        providers = list(
+            await self.db.scalars(
+                select(UserOAuthProvider.provider)
+                .where(UserOAuthProvider.user_id == user.user_id)
+                .order_by(UserOAuthProvider.provider)
+            )
+        )
+        if providers:
+            await self.db.execute(
+                delete(UserOAuthProvider).where(UserOAuthProvider.user_id == user.user_id)
+            )
+            # No provider row remains, so the primary pointer has nothing to
+            # point at (same rule as unlink with no survivor).
+            user.auth_provider = None
+            for provider in providers:
+                stage_provider_audit(
+                    self.db,
+                    user_id=user.user_id,
+                    actor_email=_AUDIT_ACTOR_LINK,
+                    action="oauth_provider_unlinked",
+                    provider=provider,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
         await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info(
@@ -373,6 +405,7 @@ class PasswordAccountService:
             user_id=user.user_id,
             oauth_tokens_revoked=tokens_revoked,
             passkeys_removed=passkeys_removed,
+            providers_unlinked=len(providers),
         )
         return user.user_id
 

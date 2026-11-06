@@ -18,6 +18,7 @@ seeds uuid-suffixed identifiers to avoid colliding on the unique columns.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -25,11 +26,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from fastapi import BackgroundTasks, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes import me_account
+from api.routes import passkeys as passkeys_module
 from api.routes.me_account import (
     LinkProviderRequest,
     LinkProviderResponse,
@@ -39,13 +42,14 @@ from api.routes.me_account import (
     list_providers,
     unlink_provider,
 )
+from auth.password import hash_password
 from auth.roles import Role, RoleManager
 from auth.session import SESSION_COOKIE_NAME
 from models.auth import AuditLog, User, UserOAuthProvider
 from services.account_linking_service import AccountLinkingService
 from services.security_notification_service import notify_security_event
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError, NotFoundException
+from utils.exceptions import AuthorizationError, ConflictError, NotFoundException
 
 
 async def _make_user(
@@ -432,30 +436,49 @@ def _mock_managers():
     return session_manager, oauth2_manager, redis
 
 
-class TestLinkProviderEndpoint:
-    @pytest.mark.asyncio
-    async def test_link_provider_initiates_oauth_without_password(self, monkeypatch):
-        """edge case 1: a session user can start a github link with NO
-        password prompt — the OAuth round-trip is the fresh re-auth.
+LINK_PASSWORD = "Link-Password-123!"
 
-        Asserts 200-shape (authorization_url + state) and that all four
-        link-mode Redis state keys are written, with intent == "link" and
-        the originating user pinned.
+
+@pytest_asyncio.fixture
+async def link_user(db_session: AsyncSession, monkeypatch) -> AsyncIterator[str]:
+    """A password account for the link endpoint; the proof counter is mocked."""
+    monkeypatch.setattr(passkeys_module, "increment_counter", AsyncMock(return_value=1))
+    user = await _make_user(
+        db_session, suffix=uuid4().hex[:8], password_hash=hash_password(LINK_PASSWORD)
+    )
+    user_id = user.user_id
+    yield user_id
+    await db_session.rollback()
+    await db_session.execute(delete(User).where(User.user_id == user_id))
+    await db_session.commit()
+
+
+def _github_env(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "test-client")
+    monkeypatch.setenv("GITHUB_REDIRECT_URI", "http://localhost:8080/api/v1/auth/github/callback")
+
+
+class TestLinkProviderEndpoint:
+    async def test_link_provider_starts_the_round_trip_after_a_password_proof(
+        self, monkeypatch, db_session: AsyncSession, link_user: str
+    ):
+        """A current-password proof starts a github link: 200-shape
+        (authorization_url + state) and all five link-mode Redis state keys,
+        with intent == "link" and the originating user and session pinned.
         """
         session_manager, oauth2_manager, redis = _mock_managers()
-        monkeypatch.setenv("GITHUB_CLIENT_ID", "test-client")
-        monkeypatch.setenv(
-            "GITHUB_REDIRECT_URI", "http://localhost:8080/api/v1/auth/github/callback"
-        )
+        session_manager.proven_within.return_value = False
+        _github_env(monkeypatch)
 
         with (
             patch.object(me_account.auth_module, "_session_manager", session_manager),
             patch.object(me_account.auth_module, "_oauth2_manager", oauth2_manager),
         ):
             result = await link_provider(
-                body=LinkProviderRequest(provider="github"),
+                body=LinkProviderRequest(provider="github", current_password=LINK_PASSWORD),
                 request=_request(),
-                user=_session(user_id="u-gh"),
+                user=_session(user_id=link_user),
+                db=db_session,
             )
 
         assert isinstance(result, LinkProviderResponse)
@@ -480,7 +503,7 @@ class TestLinkProviderEndpoint:
             for c in redis.setex.call_args_list
             if c.args[0] == f"oauth2_state_user:{result.state}"
         )
-        assert user_call.args[2] == "u-gh"
+        assert user_call.args[2] == link_user
         return_call = next(
             c for c in redis.setex.call_args_list if c.args[0] == f"oauth2_return_to:{result.state}"
         )
@@ -495,15 +518,77 @@ class TestLinkProviderEndpoint:
         )
         assert session_call.args[2] == LINK_SESSION_ID
 
-    @pytest.mark.asyncio
-    async def test_link_provider_refuses_without_session_cookie(self, monkeypatch):
+    async def test_link_provider_without_proof_writes_no_state(
+        self, monkeypatch, db_session: AsyncSession, link_user: str
+    ):
+        """No password, no passkey and no recent verified sign-in → 403
+        before any Redis write: no round trip starts."""
+        session_manager, oauth2_manager, redis = _mock_managers()
+        session_manager.proven_within.return_value = False
+        _github_env(monkeypatch)
+
+        with (
+            patch.object(me_account.auth_module, "_session_manager", session_manager),
+            patch.object(me_account.auth_module, "_oauth2_manager", oauth2_manager),
+        ):
+            with pytest.raises(AuthorizationError, match="Verify"):
+                await link_provider(
+                    body=LinkProviderRequest(provider="github"),
+                    request=_request(),
+                    user=_session(user_id=link_user),
+                    db=db_session,
+                )
+        redis.setex.assert_not_called()
+
+    async def test_link_provider_with_a_wrong_password_writes_no_state(
+        self, monkeypatch, db_session: AsyncSession, link_user: str
+    ):
+        session_manager, oauth2_manager, redis = _mock_managers()
+        session_manager.proven_within.return_value = True
+        _github_env(monkeypatch)
+
+        with (
+            patch.object(me_account.auth_module, "_session_manager", session_manager),
+            patch.object(me_account.auth_module, "_oauth2_manager", oauth2_manager),
+        ):
+            with pytest.raises(AuthorizationError, match="Verify"):
+                await link_provider(
+                    body=LinkProviderRequest(provider="github", current_password="not-it"),
+                    request=_request(),
+                    user=_session(user_id=link_user),
+                    db=db_session,
+                )
+        redis.setex.assert_not_called()
+
+    async def test_link_provider_accepts_a_recent_verified_sign_in(
+        self, monkeypatch, db_session: AsyncSession, link_user: str
+    ):
+        session_manager, oauth2_manager, redis = _mock_managers()
+        session_manager.proven_within.return_value = True
+        _github_env(monkeypatch)
+
+        with (
+            patch.object(me_account.auth_module, "_session_manager", session_manager),
+            patch.object(me_account.auth_module, "_oauth2_manager", oauth2_manager),
+        ):
+            result = await link_provider(
+                body=LinkProviderRequest(provider="github"),
+                request=_request(),
+                user=_session(user_id=link_user),
+                db=db_session,
+            )
+        assert result.state
+        session_manager.proven_within.assert_called_once()
+        assert session_manager.proven_within.call_args.args[:2] == (LINK_SESSION_ID, link_user)
+        assert redis.setex.call_count == 5
+
+    async def test_link_provider_refuses_without_session_cookie(
+        self, monkeypatch, db_session: AsyncSession, link_user: str
+    ):
         """No session cookie on the request → 401 before any Redis write: a
         link that cannot be bound to a browser session is never started."""
         session_manager, oauth2_manager, redis = _mock_managers()
-        monkeypatch.setenv("GITHUB_CLIENT_ID", "test-client")
-        monkeypatch.setenv(
-            "GITHUB_REDIRECT_URI", "http://localhost:8080/api/v1/auth/github/callback"
-        )
+        _github_env(monkeypatch)
 
         with (
             patch.object(me_account.auth_module, "_session_manager", session_manager),
@@ -511,15 +596,17 @@ class TestLinkProviderEndpoint:
         ):
             with pytest.raises(HTTPException) as exc_info:
                 await link_provider(
-                    body=LinkProviderRequest(provider="github"),
+                    body=LinkProviderRequest(provider="github", current_password=LINK_PASSWORD),
                     request=_request(cookie=None),
-                    user=_session(user_id="u-gh"),
+                    user=_session(user_id=link_user),
+                    db=db_session,
                 )
         assert exc_info.value.status_code == 401
         redis.setex.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_link_provider_google(self, monkeypatch):
+    async def test_link_provider_google(
+        self, monkeypatch, db_session: AsyncSession, link_user: str
+    ):
         """Google link → manager-built authorization URL, intent == link."""
         session_manager, oauth2_manager, redis = _mock_managers()
         monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/cb")
@@ -529,16 +616,18 @@ class TestLinkProviderEndpoint:
             patch.object(me_account.auth_module, "_oauth2_manager", oauth2_manager),
         ):
             result = await link_provider(
-                body=LinkProviderRequest(provider="google"),
+                body=LinkProviderRequest(provider="google", current_password=LINK_PASSWORD),
                 request=_request(),
-                user=_session(),
+                user=_session(user_id=link_user),
+                db=db_session,
             )
         assert result.authorization_url.startswith("https://accounts.google.com/")
 
-    @pytest.mark.asyncio
-    async def test_link_provider_missing_env_does_not_pollute_redis(self, monkeypatch):
+    async def test_link_provider_missing_env_does_not_pollute_redis(
+        self, monkeypatch, db_session: AsyncSession, link_user: str
+    ):
         """Missing GITHUB_CLIENT_ID → 500 BEFORE any Redis write (config is
-        resolved before state keys are persisted, so none are orphaned)."""
+        resolved before any state key is written, so none are orphaned)."""
         session_manager, oauth2_manager, redis = _mock_managers()
         monkeypatch.delenv("GITHUB_CLIENT_ID", raising=False)
 
@@ -548,9 +637,10 @@ class TestLinkProviderEndpoint:
         ):
             with pytest.raises(Exception) as exc_info:
                 await link_provider(
-                    body=LinkProviderRequest(provider="github"),
+                    body=LinkProviderRequest(provider="github", current_password=LINK_PASSWORD),
                     request=_request(),
-                    user=_session(),
+                    user=_session(user_id=link_user),
+                    db=db_session,
                 )
             assert exc_info.value.status_code == 500  # type: ignore[attr-defined]
         redis.setex.assert_not_called()

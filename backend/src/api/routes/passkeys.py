@@ -7,7 +7,7 @@ import hashlib
 import json
 import secrets
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -64,6 +64,8 @@ router = APIRouter(prefix="/auth/passkeys", tags=["authentication"])
 _TTL = 300
 _LIMIT = 10
 _BROWSER_COOKIE = "passkey_ceremony"
+_SIGN_IN_ATTEMPTS = 5  # assertions per account per _TTL window
+_SIGN_IN_KEY = "webauthn_signin:{user_id}"
 
 
 class Proof(BaseModel):
@@ -192,7 +194,10 @@ async def _assertion(
         )
     ):
         raise AuthenticationError("Invalid passkey")
-    await asyncio.to_thread(auth._reserve_login_attempt, auth._account_rate_key(user_id))
+    # Passkey assertions draw on a counter of their own, not the password
+    # sign-in budget; it is taken before the assertion is checked so concurrent
+    # requests past the limit are refused without a check.
+    await _reserve_sign_in_attempt(user_id)
     rp, origins = _rp()
     try:
         verified = verify_authentication_response(
@@ -216,6 +221,25 @@ async def _assertion(
     return user, key
 
 
+async def _reserve_sign_in_attempt(user_id: str) -> None:
+    """Take one passkey attempt before the assertion is checked (one INCR).
+
+    Args:
+        user_id: The account the presented credential belongs to.
+
+    Raises:
+        RateLimitError: When the account's passkey attempts in this window are spent.
+    """
+    key = _SIGN_IN_KEY.format(user_id=user_id)
+    if await increment_counter(key, ttl=_TTL) > _SIGN_IN_ATTEMPTS:
+        raise RateLimitError("Too many passkey sign-in attempts", retry_after=_TTL)
+
+
+async def _clear_sign_in_attempts(user_id: str) -> None:
+    """Clear the account's passkey attempts after a verified assertion."""
+    await get_redis_client().delete(_SIGN_IN_KEY.format(user_id=user_id))
+
+
 async def _prove(
     db: AsyncSession,
     user: User,
@@ -228,6 +252,7 @@ async def _prove(
         challenge = await _consume(proof.challenge, _binding(request, user.user_id, action))
         await _assertion(db, proof.assertion, challenge, owner=user.user_id, excluding=excluding)
         await asyncio.to_thread(auth._clear_login_failures, auth._account_rate_key(user.user_id))
+        await _clear_sign_in_attempts(user.user_id)
         return
     if proof.current_password and user.password_hash:
         if await increment_counter(f"webauthn_password:{user.user_id}", ttl=_TTL) > 5:
@@ -247,7 +272,7 @@ async def _prove(
     ):
         return
     raise AuthorizationError(
-        "Verify with your current password or another passkey, or sign in again to register"
+        "Verify with your current password or another passkey, or sign in again"
     )
 
 
@@ -263,8 +288,12 @@ async def proof_options(
     user: SessionUser,
     removing: UUID | None = None,
     db: AsyncSession = Depends(get_db),
+    linking: Literal["google", "github"] | None = None,
 ):
-    """Prove another passkey for adding or removing a credential in this session."""
+    """Prove another passkey for adding or removing a credential, or for
+    connecting a sign-in provider, in this session."""
+    if removing and linking:
+        raise ValidationError("Choose one proof purpose")
     keys = [k for k in await _keys(db, user["user_id"]) if k.id != removing]
     if not keys:
         raise ConflictError("No other passkey is available")
@@ -273,7 +302,10 @@ async def proof_options(
         allow_credentials=[PublicKeyCredentialDescriptor(id=k.credential_id) for k in keys],
         user_verification=UserVerificationRequirement.REQUIRED,
     )
-    action = f"remove:{removing}" if removing else "add"
+    if linking:
+        action = f"link:{linking}"
+    else:
+        action = f"remove:{removing}" if removing else "add"
     return await _issue(options, _binding(request, user["user_id"], action))
 
 
@@ -435,6 +467,7 @@ async def authenticate_verify(
         if not await auth._complete_password_sign_in(account.user_id, account.email, sid):
             raise AuthenticationError("Sign in again", status_code=503, error_code="AUTH-307")
         await asyncio.to_thread(auth._clear_login_failures, auth._account_rate_key(account.user_id))
+        await _clear_sign_in_attempts(account.user_id)
         await auth._record_terms_acceptance(
             email=account.email,
             user_id=account.user_id,

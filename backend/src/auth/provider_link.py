@@ -1,14 +1,16 @@
 """When a sign-in provider's link to an account counts as established (#1875).
 
-Attaching a sign-in provider (``POST /me/account/link-provider``) needs only a
-live session. Until the link has stood for ``IDENTITY_LINK_SIGN_IN_WINDOW``, a
+Attaching a sign-in provider (``POST /me/account/link-provider``) needs fresh
+proof of the account in the attaching browser session (the current password, a
+passkey or a recent verified sign-in), not of the attached identity. Until the
+link has stood for ``IDENTITY_LINK_SIGN_IN_WINDOW``, a
 sign-in through it is therefore an ordinary sign-in and nothing more: it does
 not prove the account for an identity link (``api.routes.auth``), and it does
 not become the account's primary provider, whose email and name are synced
 onto the account (``auth.roles``). Both read the one rule here. (Becoming
 primary is further limited to the identity the account was created with —
-``auth.roles._adopt_primary_provider`` — since a provider attached later could
-have been attached by any session, and the window only delays that.)
+``auth.roles._adopt_primary_provider`` — since a provider attached later was
+attached on that session's proof, and the window only delays that.)
 """
 
 from __future__ import annotations
