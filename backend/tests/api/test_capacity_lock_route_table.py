@@ -210,6 +210,8 @@ ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
     ("PATCH", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
     ("DELETE", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
+    # #2678: usage event counts and recording health, no memory content
+    ("GET", "/api/v1/resources/{resource_id}/public-mcp/usage-health"): ALLOWED,
     # #2679: observation credential management (metadata, no memory content)
     ("POST", "/api/v1/observation-credentials"): ALLOWED,
     ("GET", "/api/v1/observation-credentials"): ALLOWED,
@@ -254,6 +256,7 @@ CONTENT_ROUTERS = {
     "workspaces",
     "resources",
     "public_mcp_endpoints",
+    "public_mcp_usage",
     "observation_credentials",
     "observability",
     "resource_indexer",

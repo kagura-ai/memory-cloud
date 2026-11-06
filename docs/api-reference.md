@@ -1147,6 +1147,19 @@ Workspace owner only. Full usage in the [Resource Tokens Guide](resource-tokens-
 
 MCP `list_resource_tokens` lists the tokens that can authenticate — those with a `resources` row — and leaves out legacy rows without `resource_pk` (they cannot authenticate ingest, since `verify_token` joins through `resource_pk`). The REST list includes them so an owner can still revoke or relabel them.
 
+### Public MCP endpoint publication
+
+Workspace owner only (session or owner API key). Publishes a resource's public context as the anonymous read-only MCP endpoint `/mcp/public/<public_id>` ([#2675](https://github.com/kagura-ai/memory-cloud/issues/2675)); usage in the [Resource Tokens Guide](resource-tokens-guide.md#publishing-a-resource-as-a-public-mcp-endpoint), the MCP surface in [MCP Tools › Public endpoint tools](mcp-tools.md#public-endpoint-tools).
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/resources/{resource_id}/public-mcp` | Publish with `{public_name, public_description?, public_usage_guide?}` → `201`. `404` unknown resource; `422` with `details.precondition` `context_bound` (no live context for the resource) or `context_public` (the context is not public); `409` when the resource already has a live endpoint |
+| `GET /api/v1/resources/{resource_id}/public-mcp` | The live endpoint, or `404` |
+| `PATCH /api/v1/resources/{resource_id}/public-mcp` | Edit any of the three texts (`""` clears the description or usage guide); the address does not change |
+| `DELETE /api/v1/resources/{resource_id}/public-mcp` | Unpublish → `204`; `404` when none is live. Publishing again mints a new address |
+
+Response: `{public_id, endpoint_path, resource_id, context_id, public_name, public_description, public_usage_guide, created_at, updated_at, serving}`. `endpoint_path` is a path on this deployment; `serving` is true while `MCP_PUBLIC_ENDPOINTS_ENABLED` is on and the context is still public and bound to the resource.
+
 ### Connector create errors
 
 `POST /api/v1/workspace-connectors` (workspace admin; MCP `setup_connector` raises the same errors). One platform team (for example a Slack workspace) can be connected to one Kagura workspace only; one workspace may connect it under several worker apps. A team that is already connected answers `409` `RES-002` with a stable `details.reason` ([#1753](https://github.com/kagura-ai/memory-cloud/issues/1753)):

@@ -183,6 +183,7 @@ from models.memory import (  # noqa: E402
 )
 from models.memory_access_event import MemoryAccessEvent  # noqa: E402
 from models.observation_credential import ObservationCredential  # noqa: E402
+from models.public_mcp import PublicMcpEndpoint  # noqa: E402
 from models.resource import (  # noqa: E402
     Resource,
     ResourceToken,
@@ -263,6 +264,8 @@ SUB_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     WorkspaceMember.invited_by,
     WorkspaceInvitation.accepted_by,
     ObservationCredential.created_by,
+    PublicMcpEndpoint.created_by,
+    PublicMcpEndpoint.revoked_by,
     SecretAccessLog.actor_user_id,
     SecretAccessLog.recipient_identity,
     VectorErasureJob.subject_pseudonym,

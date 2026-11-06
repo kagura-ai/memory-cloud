@@ -1552,7 +1552,7 @@ class TestErasureResiduals1365:
 
     @pytest.mark.asyncio
     async def test_sweep_pseudonymizes_all_authorship_columns(self):
-        """All 16 surviving-row authorship columns are swept, and the
+        """All 18 surviving-row authorship columns are swept, and the
         count is their sum (distinct per-column values pin the SUM).
 
         The last four (identity_id, ContextMember/WorkspaceMember.invited_by,
@@ -1566,6 +1566,7 @@ class TestErasureResiduals1365:
             WorkspaceMember,
         )
         from models.file_objects import FileObject
+        from models.public_mcp import PublicMcpEndpoint
         from models.resource import (
             Resource,
             ResourceToken,
@@ -1596,6 +1597,9 @@ class TestErasureResiduals1365:
             (ContextMember, "invited_by"): 14,
             (WorkspaceMember, "invited_by"): 15,
             (WorkspaceInvitation, "accepted_by"): 16,
+            # #2675: who published / unpublished a public MCP endpoint.
+            (PublicMcpEndpoint, "created_by"): 17,
+            (PublicMcpEndpoint, "revoked_by"): 18,
         }
 
         async def _by_column(model, column, user_id):
