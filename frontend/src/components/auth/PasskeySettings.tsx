@@ -57,6 +57,11 @@ export default function PasskeySettings({
   useEffect(() => {
     onAvailabilityChange(ready && keys.length > 0);
   }, [keys.length, ready, onAvailabilityChange]);
+  const hasPassword = hasPasswordSignIn(user);
+  const canSetUpByEmail = Boolean(
+    user?.email && !user.email.toLowerCase().endsWith("@local"),
+  );
+  const needsRemovalMethod = !hasPassword && keys.length === 1;
   if (!supported) return null;
   async function change(operation: () => Promise<void>) {
     setBusy(true);
@@ -139,7 +144,10 @@ export default function PasskeySettings({
                 </Button>
                 <Button
                   variant="outline"
-                  disabled={busy}
+                  disabled={busy || needsRemovalMethod}
+                  aria-describedby={
+                    needsRemovalMethod ? "passkey-removal-help" : undefined
+                  }
                   onClick={() =>
                     void change(async () => {
                       const proof = await managementProof(
@@ -162,10 +170,16 @@ export default function PasskeySettings({
             )}
           </div>
         ))}
-        <p className="text-sm">{t("proof")}</p>
-        {!hasPasswordSignIn(user) && keys.length === 0 && (
+        {needsRemovalMethod ? (
+          <p id="passkey-removal-help" className="text-sm">
+            {t(canSetUpByEmail ? "onlyKeyRemoval" : "onlyKeyAddAnother")}
+          </p>
+        ) : (
+          <p className="text-sm">{t("proof")}</p>
+        )}
+        {!hasPassword && keys.length <= 1 && (
           <div className="flex flex-wrap items-center gap-3">
-            {user?.auth_provider === "google" && (
+            {keys.length === 0 && user?.auth_provider === "google" && (
               <Button
                 variant="outline"
                 onClick={() =>
@@ -178,12 +192,14 @@ export default function PasskeySettings({
                 {t("confirmGoogle")}
               </Button>
             )}
-            <a href="#profile-password" className="underline">
-              {t("setupPassword")}
-            </a>
+            {canSetUpByEmail && (
+              <a href="#profile-password" className="underline">
+                {t("setupPassword")}
+              </a>
+            )}
           </div>
         )}
-        {hasPasswordSignIn(user) && (
+        {hasPassword && (
           <div>
             <Label htmlFor="passkey-password">{t("password")}</Label>
             <Input

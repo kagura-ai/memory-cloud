@@ -29,6 +29,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { NewPasswordForm } from "@/components/auth/NewPasswordForm";
+import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { ApiError } from "@/lib/api/base";
 import { resetPassword, setupPassword } from "@/lib/auth/auth";
@@ -43,6 +44,7 @@ export function PasswordLinkPage({ mode }: PasswordLinkPageProps) {
   const t = useTranslations("passwordRecovery");
   const tCommon = useTranslations("common");
   const { toast } = useToast();
+  const { refetchUser } = useAuth();
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
@@ -67,6 +69,9 @@ export function PasswordLinkPage({ mode }: PasswordLinkPageProps) {
         await resetPassword(token, newPassword);
       } else {
         await setupPassword(token, newPassword);
+        // The profile reads has_password from the root provider, which survives
+        // client navigation back from this page. Publish the new method first.
+        await refetchUser();
       }
       setPhase("success");
     } catch (err) {
