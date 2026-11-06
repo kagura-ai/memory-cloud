@@ -188,7 +188,8 @@ class AccountLinkingService:
         # (``RoleManager._adopt_primary_provider``): only the identity the
         # account was created with (sub == ``user_id``) may become the one
         # whose email and name are synced; a surviving provider attached
-        # later — which needed only a live session — leaves the pointer NULL.
+        # later — through fresh proof of the account, not of that identity —
+        # leaves the pointer NULL.
         # A password account keeps its pointer semantics (next survivor).
         if user.auth_provider == provider:
             survivors = [r for r in rows if r.provider != provider]
@@ -210,21 +211,52 @@ class AccountLinkingService:
         ip_address: str | None,
         user_agent: str | None,
     ) -> None:
-        """Stage an ``AuditLog`` row for an account-linking action.
-
-        The provider name is HMAC-hashed into ``new_value_hash`` per the
-        audit-log no-plaintext convention; the resource carries the readable
-        ``oauth_provider:<provider>`` label for filtering.
-        """
-        key = get_settings().audit_hmac_key
-        self.db.add(
-            AuditLog(
-                user_email=email,
-                user_id=user_id,
-                action=action,
-                resource=f"oauth_provider:{provider}",
-                new_value_hash=hmac_sha256_hex(provider, key),
-                ip_address=ip_address,
-                user_agent=user_agent,
-            )
+        """Stage an ``AuditLog`` row for an account-linking action."""
+        stage_provider_audit(
+            self.db,
+            user_id=user_id,
+            actor_email=email,
+            action=action,
+            provider=provider,
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
+
+
+def stage_provider_audit(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    actor_email: str,
+    action: str,
+    provider: str,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> None:
+    """Stage an ``AuditLog`` row for a change to one of a user's providers.
+
+    The provider name is HMAC-hashed into ``new_value_hash`` per the
+    audit-log no-plaintext convention; the resource carries the readable
+    ``oauth_provider:<provider>`` label for filtering. The caller commits.
+
+    Args:
+        db: The session the row is added to.
+        user_id: The account the provider belongs to.
+        actor_email: The ``user_email`` actor label of the row.
+        action: e.g. ``oauth_provider_linked`` / ``oauth_provider_unlinked``.
+        provider: Provider name (``google`` / ``github``).
+        ip_address: Client IP, if available.
+        user_agent: Client user agent, if available.
+    """
+    key = get_settings().audit_hmac_key
+    db.add(
+        AuditLog(
+            user_email=actor_email,
+            user_id=user_id,
+            action=action,
+            resource=f"oauth_provider:{provider}",
+            new_value_hash=hmac_sha256_hex(provider, key),
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+    )

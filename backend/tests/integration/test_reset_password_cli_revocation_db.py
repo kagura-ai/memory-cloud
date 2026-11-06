@@ -9,7 +9,8 @@ store (Redis) replaced:
   pair that was already rotated or revoked are preserved;
 - pending authorization codes and device codes are deleted;
 - known devices are forgotten and emailed password links invalidated;
-- the account's passkeys are deleted (#2660);
+- the account's passkeys are deleted (#2660) and its Google / GitHub
+  sign-ins disconnected (#2676);
 - the sessions are deleted with ``strict=True`` while the transaction is
   still open — another connection sees none of the writes at that point;
 - when the session delete fails, nothing is committed.
@@ -43,6 +44,7 @@ from models.auth import (
     OAuth2Token,
     User,
     UserKnownDevice,
+    UserOAuthProvider,
     WebAuthnCredential,
 )
 from services.email_action_token_service import EmailActionTokenService
@@ -176,6 +178,9 @@ async def accounts(db_session: AsyncSession) -> AsyncIterator[tuple[_Account, _A
                 name="Passkey",
             )
         )
+        db_session.add(
+            UserOAuthProvider(user_id=user_id, provider="github", oauth_sub=f"gh-{user_id}")
+        )
         await EmailActionTokenService(db_session).issue(
             user_id=user_id, email=f"{login_id}@local", purpose="reset_password"
         )
@@ -206,6 +211,7 @@ class _State:
     device_codes: int
     known_devices: int
     passkeys: int
+    providers: int
     password_links: int
 
 
@@ -234,6 +240,7 @@ async def _state(db: AsyncSession, account: _Account) -> _State:
         device_codes=await _count(db, OAuth2DeviceCode, OAuth2DeviceCode.user_id == uid),
         known_devices=await _count(db, UserKnownDevice, UserKnownDevice.user_id == uid),
         passkeys=await _count(db, WebAuthnCredential, WebAuthnCredential.user_id == uid),
+        providers=await _count(db, UserOAuthProvider, UserOAuthProvider.user_id == uid),
         password_links=await _count(
             db,
             EmailActionToken,
@@ -256,6 +263,7 @@ _UNTOUCHED = _State(
     device_codes=1,
     known_devices=1,
     passkeys=1,
+    providers=1,
     password_links=1,
 )
 
@@ -319,6 +327,7 @@ async def test_cli_reset_revokes_grants_and_keeps_earlier_revocation_times(
         device_codes=0,
         known_devices=0,
         passkeys=0,
+        providers=0,
         password_links=0,
     )
 
@@ -347,6 +356,7 @@ async def test_cli_reset_revokes_grants_and_keeps_earlier_revocation_times(
     assert "2 browser session(s), 1 OAuth / MCP token(s)" in out
     assert "2 pending authorization / device code(s)" in out
     assert "Removed 1 passkey(s)" in out
+    assert "Disconnected 1 Google / GitHub sign-in(s)" in out
 
 
 async def test_cli_reset_commits_nothing_when_the_session_delete_fails(

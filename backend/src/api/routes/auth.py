@@ -503,8 +503,11 @@ async def _maybe_link_redirect(
             # may be ANOTHER user's address — recording it would misattribute the
             # audit row and store unexpected PII. Load the session user in the
             # SAME unit of work as link() and audit under their email.
+            # Locked: a password reset holds this row from before it signs the
+            # account out until it commits, so the session check below sees
+            # the outcome of any reset that started first.
             session_user = (
-                await db.execute(select(User).filter_by(user_id=user_id))
+                await db.execute(select(User).filter_by(user_id=user_id).with_for_update())
             ).scalar_one_or_none()
             if session_user is None:
                 # The initiating user row was deleted mid-flow (or otherwise
@@ -513,6 +516,17 @@ async def _maybe_link_redirect(
                 # deleted-user race).
                 logger.warning(
                     "oauth_provider_link_user_missing", user_id=user_id, provider=provider
+                )
+                return RedirectResponse(
+                    _safe_redirect_url(f"{frontend_url}/profile?error=link_failed"),
+                    status_code=303,
+                )
+            if not _session_manager.session_holds_user(expected_session, user_id):
+                await db.rollback()
+                logger.warning(
+                    "oauth_provider_link_rejected_session_lost_user",
+                    user_id=user_id,
+                    provider=provider,
                 )
                 return RedirectResponse(
                     _safe_redirect_url(f"{frontend_url}/profile?error=link_failed"),
@@ -1842,13 +1856,16 @@ def _identity_can_prove(owner: SessionOwner, idp_sub: str) -> bool:
     """Whether a sign-in through this identity may prove ``owner`` (#1875).
 
     Attaching a sign-in provider (``POST /me/account/link-provider``) needs
-    only a live session. A sign-in through a provider attached minutes ago
-    would therefore prove the account on the strength of that session, which
-    is what the identity-link window exists to rule out (#1803, #1818).
+    fresh proof of the account in the browser session that attaches it: the
+    current password, a passkey, or a verified sign-in within the last five
+    minutes. A sign-in through a provider attached minutes ago would therefore
+    prove the account on the strength of that session's proof, which is what
+    the identity-link window exists to rule out (#1803, #1818).
 
     Decision (#1875): the gate is here, on the proof, not on attaching — an
-    OAuth-only account has no other credential to prove before it attaches a
-    second provider. The identity counts once its link is established: see
+    OAuth-only account without a password or passkey can prove itself for
+    attaching only through that recent sign-in. The identity counts once its
+    link is established: see
     :func:`auth.provider_link.provider_link_established`, the rule
     ``RoleManager`` also reads before a provider becomes primary.
 

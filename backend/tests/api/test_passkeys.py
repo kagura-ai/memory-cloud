@@ -23,7 +23,7 @@ from models.auth import AuditLog, User, UserOAuthProvider, WebAuthnCredential
 from services.account_linking_service import AccountLinkingService
 from services.password_account_service import PasswordAccountService
 from services.user_deletion_service import delete_user_rows
-from utils.exceptions import MemoryCloudException, RateLimitError, RedisError
+from utils.exceptions import MemoryCloudException, RateLimitError, RedisError, ValidationError
 
 
 class Authenticator:
@@ -584,3 +584,73 @@ async def test_a_passkey_proof_on_the_profile_uses_the_passkey_counter(
     assert counter not in attempts.values
     pk.auth._clear_login_failures.assert_called_once_with(f"user:{owner.user_id}")
     pk.auth._reserve_login_attempt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_link_provider_accepts_a_passkey_bound_to_the_provider(
+    db_session, ceremony, monkeypatch
+):
+    from api.routes import me_account
+
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "test-client")
+    monkeypatch.setenv("GITHUB_REDIRECT_URI", "http://localhost:8080/api/v1/auth/github/callback")
+    owner = User(user_id=uuid4().hex, email=f"{uuid4().hex}@example.org", auth_provider="google")
+    db_session.add(owner)
+    await db_session.commit()
+    session = {"user_id": owner.user_id}
+    handle = pk._handle(owner)
+    body = await pending_registration(db_session, owner, ceremony)
+    await pk.register_verify(body, request(), session, BackgroundTasks(), db_session)
+    pk.auth._session_manager.proven_within.return_value = False
+    redis = Mock()
+    pk.auth._session_manager._redis = redis
+
+    options = await pk.proof_options(request(), session, None, db_session, "github")
+    link = me_account.LinkProviderRequest(
+        provider="github",
+        challenge=options["challenge"],
+        assertion=ceremony.response(options["challenge"], handle, count=2),
+    )
+    result = await me_account.link_provider(link, request(), session, db_session)
+
+    assert result.state
+    assert redis.setex.call_count == 5
+    intent = next(
+        c for c in redis.setex.call_args_list if c.args[0] == f"oauth2_state_intent:{result.state}"
+    )
+    assert intent.args[2] == "link"
+
+    # The proof is single use.
+    redis.reset_mock()
+    with pytest.raises(MemoryCloudException, match="expired"):
+        await me_account.link_provider(link, request(), session, db_session)
+    redis.setex.assert_not_called()
+
+    # A challenge issued for adding a passkey does not start a link.
+    options = await pk.proof_options(request(), session, None, db_session)
+    other_purpose = me_account.LinkProviderRequest(
+        provider="github",
+        challenge=options["challenge"],
+        assertion=ceremony.response(options["challenge"], handle, count=3),
+    )
+    with pytest.raises(MemoryCloudException, match="expired"):
+        await me_account.link_provider(other_purpose, request(), session, db_session)
+    redis.setex.assert_not_called()
+
+    # Nor does one issued for connecting the other provider.
+    options = await pk.proof_options(request(), session, None, db_session, "google")
+    wrong_provider = me_account.LinkProviderRequest(
+        provider="github",
+        challenge=options["challenge"],
+        assertion=ceremony.response(options["challenge"], handle, count=3),
+    )
+    with pytest.raises(MemoryCloudException, match="expired"):
+        await me_account.link_provider(wrong_provider, request(), session, db_session)
+    redis.setex.assert_not_called()
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_proof_options_refuses_two_purposes(db_session, ceremony):
+    with pytest.raises(ValidationError, match="one proof purpose"):
+        await pk.proof_options(request(), {"user_id": uuid4().hex}, uuid4(), db_session, "github")

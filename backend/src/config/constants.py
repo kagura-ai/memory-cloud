@@ -363,6 +363,7 @@ QUOTA_TYPES: frozenset[str] = frozenset(
 #
 # The same window is how long a newly attached sign-in provider must wait
 # before a sign-in through it proves its account (#1875): attaching one needs
-# only a live session, so a proof through it inside the window would be a proof
-# by that session.
+# fresh proof of the account in the attaching browser session (the current
+# password, a passkey or a verified sign-in within the last five minutes), so a
+# proof through it inside the window would rest on that session's proof.
 IDENTITY_LINK_SIGN_IN_WINDOW = timedelta(minutes=10)
