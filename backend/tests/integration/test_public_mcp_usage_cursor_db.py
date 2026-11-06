@@ -142,7 +142,10 @@ async def test_a_late_commit_is_never_skipped(sessions):
         assert page.horizon <= a_txid
         # (f) B is committed but not sealed yet (A is visible to no one).
         assert page.unsealed_events == 1
-        assert decode_cursor(page.next_cursor) == UsageCursor(0, 0)
+        # The empty page moves the cursor up to the sealed horizon, still
+        # below A: A has not finished, so it cannot be below the horizon.
+        early = page.next_cursor
+        assert decode_cursor(early).txid < a_txid
 
         # (b) the bigserial-only reader: it sees B, the highest visible id,
         # and would continue with "id > b_id".
@@ -173,7 +176,11 @@ async def test_a_late_commit_is_never_skipped(sessions):
     page = await _page(sessions)
     assert [e.event_id for e in page.events] == [a_row["event_id"], b_row["event_id"]]
     assert page.unsealed_events == 0
-    assert decode_cursor(page.next_cursor) == UsageCursor(b_txid, b_id)
+    assert page.has_more is False
+    assert decode_cursor(page.next_cursor) >= UsageCursor(b_txid, b_id)
+    # The cursor the empty page handed out while A was open misses neither.
+    from_early = await _page(sessions, cursor=early)
+    assert [e.event_id for e in from_early.events] == [a_row["event_id"], b_row["event_id"]]
 
 
 async def test_c_replay_is_idempotent_and_d_chaining_equals_one_page(sessions):
@@ -193,7 +200,10 @@ async def test_c_replay_is_idempotent_and_d_chaining_equals_one_page(sessions):
         page = await _page(sessions, cursor=cursor, limit=3)
         replay = await _page(sessions, cursor=cursor, limit=3)
         assert [e.event_id for e in replay.events] == [e.event_id for e in page.events]
-        assert replay.next_cursor == page.next_cursor
+        if page.has_more:
+            # A last page's cursor follows the server-wide horizon, which
+            # other transactions on the server move between the two reads.
+            assert replay.next_cursor == page.next_cursor
         seen.extend(e.event_id for e in page.events)
         cursor = page.next_cursor
         pages += 1
@@ -204,7 +214,7 @@ async def test_c_replay_is_idempotent_and_d_chaining_equals_one_page(sessions):
     # An exhausted cursor keeps its position.
     tail = await _page(sessions, cursor=cursor)
     assert tail.events == []
-    assert tail.next_cursor == cursor
+    assert decode_cursor(tail.next_cursor) >= decode_cursor(cursor)
 
 
 async def test_scope_workspace_resource_and_gap_rows(sessions):
@@ -278,6 +288,40 @@ async def test_e_cursor_below_the_purge_mark_is_expired(sessions):
     fresh = await _page(sessions)
     assert [e.event_id for e in fresh.events] == [rows[2]["event_id"], rows[3]["event_id"]]
     assert fresh.oldest_retained_at is not None
+
+
+async def _purge_mark_to(maker, txid: int, row_id: int) -> None:
+    async with maker() as s:
+        await s.execute(
+            text(
+                "UPDATE public_mcp_usage_retention SET purged_through_txid = :t, "
+                "purged_through_id = :i WHERE id = 1"
+            ),
+            {"t": txid, "i": row_id},
+        )
+        await s.commit()
+
+
+async def test_a_caught_up_reader_is_not_expired_by_a_purge_elsewhere(sessions):
+    """An empty page advances the cursor, so a purge of rows it passed is no hole."""
+    first = await _page(sessions)  # a new reader of a scope with no events
+    assert first.events == []
+    foreign = await _insert(sessions, _row(workspace_id=OTHER_WORKSPACE))
+    polled = await _page(sessions, cursor=first.next_cursor)
+    assert polled.events == []
+
+    # Retention purges the other workspace's row: the mark passes it.
+    async with sessions() as s:
+        await s.execute(delete(PublicMcpUsageEvent))
+        await s.commit()
+    await _purge_mark_to(sessions, *foreign[0])
+
+    after = await _page(sessions, cursor=polled.next_cursor)  # no cursor_expired
+    assert after.events == []
+    mine = _row()
+    await _insert(sessions, mine)
+    page = await _page(sessions, cursor=after.next_cursor)
+    assert [e.event_id for e in page.events] == [mine["event_id"]]
 
 
 async def test_page_query_uses_the_txid_index(sessions):

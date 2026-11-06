@@ -48,7 +48,7 @@ With `MCP_PUBLIC_TELEMETRY_SESSION_DETAILS_ENABLED=true`, session-era events als
 - `session_key` — an HMAC of the UTC date, the endpoint and the server-minted session id under `AUDIT_HMAC_KEY` (validated at startup in production). It is stable within one UTC day and changes the next day; the raw session id is never stored. **Session counts are connections, not people:** one person can open many sessions, and one session can serve many people behind one client.
 - `client_family` — the name the client declared in `initialize` (`clientInfo.name`), lower-cased and reduced to `[a-z0-9._-]`, at most 32 characters. It is **unverified**: any client can declare any name. Every export page says so with `"client_family_verified": false`.
 
-Stateless calls have neither. With the setting off (the default), both are always `null` and nothing reads `clientInfo`.
+Stateless calls have neither. With the setting off (the default), both are always `null`: the declared client name is kept only in the session's memory and never stored.
 
 ## How events are written, and what can be lost
 
@@ -72,7 +72,7 @@ A daily job (04:50 UTC, on the scheduler leader) deletes events older than `MCP_
 
 Events are read in pages in `(txid, id)` order: `txid` is the database transaction that wrote the event, `id` its storage order. A page only contains events whose transaction is older than every transaction still running on the database server when the page is read. Every such transaction has finished, so that set of events can no longer change, and a cursor that has passed it can never miss an event that commits later: a later commit always sorts after the cursor. A cursor that only followed insertion ids would skip an event whose transaction took an id first and committed last.
 
-- A cursor is opaque. An omitted cursor starts at the oldest retained event; `next_cursor` is always returned (the same cursor when the page is empty), and replaying a cursor returns the same events plus any sealed since.
+- A cursor is opaque. An omitted cursor starts at the oldest retained event; `next_cursor` is always returned: the last event of the page while `has_more` is true, otherwise a position at the publication horizon (so a reader that is caught up keeps up even while its scope has no events), and replaying a cursor returns the same events plus any sealed since.
 - A long-running write transaction anywhere on the database server (a migration, a long maintenance run) delays publication until it ends: events are late, never lost. A page reports `coverage.unsealed_events`, the number of committed events not yet published, so "nothing happened" and "not published yet" can be told apart.
 - **`cursor_expired` (410).** Retention advances a purge mark to the last deleted `(txid, id)`. A cursor below that mark may have missed purged events; it is refused with `error: "cursor_expired"` and `details.oldest_cursor`, where the reader restarts knowing there is a hole. A malformed cursor is `400` `cursor_invalid`.
 
