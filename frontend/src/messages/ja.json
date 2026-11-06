@@ -367,6 +367,8 @@
     "saved": "コードを保存しました",
     "password": "現在のパスワード",
     "code": "認証コード",
+    "useRecoveryCode": "回復コードを使う",
+    "useAuthenticatorCode": "認証コードを使う",
     "codeOrRecovery": "認証コードまたは回復コード",
     "qr": "認証アプリ設定用 QR コード",
     "manual": "手動で設定するためのキー",

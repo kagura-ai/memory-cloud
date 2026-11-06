@@ -32,7 +32,10 @@ describe("MfaSettings", () => {
     fireEvent.change(dialog.getByLabelText("password"), { target: { value: "current" } });
     fireEvent.click(dialog.getByRole("button", { name: "setup" }));
     expect(await dialog.findByText("manual-key")).toBeInTheDocument();
-    fireEvent.change(dialog.getByLabelText("code"), { target: { value: "123456" } });
+    const input = dialog.getByLabelText("code");
+    expect(input).toHaveAttribute("inputmode", "numeric");
+    expect(input).not.toHaveAttribute("maxlength");
+    fireEvent.change(input, { target: { value: "　１２３ ４５６" } });
     fireEvent.click(dialog.getByRole("button", { name: "enable" }));
     expect(await dialog.findByText("save-once")).toBeInTheDocument();
     expect(post).toHaveBeenCalledWith("/api/v1/auth/mfa/setup", { current_password: "current" });
@@ -48,8 +51,12 @@ describe("MfaSettings", () => {
     fireEvent.click(screen.getByRole("button", { name: "disable" }));
     const dialog = within(screen.getByRole("dialog"));
     fireEvent.change(dialog.getByLabelText("password"), { target: { value: "current" } });
-    fireEvent.change(dialog.getByLabelText("codeOrRecovery"), { target: { value: "123456" } });
+    const input = dialog.getByLabelText("codeOrRecovery");
+    fireEvent.change(input, { target: { value: "１２３４５" } });
+    expect(dialog.getByRole("button", { name: "disable" })).toBeDisabled();
+    fireEvent.change(input, { target: { value: "　１２３　４５６ " } });
     fireEvent.click(dialog.getByRole("button", { name: "disable" }));
     expect(await dialog.findByRole("alert")).toHaveTextContent("Invalid code");
+    expect(post).toHaveBeenCalledWith("/api/v1/auth/mfa/disable", { current_password: "current", code: "123456" });
   });
 });
