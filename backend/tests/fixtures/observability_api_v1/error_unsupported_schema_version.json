@@ -1,0 +1,9 @@
+{
+  "error": "unsupported_schema_version",
+  "message": "schema_version 2 is not supported",
+  "details": {
+    "supported": [
+      1
+    ]
+  }
+}

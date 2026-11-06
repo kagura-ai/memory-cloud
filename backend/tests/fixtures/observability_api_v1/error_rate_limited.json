@@ -1,0 +1,7 @@
+{
+  "error": "RATE-001",
+  "message": "Observation credential rate limit exceeded",
+  "details": {
+    "retry_after": 60
+  }
+}

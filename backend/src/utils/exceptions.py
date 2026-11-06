@@ -185,6 +185,30 @@ class MemoryGoneError(MemoryCloudException):
         super().__init__(message, status_code=410, error_code="RES-003")
 
 
+class CursorInvalidError(MemoryCloudException):
+    """An export cursor that is not one this server issued (400, #2678)."""
+
+    def __init__(self, message: str = "The cursor is not valid.") -> None:
+        super().__init__(message, status_code=400, error_code="cursor_invalid")
+
+
+class CursorExpiredError(MemoryCloudException):
+    """An export cursor older than the retention purge mark (410 Gone, #2678).
+
+    Rows at or before the cursor may have been purged, so continuing from it
+    could skip events silently. ``details.oldest_cursor`` is where a client
+    restarts, knowing there is a hole.
+    """
+
+    def __init__(self, oldest_cursor: str) -> None:
+        super().__init__(
+            "The cursor is older than the retained events; restart from oldest_cursor.",
+            status_code=410,
+            error_code="cursor_expired",
+            oldest_cursor=oldest_cursor,
+        )
+
+
 # RES-004 is reserved for the deprecated /api/v1/attachments/* surface (Issue #555).
 # Emitted directly as a JSONResponse from api/routes/attachments.py so the response
 # can carry RFC 8594 Sunset/Deprecation/Link headers — which the global

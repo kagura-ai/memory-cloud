@@ -403,6 +403,14 @@ openapi_tags = [
     },
     {"name": "resources", "description": "Resource listing and event-history inspection"},
     {"name": "resource-tokens", "description": "Resource token management"},
+    {
+        "name": "observation-credentials",
+        "description": "Scoped read-only credentials for the observability API",
+    },
+    {
+        "name": "observability",
+        "description": "Internal read-only observability API (observation credential only)",
+    },
     {"name": "resource-ingest", "description": "External data ingestion API"},
     {"name": "resource-schema", "description": "Resource schema registry"},
     {"name": "resource-indexer", "description": "Resource indexer runtime state"},
@@ -837,6 +845,7 @@ from api.routes import (  # noqa: E402
     mfa_settings,
     neural_config,
     oauth,
+    observability,  # Issue #2679: internal read-only observability API
     observation_credentials,  # Issue #2679: read-only observability credentials
     passkeys,
     password,  # Issue #1678: self-service password endpoints
@@ -1020,6 +1029,9 @@ app.include_router(resource_tokens.router, prefix="/api/v1")
 # Observation credentials (Issue #2679 - owner issues read-only credentials
 # for the observability API; always mounted, works while the API is off)
 app.include_router(observation_credentials.router, prefix="/api/v1")
+# Observability API (Issue #2679 - read with a scoped observation credential
+# only; every route answers 404 unless OBSERVABILITY_API_ENABLED)
+app.include_router(observability.router, prefix="/api/v1")
 
 # Workspace connector setup route (Issue #851 - ai-worker connector provisioning)
 app.include_router(workspace_connectors.router, prefix="/api/v1")

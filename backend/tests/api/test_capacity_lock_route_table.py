@@ -215,6 +215,12 @@ ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/observation-credentials"): ALLOWED,
     ("POST", "/api/v1/observation-credentials/{credential_id}/rotate"): ALLOWED,
     ("DELETE", "/api/v1/observation-credentials/{credential_id}"): ALLOWED,
+    # #2679: the observability API — metadata, sanitised indexer state and
+    # payload-free event summaries; documents/resolve reads memory summaries
+    ("GET", "/api/v1/observability/capabilities"): ALLOWED,
+    ("GET", "/api/v1/observability/resources"): ALLOWED,
+    ("GET", "/api/v1/observability/snapshots"): ALLOWED,
+    ("GET", "/api/v1/observability/ingestion-events"): ALLOWED,
     ("GET", "/api/v1/resource-tokens"): ALLOWED,
     ("POST", "/api/v1/resource-tokens"): ALLOWED,
     ("PATCH", "/api/v1/resource-tokens/{token_id}"): ALLOWED,
@@ -249,6 +255,7 @@ CONTENT_ROUTERS = {
     "resources",
     "public_mcp_endpoints",
     "observation_credentials",
+    "observability",
     "resource_indexer",
     "resource_schema",
     "resource_tokens",

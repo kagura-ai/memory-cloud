@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "deployment_id": "default",
+  "as_of": "2026-11-06T09:30:00Z",
+  "schema_versions": {
+    "resources": [
+      1
+    ],
+    "snapshots": [
+      1
+    ],
+    "events": [
+      1
+    ],
+    "ingestion_events": [
+      1
+    ],
+    "documents": [
+      1
+    ]
+  },
+  "scope": {
+    "kind": "workspace",
+    "workspace_id": "3b9e1f7a-5c2d-4e8f-a1b6-9d0c4e7f2a13",
+    "resource_id": null
+  },
+  "credential": {
+    "id": "obsk_8Hq2Lm5Np0Rt3Vx6Zb9Cd1",
+    "expires_at": "2027-02-04T09:00:00Z"
+  },
+  "limits": {
+    "events_page_max": 500,
+    "ingestion_page_max": 500,
+    "documents_resolve_max": 100,
+    "resources_max": 500
+  },
+  "retention": {
+    "usage_events_days": 90,
+    "ingestion_events": "resource lifetime"
+  },
+  "ingestion_seal_seconds": 120,
+  "writer_enabled": true,
+  "server_time": "2026-11-06T09:30:00Z"
+}

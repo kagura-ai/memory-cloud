@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from db.base import get_db
 from db.redis import incrby_counter
+from models.auth import Workspace
 from models.observation_credential import ObservationCredential
 from utils.datetime import utcnow
 from utils.exceptions import (
@@ -175,9 +176,15 @@ class ObservationCredentialManager:
         if not secret.startswith(OBSERVATION_KEY_PREFIX):
             return None
         key_hash = sha256_hex(secret)
+        # A credential of a deleted workspace reads nothing.
         row = (
             await self.db.execute(
-                select(ObservationCredential).where(ObservationCredential.key_hash == key_hash)
+                select(ObservationCredential)
+                .join(Workspace, Workspace.id == ObservationCredential.workspace_id)
+                .where(
+                    ObservationCredential.key_hash == key_hash,
+                    Workspace.deleted_at.is_(None),
+                )
             )
         ).scalar_one_or_none()
         # Constant-time compare before trusting the row (#964).
