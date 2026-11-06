@@ -170,6 +170,13 @@ async def lifespan(app: FastAPI):
 
     app.state.mcp_session_cleanup_task = start_local_session_cleanup()
 
+    # #2678: public MCP usage events, one bounded queue + writer per process
+    # (only when MCP_PUBLIC_TELEMETRY_ENABLED). A public tools/call only
+    # enqueues; the writer is held on app.state for a strong reference.
+    from services.public_mcp_usage_writer import start_usage_writer
+
+    app.state.public_mcp_usage_writer = start_usage_writer()
+
     # WHERE axis (#1332): one-shot geo payload backfill for points embedded
     # before the location payload existed. Best-effort — but hold a strong
     # reference on app.state: the loop keeps tasks only weakly, and an
@@ -247,6 +254,11 @@ async def lifespan(app: FastAPI):
     from tasks.rerank_calibration import stop_rerank_calibration
 
     await stop_rerank_calibration(getattr(app.state, "rerank_calibration_task", None))
+
+    # Flush this worker's public MCP usage events within a bounded budget (#2678).
+    from services.public_mcp_usage_writer import stop_usage_writer
+
+    await stop_usage_writer(timeout=5.0)
 
     # Stop this worker's MCP session cleanup loop (#1980).
     cleanup_task = getattr(app.state, "mcp_session_cleanup_task", None)
