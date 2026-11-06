@@ -1,6 +1,8 @@
 {
   "passkeys": {
     "confirmGoogle": "Confirm with Google",
+    "onlyKeyAddAnother": "To remove this passkey, add a different passkey and use it to confirm removal.",
+    "onlyKeyRemoval": "To remove this passkey, set up a password using the email link, then enter it here. You can also add a different passkey and use it to confirm removal.",
     "setupPassword": "Set up a password by email",
     "title": "Passkeys",
     "signIn": "Sign in with a passkey",

@@ -890,7 +890,12 @@ password or a recent verified sign-in. OAuth-only users can use Confirm with Goo
 on deployments that receive a verified authentication time, or set up a password
 via the verified mailbox. GitHub sign-in alone supplies no authentication time under
 the default proof policy. A verified passkey can then authorize another registration.
-Removing a key requires the current password or a different key.
+Removing a key requires the current password or a different key. For Google- or
+GitHub-only users removing their sole passkey, the Passkeys card links to the
+existing email password setup. Transactional email must be configured for this
+path. Once the owner follows the link and sets a password, they can return to
+the profile and use that password to confirm removal. An owner with a second
+authenticator can instead register a separate passkey and use it for removal.
 
 ## Which sign-in provider syncs the account's email (Issues #1811, #1875)
 

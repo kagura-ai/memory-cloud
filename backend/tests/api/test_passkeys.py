@@ -6,6 +6,7 @@ import json
 import struct
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import cbor2
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from webauthn.helpers import bytes_to_base64url
 
 from api.routes import passkeys as pk
-from models.auth import AuditLog, User, WebAuthnCredential
+from models.auth import AuditLog, User, UserOAuthProvider, WebAuthnCredential
 from services.account_linking_service import AccountLinkingService
 from services.password_account_service import PasswordAccountService
 from services.user_deletion_service import delete_user_rows
@@ -374,3 +375,49 @@ async def test_different_key_proves_removal_and_remaining_key_allows_unlink(db_s
     )
     with pytest.raises(MemoryCloudException, match="only remaining"):
         await pk.remove_passkey(first.id, pk.Proof(), req, user, tasks, db_session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["github", "google"])
+async def test_oauth_only_removal_requires_mailbox_password(db_session, ceremony, provider):
+    """A recent session may have been proved with the very key being removed."""
+    owner = User(user_id=uuid4().hex, email=f"{uuid4().hex}@example.org", auth_provider=provider)
+    db_session.add(owner)
+    await db_session.commit()
+    await AccountLinkingService(db_session).link(
+        user_id=owner.user_id, provider=provider, oauth_sub=uuid4().hex, email=owner.email
+    )
+    user = {"user_id": owner.user_id}
+    req, tasks = request(), BackgroundTasks()
+    pk.auth._session_manager.proven_within.return_value = True
+    body = await pending_registration(db_session, owner, ceremony)
+    key = await pk.register_verify(body, req, user, tasks, db_session)
+    with pytest.raises(MemoryCloudException, match="Set up a password") as denied:
+        await pk.remove_passkey(key.id, pk.Proof(), req, user, tasks, db_session)
+    assert denied.value.status_code == 403
+    assert await pk._keys(db_session, owner.user_id) == [key]
+
+    email = Mock(send_password_setup=AsyncMock(return_value=True))
+    passwords = PasswordAccountService(db_session, email_service=email)
+    await passwords.request_setup(user_id=owner.user_id)
+    delivery = email.send_password_setup.await_args.kwargs
+    assert delivery["to_email"] == owner.email
+    token = parse_qs(urlsplit(delivery["setup_url"]).query)["token"][0]
+    new_password = "New-Mailbox-Password-123!"
+    await passwords.complete_setup(raw_token=token, new_password=new_password)
+    with pytest.raises(MemoryCloudException) as incorrect:
+        await pk.remove_passkey(
+            key.id, pk.Proof(current_password="wrong"), req, user, tasks, db_session
+        )
+    assert incorrect.value.status_code == 403
+    result = await pk.remove_passkey(
+        key.id, pk.Proof(current_password=new_password), req, user, tasks, db_session
+    )
+    assert result.status_code == 204
+    assert not await pk._keys(db_session, owner.user_id)
+    assert (
+        await db_session.scalar(
+            select(UserOAuthProvider.provider).where(UserOAuthProvider.user_id == owner.user_id)
+        )
+        == provider
+    )

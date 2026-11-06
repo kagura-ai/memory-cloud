@@ -73,6 +73,12 @@ credential IDs and WebAuthn binary fields travel in base64url form.
 | `POST /proof/options` | Obtain assertion options for another registration, or use `?removing={key_id}` to prove a different key for removal. Submit the assertion as `assertion` alongside `challenge` on the management request. |
 | `DELETE /{key_id}` | Submit `current_password` or the scoped assertion proof. Returns 204. Removing the last available sign-in method returns 409. |
 
+An account with a linked Google or GitHub provider, one passkey and no password gets
+403 on removal until it can prove a different credential. From Profile → Passkeys,
+follow **Set up a password by email**, request the link in the Password section, and
+finish setup from that mailbox. Return to Passkeys and enter the new password to
+remove the key. Alternatively, register another passkey and confirm removal with it.
+
 A passkey assertion requires local user verification and signs in an existing account
 without a subsequent TOTP prompt. Account deletion cascades to all its credentials.
 
