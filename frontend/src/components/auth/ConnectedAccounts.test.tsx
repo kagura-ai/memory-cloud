@@ -249,7 +249,7 @@ describe("ConnectedAccounts — connect proof", () => {
     }
   });
 
-  it("toasts the proof requirement on a 403 and clears the password", async () => {
+  it("toasts a password mismatch on a 403 after a typed password and clears it", async () => {
     mockApiGet.mockResolvedValueOnce({ providers: [] });
     mockManagementProof.mockResolvedValueOnce({ current_password: "wrong" });
     mockApiPost.mockRejectedValueOnce(new FakeApiError(403));
@@ -264,11 +264,29 @@ describe("ConnectedAccounts — connect proof", () => {
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith({
         title: "error",
-        description: "connectProofRequired|github",
+        description: "connectWrongPassword",
         variant: "destructive",
       });
     });
     await waitFor(() => expect(field.value).toBe(""));
+  });
+
+  it("points to the proof options on a 403 without a typed password", async () => {
+    mockApiGet.mockResolvedValueOnce({ providers: [] });
+    mockManagementProof.mockResolvedValueOnce({});
+    mockApiPost.mockRejectedValueOnce(new FakeApiError(403));
+    render(<ConnectedAccounts />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^connectButton\|github$/ }),
+    );
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "error",
+        description: "connectProofRequired|github",
+        variant: "destructive",
+      });
+    });
   });
 
   it("toasts the attempt limit on a 429", async () => {
@@ -499,6 +517,7 @@ describe("ConnectedAccounts — i18n key coverage", () => {
     "password",
     "connectProof",
     "connectProofRequired",
+    "connectWrongPassword",
     "connectTooManyAttempts",
   ];
 

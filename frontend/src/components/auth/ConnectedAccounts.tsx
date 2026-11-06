@@ -190,11 +190,16 @@ export default function ConnectedAccounts({
     } catch (error) {
       setBusyProvider(null);
       const status = error instanceof ApiError ? error.status : undefined;
+      // A 403 after a typed password means that password did not match; without
+      // one, no proof the server accepts was available, and the card's hint
+      // (connectProof) lists the ways to provide it.
       toast({
         title: tCommon("error"),
         description:
           status === 403
-            ? t("connectProofRequired", { provider: t(provider) })
+            ? password
+              ? t("connectWrongPassword")
+              : t("connectProofRequired", { provider: t(provider) })
             : status === 429
               ? t("connectTooManyAttempts")
               : t("connectError", { provider: t(provider) }),
