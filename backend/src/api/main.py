@@ -415,6 +415,14 @@ openapi_tags = [
     },
     {"name": "resources", "description": "Resource listing and event-history inspection"},
     {"name": "resource-tokens", "description": "Resource token management"},
+    {
+        "name": "observation-credentials",
+        "description": "Scoped read-only credentials for the observability API",
+    },
+    {
+        "name": "observability",
+        "description": "Internal read-only observability API (observation credential only)",
+    },
     {"name": "resource-ingest", "description": "External data ingestion API"},
     {"name": "resource-schema", "description": "Resource schema registry"},
     {"name": "resource-indexer", "description": "Resource indexer runtime state"},
@@ -615,7 +623,12 @@ async def memory_cloud_exception_handler(
     if isinstance(exc, DuplicateFileError) and exc.existing_file is not None:
         content["existing_file"] = exc.existing_file
 
-    return JSONResponse(status_code=exc.status_code, content=content)
+    # #2679: a typed exception may carry response headers (``Retry-After``).
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=content,
+        headers=getattr(exc, "response_headers", None),
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -844,6 +857,8 @@ from api.routes import (  # noqa: E402
     mfa_settings,
     neural_config,
     oauth,
+    observability,  # Issue #2679: internal read-only observability API
+    observation_credentials,  # Issue #2679: read-only observability credentials
     passkeys,
     password,  # Issue #1678: self-service password endpoints
     public_mcp_endpoints,  # Issue #2675: publish a resource as a public MCP endpoint
@@ -1026,6 +1041,13 @@ app.include_router(public_mcp_usage.router, prefix="/api/v1")
 
 # Resource Token routes (Issue #242 - Resource Token Management)
 app.include_router(resource_tokens.router, prefix="/api/v1")
+
+# Observation credentials (Issue #2679 - owner issues read-only credentials
+# for the observability API; always mounted, works while the API is off)
+app.include_router(observation_credentials.router, prefix="/api/v1")
+# Observability API (Issue #2679 - read with a scoped observation credential
+# only; every route answers 404 unless OBSERVABILITY_API_ENABLED)
+app.include_router(observability.router, prefix="/api/v1")
 
 # Workspace connector setup route (Issue #851 - ai-worker connector provisioning)
 app.include_router(workspace_connectors.router, prefix="/api/v1")

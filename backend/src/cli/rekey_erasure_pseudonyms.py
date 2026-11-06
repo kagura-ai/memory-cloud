@@ -182,6 +182,7 @@ from models.memory import (  # noqa: E402
     NeuralMemoryEdge,
 )
 from models.memory_access_event import MemoryAccessEvent  # noqa: E402
+from models.observation_credential import ObservationCredential  # noqa: E402
 from models.public_mcp import PublicMcpEndpoint  # noqa: E402
 from models.resource import (  # noqa: E402
     Resource,
@@ -262,6 +263,7 @@ SUB_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     ContextMember.invited_by,
     WorkspaceMember.invited_by,
     WorkspaceInvitation.accepted_by,
+    ObservationCredential.created_by,
     PublicMcpEndpoint.created_by,
     PublicMcpEndpoint.revoked_by,
     SecretAccessLog.actor_user_id,

@@ -1,0 +1,5 @@
+{
+  "error": "resource_not_found",
+  "message": "No resource with this id is in the credential's scope",
+  "details": {}
+}

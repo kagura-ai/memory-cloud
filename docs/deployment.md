@@ -3079,6 +3079,19 @@ Each completed `tools/call` on a public MCP endpoint is also stored as a privacy
 
 Search never waits on the event writer: a slow or unavailable database loses telemetry (recorded as gap rows), not availability. A long-running write transaction anywhere on the database server delays the publication of events through the export cursor until it ends; events are late, never skipped. The owner route `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` shows the last 24 hours, the gap rows and the answering process's queue.
 
+## Observability API — Issue #2679
+
+An internal, read-only API under `/api/v1/observability/*` for a self-hosted dashboard ([Observability API](observability-api.md)). It is read only with a scoped **observation credential** (`kagura_obs_…`) that the workspace owner issues at `/api/v1/observation-credentials`; sessions and owner API keys are refused there, and the credential is refused everywhere else.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OBSERVABILITY_API_ENABLED` | `false` | Operator switch. Off: every observability route answers `404` (the unknown-path body) before any header is read. Credentials can be issued while it is off. |
+| `OBSERVABILITY_API_ALLOWED_CIDRS` | *(empty)* | Comma-separated CIDR ranges allowed to call the API; any other client address gets the same `404`. Empty allows any address (the credential is still required). A malformed range stops startup. Behind a reverse proxy the address is the proxy's unless `FORWARDED_ALLOW_IPS` trusts it. |
+| `OBSERVABILITY_API_RATE_LIMIT_PER_MINUTE` | `600` | Requests per credential per minute (Redis); over it `429` with `Retry-After: 60`. A Redis outage serves the request. |
+| `OBSERVABILITY_INGESTION_SEAL_SECONDS` | `120` | `10`–`3600`. `ingestion-events` publishes only events received at least this long ago, so its ascending cursor cannot skip an ingest transaction shorter than the seal. |
+
+Keep the API internal: besides the allow-list, block `/api/v1/observability/` at the reverse proxy for every network but the dashboard's.
+
 ## Reranking — Issue #1572
 
 Recall is hybrid (semantic + BM25); a **cross-encoder reranker** can re-score

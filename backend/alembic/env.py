@@ -23,6 +23,7 @@ import models.llm_pricing  # noqa: F401  # Issue #471: cost-grade pricing master
 import models.memory  # noqa: F401
 import models.memory_access_event  # noqa: F401  # Issue #1278: agent access audit (P0-5)
 import models.neural  # noqa: F401
+import models.observation_credential  # noqa: F401  # Issue #2679: observability credentials
 import models.public_mcp  # noqa: F401  # Issue #2675: anonymous public MCP endpoints
 import models.public_mcp_usage  # noqa: F401  # Issue #2678: public MCP usage events
 import models.resource  # noqa: F401

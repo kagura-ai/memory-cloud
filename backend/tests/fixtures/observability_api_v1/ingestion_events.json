@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "deployment_id": "default",
+  "as_of": "2026-11-06T09:30:00Z",
+  "resource_id": "product-catalog",
+  "events": [
+    {
+      "event_id": "1841",
+      "received_at": "2026-11-06T09:20:01Z",
+      "op": "upsert",
+      "doc_key": "3f9a0c1e5b7d2468ace0bdf13579bdf1",
+      "processing": {
+        "status": "processed",
+        "failed": false
+      }
+    },
+    {
+      "event_id": "1843",
+      "received_at": "2026-11-06T09:26:12Z",
+      "op": "delete",
+      "doc_key": "8e2b4d6f0a1c3e507b9d1f3a5c7e9b0d",
+      "processing": {
+        "status": "pending",
+        "failed": false
+      }
+    }
+  ],
+  "next_cursor": "eyJ2IjoxLCJpIjoxODQzfQ",
+  "has_more": false,
+  "coverage": {
+    "sealed_before": "2026-11-06T09:28:00Z",
+    "seal_seconds": 120,
+    "retention": "resource lifetime",
+    "oldest_event_id": "17"
+  }
+}

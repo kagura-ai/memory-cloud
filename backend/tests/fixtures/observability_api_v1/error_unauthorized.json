@@ -1,0 +1,5 @@
+{
+  "error": "AUTH-001",
+  "message": "Invalid or missing observation credential",
+  "details": {}
+}

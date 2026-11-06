@@ -1821,6 +1821,87 @@
         },
         "type": "object"
       },
+      "CapabilitiesV1": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {},
+          "credential": {},
+          "deployment_id": {},
+          "ingestion_seal_seconds": {},
+          "limits": {},
+          "retention": {},
+          "schema_version": {},
+          "schema_versions": {},
+          "scope": {},
+          "server_time": {},
+          "writer_enabled": {}
+        },
+        "required": [
+          "as_of",
+          "credential",
+          "deployment_id",
+          "ingestion_seal_seconds",
+          "limits",
+          "retention",
+          "schema_versions",
+          "scope",
+          "server_time",
+          "writer_enabled"
+        ],
+        "type": "object"
+      },
+      "CapabilityCredentialV1": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {},
+          "id": {}
+        },
+        "required": [
+          "expires_at",
+          "id"
+        ],
+        "type": "object"
+      },
+      "CapabilityLimitsV1": {
+        "additionalProperties": false,
+        "properties": {
+          "documents_resolve_max": {},
+          "events_page_max": {},
+          "ingestion_page_max": {},
+          "resources_max": {}
+        },
+        "required": [
+          "documents_resolve_max",
+          "events_page_max",
+          "ingestion_page_max",
+          "resources_max"
+        ],
+        "type": "object"
+      },
+      "CapabilityRetentionV1": {
+        "additionalProperties": false,
+        "properties": {
+          "ingestion_events": {},
+          "usage_events_days": {}
+        },
+        "required": [
+          "usage_events_days"
+        ],
+        "type": "object"
+      },
+      "CapabilityScopeV1": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {},
+          "resource_id": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "kind",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "CapacityLockInfo": {
         "properties": {
           "cleanup_url": {
@@ -3433,6 +3514,58 @@
         ],
         "type": "object"
       },
+      "DocumentsResolveRequestV1": {
+        "additionalProperties": false,
+        "properties": {
+          "doc_keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "default": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "doc_keys"
+        ],
+        "type": "object"
+      },
+      "DocumentsResolveV1": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {},
+          "deployment_id": {},
+          "documents": {},
+          "publication_serving": {},
+          "resource_id": {},
+          "schema_version": {}
+        },
+        "required": [
+          "as_of",
+          "deployment_id",
+          "documents",
+          "publication_serving",
+          "resource_id"
+        ],
+        "type": "object"
+      },
       "DowngradeBlocker": {
         "properties": {
           "cleanup": {
@@ -4971,6 +5104,38 @@
         ],
         "type": "object"
       },
+      "IndexerLastRunV1": {
+        "additionalProperties": false,
+        "properties": {
+          "applied_deletes": {},
+          "applied_upserts": {},
+          "errors": {},
+          "failed_events": {},
+          "skipped_reason": {}
+        },
+        "required": [
+          "applied_deletes",
+          "applied_upserts",
+          "errors",
+          "failed_events"
+        ],
+        "type": "object"
+      },
+      "IndexerSnapshotV1": {
+        "additionalProperties": false,
+        "properties": {
+          "last_offset": {},
+          "last_run": {},
+          "last_run_at": {},
+          "next_run_at": {},
+          "seconds_since_last_run": {},
+          "state": {}
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
       "IndexerState": {
         "properties": {
           "active_version": {
@@ -5095,6 +5260,73 @@
         },
         "required": [
           "resource_id"
+        ],
+        "type": "object"
+      },
+      "IngestionCoverageV1": {
+        "additionalProperties": false,
+        "properties": {
+          "oldest_event_id": {},
+          "retention": {},
+          "seal_seconds": {},
+          "sealed_before": {}
+        },
+        "required": [
+          "seal_seconds",
+          "sealed_before"
+        ],
+        "type": "object"
+      },
+      "IngestionEventV1": {
+        "additionalProperties": false,
+        "properties": {
+          "doc_key": {},
+          "event_id": {},
+          "op": {},
+          "processing": {},
+          "received_at": {}
+        },
+        "required": [
+          "doc_key",
+          "event_id",
+          "op",
+          "processing",
+          "received_at"
+        ],
+        "type": "object"
+      },
+      "IngestionEventsPageV1": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {},
+          "coverage": {},
+          "deployment_id": {},
+          "events": {},
+          "has_more": {},
+          "next_cursor": {},
+          "resource_id": {},
+          "schema_version": {}
+        },
+        "required": [
+          "as_of",
+          "coverage",
+          "deployment_id",
+          "events",
+          "has_more",
+          "next_cursor",
+          "resource_id"
+        ],
+        "type": "object"
+      },
+      "IngestionProcessingV1": {
+        "additionalProperties": false,
+        "properties": {
+          "failed": {},
+          "status": {}
+        },
+        "required": [
+          "failed",
+          "status"
         ],
         "type": "object"
       },
@@ -6840,6 +7072,112 @@
         ],
         "type": "object"
       },
+      "ObservationCredentialCreate": {
+        "properties": {
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "default": "workspace",
+            "enum": [
+              "workspace",
+              "resource"
+            ],
+            "type": "string"
+          },
+          "ttl_days": {
+            "default": 90,
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "ObservationCredentialCreateResponse": {
+        "properties": {
+          "created_at": {},
+          "created_by": {},
+          "expires_at": {},
+          "id": {},
+          "key_prefix": {},
+          "last_used_at": {},
+          "name": {},
+          "resource_id": {},
+          "revoked_at": {},
+          "rotated_from": {},
+          "scope": {},
+          "secret": {},
+          "status": {}
+        },
+        "required": [
+          "created_at",
+          "created_by",
+          "expires_at",
+          "id",
+          "key_prefix",
+          "name",
+          "scope",
+          "secret",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ObservationCredentialResponse": {
+        "properties": {
+          "created_at": {},
+          "created_by": {},
+          "expires_at": {},
+          "id": {},
+          "key_prefix": {},
+          "last_used_at": {},
+          "name": {},
+          "resource_id": {},
+          "revoked_at": {},
+          "rotated_from": {},
+          "scope": {},
+          "status": {}
+        },
+        "required": [
+          "created_at",
+          "created_by",
+          "expires_at",
+          "id",
+          "key_prefix",
+          "name",
+          "scope",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ObservationCredentialRotate": {
+        "properties": {
+          "grace_seconds": {
+            "default": 0,
+            "maximum": 86400.0,
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "OpenAIKeyStatusResponse": {
         "properties": {
           "can_configure": {
@@ -7957,6 +8295,101 @@
         },
         "type": "object"
       },
+      "PublicMcpUsageCoverageV1": {
+        "additionalProperties": false,
+        "properties": {
+          "dropped_in_page": {},
+          "gaps_in_page": {},
+          "oldest_retained_at": {},
+          "retention_days": {},
+          "unsealed_events": {},
+          "writer_enabled": {}
+        },
+        "required": [
+          "dropped_in_page",
+          "gaps_in_page",
+          "retention_days",
+          "unsealed_events",
+          "writer_enabled"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageDocumentV1": {
+        "additionalProperties": false,
+        "properties": {
+          "chunks": {},
+          "doc_key": {},
+          "rank": {}
+        },
+        "required": [
+          "chunks",
+          "doc_key",
+          "rank"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageEventV1": {
+        "additionalProperties": false,
+        "properties": {
+          "client_family": {},
+          "context_id": {},
+          "continuation": {},
+          "documents": {},
+          "documents_truncated": {},
+          "duration_ms": {},
+          "endpoint_id": {},
+          "era": {},
+          "error_code": {},
+          "event_id": {},
+          "kind": {},
+          "occurred_at": {},
+          "outcome": {},
+          "protocol_version": {},
+          "resource_id": {},
+          "resource_pk": {},
+          "result_count": {},
+          "schema_version": {},
+          "session_key": {},
+          "tool": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "context_id",
+          "duration_ms",
+          "endpoint_id",
+          "era",
+          "event_id",
+          "occurred_at",
+          "outcome",
+          "resource_id",
+          "resource_pk",
+          "tool",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageGapV1": {
+        "additionalProperties": false,
+        "properties": {
+          "dropped_count": {},
+          "event_id": {},
+          "gap_ended_at": {},
+          "gap_reason": {},
+          "gap_started_at": {},
+          "kind": {},
+          "occurred_at": {},
+          "schema_version": {}
+        },
+        "required": [
+          "dropped_count",
+          "event_id",
+          "gap_ended_at",
+          "gap_reason",
+          "gap_started_at",
+          "occurred_at"
+        ],
+        "type": "object"
+      },
       "PublicMcpUsageGaps": {
         "properties": {
           "count": {},
@@ -7988,6 +8421,28 @@
           "retention_days",
           "window_hours",
           "writer"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsagePageV1": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {},
+          "client_family_verified": {},
+          "coverage": {},
+          "deployment_id": {},
+          "events": {},
+          "has_more": {},
+          "next_cursor": {},
+          "schema_version": {}
+        },
+        "required": [
+          "as_of",
+          "coverage",
+          "deployment_id",
+          "events",
+          "has_more",
+          "next_cursor"
         ],
         "type": "object"
       },
@@ -8169,6 +8624,25 @@
           "last_n_days",
           "timeline",
           "total_searches"
+        ],
+        "type": "object"
+      },
+      "PublicationV1": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint_id": {},
+          "public_id": {},
+          "public_name": {},
+          "published_at": {},
+          "serving": {},
+          "updated_at": {}
+        },
+        "required": [
+          "endpoint_id",
+          "public_id",
+          "public_name",
+          "published_at",
+          "serving"
         ],
         "type": "object"
       },
@@ -9054,6 +9528,17 @@
         ],
         "type": "object"
       },
+      "ResolvedDocumentV1": {
+        "additionalProperties": false,
+        "properties": {
+          "source_url": {},
+          "title": {}
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
       "ResolvedTermEntry": {
         "properties": {
           "delta": {
@@ -9443,6 +9928,23 @@
         ],
         "type": "object"
       },
+      "ResourceItemV1": {
+        "additionalProperties": false,
+        "properties": {
+          "context_id": {},
+          "created_at": {},
+          "name": {},
+          "publication": {},
+          "resource_id": {},
+          "resource_pk": {}
+        },
+        "required": [
+          "created_at",
+          "resource_id",
+          "resource_pk"
+        ],
+        "type": "object"
+      },
       "ResourceListItem": {
         "properties": {
           "context_display_name": {
@@ -9630,6 +10132,22 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "ResourcesV1": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {},
+          "deployment_id": {},
+          "resources": {},
+          "schema_version": {},
+          "truncated": {}
+        },
+        "required": [
+          "as_of",
+          "deployment_id",
+          "resources"
+        ],
         "type": "object"
       },
       "RevokeGrant": {
@@ -10398,6 +10916,39 @@
         },
         "required": [
           "report_ids"
+        ],
+        "type": "object"
+      },
+      "SnapshotItemV1": {
+        "additionalProperties": false,
+        "properties": {
+          "context_id": {},
+          "indexer": {},
+          "publication": {},
+          "resource_id": {},
+          "resource_pk": {}
+        },
+        "required": [
+          "indexer",
+          "resource_id",
+          "resource_pk"
+        ],
+        "type": "object"
+      },
+      "SnapshotsV1": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {},
+          "deployment_id": {},
+          "field_notes": {},
+          "schema_version": {},
+          "snapshots": {},
+          "truncated": {}
+        },
+        "required": [
+          "as_of",
+          "deployment_id",
+          "snapshots"
         ],
         "type": "object"
       },
@@ -25569,6 +26120,559 @@
         ]
       }
     },
+    "/api/v1/observability/capabilities": {
+      "get": {
+        "operationId": "get_capabilities_api_v1_observability_capabilities_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "schema_version",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesV1"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observability"
+        ]
+      }
+    },
+    "/api/v1/observability/documents/resolve": {
+      "post": {
+        "operationId": "resolve_documents_api_v1_observability_documents_resolve_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentsResolveRequestV1"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentsResolveV1"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observability"
+        ]
+      }
+    },
+    "/api/v1/observability/events": {
+      "get": {
+        "operationId": "list_usage_events_api_v1_observability_events_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "resource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "schema_version",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicMcpUsagePageV1"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observability"
+        ]
+      }
+    },
+    "/api/v1/observability/ingestion-events": {
+      "get": {
+        "operationId": "list_ingestion_events_api_v1_observability_ingestion_events_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "resource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "schema_version",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionEventsPageV1"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observability"
+        ]
+      }
+    },
+    "/api/v1/observability/resources": {
+      "get": {
+        "operationId": "list_resources_api_v1_observability_resources_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "schema_version",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourcesV1"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observability"
+        ]
+      }
+    },
+    "/api/v1/observability/snapshots": {
+      "get": {
+        "operationId": "list_snapshots_api_v1_observability_snapshots_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "resource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "schema_version",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotsV1"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observability"
+        ]
+      }
+    },
+    "/api/v1/observation-credentials": {
+      "get": {
+        "operationId": "list_observation_credentials_api_v1_observation_credentials_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ObservationCredentialResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observation-credentials"
+        ]
+      },
+      "post": {
+        "operationId": "create_observation_credential_api_v1_observation_credentials_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ObservationCredentialCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObservationCredentialCreateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observation-credentials"
+        ]
+      }
+    },
+    "/api/v1/observation-credentials/{credential_id}": {
+      "delete": {
+        "operationId": "revoke_observation_credential_api_v1_observation_credentials__credential_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "pattern": "^obsk_[0-9A-Za-z]{22}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observation-credentials"
+        ]
+      }
+    },
+    "/api/v1/observation-credentials/{credential_id}/rotate": {
+      "post": {
+        "operationId": "rotate_observation_credential_api_v1_observation_credentials__credential_id__rotate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "pattern": "^obsk_[0-9A-Za-z]{22}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ObservationCredentialRotate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObservationCredentialCreateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "observation-credentials"
+        ]
+      }
+    },
     "/api/v1/public/{context_id}/info": {
       "get": {
         "operationId": "get_public_context_info_api_v1_public__context_id__info_get",
@@ -30941,6 +32045,12 @@
     },
     {
       "name": "oauth2-server"
+    },
+    {
+      "name": "observability"
+    },
+    {
+      "name": "observation-credentials"
     },
     {
       "name": "public-search"

@@ -1,0 +1,7 @@
+{
+  "error": "cursor_expired",
+  "message": "The cursor is older than the retained events; restart from oldest_cursor.",
+  "details": {
+    "oldest_cursor": "eyJ2IjoxLCJpIjoxNn0"
+  }
+}

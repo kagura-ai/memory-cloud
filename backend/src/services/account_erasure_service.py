@@ -162,6 +162,7 @@ from models.erasure import (
     ErasureRequest,
 )
 from models.memory import MEMORY_TYPE_TIME, Memory, MemoryRevision
+from models.observation_credential import ObservationCredential
 from models.public_mcp import PublicMcpEndpoint
 from services.billing_contract import (
     ensure_no_billing_contract,
@@ -2673,6 +2674,9 @@ class AccountErasureService:
             # workspace that outlives the subject.
             (PublicMcpEndpoint, PublicMcpEndpoint.created_by),
             (PublicMcpEndpoint, PublicMcpEndpoint.revoked_by),
+            # #2679: who issued an observation credential of a workspace that
+            # outlives the subject.
+            (ObservationCredential, ObservationCredential.created_by),
         )
         authorship_total = 0
         for model, column in authorship_sweeps:

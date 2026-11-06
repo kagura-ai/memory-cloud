@@ -212,6 +212,21 @@ ROUTES: dict[tuple[str, str], str] = {
     ("DELETE", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
     # #2678: usage event counts and recording health, no memory content
     ("GET", "/api/v1/resources/{resource_id}/public-mcp/usage-health"): ALLOWED,
+    # #2679: observation credential management (metadata, no memory content)
+    ("POST", "/api/v1/observation-credentials"): ALLOWED,
+    ("GET", "/api/v1/observation-credentials"): ALLOWED,
+    ("POST", "/api/v1/observation-credentials/{credential_id}/rotate"): ALLOWED,
+    ("DELETE", "/api/v1/observation-credentials/{credential_id}"): ALLOWED,
+    # #2679: the observability API — metadata, sanitised indexer state and
+    # payload-free event summaries; documents/resolve reads memory summaries
+    ("GET", "/api/v1/observability/capabilities"): ALLOWED,
+    ("GET", "/api/v1/observability/resources"): ALLOWED,
+    ("GET", "/api/v1/observability/snapshots"): ALLOWED,
+    ("GET", "/api/v1/observability/ingestion-events"): ALLOWED,
+    ("GET", "/api/v1/observability/events"): ALLOWED,
+    # reads public memory summaries: refused under a capacity lock or plan
+    # pause with 503 like the public endpoint (pinned by its DB test)
+    ("POST", "/api/v1/observability/documents/resolve"): BLOCKED,
     ("GET", "/api/v1/resource-tokens"): ALLOWED,
     ("POST", "/api/v1/resource-tokens"): ALLOWED,
     ("PATCH", "/api/v1/resource-tokens/{token_id}"): ALLOWED,
@@ -246,6 +261,8 @@ CONTENT_ROUTERS = {
     "resources",
     "public_mcp_endpoints",
     "public_mcp_usage",
+    "observation_credentials",
+    "observability",
     "resource_indexer",
     "resource_schema",
     "resource_tokens",

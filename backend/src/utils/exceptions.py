@@ -1531,3 +1531,70 @@ class ActiveColorUnavailableError(MemoryCloudException):
             marker_path=path,
         )
         self.empty = empty
+
+
+# Observability API (#2679)
+#
+# ``response_headers`` (when set) is sent with the response by the global
+# ``MemoryCloudException`` handler; every other exception sends none.
+
+
+class ObservabilityNotFoundError(MemoryCloudException):
+    """The observability API is switched off or the caller's address is outside
+    the allow-list (404).
+
+    The body is the one an unknown path gets (``HTTP-404`` / ``Not Found``), so
+    a switched-off API cannot be told apart from no API.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Not Found", status_code=404, error_code="HTTP-404")
+
+
+class ObservabilityResourceNotFoundError(MemoryCloudException):
+    """A resource outside the credential's scope, or no such resource (404).
+
+    One body for both, so a credential cannot probe for slugs it may not read.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "No resource with this id is in the credential's scope",
+            status_code=404,
+            error_code="resource_not_found",
+        )
+
+
+class ObservabilityRateLimitError(RateLimitError):
+    """A credential exceeded its per-minute request budget (429, ``Retry-After: 60``)."""
+
+    def __init__(self) -> None:
+        super().__init__("Observation credential rate limit exceeded", retry_after=60)
+        self.response_headers = {"Retry-After": "60"}
+
+
+class UnsupportedSchemaVersionError(BadRequestError):
+    """The requested ``schema_version`` is not served (400); ``supported`` lists those that are."""
+
+    def __init__(self, requested: int, supported: list[int]) -> None:
+        super().__init__(
+            f"schema_version {requested} is not supported",
+            error_code="unsupported_schema_version",
+            supported=supported,
+        )
+
+
+class TemporarilyUnavailableError(MemoryCloudException):
+    """The workspace cannot be served right now (503, ``Retry-After: 300``).
+
+    Raised for a plan pause or a capacity lock where the caller is an outsider
+    to the workspace: no plan, quota or count details are given.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The data is briefly unavailable. Try again later.",
+            status_code=503,
+            error_code="temporarily_unavailable",
+        )
+        self.response_headers = {"Retry-After": "300"}

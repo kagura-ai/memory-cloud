@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "deployment_id": "default",
+  "as_of": "2026-11-06T09:30:00Z",
+  "truncated": false,
+  "field_notes": {
+    "seconds_since_last_run": "age of the last indexer run; not ingest lag",
+    "last_offset": "the last processed ingestion event id; not a backlog count"
+  },
+  "snapshots": [
+    {
+      "resource_pk": "c4a7e2b9-0d3f-4b6a-8e1c-5f9d2a7b3c40",
+      "resource_id": "product-catalog",
+      "context_id": "e1b2c3d4-a5f6-4789-9abc-def012345678",
+      "indexer": {
+        "state": "idle",
+        "last_run_at": "2026-11-06T09:25:00Z",
+        "seconds_since_last_run": 300.0,
+        "next_run_at": "2026-11-06T09:35:00Z",
+        "last_offset": 1842,
+        "last_run": {
+          "applied_upserts": 12,
+          "applied_deletes": 1,
+          "errors": 0,
+          "failed_events": 0,
+          "skipped_reason": null
+        }
+      },
+      "publication": {
+        "endpoint_id": "7d0f6a52-1b8e-4c1e-9d4b-2f6a7c8e9b10",
+        "public_id": "pmcp_4fK9xQ2mL7pR1sT8vW3yZ0",
+        "public_name": "Product catalog",
+        "published_at": "2026-11-01T10:00:00Z",
+        "updated_at": null,
+        "serving": true
+      }
+    },
+    {
+      "resource_pk": "f5b8c1d2-3e4f-4a5b-9c6d-7e8f9a0b1c2d",
+      "resource_id": "internal-wiki",
+      "context_id": null,
+      "indexer": {
+        "state": "never_run",
+        "last_run_at": null,
+        "seconds_since_last_run": null,
+        "next_run_at": null,
+        "last_offset": null,
+        "last_run": null
+      },
+      "publication": null
+    },
+    {
+      "resource_pk": "0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e",
+      "resource_id": "support-faq",
+      "context_id": "1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b",
+      "indexer": {
+        "state": "error",
+        "last_run_at": "2026-11-06T08:00:00Z",
+        "seconds_since_last_run": 5400.0,
+        "next_run_at": null,
+        "last_offset": 977,
+        "last_run": {
+          "applied_upserts": 0,
+          "applied_deletes": 0,
+          "errors": 3,
+          "failed_events": 3,
+          "skipped_reason": null
+        }
+      },
+      "publication": null
+    }
+  ]
+}

@@ -235,29 +235,7 @@ async def get_indexer_status_for_context(
     # since #323 would surface ``state: null`` despite legacy state being
     # present. When the Resource row is absent, fall back to slug-only
     # (workspace boundary still comes from context_id).
-    if resource_pk is not None:
-        state_predicate = or_(
-            IndexerState.resource_pk == resource_pk,
-            (IndexerState.resource_pk.is_(None)) & (IndexerState.resource_id == resource_id),
-        )
-    else:
-        state_predicate = IndexerState.resource_id == resource_id
-
-    state_row = (
-        await db.execute(
-            select(IndexerState)
-            .where(
-                IndexerState.context_id == context.id,
-                state_predicate,
-            )
-            .order_by(
-                # Prefer rows with resource_pk populated when both exist.
-                IndexerState.resource_pk.is_(None).asc(),
-                IndexerState.id.desc(),
-            )
-            .limit(1)
-        )
-    ).scalar_one_or_none()
+    state_row = await load_indexer_state_row(db, context.id, resource_pk, resource_id)
 
     # ResourceEvent has no context_id column, so the slug alone is NOT a
     # workspace boundary — a soft-deleted context can release its slug for
@@ -284,54 +262,7 @@ async def get_indexer_status_for_context(
             .all()
         )
 
-    state_dict: dict[str, Any] | None
-    if state_row is None:
-        state_dict = None
-    else:
-        last_run_at = state_row.last_run_at
-        lag_seconds: float | None
-        if last_run_at is None:
-            lag_seconds = None
-        else:
-            # `last_run_at` is stored as naive UTC; compare against timezone-aware now().
-            if last_run_at.tzinfo is None:
-                last_run_at_utc = last_run_at.replace(tzinfo=UTC)
-            else:
-                last_run_at_utc = last_run_at
-            lag_seconds = (datetime.now(tz=UTC) - last_run_at_utc).total_seconds()
-
-        metrics_raw = state_row.metrics or {}
-        # Coerce ``metrics.reason`` to the known enum set the API surfaces.
-        # The wire schema (`IndexerSkippedReason` Literal in
-        # ``api/routes/resource_indexer.py``) is a strict pydantic enum;
-        # if an older DB row carries a reason string the API doesn't know
-        # about, blindly passing it through would 500 on response_model
-        # validation. Degrade unknowns to None so the panel gracefully
-        # shows "skipped" without an Alert text — matching the behavior
-        # the route's `IndexerSkippedReason` docstring promises.
-        skipped_reason: str | None
-        if metrics_raw.get("skipped"):
-            raw_reason = metrics_raw.get("reason")
-            skipped_reason = raw_reason if raw_reason in _KNOWN_SKIPPED_REASONS else None
-        else:
-            # Don't surface a stale reason after a successful re-run.
-            skipped_reason = None
-
-        state_dict = {
-            "job_status": state_row.job_status,
-            "last_run_at": to_utc_iso(last_run_at),
-            "next_run_at": to_utc_iso(state_row.next_run_at),
-            "active_version": state_row.active_version,
-            "last_offset": state_row.last_offset,
-            "lag_seconds": lag_seconds,
-            "metrics": {
-                "applied_upserts": int(metrics_raw.get("applied_upserts", 0) or 0),
-                "applied_deletes": int(metrics_raw.get("applied_deletes", 0) or 0),
-                "errors": int(metrics_raw.get("errors", 0) or 0),
-                "failed_events": len(recorded_failed_events(metrics_raw)),
-                "skipped_reason": skipped_reason,
-            },
-        }
+    state_dict = None if state_row is None else sanitized_indexer_state(state_row)
 
     event_dicts = []
     for ev in events:
@@ -350,6 +281,99 @@ async def get_indexer_status_for_context(
         "resource_id": resource_id,
         "state": state_dict,
         "recent_events": event_dicts,
+    }
+
+
+async def load_indexer_state_row(
+    db: AsyncSession, context_id: UUID, resource_pk: UUID | None, resource_id: str
+) -> IndexerState | None:
+    """The authoritative ``indexer_state`` row of one resource context, or ``None``.
+
+    Prefers the row with ``resource_pk`` populated; falls back to a legacy
+    ``resource_pk IS NULL`` row of the same slug and context (the Phase 1
+    dual-row contract, see ``get_indexer_status_for_context``). The workspace
+    boundary comes from ``context_id``.
+    """
+    if resource_pk is not None:
+        state_predicate = or_(
+            IndexerState.resource_pk == resource_pk,
+            (IndexerState.resource_pk.is_(None)) & (IndexerState.resource_id == resource_id),
+        )
+    else:
+        state_predicate = IndexerState.resource_id == resource_id
+
+    return (
+        await db.execute(
+            select(IndexerState)
+            .where(
+                IndexerState.context_id == context_id,
+                state_predicate,
+            )
+            .order_by(
+                # Prefer rows with resource_pk populated when both exist.
+                IndexerState.resource_pk.is_(None).asc(),
+                IndexerState.id.desc(),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+def sanitized_indexer_state(state_row: IndexerState, now: datetime | None = None) -> dict[str, Any]:
+    """The owner-visible indexer state of one row (#326), sanitised (#2679).
+
+    ``lag_seconds`` is the age of the last run (``now - last_run_at``), not an
+    ingest lag; ``None`` when the indexer never ran. ``metrics`` carries only
+    counters and a known skip reason: no error text, no failed event ids (only
+    their count), nothing else from the JSONB column.
+
+    Args:
+        state_row: The ``indexer_state`` row.
+        now: Clock override (aware UTC); defaults to the current time.
+    """
+    last_run_at = state_row.last_run_at
+    lag_seconds: float | None
+    if last_run_at is None:
+        lag_seconds = None
+    else:
+        # `last_run_at` is stored as naive UTC; compare against timezone-aware now().
+        if last_run_at.tzinfo is None:
+            last_run_at_utc = last_run_at.replace(tzinfo=UTC)
+        else:
+            last_run_at_utc = last_run_at
+        lag_seconds = ((now or datetime.now(tz=UTC)) - last_run_at_utc).total_seconds()
+
+    metrics_raw = state_row.metrics or {}
+    # Coerce ``metrics.reason`` to the known enum set the API surfaces.
+    # The wire schema (`IndexerSkippedReason` Literal in
+    # ``api/routes/resource_indexer.py``) is a strict pydantic enum;
+    # if an older DB row carries a reason string the API doesn't know
+    # about, blindly passing it through would 500 on response_model
+    # validation. Degrade unknowns to None so the panel gracefully
+    # shows "skipped" without an Alert text — matching the behavior
+    # the route's `IndexerSkippedReason` docstring promises.
+    skipped_reason: str | None
+    if metrics_raw.get("skipped"):
+        raw_reason = metrics_raw.get("reason")
+        skipped_reason = raw_reason if raw_reason in _KNOWN_SKIPPED_REASONS else None
+    else:
+        # Don't surface a stale reason after a successful re-run.
+        skipped_reason = None
+
+    return {
+        "job_status": state_row.job_status,
+        "last_run_at": to_utc_iso(last_run_at),
+        "next_run_at": to_utc_iso(state_row.next_run_at),
+        "active_version": state_row.active_version,
+        "last_offset": state_row.last_offset,
+        "lag_seconds": lag_seconds,
+        "metrics": {
+            "applied_upserts": int(metrics_raw.get("applied_upserts", 0) or 0),
+            "applied_deletes": int(metrics_raw.get("applied_deletes", 0) or 0),
+            "errors": int(metrics_raw.get("errors", 0) or 0),
+            "failed_events": len(recorded_failed_events(metrics_raw)),
+            "skipped_reason": skipped_reason,
+        },
     }
 
 

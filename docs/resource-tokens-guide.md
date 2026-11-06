@@ -231,10 +231,10 @@ curl "$KAGURA/api/v1/resources/products/public-mcp/usage-health" -H "Authorizati
 
 ## Resource Tokens vs API Keys
 
-| | API Key | Resource Token |
-|---|---------|---------------|
-| **Who uses it** | AI assistants (MCP) | External systems (REST API) |
-| **Authentication** | `Authorization: Bearer kagura_...` | `X-Resource-API-Key: ...` |
-| **Scope** | Full workspace access | Single resource + context |
-| **Purpose** | remember/recall/explore | Ingest external data |
-| **Rate limit** | Plan-based API calls/day | Per-token events/hour |
+| | API Key | Resource Token | Observation credential |
+|---|---------|---------------|------------------------|
+| **Who uses it** | AI assistants (MCP) | External systems (REST API) | A self-hosted dashboard ([Observability API](observability-api.md)) |
+| **Authentication** | `Authorization: Bearer kagura_...` | `X-Resource-API-Key: ...` | `Authorization: Bearer kagura_obs_...` |
+| **Scope** | Full workspace access | Single resource + context | One workspace or one resource, read-only |
+| **Purpose** | remember/recall/explore | Ingest external data | Read resource, indexer, usage and ingestion metadata only |
+| **Rate limit** | Plan-based API calls/day | Per-token events/hour | Per-credential requests/minute |

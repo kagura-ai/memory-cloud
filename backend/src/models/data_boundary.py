@@ -96,6 +96,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "public_mcp_usage_events",
         "public_mcp_doc_keys",
         "public_mcp_usage_retention",
+        # Read-only observability credentials (#2679) — SHA-256 verifiers,
+        # their workspace / resource binding, expiry and revocation. Auth
+        # plumbing like share_keys.
+        "observation_credentials",
         # Known browsers for new-device sign-in alerts (#1769): keyed hashes of
         # device cookies, deleted with the account.
         "user_known_devices",

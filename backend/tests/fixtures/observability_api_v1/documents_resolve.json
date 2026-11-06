@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "deployment_id": "default",
+  "as_of": "2026-11-06T09:30:00Z",
+  "resource_id": "product-catalog",
+  "documents": {
+    "a3f19c0b7e2d4c5a8b6e1f0d9c8b7a65": {
+      "title": "Blue widget, 40 mm, stainless steel",
+      "source_url": "https://shop.example.test/p/blue-widget"
+    },
+    "5d2e8f1a0b3c4d6e7f8091a2b3c4d5e6": null
+  },
+  "publication_serving": true
+}
