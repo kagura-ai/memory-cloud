@@ -66,7 +66,7 @@ credential, never from the request.
 |---|---|
 | `POST /api/v1/observation-credentials` | `{name, scope: "workspace" \| "resource", resource_id?, ttl_days?}` → `201` with `secret`. `scope=resource` needs the slug of a resource of the current workspace (`404` otherwise); `resource_id` with `scope=workspace`, or `ttl_days` outside 1–365, is `422`. |
 | `GET /api/v1/observation-credentials` | The workspace's credentials, revoked and expired ones included, with `status` `active` / `expired` / `revoked`. Never the secret. |
-| `POST /api/v1/observation-credentials/{credential_id}/rotate` | `{grace_seconds?}` → `201` with the new `secret`; `rotated_from` names the old id. `404` for an unknown, foreign, revoked or expired credential. |
+| `POST /api/v1/observation-credentials/{credential_id}/rotate` | `{grace_seconds?}` → `201` with the new `secret`; `rotated_from` names the old id. `404` for an unknown, foreign, revoked or expired credential, or one already rotated (rotate the newest one). |
 | `DELETE /api/v1/observation-credentials/{credential_id}` | Revoke → `204` (again: `204`); `404` for an id of another workspace. |
 
 ```bash
@@ -125,7 +125,8 @@ one), `resource_id` (slug), `name`, `context_id` (the live context, or
 `null`), `created_at`, and `publication` — the live public MCP endpoint
 `{endpoint_id, public_id, public_name, published_at, updated_at, serving}` or
 `null`. `serving` is whether the anonymous endpoint answers right now (operator
-switch on, not unpublished, context still public and bound). No memory counts,
+switch on, not unpublished, context still public and bound, and no plan pause or
+capacity lock answering `503`). No memory counts,
 no context descriptions.
 
 ### GET /api/v1/observability/snapshots

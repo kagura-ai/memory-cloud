@@ -205,15 +205,16 @@ class ObservationCredentialManager:
             expires_at=row.expires_at,
         )
 
-    async def _get(self, public_id: str, workspace_id: UUID) -> ObservationCredential | None:
-        return (
-            await self.db.execute(
-                select(ObservationCredential).where(
-                    ObservationCredential.public_id == public_id,
-                    ObservationCredential.workspace_id == workspace_id,
-                )
-            )
-        ).scalar_one_or_none()
+    async def _get(
+        self, public_id: str, workspace_id: UUID, *, for_update: bool = False
+    ) -> ObservationCredential | None:
+        stmt = select(ObservationCredential).where(
+            ObservationCredential.public_id == public_id,
+            ObservationCredential.workspace_id == workspace_id,
+        )
+        if for_update:
+            stmt = stmt.with_for_update()
+        return (await self.db.execute(stmt)).scalar_one_or_none()
 
     async def rotate(
         self,
@@ -239,11 +240,23 @@ class ObservationCredentialManager:
 
         Returns:
             ``(new_row, plaintext)``, or ``None`` when no live credential with
-            that id is in the workspace.
+            that id is in the workspace, or it was already rotated (one
+            successor per credential: a double submit, or rotating the old id
+            again during its grace period, would leave a second live child).
         """
         current = now or utcnow()
-        old = await self._get(public_id, workspace_id)
+        # The row lock serialises concurrent rotations of the same credential.
+        old = await self._get(public_id, workspace_id, for_update=True)
         if old is None or credential_status(old, current) != "active":
+            return None
+        successor = (
+            await self.db.execute(
+                select(ObservationCredential.id)
+                .where(ObservationCredential.rotated_from_id == old.id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if successor is not None:
             return None
         grace = max(0, min(grace_seconds, OBSERVATION_ROTATE_MAX_GRACE_SECONDS))
         secret = self._generate()
@@ -312,15 +325,21 @@ def _client_allowed(request: Request) -> bool:
         address = ipaddress.ip_address(host)
     except ValueError:
         return False
+    # A dual-stack listener reports an IPv4 caller as ``::ffff:a.b.c.d``.
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
     return any(address in network for network in networks)
 
 
 async def _check_rate_limit(key_hash: str) -> None:
     """Count one request against the presented credential's minute bucket.
 
-    Keyed by the verifier, which identifies the credential, so the budget is
-    spent before the database is asked. Fail-open: the API is internal and
-    authenticated, so a Redis outage serves the request.
+    Keyed by the verifier of the presented secret, so a known credential
+    over its budget is refused before the database is asked. An unknown
+    secret gets a fresh bucket (one key living a minute) and then the
+    uniform 401; this budget meters credentials, it does not throttle
+    guessing (a 256-bit secret is not guessable). Fail-open: the API is
+    internal and authenticated, so a Redis outage serves the request.
     """
     limit = get_settings().observability_api_rate_limit_per_minute
     minute = utcnow().strftime("%Y%m%d%H%M")

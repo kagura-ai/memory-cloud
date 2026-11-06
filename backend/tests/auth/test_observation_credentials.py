@@ -176,6 +176,37 @@ async def test_rotate_refuses_unknown_foreign_and_revoked(world: World) -> None:
         assert await manager.rotate(public_id, world.ws, created_by=world.owner) is None
 
 
+async def test_rotate_refuses_a_credential_already_rotated(world: World) -> None:
+    # A second rotation of the same parent (a double submit, or the old id
+    # rotated again during its grace period) would mint a second live child.
+    public_id, _ = await issue_credential(world)
+    async with world.factory() as s:
+        manager = ObservationCredentialManager(s)
+        first = await manager.rotate(
+            public_id, world.ws, grace_seconds=3600, created_by=world.owner
+        )
+        assert first is not None
+        await s.commit()
+        assert (
+            await manager.rotate(public_id, world.ws, grace_seconds=3600, created_by=world.owner)
+            is None
+        )
+        children = (
+            (
+                await s.execute(
+                    select(ObservationCredential).where(
+                        ObservationCredential.rotated_from_id == first[0].rotated_from_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(children) == 1
+        # The child itself can be rotated on.
+        assert await manager.rotate(first[0].public_id, world.ws, created_by=world.owner)
+
+
 async def test_revoke_is_idempotent_and_workspace_scoped(world: World) -> None:
     public_id, _ = await issue_credential(world)
     async with world.factory() as s:
@@ -310,6 +341,10 @@ async def test_cidr_allow_list(world: World, api_on, monkeypatch) -> None:
     assert outside.json()["error"] == "HTTP-404"
     # Outside with no credential at all: the same 404, no 401 oracle.
     assert (await _get(world, {}, client=("192.0.2.7", 1234))).status_code == 404
+    # A dual-stack listener reports an IPv4 caller as an IPv4-mapped address.
+    mapped = await _get(world, bearer(secret), client=("::ffff:10.0.0.5", 1234))
+    assert mapped.status_code == 200
+    assert (await _get(world, bearer(secret), client=("::ffff:192.0.2.7", 1))).status_code == 404
 
 
 def test_cidr_setting_is_validated() -> None:

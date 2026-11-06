@@ -219,7 +219,8 @@ async def rotate_observation_credential(
     working after ``grace_seconds``.
 
     Raises:
-        404: No live credential with this id in the current workspace.
+        404: No live credential with this id in the current workspace, or
+            it was already rotated.
     """
     user_id, workspace_id = owner
     grace = body.grace_seconds if body is not None else 0
