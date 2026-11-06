@@ -9,6 +9,7 @@ store (Redis) replaced:
   pair that was already rotated or revoked are preserved;
 - pending authorization codes and device codes are deleted;
 - known devices are forgotten and emailed password links invalidated;
+- the account's passkeys are deleted (#2660);
 - the sessions are deleted with ``strict=True`` while the transaction is
   still open — another connection sees none of the writes at that point;
 - when the session delete fails, nothing is committed.
@@ -42,6 +43,7 @@ from models.auth import (
     OAuth2Token,
     User,
     UserKnownDevice,
+    WebAuthnCredential,
 )
 from services.email_action_token_service import EmailActionTokenService
 from tests.conftest import TEST_DATABASE_URL
@@ -161,6 +163,19 @@ async def accounts(db_session: AsyncSession) -> AsyncIterator[tuple[_Account, _A
             )
         )
         db_session.add(UserKnownDevice(user_id=user_id, device_hash=uuid4().hex * 2))
+        db_session.add(
+            WebAuthnCredential(
+                user_id=user_id,
+                credential_id=uuid4().bytes,
+                public_key=b"public-key",
+                sign_count=0,
+                transports=["internal"],
+                aaguid=str(uuid4()),
+                backup_eligible=False,
+                backup_state=False,
+                name="Passkey",
+            )
+        )
         await EmailActionTokenService(db_session).issue(
             user_id=user_id, email=f"{login_id}@local", purpose="reset_password"
         )
@@ -190,6 +205,7 @@ class _State:
     authorization_codes: int
     device_codes: int
     known_devices: int
+    passkeys: int
     password_links: int
 
 
@@ -217,6 +233,7 @@ async def _state(db: AsyncSession, account: _Account) -> _State:
         ),
         device_codes=await _count(db, OAuth2DeviceCode, OAuth2DeviceCode.user_id == uid),
         known_devices=await _count(db, UserKnownDevice, UserKnownDevice.user_id == uid),
+        passkeys=await _count(db, WebAuthnCredential, WebAuthnCredential.user_id == uid),
         password_links=await _count(
             db,
             EmailActionToken,
@@ -238,6 +255,7 @@ _UNTOUCHED = _State(
     authorization_codes=1,
     device_codes=1,
     known_devices=1,
+    passkeys=1,
     password_links=1,
 )
 
@@ -300,6 +318,7 @@ async def test_cli_reset_revokes_grants_and_keeps_earlier_revocation_times(
         authorization_codes=0,
         device_codes=0,
         known_devices=0,
+        passkeys=0,
         password_links=0,
     )
 
@@ -327,6 +346,7 @@ async def test_cli_reset_revokes_grants_and_keeps_earlier_revocation_times(
     out = capsys.readouterr().out
     assert "2 browser session(s), 1 OAuth / MCP token(s)" in out
     assert "2 pending authorization / device code(s)" in out
+    assert "Removed 1 passkey(s)" in out
 
 
 async def test_cli_reset_commits_nothing_when_the_session_delete_fails(

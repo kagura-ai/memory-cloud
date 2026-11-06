@@ -4938,7 +4938,7 @@
     },
     "reset": {
       "title": "Choose a new password",
-      "description": "Resetting your password signs you out of every browser session and disconnects every connected app and MCP client.",
+      "description": "Resetting your password signs you out of every browser session, disconnects every connected app and MCP client, and removes your passkeys. You can add passkeys again from your profile.",
       "submit": "Reset password",
       "submitting": "Saving…",
       "successTitle": "Password updated",

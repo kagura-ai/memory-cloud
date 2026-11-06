@@ -40,7 +40,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.password import hash_password, verify_password
@@ -325,8 +325,9 @@ class PasswordAccountService:
             ip_address: Client IP for the audit row.
             user_agent: Client user agent for the audit row.
             revoke_sessions: Signs the account out; run before the commit.
-                Every OAuth2 / MCP grant of the account is revoked in the same
-                transaction (#1738), so it rolls back with the password.
+                Every OAuth2 / MCP grant of the account is revoked and every
+                passkey deleted in the same transaction (#1738, #2660), so
+                they roll back with the password.
 
         Returns:
             The user_id whose password was reset.
@@ -345,10 +346,21 @@ class PasswordAccountService:
         # #1769: forget every known browser, so the next sign-in from each —
         # the attacker's included — is a new device and emails the owner.
         await self.db.execute(known_devices_delete(user.user_id))
+        # #2660: and every passkey. One registered from a stolen session would
+        # otherwise outlive the reset and still sign in, without TOTP. The
+        # account keeps the new password, so this locks nobody out.
+        passkeys_removed = (
+            await self.db.execute(
+                delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user.user_id)
+            )
+        ).rowcount
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
         await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info(
-            "password_reset_completed", user_id=user.user_id, oauth_tokens_revoked=tokens_revoked
+            "password_reset_completed",
+            user_id=user.user_id,
+            oauth_tokens_revoked=tokens_revoked,
+            passkeys_removed=passkeys_removed,
         )
         return user.user_id
 

@@ -752,7 +752,7 @@ doing so; the API's counter is per account and ignores the client address.
 | Endpoint | Auth | What it does |
 |----------|------|--------------|
 | `POST /api/v1/auth/password/reset-request` `{email}` | public | Always `202` with the same body. Emails a reset link only to an account with that verified email and a password. 10 per client address and 3 per address per 15 minutes (the per-address limit is silent). |
-| `POST /api/v1/auth/password/reset` `{token, new_password}` | the link | Sets the password, **signs out every browser session** and **revokes every OAuth / MCP grant** of the account (see below); the person then signs in. |
+| `POST /api/v1/auth/password/reset` `{token, new_password}` | the link | Sets the password, **signs out every browser session**, **revokes every OAuth / MCP grant** and **removes every passkey** of the account (see below); the person then signs in. |
 | `POST /api/v1/me/password/setup-request` | browser session | For an account without a password: emails a set-a-password link to the account's address (`409` if it has one, `400` for `@local`). |
 | `POST /api/v1/auth/password/setup` `{token, new_password}` | the link | Sets the first password, marks the email verified, signs out the account's other browser sessions. |
 | `POST /api/v1/me/password/change` `{current_password, new_password}` | browser session | Signs out the account's other browser sessions. |
@@ -772,7 +772,10 @@ A **reset** is the recovery path after a compromise, so it also revokes, in
 the same transaction as the new password (#1738): every OAuth / MCP access and
 refresh token issued to the account, authorization codes not yet exchanged,
 and device-flow codes. Connected clients (Claude Code, ChatGPT, the CLI) must
-sign in again. A set-up, change or removal signs out browser sessions only.
+sign in again. It also deletes the account's passkeys (#2660): one registered
+from a stolen session would otherwise outlive the reset and still sign in. The
+owner registers them again. A set-up, change or removal signs out browser
+sessions only.
 
 API keys, OAuth client secrets, share keys and resource tokens are **not**
 revoked by any password flow: they are integration credentials, and revoking
@@ -864,8 +867,8 @@ SELECT created_at, action, resource, ip_address FROM audit_logs WHERE user_id = 
 
 A sign-in dated after the `oauth_provider_unlinked` row that was not the
 owner's is a reason to reset the account's password (which signs it out
-everywhere and revokes its OAuth / MCP grants, see above) and to review its
-API keys and OAuth clients in Settings.
+everywhere, revokes its OAuth / MCP grants and removes its passkeys, see
+above) and to review its API keys and OAuth clients in Settings.
 
 ## Browser passkeys (WebAuthn)
 
@@ -890,7 +893,9 @@ password or a recent verified sign-in. OAuth-only users can use Confirm with Goo
 on deployments that receive a verified authentication time, or set up a password
 via the verified mailbox. GitHub sign-in alone supplies no authentication time under
 the default proof policy. A verified passkey can then authorize another registration.
-Removing a key requires the current password or a different key.
+Removing a key requires the current password or a different key. A password
+reset (the emailed link or `python -m src.cli.reset_password`, choices 1 and 3)
+removes every passkey of the account; "Disable MFA only" keeps them.
 
 ## Which sign-in provider syncs the account's email (Issues #1811, #1875)
 

@@ -31,6 +31,7 @@ from models.auth import (
     OAuth2Token,
     User,
     UserOAuthProvider,
+    WebAuthnCredential,
 )
 from services import password_account_service as password_service_module
 from services.email_action_token_service import EmailActionTokenService
@@ -430,6 +431,47 @@ class TestResetRevokesOAuthGrants:
                 await db_session.execute(
                     select(UserKnownDevice.user_id).where(
                         UserKnownDevice.user_id.in_([user.user_id, other.user_id])
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert remaining == [other.user_id]
+
+    async def test_reset_removes_the_accounts_passkeys(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        # #2660: a passkey registered from a stolen session must not outlive
+        # the reset; it would still sign in, without TOTP.
+        user = await _user(db_session, made)
+        other = await _user(db_session, made)
+        for uid in (user.user_id, user.user_id, other.user_id):
+            db_session.add(
+                WebAuthnCredential(
+                    user_id=uid,
+                    credential_id=uuid4().bytes,
+                    public_key=b"public-key",
+                    sign_count=0,
+                    transports=["internal"],
+                    aaguid=str(uuid4()),
+                    backup_eligible=False,
+                    backup_state=False,
+                    name="Passkey",
+                )
+            )
+        await db_session.flush()
+        service = PasswordAccountService(db_session, email_service=_email())
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+
+        await service.complete_reset(raw_token=_token_from(pending.reset_url), new_password=NEW)
+
+        remaining = (
+            (
+                await db_session.execute(
+                    select(WebAuthnCredential.user_id).where(
+                        WebAuthnCredential.user_id.in_([user.user_id, other.user_id])
                     )
                 )
             )
