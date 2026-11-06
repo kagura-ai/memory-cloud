@@ -13,7 +13,7 @@ import cbor2
 import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
-from fastapi import BackgroundTasks, Request, Response
+from fastapi import BackgroundTasks, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from webauthn.helpers import bytes_to_base64url
@@ -23,7 +23,7 @@ from models.auth import AuditLog, User, UserOAuthProvider, WebAuthnCredential
 from services.account_linking_service import AccountLinkingService
 from services.password_account_service import PasswordAccountService
 from services.user_deletion_service import delete_user_rows
-from utils.exceptions import MemoryCloudException
+from utils.exceptions import MemoryCloudException, RateLimitError
 
 
 class Authenticator:
@@ -114,8 +114,13 @@ def ceremony(monkeypatch):
     async def get(key):
         return values.get(key)
 
+    async def delete(*keys):
+        return sum(values.pop(key, None) is not None for key in keys)
+
     monkeypatch.setattr(
-        pk, "get_redis_client", lambda: SimpleNamespace(setex=setex, getdel=take, get=get)
+        pk,
+        "get_redis_client",
+        lambda: SimpleNamespace(setex=setex, getdel=take, get=get, delete=delete, values=values),
     )
     monkeypatch.setattr(
         pk,
@@ -421,3 +426,126 @@ async def test_oauth_only_removal_requires_mailbox_password(db_session, ceremony
         )
         == provider
     )
+
+
+@pytest.fixture
+def attempts(ceremony, monkeypatch):
+    """A counting INCR on the ceremony store that records each key and TTL."""
+    store = pk.get_redis_client()
+    calls = []
+
+    async def incr(key, ttl=None):
+        calls.append((key, ttl))
+        store.values[key] = store.values.get(key, 0) + 1
+        return store.values[key]
+
+    monkeypatch.setattr(pk, "increment_counter", incr)
+    return SimpleNamespace(values=store.values, calls=calls)
+
+
+async def enrolled(db, device):
+    """An account with one registered passkey (sign count 1)."""
+    owner = User(user_id=uuid4().hex, email=f"{uuid4().hex}@example.org", auth_provider="google")
+    db.add(owner)
+    await db.commit()
+    pk.auth._session_manager.proven_within.return_value = True
+    body = await pending_registration(db, owner, device)
+    await pk.register_verify(body, request(), {"user_id": owner.user_id}, BackgroundTasks(), db)
+    return owner
+
+
+async def sign_in(db, account, device, **kwargs):
+    response = Response()
+    options = await pk.authenticate_options(request(), response)
+    binding = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+    body = pk.SignIn(
+        challenge=options["challenge"],
+        credential=device.response(options["challenge"], pk._handle(account), **kwargs),
+    )
+    return await pk.authenticate_verify(body, request(binding), Response(), "/profile", db)
+
+
+@pytest.mark.asyncio
+async def test_passkey_sign_in_draws_on_its_own_counter(db_session, ceremony, attempts):
+    owner = await enrolled(db_session, ceremony)
+    counter = f"webauthn_signin:{owner.user_id}"
+    # Password and TOTP failures have spent the account's sign-in budget.
+    pk.auth._reserve_login_attempt.side_effect = HTTPException(status_code=429)
+
+    result = await sign_in(db_session, owner, ceremony, count=2)
+
+    assert result["redirect_url"]
+    assert pk.auth._create_password_session.await_count == 1
+    pk.auth._reserve_login_attempt.assert_not_called()
+    assert [call for call in attempts.calls if call[0] == counter] == [(counter, 300)]
+    assert counter not in attempts.values
+    pk.auth._clear_login_failures.assert_called_once_with(f"user:{owner.user_id}")
+
+
+@pytest.mark.asyncio
+async def test_failed_assertions_spend_the_passkey_counter_and_then_answer_429(
+    db_session, ceremony, attempts, monkeypatch
+):
+    owner = await enrolled(db_session, ceremony)
+    counter = f"webauthn_signin:{owner.user_id}"
+    verify = Mock(wraps=pk.verify_authentication_response)
+    monkeypatch.setattr(pk, "verify_authentication_response", verify)
+
+    for _ in range(5):
+        with pytest.raises(MemoryCloudException, match="Invalid passkey") as denied:
+            await sign_in(db_session, owner, ceremony, count=1)
+        assert denied.value.status_code == 401
+    assert attempts.values[counter] == 5
+
+    # The sixth assertion is refused before it is checked, even a valid one.
+    with pytest.raises(RateLimitError) as refused:
+        await sign_in(db_session, owner, ceremony, count=2)
+    assert refused.value.status_code == 429
+    assert refused.value.retry_after == 300
+    assert verify.call_count == 5
+    assert pk.auth._create_password_session.await_count == 0
+    pk.auth._reserve_login_attempt.assert_not_called()
+    assert not [key for key in attempts.values if key.startswith("login_attempts:")]
+
+
+@pytest.mark.asyncio
+async def test_a_completed_passkey_sign_in_clears_both_counters(db_session, ceremony, attempts):
+    owner = await enrolled(db_session, ceremony)
+    counter = f"webauthn_signin:{owner.user_id}"
+    for _ in range(4):
+        with pytest.raises(MemoryCloudException, match="Invalid passkey"):
+            await sign_in(db_session, owner, ceremony, count=1)
+    assert attempts.values[counter] == 4
+
+    await sign_in(db_session, owner, ceremony, count=2)
+
+    assert counter not in attempts.values
+    pk.auth._clear_login_failures.assert_called_once_with(f"user:{owner.user_id}")
+    # The window started over: the next failure is an ordinary 401.
+    with pytest.raises(MemoryCloudException, match="Invalid passkey") as denied:
+        await sign_in(db_session, owner, ceremony, count=2)
+    assert denied.value.status_code == 401
+    assert attempts.values[counter] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_passkey_proof_on_the_profile_uses_the_passkey_counter(
+    db_session, ceremony, attempts
+):
+    owner = await enrolled(db_session, ceremony)
+    counter = f"webauthn_signin:{owner.user_id}"
+    user = {"user_id": owner.user_id}
+    pk.auth._session_manager.proven_within.return_value = False
+    options = await pk.proof_options(request(), user, None, db_session)
+    proof = pk.Proof(
+        challenge=options["challenge"],
+        assertion=ceremony.response(options["challenge"], pk._handle(owner), count=2),
+    )
+
+    created = await pk.register_options(proof, request(), user, db_session)
+
+    assert created["challenge"]
+    assert [call for call in attempts.calls if call[0] == counter] == [(counter, 300)]
+    assert counter not in attempts.values
+    pk.auth._clear_login_failures.assert_called_once_with(f"user:{owner.user_id}")
+    pk.auth._reserve_login_attempt.assert_not_called()
