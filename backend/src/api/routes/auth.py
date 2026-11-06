@@ -36,6 +36,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
+from redis.exceptions import RedisError
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -3339,7 +3340,6 @@ async def mfa_verify(
     try:
         _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
         session_id = await _open_password_session(user, verified)
-        _clear_login_failures(_account_rate_key(user.user_id))
         response = Response(
             content=PasswordLoginResponse(
                 success=True, mfa_required=False, redirect_url=_safe_redirect_url(return_to)
@@ -3371,6 +3371,11 @@ async def mfa_verify(
                     await settle_login_code(db, user.user_id, claim, audit=None)
         raise
 
+    try:
+        await asyncio.to_thread(_clear_login_failures, _account_rate_key(user.user_id))
+    except RedisError:
+        # The sign-in stands and a recovery code has already been consumed.
+        logger.warning("mfa_sign_in_budget_clear_failed", user_id=user.user_id)
     if claim:
         spawn_security_notification(
             user_id=user.user_id, event=SecurityEvent.RECOVERY_CODE_USED, request=request

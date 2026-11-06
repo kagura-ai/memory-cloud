@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pyotp
 import pytest
 from fastapi import HTTPException
+from redis.exceptions import RedisError
 
 from api.routes import auth as auth_routes
 from auth.password import hash_password
@@ -178,6 +179,14 @@ async def test_recovery_code_completes_password_signin_only_once(
                 await _code_step(await _password_step(), codes[0])
         account.notice.assert_not_called()
         db.add.assert_not_called()
+    if prior_failure:
+        assert auth_routes._session_manager._redis.get(COUNTER) == 1
+    else:
+        # A post-commit budget-store outage must still deliver the session
+        # and recovery-use notification for the consumed code.
+        monkeypatch.setattr(
+            auth_routes, "_clear_login_failures", MagicMock(side_effect=RedisError())
+        )
     result = await _code_step(await _password_step(), codes[0])
     assert result.status_code == 200
     assert db.add.call_args.args[0].action == "recovery_code_used"

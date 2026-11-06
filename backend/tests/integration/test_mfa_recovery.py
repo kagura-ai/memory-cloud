@@ -172,6 +172,7 @@ async def test_mfa_route_rolls_back_only_its_own_claim(
                 await asyncio.wait_for(auth.mfa_verify(body, req, None), timeout=8)
         manager.delete_session.assert_called_once_with("new-session")
         notice.assert_not_called()
+        assert manager._redis.get(f"login_attempts:user:{uid}") == 1
         await db_session.refresh(user)
         assert set(user.totp_recovery_hashes) == set(
             hashes if failure == "unavailable" else replacement
