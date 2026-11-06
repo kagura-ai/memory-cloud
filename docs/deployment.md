@@ -747,6 +747,16 @@ Deployments that also rate-limit `/api/v1/auth/login` and
 `/api/v1/auth/mfa/verify` per client address at the reverse proxy may keep
 doing so; the API's counter is per account and ignores the client address.
 
+Passkey sign-ins (`POST /api/v1/auth/passkeys/authenticate/verify`) and the
+passkey proofs on the profile draw on a counter of their own,
+`webauthn_signin:<user_id>` in Redis: five assertions per account per five
+minutes, taken before the assertion is checked. Password and TOTP failures do
+not refuse a passkey sign-in, and a failed assertion does not count against the
+password budget; a completed passkey sign-in clears both counters. Since
+v0.148.0 this replaces the #2645 rule under which passkey assertions shared the
+password budget. The per-client limit on
+`POST /api/v1/auth/passkeys/authenticate/options` (60 per minute) is unchanged.
+
 **Links and endpoints.**
 
 | Endpoint | Auth | What it does |
@@ -889,7 +899,9 @@ the API is on another host. Configure the following on the API before enrolling 
 For UI `https://app.example.com` with API `https://api.example.com`, use RP ID
 `app.example.com` and origin `https://app.example.com`. Changing the RP ID after
 enrollment requires users to register new passkeys. Redis stores one-use challenges
-for five minutes. The browser and authenticator must support discoverable credentials
+for five minutes. It also keeps the per-account passkey attempt counter
+(`webauthn_signin:<user_id>`, five assertions per five minutes, separate from the
+password sign-in budget). The browser and authenticator must support discoverable credentials
 and local user verification. Apply the database migration before serving the new API.
 
 Users enroll from Profile → Passkeys. The first registration requires a current

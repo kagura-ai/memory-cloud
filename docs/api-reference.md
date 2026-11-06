@@ -70,7 +70,7 @@ credential IDs and WebAuthn binary fields travel in base64url form.
 | `POST /register/options` | Submit a current password, a fresh passkey proof, or an empty object for recent session proof. Returns discoverable credential creation options. |
 | `POST /register/verify` | Submit the options' `challenge` and the browser's `credential`. Returns 201 with the registered key's ID, label, and timestamps. |
 | `POST /authenticate/options` | Anonymous. Returns assertion options and sets the browser ceremony cookie. |
-| `POST /authenticate/verify` | Anonymous. Submit `challenge`, `credential`, and optional `accepted_terms`, with cookies included. Success sets the session cookie and returns `redirect_url`. The optional `return_to` query uses the ordinary sign-in redirect rules. |
+| `POST /authenticate/verify` | Anonymous. Submit `challenge`, `credential`, and optional `accepted_terms`, with cookies included. Success sets the session cookie and returns `redirect_url`. The optional `return_to` query uses the ordinary sign-in redirect rules. Five assertions per account per five minutes, counted separately from the password sign-in budget; a completed sign-in clears the account's password sign-in failures as well. |
 | `GET /` (prefix without trailing slash) | Lists the active account's IDs, labels and timestamps. |
 | `PATCH /{key_id}` | Supply `name` (1–100 characters). |
 | `POST /proof/options` | Obtain assertion options for another registration, or use `?removing={key_id}` to prove a different key for removal. Submit the assertion as `assertion` alongside `challenge` on the management request. |
