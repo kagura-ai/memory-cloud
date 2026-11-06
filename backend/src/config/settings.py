@@ -1022,6 +1022,27 @@ class Settings(BaseSettings):
         ),
     )
 
+    # #2675: anonymous read-only public MCP endpoints at /mcp/public/{id}.
+    # Off by default: every /mcp/public/* request answers 404 and the owner
+    # routes report ``serving: false``. The two limits are Redis minute
+    # buckets for tools/call (per endpoint, all callers together; per
+    # session id on the session era); tools/call is refused while Redis
+    # cannot be read.
+    mcp_public_endpoints_enabled: bool = Field(
+        default=False,
+        description="Serve published anonymous read-only MCP endpoints at /mcp/public/{id}",
+    )
+    mcp_public_rate_limit_per_minute: int = Field(
+        default=120,
+        ge=1,
+        description="tools/call per public MCP endpoint per minute (all anonymous callers)",
+    )
+    mcp_public_session_rate_limit_per_minute: int = Field(
+        default=30,
+        ge=1,
+        description="tools/call per public MCP session per minute",
+    )
+
     @property
     def mcp_allowed_origins_list(self) -> list[str]:
         """Parse ``MCP_ALLOWED_ORIGINS`` into a list, dropping empty entries."""

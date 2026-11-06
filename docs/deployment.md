@@ -3017,6 +3017,22 @@ Two settings change what an MCP `recall` returns when the caller leaves an argum
 
 `MCP_RECALL_DEFAULT_FULL` is still a default: as with the built-in 3, only trusted rows (trusted context, not connector-ingested) get content, and an explicit `full=N` from the caller makes every row eligible. Like a bad verbosity, a value outside `0`-`100`, or one that is not a number (`abc`, `3.5`), stops the backend at startup instead of being clamped; note that Pydantic reads `3.0` as 3 and `1_0` as 10. A high value makes every argument-less recall build content that the `max_chars` budget (default 20,000 characters) then drops again from the lowest-ranked rows, so keep it small. The REST default stays `0`.
 
+## Public MCP endpoints — Issue #2675
+
+A workspace owner can publish one resource context as an **anonymous, read-only MCP endpoint** at `/mcp/public/<public_id>` (how: [Resource Tokens Guide › Publishing a resource as a public MCP endpoint](resource-tokens-guide.md#publishing-a-resource-as-a-public-mcp-endpoint); client setup: [MCP Client Setup › Public read-only endpoint](mcp-clients.md#public-read-only-endpoint-no-sign-in)). The operator decides whether this deployment serves such endpoints at all.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MCP_PUBLIC_ENDPOINTS_ENABLED` | `false` | Operator switch. Off: every `/mcp/public/*` request answers `404` before any database read, while the owner routes (`/api/v1/resources/{resource_id}/public-mcp`) keep working and report `serving: false`, so publications can be prepared before enabling. |
+| `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE` | `120` | `tools/call` per endpoint per minute, all anonymous callers together. The handshake / listing methods (`initialize`, `tools/list`, `server/discover`, `ping`) share a separate bucket of 5× this value; over it they answer HTTP `429` with `Retry-After: 60`. |
+| `MCP_PUBLIC_SESSION_RATE_LIMIT_PER_MINUTE` | `30` | `tools/call` per MCP session per minute (session-based clients only). A session is a client connection, not a person. |
+
+The buckets live in Redis and are keyed by the endpoint id and the server-minted session id only — no IP address or other client identifier is read or stored. **While Redis cannot be read, public `tools/call` is refused** (`temporarily_unavailable`, `retry_after_seconds: 60`): these buckets are the only limit on the anonymous path (the workspace's daily MCP quota applies to signed-in calls), and every public `recall` costs an embedding call. The handshake / listing methods stay available. The REST public search keeps its own fail-open bucket.
+
+Fixed caps (not settings): request body 64 KiB, no JSON-RPC batches, `recall` query 500 characters and `k` ≤ 20, `explore` depth ≤ 2 and limit ≤ 25, `list_tags` limit ≤ 100, at most 10 filter tags, responses 10,000–40,000 characters (default 20,000).
+
+Every request re-checks the publication with one indexed query (nothing is cached): an unpublished endpoint, a context that is no longer public or no longer bound to the resource, a removed resource or a deleted workspace answers the same `404` from the next request on, including on a session opened before. A workspace whose plan pauses public serving, or that is over its capacity, answers `503` with no details. The Origin allow-list of `/mcp` (`MCP_ALLOWED_ORIGINS`) and `MCP_REQUIRE_MIRRORED_HEADERS` apply unchanged. One log line `public_mcp_call` per `tools/call` records the endpoint, resource, tool, outcome and duration (no query text, memory id, session id or address).
+
 ## Reranking — Issue #1572
 
 Recall is hybrid (semantic + BM25); a **cross-encoder reranker** can re-score

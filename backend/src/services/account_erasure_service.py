@@ -162,6 +162,7 @@ from models.erasure import (
     ErasureRequest,
 )
 from models.memory import MEMORY_TYPE_TIME, Memory, MemoryRevision
+from models.public_mcp import PublicMcpEndpoint
 from services.billing_contract import (
     ensure_no_billing_contract,
     owned_workspaces_under_contract,
@@ -2668,6 +2669,10 @@ class AccountErasureService:
             (ContextMember, ContextMember.invited_by),
             (WorkspaceMember, WorkspaceMember.invited_by),
             (WorkspaceInvitation, WorkspaceInvitation.accepted_by),
+            # #2675: who published / unpublished a public MCP endpoint of a
+            # workspace that outlives the subject.
+            (PublicMcpEndpoint, PublicMcpEndpoint.created_by),
+            (PublicMcpEndpoint, PublicMcpEndpoint.revoked_by),
         )
         authorship_total = 0
         for model, column in authorship_sweeps:

@@ -204,6 +204,12 @@ ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/resources/{resource_id}/impact"): ALLOWED,
     ("GET", "/api/v1/resources/{resource_id}/schema"): ALLOWED,
     ("POST", "/api/v1/resources/{resource_id}/schema"): ALLOWED,
+    # #2675: publication metadata of the anonymous public MCP endpoint; the
+    # public endpoint itself refuses to serve a capacity-locked workspace
+    ("POST", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
+    ("GET", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
+    ("PATCH", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
+    ("DELETE", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
     ("GET", "/api/v1/resource-tokens"): ALLOWED,
     ("POST", "/api/v1/resource-tokens"): ALLOWED,
     ("PATCH", "/api/v1/resource-tokens/{token_id}"): ALLOWED,
@@ -236,6 +242,7 @@ CONTENT_ROUTERS = {
     "workspace",
     "workspaces",
     "resources",
+    "public_mcp_endpoints",
     "resource_indexer",
     "resource_schema",
     "resource_tokens",
