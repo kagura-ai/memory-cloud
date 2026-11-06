@@ -195,14 +195,13 @@ class PublicMcpUsageRetention(Base):
 
     __tablename__ = "public_mcp_usage_retention"
 
-    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
-    purged_through_txid: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
-    purged_through_id: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
-    purged_total: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    # A singleton keyed by the literal 1 (the migration inserts it): no sequence,
+    # and the defaults are written the way the migration writes them, so
+    # create_all() and `alembic upgrade head` build the same table.
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=False)
+    purged_through_txid: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    purged_through_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    purged_total: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     purged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (CheckConstraint("id = 1", name="pmur_singleton"),)
