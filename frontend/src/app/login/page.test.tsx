@@ -223,11 +223,27 @@ describe("LoginPage MFA form — Enter key submit (#484)", () => {
     );
   });
 
+  it("waits for IME confirmation and submits pasted full-width digits as ASCII", async () => {
+    mockVerifyMfa.mockResolvedValue({ redirect_url: null });
+    const input = await reachMfaForm();
+    expect(input).toHaveAttribute("inputmode", "numeric");
+    expect(input).not.toHaveAttribute("maxlength");
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "　１２３ ４５６　" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true, keyCode: 229 });
+    expect(mockVerifyMfa).not.toHaveBeenCalled();
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(mockVerifyMfa).toHaveBeenCalledWith(SESSION_TOKEN, "123456", undefined));
+  });
+
   it("accepts a full single-use recovery code on the MFA form", async () => {
     mockVerifyMfa.mockResolvedValue({ redirect_url: null });
     const input = await reachMfaForm();
     const code = "deadbeef-cafebabe-12345678-a0123456";
-    fireEvent.change(input, { target: { value: code } });
+    fireEvent.click(screen.getByRole("button", { name: "useRecoveryCode" }));
+    expect(input).toHaveAttribute("inputmode", "text");
+    fireEvent.change(input, { target: { value: " " + code + " " } });
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(mockVerifyMfa).toHaveBeenCalledWith(SESSION_TOKEN, code, undefined));
   });

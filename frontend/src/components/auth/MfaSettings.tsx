@@ -9,6 +9,8 @@ import { hasPasswordSignIn } from "@/lib/auth/auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { isCompleteMfaCode, normalizeMfaCode } from "@/lib/auth/mfaCode";
+import { MfaCodeInput } from "./MfaCodeInput";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -36,9 +38,12 @@ export function MfaSettings() {
     setError("");
   }
 
+  const normalizedCode = normalizeMfaCode(code);
+  const awaitingCode = step === "verify" || step === "disable";
+  const codeIncomplete = awaitingCode && !isCompleteMfaCode(normalizedCode, step === "disable");
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (busy) return;
+    if (busy || codeIncomplete) return;
     setBusy(true);
     setError("");
     try {
@@ -48,14 +53,14 @@ export function MfaSettings() {
         setEnrollment(data);
         setStep("verify");
       } else if (step === "verify") {
-        const data = await apiClient.post<{recovery_codes: string[]}>("/api/v1/auth/mfa/enable", { code });
+        const data = await apiClient.post<{recovery_codes: string[]}>("/api/v1/auth/mfa/enable", { code: normalizedCode });
         setCode("");
         setEnrollment(null);
         setCodes(data.recovery_codes);
         setStep("codes");
         await refetchUser();
       } else if (step === "disable") {
-        await apiClient.post("/api/v1/auth/mfa/disable", { current_password: password, code });
+        await apiClient.post("/api/v1/auth/mfa/disable", { current_password: password, code: normalizedCode });
         close();
         await refetchUser();
       }
@@ -92,11 +97,11 @@ export function MfaSettings() {
             </div>}
             {(step === "verify" || step === "disable") && <div>
               <Label htmlFor="mfa-code">{step === "verify" ? t("code") : t("codeOrRecovery")}</Label>
-              <Input id="mfa-code" autoComplete="one-time-code" required maxLength={step === "verify" ? 6 : 35}
-                value={code} onChange={e => setCode(e.target.value.trim())} />
+              <MfaCodeInput id="mfa-code" required allowRecovery={step === "disable"}
+                value={code} onChange={e => setCode(e.target.value)} />
             </div>}
             {error && <p role="alert" className="text-destructive">{error}</p>}
-            <Button type="submit" disabled={busy}>{step === "disable" ? t("disable") : step === "verify" ? t("enable") : t("setup")}</Button>
+            <Button type="submit" disabled={busy || codeIncomplete}>{step === "disable" ? t("disable") : step === "verify" ? t("enable") : t("setup")}</Button>
           </form>}
         </DialogContent>
       </Dialog>
