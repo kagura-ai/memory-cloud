@@ -3033,6 +3033,22 @@ Fixed caps (not settings): request body 64 KiB, no JSON-RPC batches, `recall` qu
 
 Every request re-checks the publication with one indexed query (nothing is cached): an unpublished endpoint, a context that is no longer public or no longer bound to the resource, a removed resource or a deleted workspace answers the same `404` from the next request on, including on a session opened before. A workspace whose plan pauses public serving, or that is over its capacity, answers `503` with no details. The Origin allow-list of `/mcp` (`MCP_ALLOWED_ORIGINS`) and `MCP_REQUIRE_MIRRORED_HEADERS` apply unchanged. One log line `public_mcp_call` per `tools/call` records the endpoint, resource, tool, outcome and duration (no query text, memory id, session id or address).
 
+## Public MCP usage events — Issue #2678
+
+Each completed `tools/call` on a public MCP endpoint is also stored as a privacy-minimised **usage event** (tool, outcome, duration, opaque document keys; no query text, session id, address or client identifier). Schema, loss bounds, retention and the export cursor: [Public MCP usage events](public-mcp-usage-events.md).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MCP_PUBLIC_TELEMETRY_ENABLED` | `true` | Persist usage events. Off: no writer runs and only the `public_mcp_call` log line remains. Has no effect while `MCP_PUBLIC_ENDPOINTS_ENABLED` is off (no public calls). |
+| `MCP_PUBLIC_TELEMETRY_QUEUE_SIZE` | `2000` | Events held in memory per API process (100–100,000). A public call only enqueues; when the queue is full the event is dropped and counted in a `queue_full` gap row. This is also the most a process crash can lose. |
+| `MCP_PUBLIC_TELEMETRY_FLUSH_INTERVAL_SECONDS` | `1.0` | Longest wait before a batch (≤ 200 events) is written (0.1–30). |
+| `MCP_PUBLIC_TELEMETRY_WRITE_TIMEOUT_SECONDS` | `5.0` | Time budget of one batch write (0.5–60). A batch that fails twice is dropped and recorded as a `write_failed` gap row. |
+| `MCP_PUBLIC_TELEMETRY_RETENTION_DAYS` | `90` | Days events are kept (1–3650); a daily 04:50 UTC job purges older ones. An export cursor older than the purged range answers `410 cursor_expired`. |
+| `MCP_PUBLIC_TELEMETRY_SESSION_DETAILS_ENABLED` | `false` | Also store a daily session HMAC (keyed with `AUDIT_HMAC_KEY`) and the client's self-declared, **unverified** family on session-era events. Session counts are connections, not people. |
+| `DEPLOYMENT_ID` | `default` | This deployment's name in export envelopes (`[a-z0-9][a-z0-9._-]{0,63}`); not stored per event. |
+
+Search never waits on the event writer: a slow or unavailable database loses telemetry (recorded as gap rows), not availability. A long-running write transaction anywhere on the database server delays the publication of events through the export cursor until it ends; events are late, never skipped. The owner route `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` shows the last 24 hours, the gap rows and the answering process's queue.
+
 ## Reranking — Issue #1572
 
 Recall is hybrid (semantic + BM25); a **cross-encoder reranker** can re-score

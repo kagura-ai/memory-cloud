@@ -130,3 +130,10 @@ def test_documents_are_capped_at_25():
     data["documents"] = [{"doc_key": f"{i:032x}", "chunks": 1, "rank": i + 1} for i in range(26)]
     with pytest.raises(ValidationError):
         PublicMcpUsageEventV1.model_validate(data)
+
+
+def test_docs_state_sessions_are_not_people_and_family_is_unverified():
+    docs = (Path(__file__).resolve().parents[3] / "docs" / "public-mcp-usage-events.md").read_text()
+    assert "Session counts are connections, not people" in docs
+    assert "unverified" in docs
+    assert '"client_family_verified": false' in docs
