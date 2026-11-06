@@ -208,6 +208,8 @@ class SecurityEvent(StrEnum):
     PASSKEY_ADDED = "passkey_added"
     PASSKEY_REMOVED = "passkey_removed"
     SECOND_FACTOR_LOCKED = "second_factor_locked"
+    RECOVERY_CODE_USED = "recovery_code_used"
+    RECOVERY_CODES_REPLACED = "recovery_codes_replaced"
     MFA_ENABLED = "mfa_enabled"
     MFA_DISABLED = "mfa_disabled"
 
@@ -221,7 +223,7 @@ _SIGN_IN_METHOD_LABELS: dict[SecurityEvent, str] = {
 
 # Events that are a sign-in, not a change to the account (#1769): the email's
 # opening line and the digest wording say so.
-_SIGN_IN_EVENTS = frozenset({SecurityEvent.NEW_DEVICE_SIGN_IN})
+_SIGN_IN_EVENTS = frozenset({SecurityEvent.NEW_DEVICE_SIGN_IN, SecurityEvent.RECOVERY_CODE_USED})
 
 # Events that are a refused sign-in attempt: nothing on the account changed,
 # but sign-in failures — at least one of them a wrong second-factor code after
@@ -241,6 +243,14 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
     SecurityEvent.PASSKEY_REMOVED: (
         "A passkey was removed from your Kagura account",
         "A passkey was removed.",
+    ),
+    SecurityEvent.RECOVERY_CODE_USED: (
+        "A recovery code was used to sign in to your Kagura account",
+        "A password sign-in used one of your one-time recovery codes.",
+    ),
+    SecurityEvent.RECOVERY_CODES_REPLACED: (
+        "New recovery codes for your Kagura account",
+        "A new set of recovery codes was generated. The previous codes expired.",
     ),
     SecurityEvent.MFA_ENABLED: (
         "Two-factor authentication enabled",

@@ -181,6 +181,33 @@ async def enable_mfa(
     return RecoveryCodes(recovery_codes=codes)
 
 
+@router.post("/recovery-codes/regenerate", response_model=RecoveryCodes)
+async def regenerate_recovery_codes(
+    body: DisableBody,
+    request: Request,
+    response: Response,
+    user: SessionUser,
+    tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> RecoveryCodes:
+    """Replace all backup codes after fresh password and authenticator verification."""
+    account = await _account(db, user)
+    await _check_password(account, body.current_password)
+    if not account.totp_enabled or not account.totp_secret:
+        raise ConflictError("Two-factor authentication is not enabled")
+    _manager()
+    await asyncio.to_thread(auth._reserve_login_attempt, auth._account_rate_key(account.user_id))
+    secret = get_encryptor().decrypt(account.totp_secret)
+    if not verify_totp(secret, body.code) or not await asyncio.to_thread(
+        auth._claim_totp_code, account.user_id, body.code
+    ):
+        raise AuthenticationError("Invalid or already used authenticator code")
+    codes, account.totp_recovery_hashes = issue_codes()
+    await _commit_change(account, db, request, tasks, SecurityEvent.RECOVERY_CODES_REPLACED)
+    response.headers["Cache-Control"] = "no-store"
+    return RecoveryCodes(recovery_codes=codes)
+
+
 @router.post("/disable", status_code=204, response_class=Response)
 async def disable_mfa(
     body: DisableBody,

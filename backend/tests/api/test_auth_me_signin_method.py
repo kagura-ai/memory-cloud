@@ -166,11 +166,13 @@ class TestAuthMeSignInMethod:
             auth_provider="google",
             password_hash=None,
             totp_enabled=True,
+            totp_recovery_hashes=["stored-digest"],
             is_initial_admin=True,
         )
         result = await get_current_user_info(user=_session(), db=_mock_db(protected))
         assert result["user"]["is_initial_admin"] is True
         assert result["user"]["mfa_enabled"] is True
+        assert result["user"]["mfa_recovery_codes_remaining"] == 1
 
         normal = _db_user(auth_method="oauth", auth_provider="google")
         result2 = await get_current_user_info(user=_session(), db=_mock_db(normal))

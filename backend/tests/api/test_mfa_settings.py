@@ -1,5 +1,6 @@
 """Self-service MFA updates hold the account lock and require fresh credentials."""
 
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pyotp
@@ -10,7 +11,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from api.routes import auth
 from api.routes import mfa_settings as routes
 from auth.password import hash_password
-from auth.recovery_codes import consume_login_code
+from auth.recovery_codes import claim_login_code
 from auth.session import SESSION_COOKIE_NAME
 from models.auth import User
 from services.security_notification_service import SecurityEvent
@@ -73,8 +74,8 @@ async def test_enroll_consume_and_disable(env):
         user.user_id, exclude_session_id="browser-1", strict=True
     )
     epoch = user.mfa_generation
-    assert await consume_login_code(db, user.user_id, codes[0].upper())
-    assert not await consume_login_code(db, user.user_id, codes[0])
+    assert await claim_login_code(db, user.user_id, codes[0].upper())
+    assert not await claim_login_code(db, user.user_id, codes[0])
     response = await routes.disable_mfa(
         routes.DisableBody(current_password="pass", code=codes[1]),
         req,
@@ -115,6 +116,36 @@ async def test_budget_cleanup_failure_still_delivers_recovery_codes_and_notice(e
     response = await enable(env, pyotp.TOTP(enrollment.secret).now())
     assert len(response.recovery_codes) == 8
     assert env[-1].call_args.kwargs["event"] == SecurityEvent.MFA_ENABLED
+
+
+@pytest.mark.asyncio
+async def test_regenerate_requires_fresh_totp_even_if_account_has_no_codes(env):
+    user, db, req, _, notice = env
+    enrollment = await setup(env)
+    totp = pyotp.TOTP(enrollment.secret)
+    current = totp.now()
+    enabled = await enable(env, current)
+
+    async def regenerate(code):
+        return await routes.regenerate_recovery_codes(
+            routes.DisableBody(current_password="pass", code=code),
+            req,
+            Response(),
+            {"user_id": user.user_id},
+            BackgroundTasks(),
+            db,
+        )
+
+    for invalid in [current, enabled.recovery_codes[0]]:
+        with pytest.raises(AuthenticationError):
+            await regenerate(invalid)
+    # An admin whose factor predates recovery codes can generate a first set.
+    user.totp_recovery_hashes = None
+    response = await regenerate(totp.at(int(time.time()) - 30))
+    assert len(response.recovery_codes) == 8
+    assert not await claim_login_code(db, user.user_id, enabled.recovery_codes[0])
+    assert await claim_login_code(db, user.user_id, response.recovery_codes[0])
+    assert notice.call_args.kwargs["event"] == SecurityEvent.RECOVERY_CODES_REPLACED
 
 
 @pytest.mark.asyncio

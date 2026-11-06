@@ -12,15 +12,18 @@ Kagura Memory Cloud provides both REST APIs and MCP (Model Context Protocol) too
 
 ### Password sign-in with two-factor authentication
 
-`GET /api/v1/auth/me` includes `user.mfa_enabled`. An account with a password can manage its authenticator with a signed-in browser session.
+`GET /api/v1/auth/me` includes `user.mfa_enabled` and `user.mfa_recovery_codes_remaining`. An account with a password can manage its authenticator with a signed-in browser session.
 
 | Endpoint | Request | Result |
 |---|---|---|
 | `POST /api/v1/auth/mfa/setup` | `current_password` | A base32 `secret` and `provisioning_uri` to display locally. Pending setup expires after five minutes and is bound to this session and credential state. |
 | `POST /api/v1/auth/mfa/enable` | `code` from the new authenticator | Enables TOTP and returns eight single-use `recovery_codes`. Save them before closing the dialog. |
+| `POST /api/v1/auth/mfa/recovery-codes/regenerate` | `current_password` and a fresh authenticator `code` | Replaces all old codes, signs out other browser sessions and returns eight new codes once. Also available to existing CLI admins with zero codes. |
 | `POST /api/v1/auth/mfa/disable` | `current_password`, plus an authenticator or recovery `code` | HTTP 204. Invalidates the secret and every remaining recovery code. |
 
 Enabling or disabling MFA signs out the account's other browser sessions and sends the owner a security notification. A password login that returns `mfa_required` finishes at `POST /api/v1/auth/mfa/verify`; its existing `totp_code` field accepts either the authenticator value or a recovery code. Failed attempts share the account's password sign-in budget. OAuth sign-in continues to use the provider's authentication. A password reset retains MFA. Disable MFA before removing the password. For lockouts, an operator can run `python -m src.cli.reset_password` with the login ID or user ID and choose “Disable MFA only”.
+
+Successful recovery-code sign-ins consume one code, append a `recovery_code_used` audit entry and notify the account owner. A failed sign-in releases its reservation. If a worker stops mid-sign-in, the reservation expires after five minutes. Code regeneration also writes an audit entry and notifies the owner. Creating an admin with MFA or re-enabling MFA in the operator CLI displays a new recovery set after the change commits.
 
 All API requests require authentication using one of the following methods:
 

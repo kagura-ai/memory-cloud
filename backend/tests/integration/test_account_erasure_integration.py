@@ -40,6 +40,7 @@ from models.auth import (
     APIKey,
     AuditLog,
     User,
+    WebAuthnCredential,
     Workspace,
     WorkspaceInvitation,
     WorkspaceMember,
@@ -313,6 +314,21 @@ class TestAdminForceEraseHappyPath:
 
         service = AccountErasureService(db_session)
         others_before = await _audit_rows_snapshot(db_session, other_actors_audit)
+        for index in range(2):
+            db_session.add(
+                WebAuthnCredential(
+                    user_id=target_user_id,
+                    credential_id=uuid4().bytes,
+                    public_key=b"test",
+                    sign_count=0,
+                    transports=[],
+                    aaguid=str(uuid4()),
+                    backup_eligible=False,
+                    backup_state=False,
+                    name=f"test-{index}",
+                )
+            )
+        await db_session.commit()
 
         request = await service.admin_force_erase(
             target_user_id=target_user_id,
@@ -328,6 +344,10 @@ class TestAdminForceEraseHappyPath:
         assert request.deleted_data_summary is not None
         assert "postgres" in request.deleted_data_summary
         assert request.deleted_data_summary["postgres"]["users"] == 1
+        assert request.deleted_data_summary["postgres"]["webauthn_credentials"] == 2
+        assert not await db_session.scalar(
+            select(WebAuthnCredential.id).where(WebAuthnCredential.user_id == target_user_id)
+        )
         # The audit-log pseudonymize ran inside the Postgres step (#2287;
         # count >= 1 because the prior audit row above was authored by the
         # target).
