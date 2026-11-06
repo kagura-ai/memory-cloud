@@ -159,7 +159,7 @@
     "lastMethodHint": "Your only sign-in method",
     "password": "Current password",
     "connectProof": "To connect a provider, verify with your current password or a passkey, or connect it right after a verified sign-in. Without a password or passkey, set up a password by email first (Profile > Password).",
-    "connectProofRequired": "Verify with your current password or a passkey, or sign in again, then connect {provider}.",
+    "connectProofRequired": "Verify with your current password or a passkey, then connect {provider}. Without either, set up a password by email first (Profile > Password).",
     "connectTooManyAttempts": "Too many verification attempts. Try again in a few minutes."
   },
   "linkedAccounts": {
