@@ -13,11 +13,14 @@ One pipeline for both protocol eras, in this order:
 6. the public handler, under the tool's timeout.
 
 ``record_public_call`` runs once for every call that reaches step 1,
-whatever the outcome.
+whatever the outcome — ``cancelled`` (recorded, then the cancellation goes
+on) when the client goes away or the server shuts down mid-call.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from typing import Any, Literal
 from uuid import UUID
@@ -35,6 +38,7 @@ from mcp_server.public.telemetry import PublicCallRecord, record_public_call
 from mcp_server.public.tools import PUBLIC_HANDLERS, PublicArgumentError, PublicToolResult
 from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import _error_response, execute_with_timeout
+from utils.datetime import utcnow
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
@@ -141,10 +145,29 @@ async def _run(
     except PermissionError as exc:
         logger.warning("public_mcp_tool_refused", tool=name, error_type=type(exc).__name__)
         return PublicToolResult(_unavailable(), "error")
+    except TimeoutError as exc:  # ``execute_with_timeout`` at the tool's timeout
+        return PublicToolResult(
+            _tool_exception_response(name, exc, echo_value_error=False),
+            "error",
+            error_code="timeout",
+        )
     except Exception as exc:  # noqa: BLE001 - logged with a correlation id, never echoed
         return PublicToolResult(
             _tool_exception_response(name, exc, echo_value_error=False), "error"
         )
+
+
+def _error_code(result: PublicToolResult) -> str | None:
+    """The public error code of a refusal or failure (``None`` on success)."""
+    if result.outcome in ("success", "degraded"):
+        return None
+    if result.error_code is not None:
+        return result.error_code
+    try:
+        code = json.loads(result.content[0].text).get("error")
+    except Exception:  # noqa: BLE001 - telemetry must not change the reply
+        return None
+    return code if isinstance(code, str) else None
 
 
 async def call_public_tool(
@@ -156,6 +179,7 @@ async def call_public_tool(
     era: Literal["session", "stateless"],
     session_id: str | None,
     protocol_version: str | None = None,
+    client_name: str | None = None,
 ) -> list[TextContent]:
     """Run one public ``tools/call`` and record it once.
 
@@ -167,14 +191,19 @@ async def call_public_tool(
         era: ``"session"`` or ``"stateless"``.
         session_id: The session id (session era), counted in its bucket.
         protocol_version: The negotiated / declared protocol version.
+        client_name: The session's self-declared client name (session era).
 
     Returns:
         The tool result content; an error result is marked ``is_error``.
     """
     started = time.perf_counter()
-    result = PublicToolResult(_unavailable(), "error")
+    started_at = utcnow()
+    result = PublicToolResult(_unavailable(), "error", error_code="internal_error")
     try:
         result = await _run(endpoint, view, name, arguments, session_id)
+    except asyncio.CancelledError:
+        result = PublicToolResult([], "cancelled")
+        raise
     finally:
         tool = name[:_NAME_CHARS] if isinstance(name, str) else str(name)[:_NAME_CHARS]
         record_public_call(
@@ -192,6 +221,11 @@ async def call_public_tool(
                 protocol_version=protocol_version,
                 result_count=result.result_count,
                 continuation=result.continuation,
+                started_at=started_at,
+                error_code=_error_code(result),
+                doc_ids=result.doc_ids,
+                session_id=session_id,
+                client_name=client_name,
             )
         )
     return result.content

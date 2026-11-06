@@ -1157,6 +1157,7 @@ Workspace owner only (session or owner API key). Publishes a resource's public c
 | `GET /api/v1/resources/{resource_id}/public-mcp` | The live endpoint, or `404` |
 | `PATCH /api/v1/resources/{resource_id}/public-mcp` | Edit any of the three texts (`""` clears the description or usage guide); the address does not change |
 | `DELETE /api/v1/resources/{resource_id}/public-mcp` | Unpublish → `204`; `404` when none is live. Publishing again mints a new address |
+| `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` | Usage event health ([#2678](https://github.com/kagura-ai/memory-cloud/issues/2678)): `{resource_id, endpoint_id, window_hours, events, outcomes, gaps: {count, dropped_events, last_gap_at}, writer: {enabled, queue_depth, queue_capacity, dropped_since_start, last_flush_at, last_flush_ok, process_local}, retention_days}`. `endpoint_id` is the live endpoint (`null` when unpublished); `events` / `outcomes` count its calls of the last 24 hours; `gaps` are the deployment's gap rows in that window (events the server could not record); `writer` is the answering API process only. `404` for a slug of another workspace. See [Public MCP usage events](public-mcp-usage-events.md) |
 
 Response: `{public_id, endpoint_path, resource_id, context_id, public_name, public_description, public_usage_guide, created_at, updated_at, serving}`. `endpoint_path` is a path on this deployment; `serving` is true while `MCP_PUBLIC_ENDPOINTS_ENABLED` is on and the context is still public and bound to the resource.
 

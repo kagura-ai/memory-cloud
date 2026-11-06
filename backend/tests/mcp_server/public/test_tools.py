@@ -94,6 +94,8 @@ def session(monkeypatch):
         yield db
 
     monkeypatch.setattr(tools, "_read_session", _session)
+    # recall's cost-row commit is exercised on the database (integration test).
+    monkeypatch.setattr(tools, "_recall_session", _session)
     return db
 
 
