@@ -9,6 +9,8 @@ import { hasPasswordSignIn } from "@/lib/auth/auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { isCompleteMfaCode, normalizeMfaCode } from "@/lib/auth/mfaCode";
+import { MfaCodeInput } from "./MfaCodeInput";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -36,9 +38,12 @@ export function MfaSettings() {
     setError("");
   }
 
+  const normalizedCode = normalizeMfaCode(code);
+  const awaitingCode = step === "verify" || step === "disable" || step === "regenerate";
+  const codeIncomplete = awaitingCode && !isCompleteMfaCode(normalizedCode, step === "disable");
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (busy) return;
+    if (busy || codeIncomplete) return;
     setBusy(true);
     setError("");
     try {
@@ -49,8 +54,8 @@ export function MfaSettings() {
         setStep("verify");
       } else if (step === "verify" || step === "regenerate") {
         const data = step === "verify"
-          ? await apiClient.post<{recovery_codes: string[]}>("/api/v1/auth/mfa/enable", { code })
-          : await apiClient.post<{recovery_codes: string[]}>("/api/v1/auth/mfa/recovery-codes/regenerate", { current_password: password, code });
+          ? await apiClient.post<{recovery_codes: string[]}>("/api/v1/auth/mfa/enable", { code: normalizedCode })
+          : await apiClient.post<{recovery_codes: string[]}>("/api/v1/auth/mfa/recovery-codes/regenerate", { current_password: password, code: normalizedCode });
         setPassword("");
         setCode("");
         setEnrollment(null);
@@ -58,7 +63,7 @@ export function MfaSettings() {
         setStep("codes");
         await refetchUser();
       } else if (step === "disable") {
-        await apiClient.post("/api/v1/auth/mfa/disable", { current_password: password, code });
+        await apiClient.post("/api/v1/auth/mfa/disable", { current_password: password, code: normalizedCode });
         close();
         await refetchUser();
       }
@@ -98,13 +103,13 @@ export function MfaSettings() {
               <QRCodeSVG value={enrollment.provisioning_uri} size={160} marginSize={4} title={t("qr")} />
               <p>{t("manual")}</p><code className="break-all select-all">{enrollment.secret}</code>
             </div>}
-            {(step === "verify" || step === "disable" || step === "regenerate") && <div>
+            {awaitingCode && <div>
               <Label htmlFor="mfa-code">{step === "disable" ? t("codeOrRecovery") : t("code")}</Label>
-              <Input id="mfa-code" autoComplete="one-time-code" required maxLength={step === "disable" ? 35 : 6}
-                value={code} onChange={e => setCode(e.target.value.trim())} />
+              <MfaCodeInput id="mfa-code" required allowRecovery={step === "disable"}
+                value={code} onChange={e => setCode(e.target.value)} />
             </div>}
             {error && <p role="alert" className="text-destructive">{error}</p>}
-            <Button type="submit" disabled={busy}>{t(step === "verify" ? "enable" : step ?? "setup")}</Button>
+            <Button type="submit" disabled={busy || codeIncomplete}>{t(step === "verify" ? "enable" : step ?? "setup")}</Button>
           </form>}
         </DialogContent>
       </Dialog>

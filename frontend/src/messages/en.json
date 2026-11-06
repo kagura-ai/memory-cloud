@@ -370,6 +370,8 @@
     "saved": "I saved my codes",
     "password": "Current password",
     "code": "Authenticator code",
+    "useRecoveryCode": "Use a recovery code",
+    "useAuthenticatorCode": "Use an authenticator code",
     "codeOrRecovery": "Authenticator or recovery code",
     "qr": "Authenticator setup QR code",
     "manual": "Manual setup key",
