@@ -23,7 +23,7 @@ from models.auth import AuditLog, User, UserOAuthProvider, WebAuthnCredential
 from services.account_linking_service import AccountLinkingService
 from services.password_account_service import PasswordAccountService
 from services.user_deletion_service import delete_user_rows
-from utils.exceptions import MemoryCloudException, RateLimitError
+from utils.exceptions import MemoryCloudException, RateLimitError, RedisError
 
 
 class Authenticator:
@@ -506,6 +506,41 @@ async def test_failed_assertions_spend_the_passkey_counter_and_then_answer_429(
     assert pk.auth._create_password_session.await_count == 0
     pk.auth._reserve_login_attempt.assert_not_called()
     assert not [key for key in attempts.values if key.startswith("login_attempts:")]
+    user_id = owner.user_id
+    await db_session.rollback()
+    assert await stored_sign_count(db_session, user_id) == 1
+
+
+async def stored_sign_count(db, user_id):
+    return await db.scalar(
+        select(WebAuthnCredential.sign_count).where(WebAuthnCredential.user_id == user_id)
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_passkey_sign_in_is_refused_when_the_attempt_counter_is_unavailable(
+    db_session, ceremony, monkeypatch
+):
+    owner = await enrolled(db_session, ceremony)
+    verify = Mock(wraps=pk.verify_authentication_response)
+    monkeypatch.setattr(pk, "verify_authentication_response", verify)
+
+    async def incr(key, ttl=None):
+        if key.startswith("webauthn_signin:"):
+            raise RedisError("Failed to increment counter")
+        return 1
+
+    monkeypatch.setattr(pk, "increment_counter", incr)
+
+    with pytest.raises(RedisError):
+        await sign_in(db_session, owner, ceremony, count=2)
+
+    verify.assert_not_called()
+    assert pk.auth._create_password_session.await_count == 0
+    pk.auth._reserve_login_attempt.assert_not_called()
+    user_id = owner.user_id
+    await db_session.rollback()
+    assert await stored_sign_count(db_session, user_id) == 1
 
 
 @pytest.mark.asyncio
