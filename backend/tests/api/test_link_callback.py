@@ -24,6 +24,7 @@ The companion ``_email_in_use_redirect`` (login email-collision) change — the
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -575,6 +576,54 @@ async def test_callback_when_session_no_longer_holds_user_fails_closed(monkeypat
     assert result.headers["location"] == "http://localhost:3000/profile?error=link_failed"
     fake_service_cls.assert_not_called()
     sm.session_holds_user.assert_called_once_with(SESSION_ID, "u-42")
+
+
+@pytest.mark.asyncio
+async def test_link_waits_for_a_reset_holding_the_account_and_then_links_nothing(
+    db_session: AsyncSession, monkeypatch
+):
+    """A password reset holds the account's ``users`` row from before it signs
+    the account out until it commits. A callback that passed its session check
+    before the reset waits for that row, checks the session again, finds it
+    signed out and attaches nothing."""
+    monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000")
+    suffix = uuid4().hex[:8]
+    user = await _make_user(db_session, suffix=suffix)
+    new_sub = f"gh-reset-{suffix}"
+    sm, _redis = _mock_session_manager_with_redis(_link_state(suffix, user.user_id))
+    signed_in = {"value": True}
+    sm.session_holds_user.side_effect = lambda _session, _user: signed_in["value"]
+
+    async with AsyncSession(db_session.bind) as reset:
+        await reset.execute(select(User).where(User.user_id == user.user_id).with_for_update())
+        with patch.object(auth_module, "_session_manager", sm), _patch_get_db(db_session):
+            callback = asyncio.create_task(
+                _maybe_link_redirect(
+                    state=suffix,
+                    request=_request(),
+                    provider="github",
+                    idp_sub=new_sub,
+                    idp_email=user.email,
+                    ip_address=None,
+                    user_agent=None,
+                )
+            )
+            await asyncio.sleep(0.5)
+            assert not callback.done()
+            # The reset signs the account out, then commits.
+            signed_in["value"] = False
+            await reset.commit()
+            result = await asyncio.wait_for(callback, timeout=10)
+
+    assert isinstance(result, RedirectResponse)
+    assert result.headers["location"] == "http://localhost:3000/profile?error=link_failed"
+    assert sm.session_holds_user.call_count == 2
+    row = (
+        await db_session.execute(
+            select(UserOAuthProvider).filter_by(provider="github", oauth_sub=new_sub)
+        )
+    ).scalar_one_or_none()
+    assert row is None
 
 
 @pytest.mark.asyncio
