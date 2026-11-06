@@ -199,7 +199,7 @@ def _project(memory: Memory, score: float | None = None) -> dict[str, Any]:
     """The public fields of one memory (recall item with ``score`` / reference head)."""
     item: dict[str, Any] = {
         "memory_id": str(memory.id),
-        "doc_key": memory.resource_doc_id,
+        "doc_id": memory.resource_doc_id,
         "summary": memory.summary,
     }
     if score is not None:
@@ -301,7 +301,7 @@ async def public_recall(endpoint: ServingEndpoint, args: dict[str, Any]) -> Publ
         _success(payload),
         "degraded" if degraded else "success",
         result_count=placed,
-        doc_ids=_doc_ids([r["doc_key"] for r in results[:placed]]),
+        doc_ids=_doc_ids([r["doc_id"] for r in results[:placed]]),
     )
 
 
@@ -341,7 +341,7 @@ async def public_reference(endpoint: ServingEndpoint, args: dict[str, Any]) -> P
 @dataclass(frozen=True)
 class _Neighbour:
     memory_id: UUID
-    doc_key: str | None
+    doc_id: str | None
     summary: str
     edge_type: str
 
@@ -430,13 +430,13 @@ async def public_explore(endpoint: ServingEndpoint, args: dict[str, Any]) -> Pub
     exploration: dict[str, Any] = {
         "seed": {
             "memory_id": str(seed.id),
-            "doc_key": seed.resource_doc_id,
+            "doc_id": seed.resource_doc_id,
             "summary": seed.summary,
         },
         "related": [
             {
                 "memory_id": str(n.memory_id),
-                "doc_key": n.doc_key,
+                "doc_id": n.doc_id,
                 "summary": n.summary,
                 "hop": hop,
                 "edge_type": n.edge_type,
@@ -451,7 +451,7 @@ async def public_explore(endpoint: ServingEndpoint, args: dict[str, Any]) -> Pub
         _success({"exploration": exploration}),
         "success",
         result_count=len(related),
-        doc_ids=_doc_ids([seed.resource_doc_id, *(n.doc_key for n, _ in related)]),
+        doc_ids=_doc_ids([seed.resource_doc_id, *(n.doc_id for n, _ in related)]),
     )
 
 

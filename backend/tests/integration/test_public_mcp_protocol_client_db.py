@@ -159,7 +159,7 @@ async def test_sdk_client_initializes_lists_and_calls(published, monkeypatch) ->
             found = await session.call_tool("recall", {"query": "return policy"})
             assert not found.is_error
             payload = json.loads(found.content[0].text)
-            assert [r["doc_key"] for r in payload["results"]] == ["faq-1"]
+            assert [r["doc_id"] for r in payload["results"]] == ["faq-1"]
             assert payload["results"][0]["source_url"] == "https://help.example.test/returns"
 
             denied = await session.call_tool("remember", {"summary": "x"})

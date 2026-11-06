@@ -481,7 +481,7 @@ async def test_public_data_only_through_every_tool(harness: Harness) -> None:
     assert set(ids) == {str(w.mem[k]) for k in ("p1", "p2", "p3", "p4")}
     by_id = {r["memory_id"]: r for r in body["results"]}
     assert by_id[str(w.mem["p1"])]["source_url"] == "https://shop.example.test/p/1"
-    assert by_id[str(w.mem["p1"])]["doc_key"] == "sku-1"
+    assert by_id[str(w.mem["p1"])]["doc_id"] == "sku-1"
     assert "source_url" not in by_id[str(w.mem["p4"])]  # s3:// is not public
     kwargs = harness.search.await_args.kwargs
     assert kwargs["user_id"] == w.owner
@@ -543,7 +543,7 @@ async def test_public_data_only_through_every_tool(harness: Harness) -> None:
         (str(w.mem["p4"]), 2),
     ]
     assert related[0]["edge_type"] == "neural_association"  # the strongest of the two edges
-    assert all(set(r) == {"memory_id", "doc_key", "summary", "hop", "edge_type"} for r in related)
+    assert all(set(r) == {"memory_id", "doc_id", "summary", "hop", "edge_type"} for r in related)
     assert str(w.mem["p3"]) not in json.dumps(body)
     _assert_clean(w, json.dumps(body))
     body, is_error = await harness.call(pid, session, "explore", memory_id=str(w.mem["c"]))
