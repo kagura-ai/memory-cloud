@@ -105,6 +105,156 @@ class ContextListingFailedError(Exception):
     """
 
 
+async def aggregate_context_tags(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    context_id: UUID,
+    limit: int,
+    min_count: int,
+    sort: TagSortMode,
+    prefix: str,
+    q: str | None,
+    with_tags: list[str] | None,
+    resource_id: str | None = None,
+) -> list[dict]:
+    """Aggregate the tags of a context's non-deleted memories (#614, #2675).
+
+    The query behind ``ContextService.aggregate_tags``, without its access
+    check: the caller has already resolved the context. ``resource_id``
+    narrows the rows to one resource's ingested memories (the public MCP
+    endpoint's scope); ``None`` keeps every row of the context.
+
+    Args:
+        db: Session.
+        workspace_id: The context's workspace (kept as a filter so a shared
+            context never crosses the workspace boundary).
+        context_id: The context.
+        limit: Maximum tags to return (validated by the caller).
+        min_count: Minimum memory count per tag (validated by the caller).
+        sort: ``"count"`` / ``"recent"`` / ``"alpha"`` (validated by the caller).
+        prefix: Case-insensitive tag prefix; ``%`` / ``_`` / ``#`` are literal.
+        q: Case-insensitive substring filter on ``summary``.
+        with_tags: Multi-tag AND drill-down; those tags are excluded from the
+            result. At most 50 tags of at most 200 characters.
+        resource_id: Only memories whose ``resource_id`` equals this slug.
+
+    Returns:
+        ``[{"tag", "count", "last_used_at"}]`` in ``sort`` order.
+
+    Raises:
+        ValidationError: ``with_tags`` over its caps.
+    """
+    from sqlalchemy import text
+
+    if prefix:
+        escaped = prefix.replace("#", "##").replace("%", "#%").replace("_", "#_")
+        prefix_pattern = f"{escaped}%"
+    else:
+        prefix_pattern = ""
+
+    # #618: optional ``q`` facets the cloud to tags on memories whose summary
+    # matches (same substring semantics as GET /memory/list?q). Escape
+    # #/%/_ to literals so it can't be used as a wildcard probe.
+    q_clean = (q or "").strip()
+    if q_clean:
+        eq = q_clean.replace("#", "##").replace("%", "#%").replace("_", "#_")
+        q_pattern = f"%{eq}%"
+    else:
+        q_pattern = ""
+
+    # #830: optional ``with_tags`` facets the cloud to tags that co-occur
+    # with ALL of the given tags (multi-tag AND drill-down). The matched
+    # memory set is narrowed via ``tags @> with_tags`` (GIN-indexed), and
+    # the with_tags values themselves are excluded from the returned cloud
+    # ("what else can I add"). Bound as a single ``varchar[]`` param — never
+    # interpolated — so each tag value is safe. An empty list is a no-op:
+    # ``tags @> '{}'`` is always true and ``tag <> ALL('{}')`` excludes
+    # nothing, so the result matches the pre-#830 (#618) behaviour exactly.
+    # Bind the STRIPPED value (not the raw one): a request like
+    # ``?with_tags=%20python%20`` must match memories tagged ``python`` and
+    # self-exclude ``python`` from the cloud, not bind a literal `" python "`
+    # that matches nothing (Copilot review on PR #833).
+    with_tags_clean = [s for t in (with_tags or []) if (s := t.strip())]
+    if len(with_tags_clean) > 50:
+        raise ValidationError("with_tags accepts at most 50 tags.")
+    if any(len(t) > 200 for t in with_tags_clean):
+        raise ValidationError("each with_tags value must be at most 200 characters.")
+
+    # sort is allow-list validated by the caller; safe to interpolate.
+    sort_clause = {
+        "count": "ORDER BY cnt DESC, tag ASC",
+        "recent": "ORDER BY last_used_at DESC NULLS LAST, tag ASC",
+        "alpha": "ORDER BY lower(tag) ASC, tag ASC",
+    }[sort]
+
+    sql = text(
+        f"""
+        WITH scope AS (
+            SELECT id,
+                   tags,
+                   GREATEST(created_at, updated_at) AS last_at
+            FROM memories
+            WHERE workspace_id = CAST(:workspace_id AS uuid)
+              AND context_id = CAST(:context_id AS uuid)
+              AND (
+                  CAST(:resource_id AS varchar) IS NULL
+                  OR resource_id = CAST(:resource_id AS varchar)
+              )
+              AND deleted_at IS NULL
+              AND tags IS NOT NULL
+              AND cardinality(tags) > 0
+              AND (:q_pattern = '' OR summary ILIKE :q_pattern ESCAPE '#')
+              AND tags @> CAST(:with_tags AS varchar[])
+        ),
+        tag_rows AS (
+            -- DISTINCT id, tag collapses intra-array duplicates so a
+            -- memory with ['python','python'] counts once. last_at is
+            -- functionally determined by id, so including it does not
+            -- change distinctness.
+            SELECT DISTINCT id, unnest(tags)::text AS tag, last_at
+            FROM scope
+        ),
+        tag_counts AS (
+            SELECT
+                tag,
+                COUNT(*) AS cnt,
+                MAX(last_at) AS last_used_at
+            FROM tag_rows
+            WHERE (:prefix_pattern = '' OR tag ILIKE :prefix_pattern ESCAPE '#')
+              AND tag <> ALL(CAST(:with_tags AS varchar[]))
+            GROUP BY tag
+            HAVING COUNT(*) >= :min_count
+        )
+        SELECT tag, cnt, last_used_at
+        FROM tag_counts
+        {sort_clause}
+        LIMIT :limit
+        """  # noqa: S608 — sort_clause is allow-listed
+    )
+    result = await db.execute(
+        sql,
+        {
+            "workspace_id": str(workspace_id),
+            "context_id": str(context_id),
+            "prefix_pattern": prefix_pattern,
+            "q_pattern": q_pattern,
+            "with_tags": with_tags_clean,
+            "min_count": min_count,
+            "limit": limit,
+            "resource_id": resource_id,
+        },
+    )
+    return [
+        {
+            "tag": row.tag,
+            "count": int(row.cnt),
+            "last_used_at": row.last_used_at,
+        }
+        for row in result
+    ]
+
+
 class ContextService:
     """Service for managing user contexts.
 
@@ -2052,7 +2202,6 @@ class ContextService:
             NotFoundException: Context not found or caller lacks access.
             ValidationError: Invalid ``sort`` mode.
         """
-        from sqlalchemy import text
 
         if sort not in self._LIST_TAGS_SORT_MODES:
             raise ValidationError(
@@ -2078,107 +2227,17 @@ class ContextService:
             operation="list",
         )
 
-        if prefix:
-            escaped = prefix.replace("#", "##").replace("%", "#%").replace("_", "#_")
-            prefix_pattern = f"{escaped}%"
-        else:
-            prefix_pattern = ""
-
-        # #618: optional ``q`` facets the cloud to tags on memories whose summary
-        # matches (same substring semantics as GET /memory/list?q). Escape
-        # #/%/_ to literals so it can't be used as a wildcard probe.
-        q_clean = (q or "").strip()
-        if q_clean:
-            eq = q_clean.replace("#", "##").replace("%", "#%").replace("_", "#_")
-            q_pattern = f"%{eq}%"
-        else:
-            q_pattern = ""
-
-        # #830: optional ``with_tags`` facets the cloud to tags that co-occur
-        # with ALL of the given tags (multi-tag AND drill-down). The matched
-        # memory set is narrowed via ``tags @> with_tags`` (GIN-indexed), and
-        # the with_tags values themselves are excluded from the returned cloud
-        # ("what else can I add"). Bound as a single ``varchar[]`` param — never
-        # interpolated — so each tag value is safe. An empty list is a no-op:
-        # ``tags @> '{}'`` is always true and ``tag <> ALL('{}')`` excludes
-        # nothing, so the result matches the pre-#830 (#618) behaviour exactly.
-        # Bind the STRIPPED value (not the raw one): a request like
-        # ``?with_tags=%20python%20`` must match memories tagged ``python`` and
-        # self-exclude ``python`` from the cloud, not bind a literal `" python "`
-        # that matches nothing (Copilot review on PR #833).
-        with_tags_clean = [s for t in (with_tags or []) if (s := t.strip())]
-        if len(with_tags_clean) > 50:
-            raise ValidationError("with_tags accepts at most 50 tags.")
-        if any(len(t) > 200 for t in with_tags_clean):
-            raise ValidationError("each with_tags value must be at most 200 characters.")
-
-        # sort is allow-list validated above; safe to interpolate.
-        sort_clause = {
-            "count": "ORDER BY cnt DESC, tag ASC",
-            "recent": "ORDER BY last_used_at DESC NULLS LAST, tag ASC",
-            "alpha": "ORDER BY lower(tag) ASC, tag ASC",
-        }[sort]
-
-        sql = text(
-            f"""
-            WITH scope AS (
-                SELECT id,
-                       tags,
-                       GREATEST(created_at, updated_at) AS last_at
-                FROM memories
-                WHERE workspace_id = CAST(:workspace_id AS uuid)
-                  AND context_id = CAST(:context_id AS uuid)
-                  AND deleted_at IS NULL
-                  AND tags IS NOT NULL
-                  AND cardinality(tags) > 0
-                  AND (:q_pattern = '' OR summary ILIKE :q_pattern ESCAPE '#')
-                  AND tags @> CAST(:with_tags AS varchar[])
-            ),
-            tag_rows AS (
-                -- DISTINCT id, tag collapses intra-array duplicates so a
-                -- memory with ['python','python'] counts once. last_at is
-                -- functionally determined by id, so including it does not
-                -- change distinctness.
-                SELECT DISTINCT id, unnest(tags)::text AS tag, last_at
-                FROM scope
-            ),
-            tag_counts AS (
-                SELECT
-                    tag,
-                    COUNT(*) AS cnt,
-                    MAX(last_at) AS last_used_at
-                FROM tag_rows
-                WHERE (:prefix_pattern = '' OR tag ILIKE :prefix_pattern ESCAPE '#')
-                  AND tag <> ALL(CAST(:with_tags AS varchar[]))
-                GROUP BY tag
-                HAVING COUNT(*) >= :min_count
-            )
-            SELECT tag, cnt, last_used_at
-            FROM tag_counts
-            {sort_clause}
-            LIMIT :limit
-            """  # noqa: S608 — sort_clause is allow-listed
+        rows = await aggregate_context_tags(
+            self.db,
+            workspace_id=context.workspace_id,
+            context_id=context_id,
+            limit=limit,
+            min_count=min_count,
+            sort=sort,
+            prefix=prefix,
+            q=q,
+            with_tags=with_tags,
         )
-        result = await self.db.execute(
-            sql,
-            {
-                "workspace_id": str(context.workspace_id),
-                "context_id": str(context_id),
-                "prefix_pattern": prefix_pattern,
-                "q_pattern": q_pattern,
-                "with_tags": with_tags_clean,
-                "min_count": min_count,
-                "limit": limit,
-            },
-        )
-        rows = [
-            {
-                "tag": row.tag,
-                "count": int(row.cnt),
-                "last_used_at": row.last_used_at,
-            }
-            for row in result
-        ]
         return {"context_name": context.name, "rows": rows}
 
     async def get_context_stats(
