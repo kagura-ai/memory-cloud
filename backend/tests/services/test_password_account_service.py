@@ -290,6 +290,20 @@ async def oauth_client(db_session: AsyncSession) -> AsyncIterator[str]:
     await db_session.commit()
 
 
+def _passkey(user_id: str) -> WebAuthnCredential:
+    return WebAuthnCredential(
+        user_id=user_id,
+        credential_id=uuid4().bytes,
+        public_key=b"public-key",
+        sign_count=0,
+        transports=["internal"],
+        aaguid=str(uuid4()),
+        backup_eligible=False,
+        backup_state=False,
+        name="Passkey",
+    )
+
+
 async def _grants(db: AsyncSession, client_id: str, user_id: str) -> str:
     """Give ``user_id`` a live token, a pending code and an approved device code.
 
@@ -447,19 +461,7 @@ class TestResetRevokesOAuthGrants:
         user = await _user(db_session, made)
         other = await _user(db_session, made)
         for uid in (user.user_id, user.user_id, other.user_id):
-            db_session.add(
-                WebAuthnCredential(
-                    user_id=uid,
-                    credential_id=uuid4().bytes,
-                    public_key=b"public-key",
-                    sign_count=0,
-                    transports=["internal"],
-                    aaguid=str(uuid4()),
-                    backup_eligible=False,
-                    backup_state=False,
-                    name="Passkey",
-                )
-            )
+            db_session.add(_passkey(uid))
         await db_session.flush()
         service = PasswordAccountService(db_session, email_service=_email())
         pending = await service.request_reset(email=user.email)
@@ -493,7 +495,8 @@ class TestResetRevokesOAuthGrants:
     ) -> None:
         user = await _user(db_session, made)
         uid = user.user_id
-        token = await _grants(db_session, oauth_client, uid)
+        db_session.add(_passkey(uid))
+        token = await _grants(db_session, oauth_client, uid)  # commits the passkey too
         service = PasswordAccountService(db_session, email_service=_email())
         pending = await service.request_reset(email=user.email)
         assert pending is not None
@@ -509,6 +512,12 @@ class TestResetRevokesOAuthGrants:
         db_session.expire_all()
         assert await find_active_oauth_token(token, db_session) is not None
         assert await _pending_grants(db_session, uid) == (1, 1)
+        passkeys = await db_session.scalar(
+            select(func.count())
+            .select_from(WebAuthnCredential)
+            .where(WebAuthnCredential.user_id == uid)
+        )
+        assert passkeys == 1
 
     async def test_keeps_earlier_revocation_times(
         self, db_session: AsyncSession, made: _Made, oauth_client: str

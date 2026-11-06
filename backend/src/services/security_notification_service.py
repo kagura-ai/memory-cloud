@@ -260,7 +260,8 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
     ),
     SecurityEvent.PASSWORD_RESET: (
         "Your Kagura password was reset",
-        "Your password was reset with a link sent to this address.",
+        "Your password was reset with a link sent to this address."
+        " Your passkeys were removed; add them again from your profile.",
     ),
     # Neutral wording: device-flow approvals notify every time, not only for
     # an app the account never authorized before.

@@ -47,8 +47,9 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
   for at most the OAuth state lifetime (5 minutes); starting it again works.
 - **Email + password** for existing accounts. A password reset — by emailed
   link, or by an operator with the `reset_password` CLI (choices 1 and 3) —
-  signs out every browser session and revokes every OAuth / MCP token and
-  pending grant (authorization code, device code) of the account. The grant
+  signs out every browser session, revokes every OAuth / MCP token and
+  pending grant (authorization code, device code) and deletes every passkey
+  of the account. The grant
   revocations are in the database transaction of the new password; the
   sessions live in Redis and are deleted just before that transaction
   commits, so the password is never committed while old sessions survive (a

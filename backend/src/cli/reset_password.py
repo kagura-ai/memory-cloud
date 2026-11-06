@@ -245,8 +245,8 @@ def reset_password():
                 # revocations must not be committed without them (#1866).
                 db.rollback()
                 print(f"\n✗ Could not delete the browser sessions ({type(exc).__name__}).")
-                print("  The reset was rolled back: the password, MFA and OAuth grants are as")
-                print("  before. Sessions the store already dropped stay signed out.")
+                print("  The reset was rolled back: the password, MFA, OAuth grants and passkeys")
+                print("  are as before. Sessions the store already dropped stay signed out.")
                 print("  Check the session store (REDIS_URL) and run this command again.")
                 sys.exit(1)
 
@@ -258,7 +258,8 @@ def reset_password():
             db.rollback()
             print(f"\n✗ The database commit failed ({type(exc).__name__}).")
             if session_store is not None:
-                print("  The password was NOT changed; MFA and the OAuth grants are as before.")
+                print("  The password was NOT changed; MFA, the OAuth grants and the passkeys")
+                print("  are as before.")
                 print("  The browser sessions of the account were already signed out.")
                 print("  Run this command again to complete the reset.")
             else:
