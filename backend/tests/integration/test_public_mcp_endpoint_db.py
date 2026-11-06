@@ -39,8 +39,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
 from models.auth import Context, User, Workspace, WorkspaceMember
+from models.llm_call_log import LLMCallLog
 from models.memory import Memory, NeuralMemoryEdge
 from models.resource import Resource
+from services.llm_call_log_writer import LLMCallLogWriter
+from services.search_service import SearchService
 from utils.datetime import utcnow
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -663,12 +666,35 @@ async def test_public_reads_write_no_statistics(harness: Harness) -> None:
             assert ctx is not None
             return [tuple(r) for r in rows] + [tuple(e) for e in edges] + [(ctx.last_used_at,)]
 
+    async def search(self: SearchService, **kwargs: Any) -> list[dict[str, Any]]:
+        # What the real search does on its session: one embedding cost row.
+        await LLMCallLogWriter(self.db).record(
+            caller="recall",
+            call_type="embedding",
+            provider="test",
+            model="test-embed",
+            user_id=kwargs["user_id"],
+            workspace_id=kwargs["workspace_id"],
+            context_id=kwargs["context_id"],
+            embedding_tokens=7,
+        )
+        return [{"id": str(w.mem["p1"]), "score": 0.9, "payload": {}}]
+
+    cost_rows = select(LLMCallLog.user_id, LLMCallLog.embedding_tokens).where(
+        LLMCallLog.workspace_id == w.ws["main"]
+    )
     before = await stats()
-    await harness.call(pid, session, "recall", query="shoe")
+    with patch.object(SearchService, "hybrid_search", new=search):
+        body, is_error = await harness.call(pid, session, "recall", query="shoe")
+    assert not is_error and body["count"] == 1
     await harness.call(pid, session, "reference", memory_id=str(w.mem["p1"]))
     await harness.call(pid, session, "explore", memory_id=str(w.mem["p1"]), depth=2)
     await harness.call(pid, session, "list_tags")
     assert await stats() == before
+    async with w.factory() as s:
+        assert (await s.execute(cost_rows)).all() == [(w.owner, 7)]
+        await s.execute(delete(LLMCallLog).where(LLMCallLog.workspace_id == w.ws["main"]))
+        await s.commit()
     await harness.unpublish()
 
 

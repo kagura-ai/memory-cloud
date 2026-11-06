@@ -5,7 +5,8 @@ the fields listed in its projection: no ``details``, ``scope``,
 ``importance``, ``client``, versions, links, statistics, workspace or search
 configuration. Nothing here writes — no access statistics, no graph learning,
 no usage rows, no ``last_used_at`` — so an anonymous read never moves a
-signal the workspace's own members rely on.
+signal the workspace's own members rely on. The one row kept is the
+embedding cost the search records for ``recall`` (``llm_call_log``).
 
 ``recall`` uses the search service the REST public search uses (the
 workspace owner's id is only the embedding-key principal, reranking off) and
@@ -23,7 +24,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from mcp.types import TextContent
-from sqlalchemy import func, select, union_all
+from sqlalchemy import event, func, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_server.public.limits import (
@@ -46,9 +47,13 @@ from mcp_server.public.publication import ServingEndpoint
 from mcp_server.public.scope import public_rows
 from mcp_server.tools._helpers import _dumps, _error_response
 from mcp_server.tools.memory import _reference_page, _ReferenceOffsetError
+from models.llm_call_log import LLMCallLog
 from models.memory import Memory, NeuralMemoryEdge
 from utils.datetime import to_utc_iso
+from utils.logger import get_logger
 from utils.response_budget import fit_items
+
+logger = get_logger(__name__)
 
 # Room left in ``max_chars`` for the recall envelope around the results.
 _RECALL_ENVELOPE_RESERVE = 200
@@ -81,6 +86,40 @@ async def _read_session() -> AsyncIterator[AsyncSession]:
         async for db in sessions:
             yield db
             return
+
+
+@contextlib.asynccontextmanager
+async def _recall_session() -> AsyncIterator[AsyncSession]:
+    """A read session that commits only the search's cost rows (``llm_call_log``).
+
+    The search records its embedding cost on the session it is given, as on
+    the REST public search, so owners' cost reports see anonymous use. Any
+    other write on the session means nothing is committed.
+    """
+    other: list[str] = []
+
+    def check(session: Any, *_: Any) -> None:
+        other.extend(type(o).__name__ for o in (*session.dirty, *session.deleted))
+        other.extend(type(o).__name__ for o in session.new if not isinstance(o, LLMCallLog))
+
+    def dml(state: Any) -> None:
+        if state.is_insert or state.is_update or state.is_delete:
+            other.append("dml")
+
+    async with _read_session() as db:
+        sync = db.sync_session
+        event.listen(sync, "before_flush", check)
+        event.listen(sync, "do_orm_execute", dml)
+        try:
+            yield db
+            check(sync)
+            if other:
+                logger.warning("public_mcp_recall_write_dropped", kinds=sorted(set(other)))
+            else:
+                await db.commit()
+        finally:
+            event.remove(sync, "before_flush", check)
+            event.remove(sync, "do_orm_execute", dml)
 
 
 # ============================================================================
@@ -204,7 +243,7 @@ async def public_recall(endpoint: ServingEndpoint, args: dict[str, Any]) -> Publ
     from services.search_service import SearchService
 
     degradation: dict[str, Any] = {}
-    async with _read_session() as db:
+    async with _recall_session() as db:
         hits = await SearchService(db).hybrid_search(
             query=query,
             # The owner is only the embedding-key principal (as REST public search).
