@@ -100,3 +100,83 @@ async def test_crash_expiry_reclaim_and_rotation_are_fenced(db_session, monkeypa
     finally:
         await db_session.execute(delete(User).where(User.user_id == user_id))
         await db_session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unavailable", "rotated"])
+async def test_mfa_route_rolls_back_only_its_own_claim(
+    db_session, async_engine, monkeypatch, fernet_api_key_secret, failure
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fastapi import HTTPException
+
+    from api.routes import auth
+    from tests.api.test_mfa_attempt_limit import FakeRedis
+    from utils.encryption import get_encryptor
+    from utils.exceptions import AuthenticationError
+
+    uid = f"recovery-race-{uuid4().hex}"
+    codes, hashes = issue_codes()
+    _, replacement = issue_codes()
+    user = User(
+        user_id=uid,
+        email=f"{uid}@example.test",
+        password_hash="pw-hash",
+        totp_enabled=True,
+        totp_secret=get_encryptor().encrypt("TESTSECRET"),
+        totp_recovery_hashes=hashes,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    factory = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async def get_db():
+        async with factory() as db:
+            yield db
+
+    async def complete(user_id, _email, _session_id):
+        if failure == "unavailable":
+            raise TimeoutError("session sweep timed out")
+        # Another DB session rotates the set after the password re-check but
+        # before the route finalizes the recovery-code sign-in.
+        async with factory() as db:
+            locked = await db.scalar(select(User).where(User.user_id == user_id).with_for_update())
+            locked.totp_recovery_hashes = replacement
+            await db.commit()
+        return True
+
+    manager = MagicMock()
+    manager._redis = FakeRedis()
+    token = "test-token"
+    manager._redis.setex(f"mfa_pending:{token}", 300, uid)
+    manager._redis.setex(
+        f"mfa_pending_cred:{token}", 300, credential_fingerprint(user.password_hash)
+    )
+    monkeypatch.setattr(auth, "_session_manager", manager)
+    monkeypatch.setattr(auth, "get_db", get_db)
+    monkeypatch.setattr(auth, "_create_password_session", AsyncMock(return_value="new-session"))
+    monkeypatch.setattr(auth, "_complete_password_sign_in", complete)
+    notice = MagicMock()
+    monkeypatch.setattr(auth, "spawn_security_notification", notice)
+    req = SimpleNamespace(headers={}, cookies={}, client=SimpleNamespace(host="127.0.0.1"))
+    body = auth.MfaVerifyRequest(mfa_session_token=token, totp_code=codes[0])
+    try:
+        if failure == "unavailable":
+            with pytest.raises(HTTPException) as failed:
+                await asyncio.wait_for(auth.mfa_verify(body, req, None), timeout=8)
+            assert failed.value.status_code == 503
+        else:
+            with pytest.raises(AuthenticationError):
+                await asyncio.wait_for(auth.mfa_verify(body, req, None), timeout=8)
+        manager.delete_session.assert_called_once_with("new-session")
+        notice.assert_not_called()
+        await db_session.refresh(user)
+        assert set(user.totp_recovery_hashes) == set(
+            hashes if failure == "unavailable" else replacement
+        )
+        assert not await db_session.scalar(select(AuditLog.id).where(AuditLog.user_id == uid))
+    finally:
+        await db_session.execute(delete(User).where(User.user_id == uid))
+        await db_session.commit()

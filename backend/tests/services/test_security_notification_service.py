@@ -723,6 +723,19 @@ class TestRender:
         assert "2 more times, within 10 minutes of the first" in text
         assert text.count("Your password was changed.") == 2
 
+    def test_recovery_code_sign_in_does_not_claim_the_device_is_new(self) -> None:
+        subject, text = render_security_notification(
+            SecurityEvent.RECOVERY_CODE_USED,
+            [self._occurrence()],
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert "recovery code" in subject
+        assert "recovery codes was used" in text
+        assert "device we had not" not in text
+        assert "Forgot password?" in text
+
     def test_new_device_sign_in_reads_as_a_sign_in_not_a_change(self) -> None:
         # #1769: the opening line and the digest say "sign-in"; the method
         # line names how the browser signed in.

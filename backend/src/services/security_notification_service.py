@@ -553,7 +553,9 @@ def render_security_notification(
             f"Since then the same {what} happened {count} more "
             f"{'time' if count == 1 else 'times'}, within {window_minutes} minutes of the first:",
         ]
-    elif event in _SIGN_IN_EVENTS:
+    elif event == SecurityEvent.RECOVERY_CODE_USED:
+        lines.append("One of your recovery codes was used to finish signing in.")
+    elif event == SecurityEvent.NEW_DEVICE_SIGN_IN:
         lines += [
             "Your Kagura Memory Cloud account was signed in to from a device we had not",
             "seen before. If this was you — a new browser, computer or phone, or a browser",
