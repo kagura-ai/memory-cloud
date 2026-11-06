@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MfaSettings } from "./MfaSettings";
 
 const { user, post, refetchUser } = vi.hoisted(() => ({
-  user: { has_password: true, mfa_enabled: false }, post: vi.fn(), refetchUser: vi.fn(),
+  user: { has_password: true, mfa_enabled: false, mfa_recovery_codes_remaining: 3 }, post: vi.fn(), refetchUser: vi.fn(),
 }));
 vi.mock("@/contexts/AuthContext", () => ({ useAuth: () => ({ user, refetchUser }) }));
 vi.mock("@/lib/api/base", () => ({ apiClient: { post } }));
@@ -42,6 +42,20 @@ describe("MfaSettings", () => {
     expect(post).toHaveBeenCalledWith("/api/v1/auth/mfa/enable", { code: "123456" });
     fireEvent.click(dialog.getByRole("button", { name: "saved" }));
     expect(screen.queryByText("save-once")).toBeNull();
+  });
+
+  it.each(["１２３　４５６", "deadbeef-cafebabe-12345678-a0123456"])("regenerates after fresh proof %s", async (code) => {
+    user.mfa_enabled = true;
+    post.mockResolvedValueOnce({ recovery_codes: ["replacement"] });
+    render(<MfaSettings />);
+    expect(screen.getByText("remaining")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "regenerate" }));
+    const dialog = within(screen.getByRole("dialog"));
+    fireEvent.change(dialog.getByLabelText("password"), { target: { value: "fresh" } });
+    fireEvent.change(dialog.getByLabelText("codeOrRecovery"), { target: { value: code } });
+    fireEvent.click(dialog.getByRole("button", { name: "regenerate" }));
+    expect(await dialog.findByText("replacement")).toBeVisible();
+    expect(post).toHaveBeenCalledWith("/api/v1/auth/mfa/recovery-codes/regenerate", {current_password: "fresh", code: code.startsWith("deadbeef") ? code : "123456"});
   });
 
   it("keeps a failed removal inside the dialog", async () => {

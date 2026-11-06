@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pyotp
 import pytest
 from fastapi import HTTPException
+from redis.exceptions import RedisError
 
 from api.routes import auth as auth_routes
 from auth.password import hash_password
@@ -133,7 +134,10 @@ def _wrong_code() -> str:
 
 
 @pytest.mark.asyncio
-async def test_recovery_code_completes_password_signin_only_once(account, monkeypatch):
+@pytest.mark.parametrize("prior_failure", [None, 503, 401, "audit"])
+async def test_recovery_code_completes_password_signin_only_once(
+    account, monkeypatch, prior_failure
+):
     codes, account.user.totp_recovery_hashes = issue_codes()
     db = MagicMock()
     db.scalar = AsyncMock(return_value=account.user)
@@ -146,8 +150,47 @@ async def test_recovery_code_completes_password_signin_only_once(account, monkey
         yield db
 
     monkeypatch.setattr(auth_routes, "get_db", get_db)
+    if prior_failure == "audit":
+        db.commit.side_effect = [None, RuntimeError("audit write failed"), None]
+        # A real failed transaction rolls its in-memory changes back. The next select
+        # must see the persisted reservation when the handler refunds this attempt.
+        saved = auth_routes.settle_login_code
+
+        async def fail_audit_write(db, user_id, claim, *, audit):
+            if audit is not None:
+                await db.commit()
+            return await saved(db, user_id, claim, audit=audit)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(auth_routes, "settle_login_code", fail_audit_write)
+            with pytest.raises(RuntimeError, match="audit write failed"):
+                await _code_step(await _password_step(), codes[0])
+        auth_routes._session_manager.delete_session.assert_called_once_with("sess-1")
+        db.commit.side_effect = None
+        account.notice.assert_not_called()
+    elif prior_failure:
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                auth_routes,
+                "_open_password_session",
+                AsyncMock(side_effect=HTTPException(prior_failure)),
+            )
+            with pytest.raises(HTTPException):
+                await _code_step(await _password_step(), codes[0])
+        account.notice.assert_not_called()
+        db.add.assert_not_called()
+    if prior_failure:
+        assert auth_routes._session_manager._redis.get(COUNTER) == 1
+    else:
+        # A post-commit budget-store outage must still deliver the session
+        # and recovery-use notification for the consumed code.
+        monkeypatch.setattr(
+            auth_routes, "_clear_login_failures", MagicMock(side_effect=RedisError())
+        )
     result = await _code_step(await _password_step(), codes[0])
     assert result.status_code == 200
+    assert db.add.call_args.args[0].action == "recovery_code_used"
+    assert account.notice.call_args.kwargs["event"] == SecurityEvent.RECOVERY_CODE_USED
     with pytest.raises(AuthenticationError):
         await _code_step(await _password_step(), codes[0])
 

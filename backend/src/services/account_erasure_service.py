@@ -140,6 +140,7 @@ from models.auth import (
     OAuthGrantSetting,
     User,
     UserKnownDevice,
+    WebAuthnCredential,
     Workspace,
     WorkspaceInvitation,
     WorkspaceMember,
@@ -2465,6 +2466,9 @@ class AccountErasureService:
         # ``known_devices_delete``, which does not count them).
         counts["user_known_devices"] = await self._count_and_delete(
             UserKnownDevice, UserKnownDevice.user_id == user_id
+        )
+        counts["webauthn_credentials"] = await self._count_and_delete(
+            WebAuthnCredential, WebAuthnCredential.user_id == user_id
         )
         counts["external_api_keys"] = await self._count_and_delete(
             ExternalAPIKey, ExternalAPIKey.user_id == user_id

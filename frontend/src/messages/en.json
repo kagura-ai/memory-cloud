@@ -355,6 +355,9 @@
     }
   },
   "mfaSettings": {
+    "remaining": "Recovery codes remaining: {count}",
+    "regenerate": "Generate new codes",
+    "regenerateHint": "Enter your current password and a fresh authenticator or unused recovery code. This replaces all old recovery codes and signs out other browser sessions.",
     "title": "Two-factor authentication",
     "enabled": "Your password sign-ins require a second factor.",
     "disabled": "Two-factor authentication is off.",
