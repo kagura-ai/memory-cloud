@@ -104,13 +104,18 @@ export async function managementProof(
   password: string,
   otherPasskey: boolean,
   removing?: string,
+  linking?: "google" | "github",
 ) {
   if (password) return { current_password: password };
   if (!otherPasskey) return {};
+  // One purpose per challenge: removing a key, or connecting a provider.
+  const query = removing
+    ? "?removing=" + encodeURIComponent(removing)
+    : linking
+      ? "?linking=" + encodeURIComponent(linking)
+      : "";
   const options = await apiClient.post<RequestOptions>(
-    passkeyPath +
-      "/proof/options" +
-      (removing ? "?removing=" + encodeURIComponent(removing) : ""),
+    passkeyPath + "/proof/options" + query,
     {},
   );
   return {

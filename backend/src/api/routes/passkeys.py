@@ -7,7 +7,7 @@ import hashlib
 import json
 import secrets
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -247,7 +247,7 @@ async def _prove(
     ):
         return
     raise AuthorizationError(
-        "Verify with your current password or another passkey, or sign in again to register"
+        "Verify with your current password or another passkey, or sign in again"
     )
 
 
@@ -263,8 +263,12 @@ async def proof_options(
     user: SessionUser,
     removing: UUID | None = None,
     db: AsyncSession = Depends(get_db),
+    linking: Literal["google", "github"] | None = None,
 ):
-    """Prove another passkey for adding or removing a credential in this session."""
+    """Prove another passkey for adding or removing a credential, or for
+    connecting a sign-in provider, in this session."""
+    if removing and linking:
+        raise ValidationError("Choose one proof purpose")
     keys = [k for k in await _keys(db, user["user_id"]) if k.id != removing]
     if not keys:
         raise ConflictError("No other passkey is available")
@@ -273,7 +277,10 @@ async def proof_options(
         allow_credentials=[PublicKeyCredentialDescriptor(id=k.credential_id) for k in keys],
         user_verification=UserVerificationRequirement.REQUIRED,
     )
-    action = f"remove:{removing}" if removing else "add"
+    if linking:
+        action = f"link:{linking}"
+    else:
+        action = f"remove:{removing}" if removing else "add"
     return await _issue(options, _binding(request, user["user_id"], action))
 
 

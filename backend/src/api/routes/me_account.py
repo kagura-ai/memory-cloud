@@ -44,6 +44,7 @@ from api.routes.me_oauth import (
     USER_KEY,
     _build_authorization_url,
 )
+from api.routes.passkeys import Proof, _owner, _prove
 from auth.dependencies import SessionUser
 from auth.session import SESSION_COOKIE_NAME
 from config.constants import IDENTITY_LINK_SIGN_IN_WINDOW
@@ -281,8 +282,13 @@ async def get_active_erasure_request(
 # ---------------------------------------------------------------------------
 
 
-class LinkProviderRequest(BaseModel):
-    """Body for POST /me/account/link-provider."""
+class LinkProviderRequest(Proof):
+    """Body for POST /me/account/link-provider.
+
+    The fresh proof fields (``current_password``, or ``challenge`` +
+    ``assertion`` from ``POST /auth/passkeys/proof/options?linking=<provider>``)
+    are those of passkey registration; all may be omitted right after a
+    verified sign-in."""
 
     provider: Literal["google", "github"]
 
@@ -290,9 +296,8 @@ class LinkProviderRequest(BaseModel):
 class LinkProviderResponse(BaseModel):
     """Frontend redirects ``window.location`` to ``authorization_url``.
 
-    Mirrors ``me_oauth.RefreshOAuthResponse``: the OAuth round-trip itself
-    is the fresh re-auth, so no password is ever prompted (edge case 1 — the
-    locked re-auth contract for OAuth-only users)."""
+    The round trip binds the returned identity to the account; the fresh
+    proof of the account itself is taken before it starts."""
 
     authorization_url: str
     state: str
@@ -334,17 +339,22 @@ async def link_provider(
     body: LinkProviderRequest,
     request: Request,
     user: SessionUser,
+    db: AsyncSession = Depends(get_db),
 ) -> LinkProviderResponse:
     """Attach a sign-in provider to the current account: start a link-mode
     OAuth round-trip. This adds a way to sign in to ONE account; counting two
     accounts as one owner is an identity link (``/identity-links``).
 
-    The OAuth round-trip *is* the fresh re-auth — there is no password
-    prompt, which is the locked re-auth contract for OAuth-only users
-    (edge case 1). The existing ``/auth/{provider}/callback`` reads
-    ``oauth2_state_intent:{state}`` == ``"link"`` and binds the returned
-    identity to ``oauth2_state_user:{state}`` via ``AccountLinkingService`` —
-    only when the callback arrives with the session cookie pinned under
+    The account is proved first, with the policy of passkey registration
+    (``passkeys._prove``): the current password, a passkey whose challenge
+    was issued for ``link:<provider>`` in this browser session, or a verified
+    sign-in of this session within the last five minutes. Only then is the
+    ``state`` written; it lives ``STATE_TTL`` seconds and carries the proof to
+    the callback. The existing ``/auth/{provider}/callback`` reads
+    ``oauth2_state_intent:{state}`` == ``"link"`` (deleting every link key on
+    first read) and binds the returned identity to
+    ``oauth2_state_user:{state}`` via ``AccountLinkingService`` — only when
+    the callback arrives with the session cookie pinned under
     ``oauth2_state_session:{state}`` here, so the ``authorization_url`` is of
     no use to any other browser.
 
@@ -355,6 +365,12 @@ async def link_provider(
     Raises:
         HTTPException(401): no session cookie on the request (``SessionUser``
             is browser-session only, so this is a contradiction).
+        AuthenticationError(401): the passkey challenge is unknown, expired,
+            already used or issued for another purpose, or the assertion is
+            invalid.
+        AuthorizationError(403): no fresh proof (wrong or missing password,
+            no passkey, no recent verified sign-in).
+        RateLimitError(429): too many password proofs.
         HTTPException(500): auth managers not initialised, OAuth2 manager
             missing, or a required env var (GOOGLE_REDIRECT_URI /
             GITHUB_CLIENT_ID) is missing.
@@ -367,6 +383,9 @@ async def link_provider(
     # The browser session the link belongs to; refused before any state is
     # written when the request carries none.
     session_id = _session_id(request)
+    # Fresh proof of the account before any state is written.
+    account = await _owner(db, user_id)
+    await _prove(db, account, request, body, f"link:{provider}")
 
     # Resolve config + compose the URL BEFORE writing any Redis state so a
     # missing env var 500s without orphaning five state keys for 5 minutes

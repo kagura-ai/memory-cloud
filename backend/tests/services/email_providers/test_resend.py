@@ -623,6 +623,8 @@ async def test_reset_email_names_what_the_reset_revokes() -> None:
     assert "browser" in params["text"]
     assert "MCP client" in params["text"]
     assert "API keys and other integration" in params["text"]
+    # #2676: and the sign-in providers, which the owner connects again.
+    assert "removes your passkeys\nand your Google / GitHub sign-ins" in params["text"]
 
 
 @pytest.mark.asyncio

@@ -752,7 +752,7 @@ doing so; the API's counter is per account and ignores the client address.
 | Endpoint | Auth | What it does |
 |----------|------|--------------|
 | `POST /api/v1/auth/password/reset-request` `{email}` | public | Always `202` with the same body. Emails a reset link only to an account with that verified email and a password. 10 per client address and 3 per address per 15 minutes (the per-address limit is silent). |
-| `POST /api/v1/auth/password/reset` `{token, new_password}` | the link | Sets the password, **signs out every browser session**, **revokes every OAuth / MCP grant** and **removes every passkey** of the account (see below); the person then signs in. |
+| `POST /api/v1/auth/password/reset` `{token, new_password}` | the link | Sets the password, **signs out every browser session**, **revokes every OAuth / MCP grant**, **removes every passkey** and **unlinks every Google / GitHub identity** of the account (see below); the person then signs in. |
 | `POST /api/v1/me/password/setup-request` | browser session | For an account without a password: emails a set-a-password link to the account's address (`409` if it has one, `400` for `@local`). |
 | `POST /api/v1/auth/password/setup` `{token, new_password}` | the link | Sets the first password, marks the email verified, signs out the account's other browser sessions. |
 | `POST /api/v1/me/password/change` `{current_password, new_password}` | browser session | Signs out the account's other browser sessions. |
@@ -775,7 +775,16 @@ and device-flow codes. Connected clients (Claude Code, ChatGPT, the CLI) must
 sign in again. It also deletes the account's passkeys (#2660): one registered
 from a stolen session would otherwise outlive the reset and still sign in. The
 owner registers them again; the audit log records the deletion as
-`passkey_removed` next to `password_reset`. The reset keeps TOTP, so an owner
+`passkey_removed` next to `password_reset`. It also disconnects every Google /
+GitHub identity linked to the account, one `oauth_provider_unlinked` audit row
+per provider (`user_email = 'email-link'`), so after a reset only the new
+password (and TOTP) signs in; the owner connects the providers again from
+Profile. Connecting a provider from Profile (`POST
+/api/v1/me/account/link-provider`) requires the same fresh proof as adding a
+passkey — the current password, another passkey, or a verified sign-in within
+the last five minutes — so a Google- or GitHub-only account without a password
+or passkey sets up a password by email first (GitHub sign-in supplies no
+authentication time under the default proof policy). The reset keeps TOTP, so an owner
 whose only working sign-in was a passkey still needs the authenticator or a
 recovery code afterwards; for that lockout, run
 `python -m src.cli.reset_password` and choose the reset that also disables
@@ -847,6 +856,9 @@ whose `users.user_id` still equals the provider's subject. A sign-in through
 it is refused: the callback redirects to `/login?error=provider_unlinked`,
 opens no session, and the backend logs
 `oauth_unlinked_identity_sign_in_refused` (or `session_owner_not_found`).
+A password reset unlinks every provider of the account at once and writes one
+`oauth_provider_unlinked` row per provider (actor `email-link`); the operator
+CLI's reset unlinks them too but writes no audit row.
 Earlier releases let such an identity back in by the `users` row alone. After
 upgrading, list the accounts in that state and review their recent activity —
 `users.last_login_at`, the browsers in `user_known_devices`, and their
@@ -871,8 +883,8 @@ SELECT created_at, action, resource, ip_address FROM audit_logs WHERE user_id = 
 
 A sign-in dated after the `oauth_provider_unlinked` row that was not the
 owner's is a reason to reset the account's password (which signs it out
-everywhere, revokes its OAuth / MCP grants and removes its passkeys, see
-above) and to review its API keys and OAuth clients in Settings.
+everywhere, revokes its OAuth / MCP grants, removes its passkeys and unlinks
+its providers, see above) and to review its API keys and OAuth clients in Settings.
 
 ## Browser passkeys (WebAuthn)
 
@@ -904,7 +916,9 @@ path. Once the owner follows the link and sets a password, they can return to
 the profile and use that password to confirm removal. An owner with a second
 authenticator can instead register a separate passkey and use it for removal. A
 password reset (the emailed link or `python -m src.cli.reset_password`, choices
-1 and 3) removes every passkey of the account; "Disable MFA only" keeps them.
+1 and 3) removes every passkey of the account and disconnects its Google / GitHub
+sign-ins, which the owner connects again from Profile; "Disable MFA only" keeps
+them. The CLI prints how many providers it disconnected.
 
 ## Which sign-in provider syncs the account's email (Issues #1811, #1875)
 
