@@ -181,6 +181,19 @@ async def enable_mfa(
     return RecoveryCodes(recovery_codes=codes)
 
 
+async def _verify_active_factor(account: User, code: str) -> None:
+    if not account.totp_enabled or not account.totp_secret:
+        raise ConflictError("Two-factor authentication is not enabled")
+    _manager()
+    await asyncio.to_thread(auth._reserve_login_attempt, auth._account_rate_key(account.user_id))
+    if not take_locked_code(account, code):
+        secret = get_encryptor().decrypt(account.totp_secret)
+        if not verify_totp(secret, code) or not await asyncio.to_thread(
+            auth._claim_totp_code, account.user_id, code
+        ):
+            raise AuthenticationError("Invalid or already used verification code")
+
+
 @router.post("/recovery-codes/regenerate", response_model=RecoveryCodes)
 async def regenerate_recovery_codes(
     body: DisableBody,
@@ -190,18 +203,10 @@ async def regenerate_recovery_codes(
     tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> RecoveryCodes:
-    """Replace all backup codes after fresh password and authenticator verification."""
+    """Replace all backup codes after fresh password and second-factor verification."""
     account = await _account(db, user)
     await _check_password(account, body.current_password)
-    if not account.totp_enabled or not account.totp_secret:
-        raise ConflictError("Two-factor authentication is not enabled")
-    _manager()
-    await asyncio.to_thread(auth._reserve_login_attempt, auth._account_rate_key(account.user_id))
-    secret = get_encryptor().decrypt(account.totp_secret)
-    if not verify_totp(secret, body.code) or not await asyncio.to_thread(
-        auth._claim_totp_code, account.user_id, body.code
-    ):
-        raise AuthenticationError("Invalid or already used authenticator code")
+    await _verify_active_factor(account, body.code)
     codes, account.totp_recovery_hashes = issue_codes()
     await _commit_change(account, db, request, tasks, SecurityEvent.RECOVERY_CODES_REPLACED)
     response.headers["Cache-Control"] = "no-store"
@@ -219,16 +224,7 @@ async def disable_mfa(
     """Remove MFA with the current password and a TOTP or single-use recovery code."""
     account = await _account(db, user)
     await _check_password(account, body.current_password)
-    if not account.totp_enabled or not account.totp_secret:
-        raise ConflictError("Two-factor authentication is not enabled")
-    _manager()
-    await asyncio.to_thread(auth._reserve_login_attempt, auth._account_rate_key(account.user_id))
-    if not take_locked_code(account, body.code):
-        secret = get_encryptor().decrypt(account.totp_secret)
-        if not verify_totp(secret, body.code) or not await asyncio.to_thread(
-            auth._claim_totp_code, account.user_id, body.code
-        ):
-            raise AuthenticationError("Invalid or already used verification code")
+    await _verify_active_factor(account, body.code)
     account.totp_enabled = False
     account.totp_secret = None
     account.totp_recovery_hashes = None

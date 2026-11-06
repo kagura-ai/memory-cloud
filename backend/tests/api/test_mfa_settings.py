@@ -119,7 +119,7 @@ async def test_budget_cleanup_failure_still_delivers_recovery_codes_and_notice(e
 
 
 @pytest.mark.asyncio
-async def test_regenerate_requires_fresh_totp_even_if_account_has_no_codes(env):
+async def test_regenerate_requires_fresh_factor_even_if_account_has_no_codes(env):
     user, db, req, _, notice = env
     enrollment = await setup(env)
     totp = pyotp.TOTP(enrollment.secret)
@@ -136,9 +136,13 @@ async def test_regenerate_requires_fresh_totp_even_if_account_has_no_codes(env):
             db,
         )
 
-    for invalid in [current, enabled.recovery_codes[0]]:
+    for invalid in [current, "invalid"]:
         with pytest.raises(AuthenticationError):
             await regenerate(invalid)
+    replacement = await regenerate(enabled.recovery_codes[0])
+    with pytest.raises(AuthenticationError):
+        await regenerate(enabled.recovery_codes[0])
+    assert len(replacement.recovery_codes) == 8
     # An admin whose factor predates recovery codes can generate a first set.
     user.totp_recovery_hashes = None
     response = await regenerate(totp.at(int(time.time()) - 30))

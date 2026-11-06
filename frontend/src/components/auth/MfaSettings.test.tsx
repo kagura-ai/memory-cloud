@@ -44,7 +44,7 @@ describe("MfaSettings", () => {
     expect(screen.queryByText("save-once")).toBeNull();
   });
 
-  it("shows the remaining count and regenerates after fresh proof", async () => {
+  it.each(["１２３　４５６", "deadbeef-cafebabe-12345678-a0123456"])("regenerates after fresh proof %s", async (code) => {
     user.mfa_enabled = true;
     post.mockResolvedValueOnce({ recovery_codes: ["replacement"] });
     render(<MfaSettings />);
@@ -52,10 +52,10 @@ describe("MfaSettings", () => {
     fireEvent.click(screen.getByRole("button", { name: "regenerate" }));
     const dialog = within(screen.getByRole("dialog"));
     fireEvent.change(dialog.getByLabelText("password"), { target: { value: "fresh" } });
-    fireEvent.change(dialog.getByLabelText("code"), { target: { value: "１２３　４５６" } });
+    fireEvent.change(dialog.getByLabelText("codeOrRecovery"), { target: { value: code } });
     fireEvent.click(dialog.getByRole("button", { name: "regenerate" }));
     expect(await dialog.findByText("replacement")).toBeVisible();
-    expect(post).toHaveBeenCalledWith("/api/v1/auth/mfa/recovery-codes/regenerate", {current_password: "fresh", code: "123456"});
+    expect(post).toHaveBeenCalledWith("/api/v1/auth/mfa/recovery-codes/regenerate", {current_password: "fresh", code: code.startsWith("deadbeef") ? code : "123456"});
   });
 
   it("keeps a failed removal inside the dialog", async () => {

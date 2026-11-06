@@ -40,7 +40,7 @@ export function MfaSettings() {
 
   const normalizedCode = normalizeMfaCode(code);
   const awaitingCode = step === "verify" || step === "disable" || step === "regenerate";
-  const codeIncomplete = awaitingCode && !isCompleteMfaCode(normalizedCode, step === "disable");
+  const codeIncomplete = awaitingCode && !isCompleteMfaCode(normalizedCode, step !== "verify");
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (busy || codeIncomplete) return;
@@ -104,8 +104,8 @@ export function MfaSettings() {
               <p>{t("manual")}</p><code className="break-all select-all">{enrollment.secret}</code>
             </div>}
             {awaitingCode && <div>
-              <Label htmlFor="mfa-code">{step === "disable" ? t("codeOrRecovery") : t("code")}</Label>
-              <MfaCodeInput id="mfa-code" required allowRecovery={step === "disable"}
+              <Label htmlFor="mfa-code">{step === "verify" ? t("code") : t("codeOrRecovery")}</Label>
+              <MfaCodeInput id="mfa-code" required allowRecovery={step !== "verify"}
                 value={code} onChange={e => setCode(e.target.value)} />
             </div>}
             {error && <p role="alert" className="text-destructive">{error}</p>}
