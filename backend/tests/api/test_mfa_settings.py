@@ -1,6 +1,7 @@
 """Self-service MFA updates hold the account lock and require fresh credentials."""
 
-import time
+from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pyotp
@@ -119,7 +120,17 @@ async def test_budget_cleanup_failure_still_delivers_recovery_codes_and_notice(e
 
 
 @pytest.mark.asyncio
-async def test_regenerate_requires_fresh_factor_even_if_account_has_no_codes(env):
+async def test_regenerate_requires_fresh_factor_even_if_account_has_no_codes(env, monkeypatch):
+    fixed_time = 1_700_000_010
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromtimestamp(fixed_time, tz)
+
+    # Exercise real PyOTP and replay checks across every awaited password check
+    # without a wall-clock boundary moving the earlier code outside the window.
+    monkeypatch.setattr(pyotp.totp, "datetime", SimpleNamespace(datetime=FixedDatetime))
     user, db, req, _, notice = env
     enrollment = await setup(env)
     totp = pyotp.TOTP(enrollment.secret)
@@ -145,7 +156,7 @@ async def test_regenerate_requires_fresh_factor_even_if_account_has_no_codes(env
     assert len(replacement.recovery_codes) == 8
     # An admin whose factor predates recovery codes can generate a first set.
     user.totp_recovery_hashes = None
-    response = await regenerate(totp.at(int(time.time()) - 30))
+    response = await regenerate(totp.at(fixed_time - 30))
     assert len(response.recovery_codes) == 8
     assert not await claim_login_code(db, user.user_id, enabled.recovery_codes[0])
     assert await claim_login_code(db, user.user_id, response.recovery_codes[0])
