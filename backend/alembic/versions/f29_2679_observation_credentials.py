@@ -5,7 +5,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "f29_2679_observation_credentials"
-down_revision = "f27_2675_public_mcp_endpoints"
+down_revision = "f28_2678_public_mcp_usage_events"
 branch_labels = None
 depends_on = None
 

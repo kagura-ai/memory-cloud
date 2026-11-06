@@ -13,7 +13,7 @@ from tests.integration.test_alembic_migrations import (
     _upgrade_to,
 )
 
-PRIOR = "f27_2675_public_mcp_endpoints"
+PRIOR = "f28_2678_public_mcp_usage_events"
 REVISION = "f29_2679_observation_credentials"
 
 _INSERT = (
