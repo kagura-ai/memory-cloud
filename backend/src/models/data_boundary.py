@@ -84,6 +84,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "users",
         "user_oauth_providers",
         "webauthn_credentials",
+        # Anonymous public MCP endpoint publications (#2675) — which resource
+        # context is served at which opaque address, the owner-approved public
+        # text and who published / unpublished it. Publication plumbing.
+        "public_mcp_endpoints",
         # Known browsers for new-device sign-in alerts (#1769): keyed hashes of
         # device cookies, deleted with the account.
         "user_known_devices",

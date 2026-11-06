@@ -186,6 +186,40 @@ def sync_products():
 - The cap counts the **workspace's** active tokens, whoever minted them (#1919) — not the caller's — excluding connector-owned tokens (those take `max_connectors` seats instead). Two owners share one cap.
 - A quota **raise** is checked against the **current** tier's aggregate ceiling (cap × 10,000 events/hour, summed over the same set of tokens the cap counts), so on Free (cap 0) any positive quota edit is refused (400) and on Basic the sum must fit 30,000 — the token itself keeps serving at its stored quota. Lowering is never refused. Because the cap and the ceiling share one population and a token is at most 10,000 events/hour, a workspace whose active-token count is within its cap can always raise every token to the maximum; a workspace holding more tokens than the cap (after a downgrade, or minted before the cap counted per workspace) must lower or revoke first.
 
+## Publishing a resource as a public MCP endpoint
+
+A resource's data — a website, a product catalog, an FAQ — can be served to anyone, without sign-in, as a **read-only MCP endpoint**: visitors add the URL to Claude, ChatGPT or any MCP client and search it. No API key, resource token or OAuth flow is handed out. The operator must switch the feature on first (`MCP_PUBLIC_ENDPOINTS_ENABLED=true`, see [Deployment › Public MCP endpoints](deployment.md#public-mcp-endpoints--issue-2675)).
+
+**Preconditions** (checked when you publish and again on every anonymous request):
+
+- the resource exists in your current workspace (`setup_resource` created it);
+- its context is live, **public** (`is_public=true`, which is plan-gated by the `public_contexts` feature) and not private;
+- you are the workspace **owner** (session or an owner API key).
+
+**The four owner calls** (`resource_id` is the slug):
+
+```bash
+# Publish: the approved public text is what anonymous clients see. Nothing falls
+# back to the context's internal summary or usage guide.
+curl -X POST "$KAGURA/api/v1/resources/products/public-mcp" \
+  -H "Authorization: Bearer kagura_{owner_key}" -H "Content-Type: application/json" \
+  -d '{"public_name": "Acme product catalog",
+       "public_description": "Prices and specifications of our products.",
+       "public_usage_guide": "Search by product name; reference(memory_id) for the full sheet."}'
+# → 201 {"public_id": "pmcp_…", "endpoint_path": "/mcp/public/pmcp_…", "serving": true, …}
+
+curl "$KAGURA/api/v1/resources/products/public-mcp" -H "Authorization: Bearer kagura_{owner_key}"   # read (404 when none)
+curl -X PATCH "$KAGURA/api/v1/resources/products/public-mcp" -H "Authorization: Bearer kagura_{owner_key}" \
+  -H "Content-Type: application/json" -d '{"public_usage_guide": ""}'                                # edit text ("" clears)
+curl -X DELETE "$KAGURA/api/v1/resources/products/public-mcp" -H "Authorization: Bearer kagura_{owner_key}" # unpublish → 204
+```
+
+- The address is your deployment's origin plus `endpoint_path`. It is server-minted and opaque; one live endpoint per resource context (a second publish is `409`). Unpublishing takes effect on the next request, including for clients that are already connected; publishing again mints a **new** address and the old one stays `404`.
+- `serving` says whether the endpoint answers right now (the operator switch is on and the preconditions still hold). Making the context private or non-public, moving it to another resource slug or deleting it closes the endpoint too, without a separate unpublish.
+- Name ≤ 200 characters, description ≤ 2,000, usage guide ≤ 4,000.
+
+**What is public:** the rows ingested for this resource (`details.resource_id` equals the slug) that are not deleted. A note a member writes by hand into the same context is not served — unless that member sets `details.resource_id` to the slug themselves, which anyone who can write to the context can do. Each row shows its `memory_id`, `doc_key` (your document id), summary, content (through `reference`), type, tags, `source_url` (only an `http(s)` URL), and timestamps. **Not public:** `details`, versions and history, importance, links, the context's summary / usage guide / guardrails / search configuration / statistics, and anything about the workspace. The five tools and their exact response fields: [MCP Tools › Public endpoint tools](mcp-tools.md#public-endpoint-tools).
+
 ## Resource Tokens vs API Keys
 
 | | API Key | Resource Token |

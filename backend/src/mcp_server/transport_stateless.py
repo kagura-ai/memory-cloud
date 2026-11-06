@@ -218,6 +218,11 @@ def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict, list[
     return method, params, missing
 
 
+# #2675: the public endpoint (``mcp_server.public.transport``) validates the
+# same envelope.
+validate_modern_envelope = _validate
+
+
 def _complete(result: dict) -> dict:
     """Wrap a result in the 2026-07-28 envelope: ``resultType`` + server identity."""
     return {
