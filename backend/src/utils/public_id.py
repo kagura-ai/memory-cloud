@@ -40,6 +40,7 @@ class PublicIdPrefix(StrEnum):
     SHARE_KEY = "skey"
     RESOURCE_TOKEN = "rtok"  # noqa: S105 — not a credential
     INVITATION = "winv"
+    PUBLIC_MCP = "pmcp"  # #2675: anonymous public MCP endpoint address
 
 
 def new_public_id(prefix: PublicIdPrefix) -> str:
@@ -118,3 +119,4 @@ APIKeyPublicId = Annotated[str, _path(PublicIdPrefix.API_KEY, "API key")]
 ShareKeyPublicId = Annotated[str, _path(PublicIdPrefix.SHARE_KEY, "share key")]
 ResourceTokenPublicId = Annotated[str, _path(PublicIdPrefix.RESOURCE_TOKEN, "resource token")]
 InvitationPublicId = Annotated[str, _path(PublicIdPrefix.INVITATION, "workspace invitation")]
+PublicMcpEndpointPublicId = Annotated[str, _path(PublicIdPrefix.PUBLIC_MCP, "public MCP endpoint")]
