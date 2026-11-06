@@ -130,9 +130,18 @@ def test_oauthlib_floor_excludes_the_vulnerable_range(version: str, allowed: boo
 
 
 def test_locked_oauthlib_is_patched() -> None:
-    """The tracked lock is what CI and the image install, so it must not resolve below the floor."""
+    """The tracked lock is what CI and the image install, so it must not resolve below the floor.
+
+    A lock may resolve a package once per Python-version fork (numpy and
+    networkx already do), so every locked oauthlib entry is checked.
+    """
     lock = tomllib.loads(_UV_LOCK.read_text(encoding="utf-8"))
-    locked = [p for p in lock["package"] if canonicalize_name(p["name"]) == "oauthlib"]
-    assert len(locked) == 1, [p["version"] for p in locked]
-    assert _oauthlib_requirement().specifier.contains(locked[0]["version"])
-    assert Version(locked[0]["version"]) >= Version(_OAUTHLIB_PATCHED)
+    locked = [p["version"] for p in lock["package"] if canonicalize_name(p["name"]) == "oauthlib"]
+    assert locked, "uv.lock resolves no oauthlib"
+    floor = _oauthlib_requirement().specifier
+    below = [
+        v
+        for v in locked
+        if not floor.contains(v, prereleases=True) or Version(v) < Version(_OAUTHLIB_PATCHED)
+    ]
+    assert not below, below
