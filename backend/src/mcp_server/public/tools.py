@@ -70,6 +70,14 @@ class PublicToolResult:
     outcome: str
     result_count: int | None = None
     continuation: bool = False
+    # #2678: the public error code when it is not in the content, and the
+    # returned rows' document ids in rank order (transient; hashed downstream).
+    error_code: str | None = None
+    doc_ids: tuple[str, ...] = ()
+
+
+def _doc_ids(values: list[str | None]) -> tuple[str, ...]:
+    return tuple(v for v in values if v)
 
 
 @contextlib.asynccontextmanager
@@ -251,7 +259,10 @@ async def public_recall(endpoint: ServingEndpoint, args: dict[str, Any]) -> Publ
         if degradation.get("reason"):
             payload["degraded_reason"] = str(degradation["reason"])
     return PublicToolResult(
-        _success(payload), "degraded" if degraded else "success", result_count=placed
+        _success(payload),
+        "degraded" if degraded else "success",
+        result_count=placed,
+        doc_ids=_doc_ids([r["doc_key"] for r in results[:placed]]),
     )
 
 
@@ -284,6 +295,7 @@ async def public_reference(endpoint: ServingEndpoint, args: dict[str, Any]) -> P
         "success",
         result_count=1,
         continuation=offset > 0,
+        doc_ids=_doc_ids([memory.resource_doc_id]),
     )
 
 
@@ -397,7 +409,10 @@ async def public_explore(endpoint: ServingEndpoint, args: dict[str, Any]) -> Pub
     if truncated:
         exploration["truncated"] = True
     return PublicToolResult(
-        _success({"exploration": exploration}), "success", result_count=len(related)
+        _success({"exploration": exploration}),
+        "success",
+        result_count=len(related),
+        doc_ids=_doc_ids([seed.resource_doc_id, *(n.doc_key for n, _ in related)]),
     )
 
 

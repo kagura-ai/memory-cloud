@@ -70,6 +70,10 @@ class MCPSession:
     # a JSON-RPC batch is accepted. ``None`` for a session re-adopted after a
     # restart, whose handshake this process never saw.
     protocol_version: str | None = None
+    # ``initialize.params.clientInfo.name`` as the client declared it (#2678):
+    # unverified, kept in memory only; the public endpoint's usage events
+    # store a reduced family of it when the operator turns session details on.
+    client_name: str | None = None
 
 
 class MCPSessionManager:
