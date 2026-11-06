@@ -38,9 +38,10 @@ import asyncio
 import hmac
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.password import hash_password, verify_password
@@ -349,11 +350,15 @@ class PasswordAccountService:
         # #2660: and every passkey. One registered from a stolen session would
         # otherwise outlive the reset and still sign in, without TOTP. The
         # account keeps the new password, so this locks nobody out.
-        passkeys_removed = (
-            await self.db.execute(
-                delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user.user_id)
-            )
-        ).rowcount
+        passkeys_removed = int(
+            cast(
+                CursorResult[Any],
+                await self.db.execute(
+                    delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user.user_id)
+                ),
+            ).rowcount
+            or 0
+        )
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
         await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info(

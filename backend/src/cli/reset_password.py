@@ -53,11 +53,13 @@ prints that hint.
 import getpass
 import sys
 from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import create_engine, delete, select  # noqa: E402
+from sqlalchemy.engine import CursorResult  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.password import hash_password  # noqa: E402
@@ -215,9 +217,15 @@ def reset_password():
             # is a new device.
             db.execute(known_devices_delete(user.user_id))
             # #2660: and every passkey, as the emailed-link reset does.
-            passkeys_removed = db.execute(
-                delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user.user_id)
-            ).rowcount
+            passkeys_removed = int(
+                cast(
+                    CursorResult[Any],
+                    db.execute(
+                        delete(WebAuthnCredential).where(WebAuthnCredential.user_id == user.user_id)
+                    ),
+                ).rowcount
+                or 0
+            )
 
         # Disable MFA
         if choice in ("2", "3"):
