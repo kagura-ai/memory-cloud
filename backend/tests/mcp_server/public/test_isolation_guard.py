@@ -104,4 +104,5 @@ def test_the_guard_reads_every_module_of_the_package() -> None:
         "definitions.py",
         "tools.py",
         "dispatch.py",
+        "transport.py",
     } <= names

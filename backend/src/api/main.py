@@ -1080,6 +1080,26 @@ async def mcp_workspace_handler(request: Request, workspace_id: str, path: str):
     return await mcp_asgi_app(scope, request.receive, request._send)
 
 
+# Issue #2675: the anonymous read-only public MCP endpoint. Registered above
+# the ``/mcp{path:path}`` catch-all, which would otherwise serve it with the
+# authenticated transport. Never authenticates; the public app revalidates
+# the publication on every request.
+from mcp_server.public.transport import public_mcp_asgi_app  # noqa: E402
+
+
+@app.api_route(
+    "/mcp/public/{public_id}{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def public_mcp_handler(request: Request, public_id: str, path: str):
+    """Serve ``/mcp/public/{public_id}`` (and its trailing-slash form)."""
+    scope = dict(request.scope)
+    scope["public_endpoint_public_id"] = public_id
+    scope["path"] = "/mcp/public/" if path in ("", "/") else f"/mcp/public{path}"
+    return await public_mcp_asgi_app(scope, request.receive, request._send)
+
+
 @app.api_route(
     "/mcp{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
