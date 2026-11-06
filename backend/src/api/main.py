@@ -834,6 +834,7 @@ from api.routes import (  # noqa: E402
     oauth,
     passkeys,
     password,  # Issue #1678: self-service password endpoints
+    public_mcp_endpoints,  # Issue #2675: publish a resource as a public MCP endpoint
     public_search,  # Issue #238: Public Search API
     referrals,  # Issue #1470: user-facing referral code + redeem
     resource_indexer,  # Issue #326: Indexer status visibility API
@@ -1003,6 +1004,9 @@ app.include_router(resource_indexer.router, prefix="/api/v1")
 
 # Resource list route (Issue #47 - Web UI resource list)
 app.include_router(resources.router, prefix="/api/v1")
+
+# Public MCP endpoint publication (Issue #2675 - owner-only, metadata)
+app.include_router(public_mcp_endpoints.router, prefix="/api/v1")
 
 # Resource Token routes (Issue #242 - Resource Token Management)
 app.include_router(resource_tokens.router, prefix="/api/v1")
