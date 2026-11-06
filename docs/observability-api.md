@@ -89,9 +89,12 @@ curl -X POST "$KAGURA/api/v1/observation-credentials" \
   checked against the response models in CI. The `events` fixture is the page
   of [`public_mcp_usage_events_v1.json`](../backend/tests/fixtures/public_mcp_usage_events_v1.json).
 - **Pagination.** `events` and `ingestion-events` use opaque keyset cursors
-  (base64url JSON; do not parse them). `next_cursor` is always present — the
-  input cursor when the page is empty — and `has_more` says whether to call
-  again now. Store `next_cursor` after you processed a page; replaying a cursor
+  (base64url JSON; do not parse them). `next_cursor` is always present and
+  `has_more` says whether to call again now. On `ingestion-events` an empty
+  page hands back the input cursor; on `events` a page without more rows hands
+  back a position at the publication horizon, which can move forward even when
+  the page is empty (see
+  [Public MCP usage events](public-mcp-usage-events.md)). Store `next_cursor` after you processed a page; replaying a cursor
   answers the same rows plus anything published since.
 - **Maximum sizes.** `limit` 1–500 (default 100) for `events` and
   `ingestion-events` (`422` outside); `resources` and `snapshots` return at most
