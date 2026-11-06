@@ -4,6 +4,31 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.148.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.148.0) — 2026-11-06
+
+Anonymous read-only public MCP endpoints, with usage telemetry and an internal observability API for a self-hosted dashboard; plus an OAuth key-file startup fix, an oauthlib upgrade and security follow-ups for account recovery and sign-in.
+
+### Added
+- **Anonymous read-only public MCP endpoint** ([#2675](https://github.com/kagura-ai/memory-cloud/issues/2675)): a workspace owner publishes one resource context with approved public text through `POST/GET/PATCH/DELETE /api/v1/resources/{resource_id}/public-mcp`. The endpoint `/mcp/public/{pmcp_…}` serves both MCP protocol eras without sign-in and offers five read-only tools (`recall`, `reference`, `explore`, `list_tags`, `get_context_info`) over the resource's ingested, non-deleted memories only — no `details`, versions, workspace data or statistics; each result carries the resource's own `doc_id` and an `http(s)` `source_url` where one exists. Query parameters can only narrow the tool list, unpublishing takes effect on the next request (also for open sessions), and anonymous calls are refused while the rate-limit store is unavailable. Off by default: `MCP_PUBLIC_ENDPOINTS_ENABLED=true` turns it on; `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE` (120) and `MCP_PUBLIC_SESSION_RATE_LIMIT_PER_MINUTE` (30) bound anonymous calls. Client setup is in `docs/mcp-clients.md`, the public response contracts in `docs/mcp-tools.md`.
+- **Public MCP usage events** ([#2678](https://github.com/kagura-ai/memory-cloud/issues/2678)): one durable, versioned row per completed public `tools/call` (tool, outcome, duration, opaque document keys; no query or result text, memory ids, IP addresses or client identifiers), written through a bounded per-process queue so a public call never waits on the database; lost events are recorded as gap rows, a daily job purges rows older than `MCP_PUBLIC_TELEMETRY_RETENTION_DAYS` (90), and the owner route `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` shows outcomes, gaps and the writer's state. `MCP_PUBLIC_TELEMETRY_ENABLED` (default on; it only matters while the endpoint is on) and `MCP_PUBLIC_TELEMETRY_SESSION_DETAILS_ENABLED` (default off). Contract in `docs/public-mcp-usage-events.md`.
+- **Observation credentials and the observability API** ([#2679](https://github.com/kagura-ai/memory-cloud/issues/2679)): owners issue, rotate and revoke expiring read-only credentials (`/api/v1/observation-credentials`, `kagura_obs_…`, scoped to a workspace or one resource, 90 days by default and at most 365) that are accepted only by `GET /api/v1/observability/{capabilities,resources,snapshots,events,ingestion-events}` and `POST /api/v1/observability/documents/resolve` — paginated, schema-versioned exports for a self-hosted dashboard, with a commit-safe cursor over the usage events and explicit `cursor_expired` / `cursor_invalid` / `unsupported_schema_version` errors. Off by default: `OBSERVABILITY_API_ENABLED`, with `OBSERVABILITY_API_ALLOWED_CIDRS`, `OBSERVABILITY_API_RATE_LIMIT_PER_MINUTE` (600), `OBSERVABILITY_INGESTION_SEAL_SECONDS` (120) and `DEPLOYMENT_ID`. Every route is documented in `docs/observability-api.md`.
+
+### Changed
+- Typed API errors can carry a `Retry-After` header (the observability API's 429 and 503 answers use it).
+
+### Fixed
+- **OAuth encryption key file created atomically** ([#2673](https://github.com/kagura-ai/memory-cloud/issues/2673)): several API workers starting on a fresh config directory no longer race to write the CLI credential key `.key`; exactly one key is published (a hard link of a fully written temporary file, with an exclusive-create fallback where hard links are unavailable) and the other workers read it.
+
+### Security
+- **oauthlib 4.0.1** ([#2674](https://github.com/kagura-ai/memory-cloud/issues/2674)): the backend requires `oauthlib>=4.0.1` (GHSA-3jp2-3mrg-2vxc in the dependency); `backend/uv.lock` resolves 4.0.1 and `pip-audit` reports no known vulnerabilities. oauthlib is loaded only through the Google OAuth client; Memory Cloud's own device grant is built on Authlib.
+- **Security follow-ups for account recovery and sign-in** ([#2676](https://github.com/kagura-ai/memory-cloud/issues/2676), [#2677](https://github.com/kagura-ai/memory-cloud/issues/2677)): a password reset — by emailed link or the operator CLI's reset choices — also disconnects the account's Google / GitHub sign-ins (the owner connects them again from Profile); connecting a provider from Profile first asks for fresh proof of the account (the current password, a passkey or a recent verified sign-in), and the Connected accounts card asks for it; passkey sign-in has its own per-account attempt budget. `SECURITY.md` and `docs/deployment.md` describe the behaviour.
+
+### Notes
+- Migrations f27 (`public_mcp_endpoints`), f28 (`public_mcp_usage_events`, `public_mcp_doc_keys`, `public_mcp_usage_retention`) and f29 (`observation_credentials`), one chain from f26. Apply them before serving the new API. Both new surfaces are off by default, so upgrading changes nothing until an operator turns them on.
+- New environment variables are listed in `.env.example` and `docs/deployment.md` (public endpoint: 3; usage telemetry: 6 plus `DEPLOYMENT_ID`; observability API: 4).
+- Behaviour an owner may notice: after a password reset, Google / GitHub sign-ins must be connected again; an account that signs in only with Google or GitHub and has neither a password nor a passkey sets up a password by email before it can connect a second provider.
+- API changes are additive; the authenticated MCP tools and existing REST routes are unchanged.
+
 ## [v0.147.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.147.0) — 2026-11-06
 
 Second-factor follow-ups to v0.146.0: a password reset also removes the account's passkeys, recovery codes are consumed under the account lock, counted and regenerable, full-width authenticator codes are accepted, and a Google- or GitHub-only account can remove its last passkey through a mailbox password setup.
