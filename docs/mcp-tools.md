@@ -29,6 +29,38 @@ Sizes are the compact JSON of the `tools` array, measured at v0.135.0, when `exp
 
 > **Upgrading from v0.92.0 or earlier.** The bare `/mcp` URL used to list every tool; it now lists the core profile. A client that needs the other tools adds `?profile=full` to its URL (`&profile=full` when the URL already has a query) — most clients let the model call listed tools only, so this is the step that makes them usable; `describe_tools` tells the model which ones exist. Nothing changes on the server side (`tools/call` accepts every registered tool); connectors that cache `tools/list` (ChatGPT until Refresh, Codex per `initialize`) show the new list at their next read.
 
+### Listing profile vs enforced restriction
+
+`profile`, `tools` and `add_tools` on `/mcp` are a **listing profile**: they shape `tools/list` for a signed-in client and restrict nothing. The **enforced restriction** is a separate address, the anonymous public endpoint `/mcp/public/<public_id>` ([#2675](https://github.com/kagura-ai/memory-cloud/issues/2675)): there the server owns the policy — five read-only tools over one published resource dataset, checked on `tools/call` before any handler runs, with the URL able only to narrow it (`?tools=` intersects the five; `profile` and `add_tools` are ignored). Nothing changes on `/mcp`: there is no restrict flag for signed-in clients. Publishing: [Resource Tokens Guide](resource-tokens-guide.md#publishing-a-resource-as-a-public-mcp-endpoint); connecting: [MCP Client Setup](mcp-clients.md#public-read-only-endpoint-no-sign-in); operator settings: [Deployment](deployment.md#public-mcp-endpoints--issue-2675).
+
+### Public endpoint tools
+
+The public endpoint has its own definitions for `recall`, `reference`, `explore`, `list_tags` and `get_context_info` (≈ 5k characters in all), each annotated read-only (`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`) with `additionalProperties: false`. Every tool takes an optional `context_id`, which must be the published context's id. Its server `instructions` name the dataset and the five tools (≤ 240 characters); `serverInfo.name` is `kagura-memory-cloud-public`. The rows served are the published resource's ingested, non-deleted rows only. Responses carry exactly these fields (`?` = omitted when empty):
+
+| Tool | Arguments | Response |
+|---|---|---|
+| `get_context_info` (public) | — | `{status, endpoint: {public_id, name, description?, usage_guide?}, resource: {resource_id}, context: {id, name}}` |
+| `recall` (public) | `query` (1–500 chars), `k` (1–20, default 5), `search_mode` (`hybrid` \| `semantic` \| `keyword`), `tags` (≤ 10, all must match), `max_chars` (10,000–40,000, default 20,000) | `{status, count, results: [{memory_id, doc_key, summary, score, type, tags?, source_url?, created_at, updated_at, observed_at?}], truncated?, degraded?, degraded_reason?}` — lowest-ranked results are cut at `max_chars`; no reranking |
+| `reference` (public) | `memory_id`, `content_offset` (≥ 0), `max_chars` | `{status, memory: {memory_id, doc_key, summary, type, tags?, source_url?, created_at, updated_at, observed_at?, content, content_offset, content_total_chars, content_truncated, content_next_offset}}` — continue with `content_offset=content_next_offset` |
+| `explore` (public) | `memory_id`, `depth` (1–2, default 1), `limit` (1–25, default 10) | `{status, exploration: {seed: {memory_id, doc_key, summary}, related: [{memory_id, doc_key, summary, hop, edge_type}], returned, truncated?}}` — one row per related entry, strongest relation first; hop 2 walks only from public entries |
+| `list_tags` (public) | `limit` (1–100, default 50), `min_count`, `sort` (`count` \| `recent` \| `alpha`), `prefix`, `with_tags` (≤ 10) | `{status, tags: [{tag, count}], total, has_more}` |
+
+`doc_key` is the resource's own document id; `source_url` appears only for an `http(s)` source. Never returned: `details`, versions or history (`version` on `reference` is refused), importance, scope, client, links, edge weights, the context's summary, usage guide, guardrails, search configuration or statistics, and anything about the workspace. Public reads write nothing: no access counts, no graph learning, no `last_used_at`.
+
+Error results (`isError: true`, HTTP 200):
+
+| `error` | When |
+|---|---|
+| `unknown_tool` | Any name outside the five (or outside a `?tools=` narrowing) — the same `Unknown tool: <name>` for every refused name, before anything runs |
+| `invalid_argument` | An argument the public schema does not have (`unknown arguments: …`), `version` on `reference` (`historical versions are not available on this endpoint`), a value out of range, or a `content_offset` past the end |
+| `context_not_available` | A `context_id` other than the published one |
+| `memory_not_found` | `Memory not found on this endpoint: <id>` — the same text for an unknown, deleted, foreign or non-public id |
+| `rate_limit_exceeded` | The endpoint's or session's per-minute budget is spent (`retry_after_seconds`) |
+| `temporarily_unavailable` | The rate-limit store cannot be read, or a workspace limit stopped the call (`retry_after_seconds`) |
+| `internal_error` / `timeout` / `service_unavailable` | A server failure, with a `correlation_id`; the exception text is never returned |
+
+HTTP-level answers: `404 {"error": "not_found", …}` for every address that is not served (unknown, unpublished, data no longer public, operator switch off), `503 {"error": "temporarily_unavailable"}` while the workspace's plan pauses public serving or it is over its capacity, `429 {"error": "rate_limited"}` with `Retry-After` for the handshake / listing methods, `400` for a body over 64 KiB, a JSON-RPC batch or a malformed request, `405` for `GET`. `tools/list` and `server/discover` carry `ttlMs` 300,000 with `cacheScope: "public"`: a client may keep a stale list up to 5 minutes after an unpublish, but every call is refused.
+
 ## Tool annotations
 
 Every definition in `tools/list` carries a human-readable `title` and the standard MCP `annotations` object: the same `title` plus `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`, all four sent on every tool (read-only tools send `destructiveHint: false` and `idempotentHint: true`). `annotations` exists since MCP 2025-03-26 and a top-level `title` since 2025-06-18; a client that does not know them ignores them. Together they add about 160 characters per tool, on every profile.

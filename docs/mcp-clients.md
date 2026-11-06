@@ -13,6 +13,7 @@ Every client below takes one of two endpoint URLs — same server, same credenti
 | **Guardrail digest** (clients without tool hooks) | `…/mcp?guardrails=<context_id>` (off: `?guardrails=off`) |
 | **Default context** (the client works in one context) | `…/mcp?context=<context_id>` — tools called without `context_id` run in it. Or set it on the credential instead (below) |
 | **Pinned to one workspace** (OAuth client, several workspaces) | `…/mcp/w/{workspace_id}` — takes the same query parameters |
+| **Public read-only dataset** (anyone, no sign-in) | `…/mcp/public/pmcp_…` — see [Public read-only endpoint](#public-read-only-endpoint-no-sign-in) |
 
 A default context can come from three places, so a client that cannot edit its URL (or whose OAuth token is stored per URL) does not have to: `?context=` on the URL, a default set on the **API key** (key management on the Credentials & Integrations page, or `PATCH /api/v1/config/api-keys/{key_id}`), or a default set on the **app's OAuth grant** (picked on the consent page when you authorize the app, or changed later with `PUT /api/v1/me/oauth/grants/{client_id}/default-context`). Precedence: an explicit `context_id` > `?context=` > the key's or the app's default > an agent-bound key's default binding > none.
 
@@ -410,6 +411,26 @@ Restart or reconnect the client afterwards so it lists tools again. A typo in `p
 > This changes what is **listed**, not what can be **called** — it is not an access control. See [MCP Tools Reference › Tool Profiles](mcp-tools.md#tool-profiles) for the exact rules and the core tool set.
 >
 > Clients that defer tool loading — fetching a tool's schema only when it is about to be used, as Claude Code's tool search does — gain little: they never paid for the whole list in the first place.
+
+## Public read-only endpoint (no sign-in)
+
+A workspace owner can publish one resource's data (a website, product catalog or FAQ) as an anonymous, read-only MCP endpoint ([how to publish](resource-tokens-guide.md#publishing-a-resource-as-a-public-mcp-endpoint); the operator enables it with `MCP_PUBLIC_ENDPOINTS_ENABLED`). Visitors connect **without signing in and without a key**:
+
+```
+https://your-domain.com/mcp/public/pmcp_<22 characters>
+```
+
+- **Claude (claude.ai / Desktop):** add a custom connector with that URL and no authentication.
+- **ChatGPT (developer mode):** add a connector with that Server URL and authentication "No authentication".
+- **Claude Code:** `claude mcp add --transport http acme-catalog https://your-domain.com/mcp/public/pmcp_…`
+- Any Streamable HTTP client works: both the `initialize` handshake and stateless MCP 2026-07-28 requests are served, and the server never answers with an authentication challenge.
+
+The endpoint lists exactly five read-only tools, all bound to the one published dataset, so no `context_id` is needed: `get_context_info` (the dataset's public name, description and usage guide — call it first), `recall` (search), `reference` (an entry's full text, paged with `content_offset`), `explore` (related entries) and `list_tags` (categories for `recall`'s `tags` filter). Response fields: [MCP Tools › Public endpoint tools](mcp-tools.md#public-endpoint-tools).
+
+- `?tools=recall,reference` on the URL lists and allows fewer of the five; nothing on the URL adds a tool (`profile=`, `add_tools=` are ignored). Any other tool name answers `unknown_tool`.
+- A credential sent to this URL is ignored — the answers are the same public ones.
+- Limits are per endpoint and per session (a client connection, not a person): by default 120 tool calls a minute for all visitors together and 30 per session; over the limit a call returns `rate_limit_exceeded` with `retry_after_seconds`. No IP address is used or stored.
+- When the owner unpublishes, or the data stops being public, the URL answers `404` from the next request on, also for clients that are already connected. A client may show a cached tool list for up to 5 minutes (`ttlMs`), but every call is refused.
 
 ## Other MCP Clients / REST API
 
