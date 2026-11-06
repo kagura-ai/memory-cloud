@@ -1043,6 +1043,53 @@ class Settings(BaseSettings):
         description="tools/call per public MCP session per minute",
     )
 
+    # #2679: the internal observability API (/api/v1/observability/*) a
+    # self-hosted dashboard reads with a scoped observation credential. Off by
+    # default: every observability route answers 404 before any header is
+    # read. Credentials can be issued while it is off.
+    observability_api_enabled: bool = Field(
+        default=False,
+        description="Serve the read-only observability API under /api/v1/observability",
+    )
+    observability_api_allowed_cidrs: str = Field(
+        default="",
+        description=(
+            "Comma-separated CIDR ranges whose client addresses may call the "
+            "observability API; any other address gets 404. Empty allows every "
+            "address (the credential is still required). The address is "
+            "request.client.host — behind a reverse proxy, set "
+            "FORWARDED_ALLOW_IPS so it is the caller's, and restrict at the proxy too."
+        ),
+    )
+    observability_api_rate_limit_per_minute: int = Field(
+        default=600,
+        ge=1,
+        description="Observability API requests per credential per minute",
+    )
+    observability_ingestion_seal_seconds: int = Field(
+        default=120,
+        ge=10,
+        le=3600,
+        description=(
+            "Ingestion events younger than this are not yet published by "
+            "GET /api/v1/observability/ingestion-events (the time seal)"
+        ),
+    )
+
+    @field_validator("observability_api_allowed_cidrs")
+    @classmethod
+    def _validate_observability_cidrs(cls, value: str) -> str:
+        """Refuse a malformed range at startup rather than allowing nobody."""
+        _parse_cidrs(value)
+        return value
+
+    @property
+    def observability_api_allowed_networks(
+        self,
+    ) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+        """Parsed ``observability_api_allowed_cidrs``."""
+        return _parse_cidrs(self.observability_api_allowed_cidrs)
+
     @property
     def mcp_allowed_origins_list(self) -> list[str]:
         """Parse ``MCP_ALLOWED_ORIGINS`` into a list, dropping empty entries."""

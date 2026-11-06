@@ -603,7 +603,12 @@ async def memory_cloud_exception_handler(
     if isinstance(exc, DuplicateFileError) and exc.existing_file is not None:
         content["existing_file"] = exc.existing_file
 
-    return JSONResponse(status_code=exc.status_code, content=content)
+    # #2679: a typed exception may carry response headers (``Retry-After``).
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=content,
+        headers=getattr(exc, "response_headers", None),
+    )
 
 
 @app.exception_handler(RequestValidationError)
