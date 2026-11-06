@@ -75,6 +75,14 @@ class PublicToolResult:
     outcome: str
     result_count: int | None = None
     continuation: bool = False
+    # #2678: the public error code when it is not in the content, and the
+    # returned rows' document ids in rank order (transient; hashed downstream).
+    error_code: str | None = None
+    doc_ids: tuple[str, ...] = ()
+
+
+def _doc_ids(values: list[str | None]) -> tuple[str, ...]:
+    return tuple(v for v in values if v)
 
 
 @contextlib.asynccontextmanager
@@ -191,7 +199,7 @@ def _project(memory: Memory, score: float | None = None) -> dict[str, Any]:
     """The public fields of one memory (recall item with ``score`` / reference head)."""
     item: dict[str, Any] = {
         "memory_id": str(memory.id),
-        "doc_key": memory.resource_doc_id,
+        "doc_id": memory.resource_doc_id,
         "summary": memory.summary,
     }
     if score is not None:
@@ -290,7 +298,10 @@ async def public_recall(endpoint: ServingEndpoint, args: dict[str, Any]) -> Publ
         if degradation.get("reason"):
             payload["degraded_reason"] = str(degradation["reason"])
     return PublicToolResult(
-        _success(payload), "degraded" if degraded else "success", result_count=placed
+        _success(payload),
+        "degraded" if degraded else "success",
+        result_count=placed,
+        doc_ids=_doc_ids([r["doc_id"] for r in results[:placed]]),
     )
 
 
@@ -323,13 +334,14 @@ async def public_reference(endpoint: ServingEndpoint, args: dict[str, Any]) -> P
         "success",
         result_count=1,
         continuation=offset > 0,
+        doc_ids=_doc_ids([memory.resource_doc_id]),
     )
 
 
 @dataclass(frozen=True)
 class _Neighbour:
     memory_id: UUID
-    doc_key: str | None
+    doc_id: str | None
     summary: str
     edge_type: str
 
@@ -418,13 +430,13 @@ async def public_explore(endpoint: ServingEndpoint, args: dict[str, Any]) -> Pub
     exploration: dict[str, Any] = {
         "seed": {
             "memory_id": str(seed.id),
-            "doc_key": seed.resource_doc_id,
+            "doc_id": seed.resource_doc_id,
             "summary": seed.summary,
         },
         "related": [
             {
                 "memory_id": str(n.memory_id),
-                "doc_key": n.doc_key,
+                "doc_id": n.doc_id,
                 "summary": n.summary,
                 "hop": hop,
                 "edge_type": n.edge_type,
@@ -436,7 +448,10 @@ async def public_explore(endpoint: ServingEndpoint, args: dict[str, Any]) -> Pub
     if truncated:
         exploration["truncated"] = True
     return PublicToolResult(
-        _success({"exploration": exploration}), "success", result_count=len(related)
+        _success({"exploration": exploration}),
+        "success",
+        result_count=len(related),
+        doc_ids=_doc_ids([seed.resource_doc_id, *(n.doc_id for n, _ in related)]),
     )
 
 

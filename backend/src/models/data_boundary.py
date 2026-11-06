@@ -88,6 +88,14 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # context is served at which opaque address, the owner-approved public
         # text and who published / unpublished it. Publication plumbing.
         "public_mcp_endpoints",
+        # Public MCP usage telemetry (#2678): one row per anonymous public
+        # tools/call plus gap rows, keyed by endpoint identity and opaque HMAC
+        # doc keys; no user id, no content. The doc-key map resolves a key to
+        # the resource's own document id (cascades with the resource); the
+        # retention row is the singleton purge mark.
+        "public_mcp_usage_events",
+        "public_mcp_doc_keys",
+        "public_mcp_usage_retention",
         # Known browsers for new-device sign-in alerts (#1769): keyed hashes of
         # device cookies, deleted with the account.
         "user_known_devices",

@@ -29,6 +29,7 @@ from models.llm_call_log import LLMCallLog
 from models.measurement import Measurement
 from models.memory import Memory, NeuralMemoryEdge
 from models.memory_access_event import MemoryAccessEvent
+from models.public_mcp_usage import PublicMcpUsageEvent
 from models.resource import IndexerState, Resource, ResourceEvent, WorkspaceConnector
 from models.schemas import RememberRequest
 from models.sleep import SleepAction, SleepReport
@@ -255,6 +256,27 @@ CASES: list[tuple[str, str, str, Factory, bool]] = [
             surface="rest",
             operation="recall",
             outcome="success",
+            **c,
+        ),
+        False,
+    ),
+    # Append-only (#2678: written in batches, deleted by retention): INSERT only.
+    (
+        "public_mcp_usage_events",
+        "documents",
+        "documents",
+        lambda s, c: PublicMcpUsageEvent(
+            occurred_at=utcnow(),
+            kind="tool_call",
+            endpoint_id=uuid4(),
+            workspace_id=s.ws.id,
+            context_id=s.ctx.id,
+            resource_pk=s.resource.id,
+            resource_id=s.resource.resource_id,
+            tool="get_context_info",
+            outcome="success",
+            era="session",
+            duration_ms=1,
             **c,
         ),
         False,

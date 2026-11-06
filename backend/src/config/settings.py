@@ -1042,6 +1042,48 @@ class Settings(BaseSettings):
         ge=1,
         description="tools/call per public MCP session per minute",
     )
+    # #2678: durable usage events of the public endpoint (one row per completed
+    # tools/call). A per-process bounded queue feeds a background writer, so a
+    # public call never waits on the database; lost events are recorded as gap
+    # rows. Session details (a daily session HMAC and the client's
+    # self-declared family) are off by default.
+    mcp_public_telemetry_enabled: bool = Field(
+        default=True,
+        description="Persist public MCP usage events (the log line is written either way)",
+    )
+    mcp_public_telemetry_queue_size: int = Field(
+        default=2000,
+        ge=100,
+        le=100_000,
+        description="Usage events held in memory per process before new ones are dropped",
+    )
+    mcp_public_telemetry_flush_interval_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=30.0,
+        description="Longest wait before a batch of usage events is written",
+    )
+    mcp_public_telemetry_write_timeout_seconds: float = Field(
+        default=5.0,
+        ge=0.5,
+        le=60.0,
+        description="Time budget of one usage event batch write",
+    )
+    mcp_public_telemetry_retention_days: int = Field(
+        default=90,
+        ge=1,
+        le=3650,
+        description="Days public MCP usage events are kept",
+    )
+    mcp_public_telemetry_session_details_enabled: bool = Field(
+        default=False,
+        description="Record a daily session HMAC and the unverified client family",
+    )
+    deployment_id: str = Field(
+        default="default",
+        pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$",
+        description="This deployment's identity in observability exports",
+    )
 
     @property
     def mcp_allowed_origins_list(self) -> list[str]:

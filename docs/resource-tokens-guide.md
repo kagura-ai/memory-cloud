@@ -218,7 +218,16 @@ curl -X DELETE "$KAGURA/api/v1/resources/products/public-mcp" -H "Authorization:
 - `serving` says whether the endpoint answers right now (the operator switch is on and the preconditions still hold). Making the context private or non-public, moving it to another resource slug or deleting it closes the endpoint too, without a separate unpublish.
 - Name ≤ 200 characters, description ≤ 2,000, usage guide ≤ 4,000.
 
-**What is public:** the rows ingested for this resource (`details.resource_id` equals the slug) that are not deleted. A note a member writes by hand into the same context is not served — unless that member sets `details.resource_id` to the slug themselves, which anyone who can write to the context can do. Each row shows its `memory_id`, `doc_key` (your document id), summary, content (through `reference`), type, tags, `source_url` (only an `http(s)` URL), and timestamps. **Not public:** `details`, versions and history, importance, links, the context's summary / usage guide / guardrails / search configuration / statistics, and anything about the workspace. The five tools and their exact response fields: [MCP Tools › Public endpoint tools](mcp-tools.md#public-endpoint-tools).
+**What is public:** the rows ingested for this resource (`details.resource_id` equals the slug) that are not deleted. A note a member writes by hand into the same context is not served — unless that member sets `details.resource_id` to the slug themselves, which anyone who can write to the context can do. Each row shows its `memory_id`, `doc_id` (your document id), summary, content (through `reference`), type, tags, `source_url` (only an `http(s)` URL), and timestamps. **Not public:** `details`, versions and history, importance, links, the context's summary / usage guide / guardrails / search configuration / statistics, and anything about the workspace. The five tools and their exact response fields: [MCP Tools › Public endpoint tools](mcp-tools.md#public-endpoint-tools).
+
+**Usage of your endpoint:** each completed tool call is recorded as a usage event — tool, outcome, duration and opaque document keys; never the visitor's query, session id or address ([Public MCP usage events](public-mcp-usage-events.md)). `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` (owner) shows the live endpoint's calls of the last 24 hours by outcome, the gap rows that report events the server could not record, and the event writer's queue:
+
+```bash
+curl "$KAGURA/api/v1/resources/products/public-mcp/usage-health" -H "Authorization: Bearer kagura_{owner_key}"
+# → {"resource_id": "products", "endpoint_id": "…", "window_hours": 24, "events": 42,
+#    "outcomes": {"success": 40, "rate_limited": 2}, "gaps": {"count": 0, "dropped_events": 0, "last_gap_at": null},
+#    "writer": {"enabled": true, "queue_depth": 0, …, "process_local": true}, "retention_days": 90}
+```
 
 ## Resource Tokens vs API Keys
 

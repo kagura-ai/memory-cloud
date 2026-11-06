@@ -447,6 +447,10 @@ async def _dispatch_public_message(
             requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
         )
         session.protocol_version = protocol_version
+        client_info = params.get("clientInfo") if isinstance(params, dict) else None
+        client_name = client_info.get("name") if isinstance(client_info, dict) else None
+        # Unverified and in memory only (#2678); stored reduced, if at all.
+        session.client_name = client_name[:200] if isinstance(client_name, str) else None
         await _send_jsonrpc_result(
             send,
             session,
@@ -483,6 +487,7 @@ async def _dispatch_public_message(
             era="session",
             session_id=session.session_id,
             protocol_version=getattr(session, "protocol_version", None),
+            client_name=getattr(session, "client_name", None),
         )
         await _send_jsonrpc_result(send, session, request_id, _tool_call_result(content))
     elif method == "ping":

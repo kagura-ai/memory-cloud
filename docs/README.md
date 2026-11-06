@@ -30,6 +30,7 @@
 
 - [Chunking Guide](chunking-guide.md) — Best practices for structuring memories (the **Compile** layer in human terms)
 - [Resource Tokens Guide](resource-tokens-guide.md) — External data ingestion via resource tokens (the **Ingest** layer)
+- [Public MCP Usage Events](public-mcp-usage-events.md) — What a public read-only MCP endpoint records per tool call, loss bounds, retention and the commit-safe export cursor
 - [Neural Memory Evaluation](neural-memory-evaluation.md) — Benchmark results, architecture decisions, known limitations (the **Enhance** layer evidence)
 - [Sleep Maintenance](sleep-maintenance.md) — Background 6-phase cleanup cycle, sleep_mode, observability, and rollback (the **Compile / Enhance** consolidation layer)
 - [Deployment](deployment.md) — Production deployment with Caddy reverse proxy (incl. the embedded LanceDB **"Kagura Lite"** backend, preview)
