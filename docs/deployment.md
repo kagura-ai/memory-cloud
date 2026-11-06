@@ -3033,6 +3033,19 @@ Fixed caps (not settings): request body 64 KiB, no JSON-RPC batches, `recall` qu
 
 Every request re-checks the publication with one indexed query (nothing is cached): an unpublished endpoint, a context that is no longer public or no longer bound to the resource, a removed resource or a deleted workspace answers the same `404` from the next request on, including on a session opened before. A workspace whose plan pauses public serving, or that is over its capacity, answers `503` with no details. The Origin allow-list of `/mcp` (`MCP_ALLOWED_ORIGINS`) and `MCP_REQUIRE_MIRRORED_HEADERS` apply unchanged. One log line `public_mcp_call` per `tools/call` records the endpoint, resource, tool, outcome and duration (no query text, memory id, session id or address).
 
+## Observability API — Issue #2679
+
+An internal, read-only API under `/api/v1/observability/*` for a self-hosted dashboard ([Observability API](observability-api.md)). It is read only with a scoped **observation credential** (`kagura_obs_…`) that the workspace owner issues at `/api/v1/observation-credentials`; sessions and owner API keys are refused there, and the credential is refused everywhere else.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OBSERVABILITY_API_ENABLED` | `false` | Operator switch. Off: every observability route answers `404` (the unknown-path body) before any header is read. Credentials can be issued while it is off. |
+| `OBSERVABILITY_API_ALLOWED_CIDRS` | *(empty)* | Comma-separated CIDR ranges allowed to call the API; any other client address gets the same `404`. Empty allows any address (the credential is still required). A malformed range stops startup. Behind a reverse proxy the address is the proxy's unless `FORWARDED_ALLOW_IPS` trusts it. |
+| `OBSERVABILITY_API_RATE_LIMIT_PER_MINUTE` | `600` | Requests per credential per minute (Redis); over it `429` with `Retry-After: 60`. A Redis outage serves the request. |
+| `OBSERVABILITY_INGESTION_SEAL_SECONDS` | `120` | `10`–`3600`. `ingestion-events` publishes only events received at least this long ago, so its ascending cursor cannot skip an ingest transaction shorter than the seal. |
+
+Keep the API internal: besides the allow-list, block `/api/v1/observability/` at the reverse proxy for every network but the dashboard's.
+
 ## Reranking — Issue #1572
 
 Recall is hybrid (semantic + BM25); a **cross-encoder reranker** can re-score

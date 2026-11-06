@@ -1160,6 +1160,23 @@ Workspace owner only (session or owner API key). Publishes a resource's public c
 
 Response: `{public_id, endpoint_path, resource_id, context_id, public_name, public_description, public_usage_guide, created_at, updated_at, serving}`. `endpoint_path` is a path on this deployment; `serving` is true while `MCP_PUBLIC_ENDPOINTS_ENABLED` is on and the context is still public and bound to the resource.
 
+### Observation credentials and the observability API
+
+Workspace owner only (session or owner API key) for the credential routes; the observability routes accept **only** an observation credential (`Authorization: Bearer kagura_obs_…`) and answer `404` while `OBSERVABILITY_API_ENABLED` is off ([#2679](https://github.com/kagura-ai/memory-cloud/issues/2679)). Bodies, cursors, limits and error codes: [Observability API](observability-api.md).
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/observation-credentials` | Issue `{name, scope: "workspace" \| "resource", resource_id?, ttl_days? (1-365, default 90)}` → `201` with the secret, shown once |
+| `GET /api/v1/observation-credentials` | The workspace's credentials with `status` (`active` / `expired` / `revoked`) |
+| `POST /api/v1/observation-credentials/{credential_id}/rotate` | `{grace_seconds? (0-86400)}` → `201` with a new secret of the same binding and remaining lifetime |
+| `DELETE /api/v1/observation-credentials/{credential_id}` | Revoke → `204` |
+| `GET /api/v1/observability/capabilities` | Scope, limits, schema versions, retention |
+| `GET /api/v1/observability/resources` | Resources in scope with their live public MCP publication |
+| `GET /api/v1/observability/snapshots` | Sanitised indexer state per resource (`never_run` / `idle` / `queued` / `running` / `error`) |
+| `GET /api/v1/observability/events` | Public MCP usage events, commit-safe cursor |
+| `GET /api/v1/observability/ingestion-events` | Payload-free, time-sealed summary of one resource's ingestion events |
+| `POST /api/v1/observability/documents/resolve` | Up to 100 doc keys → current public title and source URL, or `null` |
+
 ### Connector create errors
 
 `POST /api/v1/workspace-connectors` (workspace admin; MCP `setup_connector` raises the same errors). One platform team (for example a Slack workspace) can be connected to one Kagura workspace only; one workspace may connect it under several worker apps. A team that is already connected answers `409` `RES-002` with a stable `details.reason` ([#1753](https://github.com/kagura-ai/memory-cloud/issues/1753)):
