@@ -479,6 +479,14 @@ class TestResetRevokesOAuthGrants:
             .all()
         )
         assert remaining == [other.user_id]
+        # The deletion is audited like the profile's own removal, so an
+        # investigation sees it next to `password_reset`.
+        audited = await db_session.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.user_id == user.user_id, AuditLog.action == "passkey_removed")
+        )
+        assert audited == 1
 
     async def test_revocation_rolls_back_with_the_reset(
         self, db_session: AsyncSession, made: _Made, oauth_client: str

@@ -20,9 +20,9 @@ write back instead of leaving a new password beside the old sessions.
 
 A **reset** is the compromise-recovery path, so it also revokes every OAuth2 /
 MCP grant of the account in the same transaction (#1738): access and refresh
-tokens, authorization codes not yet exchanged, and device codes. A change or
-set-up (the caller proves the current password or the mailbox while signed
-in) keeps them. API keys, OAuth client secrets, share keys and resource tokens
+tokens, authorization codes not yet exchanged, and device codes — and deletes
+the account's passkeys (#2660). A change or set-up (the caller proves the
+current password or the mailbox while signed in) keeps them. API keys, OAuth client secrets, share keys and resource tokens
 are integration credentials and are never revoked here; the reset page and
 email tell the user to review them.
 
@@ -349,7 +349,9 @@ class PasswordAccountService:
         await self.db.execute(known_devices_delete(user.user_id))
         # #2660: and every passkey. One registered from a stolen session would
         # otherwise outlive the reset and still sign in, without TOTP. The
-        # account keeps the new password, so this locks nobody out.
+        # account keeps the new password; one with TOTP enabled still needs its
+        # authenticator or a recovery code afterwards (the CLI's choice 3 is
+        # the operator's way out of that lockout).
         passkeys_removed = int(
             cast(
                 CursorResult[Any],
@@ -359,6 +361,11 @@ class PasswordAccountService:
             ).rowcount
             or 0
         )
+        if passkeys_removed:
+            # Same action the profile's own removal writes, so an investigation
+            # that lists `passkey_added` / `passkey_removed` sees the reset's
+            # deletion next to `password_reset` instead of a key that vanished.
+            self._audit(user.user_id, _AUDIT_ACTOR_LINK, "passkey_removed", ip_address, user_agent)
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
         await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info(

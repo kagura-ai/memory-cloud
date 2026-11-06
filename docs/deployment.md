@@ -774,8 +774,12 @@ refresh token issued to the account, authorization codes not yet exchanged,
 and device-flow codes. Connected clients (Claude Code, ChatGPT, the CLI) must
 sign in again. It also deletes the account's passkeys (#2660): one registered
 from a stolen session would otherwise outlive the reset and still sign in. The
-owner registers them again. A set-up, change or removal signs out browser
-sessions only.
+owner registers them again; the audit log records the deletion as
+`passkey_removed` next to `password_reset`. The reset keeps TOTP, so an owner
+whose only working sign-in was a passkey still needs the authenticator or a
+recovery code afterwards; for that lockout, run
+`python -m src.cli.reset_password` and choose the reset that also disables
+MFA. A set-up, change or removal signs out browser sessions only.
 
 API keys, OAuth client secrets, share keys and resource tokens are **not**
 revoked by any password flow: they are integration credentials, and revoking
