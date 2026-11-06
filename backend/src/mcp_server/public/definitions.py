@@ -86,7 +86,7 @@ PUBLIC_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "recall",
         "Search Public Data",
         "Search this read-only public dataset by meaning and keywords. Returns "
-        "{status, count, results: [{memory_id, doc_key, summary, score, type, tags?, "
+        "{status, count, results: [{memory_id, doc_id, summary, score, type, tags?, "
         "source_url?, created_at, updated_at, observed_at?}], truncated?, degraded?}. "
         "Use reference(memory_id) for an entry's full text.",
         {
@@ -122,7 +122,7 @@ PUBLIC_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "reference",
         "Read Public Entry",
         "Read one entry of this public dataset in full. Returns {status, memory: "
-        "{memory_id, doc_key, summary, type, tags?, source_url?, created_at, updated_at, "
+        "{memory_id, doc_id, summary, type, tags?, source_url?, created_at, updated_at, "
         "observed_at?, content, content_truncated, content_next_offset}}. When "
         "content_truncated is true, call again with content_offset=content_next_offset.",
         {
@@ -140,7 +140,7 @@ PUBLIC_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "explore",
         "Explore Related Public Entries",
         "List entries of this public dataset related to one entry. Returns {status, "
-        "exploration: {seed: {memory_id, doc_key, summary}, related: [{memory_id, doc_key, "
+        "exploration: {seed: {memory_id, doc_id, summary}, related: [{memory_id, doc_id, "
         "summary, hop, edge_type}], returned, truncated?}}.",
         {
             "memory_id": _MEMORY_ID,

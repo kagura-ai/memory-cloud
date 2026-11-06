@@ -118,3 +118,61 @@ async def test_writer_inserts_events_gaps_and_doc_keys(maker):
         (resource_pk, "doc-b"),
     }
     assert writer.health().last_flush_ok is True
+
+
+class _CommitThenTimeOut:
+    """Session factory whose first session commits and then reports a timeout."""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
+        self.calls = 0
+
+    def __call__(self) -> AsyncSession:
+        self.calls += 1
+        session = self._factory()
+        if self.calls == 1:
+            real_commit = session.commit
+
+            async def commit() -> None:
+                await real_commit()
+                raise TimeoutError
+
+            session.commit = commit  # type: ignore[method-assign]
+        return session
+
+
+async def test_retry_after_a_commit_that_landed_is_not_a_loss(maker):
+    """A write that committed but timed out is retried without a loss or a gap."""
+    workspace_id, resource_pk = await _resource(maker)
+    factory = _CommitThenTimeOut(maker)
+    writer = PublicMcpUsageWriter(
+        session_factory=factory,
+        queue_size=10,
+        flush_interval=0.05,
+        write_timeout=5.0,
+        key=KEY,
+        session_details_enabled=False,
+        retry_backoff=0.0,
+    )
+    writer.offer(_event(workspace_id, resource_pk))
+    writer.offer(_event(workspace_id, resource_pk, doc_ids=()))
+    writer.start()
+    await writer.stop(timeout=5)
+
+    async with maker() as s:
+        sql_nulls = (
+            await s.execute(
+                text("SELECT count(*) FROM public_mcp_usage_events WHERE documents IS NULL")
+            )
+        ).scalar_one()
+        kinds = (
+            (await s.execute(select(PublicMcpUsageEvent.kind).order_by(PublicMcpUsageEvent.id)))
+            .scalars()
+            .all()
+        )
+    assert factory.calls >= 2  # the batch was retried
+    assert kinds == ["tool_call", "tool_call"]  # stored once, no gap row
+    assert sql_nulls == 1  # no documents is SQL NULL, not JSON null
+    health = writer.health()
+    assert health.dropped_since_start == 0
+    assert health.last_flush_ok is True

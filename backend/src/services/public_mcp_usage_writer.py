@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CHAR, String, Uuid, bindparam, cast, exists, insert, select
+from sqlalchemy import CHAR, String, Uuid, bindparam, cast, exists, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -280,7 +280,9 @@ class PublicMcpUsageWriter:
     async def _write(self, rows: list[dict[str, Any]], doc_rows: list[dict[str, Any]]) -> None:
         async with self._session_factory() as session:
             if rows:
-                await session.execute(insert(PublicMcpUsageEvent), rows)
+                # A retry after a commit that landed but timed out re-sends
+                # the same event_ids: those rows are already stored, not lost.
+                await session.execute(_EVENT_INSERT, rows)
             if doc_rows:
                 try:
                     # Keys of a resource deleted since the call are skipped;
@@ -327,6 +329,8 @@ class PublicMcpUsageWriter:
         self._last_drop_log = now
         logger.warning(event, dropped_since_start=self._dropped_since_start, **fields)
 
+
+_EVENT_INSERT = pg_insert(PublicMcpUsageEvent).on_conflict_do_nothing(index_elements=["event_id"])
 
 _DOC_KEY_PK = cast(bindparam("resource_pk"), Uuid)
 _DOC_KEY_INSERT = (

@@ -491,7 +491,8 @@ async def read_usage_events_page(
         limit: Rows per page, 1..``USAGE_PAGE_MAX``.
 
     Returns:
-        The page; ``next_cursor`` is the input cursor when the page is empty.
+        The page. ``next_cursor`` is the last row when more rows follow;
+        otherwise it is the sealed horizon (never below the input cursor).
 
     Raises:
         CursorInvalidError: ``cursor`` is not one this server issued.
@@ -504,6 +505,10 @@ async def read_usage_events_page(
     e = PublicMcpUsageEvent
     scope = _scope(workspace_id, resource_pk)
     horizon = literal_column(_HORIZON_SQL)
+
+    # Read before the page, so it is no later than the page's own horizon
+    # (the horizon only moves forward): what an empty page vouches for.
+    floor = int((await db.execute(select(horizon))).scalar_one())
 
     # ONE statement: the horizon and the visible rows share the snapshot.
     page_stmt = (
@@ -522,7 +527,6 @@ async def read_usage_events_page(
     # so a purge the page could not see the rows of is visible here.
     r = PublicMcpUsageRetention
     stats_stmt = select(
-        horizon.label("horizon"),
         select(func.count())
         .select_from(e)
         .where(e.txid >= horizon, *scope)
@@ -539,13 +543,17 @@ async def read_usage_events_page(
 
     has_more = len(rows) > limit
     rows = rows[:limit]
-    if rows:
+    page_horizon = int(rows[0].horizon) if rows else floor
+    if has_more:
         last = rows[-1][0]
         next_cursor = encode_cursor(UsageCursor(last.txid, last.id))
-        page_horizon = int(rows[0].horizon)
     else:
-        next_cursor = encode_cursor(start)
-        page_horizon = int(stats.horizon)
+        # Every row of the scope below the horizon has been returned, and any
+        # row still to come has a txid at or above it: the cursor moves up to
+        # the horizon, so an idle reader keeps pace with the purge mark
+        # instead of being refused as expired for rows it was never owed.
+        sealed = UsageCursor(page_horizon - 1, _MAX_BIGINT)
+        next_cursor = encode_cursor(max(start, sealed))
     return UsageEventsPage(
         events=[to_export(row[0]) for row in rows],
         next_cursor=next_cursor,

@@ -54,7 +54,7 @@ def _memory(**over: Any) -> Memory:
         created_at=datetime(2026, 11, 1, 12, 0, 0),
         updated_at=over.pop("updated_at", datetime(2026, 11, 2, 12, 0, 0)),
     )
-    m.resource_doc_id = over.pop("doc_key", "sku-1")
+    m.resource_doc_id = over.pop("doc_id", "sku-1")
     m.observed_at = over.pop("observed_at", None)
     assert not over, over
     return m
@@ -132,7 +132,7 @@ def search(monkeypatch) -> AsyncMock:
 
 RECALL_ITEM_KEYS = {
     "memory_id",
-    "doc_key",
+    "doc_id",
     "summary",
     "score",
     "type",
@@ -158,7 +158,7 @@ async def test_recall_projects_only_rows_the_predicate_returns(session, search) 
     assert set(item) == RECALL_ITEM_KEYS
     assert item == {
         "memory_id": str(keep.id),
-        "doc_key": "sku-1",
+        "doc_id": "sku-1",
         "summary": "A product",
         "score": 0.8123,
         "type": "fact",
@@ -192,7 +192,7 @@ async def test_recall_optional_fields_are_omitted(session, search) -> None:
     first, second = body["results"]
     assert set(first) == {
         "memory_id",
-        "doc_key",
+        "doc_id",
         "summary",
         "score",
         "type",
@@ -305,7 +305,7 @@ async def test_reference_projection_is_exact(session) -> None:
     assert set(body) == {"status", "memory"}
     assert set(body["memory"]) == {
         "memory_id",
-        "doc_key",
+        "doc_id",
         "summary",
         "type",
         "tags",
@@ -416,13 +416,11 @@ async def test_explore_projection_and_hops(session, monkeypatch) -> None:
     assert set(body["exploration"]) == {"seed", "related", "returned"}
     assert body["exploration"]["seed"] == {
         "memory_id": str(seed_id),
-        "doc_key": "doc-seed",
+        "doc_id": "doc-seed",
         "summary": "seed",
     }
     related = body["exploration"]["related"]
-    assert [set(r) for r in related] == [
-        {"memory_id", "doc_key", "summary", "hop", "edge_type"}
-    ] * 3
+    assert [set(r) for r in related] == [{"memory_id", "doc_id", "summary", "hop", "edge_type"}] * 3
     assert [(r["summary"], r["hop"]) for r in related] == [("a", 1), ("b", 1), ("c", 2)]
     assert related[1]["edge_type"] == "semantic_similarity"
     assert "weight" not in result.content[0].text
