@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import String
 
 from models.auth import APIKey, ShareKey, WorkspaceInvitation
+from models.observation_credential import ObservationCredential
 from models.public_mcp import PublicMcpEndpoint
 from models.resource import ResourceToken
 from utils.public_id import PublicIdPrefix, public_id_pattern, public_id_server_default
@@ -16,6 +17,7 @@ CASES = [
     (ResourceToken, PublicIdPrefix.RESOURCE_TOKEN),
     (WorkspaceInvitation, PublicIdPrefix.INVITATION),
     (PublicMcpEndpoint, PublicIdPrefix.PUBLIC_MCP),
+    (ObservationCredential, PublicIdPrefix.OBSERVATION_KEY),
 ]
 
 

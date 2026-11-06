@@ -41,6 +41,7 @@ class PublicIdPrefix(StrEnum):
     RESOURCE_TOKEN = "rtok"  # noqa: S105 — not a credential
     INVITATION = "winv"
     PUBLIC_MCP = "pmcp"  # #2675: anonymous public MCP endpoint address
+    OBSERVATION_KEY = "obsk"  # #2679: read-only observability credential
 
 
 def new_public_id(prefix: PublicIdPrefix) -> str:
@@ -120,3 +121,6 @@ ShareKeyPublicId = Annotated[str, _path(PublicIdPrefix.SHARE_KEY, "share key")]
 ResourceTokenPublicId = Annotated[str, _path(PublicIdPrefix.RESOURCE_TOKEN, "resource token")]
 InvitationPublicId = Annotated[str, _path(PublicIdPrefix.INVITATION, "workspace invitation")]
 PublicMcpEndpointPublicId = Annotated[str, _path(PublicIdPrefix.PUBLIC_MCP, "public MCP endpoint")]
+ObservationCredentialPublicId = Annotated[
+    str, _path(PublicIdPrefix.OBSERVATION_KEY, "observation credential")
+]
