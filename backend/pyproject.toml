@@ -154,6 +154,12 @@ dependencies = [
     # Environment
     "python-dotenv>=1.0.0",
 
+    # IANA time zone database (#2700). zoneinfo falls back to this package for
+    # names the system tz database lacks: Debian 13 slim images (the backend
+    # base) ship no tzdata-legacy aliases, so names browsers still report
+    # (Asia/Calcutta, Europe/Kiev, US/Eastern) would neither validate nor load.
+    "tzdata>=2024.1",
+
     # Memory Broadlistening (#495 / umbrella #493)
     # KMeans + silhouette_score for cluster_index assignments and quality
     # metrics (Stage [D]). scipy is pulled transitively by sklearn.

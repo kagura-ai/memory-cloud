@@ -8,6 +8,7 @@ hostile input into a 500.
 
 from __future__ import annotations
 
+import importlib.util
 import zoneinfo
 
 import pytest
@@ -76,3 +77,21 @@ class TestTimezone:
         from models.auth import User
 
         assert User.__table__.c.timezone.type.length == TIMEZONE_MAX_LENGTH
+
+
+class TestTzdataRuntimeDependency:
+    """``tzdata`` is a runtime dependency (#2700): zoneinfo falls back to it for
+    names the system tz database lacks, and Debian 13 slim images (the backend
+    base) ship none of the legacy aliases browsers still report. Without the
+    package those users' time zone is dropped to UTC."""
+
+    def test_tzdata_is_installed_so_legacy_browser_names_validate(self) -> None:
+        assert importlib.util.find_spec("tzdata") is not None
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Asia/Calcutta", "Europe/Kiev", "Asia/Saigon", "America/Buenos_Aires", "US/Eastern"],
+    )
+    def test_legacy_alias_a_browser_reports_validates(self, name) -> None:
+        assert is_valid_timezone(name) is True
+        zoneinfo.ZoneInfo(name)  # and loads
