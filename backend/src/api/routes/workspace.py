@@ -39,6 +39,7 @@ from models.auth import Context, User, Workspace, WorkspaceMember
 from models.auth import UsageStats as UsageStatsModel
 from models.memory import Memory
 from services.memory_counts import count_live_memories
+from services.permission_service import PermissionService
 from services.plan_seats import member_seat_suspended
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import AuthenticationError
@@ -351,6 +352,7 @@ async def get_workspace_usage_current(
 
     Raises:
         HTTPException: 400 if no workspace selected, 500 on error
+        AuthorizationError: 403 if workspace access is no longer allowed
     """
     from utils import db_transaction
 
@@ -362,6 +364,9 @@ async def get_workspace_usage_current(
         )
 
     async with db_transaction(db, "get_workspace_usage_current", "Failed to get workspace usage"):
+        await PermissionService(db).check_workspace_access(
+            user["user_id"], workspace_id, required_role="viewer"
+        )
         # Get workspace with plan limits
         workspace_result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
         workspace = workspace_result.scalar_one_or_none()

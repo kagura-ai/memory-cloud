@@ -423,6 +423,32 @@ class TestWorkspaceUsageCurrent:
     """Tests for get_workspace_usage_current endpoint (Issue #65 optimization)."""
 
     @pytest.fixture(autouse=True)
+    def workspace_access(self):
+        with patch(
+            "services.permission_service.PermissionService.check_workspace_access",
+            new=AsyncMock(),
+        ) as access:
+            yield access
+
+    @pytest.mark.asyncio
+    async def test_stale_workspace_is_refused_before_usage_reads(
+        self, mock_db, mock_user, workspace_access, quota_meters
+    ):
+        from utils.exceptions import AuthorizationError
+
+        workspace_access.side_effect = AuthorizationError(
+            "Insufficient permissions", reason="not_a_member"
+        )
+        with pytest.raises(AuthorizationError):
+            await get_workspace_usage_current(user=mock_user, db=mock_db)
+
+        workspace_access.assert_awaited_once_with(
+            mock_user["user_id"], mock_user["current_workspace_id"], required_role="viewer"
+        )
+        mock_db.execute.assert_not_awaited()
+        quota_meters.assert_not_awaited()
+
+    @pytest.fixture(autouse=True)
     def quota_meters(self):
         # The additional meter queries have dedicated tests in test_workspace_quota_usage.
         with patch(
