@@ -226,6 +226,19 @@ describe("useAccountSwitcher", () => {
     expect(result.current.accounts).toEqual([ALICE, BOB]);
   });
 
+  it("carries the language in use, so an account created here starts in it (#2700)", async () => {
+    localStorage.setItem("kagura_locale", "ja");
+    try {
+      const { result } = renderHook(() => useAccountSwitcher());
+      act(() => result.current.addAccount("google"));
+      const url = new URL(assignSpy.mock.calls[0][0] as string);
+      expect(url.searchParams.get("locale")).toBe("ja");
+      expect(url.searchParams.get("add_account")).toBe("1");
+    } finally {
+      localStorage.clear();
+    }
+  });
+
   it("builds a github URL when github is chosen", async () => {
     const { result } = renderHook(() => useAccountSwitcher());
     act(() => result.current.addAccount("github"));

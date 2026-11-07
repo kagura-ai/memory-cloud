@@ -247,6 +247,28 @@ class TestSyncEmail:
         db.add.assert_not_called()
         db.commit.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_existing_user_keeps_its_own_prefs(self, role_manager):
+        """#2700: the sign-in page's language / time zone only seed a new row."""
+        existing = _user_row(email="alice@old.com")
+        existing.locale = "en"
+        existing.timezone = "America/New_York"
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
+
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="alice@new.com",
+                user_id="u1",
+                auth_provider="google",
+                email_verified=True,
+                locale="ja",
+                timezone="Asia/Tokyo",
+            )
+
+        assert existing.email == "alice@new.com"
+        assert existing.locale == "en"
+        assert existing.timezone == "America/New_York"
+
 
 class TestLinkedProviderSkipsSync:
     """#1811: a provider linked to the account is not its primary identity."""
@@ -686,6 +708,79 @@ class TestCreatePath:
         added = [c.args[0] for c in db.add.call_args_list]
         audits = [a for a in added if getattr(a, "action", None) == "oauth_user_email_synced"]
         assert len(audits) == 1
+
+    @pytest.mark.asyncio
+    async def test_new_user_takes_the_sign_in_page_prefs(self, role_manager):
+        """#2700: the language / time zone the sign-in page carried."""
+        db = _make_db_mock(_execute_returns(None, {"scalar": 1}))
+
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="new@example.com",
+                user_id="u2",
+                auth_provider="google",
+                email_verified=True,
+                locale="ja",
+                timezone="Asia/Tokyo",
+            )
+
+        added = db.add.call_args_list[0].args[0]
+        assert added.locale == "ja"
+        assert added.timezone == "Asia/Tokyo"
+
+    @pytest.mark.parametrize(
+        ("locale", "timezone"), [(None, None), ("xx", "Nope/Zone"), ("EN", "../etc/passwd")]
+    )
+    @pytest.mark.asyncio
+    async def test_absent_or_invalid_prefs_leave_the_column_defaults(
+        self, role_manager, locale, timezone
+    ):
+        """Not passed to the row at all, so the INSERT takes ``en`` / ``UTC``
+        (asserted against a real table in tests/integration)."""
+        from models.auth import User
+
+        db = _make_db_mock(_execute_returns(None, {"scalar": 1}))
+
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="new@example.com",
+                user_id="u2",
+                auth_provider="google",
+                email_verified=True,
+                locale=locale,
+                timezone=timezone,
+            )
+
+        added = db.add.call_args_list[0].args[0]
+        assert added.locale is None
+        assert added.timezone is None
+        assert User.__table__.c.locale.default.arg == "en"
+        assert User.__table__.c.timezone.default.arg == "UTC"
+
+    @pytest.mark.asyncio
+    async def test_user_id_race_keeps_the_existing_rows_prefs(self, role_manager):
+        """#2700: the row a concurrent first sign-in created keeps its own."""
+        race_existing = _user_row(email="alice@example.com", name="Alice")
+        race_existing.locale = "en"
+        race_existing.timezone = "America/New_York"
+        link = _oauth_link_row()
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link))
+        db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
+
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="alice@example.com",
+                user_id="u1",
+                name="Alice",
+                auth_provider="google",
+                email_verified=True,
+                locale="ja",
+                timezone="Asia/Tokyo",
+            )
+
+        db.rollback.assert_awaited_once()
+        assert race_existing.locale == "en"
+        assert race_existing.timezone == "America/New_York"
 
     @pytest.mark.asyncio
     async def test_email_collision_on_create_raises_conflict(self, role_manager):

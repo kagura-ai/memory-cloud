@@ -157,3 +157,64 @@ class TestRealDbEmailSync:
     # without depending on asyncpg's transaction-abort semantics. The
     # integration test above (lookup-by-user-id with email sync) confirms the
     # primary fix actually executes against a real PostgreSQL table.
+
+
+class TestRealDbSignupPrefs:
+    """#2700: the sign-in page's language / time zone seed a NEW row only."""
+
+    @staticmethod
+    async def _row(db_session: AsyncSession, user_id: str) -> User:
+        row = (
+            await db_session.execute(
+                select(User)
+                .where(User.user_id == user_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        return row
+
+    @pytest.mark.asyncio
+    async def test_new_user_takes_the_carried_prefs(self, db_session: AsyncSession):
+        sub = f"prefs-ja-{uuid4().hex[:8]}"
+        with _patch_get_db_with_fresh_session(db_session.bind):
+            await RoleManager(use_postgres=True).ensure_user(
+                email=f"{sub}@example.com",
+                user_id=sub,
+                auth_provider="google",
+                email_verified=True,
+                locale="ja",
+                timezone="Asia/Tokyo",
+            )
+
+        row = await self._row(db_session, sub)
+        assert (row.locale, row.timezone) == ("ja", "Asia/Tokyo")
+
+    @pytest.mark.asyncio
+    async def test_new_user_without_prefs_gets_the_column_defaults(self, db_session: AsyncSession):
+        sub = f"prefs-none-{uuid4().hex[:8]}"
+        with _patch_get_db_with_fresh_session(db_session.bind):
+            await RoleManager(use_postgres=True).ensure_user(
+                email=f"{sub}@example.com",
+                user_id=sub,
+                auth_provider="github",
+                email_verified=True,
+            )
+
+        row = await self._row(db_session, sub)
+        assert (row.locale, row.timezone) == ("en", "UTC")
+
+    @pytest.mark.asyncio
+    async def test_existing_user_keeps_its_own(self, two_users, db_session: AsyncSession):
+        alice = two_users["alice"]
+        with _patch_get_db_with_fresh_session(db_session.bind):
+            await RoleManager(use_postgres=True).ensure_user(
+                email=alice.email,
+                user_id=alice.user_id,
+                auth_provider="google",
+                email_verified=True,
+                locale="ja",
+                timezone="Asia/Tokyo",
+            )
+
+        row = await self._row(db_session, alice.user_id)
+        assert (row.locale, row.timezone) == ("en", "UTC")

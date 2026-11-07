@@ -22,6 +22,7 @@ import asyncio
 import contextvars
 import functools
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -101,6 +102,7 @@ from utils.redis_lock import (
     release_lock_sync,
     watch_token_sync,
 )
+from utils.user_prefs import is_valid_locale, is_valid_timezone
 from utils.utf8 import is_utf8_encodable
 
 # auth.py historically bound logger via stdlib ``logging.getLogger``
@@ -641,6 +643,8 @@ async def google_login(
     invite: str | None = None,
     accepted_terms: str | None = None,
     link_proof: bool = False,
+    locale: str | None = None,
+    timezone: str | None = None,
 ):
     """Initiate Google OAuth2 login flow.
 
@@ -658,6 +662,11 @@ async def google_login(
             (#1818): Google is asked for ``auth_time``, and the callback
             records it from the verified ID token. Ordinary sign-ins send the
             same request as before.
+        locale: The UI language the sign-in page was showing (``en`` / ``ja``,
+            #2700). Bound to this flow's state; a NEW account starts in it,
+            an existing one keeps its own. Unsupported values are ignored.
+        timezone: The browser's IANA time zone (e.g. ``Asia/Tokyo``, #2700).
+            Same handling as ``locale``.
 
     Returns:
         If return_to: RedirectResponse to Google OAuth (browser user)
@@ -709,6 +718,9 @@ async def google_login(
 
         # #1665: the terms version the person agreed to, bound to this state.
         _remember_accepted_terms(state, accepted_terms)
+
+        # #2700: the sign-in page's language / time zone, for a new account.
+        _remember_signup_prefs(state, locale, timezone)
 
         # #1818: a sign-in that proves this account for an identity link.
         if link_proof:
@@ -900,6 +912,8 @@ async def google_callback(
     beta_invite_token_hash = _take_beta_invite_hash(state)
     # #1665: likewise single-use and taken only after the CSRF check.
     accepted_terms = _take_accepted_terms(state)
+    # #2700: likewise; seeds a new account only.
+    signup_locale, signup_timezone = _take_signup_prefs(state)
     # #1818: likewise.
     link_proof = _take_link_proof_intent(state)
 
@@ -988,6 +1002,9 @@ async def google_callback(
             email_verified=user_info.get("email_verified") is True,
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
+            # #2700: applied only when this sign-in creates the account.
+            locale=signup_locale,
+            timezone=signup_timezone,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).
@@ -1603,6 +1620,67 @@ def _take_accepted_terms(state: str) -> str | None:
     return value
 
 
+# --- carrying the sign-in page's language and time zone (#2700) --------------
+#
+# ``GET /auth/{provider}/login?locale=<en|ja>&timezone=<IANA name>`` travels
+# like ``accepted_terms`` above: a short-lived Redis key beside the CSRF state,
+# read and deleted by the callback after the state check, and handed to
+# ``ensure_user``, which applies it to a NEW account only. Each value is
+# validated when stored and again when read; an invalid one is dropped on its
+# own. Application logs never record them (a time zone is a coarse location
+# signal); the server's access log does record the request line, query string
+# included, as it does for any GET.
+_SIGNUP_PREFS_KEY = "oauth2_signup_prefs:{state}"
+_SIGNUP_PREFS_TTL = 300  # same lifetime as oauth2_state:{state}
+
+
+def _remember_signup_prefs(state: str, locale: str | None, timezone: str | None) -> None:
+    """Bind the sign-in page's language and time zone to this OAuth ``state``.
+
+    Stores ``{"locale": ..., "timezone": ...}`` with an invalid value as
+    ``null``; stores nothing when neither value is valid.
+    """
+    if not _session_manager:
+        return
+    valid_locale = locale if is_valid_locale(locale) else None
+    valid_timezone = timezone if is_valid_timezone(timezone) else None
+    if valid_locale is None and valid_timezone is None:
+        return
+    _session_manager._redis.setex(
+        _SIGNUP_PREFS_KEY.format(state=state),
+        _SIGNUP_PREFS_TTL,
+        json.dumps({"locale": valid_locale, "timezone": valid_timezone}),
+    )
+
+
+def _take_signup_prefs(state: str) -> tuple[str | None, str | None]:
+    """Read-and-delete the ``(locale, timezone)`` bound to ``state``.
+
+    Call only AFTER the CSRF state check has passed. Consumes the key on every
+    path; a value that is not valid any more (or JSON that is not the stored
+    shape) comes back as ``None``.
+    """
+    if not _session_manager:
+        return None, None
+    key = _SIGNUP_PREFS_KEY.format(state=state)
+    raw = _session_manager._redis.get(key)
+    if raw is None:
+        return None, None
+    _session_manager._redis.delete(key)
+    try:
+        prefs = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, None
+    if not isinstance(prefs, dict):
+        return None, None
+    locale = prefs.get("locale")
+    timezone = prefs.get("timezone")
+    return (
+        locale if is_valid_locale(locale) else None,
+        timezone if is_valid_timezone(timezone) else None,
+    )
+
+
 async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
     """Whether ``ensure_user`` would NOT create a new account here (#1665).
 
@@ -2179,13 +2257,17 @@ async def github_login(
     add_account: bool = False,
     invite: str | None = None,
     accepted_terms: str | None = None,
+    locale: str | None = None,
+    timezone: str | None = None,
 ):
     """Initiate GitHub OAuth2 login flow.
 
-    ``invite`` is an optional closed-beta invite token (#1581) and
-    ``accepted_terms`` the terms version agreed to (#1665) — see
-    ``google_login``; both providers share ``_remember_beta_invite`` and
-    ``_remember_accepted_terms``.
+    ``invite`` is an optional closed-beta invite token (#1581),
+    ``accepted_terms`` the terms version agreed to (#1665), and ``locale`` /
+    ``timezone`` the sign-in page's UI language (``en`` / ``ja``) and the
+    browser's IANA time zone, which seed a NEW account only (#2700) — see
+    ``google_login``; both providers share ``_remember_beta_invite``,
+    ``_remember_accepted_terms`` and ``_remember_signup_prefs``.
     """
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Auth managers not initialized")
@@ -2217,6 +2299,9 @@ async def github_login(
 
     # #1665: the terms version the person agreed to, bound to this state.
     _remember_accepted_terms(state, accepted_terms)
+
+    # #2700: the sign-in page's language / time zone, for a new account.
+    _remember_signup_prefs(state, locale, timezone)
 
     redirect_uri = os.getenv(
         "GITHUB_REDIRECT_URI",
@@ -2358,6 +2443,8 @@ async def github_callback(
     beta_invite_token_hash = _take_beta_invite_hash(state)
     # #1665: the accepted terms version — see google_callback.
     accepted_terms = _take_accepted_terms(state)
+    # #2700: the sign-in page's language / time zone — see google_callback.
+    signup_locale, signup_timezone = _take_signup_prefs(state)
 
     try:
         # 2. Exchange code for token
@@ -2432,6 +2519,9 @@ async def github_callback(
             email_verified=user_info["email_verified"],
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
+            # #2700: applied only when this sign-in creates the account.
+            locale=signup_locale,
+            timezone=signup_timezone,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).

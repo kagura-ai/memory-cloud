@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   COMMON_TIMEZONES,
+  browserTimezone,
   timezoneOptions,
   formatDate,
   formatDateTime,
@@ -139,5 +140,86 @@ describe("timezoneOptions (#2701)", () => {
     ]);
     expect(options.filter((tz) => tz.value === "Asia/Tokyo")).toHaveLength(1);
     expect(options).toHaveLength(COMMON_TIMEZONES.length + 1);
+  });
+});
+
+describe("browserTimezone (#2700, #2701)", () => {
+  /** Make `Intl.DateTimeFormat()` report `timeZone` (or throw). */
+  function stubTimeZone(timeZone: unknown) {
+    vi.spyOn(Intl, "DateTimeFormat").mockImplementation(function () {
+      if (timeZone instanceof Error) throw timeZone;
+      return { resolvedOptions: () => ({ timeZone }) };
+    } as unknown as typeof Intl.DateTimeFormat);
+  }
+
+  /** The zones `Intl.supportedValuesOf("timeZone")` reports. */
+  function listed(...zones: string[]) {
+    vi.spyOn(Intl, "supportedValuesOf").mockReturnValue(zones);
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("is a zone the platform lists", () => {
+    stubTimeZone("Asia/Tokyo");
+    listed("Asia/Tokyo", "Europe/Berlin");
+    expect(browserTimezone()).toBe("Asia/Tokyo");
+  });
+
+  it("accepts UTC even where the platform does not list it", () => {
+    stubTimeZone("UTC");
+    listed("Asia/Tokyo");
+    expect(browserTimezone()).toBe("UTC");
+  });
+
+  it("is null for a zone the platform does not list", () => {
+    stubTimeZone("Nope/Zone");
+    listed("Asia/Tokyo");
+    expect(browserTimezone()).toBeNull();
+  });
+
+  it.each([
+    ["empty", ""],
+    ["Etc/Unknown", "Etc/Unknown"],
+    ["undefined", undefined],
+    ["not a string", 540],
+  ])("is null when the zone is %s", (_label, zone) => {
+    stubTimeZone(zone);
+    if (typeof zone === "string") listed(zone);
+    expect(browserTimezone()).toBeNull();
+  });
+
+  it("is null for a listed name longer than the backend stores (50)", () => {
+    const long = `America/${"A".repeat(43)}`;
+    stubTimeZone(long);
+    listed(long);
+    expect(browserTimezone()).toBeNull();
+  });
+
+  it("keeps a listed 50-character name", () => {
+    const fifty = `America/${"A".repeat(42)}`;
+    stubTimeZone(fifty);
+    listed(fifty);
+    expect(browserTimezone()).toBe(fifty);
+  });
+
+  it("is null when Intl throws", () => {
+    stubTimeZone(new RangeError("no tz support"));
+    expect(browserTimezone()).toBeNull();
+  });
+
+  it("trusts the zone where the platform cannot list zones", () => {
+    const original = Object.getOwnPropertyDescriptor(Intl, "supportedValuesOf");
+    Object.defineProperty(Intl, "supportedValuesOf", {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      stubTimeZone("Europe/Berlin");
+      expect(browserTimezone()).toBe("Europe/Berlin");
+    } finally {
+      if (original) Object.defineProperty(Intl, "supportedValuesOf", original);
+    }
   });
 });

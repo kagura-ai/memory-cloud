@@ -57,6 +57,8 @@ curl -H "Authorization: Bearer <access_token>" \
 
 Session-based authentication for the web management interface.
 
+The OAuth sign-in endpoints (`GET /api/v1/auth/{google,github}/login`) also take `locale` (`en` or `ja`, the sign-in page's language) and `timezone` (an IANA name such as `Asia/Tokyo`, the browser's time zone). Both are bound to the OAuth state like `accepted_terms`, and an account created by that sign-in starts with them instead of `en` / `UTC`. An existing account keeps its own settings, and an unsupported value is ignored.
+
 ---
 
 ### Passkeys

@@ -28,6 +28,7 @@ from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, UnlinkedProviderSignInError
 from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
+from utils.user_prefs import is_valid_locale, is_valid_timezone
 
 if TYPE_CHECKING:
     from sqlalchemy.exc import IntegrityError as _IntegrityError
@@ -268,6 +269,8 @@ class RoleManager:
         email_verified: bool = False,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        locale: str | None = None,
+        timezone: str | None = None,
     ) -> Role:
         """Ensure user exists; on existing users, sync email/name from IdP.
 
@@ -295,6 +298,12 @@ class RoleManager:
             ip_address: Caller IP, captured for the audit log row when an email
                 change is recorded.
             user_agent: Caller User-Agent, captured for the audit log row.
+            locale: UI language the sign-in page was showing (#2700). Only a
+                NEW row takes it; an existing account (including the row a
+                concurrent first sign-in created) keeps its own. ``None`` or
+                an unsupported value leaves the column default ``en``.
+            timezone: IANA time zone the browser reported (#2700). Same rule
+                as ``locale``; the column default is ``UTC``.
 
         Returns:
             The user's assigned role.
@@ -326,6 +335,8 @@ class RoleManager:
                 email_verified=email_verified,
                 ip_address=ip_address,
                 user_agent=user_agent,
+                locale=locale,
+                timezone=timezone,
             )
 
         # In-memory backend (testing only) — keyed by email for backward
@@ -350,6 +361,8 @@ class RoleManager:
         email_verified: bool,
         ip_address: str | None,
         user_agent: str | None,
+        locale: str | None = None,
+        timezone: str | None = None,
     ) -> Role:
         """PostgreSQL-backed ``ensure_user``. See ``ensure_user`` docstring."""
         from sqlalchemy import select
@@ -416,6 +429,16 @@ class RoleManager:
             user_count = count_result.scalar() or 0
             role = Role.ADMIN if user_count == 0 else Role.USER
 
+            # #2700: seed the new row with the sign-in page's language and
+            # time zone. Passed only when valid, so otherwise the column
+            # defaults (``en`` / ``UTC``) apply. Never applied to an existing
+            # row: neither _sync_existing_user nor the race retry below.
+            prefs: dict[str, str] = {}
+            if is_valid_locale(locale):
+                prefs["locale"] = locale
+            if is_valid_timezone(timezone):
+                prefs["timezone"] = timezone
+
             new_user = User(
                 email=email,
                 user_id=user_id,
@@ -428,6 +451,7 @@ class RoleManager:
                 # #1752: only an address the IdP attested as verified counts
                 # as verified (security notices go only to verified addresses).
                 email_verified_at=utcnow() if email_verified else None,
+                **prefs,
             )
             db.add(new_user)
             # Issue #517: register the provider identity so future logins

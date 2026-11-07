@@ -14,6 +14,7 @@ from db.base import get_db
 from models.auth import User
 from models.schemas import UpdateUserProfileRequest, UserProfileResponse, UserResponse
 from utils.logger import get_logger
+from utils.user_prefs import TIMEZONE_MAX_LENGTH, is_valid_timezone
 
 logger = get_logger(__name__)
 
@@ -106,24 +107,26 @@ async def update_user_profile(
     if data.name is not None:
         db_user.name = data.name
 
-    if data.timezone is not None:
+    # #2700: the profile page always sends the timezone, so a name-only save
+    # re-sends the stored one. That value is kept as it is, unchecked: a name
+    # saved before this validator (e.g. ``posix/Asia/Tokyo``, which ZoneInfo()
+    # accepted) must not turn every later save into a 400.
+    if data.timezone is not None and data.timezone != db_user.timezone:
         # Security: Input validation to prevent DoS
-        if len(data.timezone) > 50:
+        if len(data.timezone) > TIMEZONE_MAX_LENGTH:
             raise HTTPException(
-                status_code=400, detail="Timezone string too long (max 50 characters)"
+                status_code=400,
+                detail=f"Timezone string too long (max {TIMEZONE_MAX_LENGTH} characters)",
             )
 
-        # Validate timezone (Python 3.9+ standard library)
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-        try:
-            ZoneInfo(data.timezone)  # Validate timezone
-            db_user.timezone = data.timezone
-        except ZoneInfoNotFoundError as e:
+        # #2700: a lookup in the tz database's names, not ZoneInfo(), which
+        # raises ValueError for "", absolute paths and ".." (a 500 here before).
+        if not is_valid_timezone(data.timezone):
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid timezone: {data.timezone}. Must be IANA timezone (e.g., Asia/Tokyo)",
-            ) from e
+            )
+        db_user.timezone = data.timezone
 
     if data.locale is not None:
         # Locale validation (pattern already enforced in schema)

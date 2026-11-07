@@ -41,7 +41,14 @@
  * backend binds it to the OAuth state and records it. Same rule: appended only
  * for a non-empty string, so a deployment without `TERMS_VERSION` sends
  * exactly the URL it sent before.
+ *
+ * Every URL ends with `&locale=<lang>` and, when the browser reports one,
+ * `&timezone=<IANA name>` (#2700): the sign-in page's language and the
+ * browser's time zone, which an account created by this sign-in starts with
+ * (see `signupPrefs`).
  */
+import { signupPrefs } from "./signupPrefs";
+
 export type OAuthProvider = "google" | "github";
 
 export interface BuildOAuthRedirectOptions {
@@ -79,5 +86,9 @@ export function buildOAuthRedirect(
     typeof options?.acceptedTerms === "string" && options.acceptedTerms !== ""
       ? `&accepted_terms=${encodeURIComponent(options.acceptedTerms)}`
       : "";
-  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo.toString())}${inviteParam}${termsParam}`;
+  const prefs = signupPrefs();
+  const prefsParam =
+    `&locale=${encodeURIComponent(prefs.locale)}` +
+    (prefs.timezone ? `&timezone=${encodeURIComponent(prefs.timezone)}` : "");
+  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo.toString())}${inviteParam}${termsParam}${prefsParam}`;
 }

@@ -51,6 +51,13 @@ vi.mock("@/components/LanguageSelector", () => ({
   LanguageSelector: () => null,
 }));
 
+// #2700: the OAuth login also carries the sign-in page's language and the
+// browser's time zone. Pinned so the exact URLs below are machine-independent.
+vi.mock("@/lib/auth/signupPrefs", () => ({
+  signupPrefs: () => ({ locale: "ja", timezone: "Asia/Tokyo" }),
+}));
+const PREFS = "&locale=ja&timezone=Asia%2FTokyo";
+
 vi.mock("@/components/common/LoadingState", () => ({
   SpinnerLoading: () => null,
 }));
@@ -155,7 +162,7 @@ describe("AcceptInvitationPage OAuth login wiring", () => {
     const navigated = hrefAssignments[hrefAssignments.length - 1];
     const expectedReturnTo = encodeURIComponent(INVITE_URL);
     expect(navigated).toBe(
-      `https://api.example.com/api/v1/auth/google/login?return_to=${expectedReturnTo}`,
+      `https://api.example.com/api/v1/auth/google/login?return_to=${expectedReturnTo}${PREFS}`,
     );
     expect(navigated).not.toMatch(/\/api\/v1\/api\/v1\//);
   });
@@ -174,7 +181,7 @@ describe("AcceptInvitationPage OAuth login wiring", () => {
     const navigated = hrefAssignments[hrefAssignments.length - 1];
     const expectedReturnTo = encodeURIComponent(INVITE_URL);
     expect(navigated).toBe(
-      `https://api.example.com/api/v1/auth/github/login?return_to=${expectedReturnTo}`,
+      `https://api.example.com/api/v1/auth/github/login?return_to=${expectedReturnTo}${PREFS}`,
     );
     expect(navigated).not.toMatch(/\/api\/v1\/api\/v1\//);
   });
@@ -221,7 +228,7 @@ describe("AcceptInvitationPage terms acceptance (#1665)", () => {
 
     await waitFor(() => expect(hrefAssignments).toHaveLength(1));
     expect(hrefAssignments[0]).toBe(
-      `https://api.example.com/api/v1/auth/github/login?return_to=${encodeURIComponent(INVITE_URL)}&accepted_terms=2026-09`,
+      `https://api.example.com/api/v1/auth/github/login?return_to=${encodeURIComponent(INVITE_URL)}&accepted_terms=2026-09${PREFS}`,
     );
   });
 });
