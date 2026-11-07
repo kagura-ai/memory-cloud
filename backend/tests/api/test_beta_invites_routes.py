@@ -120,7 +120,16 @@ class TestKillSwitch:
         assert response.json()["next_offset"] == 4
         assert get_summary.await_args.kwargs == {"limit": 2, "offset": 2}
 
-    @pytest.mark.parametrize("query", ["limit=0", "limit=101", "offset=-1"])
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "limit=0",
+            "limit=101",
+            "offset=-1",
+            "offset=9223372036854775808",
+            "offset=99999999999999999999",
+        ],
+    )
     def test_invalid_page(self, client, enabled, query):
         assert client.get(f"/api/v1/beta-invites/me?{query}").status_code == 422
 

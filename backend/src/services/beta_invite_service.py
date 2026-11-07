@@ -1,7 +1,8 @@
 """Closed-beta invite link service (Issues #1581, #1595).
 
 A signed-in user mints a one-time ``/join/{token}`` URL; whoever opens it may
-pass the admin-configured signup gate once, within :data:`BETA_INVITE_TTL`.
+pass the admin-configured signup gate once before its expiry. Single invites
+use :data:`BETA_INVITE_TTL`; admin CLI batches use dated expiries (#2704).
 This module owns every statement against ``beta_invites``. The redemption
 itself is driven by ``SignupGateService`` (it owns ``signup_allowlist`` writes
 and knows when the gate would otherwise block); it calls
@@ -11,16 +12,17 @@ one place.
 
 Security contract, in one paragraph: the token is ``secrets.token_urlsafe(32)``
 and only ``sha256_hex(token)`` is ever stored (the API-key pattern,
-``auth/api_keys.py``). The plaintext leaves this module exactly once, inside the
-URL returned by :meth:`BetaInviteService.create` (or
-:meth:`BetaInviteService.reissue`). Nothing here logs or audits the token, its
+``auth/api_keys.py``). Each plaintext URL is returned only at mint time: by
+:meth:`BetaInviteService.create` or :meth:`BetaInviteService.reissue` for an API
+response, or by :meth:`BetaInviteService.create_batches` for the admin CLI's
+CSV export on stdout. Nothing here logs or audits the token, its
 hash, or the URL — the invite ``id`` is the only identifier that may appear in a
 log line.
 
 Privacy contract (#1595): an invite's ``label`` is the inviter's free-text note
 and may hold a name or an address; ``redeemed_email`` is the admitted account's
-address. Both go to the inviter's own responses and nowhere else — never a log
-line, an audit row or an exception message.
+address. They go to the inviter's own responses (and batch labels to the admin
+CLI's CSV export) — never a log line, an audit row or an exception message.
 """
 
 from __future__ import annotations
@@ -54,9 +56,10 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Fixed by design (#1581) — a code constant, not a setting: a link that lingers
-# for months is a standing credential, and nothing about a deployment changes
-# how long "come join the beta" stays a reasonable thing to act on.
+# Single create/reissue TTL (#1581): a code constant, not a deployment setting.
+# Admin CLI dated batches (#2704) instead expire on sending day + valid days
+# at the selected local time. To bound how long that stock remains a credential,
+# every batch expiry must be in the future and at most 60 days after minting.
 BETA_INVITE_TTL = timedelta(days=7)
 
 # 32 bytes -> 43 URL-safe characters, 256 bits. Enumerating the public preview

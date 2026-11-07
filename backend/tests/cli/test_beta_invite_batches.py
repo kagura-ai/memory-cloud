@@ -10,6 +10,7 @@ import pytest
 from cli import beta_invite_batches as cli
 from models.beta_invite import BetaInvite
 from services.beta_invite_service import MintedBetaInvite
+from utils.exceptions import NotFoundException
 
 
 def args(*extra):
@@ -107,6 +108,32 @@ async def test_sql_error_does_not_print_parameters(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "secret-label" not in captured.err
+
+
+@pytest.mark.parametrize("command", ["mint", "revoke"])
+async def test_unknown_inviter_reports_user_not_found(monkeypatch, capsys, command):
+    svc = MagicMock()
+    missing = NotFoundException("User", "unknown-admin")
+    svc.create_batches = AsyncMock(side_effect=missing)
+    svc.revoke_unused_by_label = AsyncMock(side_effect=missing)
+    monkeypatch.setattr(cli, "BetaInviteService", lambda _: svc)
+    monkeypatch.setattr(cli, "configure_logging", lambda: None)
+    monkeypatch.setattr("cli._oneshot.require_settings", lambda: None)
+
+    async def get_db():
+        yield MagicMock()
+
+    monkeypatch.setattr("cli._oneshot.get_db", get_db)
+    parsed = (
+        args("--inviter", "unknown-admin")
+        if command == "mint"
+        else cli._parse(["revoke", "--inviter", "unknown-admin", "--label", "batch"])
+    )
+    assert await cli._main(parsed) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "User not found: unknown-admin" in captured.err
+    assert "Batch operation failed" not in captured.err
 
 
 @pytest.mark.parametrize("count", [0, 3])

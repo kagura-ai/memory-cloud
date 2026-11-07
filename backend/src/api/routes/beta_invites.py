@@ -193,7 +193,9 @@ async def get_my_beta_invites(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0),
+    # PostgreSQL OFFSET is int8; don't cap an admin's lifetime history at the
+    # CLI's per-run mint limit, but reject values the database cannot represent.
+    offset: int = Query(0, ge=0, le=9_223_372_036_854_775_807),
 ) -> BetaInviteSummaryResponse:
     """Return the caller's invite quota standing and their invites, newest first.
 

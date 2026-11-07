@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 from cli._oneshot import configure_logging, run_plan_apply  # noqa: E402
 from services.beta_invite_service import BetaInviteService, MintedBetaInvite  # noqa: E402
 from utils.datetime import to_utc_iso  # noqa: E402
+from utils.exceptions import NotFoundException  # noqa: E402
 
 
 @dataclass
@@ -84,7 +85,7 @@ async def _main(args: argparse.Namespace) -> int:
             return BatchResult(
                 await svc.revoke_unused_by_label(args.inviter, args.label, dry_run=dry_run)
             )
-        except (ValueError, PermissionError):
+        except (ValueError, PermissionError, NotFoundException):
             raise
         except Exception:
             # SQL exceptions can include parameters (labels, token hashes).

@@ -7,14 +7,17 @@ and is a different layer entirely (#358 disambiguation note), and from the
 referral program (``models/referral.py``), which pays quota and admits nobody.
 
 Only ``sha256_hex(token)`` is stored — the API-key pattern (``auth/api_keys.py``).
-The plaintext exists in exactly one place: the ``POST /beta-invites`` response.
+Each plaintext URL is exposed only at mint time: in the ``POST /beta-invites``
+or reissue response, or in the admin batch-mint CLI's CSV export on stdout
+(``BetaInviteService.create_batches``).
 
 Status is **derived**, never stored, so it cannot disagree with the timestamps
 that the atomic redeem ``UPDATE`` and the quota ``COUNT`` filter on.
 
 ``label`` (#1595) is the inviter's own note about who a link went to. It is free
 text that may hold a name or an address, so it lives on this row and in the
-inviter's own API responses only — never in a log line, an audit row or an error.
+inviter's own API responses or the admin batch-mint CSV export — never in a log
+line, an audit row or an error.
 """
 
 from __future__ import annotations
@@ -50,7 +53,9 @@ class BetaInvite(Base):
         inviter_user_id: The minting user's ID (OAuth sub). ``ON DELETE CASCADE``
             — account erasure removes the inviter's links.
         created_at: When the link was minted.
-        expires_at: ``created_at`` + the fixed TTL.
+        expires_at: ``created_at`` + the fixed TTL for single create/reissue;
+            for CLI batches, sending day + valid days at the selected local
+            time, stored as UTC and capped at 60 days after minting.
         redeemed_at: Set once, by the signup gate's atomic redeem ``UPDATE``.
         redeemed_allowlist_entry_id: The ``signup_allowlist`` row written at
             redemption. ``ON DELETE SET NULL`` — an admin pruning that row does
