@@ -1,11 +1,31 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildOAuthRedirect } from "./buildOAuthRedirect";
 
 // jsdom's window.location.origin; the helper resolves relative returnTo against it.
 const FRONTEND_ORIGIN = "http://localhost:3000";
 
+/** Make `Intl.DateTimeFormat()` report `timeZone` (or throw). */
+function stubTimeZone(timeZone: string | Error) {
+  vi.spyOn(Intl, "DateTimeFormat").mockImplementation(function () {
+    if (timeZone instanceof Error) throw timeZone;
+    return { resolvedOptions: () => ({ timeZone }) };
+  } as unknown as typeof Intl.DateTimeFormat);
+}
+
+// #2700: every URL ends with the sign-in page's language and the browser's
+// time zone. Pinned here so the exact-URL assertions below do not depend on
+// the machine running them.
+const PREFS = "&locale=en&timezone=Asia%2FTokyo";
+
+beforeEach(() => {
+  localStorage.setItem("kagura_locale", "en");
+  stubTimeZone("Asia/Tokyo");
+});
+
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  localStorage.clear();
 });
 
 describe("buildOAuthRedirect — return_to absolute-URL conversion", () => {
@@ -129,14 +149,14 @@ describe("buildOAuthRedirect — optional invite token (#1582)", () => {
     vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
     const url = buildOAuthRedirect("google", "/", { invite: "tok_abc123" });
     expect(url).toBe(
-      `https://api.example.com/api/v1/auth/google/login?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/`)}&invite=tok_abc123`,
+      `https://api.example.com/api/v1/auth/google/login?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/`)}&invite=tok_abc123${PREFS}`,
     );
   });
 
   it("URL-encodes the invite token", () => {
     vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
     const url = buildOAuthRedirect("github", "/", { invite: "a b&c=d/e" });
-    expect(url.endsWith("&invite=a%20b%26c%3Dd%2Fe")).toBe(true);
+    expect(url.endsWith(`&invite=a%20b%26c%3Dd%2Fe${PREFS}`)).toBe(true);
     expect(new URL(url).searchParams.get("invite")).toBe("a b&c=d/e");
   });
 
@@ -203,7 +223,7 @@ describe("buildOAuthRedirect — optional accepted terms version (#1665)", () =>
       acceptedTerms: "2026-09",
     });
     expect(url).toBe(
-      `https://api.example.com/api/v1/auth/github/login?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/`)}&invite=tok&accepted_terms=2026-09`,
+      `https://api.example.com/api/v1/auth/github/login?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/`)}&invite=tok&accepted_terms=2026-09${PREFS}`,
     );
   });
 
@@ -220,6 +240,55 @@ describe("buildOAuthRedirect — optional accepted terms version (#1665)", () =>
     vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
     expect(buildOAuthRedirect("google", "/x", options)).toBe(
       buildOAuthRedirect("google", "/x"),
+    );
+  });
+});
+
+describe("buildOAuthRedirect — the sign-in page's language and time zone (#2700)", () => {
+  it("sends the language chosen on the sign-in page", () => {
+    localStorage.setItem("kagura_locale", "ja");
+    const url = buildOAuthRedirect("google", "/");
+    expect(new URL(url).searchParams.get("locale")).toBe("ja");
+  });
+
+  it("falls back to en when no language is stored", () => {
+    localStorage.clear();
+    vi.spyOn(navigator, "language", "get").mockReturnValue("de-DE");
+    const url = buildOAuthRedirect("github", "/");
+    expect(new URL(url).searchParams.get("locale")).toBe("en");
+  });
+
+  it("sends the browser's time zone", () => {
+    const url = buildOAuthRedirect("google", "/");
+    expect(new URL(url).searchParams.get("timezone")).toBe("Asia/Tokyo");
+  });
+
+  it("omits the time zone when Intl throws, and still sends the language", () => {
+    vi.restoreAllMocks();
+    stubTimeZone(new RangeError("no tz support"));
+    const url = buildOAuthRedirect("google", "/");
+    expect(url).not.toContain("timezone");
+    expect(url.endsWith("&locale=en")).toBe(true);
+  });
+
+  it("URL-encodes the time zone", () => {
+    vi.restoreAllMocks();
+    // "+" unencoded would arrive as a space.
+    stubTimeZone("Etc/GMT+9");
+    const url = buildOAuthRedirect("google", "/");
+    expect(url.endsWith("&timezone=Etc%2FGMT%2B9")).toBe(true);
+    expect(new URL(url).searchParams.get("timezone")).toBe("Etc/GMT+9");
+  });
+
+  it("comes after the invite and the accepted terms version", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    localStorage.setItem("kagura_locale", "ja");
+    const url = buildOAuthRedirect("google", "/x", {
+      invite: "tok",
+      acceptedTerms: "2026-09",
+    });
+    expect(url).toBe(
+      `https://api.example.com/api/v1/auth/google/login?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/x`)}&invite=tok&accepted_terms=2026-09&locale=ja&timezone=Asia%2FTokyo`,
     );
   });
 });

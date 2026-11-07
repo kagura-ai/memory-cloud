@@ -478,8 +478,11 @@ describe("LoginPage OAuth return_to forwarding (#774)", () => {
     const expectedReturnTo = encodeURIComponent(
       new URL("/device?user_code=ABC", originalOrigin).toString(),
     );
+    // #2700: the sign-in page's language follows return_to.
     expect(hrefAssignments[0]).toMatch(
-      new RegExp(`/api/v1/auth/google/login\\?return_to=${expectedReturnTo}$`),
+      new RegExp(
+        `/api/v1/auth/google/login\\?return_to=${expectedReturnTo}&locale=`,
+      ),
     );
     // Guard against the /api/v1 double-prefix trap — verify the URL has
     // exactly one /api/v1/ segment, not two.
@@ -498,7 +501,9 @@ describe("LoginPage OAuth return_to forwarding (#774)", () => {
       new URL("/device?user_code=ABC", originalOrigin).toString(),
     );
     expect(hrefAssignments[0]).toMatch(
-      new RegExp(`/api/v1/auth/github/login\\?return_to=${expectedReturnTo}$`),
+      new RegExp(
+        `/api/v1/auth/github/login\\?return_to=${expectedReturnTo}&locale=`,
+      ),
     );
     expect(hrefAssignments[0]).not.toMatch(/\/api\/v1\/api\/v1\//);
     expect(mockGetGitHubAuthUrl).not.toHaveBeenCalled();
@@ -1184,6 +1189,83 @@ describe("LoginPage sends the accepted terms version (#1665)", () => {
     expect(await screen.findByText("termsRequired")).toBeTruthy();
     expect(screen.queryByText("terms_required")).toBeNull();
   });
+});
+
+describe("LoginPage carries the sign-in page language into the OAuth login (#2700)", () => {
+  // A new account starts in the language this page shows; without it the
+  // backend creates the row as `en` and the app flips to English after
+  // sign-up.
+  let hrefAssignments: string[];
+  const originalLocation = window.location;
+  const originalOrigin = window.location.origin;
+
+  beforeEach(() => {
+    hrefAssignments = [];
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        get origin() {
+          return originalOrigin;
+        },
+        get href() {
+          return hrefAssignments[hrefAssignments.length - 1] || "";
+        },
+        set href(val: string) {
+          hrefAssignments.push(val);
+        },
+      },
+    });
+    localStorage.setItem("kagura_locale", "ja");
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: originalLocation,
+    });
+    localStorage.clear();
+  });
+
+  it.each(["google", "github"] as const)(
+    "adds locale to the %s redirect URL",
+    async (provider) => {
+      mockSearchParams.set("return_to", "/device?user_code=ABC");
+      await clickOAuthButton(provider);
+
+      await waitFor(() => expect(hrefAssignments.length).toBeGreaterThan(0));
+      const url = new URL(hrefAssignments[0]);
+      expect(url.pathname).toBe(`/api/v1/auth/${provider}/login`);
+      expect(url.searchParams.get("locale")).toBe("ja");
+    },
+  );
+
+  it.each(["google", "github"] as const)(
+    "adds locale to the JSON-mode %s login (no return_to)",
+    async (provider) => {
+      // The real URL builders behind the page's mocks, over a stubbed fetch.
+      const actual =
+        await vi.importActual<typeof import("@/lib/auth/auth")>(
+          "@/lib/auth/auth",
+        );
+      const { apiClient } = await import("@/lib/api/base");
+      const get = vi
+        .spyOn(apiClient, "get")
+        .mockResolvedValue({ authorization_url: "https://idp.example.test/" });
+      mockGetAuthUrl.mockImplementation(actual.getAuthUrl);
+      mockGetGitHubAuthUrl.mockImplementation(actual.getGitHubAuthUrl);
+
+      await clickOAuthButton(provider);
+
+      await waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+      const url = new URL(get.mock.calls[0][0] as string, "http://api.test");
+      expect(url.pathname).toBe(`/api/v1/auth/${provider}/login`);
+      expect(url.searchParams.get("locale")).toBe("ja");
+      expect(url.searchParams.has("return_to")).toBe(false);
+      await waitFor(() =>
+        expect(hrefAssignments).toEqual(["https://idp.example.test/"]),
+      );
+    },
+  );
 });
 
 describe("LoginPage waits for /system/info before signing in (#1665)", () => {

@@ -61,6 +61,13 @@ vi.mock("@/components/LanguageSelector", () => ({
   LanguageSelector: () => null,
 }));
 
+// #2700: the OAuth login also carries the sign-in page's language and the
+// browser's time zone. Pinned so the exact URLs below are machine-independent.
+vi.mock("@/lib/auth/signupPrefs", () => ({
+  signupPrefs: () => ({ locale: "ja", timezone: "Asia/Tokyo" }),
+}));
+const PREFS = "&locale=ja&timezone=Asia%2FTokyo";
+
 vi.mock("@/components/common/LoadingState", () => ({
   SpinnerLoading: ({ message }: { message?: string }) => (
     <div role="status">{message}</div>
@@ -216,7 +223,7 @@ describe("/join/[token] — valid", () => {
       expect(hrefAssignments[0]).toBe(
         `https://api.example.com/api/v1/auth/${provider}/login` +
           `?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/workspace/dashboard`)}` +
-          `&invite=${encodeURIComponent(TOKEN)}`,
+          `&invite=${encodeURIComponent(TOKEN)}${PREFS}`,
       );
     },
   );
@@ -361,11 +368,13 @@ const PROVIDERS = [
   ["github", "join.valid.continueWithGitHub"],
 ] as const;
 
-function loginUrl(provider: string, returnTo: string) {
+function loginUrl(provider: string, returnTo: string, acceptedTerms?: string) {
   return (
     `https://api.example.com/api/v1/auth/${provider}/login` +
     `?return_to=${encodeURIComponent(returnTo)}` +
-    `&invite=${encodeURIComponent(TOKEN)}`
+    `&invite=${encodeURIComponent(TOKEN)}` +
+    (acceptedTerms ? `&accepted_terms=${acceptedTerms}` : "") +
+    PREFS
   );
 }
 
@@ -582,7 +591,7 @@ describe("/join/[token] — server-side terms acceptance (#1665)", () => {
     async (provider, label) => {
       mockTermsVersion = "2026-09";
       expect(await signUpWith(label)).toBe(
-        `${loginUrl(provider, `${FRONTEND_ORIGIN}/workspace/dashboard`)}&accepted_terms=2026-09`,
+        loginUrl(provider, `${FRONTEND_ORIGIN}/workspace/dashboard`, "2026-09"),
       );
     },
   );

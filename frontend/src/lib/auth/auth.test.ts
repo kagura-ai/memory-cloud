@@ -22,28 +22,85 @@ import {
   verifyMfa,
 } from "./auth";
 
+/** Make `Intl.DateTimeFormat()` report `timeZone` (or throw). */
+function stubTimeZone(timeZone: string | Error) {
+  vi.spyOn(Intl, "DateTimeFormat").mockImplementation(function () {
+    if (timeZone instanceof Error) throw timeZone;
+    return { resolvedOptions: () => ({ timeZone }) };
+  } as unknown as typeof Intl.DateTimeFormat);
+}
+
+// #2700: the JSON-mode OAuth login carries the sign-in page's language and the
+// browser's time zone. Pinned so the exact URLs below are machine-independent.
+const PREFS = "locale=en&timezone=Asia%2FTokyo";
+
 beforeEach(() => {
   mockApiClientGet.mockReset();
   mockApiClientPost.mockReset();
   mockApiClientGet.mockResolvedValue({ authorization_url: "https://idp/" });
   mockApiClientPost.mockResolvedValue({ success: true, mfa_required: false });
+  localStorage.setItem("kagura_locale", "en");
+  stubTimeZone("Asia/Tokyo");
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  localStorage.clear();
 });
 
 describe("getAuthUrl — no return_to query param appended (post-#775 contract)", () => {
-  it("calls /api/v1/auth/google/login with no query string", async () => {
+  it("calls /api/v1/auth/google/login without return_to", async () => {
     await getAuthUrl();
-    expect(mockApiClientGet).toHaveBeenCalledWith("/api/v1/auth/google/login");
+    expect(mockApiClientGet).toHaveBeenCalledWith(
+      `/api/v1/auth/google/login?${PREFS}`,
+    );
   });
 });
 
 describe("getGitHubAuthUrl — no return_to query param appended (post-#775 contract)", () => {
-  it("calls /api/v1/auth/github/login with no query string", async () => {
+  it("calls /api/v1/auth/github/login without return_to", async () => {
     await getGitHubAuthUrl();
-    expect(mockApiClientGet).toHaveBeenCalledWith("/api/v1/auth/github/login");
+    expect(mockApiClientGet).toHaveBeenCalledWith(
+      `/api/v1/auth/github/login?${PREFS}`,
+    );
+  });
+});
+
+describe("JSON-mode OAuth login carries the sign-in page's language and time zone (#2700)", () => {
+  it("starts the query with ? when there is no terms version", async () => {
+    localStorage.setItem("kagura_locale", "ja");
+    await getAuthUrl();
+    expect(mockApiClientGet).toHaveBeenLastCalledWith(
+      "/api/v1/auth/google/login?locale=ja&timezone=Asia%2FTokyo",
+    );
+    await getGitHubAuthUrl();
+    expect(mockApiClientGet).toHaveBeenLastCalledWith(
+      "/api/v1/auth/github/login?locale=ja&timezone=Asia%2FTokyo",
+    );
+  });
+
+  it("joins them to accepted_terms with &", async () => {
+    localStorage.setItem("kagura_locale", "ja");
+    await getGitHubAuthUrl("2026-09");
+    const url = new URL(mockApiClientGet.mock.lastCall?.[0], "http://x");
+    expect(url.pathname).toBe("/api/v1/auth/github/login");
+    expect(url.search).toBe(
+      "?accepted_terms=2026-09&locale=ja&timezone=Asia%2FTokyo",
+    );
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      accepted_terms: "2026-09",
+      locale: "ja",
+      timezone: "Asia/Tokyo",
+    });
+  });
+
+  it("omits the time zone when Intl throws", async () => {
+    vi.restoreAllMocks();
+    stubTimeZone(new RangeError("no tz support"));
+    await getAuthUrl();
+    expect(mockApiClientGet).toHaveBeenLastCalledWith(
+      "/api/v1/auth/google/login?locale=en",
+    );
   });
 });
 
@@ -177,11 +234,11 @@ describe("terms acceptance plumbing (#1665)", () => {
   it("getAuthUrl / getGitHubAuthUrl add ?accepted_terms when given", async () => {
     await getAuthUrl("2026-09");
     expect(mockApiClientGet).toHaveBeenLastCalledWith(
-      "/api/v1/auth/google/login?accepted_terms=2026-09",
+      `/api/v1/auth/google/login?accepted_terms=2026-09&${PREFS}`,
     );
     await getGitHubAuthUrl("a&b");
     expect(mockApiClientGet).toHaveBeenLastCalledWith(
-      "/api/v1/auth/github/login?accepted_terms=a%26b",
+      `/api/v1/auth/github/login?accepted_terms=a%26b&${PREFS}`,
     );
   });
 

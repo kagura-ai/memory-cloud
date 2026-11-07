@@ -5,15 +5,23 @@
  */
 
 import { apiClient } from "../api/base";
+import { signupPrefs, type SignupPrefs } from "./signupPrefs";
 
 /**
- * Build a `?accepted_terms=<encoded>` query string for the JSON-mode OAuth
- * login (#1665), or "" when no terms version is in play.
+ * Build the query string for the JSON-mode OAuth login: `accepted_terms`
+ * (#1665) when a terms version is in play, then the sign-in page's `locale`
+ * and, when known, the browser's `timezone` (#2700), which an account created
+ * by this sign-in starts with.
  */
-function acceptedTermsParam(acceptedTerms?: string): string {
-  return acceptedTerms
-    ? `?accepted_terms=${encodeURIComponent(acceptedTerms)}`
-    : "";
+function oauthLoginQuery(
+  acceptedTerms?: string,
+  prefs: SignupPrefs = signupPrefs(),
+): string {
+  const params = new URLSearchParams();
+  if (acceptedTerms) params.set("accepted_terms", acceptedTerms);
+  params.set("locale", prefs.locale);
+  if (prefs.timezone) params.set("timezone", prefs.timezone);
+  return `?${params.toString()}`;
 }
 
 /** Build a `?return_to=<encoded>` query string, or "" when returnTo is absent. */
@@ -84,7 +92,7 @@ export interface AuthResponse {
 export async function getAuthUrl(acceptedTerms?: string): Promise<string> {
   try {
     const response = await apiClient.get<{ authorization_url: string }>(
-      `/api/v1/auth/google/login${acceptedTermsParam(acceptedTerms)}`,
+      `/api/v1/auth/google/login${oauthLoginQuery(acceptedTerms)}`,
     );
     return response.authorization_url;
   } catch (error) {
@@ -103,7 +111,7 @@ export async function getGitHubAuthUrl(
 ): Promise<string> {
   try {
     const response = await apiClient.get<{ authorization_url: string }>(
-      `/api/v1/auth/github/login${acceptedTermsParam(acceptedTerms)}`,
+      `/api/v1/auth/github/login${oauthLoginQuery(acceptedTerms)}`,
     );
     return response.authorization_url;
   } catch (error) {
