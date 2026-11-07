@@ -4,6 +4,18 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.151.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.151.0) — 2026-11-07
+
+Better answers from conversation memories. The `recall` tool description now carries the answering rules for list-all, dated and "likely" questions, so an agent that calls `recall` without loading the recall skill still sees them. The remember guidance attributes each fact to the right person in a conversation between named speakers.
+
+### Changed
+- **Answering rules in the `recall` tool description** ([#2716](https://github.com/kagura-ai/memory-cloud/issues/2716)): for a question about every item of a kind, read every result rather than only the top ones, recall once more for each kind of item found (or call `list` with a tag or type filter that names the set) and answer with all of them. For a named date or period, pass `observed_after` / `observed_before` around it with a margin, and recall again without the filter if nothing matches. The same rules are in step 2b of the recall skill, the Recall section of the plugin's `SKILL.md` and `docs/mcp-tools.md`, kept in sync.
+- **"Likely / would / might" questions** ([#2717](https://github.com/kagura-ai/memory-cloud/issues/2717)): recall again on the concrete entities and category words, with `search_mode="keyword"` for names the first recall surfaced. Answer with the best-supported inference, name the memory that supports it and mark it as an inference. Decline only when `confidence.level` is `none` or `low`. "The store is the authority" is unchanged.
+- **Speaker attribution when remembering a conversation** ([#2718](https://github.com/kagura-ai/memory-cloud/issues/2718)): with named speakers, each summary starts with the name of the person it is about. A suggestion, gift, invitation or question records both people and its direction. A fact is attributed to the speaker who said it, and each subject is checked against the speaker label before writing. The remember skill and the plugin's `SKILL.md` include a two-speaker example, and the `remember` tool description carries a one-line version.
+
+### Notes
+- Text only: tool and parameter descriptions and skill guidance. Ranking, response shapes and input parameters are unchanged, and the descriptions stay within their length budgets. No migration, no new environment variables, no operator action.
+
 ## [v0.150.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.150.0) — 2026-11-07
 
 A guided first run and scoped integration management: the welcome dialog sets the language and timezone and walks a new owner through connecting an AI chat client over MCP, new accounts keep the sign-in page's language and the browser's timezone, and a workspace owner can hand an external service an expiring, resource-scoped management grant instead of an owner credential.
