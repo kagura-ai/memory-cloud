@@ -83,12 +83,31 @@
     "openContexts": "コンテキストを確認する",
     "endPractice": "読み取り専用のガイドに進む",
     "title": "Kagura AIへようこそ",
-    "subtitle": "5分以内に最初の recall まで案内します。",
+    "subtitle": "数分で使い始められるよう案内します。",
     "dismiss": "オンボーディングを閉じる",
     "finish": "コンテキストへ移動",
     "stepOf": "ステップ {current} / {total}",
+    "prefs": {
+      "title": "言語とタイムゾーンを設定",
+      "body": "日時はこのタイムゾーンで表示されます。どちらもあとからプロフィールで変更できます。",
+      "language": "言語",
+      "timezone": "タイムゾーン",
+      "detected": "ブラウザの設定から入力しました。",
+      "save": "保存して次へ",
+      "skip": "スキップ",
+      "saveFailed": "設定を保存できませんでした。もう一度お試しください。"
+    },
+    "chat": {
+      "title": "チャットに設定しよう",
+      "body": "Claude、ChatGPT、Gemini などのコネクタ(MCP)設定にこの URL を貼り付け、案内に沿ってサインインします。あとはチャットしながら AI が記憶を保存・検索します。",
+      "copy": "URL をコピー",
+      "copied": "コピーしました",
+      "guide": "クライアント別の手順を見る",
+      "next": "次へ: Web で試す"
+    },
     "context": {
       "title": "1. 最初のコンテキストを作成",
+      "optional": "任意: Web アプリで記憶の保存と検索を試せます。",
       "createButton": "コンテキストを作成"
     },
     "memory": {
@@ -121,7 +140,6 @@
       "exploreTitle": "explore",
       "exploreBody": "発見 — ニューラルグラフを別途たどり、検索していない関連記憶を浮かび上がらせます。"
     },
-    "connectNow": "AIクライアントを先に接続することもできます。",
     "mcp": {
       "heading": "MCP で自動化",
       "body": "実運用では、AIアシスタントが MCP ツール経由で記憶を書き込みます。クライアントを接続すれば、作業しながら自動で記憶します。",

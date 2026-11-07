@@ -83,12 +83,31 @@
     "openContexts": "Review my contexts",
     "endPractice": "Continue with the read-only guide",
     "title": "Welcome to Kagura AI",
-    "subtitle": "Let's get you to your first recall in under 5 minutes.",
+    "subtitle": "A few minutes to get you set up.",
     "dismiss": "Dismiss onboarding",
     "finish": "Go to your context",
     "stepOf": "Step {current} of {total}",
+    "prefs": {
+      "title": "Set your language and timezone",
+      "body": "Dates and times are shown in your timezone. You can change both later in Profile.",
+      "language": "Language",
+      "timezone": "Timezone",
+      "detected": "Filled in from your browser settings.",
+      "save": "Save and continue",
+      "skip": "Skip",
+      "saveFailed": "Couldn't save your settings. Please try again."
+    },
+    "chat": {
+      "title": "Connect your AI chat",
+      "body": "Paste this URL into the connector (MCP) settings of Claude, ChatGPT, Gemini or another client, then sign in when asked. From then on, your AI saves and recalls memories while you chat.",
+      "copy": "Copy URL",
+      "copied": "Copied",
+      "guide": "Steps for each client",
+      "next": "Next: try it in the web app"
+    },
     "context": {
       "title": "1. Create your first context",
+      "optional": "Optional: try saving and finding a memory here in the web app.",
       "createButton": "Create context"
     },
     "memory": {
@@ -121,7 +140,6 @@
       "exploreTitle": "explore",
       "exploreBody": "discovery — separately walks the neural graph to surface related memories you didn't search for."
     },
-    "connectNow": "You can also connect your AI client first.",
     "mcp": {
       "heading": "Make it automatic with MCP",
       "body": "In real use, your AI assistant writes memories for you via MCP tools — connect a client and it remembers as you work.",

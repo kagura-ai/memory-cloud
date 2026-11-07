@@ -66,3 +66,18 @@ function writeProgress(scope: string, progress: PracticeProgress): boolean {
     return false;
   }
 }
+
+/** #2701: the screens before the practice: "prefs", then "chat", then "done". */
+export type IntroStage = "prefs" | "chat" | "done";
+
+export function readIntro(scope: string): IntroStage {
+  try {
+    const value = localStorage.getItem(scope + ":intro");
+    if (value === "chat" || value === "done") return value;
+  } catch { /* Optional onboarding must not block the workspace. */ }
+  return "prefs";
+}
+
+export function writeIntro(scope: string, stage: IntroStage): void {
+  try { localStorage.setItem(scope + ":intro", stage); } catch { /* Session-only fallback. */ }
+}

@@ -22,15 +22,18 @@
  *    card and (with 1 context now) hide it, killing the stepper.
  *  - remember/recall need available embeddings; if absent we show a
  *    non-error "set up embeddings" notice instead of a guaranteed-to-fail flow.
- *  - MCP setup link (#2698): shown from the first step and on the done step,
- *    pointing at the connection card on the Integrations entry. Clients
- *    register over OAuth, so a new user needs no API key to connect.
+ *  - First screens (#2701): language and timezone, then connecting an AI chat
+ *    client over MCP (IntroSteps), once per user and workspace before the
+ *    practice, which is optional. A replay or a practice under way skips them.
+ *  - MCP links (#2698) point at the connection card on the Integrations
+ *    entry: clients register over OAuth, so a new user needs no API key.
  */
 
 import Link from "next/link";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { advancePractice, claimPractice, onboardingScope, practiceContextName, readProgress, updateProgress } from "./progress";
+import { advancePractice, claimPractice, onboardingScope, practiceContextName, readIntro, readProgress, updateProgress, writeIntro, type IntroStage } from "./progress";
+import { ChatStep, MCP_CONNECTION_HREF, PreferencesStep } from "./IntroSteps";
 import { ApiError } from "@/lib/api/base";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -62,8 +65,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { InlineSpinner } from "@/components/common/LoadingState";
 
 type Step = "context" | "memory" | "recall" | "done" | "recovery";
-
-const MCP_CONNECTION_HREF = "/workspace/integrations#mcp-connection";
 
 interface PracticeOptions {
   replay?: boolean;
@@ -98,12 +99,26 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
 
   const [step, setStep] = useState<Step>("context");
   const [contextId, setContextId] = useState<string | null>(null);
-  // Seed the editable sample copy from i18n ONCE via lazy initializers — never
-  // in an effect keyed on `t`, which would clobber the user's edits whenever the
-  // `t` identity changes (locale switch / provider re-render).
-  const [summary, setSummary] = useState(() => t("memory.sampleSummary"));
-  const [content, setContent] = useState(() => t("memory.sampleContent"));
-  const [query, setQuery] = useState(() => t("recall.sampleQuery"));
+  // #2701: the first screens come once per user and workspace, before the
+  // practice; a replay or a practice already under way goes straight to it.
+  const [intro, setIntro] = useState<IntroStage>(() => {
+    const saved = readProgress(scope);
+    return replay || saved.step !== "context" || saved.contextId ? "done" : readIntro(scope);
+  });
+  const advanceIntro = (next: IntroStage) => {
+    writeIntro(scope, next);
+    setIntro(next);
+  };
+  // The sample copy follows the UI language until the user edits it (the
+  // language can change on the first screen, #2701): state holds only the
+  // edit, and the shown value falls back to the current translation. Never
+  // re-seed it from an effect keyed on `t`, which would clobber the edits.
+  const [summaryEdit, setSummary] = useState<string | null>(null);
+  const [contentEdit, setContent] = useState<string | null>(null);
+  const [queryEdit, setQuery] = useState<string | null>(null);
+  const summary = summaryEdit ?? t("memory.sampleSummary");
+  const content = contentEdit ?? t("memory.sampleContent");
+  const query = queryEdit ?? t("recall.sampleQuery");
   const [results, setResults] = useState<RecallResultItem[]>([]);
   const [busy, setBusy] = useState(false);
   // A pending create or save keeps the guide open (a second write must not
@@ -291,6 +306,10 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
             <Button variant="link" onClick={() => { dismiss(); router.push("/workspace/contexts"); }}>{t("openContexts")}</Button>
             <Button variant="ghost" onClick={endPractice}>{t("endPractice")}</Button>
           </AlertDescription></Alert>
+        ) : intro === "prefs" ? (
+          <PreferencesStep onDone={() => advanceIntro("chat")} />
+        ) : intro === "chat" ? (
+          <ChatStep onNext={() => advanceIntro("done")} />
         ) : !hasKey ? (
           // Informational gating notice (not an error): remember/recall need a
           // workspace embedding key. Point at the existing key-setup surface.
@@ -325,6 +344,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               <div className="space-y-3">
                 <div>
                   <h3 className="font-semibold">{t("context.title")}</h3>
+                  <p className="text-sm text-muted-foreground">{t("context.optional")}</p>
                 </div>
                 <Button
                   onClick={handleCreateContext}
@@ -403,15 +423,6 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
                   {t("recall.searchButton")}
                 </Button>
               </div>
-            )}
-
-            {step !== "done" && (
-              <p className="border-t pt-3 text-sm text-muted-foreground">
-                {t("connectNow")}{" "}
-                <Link href={MCP_CONNECTION_HREF} className="text-primary underline">
-                  {t("mcp.link")}
-                </Link>
-              </p>
             )}
 
             {step === "done" && (
