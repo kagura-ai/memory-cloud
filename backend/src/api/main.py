@@ -415,6 +415,8 @@ openapi_tags = [
     },
     {"name": "resources", "description": "Resource listing and event-history inspection"},
     {"name": "resource-tokens", "description": "Resource token management"},
+    {"name": "resource-management", "description": "Scoped integration management"},
+    {"name": "resource-management-grants", "description": "Owner-provisioned management grants"},
     {
         "name": "observation-credentials",
         "description": "Scoped read-only credentials for the observability API",
@@ -847,6 +849,7 @@ from api.routes import (  # noqa: E402
     graph,
     internal_billing,  # Issue #954: billing-service entitlement push (/internal)
     invitations,
+    management_grants,
     mcp,
     me_account,  # Issue #360: GDPR right-to-erasure self-service endpoints
     me_oauth,  # Issue #515: manual IdP refresh endpoint
@@ -867,6 +870,7 @@ from api.routes import (  # noqa: E402
     referrals,  # Issue #1470: user-facing referral code + redeem
     resource_indexer,  # Issue #326: Indexer status visibility API
     resource_ingest,  # Issue #238: Resource Ingest API
+    resource_management,
     resource_schema,  # Issue #238: Schema Management API
     resource_tokens,  # Issue #242: Resource Token Management API
     resources,  # Issue #47: Workspace resource list
@@ -1045,6 +1049,8 @@ app.include_router(resource_tokens.router, prefix="/api/v1")
 # Observation credentials (Issue #2679 - owner issues read-only credentials
 # for the observability API; always mounted, works while the API is off)
 app.include_router(observation_credentials.router, prefix="/api/v1")
+app.include_router(management_grants.router, prefix="/api/v1")
+app.include_router(resource_management.router, prefix="/api/v1")
 # Observability API (Issue #2679 - read with a scoped observation credential
 # only; every route answers 404 unless OBSERVABILITY_API_ENABLED)
 app.include_router(observability.router, prefix="/api/v1")

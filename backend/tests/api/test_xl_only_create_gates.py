@@ -77,7 +77,7 @@ class TestResourceTokenCreate:
         manager.create_token = AsyncMock(return_value=("kagura_resource_plain", _token()))
 
         with patch(
-            "api.routes.resource_tokens.resolve_resource_pk",
+            "services.resource_token_policy.resolve_resource_pk",
             new=AsyncMock(return_value=uuid.uuid4()),
         ):
             response = await create_resource_token(
@@ -140,7 +140,7 @@ class TestResourceTokenCreate:
         manager.create_token = AsyncMock()
         with (
             patch(
-                "api.routes.resource_tokens.resolve_resource_pk",
+                "services.resource_token_policy.resolve_resource_pk",
                 new=AsyncMock(return_value=uuid.uuid4()),
             ),
             pytest.raises(QuotaExceededError) as exc_info,
@@ -202,6 +202,8 @@ class TestResourceTokenQuotaUpdateKeepsServing:
         db.execute = AsyncMock(
             side_effect=[
                 _result(one=token),
+                _result(),  # shared workspace mint lock
+                _result(scalar=0),  # current cap population under the lock
                 _result(one=None),
                 _result(one=plan_name),
                 _result(scalar=used_by_others),

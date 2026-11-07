@@ -100,6 +100,8 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # their workspace / resource binding, expiry and revocation. Auth
         # plumbing like share_keys.
         "observation_credentials",
+        "resource_management_grants",
+        "resource_management_operations",
         # Known browsers for new-device sign-in alerts (#1769): keyed hashes of
         # device cookies, deleted with the account.
         "user_known_devices",

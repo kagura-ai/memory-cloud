@@ -221,7 +221,7 @@ REFUSALS: list[Refusal] = [
     ),
     Refusal(
         id="plan/resources",
-        site="api.routes.resource_tokens:create_resource_token",
+        site="services.resource_token_policy:authorize_resource_token_mint",
         exc=FeatureNotAvailableError.for_feature(_FREE, "resources"),
         site_literal="resources",
         carries_counts=False,
@@ -513,7 +513,7 @@ REFUSALS: list[Refusal] = [
     ),
     Refusal(
         id="quota/resource_tokens",
-        site="api.routes.resource_tokens:create_resource_token",
+        site="services.resource_token_policy:authorize_resource_token_mint",
         exc=QuotaExceededError(
             "Token limit reached.",
             status_code=403,

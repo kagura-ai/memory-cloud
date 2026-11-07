@@ -17,6 +17,7 @@ import models.erasure  # noqa: F401  # Vector cleanup jobs reference erasure_req
 import models.file_objects  # noqa: F401  # Issue #485: file storage
 import models.llm_call_log  # noqa: F401  # Issue #474: comprehensive call ledger
 import models.llm_pricing  # noqa: F401
+import models.management_grant  # noqa: F401  # Scoped integration delegation
 import models.measurement  # noqa: F401  # Issue #1333: HOW-MUCH measurement lane
 import models.memory_access_event  # noqa: F401  # Issue #1278: agent access audit (P0-5)
 import models.observation_credential  # noqa: F401  # Issue #2679: observability credentials

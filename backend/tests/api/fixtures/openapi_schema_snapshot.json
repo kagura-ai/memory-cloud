@@ -4753,6 +4753,78 @@
         ],
         "type": "object"
       },
+      "GrantCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledge_full_resource_token_authority": {
+            "default": false,
+            "type": "boolean"
+          },
+          "approved_fields": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "context_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "endpoint_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "max_active_tokens": {
+            "default": 3,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "operations": {
+            "items": {
+              "enum": [
+                "schema:read",
+                "events:upsert",
+                "events:delete",
+                "tokens:read",
+                "tokens:create",
+                "tokens:update",
+                "tokens:revoke"
+              ],
+              "type": "string"
+            },
+            "maxItems": 7,
+            "minItems": 1,
+            "type": "array"
+          },
+          "quota_events_per_hour": {
+            "default": 1000,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "resource_pk": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "ttl_days": {
+            "default": 30,
+            "maximum": 90.0,
+            "minimum": 1.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "approved_fields",
+          "context_id",
+          "endpoint_id",
+          "operations",
+          "resource_pk"
+        ],
+        "type": "object"
+      },
       "GraphDataResponse": {
         "properties": {
           "edges": {
@@ -5806,6 +5878,120 @@
         "required": [
           "tools",
           "total"
+        ],
+        "type": "object"
+      },
+      "ManagedBatch": {
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ManagedEvent"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "schema_hash": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "events",
+          "operation_id",
+          "schema_hash"
+        ],
+        "type": "object"
+      },
+      "ManagedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "doc_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "op": {
+            "enum": [
+              "upsert",
+              "delete"
+            ],
+            "type": "string"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "anyOf": [
+              {
+                "maximum": 2147483647.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "doc_id",
+          "idempotency_key",
+          "op"
+        ],
+        "type": "object"
+      },
+      "ManagedRevoke": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id"
+        ],
+        "type": "object"
+      },
+      "ManagedToken": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "default": "",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "quota_events_per_hour": {
+            "default": 1000,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation_id"
         ],
         "type": "object"
       },
@@ -26889,6 +27075,419 @@
         ]
       }
     },
+    "/api/v1/resource-management-grants": {
+      "get": {
+        "operationId": "list_grants_api_v1_resource_management_grants_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management-grants"
+        ]
+      },
+      "post": {
+        "operationId": "create_grant_api_v1_resource_management_grants_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management-grants"
+        ]
+      }
+    },
+    "/api/v1/resource-management-grants/{grant_id}": {
+      "delete": {
+        "operationId": "revoke_grant_api_v1_resource_management_grants__grant_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "grant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management-grants"
+        ]
+      }
+    },
+    "/api/v1/resource-management/capabilities": {
+      "get": {
+        "operationId": "capabilities_api_v1_resource_management_capabilities_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management"
+        ]
+      }
+    },
+    "/api/v1/resource-management/events": {
+      "post": {
+        "operationId": "submit_events_api_v1_resource_management_events_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedBatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management"
+        ]
+      }
+    },
+    "/api/v1/resource-management/schema": {
+      "get": {
+        "operationId": "schema_api_v1_resource_management_schema_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management"
+        ]
+      }
+    },
+    "/api/v1/resource-management/tokens": {
+      "get": {
+        "operationId": "tokens_api_v1_resource_management_tokens_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management"
+        ]
+      },
+      "post": {
+        "operationId": "create_token_api_v1_resource_management_tokens_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management"
+        ]
+      }
+    },
+    "/api/v1/resource-management/tokens/{token_id}": {
+      "delete": {
+        "operationId": "revoke_token_api_v1_resource_management_tokens__token_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedRevoke"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management"
+        ]
+      },
+      "patch": {
+        "operationId": "update_token_api_v1_resource_management_tokens__token_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resource-management"
+        ]
+      }
+    },
     "/api/v1/resource-tokens": {
       "get": {
         "operationId": "list_resource_tokens_api_v1_resource_tokens_get",
@@ -32063,6 +32662,12 @@
     },
     {
       "name": "resource-ingest"
+    },
+    {
+      "name": "resource-management"
+    },
+    {
+      "name": "resource-management-grants"
     },
     {
       "name": "resource-schema"

@@ -44,6 +44,8 @@ async def check_event_quota(
     workspace_id: UUID,
     quota_per_hour: int,
     count: int = 1,
+    *,
+    strict: bool = False,
 ) -> None:
     """Reserve ``count`` units against the per-hour event ceiling.
 
@@ -55,6 +57,9 @@ async def check_event_quota(
             the check (skip Redis round-trip).
         count: Number of events to reserve in one shot. Batch ingest passes
             ``len(events)`` so batching cannot bypass the ceiling.
+        strict: Delegated integrations refuse backend outages and check the
+            post-INCR total as well, preventing concurrent reservations from
+            exceeding their bound. Existing callers retain fail-open behavior.
 
     Raises:
         RateLimitError: If reserving ``count`` would exceed ``quota_per_hour``.
@@ -93,6 +98,8 @@ async def check_event_quota(
             )
 
         new_count = await incrby_counter(key, count, ttl=_TTL_SECONDS)
+        if strict and new_count > quota_per_hour:
+            raise RateLimitError(message="Event quota exceeded", retry_after=_TTL_SECONDS)
         logger.debug(
             "resource_event_quota_checked",
             resource_id=resource_id,
@@ -105,6 +112,8 @@ async def check_event_quota(
     except RateLimitError:
         raise
     except RedisError as e:
+        if strict:
+            raise
         logger.error("redis_quota_check_failed", error=str(e), key=key)
         return
 
