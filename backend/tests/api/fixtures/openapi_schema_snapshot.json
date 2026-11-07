@@ -13280,6 +13280,10 @@
             },
             "type": "object"
           },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
           "entitlement_source": {
             "type": "string"
           },
@@ -13292,6 +13296,7 @@
         },
         "required": [
           "addons",
+          "created_at",
           "entitlement_source",
           "plan_name",
           "workspace_id"

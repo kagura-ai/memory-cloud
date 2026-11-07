@@ -8,6 +8,7 @@ tests/integration/test_internal_billing_plan_db.py.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ def _make_ws():
     ws = MagicMock()
     ws.id = _WS_ID
     ws.plan_name = "free"
+    ws.created_at = datetime(2026, 11, 7, 1, 23, 45)
     # The echo reads ALL addon columns → they must be ints, not MagicMocks.
     for col in (
         "addon_memory_bonus",
@@ -286,6 +288,28 @@ def test_get_entitlement_returns_source(billing):
 def test_get_entitlement_requires_token(billing):
     resp = billing.client(_make_ws()).get(_PATH)
     assert resp.status_code == 401
+
+
+def test_get_entitlement_returns_workspace_created_at_as_utc(billing):
+    ws = _make_ws()
+    ws.created_at = datetime(2025, 3, 4, 5, 6, 7, 123456)
+    response = billing.client(ws).get(_PATH, headers={"Authorization": "Bearer secret"})
+    assert response.status_code == 200
+    created_at = response.json()["created_at"]
+    assert created_at == "2025-03-04T05:06:07.123456Z"
+    assert datetime.fromisoformat(created_at) == ws.created_at.replace(tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("token", "authorization", "expected"),
+    [("", "Bearer secret", 503), ("secret", "Bearer wrong", 401)],
+)
+def test_get_entitlement_rejects_unconfigured_or_wrong_token(
+    billing, token, authorization, expected
+):
+    billing.token = token
+    response = billing.client(_make_ws()).get(_PATH, headers={"Authorization": authorization})
+    assert response.status_code == expected
 
 
 def test_get_entitlement_not_found_returns_404(billing):
