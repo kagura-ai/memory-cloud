@@ -3793,6 +3793,12 @@
     }
   },
   "contextDetail": {
+    "switchWorkspace": {
+      "title": "This context belongs to another workspace",
+      "message": "Switch to its workspace to open this context.",
+      "action": "Switch workspace and open",
+      "failed": "Could not switch workspaces. Please try again."
+    },
     "title": "Context Detail",
     "loading": "Loading context...",
     "failedToLoad": "Failed to load context",
