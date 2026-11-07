@@ -122,7 +122,9 @@ async def _upsert(db: AsyncSession, caller: User, context: Context):
     """Run the upsert with remember()/forget() stubbed: what is under test is
     which row the external_id resolves to and what is handed to forget()."""
     service = MemoryService(db)
-    remembered = MagicMock(memory_id=uuid4(), scope="working", persistence=None, lint=[])
+    remembered = MagicMock(
+        memory_id=uuid4(), scope="working", persistence=None, lint=[], observed_at=None
+    )
     with (
         patch.object(service, "remember", AsyncMock(return_value=remembered)),
         patch.object(service, "forget", AsyncMock()) as forget,
