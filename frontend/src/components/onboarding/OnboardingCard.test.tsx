@@ -614,6 +614,23 @@ describe("OnboardingCard first screens (#2701)", () => {
     expect(screen.queryByText("chat.title")).not.toBeInTheDocument();
   });
 
+  it("ignores a browser timezone the platform does not know", async () => {
+    browserIn(["en-US"], "Etc/Unknown");
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "prefs.save" }));
+    await screen.findByText("context.createButton");
+    expect(mockUpdateProfile).toHaveBeenCalledWith({ locale: "en", timezone: "UTC" });
+  });
+
+  it("keeps the chat screen when the per-client steps open in a new tab", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("link", { name: "chat.guide" }), { ctrlKey: true });
+    expect(localStorage.getItem("onboarding:u1:intro")).toBe("chat");
+    expect(screen.getByText("chat.title")).toBeInTheDocument();
+  });
+
   it("a replay from Getting started goes straight to the practice", async () => {
     render(<OnboardingCard replay />);
     expect(await screen.findByText("context.createButton")).toBeInTheDocument();

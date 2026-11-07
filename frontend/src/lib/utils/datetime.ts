@@ -202,3 +202,20 @@ export const COMMON_TIMEZONES = [
   { value: "Asia/Singapore", label: "Asia/Singapore" },
   { value: "Australia/Sydney", label: "Australia/Sydney" },
 ] as const;
+
+/**
+ * The timezone choices: the common list plus each given zone that is not on
+ * it (a saved or detected zone such as Europe/Berlin), so a select never
+ * shows a saved value as blank (#2701).
+ */
+export function timezoneOptions(
+  ...include: (string | null | undefined)[]
+): { value: string; label: string }[] {
+  const options: { value: string; label: string }[] = [...COMMON_TIMEZONES];
+  for (const zone of include) {
+    if (zone && !options.some((tz) => tz.value === zone)) {
+      options.push({ value: zone, label: zone });
+    }
+  }
+  return options;
+}

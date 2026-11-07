@@ -13,6 +13,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  COMMON_TIMEZONES,
+  timezoneOptions,
   formatDate,
   formatDateTime,
   formatLocalDate,
@@ -126,5 +128,16 @@ describe("formatLocalDate", () => {
     // must read getFullYear / getMonth / getDate, which return local.
     const localMidnight = new Date(2026, 4, 1, 0, 0, 0);
     expect(formatLocalDate(localMidnight)).toBe("2026-05-01");
+  });
+});
+
+describe("timezoneOptions (#2701)", () => {
+  it("adds each zone that is not on the common list, once", () => {
+    const options = timezoneOptions("Europe/Berlin", "Europe/Berlin", null, undefined, "Asia/Tokyo");
+    expect(options.filter((tz) => tz.value === "Europe/Berlin")).toEqual([
+      { value: "Europe/Berlin", label: "Europe/Berlin" },
+    ]);
+    expect(options.filter((tz) => tz.value === "Asia/Tokyo")).toHaveLength(1);
+    expect(options).toHaveLength(COMMON_TIMEZONES.length + 1);
   });
 });

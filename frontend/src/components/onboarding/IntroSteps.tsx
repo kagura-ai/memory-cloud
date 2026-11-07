@@ -21,7 +21,7 @@ import {
 } from "@/i18n";
 import { API_BASE_URL, updateUserProfile } from "@/lib/api/base";
 import { mcpEndpoints } from "@/lib/mcp/url";
-import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
+import { timezoneOptions } from "@/lib/utils/datetime";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -69,7 +69,15 @@ export function browserLocale(): Locale | null {
 /** The browser's IANA timezone, else null. */
 export function browserTimezone(): string | null {
   try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (!zone || zone === "Etc/Unknown") return null;
+    // Only a name the platform lists: the server validates with tzdata and
+    // refuses unknown names. UTC is not in every platform's list.
+    const known =
+      typeof Intl.supportedValuesOf === "function"
+        ? Intl.supportedValuesOf("timeZone")
+        : null;
+    return zone === "UTC" || !known || known.includes(zone) ? zone : null;
   } catch {
     return null;
   }
@@ -124,14 +132,7 @@ export function PreferencesStep({
   const [failed, setFailed] = useState(false);
   // The common list, plus the starting zone when it is not on it (a saved or
   // detected zone such as Europe/Berlin), so it is never swapped for UTC.
-  const [zones] = useState(() =>
-    COMMON_TIMEZONES.some((tz) => tz.value === initial.timezone)
-      ? [...COMMON_TIMEZONES]
-      : [
-          ...COMMON_TIMEZONES,
-          { value: initial.timezone, label: initial.timezone },
-        ],
-  );
+  const [zones] = useState(() => timezoneOptions(initial.timezone));
 
   const save = async () => {
     setBusy(true);
@@ -276,7 +277,19 @@ export function ChatStep({
       </div>
       <Link
         href={MCP_CONNECTION_HREF}
-        onClick={onGuide}
+        onClick={(event) => {
+          // Only a same-tab visit leaves this screen; a link opened in a new
+          // tab keeps the URL here to copy.
+          if (
+            event.button === 0 &&
+            !event.metaKey &&
+            !event.ctrlKey &&
+            !event.shiftKey &&
+            !event.altKey
+          ) {
+            onGuide();
+          }
+        }}
         className="inline-block text-sm text-primary underline"
       >
         {t("chat.guide")}

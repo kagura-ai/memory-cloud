@@ -92,7 +92,7 @@
       "body": "Dates and times are shown in your timezone. You can change both later in Profile.",
       "language": "Language",
       "timezone": "Timezone",
-      "detected": "Filled in from your browser settings.",
+      "detected": "Filled in from your browser settings where possible.",
       "save": "Save and continue",
       "skip": "Skip",
       "saveFailed": "Couldn't save your settings. Please try again."
