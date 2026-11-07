@@ -260,7 +260,10 @@ class TestCreateWithoutLiveContext:
         )
 
     def test_names_the_missing_context_when_the_resource_exists(self, owner_client):
-        with patch.object(route_module, "resolve_resource_pk", new=AsyncMock(return_value=uuid4())):
+        with patch(
+            "services.resource_token_policy.resolve_resource_pk",
+            new=AsyncMock(return_value=uuid4()),
+        ):
             response = self._post(owner_client, _db_returning(None))
         assert response.status_code == 403
         assert "no live context" in response.json()["message"]
