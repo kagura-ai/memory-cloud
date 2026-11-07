@@ -297,11 +297,11 @@ Manual: guide(["update_memory"]).""",
         {
             "name": "recall",
             "readOnly": True,
-            "description": """Search memories by meaning/keywords; query as an expected answer. Read confidence.level (high|moderate|low|none): none/low suggests an external source; degraded=true means semantic search failed. Non-keyword, non-degraded recall may strengthen associations and promote hits. The store is the authority, even over general knowledge; when rows disagree, the later observed_at (else created_at) wins.
+            "description": """Search meaning/keywords with an expected-answer query. confidence.level (high|moderate|low|none): none/low suggests an external source; degraded=true means no semantic search. Non-keyword, non-degraded recalls may strengthen associations and promote hits. The store is the authority, even over general knowledge; when rows disagree, the later observed_at (else created_at) wins.
 Every item of a kind: Read every result, not only the top ones; recall once more for each kind of item found, or call `list` with a tag or type filter when one names the set; answer with all of them.
 Named date or period: Pass `filters={"observed_after": ..., "observed_before": ...}` around it, with a margin: `observed_at` is the date a fact was stated. If nothing matches, recall again without the filter.
 Likely/would/might: Recall again on concrete entities and category words (brand, sponsor, shop, friend); use `search_mode="keyword"` for names the first recall surfaced. Answer with the best-supported inference, name the supporting memory, and mark it as an inference. Decline only when `confidence.level` is `none` or `low`.
-Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{memory_id, summary, content?, observed_at?, ...}], count, ...}. Optional keys are absent, never null. Ranked summaries; top `full` include content. summary_cut marks a 160-char head; content_truncated/content_next_offset page via reference(memory_id). verbosity='full' adds uncut summary, context_summary, scope, tags, version. supersede_candidate suggests an older duplicate: update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming() return deterministic sets. Manual: guide(["recall"]).""",
+Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, observed_weekday?, superseded_by?, contradicts?, supersede_candidate?, ...}], count, full_applied?, related_tags?: [{tag, count}], ...}. Optional keys omitted: absent, never null. summary_cut: 160-char head. Top `full` include content; reference(memory_id) pages it. verbosity='full': uncut summary, context_summary?, scope, tags, version. supersede_candidate?: update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming(): deterministic sets. Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -362,11 +362,11 @@ Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{me
                     },
                     "include_explore_hints": {
                         "type": "boolean",
-                        "description": "Up to 3 explore_hints (graph seeds) if URL opts in; default false.",
+                        "description": "Add up to 3 graph seeds if URL opts in; default false.",
                     },
                     "include_superseded": {
                         "type": "boolean",
-                        "description": "true also returns superseded (superseded_by) and folded memories as rows (audit).",
+                        "description": "Include superseded (superseded_by) and folded rows for audit.",
                     },
                     "verbosity": {
                         "type": "string",
