@@ -76,7 +76,7 @@ async def test_stdout_is_only_csv_and_plan_mints_nothing(monkeypatch, capsys):
         side_effect=[[], [MintedBetaInvite(invite, "https://app/join/secret")]]
     )
     monkeypatch.setattr(cli, "BetaInviteService", lambda _: svc)
-    monkeypatch.setattr(cli, "configure_logging", lambda: None)
+    monkeypatch.setattr(cli, "configure_logging", lambda level: None)
     monkeypatch.setattr("cli._oneshot.require_settings", lambda: None)
 
     async def get_db():
@@ -97,7 +97,7 @@ async def test_sql_error_does_not_print_parameters(monkeypatch, capsys):
     svc = MagicMock()
     svc.create_batches = AsyncMock(side_effect=RuntimeError("secret-label token-hash"))
     monkeypatch.setattr(cli, "BetaInviteService", lambda _: svc)
-    monkeypatch.setattr(cli, "configure_logging", lambda: None)
+    monkeypatch.setattr(cli, "configure_logging", lambda level: None)
     monkeypatch.setattr("cli._oneshot.require_settings", lambda: None)
 
     async def get_db():
@@ -117,7 +117,7 @@ async def test_unknown_inviter_reports_user_not_found(monkeypatch, capsys, comma
     svc.create_batches = AsyncMock(side_effect=missing)
     svc.revoke_unused_by_label = AsyncMock(side_effect=missing)
     monkeypatch.setattr(cli, "BetaInviteService", lambda _: svc)
-    monkeypatch.setattr(cli, "configure_logging", lambda: None)
+    monkeypatch.setattr(cli, "configure_logging", lambda level: None)
     monkeypatch.setattr("cli._oneshot.require_settings", lambda: None)
 
     async def get_db():
@@ -141,7 +141,7 @@ async def test_revoke_prints_count_including_noop(monkeypatch, capsys, count):
     svc = MagicMock()
     svc.revoke_unused_by_label = AsyncMock(return_value=count)
     monkeypatch.setattr(cli, "BetaInviteService", lambda _: svc)
-    monkeypatch.setattr(cli, "configure_logging", lambda: None)
+    monkeypatch.setattr(cli, "configure_logging", lambda level: None)
     monkeypatch.setattr("cli._oneshot.require_settings", lambda: None)
 
     async def get_db():

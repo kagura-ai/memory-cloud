@@ -67,7 +67,7 @@ def dated_batches(args: argparse.Namespace) -> list[tuple[str, datetime, int]]:
 
 
 async def _main(args: argparse.Namespace) -> int:
-    configure_logging()
+    configure_logging("INFO")
     output = sys.stdout
     reported = False
     try:
