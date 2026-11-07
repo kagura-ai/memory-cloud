@@ -1375,6 +1375,22 @@ async def agent_erasure_scenario(db_session: AsyncSession):
         "key_revoked_id": key_revoked.id,
     }
 
+    # #2686: the database outlives a test; the erasure leaves its request and
+    # its audit row under the target's pseudonym, which a later test (or file)
+    # reading the whole table would find. Same cleanup as ``erasure_scenario``.
+    await db_session.rollback()
+    pseudonym = sha256_hex(target_user_id, salt=_audit_salt())
+    await db_session.execute(
+        delete(AuditLog).where(
+            AuditLog.action.in_(("account_erasure", "account_erasure_reprocess"))
+            & (AuditLog.user_id == pseudonym)
+        )
+    )
+    await db_session.execute(
+        delete(ErasureRequest).where(ErasureRequest.user_id.in_((target_user_id, pseudonym)))
+    )
+    await db_session.commit()
+
 
 class TestAgentErasureCascade:
     """F1 sign-off scenario: workspace hard-delete cascades the agent lane."""
