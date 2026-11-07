@@ -51,6 +51,35 @@ beforeEach(() => {
   mockReissue.mockResolvedValue(CREATED);
 });
 
+describe("useBetaInvites — paging", () => {
+  it("loads the next page, deduplicates overlaps and refreshes from page one", async () => {
+    mockGetMine.mockResolvedValueOnce({ ...SUMMARY, invites: [{ id: "a" }], next_offset: 50 });
+    const { result } = renderHook(() => useBetaInvites());
+    await waitFor(() => expect(result.current.summary?.next_offset).toBe(50));
+    mockGetMine.mockResolvedValueOnce({ ...SUMMARY, invites: [{ id: "a" }, { id: "b" }], next_offset: null });
+    await act(async () => { await result.current.loadMore(); });
+    expect(mockGetMine).toHaveBeenLastCalledWith(50);
+    expect(result.current.summary?.invites.map((i) => i.id)).toEqual(["a", "b"]);
+    await act(async () => { await result.current.loadMore(); });
+    expect(mockGetMine).toHaveBeenCalledTimes(2);
+    await act(async () => { await result.current.refresh(); });
+    expect(mockGetMine).toHaveBeenLastCalledWith();
+    expect(result.current.summary).toEqual(SUMMARY);
+  });
+
+  it("retains the page and cursor after a failed load so it can be retried", async () => {
+    const page = { ...SUMMARY, invites: [{ id: "a" }], next_offset: 50 };
+    mockGetMine.mockResolvedValueOnce(page);
+    const { result } = renderHook(() => useBetaInvites());
+    await waitFor(() => expect(result.current.summary).toEqual(page));
+    mockGetMine.mockRejectedValueOnce(new Error("offline"));
+    await act(async () => { await result.current.loadMore(); });
+    expect(result.current.summary).toEqual(page);
+    expect(result.current.error).toBeTruthy();
+    expect(result.current.isLoading).toBe(false);
+  });
+});
+
 describe("useBetaInvites — when it asks", () => {
   it.each([
     ["the flag is off", { beta_invites: false }],

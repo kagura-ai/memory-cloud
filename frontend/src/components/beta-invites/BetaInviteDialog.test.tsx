@@ -123,6 +123,16 @@ afterEach(() => {
 });
 
 describe("BetaInviteDialog header", () => {
+  it("offers the next page and disables it while loading", () => {
+    const loadMore = vi.fn().mockResolvedValue(undefined);
+    const view = renderDialog({ summary: summary({ next_offset: 50 }), loadMore });
+    fireEvent.click(screen.getByRole("button", { name: "dialog.list.loadMore" }));
+    expect(loadMore).toHaveBeenCalledOnce();
+    view.rerender(<BetaInviteDialog {...view.props} isLoading />);
+    expect(screen.getByRole("button", { name: "dialog.list.loadMore" })).toBeDisabled();
+    view.rerender(<BetaInviteDialog {...view.props} summary={summary({ next_offset: null })} />);
+    expect(screen.queryByRole("button", { name: "dialog.list.loadMore" })).not.toBeInTheDocument();
+  });
   it("breaks the usage down into active / redeemed / limit", () => {
     renderDialog({
       summary: summary({ used: 3, active: 2, redeemed: 1, remaining: 1 }),

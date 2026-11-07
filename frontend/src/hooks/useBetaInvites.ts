@@ -35,6 +35,7 @@ export interface UseBetaInvites {
   /** The last failed load; cleared by the next successful one. */
   error: unknown;
   refresh: () => Promise<void>;
+  loadMore: () => Promise<void>;
   /** Mints an invite. The returned URL is a credential, shown once. */
   create: (label?: string) => Promise<BetaInviteCreated>;
   revoke: (id: string) => Promise<void>;
@@ -76,6 +77,27 @@ export function useBetaInvites(): UseBetaInvites {
       if (isCurrent()) setIsLoading(false);
     }
   }, [enabled]);
+
+  const loadMore = useCallback(async () => {
+    if (!enabled || isLoading || summary?.next_offset == null) return;
+    const load = ++latestLoadRef.current;
+    const isCurrent = () => aliveRef.current && load === latestLoadRef.current;
+    setIsLoading(true);
+    try {
+      const next = await getMyBetaInvites(summary.next_offset);
+      if (!isCurrent()) return;
+      // A newly minted invite can shift offset pages; don't render duplicates.
+      const ids = new Set(summary.invites.map((invite) => invite.id));
+      setSummary({ ...next, invites: [
+        ...summary.invites, ...next.invites.filter((invite) => !ids.has(invite.id)),
+      ] });
+      setError(null);
+    } catch (e) {
+      if (isCurrent()) setError(e);
+    } finally {
+      if (isCurrent()) setIsLoading(false);
+    }
+  }, [enabled, isLoading, summary]);
 
   useEffect(() => {
     void refresh();
@@ -127,5 +149,5 @@ export function useBetaInvites(): UseBetaInvites {
     [refresh],
   );
 
-  return { summary, isLoading, error, refresh, create, revoke, reissue };
+  return { summary, isLoading, error, refresh, loadMore, create, revoke, reissue };
 }

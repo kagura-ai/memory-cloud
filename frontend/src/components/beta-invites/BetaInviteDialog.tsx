@@ -66,6 +66,8 @@ interface BetaInviteDialogProps {
   /** `null` while the first load is pending (or failed — see `error`). */
   summary: BetaInviteSummary | null;
   error: unknown;
+  isLoading?: boolean;
+  loadMore?: () => Promise<void>;
   create: (label?: string) => Promise<BetaInviteCreated>;
   revoke: (id: string) => Promise<void>;
   reissue: (id: string) => Promise<BetaInviteCreated>;
@@ -91,6 +93,8 @@ export function BetaInviteDialog({
   onOpenChange,
   summary,
   error,
+  isLoading = false,
+  loadMore,
   create,
   revoke,
   reissue,
@@ -500,6 +504,17 @@ export function BetaInviteDialog({
                     );
                   })}
                 </ul>
+                {Boolean(error) && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{t("dialog.loadFailed")}</AlertDescription>
+                  </Alert>
+                )}
+                {summary.next_offset != null && loadMore && (
+                  <Button variant="outline" disabled={isLoading} onClick={() => void loadMore()}>
+                    {isLoading && <InlineSpinner className="mr-2" />}
+                    {t("dialog.list.loadMore")}
+                  </Button>
+                )}
               </div>
             )}
           </div>

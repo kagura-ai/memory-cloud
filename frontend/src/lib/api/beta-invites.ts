@@ -44,6 +44,8 @@ export interface BetaInviteSummary {
   /** `null` = unlimited (system admin). */
   remaining: number | null;
   invites: BetaInvite[];
+  /** Omitted by older servers; null when the last page has been reached. */
+  next_offset?: number | null;
 }
 
 export interface BetaInviteCreated {
@@ -60,8 +62,10 @@ export interface BetaInvitePreview {
 }
 
 /** The caller's quota and invites. */
-export async function getMyBetaInvites(): Promise<BetaInviteSummary> {
-  return await apiClient.get<BetaInviteSummary>("/api/v1/beta-invites/me");
+export async function getMyBetaInvites(offset = 0): Promise<BetaInviteSummary> {
+  return await apiClient.get<BetaInviteSummary>(
+    offset === 0 ? "/api/v1/beta-invites/me" : `/api/v1/beta-invites/me?offset=${offset}`,
+  );
 }
 
 /**

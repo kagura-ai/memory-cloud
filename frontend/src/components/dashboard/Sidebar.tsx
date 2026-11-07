@@ -942,6 +942,8 @@ export function Sidebar() {
           onOpenChange={setInviteDialogOpen}
           summary={betaInvites.summary}
           error={betaInvites.error}
+          isLoading={betaInvites.isLoading}
+          loadMore={betaInvites.loadMore}
           create={betaInvites.create}
           revoke={betaInvites.revoke}
           reissue={betaInvites.reissue}
