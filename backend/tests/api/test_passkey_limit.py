@@ -37,3 +37,26 @@ async def test_list_option_reports_server_limit_without_breaking_array_clients(m
         "keys": [],
         "limit": 3,
     }
+
+
+def test_http_list_includes_keys_and_limit(monkeypatch):
+    from datetime import datetime
+    from uuid import uuid4
+
+    from fastapi.testclient import TestClient
+
+    from api.main import app
+    from auth.dependencies import require_session_auth
+    from db.base import get_db
+
+    key = SimpleNamespace(
+        id=uuid4(), name="Example key", created_at=datetime(2030, 1, 1), last_used_at=None
+    )
+    monkeypatch.setattr(pk, "_keys", AsyncMock(return_value=[key]))
+    monkeypatch.setattr(pk, "_LIMIT", 2)
+    monkeypatch.setitem(app.dependency_overrides, require_session_auth, lambda: {"user_id": "u"})
+    monkeypatch.setitem(app.dependency_overrides, get_db, lambda: MagicMock())
+    response = TestClient(app).get("/api/v1/auth/passkeys?include_limit=true")
+    assert response.status_code == 200
+    assert response.json()["limit"] == 2
+    assert response.json()["keys"][0]["id"] == str(key.id)
