@@ -471,7 +471,7 @@ When you can see no context at all, the envelope also carries `hint`: one line s
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
-| `list_tags` | List tag vocabulary in a context (call before remember/recall to align tagging) | Viewer+ |
+| `list_tags` | List tag vocabulary in a context (a tag review, or the stored spellings for a recall tag filter; a write aligns its spellings with `tags_normalize=true`) | Viewer+ |
 
 ## Files / R2 Attachments (5)
 
@@ -928,7 +928,7 @@ A cut summary is at most 80 characters, the `…` included, cut by recall's comp
 
 ### `list_tags`
 
-Tag filters match exactly, so semantically identical tags under different spellings (`troubleshoot` / `troubleshooting` / `trouble-shoot`) silently erode `recall(filters={"tags": [...]})` over time. `list_tags` is the primary mitigation: call it before `remember()` to reuse existing spellings, and before a tag-filtered `recall()` to build filters that match what is stored.
+Tag filters match exactly, so semantically identical tags under different spellings (`troubleshoot` / `troubleshooting` / `trouble-shoot`) silently erode `recall(filters={"tags": [...]})` over time. On a write, `tags_normalize=true` (`remember` / `remember_batch`, see above) stores a mechanical variant under the context's established spelling and reports it as `tag_normalized`, and an abbreviation or edit-distance variant stays a `tag_near_duplicate` lint naming the stored tag, so no `list_tags` call is needed before a write. Call `list_tags` for a tag review, and before a tag-filtered `recall()` to build filters that match what is stored.
 
 ```
 list_tags(context_id="...")                   # top 50 tags by usage count
