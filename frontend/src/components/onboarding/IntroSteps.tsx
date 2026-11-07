@@ -37,6 +37,13 @@ import { InlineSpinner } from "@/components/common/LoadingState";
 /** The connection card on the Integrations entry, with the per-client steps. */
 export const MCP_CONNECTION_HREF = "/workspace/integrations#mcp-connection";
 
+/**
+ * The welcome dialog's primary actions in the brand green (#047857: white
+ * text at 5.5:1, WCAG AA), set apart from the black buttons of the app.
+ */
+export const PRIMARY_BUTTON =
+  "bg-brand-green-600 text-white hover:bg-brand-green-700";
+
 const COPY_KEY = "onboarding-mcp-url";
 /** The timezone a new account starts with (backend column default). */
 const DEFAULT_TIMEZONE = "UTC";
@@ -196,7 +203,7 @@ export function PreferencesStep({
         <p className="text-xs text-muted-foreground">{t("prefs.detected")}</p>
       )}
       <div className="flex flex-wrap gap-2">
-        <Button onClick={save} disabled={busy}>
+        <Button onClick={save} disabled={busy} className={PRIMARY_BUTTON}>
           {busy && <InlineSpinner />}
           {t("prefs.save")}
           <ArrowRight className="ml-2 h-4 w-4" />
@@ -275,7 +282,7 @@ export function ChatStep({
         {t("chat.guide")}
       </Link>
       <div>
-        <Button onClick={onNext}>
+        <Button onClick={onNext} className={PRIMARY_BUTTON}>
           {t("chat.next")}
           <ArrowRight className="ml-2 h-4 w-4" />
         </Button>

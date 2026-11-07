@@ -99,7 +99,7 @@
     },
     "chat": {
       "title": "Connect your AI chat",
-      "body": "Paste this URL into the connector (MCP) settings of Claude, ChatGPT, Gemini or another client, then sign in when asked. From then on, your AI saves and recalls memories while you chat.",
+      "body": "Paste this URL into the connector (MCP) settings of Claude, ChatGPT, Gemini or another client, then sign in when asked. From then on, your AI saves and recalls memories in the context you just created while you chat.",
       "copy": "Copy URL",
       "copied": "Copied",
       "guide": "Steps for each client",
@@ -107,11 +107,12 @@
     },
     "context": {
       "title": "1. Create your first context",
-      "optional": "Optional: try saving and finding a memory here in the web app.",
+      "lead": "Your AI client saves memories into a context. Start with one.",
       "createButton": "Create context"
     },
     "memory": {
       "title": "2. Save your first memory",
+      "optional": "Optional: try saving and finding a memory here in the web app.",
       "body": "Memories have a short summary (used for search) and full content. Here's a sample — edit it or save as-is.",
       "summaryLabel": "Summary",
       "sampleSummary": "Kagura recall blends semantic search with full-text matching.",

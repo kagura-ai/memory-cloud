@@ -22,10 +22,12 @@
  *    card and (with 1 context now) hide it, killing the stepper.
  *  - remember/recall need available embeddings; if absent we show a
  *    non-error "set up embeddings" notice instead of a guaranteed-to-fail flow.
- *  - First screens (#2701): language and timezone, then connecting an AI chat
- *    client over MCP (IntroSteps), once per user before the practice, which
- *    is optional. A replay or a practice under way skips them; a workspace
- *    without an embedding key gets the key notice before the chat screen.
+ *  - First screens (#2701), once per user: language and timezone before the
+ *    practice, then connecting an AI chat client over MCP (IntroSteps) right
+ *    after the first context is created, since that is where the AI saves.
+ *    Saving and recalling in the web app after that is optional. A replay
+ *    skips them; a workspace without an embedding key gets the key notice
+ *    first.
  *  - MCP links (#2698) point at the connection card on the Integrations
  *    entry: clients register over OAuth, so a new user needs no API key.
  */
@@ -34,12 +36,12 @@ import Link from "next/link";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { advancePractice, claimPractice, onboardingScope, practiceContextName, readIntro, readProgress, updateProgress, writeIntro, type IntroStage } from "./progress";
-import { ChatStep, MCP_CONNECTION_HREF, PreferencesStep } from "./IntroSteps";
+import { ChatStep, MCP_CONNECTION_HREF, PreferencesStep, PRIMARY_BUTTON } from "./IntroSteps";
+import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { ApiError } from "@/lib/api/base";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
-  Sparkles,
   ArrowRight,
   Check,
   Search,
@@ -100,12 +102,10 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
 
   const [step, setStep] = useState<Step>("context");
   const [contextId, setContextId] = useState<string | null>(null);
-  // #2701: the first screens come once per user, before the practice; a
-  // replay or a practice already under way goes straight to it.
-  const [intro, setIntro] = useState<IntroStage>(() => {
-    const saved = readProgress(scope);
-    return replay || saved.step !== "context" || saved.contextId ? "done" : readIntro(userId);
-  });
+  // #2701: language and timezone first, then the chat screen once the first
+  // context exists (the AI saves into it); once per user. A replay from
+  // Getting started goes straight to the practice.
+  const [intro, setIntro] = useState<IntroStage>(() => (replay ? "done" : readIntro(userId)));
   const advanceIntro = (next: IntroStage) => {
     writeIntro(userId, next);
     setIntro(next);
@@ -294,7 +294,9 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
         onInteractOutside={event => { if (writePending) event.preventDefault(); }}>
         <DialogHeader className="pr-6">
           <DialogTitle className="flex items-center gap-2">
-            <Sparkles className="h-5 w-5 text-brand-green-600 dark:text-brand-green-400" />
+            <span aria-hidden="true" className="shrink-0">
+              <KaguraLogo variant="mark" className="h-6 w-6" />
+            </span>
             {t("title")}
           </DialogTitle>
           <DialogDescription className="text-slate-600 dark:text-slate-300">{t("subtitle")}</DialogDescription>
@@ -331,8 +333,9 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               </Button>
             </AlertDescription>
           </Alert>
-        ) : intro === "chat" ? (
-          // After the key notice: MCP writes need the same embedding key.
+        ) : intro === "chat" && step !== "context" ? (
+          // Once the first context exists, which is where the AI saves, and
+          // after the key notice: MCP writes need the same embedding key.
           <ChatStep onNext={() => advanceIntro("done")} onGuide={() => advanceIntro("done")} />
         ) : (
           <div className="space-y-4">
@@ -346,11 +349,12 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               <div className="space-y-3">
                 <div>
                   <h3 className="font-semibold">{t("context.title")}</h3>
-                  <p className="text-sm text-muted-foreground">{t("context.optional")}</p>
+                  <p className="text-sm text-muted-foreground">{t("context.lead")}</p>
                 </div>
                 <Button
                   onClick={handleCreateContext}
                   disabled={busy}
+                  className={PRIMARY_BUTTON}
                 >
                   {busy && <InlineSpinner />}
                   {t("context.createButton")}
@@ -363,6 +367,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               <div className="space-y-3">
                 <div>
                   <h3 className="font-semibold">{t("memory.title")}</h3>
+                  <p className="text-sm text-muted-foreground">{t("memory.optional")}</p>
                   <p className="text-sm text-muted-foreground">
                     {t("memory.body")}
                   </p>
@@ -390,6 +395,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
                 </div>
                 <Button
                   onClick={handleSaveMemory}
+                  className={PRIMARY_BUTTON}
                   disabled={
                     busy || summary.trim().length < 10 || !content.trim()
                   }
@@ -419,7 +425,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
                     onChange={(e) => setQuery(e.target.value)}
                   />
                 </div>
-                <Button onClick={handleRecall} disabled={busy || !query.trim()}>
+                <Button onClick={handleRecall} disabled={busy || !query.trim()} className={PRIMARY_BUTTON}>
                   {busy && <InlineSpinner />}
                   <Search className="mr-2 h-4 w-4" />
                   {t("recall.searchButton")}
@@ -500,7 +506,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
                   </Button>
                 </div>
 
-                <Button onClick={finish}>{t("finish")}</Button>
+                <Button onClick={finish} className={PRIMARY_BUTTON}>{t("finish")}</Button>
               </div>
             )}
           </div>
