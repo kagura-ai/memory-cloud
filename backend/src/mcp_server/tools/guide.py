@@ -147,9 +147,10 @@ GUIDE_TOPICS: dict[str, str] = {
         "validation_error. update_memory(memory_id, observed_at=...) alone changes only "
         "the event time; a details write without the key drops it. Wherever observed_at "
         "is returned (remember, remember_batch items, update_memory, recall, list, "
-        "reference) observed_weekday follows it: Mon … Sun of the stored day, computed "
-        "by the server — check a weekday you wrote while resolving a relative date "
-        "against it, and fix the row with update_memory when they differ."
+        "reference) observed_weekday follows it: Mon … Sun of the stored day (a "
+        "datetime's UTC day), computed by the server. When you resolved a relative "
+        "date from a date-only observed_at, check the weekday you wrote against it "
+        "and fix the row with update_memory when they differ."
     ),
     "remember.returns": (
         "Returns: {status, memory_id, scope, version, observed_at?, observed_weekday?, "

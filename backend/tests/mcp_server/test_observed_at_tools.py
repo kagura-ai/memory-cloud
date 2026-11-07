@@ -53,6 +53,21 @@ class TestDefinitions:
         for topic in ("remember.returns", "update_memory.returns"):
             assert "observed_at?, observed_weekday?" in GUIDE_TOPICS[topic]
 
+    def test_the_guide_check_is_for_a_date_only_value(self):
+        """A datetime's weekday is its stored UTC day's, which can be the day
+        before the material's local day (2024-03-11T08:00:00+09:00 is stored as
+        2024-03-10T23:00:00Z, a Sunday); the fix-the-row check must not fire on it."""
+        from mcp_server.tools.guide import GUIDE_TOPICS
+
+        topic = GUIDE_TOPICS["remember.observed_at"]
+        assert "a datetime's UTC day" in topic
+        assert "from a date-only observed_at" in topic
+
+    def test_the_bootstrap_description_names_both_exceptions(self):
+        """get_agent_bootstrap's recall rows drop observed_weekday too (#2689)."""
+        description = _definition("get_agent_bootstrap")["description"]
+        assert "without supersede_candidate or observed_weekday" in description
+
 
 class TestRememberArgs:
     def test_reaches_the_service_as_an_argument(self):
