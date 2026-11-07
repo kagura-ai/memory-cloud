@@ -343,7 +343,8 @@ async def test_revocation_and_operation_allowlist(scenario):
             )
         ).status_code == 403
     async with owner_client(w, w.owner) as c:
-        assert (await c.delete(GRANTS + "/" + grant["id"])).status_code == 204
+        revoked = await c.delete(GRANTS + "/" + grant["id"])
+        assert revoked.status_code == 204
     async with app_client(w) as c:
         assert (await c.get(BASE + "/schema", headers=headers(grant))).status_code == 401
 
