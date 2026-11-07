@@ -111,8 +111,9 @@ GUIDE_TOPICS: dict[str, str] = {
         'search would use. Good: "JWT expiry caused 401. Fixed with refresh token '
         'rotation and clock skew handling." Bad: "Discussed auth errors in today\'s '
         'meeting." Long material (>2000 chars): store several memories, one per '
-        "topic, linked by shared tags — never 'part 1/3'. Call list_tags() first and "
-        "reuse existing tag spellings. Tags: at most 50, 100 characters each; mix "
+        "topic, linked by shared tags — never 'part 1/3'. Write with "
+        "tags_normalize=true to reuse the stored tag spellings; list_tags is for a tag "
+        "review or a tag filter. Tags: at most 50, 100 characters each; mix "
         "category tags ('category:auth') and entity tags ('oauth2', 'fastapi'); for "
         "Japanese add the kanji form and one kana form (['鯖', 'サバ']) — hiragana and "
         "katakana fold together; with one kana form stored, a filter in the other "
@@ -790,8 +791,9 @@ GUIDE_TOPICS: dict[str, str] = {
     # -------------------------------------------------------------- list_tags
     "list_tags.usage": (
         "Tag filters match exactly, and drift (troubleshoot / troubleshooting / "
-        "trouble-shoot) silently breaks them, so call list_tags BEFORE remember() and "
-        "BEFORE recall(filters={'tags': [...]}) and reuse the stored spellings. "
+        "trouble-shoot) silently breaks them, so call list_tags BEFORE "
+        "recall(filters={'tags': [...]}) and reuse the stored spellings, or for a tag "
+        "review; a write uses tags_normalize=true instead of a list_tags call. "
         "Examples: list_tags(context_id=..., prefix='auth') for autocomplete (% and _ "
         "are literal); sort='recent' for what is in use now ('count' default, "
         "'alpha' case-folded); min_count=5 to hide one-offs; with_tags=['python'] "

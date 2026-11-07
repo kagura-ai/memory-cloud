@@ -7,6 +7,9 @@ before writing an updated fact and passes ``supersedes``, and stamps the
 material's own date in ``details.observed_at``.
 #2333: recall answers count / when / current-value questions from the whole
 set, sorted by the date the fact held, newest value current.
+#2690: the skills also accept the SessionStart hook's default-context line,
+load their tools with one ``ToolSearch`` call and write with
+``tags_normalize=true`` instead of calling ``list_tags`` first.
 
 Each rule is pinned in the Claude command and in the Codex skill (SYNC pair).
 """
@@ -22,6 +25,7 @@ from utils.time_trigger import normalize_trigger
 RECALL = "claude-skills/recall.md"
 REMEMBER = "claude-skills/remember.md"
 SESSION_SUMMARY = "claude-skills/session-summary.md"
+SESSION_START = "claude-skills/session-start.md"
 CODEX = "plugins/kagura-memory/skills/kagura-memory/SKILL.md"
 DEFAULT_CONTEXT = "Default context: <name>; omit context_id"
 
@@ -35,14 +39,32 @@ def _section(text: str, start: str, end: str) -> str:
     return text[head : text.index(end, head)]
 
 
-@pytest.mark.parametrize("relative", [RECALL, REMEMBER])
-def test_default_context_skips_list_contexts_before_the_listing(relative):
+CONTEXT_STEPS = {
+    RECALL: ("### 1. Resolve the target context", "### 2."),
+    REMEMBER: ("### 1. Resolve the target context", "### 2."),
+    SESSION_SUMMARY: ("### 3. Get the target context", "### 4."),
+}
+
+
+@pytest.mark.parametrize("relative", [RECALL, REMEMBER, SESSION_SUMMARY])
+def test_default_context_skips_list_contexts_before_the_listing(relative, hook_module):
     text = _flat(relative)
-    step = _section(text, "### 1. Resolve the target context", "### 2.")
+    step = _section(text, *CONTEXT_STEPS[relative])
     assert DEFAULT_CONTEXT in step
+    # #2690: the SessionStart hook line is a source too (its prefix, quoted).
+    assert f'"{hook_module.DEFAULT_CONTEXT_PREFIX.strip()}"' in step
     assert "skip this step" in step and "without `context_id`" in step
     # The skip comes first; list_contexts() is the "Otherwise" path.
     assert step.index(DEFAULT_CONTEXT) < step.index("Otherwise:") < step.index("list_contexts()")
+
+
+def test_session_start_skip_quotes_the_hook_prefix(hook_module):
+    """#2690: session-start's default-context skip accepts the hook line too."""
+    text = _flat(SESSION_START)
+    head = text.index("**When the connection has a default context**")
+    skip = text[head : text.index("Otherwise:", head)]
+    assert DEFAULT_CONTEXT in skip and "skip `list_contexts()`" in skip
+    assert f'"{hook_module.DEFAULT_CONTEXT_PREFIX.strip()}"' in skip
 
 
 def _codex(name: str) -> str:
@@ -65,10 +87,87 @@ def _recall_rules(relative: str) -> str:
     return _section(_flat(relative), "### 2b. When, how many", "### 3. Read the response signals")
 
 
-def test_codex_recall_and_remember_skip_list_contexts_on_a_default_context():
+def test_codex_recall_and_remember_skip_list_contexts_on_a_default_context(hook_module):
     for name in ("Recall", "Remember"):
         section = _codex(name)
         assert DEFAULT_CONTEXT in section and "skip `list_contexts()`" in section
+        assert f'"{hook_module.DEFAULT_CONTEXT_PREFIX.strip()}"' in section  # #2690
+
+
+def _write_rules(relative: str) -> str:
+    """Where a skill decides its tags and makes the write (#2690)."""
+    if relative == CODEX:
+        return _codex("Remember")
+    if relative == SESSION_SUMMARY:
+        return _section(_flat(relative), "### 4. Save each item", "### 4a.")
+    return _section(_flat(relative), "### 2. Parse the input", "### 4. Confirm")
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, SESSION_SUMMARY, CODEX])
+def test_remember_writes_with_tags_normalize_and_no_list_tags(relative):
+    """#2690: the server folds tag spelling variants, so no list_tags round trip."""
+    text = _write_rules(relative)
+    assert "tags_normalize=true" in text
+    assert "`tag_normalized`" in text
+    assert "no spelling variants" in text
+    assert "list_tags(context_id=...)` first" not in text
+    assert "Call `list_tags`" not in text
+    assert "spellings `list_tags(" not in text
+
+
+def test_remember_default_context_skip_no_longer_calls_list_tags():
+    step = _section(_flat(REMEMBER), "### 1. Resolve the target context", "### 2.")
+    assert "list_tags" not in step
+    assert "list_tags" not in _codex("Remember").split("Otherwise ask before writing")[0]
+
+
+TOOL_LOADS = {
+    REMEMBER: ("remember", "remember_batch", "recall", "update_memory"),
+    RECALL: ("recall", "list", "reference"),
+    SESSION_SUMMARY: (
+        "remember_batch",
+        "remember",
+        "update_memory",
+        "create_edge",
+        "forget",
+        "reference",
+    ),
+}
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, RECALL, SESSION_SUMMARY])
+def test_claude_skills_load_the_tools_in_one_toolsearch_call(relative):
+    """#2690: a client that defers MCP tools loads them in one round trip."""
+    text = _flat(relative)
+    assert text.count("select:mcp__kagura-memory__") == 1
+    head = text.index("## Steps")
+    load = text[head : text.index("### 1.", head)]
+    query = load[load.index("select:") : load.index('")', load.index("select:"))]
+    names = {n.removeprefix("mcp__kagura-memory__") for n in query[len("select:") :].split(",")}
+    assert names == set(TOOL_LOADS[relative])
+    assert "`mcp__kagura-memory__list_contexts`" in load
+    # The no-default path may also call get_context_info before the first write.
+    assert "`mcp__kagura-memory__get_context_info`" in load
+    assert "Never call `ToolSearch` a second time" in load
+    assert "has no `ToolSearch`: skip this paragraph" in load
+
+
+def test_codex_skill_carries_no_toolsearch_text():
+    assert "ToolSearch" not in _flat(CODEX)
+
+
+def test_server_text_points_a_write_at_tags_normalize():
+    """#2690: the tool text and guide topics no longer send a write to list_tags first."""
+    from mcp_server.tools.guide import GUIDE_TOPICS
+
+    tools = {tool["name"]: tool for tool in get_tool_definitions()}
+    tags = tools["remember"]["inputSchema"]["properties"]["tags"]["description"]
+    assert "tags_normalize" in tags and "list_tags" not in tags
+    assert "remember" not in tools["list_tags"]["description"]
+    for topic in ("remember.layers", "list_tags.usage"):
+        text = GUIDE_TOPICS[topic]
+        assert "tags_normalize=true" in text
+        assert "BEFORE remember" not in text and "list_tags() first" not in text
 
 
 @pytest.mark.parametrize("relative", [REMEMBER, CODEX])

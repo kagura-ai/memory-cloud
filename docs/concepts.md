@@ -362,7 +362,7 @@ Kagura Memory Cloud exposes 72 tools via the [Model Context Protocol (MCP)](http
 | Agent Control Plane (preview) | 10 | `register_agent`, `list_agents`, `get_agent`, `update_agent`, `delete_agent`, `bind_agent_context`, `list_agent_bindings`, `update_agent_binding`, `unbind_agent_context`, `get_agent_bootstrap` — registry, subtractive scoping, and session bootstrap |
 | Neural Edges | 4 | `list_edges`, `create_edge`, `update_edge`, `delete_edge` — manage the Hebbian graph manually |
 | Contexts | 7 | `get_context_info`, `list_contexts`, `create_context`, `update_context`, `delete_context`, `merge_contexts`, `update_search_config` |
-| Tags | 1 | `list_tags` — tag vocabulary discovery for alignment before `remember`/`recall` |
+| Tags | 1 | `list_tags` — tag vocabulary discovery: a tag review, or the stored spellings for a `recall` tag filter (a write aligns its spellings with `tags_normalize=true`, no `list_tags` call first) |
 | Files / R2 | 5 | `init_file_upload`, `complete_file_upload`, `list_files`, `get_file_download_url`, `delete_file` — binary attachments via R2 |
 | Analyses (Memory Analysis) | 5 | `analyze_context`, `list_analyses`, `get_analysis`, `get_active_analysis`, `get_cluster` — large-scale qualitative clustering (Owner + Pro plan; per-run size cap `ANALYSIS_MAX_MEMORY_COUNT`, default 10,000 memories — preview and start reject over-cap contexts with a 422 naming the limit) |
 | Resources | 6 | `setup_resource`, `setup_connector`, `list_resource_tokens`, `ingest_events`, `get_resource_impact`, `get_resource_schema` — external data ingestion + connector provisioning |

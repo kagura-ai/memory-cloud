@@ -109,7 +109,7 @@ Manual: guide(["remember"]).""",
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Tags for filtering (recall matches them exactly); at most 50, 100 chars each. Mix 'category:x' and entity tags; reuse spellings from list_tags(). For Japanese include script variants.",
+                        "description": "Tags for filtering (recall matches them exactly); at most 50, 100 chars each. Mix 'category:x' and entity tags; set tags_normalize to reuse stored spellings. For Japanese include script variants.",
                     },
                     "context": {
                         "type": "object",
@@ -912,7 +912,7 @@ Manual: guide(["list_contexts"]).""",
         {
             "name": "list_tags",
             "readOnly": True,
-            "description": """List a context's tag vocabulary with usage counts and recency. Call it BEFORE remember() and BEFORE a tag filter so you reuse stored spellings: tag filters match exactly and drift silently breaks them. Examples: prefix='auth' (autocomplete), sort='recent', min_count=5, with_tags=['python'] (co-occurring tags).
+            "description": """List a context's tag vocabulary with usage counts and recency. Call it BEFORE a tag filter so you reuse stored spellings: tag filters match exactly and drift silently breaks them. Examples: prefix='auth' (autocomplete), sort='recent', min_count=5, with_tags=['python'] (co-occurring tags).
 Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], total, has_more}; an empty context returns tags=[].
 Manual: guide(["list_tags"]).""",
             "inputSchema": {

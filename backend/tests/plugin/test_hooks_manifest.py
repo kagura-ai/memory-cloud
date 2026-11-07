@@ -143,6 +143,12 @@ def test_user_config_shape() -> None:
         "--guardrails off to its args instead (kagura-mcp 0.39.0+)"
         in cfg["server_url"]["description"]
     )
+    # #2690: the hook names the default context only when server_url keeps context=.
+    assert (
+        "Keep that context= in server_url as well: the SessionStart hook then tells the "
+        "model the default context, so no list_contexts call is made."
+        in cfg["server_url"]["description"]
+    )
 
 
 def test_user_config_descriptions_carry_the_traps() -> None:
@@ -441,6 +447,7 @@ def test_setup_skill_ships_as_a_plugin_command() -> None:
         # 3. server_url is derived from the active MCP URL
         "https://<host>/mcp",
         "/mcp/w/<workspace-id>",
+        "context=",  # kept in server_url so the hook names the default context (#2690)
         # 4. the OAuth trap, before the change
         "re-run `/mcp`",
         # 5. verification through MCP, then the hook itself

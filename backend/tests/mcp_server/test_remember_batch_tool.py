@@ -551,3 +551,78 @@ async def test_remember_dedupe_unavailable_reply_has_no_exception_text_and_is_lo
     usage.assert_awaited_once()
     assert usage.await_args.args[2:5] == ("remember", usage.await_args.args[3], 503)
     assert await _rows(live, ctx_id) == 0
+
+
+# ------------------------------------------- skill-style write, stubbed (#2690)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("atomic", [False, True])
+async def test_a_skill_style_write_normalizes_tags_and_reports_the_mapping(atomic):
+    """The skills write with ``tags_normalize=true`` instead of calling ``list_tags``
+    first: the flag reaches the service on both batch paths, and the service's
+    ``tag_normalized`` hint reaches the item's ``lint``. The storage half (the
+    established spelling wins) runs on Postgres in test_remember_write_options.py."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4 as _uuid4
+
+    from models.schemas import WriteLintHint
+
+    hint = WriteLintHint(
+        code="tag_normalized",
+        hint="Stored under the context's established spelling.",
+        subject="Dev_Environment",
+        replacement="dev-environment",
+    )
+    response = SimpleNamespace(memory_id=_uuid4(), scope="working", persistence=None, lint=[hint])
+    service = MagicMock(
+        tag_canonical_map=AsyncMock(return_value={"devenvironment": "dev-environment"}),
+        remember=AsyncMock(return_value=response),
+        remember_many=AsyncMock(return_value=[response]),
+    )
+    db = MagicMock(commit=AsyncMock(), rollback=AsyncMock(), refresh=AsyncMock())
+
+    async def _db():
+        yield db
+
+    context = MagicMock(workspace_id=_uuid4())
+    with (
+        patch("db.base.get_db", new=_db),
+        patch("services.memory_service.MemoryService", return_value=service),
+        patch("mcp_server.tools.batch._resolve_context", new=AsyncMock(return_value=context)),
+        patch("mcp_server.tools.batch._context_response_fields", return_value={"context_id": CTX}),
+        patch("mcp_server.tools.batch._log_tool_usage", new=AsyncMock()),
+        patch("mcp_server.tools.batch._touch_context_last_used", new=AsyncMock()),
+        patch("mcp_server.tools.batch._plan_headroom_field", new=AsyncMock(return_value={})),
+    ):
+        payload = _parse(
+            await handle_remember_batch(
+                {
+                    "context_id": CTX,
+                    "items": [{**ITEM, "tags": ["Dev_Environment"]}],
+                    "tags_normalize": True,
+                    "atomic": atomic,
+                },
+                "user-1",
+                None,
+            )
+        )
+    assert payload["status"] == "success"
+    assert payload["results"][0]["lint"] == [
+        {
+            "code": "tag_normalized",
+            "hint": "Stored under the context's established spelling.",
+            "subject": "Dev_Environment",
+            "replacement": "dev-environment",
+        }
+    ]
+    if atomic:
+        (requests,), kwargs = service.remember_many.await_args
+        assert requests[0].tags == ["Dev_Environment"]
+        assert kwargs["tags_normalize"] is True
+    else:
+        (request,), kwargs = service.remember.await_args
+        assert request.tags == ["Dev_Environment"]
+        assert kwargs["tags_normalize"] is True
+        assert kwargs["tag_canonical"] == {"devenvironment": "dev-environment"}
