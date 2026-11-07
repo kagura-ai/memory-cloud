@@ -259,9 +259,9 @@ class TestStoreIsAuthority:
         )
         assert rs.INJECTION_RESISTANCE_DIRECTIVE in rs.SELECTOR_SYSTEM
 
-    def test_the_prompt_revision_is_v4(self) -> None:
-        # selector-v4 (#2330): the observed header and the date the rule compares.
-        assert rs.PROMPT_REVISION == "selector-v4"
+    def test_the_prompt_revision_is_v5(self) -> None:
+        # selector-v5 (#2689): the weekday after the observed day.
+        assert rs.PROMPT_REVISION == "selector-v5"
 
     def test_a_counterfactual_row_is_sent_verbatim_with_its_header(self) -> None:
         page = [_response("Capital of Romania (quiz set)", COUNTERFACTUAL)]
@@ -347,7 +347,7 @@ class TestStoreIsAuthority:
         kwargs = llm.complete_json.await_args.kwargs
         assert kwargs["system_prompt"] == rs.SELECTOR_SYSTEM
         assert "Rajanpur" in kwargs["prompt"]
-        assert ledger.await_args.kwargs["call_metadata"]["prompt_revision"] == "selector-v4"
+        assert ledger.await_args.kwargs["call_metadata"]["prompt_revision"] == "selector-v5"
 
     def test_an_observed_row_is_dated_by_its_event_time(self) -> None:
         """#2330: the day the fact held wins over the write day."""
@@ -367,14 +367,47 @@ class TestStoreIsAuthority:
         prompt = rs.build_prompt(
             "What is the price?", rs.rows_for([late_written, current, plain], 10)
         )
-        assert "Row 0 (observed 2024-03-07)" in prompt
-        assert "Row 1 (observed 2025-01-01)" in prompt  # day only, no time of day
+        assert "Row 0 (observed 2024-03-07 Thu)" in prompt
+        assert "Row 1 (observed 2025-01-01 Wed)" in prompt  # day only, no time of day
         assert "Row 2 (written 2026-02-03, summary only)" in prompt
         assert "2026-10-01" not in prompt and "09:30" not in prompt
 
     def test_an_observed_summary_only_row(self) -> None:
         row = _response(observed_at="2024-03-07T23:59:59Z")
-        assert rs.row_header(3, row) == "Row 3 (observed 2024-03-07, summary only)"
+        assert rs.row_header(3, row) == "Row 3 (observed 2024-03-07 Thu, summary only)"
+
+    def test_the_weekday_is_the_stored_days(self) -> None:
+        """#2689: the server's weekday of observed_at[:10], no conversion."""
+        monday = _response(observed_at="2024-03-11T23:30:00Z")
+        thursday = _response("s", SENTENCES, observed_at="2024-03-14")
+        assert rs.row_header(0, monday) == "Row 0 (observed 2024-03-11 Mon, summary only)"
+        assert rs.row_header(1, thursday) == "Row 1 (observed 2024-03-14 Thu)"
+
+    @pytest.mark.asyncio
+    async def test_the_observed_headers_counted_are_the_headers_sent(self) -> None:
+        """#2689: the weekday is in the one string both the budget and the prompt use."""
+        page = [
+            _response("s", SENTENCES, observed_at="2024-03-11"),
+            _response("summary-only row", observed_at="2024-03-14T23:30:00Z"),
+        ]
+        body = len("s") + len(SENTENCES) + len("summary-only row")
+        headers = len(rs.row_header(0, page[0])) + len(rs.row_header(1, page[1]))
+        assert headers == len("Row 0 (observed 2024-03-11 Mon)") + len(
+            "Row 1 (observed 2024-03-14 Thu, summary only)"
+        )
+        llm = _llm({"rows": [{"i": 0, "relevant": True}]})
+        at_limit, llm, _ = await _run(
+            page, llm=llm, settings=_settings(llm_selector_max_prompt_chars=body + headers)
+        )
+        assert at_limit.report.applied is True
+        prompt = llm.complete_json.await_args.kwargs["prompt"]
+        lines = prompt.splitlines()
+        assert rs.row_header(0, page[0]) in lines and rs.row_header(1, page[1]) in lines
+        over, llm2, _ = await _run(
+            page, llm=_llm(), settings=_settings(llm_selector_max_prompt_chars=body + headers - 1)
+        )
+        assert over.report.reason == "too_large"
+        llm2.complete_json.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_the_row_headers_count_against_the_prompt_budget(self) -> None:

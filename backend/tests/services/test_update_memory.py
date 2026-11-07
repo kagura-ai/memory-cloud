@@ -162,6 +162,7 @@ class TestUpsertByExternalId:
         mock_remember_response.scope = "working"
         # #1519: RememberResponse always carries `persistence`; the upsert reuses it.
         mock_remember_response.persistence = None
+        mock_remember_response.observed_at = None  # #2689: carried as well
         service.remember = AsyncMock(return_value=mock_remember_response)
 
         ctx_id = uuid4()
@@ -201,6 +202,7 @@ class TestUpsertByExternalId:
         mock_remember_response.scope = "working"
         # #1519: RememberResponse always carries `persistence`; the upsert reuses it.
         mock_remember_response.persistence = None
+        mock_remember_response.observed_at = None  # #2689: carried as well
         service.remember = AsyncMock(return_value=mock_remember_response)
 
         mock_forget_response = MagicMock()

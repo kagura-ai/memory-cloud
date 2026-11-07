@@ -1629,6 +1629,7 @@ class MemoryService:
             memory_id=memory_id,
             scope=memory.scope,
             version=memory.version,  # #2043
+            observed_at=observed_at_from_details(memory.details),  # #2689
             # #1505: say what 'working' means for durability instead of
             # leaving the caller to guess.
             persistence=persistence_info(
@@ -1851,6 +1852,7 @@ class MemoryService:
             memory_id=memory.id,
             scope=memory.scope,
             version=memory.version,  # #2043
+            observed_at=observed_at_from_details(memory.details),  # #2689
             persistence=persistence_info(
                 memory.scope,
                 pinned=memory.is_pinned,
@@ -2307,6 +2309,7 @@ class MemoryService:
             re_embedded=re_embedded,
             scope=memory.scope,
             version=memory.version,  # #2043
+            observed_at=observed_at_from_details(memory.details),  # #2689
             persistence=persistence_info(  # #1505
                 memory.scope,
                 pinned=memory.is_pinned,
@@ -3453,6 +3456,7 @@ class MemoryService:
             re_embedded=True,
             scope=result.scope,
             version=result.version,  # #2043: the new row's version (1)
+            observed_at=result.observed_at,  # #2689: the new row's
             # #1505/#1519: remember() already built the block from the row it
             # actually wrote (pinned flag included) — reuse it like lint below.
             persistence=result.persistence,

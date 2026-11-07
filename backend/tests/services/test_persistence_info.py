@@ -608,6 +608,7 @@ async def test_upsert_populates_persistence(service, sleep_pass):
     service.memory_repo.list_by_resource_id = AsyncMock(return_value=[])
     remembered = MagicMock()
     remembered.memory_id = uuid4()
+    remembered.observed_at = None  # #2689: RememberResponse's is a str or None
     remembered.scope = "working"
     remembered.persistence = persistence_info("working")
     service.remember = AsyncMock(return_value=remembered)
@@ -640,6 +641,7 @@ async def test_upsert_forwards_delivery_mode_and_reuses_remember_persistence(ser
     service.memory_repo.list_by_resource_id = AsyncMock(return_value=[])
     remembered = MagicMock()
     remembered.memory_id = uuid4()
+    remembered.observed_at = None  # #2689: RememberResponse's is a str or None
     remembered.scope = "persistent"
     remembered.persistence = persistence_info("persistent", pinned=True)
     service.remember = AsyncMock(return_value=remembered)
@@ -675,6 +677,7 @@ async def test_upsert_replacement_inherits_existing_pin_when_omitted(service, sl
     service.memory_repo.list_by_resource_id = AsyncMock(return_value=[existing])
     remembered = MagicMock()
     remembered.memory_id = uuid4()
+    remembered.observed_at = None  # #2689: RememberResponse's is a str or None
     remembered.scope = "persistent"
     remembered.persistence = persistence_info("persistent", pinned=True)
     service.remember = AsyncMock(return_value=remembered)
@@ -707,6 +710,7 @@ async def test_upsert_explicit_delivery_mode_overrides_existing_pin(service, sle
     service.memory_repo.list_by_resource_id = AsyncMock(return_value=[existing])
     remembered = MagicMock()
     remembered.memory_id = uuid4()
+    remembered.observed_at = None  # #2689: RememberResponse's is a str or None
     remembered.scope = "persistent"
     remembered.persistence = persistence_info("persistent")
     service.remember = AsyncMock(return_value=remembered)

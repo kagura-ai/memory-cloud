@@ -752,14 +752,17 @@ class AgentBootstrapService:
 def _bootstrap_recall_row(r: Any) -> dict[str, Any]:
     """One recall result as the bootstrap recall component renders it (#2013).
 
-    Recall's ``verbosity="full"`` item, with one documented exception: no
-    ``supersede_candidate``. Bootstrap is the behaviour-establishing
+    Recall's ``verbosity="full"`` item, with two documented exceptions. No
+    ``supersede_candidate``: bootstrap is the behaviour-establishing
     session-start lane — an agent does not act on a suggestion there, the
     max_chars fit cannot drop the field, and it would put another memory's
-    summary in the trusted lane. ``recall`` keeps it.
+    summary in the trusted lane. ``recall`` keeps it. No ``observed_weekday``
+    (#2689): REST ``/agents/{id}/bootstrap`` serves these rows too, and the
+    REST responses stay as they were.
     """
     item = recall_result_item(r, BOOTSTRAP_RECALL_VERBOSITY)
     item.pop("supersede_candidate", None)
+    item.pop("observed_weekday", None)
     # #2124: the request asks for no content (full=0); dropping the keys here
     # too keeps Layer-3 text out of this lane whatever the service returns.
     for key in RECALL_CONTENT_KEYS:

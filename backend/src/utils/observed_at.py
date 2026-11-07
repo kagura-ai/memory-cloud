@@ -28,6 +28,10 @@ One normaliser, four readers: :func:`normalize_observed_at` (every write path,
 via ``MemoryService._apply_observed_at``), :func:`column_value` (the Qdrant
 payload of a metadata edit), :func:`observed_at_from_details` (responses) and
 :func:`parse_observed_bound` (filters).
+
+#2689: an MCP response that shows ``observed_at`` shows ``observed_weekday``
+after it (:func:`observed_fields`): the weekday of the stored day, computed
+here so a writer can check the weekday it resolved a relative date against.
 """
 
 from __future__ import annotations
@@ -54,6 +58,10 @@ _INPUT_DATETIME = re.compile(
 _FORMAT_HINT = (
     "observed_at must be an ISO 8601 date (2024-03-07) or datetime (2024-03-07T10:00:00Z)"
 )
+
+# date.weekday() order. A fixed tuple, never strftime("%a"), which follows the
+# process locale.
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 class ObservedAtValidationError(ValueError):
@@ -159,6 +167,39 @@ def observed_at_from_details(details: Any) -> str | None:
     if isinstance(value, str) and (_DATE.fullmatch(value) or _DATETIME.fullmatch(value)):
         return value
     return None
+
+
+def observed_weekday(value: Any) -> str | None:
+    """The weekday of the day ``value`` starts with (``Mon`` … ``Sun``), or None.
+
+    ``value`` is a stored form (a date, or a UTC datetime): both begin with
+    the day, which is read as it is, with no timezone conversion. Anything
+    that does not begin with a ``YYYY-MM-DD`` calendar date is None. Never
+    raises.
+    """
+    if not isinstance(value, str) or not _DATE.fullmatch(value[:10]):
+        return None
+    try:
+        day = date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+    return WEEKDAYS[day.weekday()]
+
+
+def observed_fields(value: Any) -> dict[str, str]:
+    """``observed_at`` and, right after it, ``observed_weekday`` for a response.
+
+    Empty when there is no value: the keys are absent, never null. A value
+    whose day is not a calendar date (a legacy one) keeps ``observed_at``
+    alone.
+    """
+    if not isinstance(value, str) or not value:
+        return {}
+    fields = {"observed_at": value}
+    weekday = observed_weekday(value)
+    if weekday is not None:
+        fields["observed_weekday"] = weekday
+    return fields
 
 
 def parse_observed_bound(value: Any, name: str) -> tuple[str, datetime]:
