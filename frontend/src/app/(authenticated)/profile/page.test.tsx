@@ -109,6 +109,7 @@ const { mockApiGet, mockApiPost, mockApiPut, FakeApiError } = vi.hoisted(() => {
   };
 });
 vi.mock("@/lib/api/base", () => ({
+  updateUserProfile: (...args: unknown[]) => mockApiPut("/api/v1/users/profile", ...args),
   apiClient: {
     get: (...args: unknown[]) => mockApiGet(...args),
     post: (...args: unknown[]) => mockApiPost(...args),

@@ -9,6 +9,9 @@ hostile input into a 500.
 from __future__ import annotations
 
 import importlib.util
+import ast
+from pathlib import Path
+import re
 import zoneinfo
 
 import pytest
@@ -23,6 +26,14 @@ from utils.user_prefs import (
 
 
 class TestLocale:
+    def test_frontend_and_backend_offer_the_same_languages(self):
+        config = Path(__file__).resolve().parents[3] / "frontend/src/i18n/config.ts"
+        if not config.exists():
+            pytest.skip("Frontend sources are not present in a backend-only image")
+        match = re.search(r"export const locales = (\[[^\]]+\]) as const", config.read_text())
+        assert match is not None
+        assert tuple(ast.literal_eval(match[1])) == SUPPORTED_LOCALES
+
     @pytest.mark.parametrize("value", ["en", "ja"])
     def test_supported(self, value) -> None:
         assert is_valid_locale(value) is True

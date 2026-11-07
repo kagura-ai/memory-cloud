@@ -9,7 +9,7 @@
 import Link from "next/link";
 import { useId, useState } from "react";
 import { useTranslations } from "next-intl";
-import { ArrowRight, Check, Copy } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import {
@@ -19,7 +19,9 @@ import {
   useLocale,
   type Locale,
 } from "@/i18n";
-import { API_BASE_URL, updateUserProfile } from "@/lib/api/base";
+import { API_BASE_URL } from "@/lib/api/base";
+import { saveUserPreferences } from "@/lib/auth/saveUserPreferences";
+import { CopyIconButton } from "@/components/common/CopyIconButton";
 import { mcpEndpoints } from "@/lib/mcp/url";
 import { browserTimezone, timezoneOptions } from "@/lib/utils/datetime";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -122,14 +124,7 @@ export function PreferencesStep({
     setFailed(false);
     onBusyChange?.(true);
     try {
-      await updateUserProfile({ locale: language, timezone });
-      // Refresh before applying: the layout applies the signed-in user's saved
-      // locale whenever it differs from the UI, so switching over a stale
-      // record would be switched straight back. refetchUser resolves
-      // undefined on a transient failure instead of throwing.
-      const fresh = await refetchUser();
-      if (!fresh) throw new Error("The signed-in user was not refreshed");
-      setLocale(language);
+      await saveUserPreferences({ locale: language, timezone }, refetchUser, setLocale);
       onDone();
     } catch {
       setFailed(true);
@@ -242,21 +237,14 @@ export function ChatStep({
         <code className="min-w-0 flex-1 select-all break-all rounded-md border bg-muted/30 px-3 py-2 font-mono text-sm">
           {mcpUrl}
         </code>
-        <Button
-          type="button"
-          variant="outline"
-          onClick={copy}
-          className="shrink-0 gap-2"
-        >
-          {isCopied(COPY_KEY) ? (
-            <Check aria-hidden="true" className="h-4 w-4" />
-          ) : (
-            <Copy aria-hidden="true" className="h-4 w-4" />
-          )}
-          <span aria-live="polite">
-            {isCopied(COPY_KEY) ? t("chat.copied") : t("chat.copy")}
-          </span>
-        </Button>
+        <CopyIconButton
+          value={mcpUrl}
+          copyKey={COPY_KEY}
+          label={isCopied(COPY_KEY) ? t("chat.copied") : t("chat.copy")}
+          isCopied={isCopied}
+          onCopy={() => void copy()}
+          className="shrink-0"
+        />
       </div>
       <Link
         href={MCP_CONNECTION_HREF}

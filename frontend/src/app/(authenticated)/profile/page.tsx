@@ -41,6 +41,7 @@ import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import LinkedAccounts from "@/components/auth/LinkedAccounts";
 import PasskeySettings from "@/components/auth/PasskeySettings";
 import { usePasswordSetup } from "@/hooks/usePasswordSetup";
+import { saveUserPreferences } from "@/lib/auth/saveUserPreferences";
 import PasswordSettings from "@/components/auth/PasswordSettings";
 import { MfaSettings } from "@/components/auth/MfaSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
@@ -238,28 +239,19 @@ export default function ProfilePage() {
 
   const handleSaveProfile = async () => {
     try {
-      await apiClient.put("/api/v1/users/profile", {
-        name,
-        timezone,
-        locale,
-      });
-
-      // Refresh user data to get updated timezone
-      await refetchUser();
-
-      // Apply the chosen UI language immediately (localStorage + context), so
-      // the interface switches now instead of only persisting to the backend.
-      applyUiLocale(locale as Locale);
+      await saveUserPreferences(
+        { name, timezone, locale: locale as Locale }, refetchUser, applyUiLocale,
+      );
 
       toast({
         title: t("profileUpdated"),
         description: t("profileUpdatedDesc"),
       });
       setIsEditMode(false);
-    } catch (error: any) {
+    } catch {
       toast({
         title: tCommon("error"),
-        description: error.message || t("failedToUpdateProfile"),
+        description: t("failedToUpdateProfile"),
         variant: "destructive",
       });
     }

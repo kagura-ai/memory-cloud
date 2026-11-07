@@ -21,7 +21,7 @@ TIMEZONE_MAX_LENGTH = 50
 @cache
 def _available_timezones() -> frozenset[str]:
     """The IANA names this interpreter's tz database knows, read once."""
-    return frozenset(zoneinfo.available_timezones())
+    return frozenset(zoneinfo.available_timezones()) - {"localtime", "Factory"}
 
 
 def is_valid_locale(value: object) -> TypeGuard[str]:
