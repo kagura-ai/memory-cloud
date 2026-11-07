@@ -18,7 +18,20 @@
     "save": "Save",
     "cancel": "Cancel",
     "name": "Passkey name",
-    "error": "Could not update passkeys."
+    "error": "Could not update passkeys.",
+    "errors": {
+      "cancelled": "The passkey request was cancelled or timed out. Try again when you're ready.",
+      "alreadyRegistered": "This device already has a passkey for your account. To add another, use a different device or password manager.",
+      "tooManyAttempts": "Too many verification attempts. Try again in a few minutes.",
+      "wrongPassword": "The current password did not match. Check it and try again.",
+      "passwordRequired": "Enter your current password, then add the passkey.",
+      "signInAgain": "For your security, sign in again, then add the passkey right away.",
+      "removeProof": "To remove this passkey, enter your current password or confirm with another passkey.",
+      "verifyFailed": "The passkey could not be verified, or your session has expired. Try again, and sign in again if it keeps failing.",
+      "limitReached": "You have reached the passkey limit. Remove a passkey you no longer use, then add the new one.",
+      "changed": "Your passkeys were changed in another tab or on another device. Reload the page and try again.",
+      "load": "Could not load your passkeys. Reload the page to try again."
+    }
   },
   "gettingStarted": {
     "ownerEmpty": "Connect a client now, or create a private practice context below to save your first memory.",
