@@ -1627,7 +1627,9 @@ def _take_accepted_terms(state: str) -> str | None:
 # read and deleted by the callback after the state check, and handed to
 # ``ensure_user``, which applies it to a NEW account only. Each value is
 # validated when stored and again when read; an invalid one is dropped on its
-# own. The values are never logged (a time zone is a coarse location signal).
+# own. Application logs never record them (a time zone is a coarse location
+# signal); the server's access log does record the request line, query string
+# included, as it does for any GET.
 _SIGNUP_PREFS_KEY = "oauth2_signup_prefs:{state}"
 _SIGNUP_PREFS_TTL = 300  # same lifetime as oauth2_state:{state}
 

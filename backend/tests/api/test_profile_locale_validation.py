@@ -134,3 +134,35 @@ class TestProfileTimezoneValidation:
             await update_user_profile(data=data, user=_user_session(), db=db)
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "Timezone string too long (max 50 characters)"
+
+    @pytest.mark.asyncio
+    async def test_unchanged_stored_timezone_is_not_rechecked(self):
+        """The profile page always sends the timezone. A stored name the
+        validator does not list (``posix/...`` passed the old ZoneInfo()
+        check) must not make a name-only save fail."""
+        from utils.user_prefs import is_valid_timezone
+
+        user = _db_user()
+        user.timezone = "posix/Asia/Tokyo"
+        assert is_valid_timezone(user.timezone) is False
+        db = _mock_db(user)
+        data = UpdateUserProfileRequest(name="Renamed", timezone="posix/Asia/Tokyo")
+
+        result = await update_user_profile(data=data, user=_user_session(), db=db)
+
+        assert result.name == "Renamed"
+        assert result.timezone == "posix/Asia/Tokyo"
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_changing_away_to_an_invalid_timezone_is_still_a_400(self):
+        user = _db_user()
+        user.timezone = "posix/Asia/Tokyo"
+        db = _mock_db(user)
+        data = UpdateUserProfileRequest(timezone="posix/Asia/Seoul")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_user_profile(data=data, user=_user_session(), db=db)
+
+        assert exc_info.value.status_code == 400
+        assert user.timezone == "posix/Asia/Tokyo"
