@@ -42,6 +42,7 @@ from models.memory import Memory, MemoryRevision
 from models.vector_erasure import VectorErasureJob
 from services.account_erasure_service import AccountErasureService, _audit_salt
 from services.erasure_details import pseudonym_salt_fingerprint
+from utils.datetime import utcnow
 from utils.exceptions import QdrantError
 from utils.hashing import sha256_hex
 
@@ -270,7 +271,8 @@ async def _erase(db: AsyncSession, world: dict[str, Any], sub: str) -> UUID:
 
 
 async def _bystander(db: AsyncSession, world: dict[str, Any]) -> UUID:
-    """A finished request stamped with another salt's fingerprint (B).
+    """A finished request (``completed_at`` set, as an erasure leaves it)
+    stamped with another salt's fingerprint (B).
 
     Rotating off B is the re-key's job; the stamp only marks requests that
     carry no fingerprint, so it must leave this row exactly as it is.
@@ -284,6 +286,7 @@ async def _bystander(db: AsyncSession, world: dict[str, Any]) -> UUID:
         is_self_service=False,
         reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
         status=STATUS_COMPLETE,
+        completed_at=utcnow(),
         deleted_data_summary={
             "postgres": {},
             NOTE_PSEUDONYM_SALT_KEY: pseudonym_salt_fingerprint(SALT_B),
@@ -384,7 +387,7 @@ async def test_after_the_rekey_the_old_salt_matches_no_row(
     vectors = _Vectors({subject["authored"]: p_a})
     plan = await _rekey(db_session, vectors, dry_run=True)
     vectors.author.assert_not_awaited()  # the plan makes no vector-store call
-    assert plan.to_rekey >= 1 and plan.payload_memories >= 1
+    assert (plan.to_rekey, plan.payload_memories) == (1, 1)
     applied = await _rekey(db_session, vectors, dry_run=False)
 
     assert applied.columns == plan.columns  # the plan's counts are the apply's
@@ -466,12 +469,13 @@ async def test_stamp_current_marks_the_unmarked_rows_and_rewrites_nothing(
     db_session: AsyncSession, subject: dict[str, Any], stores: None
 ) -> None:
     """A deployment that did not rotate: rows written before the fingerprint
-    get it and nothing else changes; a re-key under the same salt then has
-    nothing to do.
+    get it and nothing else changes; a re-key under the same salt then finds
+    nothing more to do for them.
 
     The table holds only this test's requests (``_empty_erasure_requests``):
-    the one to stamp and a bystander under another salt, which the stamp must
-    leave alone."""
+    the one to stamp and a bystander under another salt. The stamp leaves the
+    bystander alone; the re-key that follows has exactly that one row to
+    rewrite, so it reports nothing for the stamped one."""
     salt_a = _audit_salt()
     request_id = await _erase(db_session, subject, subject["sub"])
     # what a row written before v0.141.0 looks like: no fingerprint
@@ -497,15 +501,16 @@ async def test_stamp_current_marks_the_unmarked_rows_and_rewrites_nothing(
         assert plan.other_salt == applied.other_salt == 1  # the bystander: counted, not stamped
         assert applied.columns == {} and applied.payload is None
         after = {table: await _snapshot(db_session, table) for table in _TABLES}
-        # a request under another salt is the re-key's to rewrite: take it out,
-        # so the re-key below is about the rows the stamp covered
-        await db_session.execute(delete(ErasureRequest).where(ErasureRequest.id == bystander_id))
-        await db_session.commit()
         # the salt is the shipped default here: let the re-key run under it
         with patch.object(cli, "is_placeholder_secret", return_value=False):
             rekey = await cli.rekey_erasure_pseudonyms(db_session, dry_run=False)
+        final = {table: await _snapshot(db_session, table) for table in _TABLES}
 
-    assert (rekey.to_rekey, rekey.stamped, rekey.columns, rekey.changes) == (0, 0, {}, 0)
+    # the one row to re-key is the bystander (another salt's); the stamped
+    # request is current, so it is neither re-keyed nor stamped again
+    assert (rekey.current, rekey.to_rekey, rekey.stamped) == (1, 1, 1)
+    assert rekey.columns == {"erasure_requests.user_id": 1, "erasure_requests.initiated_by": 1}
+    assert rekey.changes == 3
     vectors.author.assert_not_awaited()
     requests = after.pop("erasure_requests")
     assert after == {table: rows for table, rows in before.items() if table != "erasure_requests"}
@@ -516,14 +521,27 @@ async def test_stamp_current_marks_the_unmarked_rows_and_rewrites_nothing(
         summary = row["deleted_data_summary"]
         if old["deleted_data_summary"] != summary:
             # the one change: the fingerprint, on a row that had none
+            assert NOTE_PSEUDONYM_SALT_KEY not in old["deleted_data_summary"]
             assert summary == {**old["deleted_data_summary"], NOTE_PSEUDONYM_SALT_KEY: fingerprint}
         assert {k: v for k, v in row.items() if k != "deleted_data_summary"} == {
             k: v for k, v in old.items() if k != "deleted_data_summary"
         }
     assert requests[request_id]["deleted_data_summary"][NOTE_PSEUDONYM_SALT_KEY] == fingerprint
     # the stamp left the other salt's request byte-identical, fingerprint included
-    assert requests.pop(bystander_id) == before["erasure_requests"][bystander_id]
-    assert await _snapshot(db_session, "erasure_requests") == requests
+    bystander_before = before["erasure_requests"][bystander_id]
+    assert requests.pop(bystander_id) == bystander_before
+    # then the re-key rewrote the bystander and nothing else: the stamped
+    # request, and every other table, are as the stamp left them
+    final_requests = final.pop("erasure_requests")
+    rewritten = final_requests.pop(bystander_id)
+    assert final_requests == requests
+    assert final == after
+    assert (
+        rewritten["user_id"]
+        == rewritten["initiated_by"]
+        == sha256_hex(bystander_before["user_id"], salt=salt_a)
+    )
+    assert rewritten["deleted_data_summary"][NOTE_PSEUDONYM_SALT_KEY] == fingerprint
 
 
 @pytest.mark.asyncio
@@ -554,7 +572,7 @@ async def test_unfinished_erasures_and_scopes_are_counted_and_left_alone(
     plan = await _rekey(db_session, vectors, dry_run=True)
     applied = await _rekey(db_session, vectors, dry_run=False)
 
-    assert plan.in_progress >= 1 and plan.scopes_pending >= 1
+    assert (plan.in_progress, plan.scopes_pending) == (1, 1)
     for result in (stamp, applied):
         assert (result.in_progress, result.scopes_pending) == (
             plan.in_progress,
