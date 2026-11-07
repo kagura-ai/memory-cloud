@@ -280,6 +280,41 @@ def test_tool_selection_guidance_names_the_neighbours():
     assert "remember" in _tool("update_memory")["description"]
 
 
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "Read every result, not only the top ones",
+        "recall once more for each kind of item found",
+        "call `list` with a tag or type filter when one names the set",
+        "answer with all of them",
+        'filters={"observed_after": ..., "observed_before": ...}',
+        "with a margin",
+        "`observed_at` is the date a fact was stated",
+        "If nothing matches, recall again without the filter",
+        "Recall again on concrete entities and category words (brand, sponsor, shop, friend)",
+        'use `search_mode="keyword"` for names the first recall surfaced',
+        "Answer with the best-supported inference, name the supporting memory",
+        "mark it as an inference",
+        "Decline only when `confidence.level` is `none` or `low`",
+    ],
+)
+def test_recall_description_carries_answering_rules(rule):
+    assert rule in _tool("recall")["description"]
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "start summaries with the subject's name",
+        "record both people and direction",
+        "attribute facts to their speaker",
+        "check subjects against speaker labels",
+    ],
+)
+def test_remember_description_carries_speaker_attribution(rule):
+    assert rule in _tool("remember")["description"]
+
+
 # ID parameters that told the agent not to invent a UUID before the trim. The
 # example UUID went; the warning stays — a fabricated ID is a wasted call on a
 # read and the wrong thing to guess at on a write.

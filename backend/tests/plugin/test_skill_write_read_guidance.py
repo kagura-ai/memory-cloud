@@ -217,6 +217,57 @@ def test_recall_signals_point_at_the_time_section():
     assert "see step 2b" in text
 
 
+@pytest.mark.parametrize("relative", [RECALL, CODEX])
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "Read every result, not only the top ones; recall once more for each kind of item "
+        "found, or call `list` with a tag or type filter when one names the set; answer "
+        "with all of them.",
+        'Pass `filters={"observed_after": ..., "observed_before": ...}` around it, with a '
+        "margin: `observed_at` is the date a fact was stated. If nothing matches, recall "
+        "again without the filter.",
+        "Recall again on concrete entities and category words (brand, sponsor, shop, friend); "
+        'use `search_mode="keyword"` for names the first recall surfaced. Answer with the '
+        "best-supported inference, name the supporting memory, and mark it as an inference. "
+        "Decline only when `confidence.level` is `none` or `low`.",
+    ],
+)
+def test_answering_rules_match_the_tool_and_both_skills(relative, rule):
+    assert rule in _recall_rules(relative)
+    tools = {tool["name"]: tool for tool in get_tool_definitions()}
+    assert rule in tools["recall"]["description"]
+    assert rule in _section(_flat("docs/mcp-tools.md"), "### `recall`", "### `reference`")
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_named_speakers_keep_subject_attribution_and_direction(relative):
+    text = _remember_rules(relative)
+    for rule in (
+        "Each summary starts with the name of the person it is about",
+        'never "the user", "they", "he" or "she" alone',
+        "Suggestions, advice, gifts, invitations and questions record both people and the direction",
+        "Attribute each fact to the speaker who said it",
+        "a fact about the other person keeps that person as its subject and names who said it",
+        "Check each summary's subject against the speaker label of its source line",
+    ):
+        assert rule in text
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_named_speaker_example_keeps_both_directions_and_the_reported_subject(relative):
+    text = _remember_rules(relative)
+    for line in (
+        'Neri: "I started pottery. Tovan, I suggest you try swimming."',
+        'Tovan: "I gave you a sketchbook, Neri. You won the local poetry prize."',
+        "Neri started pottery.",
+        "Neri suggested Tovan try swimming.",
+        "Tovan gave Neri a sketchbook.",
+        "Neri won the local poetry prize, according to Tovan.",
+    ):
+        assert line in text
+
+
 def test_the_guidance_uses_real_tool_parameters():
     tools = {t["name"]: t for t in get_tool_definitions()}
     listing = tools["list"]["inputSchema"]["properties"]

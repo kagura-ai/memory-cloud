@@ -97,7 +97,13 @@ recall(context_id=..., query="...", k=10, filters={"source_uri_prefix": "vault:/
 
 ### 2b. When, how many, which is current
 
-One `recall(k=5)` ranks by similarity and its rows carry no `details`, so it answers these questions badly. Use `list` — it returns every match, unranked — with the same `context_id` as step 1 (leave it out on a default context):
+One `recall(k=5)` ranks by similarity and its rows carry no `details`. Choose the follow-up below with the same `context_id` as step 1 (leave it out on a default context):
+
+<!-- SYNC: keep the next three answering rules identical in the recall tool description, docs/mcp-tools.md and the Recall section of plugins/kagura-memory/skills/kagura-memory/SKILL.md. -->
+
+- **Every item of a kind** ("what instruments…", "which places…") — Read every result, not only the top ones; recall once more for each kind of item found, or call `list` with a tag or type filter when one names the set; answer with all of them.
+- **A named date or period** — Pass `filters={"observed_after": ..., "observed_before": ...}` around it, with a margin: `observed_at` is the date a fact was stated. If nothing matches, recall again without the filter.
+- **Likely / would / might** — Recall again on concrete entities and category words (brand, sponsor, shop, friend); use `search_mode="keyword"` for names the first recall surfaced. Answer with the best-supported inference, name the supporting memory, and mark it as an inference. Decline only when `confidence.level` is `none` or `low`.
 
 - **How many / list all** — never count from the top five. Call `list(context_id=..., filters={"tags": [...], "type": ...}, order_by="created_at", include_details=true, limit=50)` when a tag or type names the set and answer from its `total`; follow `next_cursor` while `has_more` is true when you need every row. When no filter names the set, `recall(context_id=..., query=..., k=20, full=0)` finds candidates — say the count is at least what it returned, not exact.
 - **When did / in what order** — use the date the fact held: `observed_at` (rows of `recall`, `list` and `reference` carry it when the memory has one — a date or a UTC datetime, from `details.observed_at`), else `created_at`. `list(context_id=..., filters={"observed_after": "2024-03-01", "observed_before": "2024-04-01"}, order_by="observed_at", direction="asc")` returns the dated rows in time order — after inclusive, before exclusive, a date means the start of that day (UTC); rows without `observed_at` never match an `observed_*` filter and sort last. `recall` takes the same `observed_after` / `observed_before` filters, and `list(filters={"details.observed_at": "2024-03-07"})` matches one stored date exactly.
