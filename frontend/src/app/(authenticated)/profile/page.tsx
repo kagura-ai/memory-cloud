@@ -40,6 +40,7 @@ import { PageSectionNavigation } from "@/components/common/PageSectionNavigation
 import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import LinkedAccounts from "@/components/auth/LinkedAccounts";
 import PasskeySettings from "@/components/auth/PasskeySettings";
+import { usePasswordSetup } from "@/hooks/usePasswordSetup";
 import PasswordSettings from "@/components/auth/PasswordSettings";
 import { MfaSettings } from "@/components/auth/MfaSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
@@ -62,6 +63,7 @@ export default function ProfilePage() {
   const t = useTranslations("profile");
   const tCommon = useTranslations("common");
   const { user, refetchUser } = useAuth();
+  const passwordSetup = usePasswordSetup(user?.id);
   const { toast } = useToast();
   const [isEditMode, setIsEditMode] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -506,8 +508,8 @@ export default function ProfilePage() {
       <section id="profile-linked-accounts" tabIndex={-1} aria-label={t("sections.linkedAccounts")} className="scroll-mt-24"><LinkedAccounts /></section>
 
       {/* Password (Issue #1678): set up / change / remove. */}
-      <PasskeySettings key={`passkeys-${user?.id}`} onAvailabilityChange={setHasPasskey} />
-      <section id="profile-password" tabIndex={-1} aria-label={t("sections.password")} className="scroll-mt-24"><PasswordSettings hasPasskey={hasPasskey} providersVersion={providersVersion} /></section>
+      <PasskeySettings key={`passkeys-${user?.id}`} passwordSetup={passwordSetup} onAvailabilityChange={setHasPasskey} />
+      <section id="profile-password" tabIndex={-1} aria-label={t("sections.password")} className="scroll-mt-24"><PasswordSettings passwordSetup={passwordSetup} hasPasskey={hasPasskey} providersVersion={providersVersion} /></section>
 
       <MfaSettings key={`mfa-${user?.id}`} />
 

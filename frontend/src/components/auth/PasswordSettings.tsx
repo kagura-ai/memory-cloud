@@ -53,8 +53,8 @@ import {
   changePassword,
   hasPasswordSignIn,
   removePassword,
-  requestPasswordSetup,
 } from "@/lib/auth/auth";
+import { usePasswordSetup, type PasswordSetup } from "@/hooks/usePasswordSetup";
 
 interface ProvidersResponse {
   providers: { provider: string }[];
@@ -65,13 +65,14 @@ function statusOf(err: unknown): number {
 }
 
 interface PasswordSettingsProps {
+  passwordSetup?: PasswordSetup;
   /** Bumped by the page when the linked providers change elsewhere. */
   hasPasskey?: boolean;
   providersVersion?: number;
 }
 
 export default function PasswordSettings({
-  providersVersion = 0, hasPasskey = false,
+  providersVersion = 0, hasPasskey = false, passwordSetup,
 }: PasswordSettingsProps = {}) {
   const t = useTranslations("passwordSettings");
   const tCommon = useTranslations("common");
@@ -85,8 +86,10 @@ export default function PasswordSettings({
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Set-up request
-  const [sendingSetup, setSendingSetup] = useState(false);
-  const [setupSent, setSetupSent] = useState(false);
+  const localSetup = usePasswordSetup(user?.id);
+  const setup = passwordSetup ?? localSetup;
+  const sendingSetup = setup.state === "sending";
+  const setupSent = setup.state === "sent";
 
   // Change form
   const [currentPassword, setCurrentPassword] = useState("");
@@ -125,10 +128,8 @@ export default function PasswordSettings({
   const canRemove = linkedCount > 0 || hasPasskey;
 
   const handleSetupRequest = async () => {
-    setSendingSetup(true);
     try {
-      await requestPasswordSetup();
-      setSetupSent(true);
+      await setup.request();
     } catch (err) {
       const status = statusOf(err);
       if (status === 409) {
@@ -141,8 +142,6 @@ export default function PasswordSettings({
           variant: "destructive",
         });
       }
-    } finally {
-      setSendingSetup(false);
     }
   };
 
@@ -229,12 +228,17 @@ export default function PasswordSettings({
               {!hasPassword && (
                 <>
                   {setupSent ? (
+                    <div className="space-y-2">
                     <Alert>
                       <MailCheck className="h-4 w-4" />
                       <AlertDescription>
                         {t("setupSent", { email: user?.email ?? "" })}
                       </AlertDescription>
                     </Alert>
+                    <Button variant="link" onClick={() => void handleSetupRequest()}>
+                      {t("replaceSetupLink")}
+                    </Button>
+                    </div>
                   ) : (
                     <Button
                       variant="outline"

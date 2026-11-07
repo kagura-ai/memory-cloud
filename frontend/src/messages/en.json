@@ -29,7 +29,7 @@
       "removeProof": "To remove this passkey, enter your current password or confirm with another passkey.",
       "verifyFailed": "The passkey could not be verified, or your session has expired. Try again, and sign in again if it keeps failing.",
       "limitReached": "You have reached the passkey limit. Remove a passkey you no longer use, then add the new one.",
-      "changed": "Your passkeys were changed in another tab or on another device. Reload the page and try again.",
+      "changed": "Your passkeys changed in another tab or on another device. Review the list and try again. If the list cannot refresh, reload the page.",
       "load": "Could not load your passkeys. Reload the page to try again."
     }
   },
@@ -5018,6 +5018,7 @@
     "statusNotSet": "No password is set for this account.",
     "loadError": "Couldn't load your sign-in methods. Please refresh and try again.",
     "setupButton": "Set up a password",
+    "replaceSetupLink": "Send a replacement link",
     "setupSending": "Sending…",
     "setupSent": "Check your email: we sent a link to {email} to set your password. It expires shortly, so use it soon.",
     "setupError": "Couldn't send the email. Please try again.",

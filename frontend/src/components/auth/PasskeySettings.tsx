@@ -4,11 +4,11 @@ import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { startAddAccount } from "@/hooks/useAccountSwitcher";
 import { useAuth } from "@/contexts/AuthContext";
-import { hasPasswordSignIn, requestPasswordSetup } from "@/lib/auth/auth";
+import { hasPasswordSignIn } from "@/lib/auth/auth";
+import { usePasswordSetup, type PasswordSetup } from "@/hooks/usePasswordSetup";
 import { apiClient, ApiError } from "@/lib/api/base";
 import {
   managementProof,
-  passkeyLimit,
   passkeyPath,
   registerPasskey,
   type Passkey,
@@ -25,8 +25,10 @@ type Operation = "add" | "remove" | "rename";
 
 export default function PasskeySettings({
   onAvailabilityChange,
+  passwordSetup,
 }: {
   onAvailabilityChange: (hasPasskey: boolean) => void;
+  passwordSetup?: PasswordSetup;
 }) {
   const t = useTranslations("passkeys");
   const tPassword = useTranslations("passwordSettings");
@@ -35,29 +37,31 @@ export default function PasskeySettings({
   const { toast } = useToast();
   const [supported, setSupported] = useState(false);
   const [keys, setKeys] = useState<Passkey[]>([]);
+  const [limit, setLimit] = useState<number | null>(null);
   const [ready, setReady] = useState(false);
   const [password, setPassword] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [setupEmail, setSetupEmail] = useState<"idle" | "sending" | "sent">(
-    "idle",
-  );
+  const localSetup = usePasswordSetup(user?.id);
+  const setup = passwordSetup ?? localSetup;
+  const setupEmail = setup.state;
   useEffect(() => {
     if (typeof PublicKeyCredential === "undefined" || !user?.id) return;
     setSupported(true);
     let current = true;
     setReady(false);
     setLoadFailed(false);
-    setSetupEmail("idle");
+    setLimit(null);
     setPassword("");
     setKeys([]);
     apiClient
-      .get<Passkey[]>(passkeyPath)
-      .then((rows) => {
+      .get<{ keys: Passkey[]; limit: number }>(passkeyPath + "?include_limit=true")
+      .then((data) => {
         if (current) {
-          setKeys(rows);
+          setKeys(data.keys);
+          setLimit(data.limit);
           setReady(true);
         }
       })
@@ -110,7 +114,7 @@ export default function PasskeySettings({
     if (e.status === 409) {
       // The other 409s (no other passkey, already registered, only sign-in
       // method) mean the list on screen is out of date.
-      return operation === "add" && keys.length >= passkeyLimit
+      return e.details?.reason === "passkey_limit"
         ? t("errors.limitReached")
         : t("errors.changed");
     }
@@ -122,6 +126,20 @@ export default function PasskeySettings({
       await run();
       setEditing(null);
     } catch (e) {
+      if (e instanceof ApiError && (e.status === 404 || e.status === 409)) {
+        try {
+          const data = await apiClient.get<{ keys: Passkey[]; limit: number }>(
+            passkeyPath + "?include_limit=true",
+          );
+          setKeys(data.keys);
+          setLimit(data.limit);
+          setReady(true);
+        } catch {
+          // The action error is shown once, below. Stop further stale writes.
+          setReady(false);
+        }
+        setEditing(null);
+      }
       showError(errorText(e, operation));
     } finally {
       setPassword("");
@@ -131,12 +149,9 @@ export default function PasskeySettings({
   // The same request as the Password section's button, sent from here so the
   // link does something visible (#2699).
   async function sendSetupEmail() {
-    setSetupEmail("sending");
     try {
-      await requestPasswordSetup();
-      setSetupEmail("sent");
+      await setup.request();
     } catch (e) {
-      setSetupEmail("idle");
       const status = e instanceof ApiError ? e.status : 0;
       if (status === 409) {
         // A password was set elsewhere: refresh, and the card offers it. A
@@ -210,7 +225,7 @@ export default function PasskeySettings({
               <div className="flex gap-2">
                 <Button
                   variant="outline"
-                  disabled={busy}
+                  disabled={!ready || busy}
                   onClick={() => {
                     setEditing(key.id);
                     setName(key.name);
@@ -220,7 +235,7 @@ export default function PasskeySettings({
                 </Button>
                 <Button
                   variant="outline"
-                  disabled={busy || needsRemovalMethod}
+                  disabled={!ready || busy || needsRemovalMethod}
                   aria-describedby={
                     needsRemovalMethod ? "passkey-removal-help" : undefined
                   }
@@ -270,9 +285,14 @@ export default function PasskeySettings({
             )}
             {canSetUpByEmail &&
               (setupEmail === "sent" ? (
+                <div className="space-y-2">
                 <p role="status" className="text-sm">
                   {tPassword("setupSent", { email: user?.email ?? "" })}
                 </p>
+                <Button variant="link" onClick={() => void sendSetupEmail()}>
+                  {tPassword("replaceSetupLink")}
+                </Button>
+                </div>
               ) : (
                 <Button
                   variant="link"
@@ -300,8 +320,11 @@ export default function PasskeySettings({
             />
           </div>
         )}
+        {ready && limit !== null && keys.length >= limit && (
+          <p className="text-sm">{t("errors.limitReached")}</p>
+        )}
         <Button
-          disabled={!ready || busy}
+          disabled={!ready || busy || limit === null || keys.length >= limit}
           onClick={() =>
             void change("add", async () => {
               const added = await registerPasskey(
