@@ -275,6 +275,7 @@ describe("buildOAuthRedirect — the sign-in page's language and time zone (#270
     vi.restoreAllMocks();
     // "+" unencoded would arrive as a space.
     stubTimeZone("Etc/GMT+9");
+    vi.spyOn(Intl, "supportedValuesOf").mockReturnValue(["Etc/GMT+9"]);
     const url = buildOAuthRedirect("google", "/");
     expect(url.endsWith("&timezone=Etc%2FGMT%2B9")).toBe(true);
     expect(new URL(url).searchParams.get("timezone")).toBe("Etc/GMT+9");

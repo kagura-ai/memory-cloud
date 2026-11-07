@@ -203,6 +203,39 @@ export const COMMON_TIMEZONES = [
   { value: "Australia/Sydney", label: "Australia/Sydney" },
 ] as const;
 
+/** Longest timezone name the backend stores (`users.timezone` is 50 wide). */
+export const MAX_TIMEZONE_LENGTH = 50;
+
+/**
+ * The browser's IANA timezone, or null when there is none worth using: empty,
+ * `Etc/Unknown`, longer than the backend stores, or a name this platform does
+ * not list (`Intl.supportedValuesOf("timeZone")`, where it exists). `UTC` is
+ * always accepted, as not every platform lists it. The server validates with
+ * tzdata and refuses unknown names. Shared by the welcome dialog (#2701) and
+ * the OAuth sign-up (#2700).
+ */
+export function browserTimezone(): string | null {
+  try {
+    const zone: unknown = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (
+      typeof zone !== "string" ||
+      zone === "" ||
+      zone === "Etc/Unknown" ||
+      zone.length > MAX_TIMEZONE_LENGTH
+    ) {
+      return null;
+    }
+    if (zone === "UTC") return zone;
+    const known =
+      typeof Intl.supportedValuesOf === "function"
+        ? Intl.supportedValuesOf("timeZone")
+        : null;
+    return !known || known.includes(zone) ? zone : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The timezone choices: the common list plus each given zone that is not on
  * it (a saved or detected zone such as Europe/Berlin), so a select never

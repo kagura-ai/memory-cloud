@@ -21,7 +21,7 @@ import {
 } from "@/i18n";
 import { API_BASE_URL, updateUserProfile } from "@/lib/api/base";
 import { mcpEndpoints } from "@/lib/mcp/url";
-import { timezoneOptions } from "@/lib/utils/datetime";
+import { browserTimezone, timezoneOptions } from "@/lib/utils/datetime";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -64,23 +64,6 @@ export function browserLocale(): Locale | null {
     // No navigator (SSR): nothing detected.
   }
   return null;
-}
-
-/** The browser's IANA timezone, else null. */
-export function browserTimezone(): string | null {
-  try {
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (!zone || zone === "Etc/Unknown") return null;
-    // Only a name the platform lists: the server validates with tzdata and
-    // refuses unknown names. UTC is not in every platform's list.
-    const known =
-      typeof Intl.supportedValuesOf === "function"
-        ? Intl.supportedValuesOf("timeZone")
-        : null;
-    return zone === "UTC" || !known || known.includes(zone) ? zone : null;
-  } catch {
-    return null;
-  }
 }
 
 /**

@@ -65,9 +65,18 @@ describe("signupPrefs — the browser's time zone (#2700)", () => {
     expect(signupPrefs()).toEqual({ locale: "en" });
   });
 
-  it("keeps a 50-character name", () => {
+  it("keeps a 50-character name the platform lists", () => {
     const fifty = `America/${"A".repeat(42)}`;
     stubTimeZone(fifty);
+    vi.spyOn(Intl, "supportedValuesOf").mockReturnValue([fifty]);
     expect(signupPrefs().timezone).toBe(fifty);
+  });
+
+  it.each([
+    ["Etc/Unknown", "Etc/Unknown"],
+    ["a name the platform does not list", "Nope/Zone"],
+  ])("is omitted for %s", (_label, value) => {
+    stubTimeZone(value);
+    expect(signupPrefs()).toEqual({ locale: "en" });
   });
 });
