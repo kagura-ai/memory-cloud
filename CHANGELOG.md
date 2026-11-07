@@ -4,6 +4,22 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.149.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.149.0) — 2026-11-07
+
+Fewer round trips before a memory write and a server-computed weekday on every dated row: the kagura-memory skills load their tools once, take the default context from the plugin's SessionStart hook and let the server align tag spellings, and every `observed_at` in an MCP response is followed by its weekday so a relative date is resolved against a known day.
+
+### Added
+- **`observed_weekday` next to `observed_at`** ([#2689](https://github.com/kagura-ai/memory-cloud/issues/2689)): `recall`, `list` and `reference` rows and the `remember`, `remember_batch` item and `update_memory` responses carry `observed_weekday` (`Mon` … `Sun` of the stored day — for a datetime, its UTC day — computed by the server from a fixed table, never from the process locale) right after `observed_at`; a row without `observed_at` is unchanged. The recall selector's row header reads `Row 0 (observed 2024-03-11 Mon)` and its prompt revision is `selector-v5`. The REST responses and the `get_agent_bootstrap` recall rows do not carry the weekday. `/kagura-memory:remember` and the Codex skill count "last weekend" and "N weekends ago" from the material date's weekday, write that weekday next to the resolved date and check it against the response's `observed_weekday`, fixing the row with `update_memory` when the two differ.
+- **The SessionStart hook names the default context** ([#2690](https://github.com/kagura-ai/memory-cloud/issues/2690)): when the plugin's `server_url` carries `context=<context-id>` and it is the configured `context_id`, the hook prints `Kagura Memory: default context "<name>" (<id>) — …` right after the store-is-the-authority line — also when the guardrail fetch failed — so `/kagura-memory:remember`, `recall`, `session-summary`, `session-start` and the Codex skill call the tools without `context_id` and make no `list_contexts` call. The guardrail cache gains the additive `context_name` key (cache format unchanged; an older cache prints the line without the name). The line needs `context=` kept in the plugin's `server_url`: re-run `/kagura-memory:setup`, which now keeps `context=` when it derives `server_url`, or add `?context=<context-id>` under `/plugin` → Configure; until then nothing changes.
+
+### Changed
+- **Skills cut the setup round trips before a write** ([#2690](https://github.com/kagura-ai/memory-cloud/issues/2690)): `/kagura-memory:remember`, `recall` and `session-summary` load the MCP tools they call in one `ToolSearch select:` call on a client that defers them; every write passes `tags_normalize=true`, and no skill calls `list_tags` before a write — the server stores each tag under the context's established spelling and reports the mapping in `lint` as `tag_normalized`, while `list_tags` remains the tool for a tag review or a `recall` tag filter. The `remember` tool's `tags` text, the `list_tags` description and the `guide` topics say the same. The server default of `tags_normalize` stays `false`.
+
+### Notes
+- No migration, no new environment variables. The MCP changes are additive (`observed_weekday` is present exactly when `observed_at` is, never `null`); the REST responses and the OpenAPI schema are unchanged.
+- Plugin users: the default-context line appears only after the plugin's `server_url` carries `context=` — re-run `/kagura-memory:setup` once (or add `?context=<context-id>` to `server_url` under `/plugin` → Configure).
+- Test-only: the erasure re-key tests no longer depend on the other erasure modules' leftovers ([#2686](https://github.com/kagura-ai/memory-cloud/issues/2686)).
+
 ## [v0.148.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.148.0) — 2026-11-06
 
 Anonymous read-only public MCP endpoints, with usage telemetry and an internal observability API for a self-hosted dashboard; plus an OAuth key-file startup fix, an oauthlib upgrade and security follow-ups for account recovery and sign-in.
