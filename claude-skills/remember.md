@@ -60,6 +60,26 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
 
 Split long material (over ~2,000 characters) into one memory per topic — "OAuth2 login implementation", "JWT token validation logic" — never "part 1/3", and link the pieces with shared tags. If the new memory replaces an earlier one, pass `supersedes=<old_memory_id>` instead of storing a near-duplicate. Never store secrets, credentials or PII; coordinates go in `details.location` only.
 
+<!-- SYNC: keep the named-speaker rules and worked example identical in the Remember section of plugins/kagura-memory/skills/kagura-memory/SKILL.md. -->
+
+**Named speakers.** When the material is a conversation between named people, save each person's statements about themselves and their world. Each summary starts with the name of the person it is about; never "the user", "they", "he" or "she" alone. Suggestions, advice, gifts, invitations and questions record both people and the direction. Attribute each fact to the speaker who said it; a fact about the other person keeps that person as its subject and names who said it. Check each summary's subject against the speaker label of its source line, resolving who the words refer to rather than copying the turn's speaker as the subject.
+
+**Worked example (fictional speakers).**
+
+```text
+Neri: "I started pottery. Tovan, I suggest you try swimming."
+Tovan: "I gave you a sketchbook, Neri. You won the local poetry prize."
+```
+
+Store four separate summaries:
+
+- "Neri started pottery."
+- "Neri suggested Tovan try swimming."
+- "Tovan gave Neri a sketchbook."
+- "Neri won the local poetry prize, according to Tovan."
+
+The last fact is about Neri but was stated by Tovan; the gift goes from Tovan to Neri, and the suggestion goes from Neri to Tovan.
+
 ### 3. Save
 
 Use `remember` with the resolved context_id, parsed summary, content, and appropriate type/importance/tags, and always `tags_normalize=true`. For several items, one `remember_batch(context_id=..., items=[{...}, ...], tags_normalize=true)` call takes the same fields per item (no `context_id`). Keep a call to about 20 items and split a longer list; read each item's `status`. Older servers (no `remember_batch` in the tool list): one `remember` per item. Say each thing once — the user waits while it is written:

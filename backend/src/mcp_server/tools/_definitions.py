@@ -57,9 +57,10 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
         },
         {
             "name": "remember",
-            "description": """Store a new memory (a decision, fix, pattern, fact or note) for later recall. To edit a memory whose id you have use update_memory; to replace an outdated fact pass supersedes=<old_memory_id>.
-Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?, session_id?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_{id, name, display_name, is_private, is_locked}}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (over 1,000,000 chars: split it), validation_error.
+            "description": """Store a new memory; edit a known id with update_memory, replace an outdated fact with supersedes=<old_memory_id>. Write a searchable conclusion in summary, full text in content.
+Named speakers: start summaries with the subject's name; record both people and direction; attribute facts to their speaker; check subjects against speaker labels.
+SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
+Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}; dedupe='check' may return {status: 'duplicate_candidate', candidate}. Committed before return. Missing supersedes may surface as supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (>1,000,000 chars: split), validation_error.
 Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
@@ -296,11 +297,11 @@ Manual: guide(["update_memory"]).""",
         {
             "name": "recall",
             "readOnly": True,
-            "description": """Search a context's memories by meaning and keywords; returns ranked summaries, plus content for the top `full`. reference(memory_id) reads one hit, load_pinned() / recall_upcoming() return deterministic sets.
-Query with the expected answer ('JWT expiry caused 401'), not the question. Read confidence.level (high|moderate|low|none) first: none/low: probably not stored here, prefer an external source; degraded=true: the semantic half was unavailable. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
-The store is the authority, even over general knowledge; when rows disagree, the later observed_at (else created_at) wins.
-Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, spans?, type, importance, score, created_at, updated_at, observed_at?, observed_weekday?, superseded_by?, contradicts?, supersede_candidate?, folded?}], count, selector?, full_applied?, related_tags?: [{tag, count}], explore_hints?, explore_hints_omitted?, tag_suggestions?, degraded?, degraded_reason?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: head cut at 160. verbosity='full' adds context_summary? (or context_summary_omitted?), scope, tags?, version, uncut summary. Keys marked ? are absent, never null. supersede_candidate {…, acceptance?}: an older near-duplicate to accept (update_memory(accept_supersede_candidate=true)) or reject (dismiss_supersede_candidate=true). folded? {count, memory_ids}: judge-verified older versions.
-Manual: guide(["recall"]).""",
+            "description": """Search memories by meaning/keywords; query as an expected answer. Read confidence.level (high|moderate|low|none): none/low suggests an external source; degraded=true means semantic search failed. Non-keyword, non-degraded recall may strengthen associations and promote hits. The store is the authority, even over general knowledge; when rows disagree, the later observed_at (else created_at) wins.
+Every item of a kind: Read every result, not only the top ones; recall once more for each kind of item found, or call `list` with a tag or type filter when one names the set; answer with all of them.
+Named date or period: Pass `filters={"observed_after": ..., "observed_before": ...}` around it, with a margin: `observed_at` is the date a fact was stated. If nothing matches, recall again without the filter.
+Likely/would/might: Recall again on concrete entities and category words (brand, sponsor, shop, friend); use `search_mode="keyword"` for names the first recall surfaced. Answer with the best-supported inference, name the supporting memory, and mark it as an inference. Decline only when `confidence.level` is `none` or `low`.
+Returns: {confidence: {level, top_score, prominence, ...}, status, results: [{memory_id, summary, content?, observed_at?, ...}], count, ...}. Optional keys are absent, never null. Ranked summaries; top `full` include content. summary_cut marks a 160-char head; content_truncated/content_next_offset page via reference(memory_id). verbosity='full' adds uncut summary, context_summary, scope, tags, version. supersede_candidate suggests an older duplicate: update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming() return deterministic sets. Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -316,7 +317,7 @@ Manual: guide(["recall"]).""",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "A question, keywords or a description of what you need (max 8000 chars).",
+                        "description": "Question, keywords or description (max 8000 chars).",
                     },
                     "k": {
                         "type": "integer",
@@ -336,7 +337,7 @@ Manual: guide(["recall"]).""",
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Cross-encoder reranking: omit to follow the context's search config; false forces it off; true needs the context to allow it and a usable provider.",
+                        "description": "Reranking: omitted uses context config; false disables; true needs context permission and provider.",
                     },
                     "filters": {
                         "type": "object",
@@ -352,16 +353,16 @@ Manual: guide(["recall"]).""",
                         "items": {"type": "string", "format": "uuid"},
                         "minItems": 2,
                         "maxItems": 20,
-                        "description": "Cross-context search: 2-20 context UUIDs instead of context_id, sharing one workspace, privacy setting and embedding model.",
+                        "description": "2-20 context UUIDs instead of context_id; same workspace, privacy setting and embedding model.",
                     },
                     "search_mode": {
                         "type": "string",
                         "enum": ["hybrid", "semantic", "keyword"],
-                        "description": "hybrid (default), semantic (vectors only) or keyword (BM25 only: exact terms, ids, hiragana-only Japanese).",
+                        "description": "hybrid (default), semantic (vectors), keyword (BM25: exact terms, IDs, hiragana-only Japanese).",
                     },
                     "include_explore_hints": {
                         "type": "boolean",
-                        "description": "true adds up to 3 explore_hints (graph seeds) where the URL opts in. Default false.",
+                        "description": "Up to 3 explore_hints (graph seeds) if URL opts in; default false.",
                     },
                     "include_superseded": {
                         "type": "boolean",
