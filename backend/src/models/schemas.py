@@ -24,6 +24,7 @@ from auth.connector_keys import reject_reserved_key_name
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from models.api_base import TZAwareBaseModel
 from utils.public_id import PublicIdPrefix, public_id_pattern
+from utils.user_prefs import LOCALE_PATTERN
 
 logger = logging.getLogger(__name__)
 
@@ -1784,7 +1785,7 @@ class UpdateUserProfileRequest(BaseModel):
     timezone: str | None = Field(
         None, description="IANA timezone (e.g., Asia/Tokyo, America/New_York)"
     )
-    locale: str | None = Field(None, pattern="^(en|ja)$", description="UI language (en, ja)")
+    locale: str | None = Field(None, pattern=LOCALE_PATTERN, description="UI language (en, ja)")
 
 
 # NOTE (#991): the dead APIKeyCreate / APIKeyResponse / APIKeyCreateResponse
