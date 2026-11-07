@@ -8,9 +8,13 @@ Use the Kagura Memory Cloud MCP tools to search for: $ARGUMENTS
 
 ## Steps
 
+**Load the tools once.** When this client lists the kagura-memory tools as deferred (a `ToolSearch` tool is present), load the tools this skill calls in one call before step 1:
+`ToolSearch(query="select:mcp__kagura-memory__recall,mcp__kagura-memory__list,mcp__kagura-memory__reference")`
+— add `mcp__kagura-memory__list_contexts` to that same list only when step 1 has no default context to skip to; `update_memory` and `explore` are loaded only when a later step needs them. `mcp__kagura-memory__` is the prefix the client gives the tools of the server entry named `kagura-memory`; when your deferred tool list shows another prefix for these tools, use that one. A client that lists the tools directly has no `ToolSearch`: skip this paragraph. Never call `ToolSearch` a second time for these tools.
+
 ### 1. Resolve the target context
 
-**When the connection has a default context** — the server instructions say "Default context: <name>; omit context_id" (the MCP URL carries `?context=<context-id>`) — skip this step: call `recall` (and any `reference` / `list`) without `context_id`. The response's `context_id` / `context_name` confirm which context it is; switch with `list_contexts(name_contains="...")` only when the user asks for another one.
+**When the connection has a default context** — the server instructions say "Default context: <name>; omit context_id", or the session-start line from the kagura-memory plugin hook begins "Kagura Memory: default context" (either way the MCP URL carries `?context=<context-id>`, or the credential carries a default) — skip this step: call `recall` (and any `reference` / `list`) without `context_id`. The response's `context_id` / `context_name` confirm which context it is; switch with `list_contexts(name_contains="...")` only when the user asks for another one.
 
 Otherwise:
 

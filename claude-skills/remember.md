@@ -8,9 +8,13 @@ Save the following to memory: $ARGUMENTS
 
 ## Steps
 
+**Load the tools once.** When this client lists the kagura-memory tools as deferred (a `ToolSearch` tool is present), load every tool this skill may call in one call before step 1:
+`ToolSearch(query="select:mcp__kagura-memory__remember,mcp__kagura-memory__remember_batch,mcp__kagura-memory__recall,mcp__kagura-memory__update_memory")`
+— add `mcp__kagura-memory__list_contexts` to that same list only when step 1 has no default context to skip to. `mcp__kagura-memory__` is the prefix the client gives the tools of the server entry named `kagura-memory`; when your deferred tool list shows another prefix for these tools, use that one. A client that lists the tools directly has no `ToolSearch`: skip this paragraph. Never call `ToolSearch` a second time for these tools.
+
 ### 1. Resolve the target context
 
-**When the connection has a default context** — the server instructions say "Default context: <name>; omit context_id" (the MCP URL carries `?context=<context-id>`) — skip this step: call `list_tags` and `remember` without `context_id`. The response's `context_id` / `context_name` confirm which context it is; switch with `list_contexts(name_contains="...")` only when the user asks for another one.
+**When the connection has a default context** — the server instructions say "Default context: <name>; omit context_id", or the session-start line from the kagura-memory plugin hook begins "Kagura Memory: default context" (either way the MCP URL carries `?context=<context-id>`, or the credential carries a default) — skip this step: call `remember` / `remember_batch` without `context_id`. The response's `context_id` / `context_name` confirm which context it is; switch with `list_contexts(name_contains="...")` only when the user asks for another one.
 
 Otherwise:
 
@@ -37,7 +41,7 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
   - `event`: Something that happened, with when it happened ("Attended Sam's dinner party on 2023-05-12")
   - `time`: A forward-looking plan, deadline or appointment with a date. Set `details={"trigger": {"year": 2026, "month": 11, "day": 3}}` (integers, `year` required) so `recall_upcoming` surfaces it. A plan with no date is a `fact`
 - Set importance based on impact (default: 0.8, design decisions: 0.9, core principles: 1.0)
-- Generate relevant tags (technology, domain, feature area, `issue:#N`), about 6 at most. **Call `list_tags(context_id=...)` first** to discover existing tag spellings so you reuse them instead of inventing drift (e.g. `troubleshoot` vs `troubleshooting`); no spelling variants of the same tag.
+- Generate relevant tags (technology, domain, feature area, `issue:#N`), about 6 at most, and write with `tags_normalize=true` (step 3): the server stores each tag under the context's established spelling (case, separators, plural, kana variants) and reports each mapping in `lint` as `tag_normalized`. Do not call `list_tags` before a write; call it only when the user asks to review the tag vocabulary. An abbreviation (`dev-env` vs `dev-environment`) is not folded — a `tag_near_duplicate` lint names the stored tag; apply it with `update_memory`, so no spelling variants of the same tag remain.
 
 **One fact per memory, specifics verbatim.** When the material is a conversation, save first what the user said about themselves and their world — facts, preferences, events, plans, counts, amounts, prices, durations, names — each as its own memory, with every name, number, date, place and quantity exactly as stated (a per-item price and a total are two facts; keep both). Never merge several personal facts into one summary. Save the assistant's suggestions only when they are specific (a named product, a recipe, a place, a figure), not generic advice. A name or value inside a stated fact is the fact itself; contact details, home addresses, and account, card or ID numbers stay out, as do secrets and credentials. Write many items with one `remember_batch` call.
 
@@ -58,7 +62,7 @@ Split long material (over ~2,000 characters) into one memory per topic — "OAut
 
 ### 3. Save
 
-Use `remember` with the resolved context_id, parsed summary, content, and appropriate type/importance/tags. For several items, one `remember_batch(context_id=..., items=[{...}, ...], tags_normalize=true)` call takes the same fields per item (no `context_id`). Keep a call to about 20 items and split a longer list; read each item's `status`. Older servers (no `remember_batch` in the tool list): one `remember` per item. Say each thing once — the user waits while it is written:
+Use `remember` with the resolved context_id, parsed summary, content, and appropriate type/importance/tags, and always `tags_normalize=true`. For several items, one `remember_batch(context_id=..., items=[{...}, ...], tags_normalize=true)` call takes the same fields per item (no `context_id`). Keep a call to about 20 items and split a longer list; read each item's `status`. Older servers (no `remember_batch` in the tool list): one `remember` per item. Say each thing once — the user waits while it is written:
 
 - `content` (required): only what the summary leaves out (the why, the evidence, numbers, the rejected option); never restate the summary — when the summary holds the whole fact, one short line naming the evidence or source (a PR, a file, a command).
 - `context_summary`: one sentence on when to recall it, not a second summary. Search reads it, so keep it rather than drop it.
@@ -71,6 +75,7 @@ remember(
   type="decision",
   importance=0.9,
   tags=["auth", "architecture"],
+  tags_normalize=true,
   context_summary="Why this matters and when to reference it.",
   details={"observed_at": "2024-03-07"}  # only when the material is dated
 )
@@ -136,4 +141,4 @@ remember(
 
 ### 4. Confirm
 
-Show what was saved: summary, type, importance, tags. If the response carries a `lint` key, the write will recall badly (short / long / narrative summary, no tags, or a tag that near-duplicates an existing one) — apply the hint with `update_memory`. The memory is saved either way: `scope="working"` names its consolidation lifecycle, not whether the write landed.
+Show what was saved: summary, type, importance, tags. If the response carries a `lint` key, the write will recall badly (short / long / narrative summary, no tags, or a tag that near-duplicates an existing one) — apply the hint with `update_memory`. A `tag_normalized` entry only reports that a tag was stored under the context's established spelling; change it with `update_memory` only when you meant a different tag. The memory is saved either way: `scope="working"` names its consolidation lifecycle, not whether the write landed.

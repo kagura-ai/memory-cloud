@@ -433,8 +433,10 @@ Derive it from B1 — never invent it, never ask the user to:
   A CLI-profile entry has no `url` field — never read one from it.
 - Keep the scheme, host and **path** exactly as they are: `https://<host>/mcp` or
   `https://<host>/mcp/w/<workspace-id>`.
-- Drop the query, except that `guardrails=off` may stay. A `guardrails=<context-id>` left in
-  `server_url` makes the hook print a warning at every session start.
+- Drop the query, except that `guardrails=off` may stay and `context=<context-id>` **must** stay
+  when the MCP URL carries it and it is the A2 context: the SessionStart hook then names the
+  default context to the model, so no `list_contexts` call is made. A `guardrails=<context-id>`
+  left in `server_url` makes the hook print a warning at every session start.
 
 Write the derived endpoint to `<values dir>/server_url` and the context id to
 `<values dir>/context_id`, and run B0's check. Only after `ok`, show the values to enter — three of
@@ -704,7 +706,7 @@ Kagura Memory setup
   Upstream     https://<host>/mcp?guardrails=off&profile=core — guardrails from --guardrails, profile from --tool-profile (profile default: https://<host>/mcp, which lists the core profile)
   Shadowed     user (~/.claude.json) — OAuth — https://<host>/mcp
   Plugin       kagura-memory@kagura-memory-cloud 0.74.0 — Hooks (4)
-  server_url   https://<host>/mcp
+  server_url   https://<host>/mcp (https://<host>/mcp?context=<uuid> when the MCP URL carries context=)
   context      <name> (<uuid>)
   Lane         hooks — guardrails=off on the MCP URL — yes
   MCP          get_context_info: guardrails absent (hooks lane) — load_guardrails: 7 tool guardrails, 2 pinned

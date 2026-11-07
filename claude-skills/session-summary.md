@@ -30,6 +30,10 @@ Open the run with one line naming the mode and, for `auto`, why — for example 
 
 ## Steps
 
+**Load the tools once.** When this client lists the kagura-memory tools as deferred (a `ToolSearch` tool is present), load every tool this skill may call in one call before step 1:
+`ToolSearch(query="select:mcp__kagura-memory__remember_batch,mcp__kagura-memory__remember,mcp__kagura-memory__update_memory,mcp__kagura-memory__create_edge,mcp__kagura-memory__forget,mcp__kagura-memory__reference")`
+— add `mcp__kagura-memory__list_contexts` to that same list only when step 3 has no default context to skip to; `load_pinned` is loaded only when step 4a pins. `mcp__kagura-memory__` is the prefix the client gives the tools of the server entry named `kagura-memory`; when your deferred tool list shows another prefix for these tools, use that one. A client that lists the tools directly has no `ToolSearch`: skip this paragraph. Never call `ToolSearch` a second time for these tools.
+
 ### 1. Identify related GitHub issues
 
 Review the conversation and collect all GitHub issue numbers that were worked on, referenced, or discussed. Use `gh issue view <number>` if needed to confirm titles.
@@ -68,6 +72,10 @@ One memo per theme. `/kagura-memory:maintain` lists the open ones and closes the
 
 ### 3. Get the target context
 
+**When the connection has a default context** — the server instructions say "Default context: <name>; omit context_id", or the session-start line from the kagura-memory plugin hook begins "Kagura Memory: default context" (either way the MCP URL carries `?context=<context-id>`, or the credential carries a default) — skip this step: call `remember_batch` / `remember` without `context_id`. The response's `context_id` / `context_name` confirm which context it is; switch with `list_contexts(name_contains="...")` only when the user asks for another one, or when this session's knowledge belongs elsewhere (a conversation about the user's own life goes to the context the user names or a private one).
+
+Otherwise:
+
 ```
 list_contexts()
 ```
@@ -89,7 +97,7 @@ For each kept item (a batch item or a single `remember`), set the fields below. 
 - **type**: From the table above
 - **details.observed_at**: the session's date as `YYYY-MM-DD` when the conversation is dated (the date the fact was stated, never the time you write it); resolve relative dates ("last Tuesday") into the content (`light`: the summary).
 - **importance**: Based on reusability across future sessions
-- **tags**: About 6 at most: `category:{domain}` + entity tags + `issue:#N` for each related issue. Reuse the spellings `list_tags(context_id=...)` returns; `tags_normalize=true` covers drift, so no spelling variants.
+- **tags**: About 6 at most: `category:{domain}` + entity tags + `issue:#N` for each related issue. `tags_normalize=true` stores each tag under the context's established spelling and reports the mapping as `tag_normalized`, so no `list_tags` call before the save and no spelling variants.
 - **context_summary**: One sentence — when to recall it. Not a second summary. (`light` leaves it out.)
 - **supersedes** (optional): when the item replaces an earlier memory whose full id is in this session's tool results, show that pair with the candidate. Pass `supersedes=<old_memory_id>` on this `remember` call only when the user picked the replacement — "save everything" is not that pick. The old memory is shadowed out of default recall, not deleted.
 - **linked_memory_ids** (optional, mainly `deep`): ids of related memories, copied verbatim from this session's tool results — never guessed, never fetched by an extra recall.
