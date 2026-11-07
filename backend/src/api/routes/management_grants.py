@@ -7,7 +7,7 @@ import secrets
 from datetime import timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,7 @@ from models.management_grant import ManagementGrant
 from models.management_schemas import GrantCreate, digest
 from models.resource import Resource, ResourceSchema
 from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import ConflictError, NotFoundException
 
 router = APIRouter(
     prefix="/resource-management-grants",
@@ -64,7 +65,7 @@ async def create_grant(
         )
     ).scalar_one_or_none()
     if resource is None:
-        raise HTTPException(404, "Resource not found")
+        raise NotFoundException("Resource")
     schema = (
         await db.execute(
             select(ResourceSchema)
@@ -74,7 +75,7 @@ async def create_grant(
         )
     ).scalar_one_or_none()
     if schema is None:
-        raise HTTPException(409, "Approved schema required")
+        raise ConflictError("Approved schema required")
     secret = "kagura_mgmt_" + secrets.token_urlsafe(32)
     grant = ManagementGrant(
         workspace_id=workspace_id,
@@ -135,6 +136,6 @@ async def revoke_grant(
         )
     ).scalar_one_or_none()
     if grant is None:
-        raise HTTPException(404, "Grant not found")
+        raise NotFoundException("Management grant")
     grant.revoked_at = grant.revoked_at or utcnow()
     await db.commit()

@@ -1584,6 +1584,13 @@ class UnsupportedSchemaVersionError(BadRequestError):
         )
 
 
+class ManagementRequestTooLargeError(MemoryCloudException):
+    """Reject an integration management body before parsing or persistence."""
+
+    def __init__(self) -> None:
+        super().__init__("Management request exceeds limit", status_code=413, error_code="MGMT-001")
+
+
 class TemporarilyUnavailableError(MemoryCloudException):
     """The workspace cannot be served right now (503, ``Retry-After: 300``).
 

@@ -2,8 +2,10 @@
 
 from collections.abc import Callable
 
-from fastapi import HTTPException, Request, Response
+from fastapi import Request, Response
 from fastapi.routing import APIRoute
+
+from utils.exceptions import ManagementRequestTooLargeError
 
 
 class BoundedManagementRoute(APIRoute):
@@ -15,7 +17,7 @@ class BoundedManagementRoute(APIRoute):
             async for chunk in request.stream():
                 data.extend(chunk)
                 if len(data) > 1048576:
-                    raise HTTPException(413, "Management request exceeds limit")
+                    raise ManagementRequestTooLargeError()
             request._body = bytes(data)
             response = await handler(request)
             response.headers["Cache-Control"] = "no-store"

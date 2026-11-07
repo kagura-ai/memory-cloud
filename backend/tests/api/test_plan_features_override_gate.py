@@ -66,7 +66,7 @@ async def _create(plan_name: str):
     manager.create_token = AsyncMock(return_value=("kagura_resource_plain", _token()))
 
     with patch(
-        "api.routes.resource_tokens.resolve_resource_pk",
+        "services.resource_token_policy.resolve_resource_pk",
         new=AsyncMock(return_value=uuid.uuid4()),
     ):
         response = await create_resource_token(

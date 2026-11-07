@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from models.management_schemas import digest, public_fields
 from models.public_mcp import PublicMcpEndpoint
 from models.resource import Resource, ResourceSchema, WorkspaceConnector
 from utils.datetime import utcnow
+from utils.exceptions import AuthenticationError, AuthorizationError, BadRequestError, ConflictError
 
 
 @dataclass
@@ -35,7 +36,7 @@ class ManagementPrincipal:
     def require(self, operation: str) -> None:
         """Refuse an unapproved operation before work is performed."""
         if operation not in self.grant.operations:
-            raise HTTPException(403, "Operation not delegated")
+            raise AuthorizationError("Operation not delegated")
 
 
 async def current_binding(
@@ -52,7 +53,7 @@ async def current_binding(
         or workspace.deleted_at is not None
         or not has_feature(workspace.plan_name or "", "resources")
     ):
-        raise HTTPException(403, "Resource management unavailable")
+        raise AuthorizationError("Resource management unavailable")
     member = (
         await db.execute(
             select(WorkspaceMember)
@@ -64,7 +65,7 @@ async def current_binding(
         )
     ).scalar_one_or_none()
     if member is None or member.role != "owner":
-        raise HTTPException(403, "Delegating owner permission changed")
+        raise AuthorizationError("Delegating owner permission changed")
     resource = (
         await db.execute(
             select(Resource)
@@ -105,13 +106,13 @@ async def current_binding(
         or endpoint.workspace_id != workspace.id
         or endpoint.resource_id != resource.resource_id
     ):
-        raise HTTPException(403, "Resource binding changed")
+        raise AuthorizationError("Resource binding changed")
     if (
         await db.execute(
             select(WorkspaceConnector.id).where(WorkspaceConnector.resource_pk == resource.id)
         )
     ).first():
-        raise HTTPException(403, "Connector resources cannot be delegated")
+        raise AuthorizationError("Connector resources cannot be delegated")
     schema = (
         await db.execute(
             select(ResourceSchema)
@@ -126,11 +127,11 @@ async def current_binding(
         or schema.schema_version != grant.schema_version
         or digest(schema.field_definitions) != grant.schema_hash
     ):
-        raise HTTPException(409, "Schema approval changed; provision a new grant")
+        raise ConflictError("Schema approval changed; provision a new grant")
     try:
         fields = public_fields(schema.field_definitions, grant.approved_fields)
     except ValueError as exc:
-        raise HTTPException(409, "Public field approval changed") from exc
+        raise ConflictError("Public field approval changed") from exc
     return resource, workspace, fields
 
 
@@ -140,7 +141,7 @@ async def management_principal(
     """Authenticate only this router, serializing revocation with every operation."""
     authorization = request.headers.get("authorization", "")
     if not re.fullmatch(r"Bearer kagura_mgmt_[A-Za-z0-9_-]{43}", authorization):
-        raise HTTPException(401, "Invalid management credential")
+        raise AuthenticationError("Invalid management credential")
     key_hash = hashlib.sha256(authorization[7:].encode()).hexdigest()
     identity = (
         await db.execute(
@@ -150,7 +151,7 @@ async def management_principal(
         )
     ).first()
     if identity is None:
-        raise HTTPException(401, "Invalid management credential")
+        raise AuthenticationError("Invalid management credential")
     # The existing owner mint path takes this advisory lock before inserting
     # a Resource FK. Take it before our resource row lock to avoid inversion.
     await count_regular_active_tokens_for_mint(db, identity.workspace_id)
@@ -173,11 +174,11 @@ async def management_principal(
         or grant.expires_at <= utcnow()
         or grant.deployment_id != get_settings().deployment_id
     ):
-        raise HTTPException(401, "Invalid management credential")
+        raise AuthenticationError("Invalid management credential")
     resource, workspace, fields = await current_binding(db, grant)
     actor = request.headers.get("x-management-actor", "")
     if request.method != "GET" and not re.fullmatch(r"[a-f0-9]{64}", actor):
-        raise HTTPException(400, "Service-attributed actor required")
+        raise BadRequestError("Service-attributed actor required")
     return ManagementPrincipal(grant, resource, workspace, fields, actor)
 
 

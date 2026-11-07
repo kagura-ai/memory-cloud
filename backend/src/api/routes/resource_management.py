@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,7 +33,14 @@ from services.resource_token_policy import (
     authorize_resource_token_mint,
     check_workspace_quota_ceiling,
 )
-from utils.exceptions import RedisError
+from utils.exceptions import (
+    AuthorizationError,
+    ConflictError,
+    NotFoundException,
+    RedisError,
+    TemporarilyUnavailableError,
+    ValidationError,
+)
 
 router = APIRouter(
     prefix="/resource-management", tags=["resource-management"], route_class=BoundedManagementRoute
@@ -48,7 +55,7 @@ async def previous(
     if row is None:
         return None
     if row.action != action or row.request_hash != digest(body) or row.actor != auth.actor:
-        raise HTTPException(409, "Operation identifier already used")
+        raise ConflictError("Operation identifier already used")
     return {**row.outcome, "replayed": True}
 
 
@@ -142,16 +149,16 @@ async def create_token(
     if result := await previous(db, auth, "tokens:create", data):
         return result
     if body.quota_events_per_hour > auth.grant.quota_events_per_hour:
-        raise HTTPException(403, "Delegated quota exceeded")
+        raise AuthorizationError("Delegated quota exceeded")
     pk = await authorize_resource_token_mint(db, auth.grant.workspace_id, auth.resource.resource_id)
     if pk != auth.resource.id:
-        raise HTTPException(403, "Resource binding changed")
+        raise AuthorizationError("Resource binding changed")
     manager = ResourceTokenManager(db)
     count = await manager.count_tokens(
         workspace_id=auth.grant.workspace_id, resource_pk=pk, include_revoked=False
     )
     if count >= auth.grant.max_active_tokens:
-        raise HTTPException(403, "Delegated token cap reached")
+        raise AuthorizationError("Delegated token cap reached")
     secret, token = await manager.create_token(
         resource_id=auth.resource.resource_id,
         resource_pk=pk,
@@ -182,7 +189,7 @@ async def target_token(db: AsyncSession, auth: ManagementPrincipal, token_id: st
         )
     ).scalar_one_or_none()
     if token is None:
-        raise HTTPException(404, "Token not found")
+        raise NotFoundException("Resource token")
     return token
 
 
@@ -201,7 +208,7 @@ async def update_token(
     if result := await previous(db, auth, "tokens:update", data):
         return result
     if body.quota_events_per_hour > auth.grant.quota_events_per_hour:
-        raise HTTPException(403, "Delegated quota exceeded")
+        raise AuthorizationError("Delegated quota exceeded")
     await count_regular_active_tokens_for_mint(db, auth.grant.workspace_id)
     token = await target_token(db, auth, token_id)
     if body.quota_events_per_hour > token.quota_events_per_hour:
@@ -249,13 +256,13 @@ async def submit_events(
     for event in body.events:
         auth.require("events:" + event.op)
     if body.schema_hash != auth.grant.schema_hash:
-        raise HTTPException(409, "Schema revision changed")
+        raise ConflictError("Schema revision changed")
     try:
         for event in body.events:
             if event.payload is not None:
                 validate_public_payload(event.payload, auth.fields)
     except ValueError as exc:
-        raise HTTPException(422, "Payload does not match approved public fields") from exc
+        raise ValidationError("Payload does not match approved public fields") from exc
     data = body.model_dump(mode="json")
     if result := await previous(db, auth, "events", data):
         return result
@@ -272,7 +279,7 @@ async def submit_events(
         events.append(item)
     valid, errors = validate_events(events)
     if errors:
-        raise HTTPException(422, "Invalid batch")
+        raise ValidationError("Invalid batch")
     try:
         await check_event_quota(
             auth.resource.resource_id,
@@ -282,7 +289,7 @@ async def submit_events(
             strict=True,
         )
     except RedisError as exc:
-        raise HTTPException(503, "Quota reservation unavailable") from exc
+        raise TemporarilyUnavailableError() from exc
     saved = await persist_events(
         db, resource_id=auth.resource.resource_id, resource_pk=auth.resource.id, events=valid
     )
