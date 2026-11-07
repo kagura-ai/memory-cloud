@@ -14,6 +14,7 @@ const {
   getCredential,
   setupRequest,
   refetchUser,
+  toast,
 } = vi.hoisted(() => ({
   user: {
     id: "u1",
@@ -29,10 +30,12 @@ const {
   getCredential: vi.fn(),
   setupRequest: vi.fn(),
   refetchUser: vi.fn(),
+  toast: vi.fn(),
 }));
 vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user, refetchUser }),
 }));
+vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast }) }));
 vi.mock("@/lib/api/base", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/base")>()),
   apiClient: { get, post, patch, delete: del },
@@ -59,6 +62,7 @@ beforeEach(() => {
     configurable: true,
     value: { get: getCredential, create: createCredential },
   });
+  user.id = "u1";
   user.has_password = true;
   user.email = "user@example.org";
   user.auth_provider = "google";
@@ -70,6 +74,7 @@ beforeEach(() => {
   getCredential.mockReset();
   setupRequest.mockReset();
   refetchUser.mockReset();
+  toast.mockReset();
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -246,18 +251,31 @@ function typePassword(value?: string) {
   fireEvent.change(screen.getByLabelText("password"), { target: { value } });
 }
 
+// A failed action is one destructive toast (frontend.md "Error Surface"), and
+// nothing inline; its description is the message key.
+async function toastedError() {
+  await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+  const [payload] = toast.mock.calls[0];
+  expect(payload).toMatchObject({
+    title: "common.error",
+    variant: "destructive",
+  });
+  expect(screen.queryByRole("alert")).toBeNull();
+  return payload.description;
+}
+
 async function addPasskey(typed?: string) {
   const add = await renderCard();
   typePassword(typed);
   fireEvent.click(add);
-  return (await screen.findByRole("alert")).textContent;
+  return toastedError();
 }
 
 async function removeFirstPasskey(typed?: string) {
   await renderCard();
   typePassword(typed);
   fireEvent.click(screen.getAllByRole("button", { name: "remove" })[0]);
-  return (await screen.findByRole("alert")).textContent;
+  return toastedError();
 }
 
 describe("passkey card errors (#2699)", () => {
@@ -379,18 +397,17 @@ describe("passkey card errors (#2699)", () => {
       target: { value: "Laptop" },
     });
     fireEvent.click(screen.getByRole("button", { name: "save" }));
-    expect((await screen.findByRole("alert")).textContent).toBe(
-      "errors.changed",
-    );
+    expect(await toastedError()).toBe("errors.changed");
   });
 
-  it("shows its own copy when the list cannot be loaded", async () => {
+  it("shows its own copy in a banner when the list cannot be loaded", async () => {
     get.mockRejectedValue(apiError(503, "SVC-001", "Service unavailable"));
     render(<PasskeySettings onAvailabilityChange={vi.fn()} />);
     expect((await screen.findByRole("alert")).textContent).toBe(
       "errors.load",
     );
     expect(screen.getByRole("button", { name: "add" })).toBeDisabled();
+    expect(toast).not.toHaveBeenCalled();
   });
 });
 
@@ -421,21 +438,36 @@ describe("setting up a password from the passkey card (#2699)", () => {
       "passwordSettings.setupSent|user@example.org",
     );
     expect(screen.queryByRole("button", { name: /setup/ })).toBeNull();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("offers the email again after switching to another account", async () => {
+    setupRequest.mockResolvedValue(undefined);
+    const page = render(<PasskeySettings onAvailabilityChange={vi.fn()} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "setupPassword" }),
+    );
+    await screen.findByRole("status");
+    user.id = "u2";
+    page.rerender(<PasskeySettings onAvailabilityChange={vi.fn()} />);
+    expect(
+      await screen.findByRole("button", { name: "setupPassword" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it.each([
     [429, "passwordSettings.tooManyRequests"],
     [503, "passwordSettings.setupError"],
   ])(
-    "shows a refused send (%i) in the card and lets the user retry",
+    "toasts a refused send (%i) and lets the user retry",
     async (status, message) => {
       setupRequest.mockRejectedValue(apiError(status, "X", "English prose"));
       render(<PasskeySettings onAvailabilityChange={vi.fn()} />);
       fireEvent.click(
         await screen.findByRole("button", { name: "setupPassword" }),
       );
-      expect((await screen.findByRole("alert")).textContent).toBe(message);
+      expect(await toastedError()).toBe(message);
       expect(
         screen.getByRole("button", { name: "setupPassword" }),
       ).toBeEnabled();
@@ -445,11 +477,22 @@ describe("setting up a password from the passkey card (#2699)", () => {
 
   it("refreshes the user when a password was already set elsewhere (409)", async () => {
     setupRequest.mockRejectedValue(apiError(409, "RES-002", "Already set"));
+    refetchUser.mockResolvedValue({ ...user, has_password: true });
     render(<PasskeySettings onAvailabilityChange={vi.fn()} />);
     fireEvent.click(
       await screen.findByRole("button", { name: "setupPassword" }),
     );
     await waitFor(() => expect(refetchUser).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("says so when that refresh fails too (409, no user back)", async () => {
+    setupRequest.mockRejectedValue(apiError(409, "RES-002", "Already set"));
+    refetchUser.mockResolvedValue(undefined);
+    render(<PasskeySettings onAvailabilityChange={vi.fn()} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "setupPassword" }),
+    );
+    expect(await toastedError()).toBe("errors.changed");
   });
 });

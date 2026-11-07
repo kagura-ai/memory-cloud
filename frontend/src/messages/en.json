@@ -27,7 +27,7 @@
       "passwordRequired": "Enter your current password, then add the passkey.",
       "signInAgain": "For your security, sign in again, then add the passkey right away.",
       "removeProof": "To remove this passkey, enter your current password or confirm with another passkey.",
-      "verifyFailed": "The passkey could not be verified, or the request expired. Try again.",
+      "verifyFailed": "The passkey could not be verified, or your session has expired. Try again, and sign in again if it keeps failing.",
       "limitReached": "You have reached the passkey limit. Remove a passkey you no longer use, then add the new one.",
       "changed": "Your passkeys were changed in another tab or on another device. Reload the page and try again.",
       "load": "Could not load your passkeys. Reload the page to try again."

@@ -17,7 +17,9 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { InlineSpinner } from "@/components/common/LoadingState";
+import { useToast } from "@/hooks/use-toast";
 
 type Operation = "add" | "remove" | "rename";
 
@@ -28,7 +30,9 @@ export default function PasskeySettings({
 }) {
   const t = useTranslations("passkeys");
   const tPassword = useTranslations("passwordSettings");
+  const tCommon = useTranslations("common");
   const { user, refetchUser } = useAuth();
+  const { toast } = useToast();
   const [supported, setSupported] = useState(false);
   const [keys, setKeys] = useState<Passkey[]>([]);
   const [ready, setReady] = useState(false);
@@ -36,7 +40,6 @@ export default function PasskeySettings({
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [loadFailed, setLoadFailed] = useState(false);
   const [setupEmail, setSetupEmail] = useState<"idle" | "sending" | "sent">(
     "idle",
@@ -47,6 +50,7 @@ export default function PasskeySettings({
     let current = true;
     setReady(false);
     setLoadFailed(false);
+    setSetupEmail("idle");
     setPassword("");
     setKeys([]);
     apiClient
@@ -73,6 +77,9 @@ export default function PasskeySettings({
   );
   const needsRemovalMethod = !hasPassword && keys.length === 1;
   if (!supported) return null;
+  function showError(description: string) {
+    toast({ title: tCommon("error"), description, variant: "destructive" });
+  }
   // #2699: the card shows its own copy, never the server's prose (English, for
   // API clients) or the browser's. What a 403 or 409 means depends on what was
   // being done and with which proof, which only this card knows.
@@ -80,19 +87,19 @@ export default function PasskeySettings({
     if (!(e instanceof ApiError)) {
       // WebAuthn rejects with a DOMException: a closed or timed-out prompt is
       // NotAllowedError; a device that already holds a key for this account
-      // refuses to create another with InvalidStateError.
+      // refuses to create another with InvalidStateError. Both checks: jsdom's
+      // DOMException is not an Error.
       const name =
         e instanceof DOMException || e instanceof Error ? e.name : "";
-      if (name === "NotAllowedError" || name === "AbortError") {
-        return t("errors.cancelled");
-      }
+      if (name === "NotAllowedError") return t("errors.cancelled");
       if (name === "InvalidStateError") return t("errors.alreadyRegistered");
       return t("error");
     }
     if (e.status === 429) return t("errors.tooManyAttempts");
     if (e.status === 404) return t("errors.changed");
     if (operation === "rename") return t("error");
-    // An assertion that did not verify, or a challenge that expired.
+    // An assertion that did not verify, an expired challenge, or a session
+    // that has ended.
     if (e.status === 401) return t("errors.verifyFailed");
     if (e.status === 403) {
       if (password) return t("errors.wrongPassword");
@@ -111,12 +118,11 @@ export default function PasskeySettings({
   }
   async function change(operation: Operation, run: () => Promise<void>) {
     setBusy(true);
-    setError("");
     try {
       await run();
       setEditing(null);
     } catch (e) {
-      setError(errorText(e, operation));
+      showError(errorText(e, operation));
     } finally {
       setPassword("");
       setBusy(false);
@@ -126,7 +132,6 @@ export default function PasskeySettings({
   // link does something visible (#2699).
   async function sendSetupEmail() {
     setSetupEmail("sending");
-    setError("");
     try {
       await requestPasswordSetup();
       setSetupEmail("sent");
@@ -134,10 +139,11 @@ export default function PasskeySettings({
       setSetupEmail("idle");
       const status = e instanceof ApiError ? e.status : 0;
       if (status === 409) {
-        // A password was set elsewhere: refresh, and the card offers it.
-        await refetchUser();
+        // A password was set elsewhere: refresh, and the card offers it. A
+        // refresh that failed resolves without a user, so say so.
+        if (!(await refetchUser())) showError(t("errors.changed"));
       } else {
-        setError(
+        showError(
           status === 429
             ? tPassword("tooManyRequests")
             : tPassword("setupError"),
@@ -151,9 +157,8 @@ export default function PasskeySettings({
         <CardTitle>{t("title")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        {(error || loadFailed) && (
-          <p role="alert">{error || t("errors.load")}</p>
-        )}
+        <ErrorBanner error={loadFailed ? t("errors.load") : null} />
+
         {keys.map((key) => (
           <div key={key.id} className="space-y-2 border-b pb-3">
             <p className="font-medium">{key.name}</p>
