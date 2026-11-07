@@ -96,16 +96,36 @@
     "openContexts": "Review my contexts",
     "endPractice": "Continue with the read-only guide",
     "title": "Welcome to Kagura AI",
-    "subtitle": "Let's get you to your first recall in under 5 minutes.",
+    "subtitle": "A few minutes to get you set up.",
     "dismiss": "Dismiss onboarding",
     "finish": "Go to your context",
     "stepOf": "Step {current} of {total}",
+    "prefs": {
+      "title": "Set your language and timezone",
+      "body": "Dates and times are shown in your timezone. You can change both later in Profile.",
+      "language": "Language",
+      "timezone": "Timezone",
+      "detected": "Filled in from your browser settings where possible.",
+      "save": "Save and continue",
+      "skip": "Skip",
+      "saveFailed": "Couldn't save your settings. Please try again."
+    },
+    "chat": {
+      "title": "Connect your AI chat",
+      "body": "Paste this URL into the connector (MCP) settings of Claude, ChatGPT, Gemini or another client, then sign in when asked. From then on, your AI saves and recalls memories in the context you just created while you chat.",
+      "copy": "Copy URL",
+      "copied": "Copied",
+      "guide": "Steps for each client",
+      "next": "Next: try it in the web app"
+    },
     "context": {
       "title": "1. Create your first context",
+      "lead": "Your AI client saves memories into a context. Start with one.",
       "createButton": "Create context"
     },
     "memory": {
       "title": "2. Save your first memory",
+      "optional": "Optional: try saving and finding a memory here in the web app.",
       "body": "Memories have a short summary (used for search) and full content. Here's a sample — edit it or save as-is.",
       "summaryLabel": "Summary",
       "sampleSummary": "Kagura recall blends semantic search with full-text matching.",

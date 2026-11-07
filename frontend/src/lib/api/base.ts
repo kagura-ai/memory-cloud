@@ -282,6 +282,7 @@ export interface UserProfile {
 export interface UpdateUserProfileRequest {
   display_name?: string;
   locale?: string;
+  timezone?: string;
 }
 
 /**

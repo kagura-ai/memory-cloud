@@ -15,7 +15,27 @@ import {
 } from "@testing-library/react";
 
 let mockUserId = "u1";
-vi.mock("@/contexts/AuthContext", () => ({ useAuth: () => ({ user: { id: mockUserId } }) }));
+const mockRefetchUser = vi.fn();
+const mockUpdateProfile = vi.fn();
+const mockSetLocale = vi.fn();
+const mockCopy = vi.fn();
+let mockProfile = { timezone: "UTC", locale: "en" };
+vi.mock("@/contexts/AuthContext", () => ({
+  useAuth: () => ({ user: { id: mockUserId, ...mockProfile }, refetchUser: mockRefetchUser }),
+}));
+vi.mock("@/i18n", () => ({
+  defaultLocale: "en",
+  locales: ["en", "ja"],
+  localeNames: { en: "English", ja: "日本語" },
+  useLocale: () => ({ locale: "en", setLocale: mockSetLocale }),
+}));
+vi.mock("@/lib/api/base", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api/base")>()),
+  updateUserProfile: (...a: unknown[]) => mockUpdateProfile(...a),
+}));
+vi.mock("@/hooks/useCopyFeedback", () => ({
+  useCopyFeedback: () => ({ isCopied: () => false, copyToTarget: (...a: unknown[]) => mockCopy(...a) }),
+}));
 const mockPush = vi.fn();
 const mockToast = vi.fn();
 const mockGetContexts = vi.fn();
@@ -76,6 +96,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   Object.defineProperty(navigator, "locks", { configurable: true, value: { request: async (_key: string, run: () => boolean) => run() } });
   window.localStorage.clear();
+  // The practice tests start past the first screens (#2701 has its own block).
+  window.localStorage.setItem("onboarding:u1:intro", "done");
+  mockProfile = { timezone: "UTC", locale: "en" };
+  mockRefetchUser.mockResolvedValue({ id: "u1" });
+  mockUpdateProfile.mockResolvedValue({});
+  mockCopy.mockResolvedValue(undefined);
   mockUserId = "u1";
   setWorkspace("owner");
   mockFeatures = { byok: true };
@@ -87,7 +113,11 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  Reflect.deleteProperty(navigator, "languages");
+});
 
 describe("OnboardingCard trigger gating", () => {
   it("shows the create-context step for an owner with zero contexts + a key", async () => {
@@ -214,6 +244,8 @@ describe("OnboardingCard trigger gating", () => {
       expect(screen.getByText("needsKey.title")).toBeInTheDocument(),
     );
     expect(screen.queryByText("context.createButton")).not.toBeInTheDocument();
+    // MCP writes need the same embedding key, so the key comes first.
+    expect(screen.queryByRole("link", { name: "mcp.link" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText("needsKey.button"));
     expect(mockPush).toHaveBeenCalledWith(
@@ -269,6 +301,7 @@ describe("OnboardingCard value-moment happy path", () => {
     );
     expect(screen.getByRole("dialog")).toBeVisible();
     expect(screen.queryByLabelText("context.nameLabel")).not.toBeInTheDocument();
+    expect(screen.getByText("context.lead")).toBeInTheDocument();
     fireEvent.click(screen.getByText("context.createButton"));
 
     // Step 2: save memory
@@ -304,11 +337,11 @@ describe("OnboardingCard value-moment happy path", () => {
     );
     expect(screen.getByText("done.title")).toBeInTheDocument();
 
-    // The MCP pointer opens the API keys tab of the credentials page.
-    fireEvent.click(screen.getByText("mcp.link"));
-    expect(mockPush).toHaveBeenCalledWith(
-      "/workspace/integrations/credentials?tab=api-keys",
-    );
+    // The MCP pointer opens the connection card on the Integrations entry,
+    // not the API keys tab: clients register over OAuth (#2698).
+    const links = screen.getAllByRole("link", { name: "mcp.link" });
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAttribute("href", "/workspace/integrations#mcp-connection");
   });
 
   it("shows a fallback (not a blank screen) when recall returns no results", async () => {
@@ -416,5 +449,191 @@ describe("OnboardingCard value-moment happy path", () => {
     fireEvent.click(screen.getByRole("button", { name: "dismiss" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(JSON.parse(window.localStorage.getItem("onboarding:u1:ws-1:wizard")!).dismissed).toBe(true);
+  });
+});
+
+describe("OnboardingCard first screens (#2701)", () => {
+  beforeEach(() => {
+    window.localStorage.removeItem("onboarding:u1:intro");
+  });
+
+  function browserIn(languages: string[], timeZone: string) {
+    Object.defineProperty(navigator, "languages", { configurable: true, value: languages });
+    vi.spyOn(Intl, "DateTimeFormat").mockImplementation(
+      (() => ({ resolvedOptions: () => ({ timeZone }) })) as unknown as typeof Intl.DateTimeFormat,
+    );
+  }
+
+  /** The first context exists: the practice resumes at "save a memory". */
+  function withPracticeContext() {
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "memory", contextId: "c1" }));
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", workspace_id: "ws-1", is_private: true, created_by: "u1" }] });
+  }
+
+  it("asks for the language and timezone first, prefilled from the browser, and saves them before switching the language", async () => {
+    browserIn(["ja-JP", "en-US"], "Asia/Tokyo");
+    render(<OnboardingCard />);
+    expect(await screen.findByText("prefs.title")).toBeInTheDocument();
+    expect(screen.getByText("prefs.detected")).toBeInTheDocument();
+    expect(screen.queryByText("context.createButton")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "prefs.save" }));
+
+    expect(await screen.findByText("context.createButton")).toBeInTheDocument();
+    expect(mockUpdateProfile).toHaveBeenCalledWith({ locale: "ja", timezone: "Asia/Tokyo" });
+    // The layout re-applies the saved user locale, so the refresh comes first.
+    expect(mockRefetchUser.mock.invocationCallOrder[0]).toBeLessThan(mockSetLocale.mock.invocationCallOrder[0]);
+    expect(mockSetLocale).toHaveBeenCalledWith("ja");
+    expect(localStorage.getItem("onboarding:u1:intro")).toBe("chat");
+  });
+
+  it("uses the browser timezone even off the common list, and keeps a language the browser does not offer", async () => {
+    browserIn(["fr-FR"], "Europe/Berlin");
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "prefs.save" }));
+    await screen.findByText("context.createButton");
+    expect(mockUpdateProfile).toHaveBeenCalledWith({ locale: "en", timezone: "Europe/Berlin" });
+  });
+
+  it("keeps values the user already chose instead of the browser's", async () => {
+    mockProfile = { timezone: "Asia/Kolkata", locale: "ja" };
+    browserIn(["en-US"], "America/New_York");
+    render(<OnboardingCard />);
+    expect(await screen.findByText("prefs.title")).toBeInTheDocument();
+    expect(screen.queryByText("prefs.detected")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "prefs.save" }));
+    await screen.findByText("context.createButton");
+    expect(mockUpdateProfile).toHaveBeenCalledWith({ locale: "ja", timezone: "Asia/Kolkata" });
+  });
+
+  it("asks once per user, not again for another workspace", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "done");
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: { id: "ws-2", current_user_role: "owner" },
+      currentWorkspaceId: "ws-2",
+      loading: false,
+    });
+    render(<OnboardingCard />);
+    expect(await screen.findByText("context.createButton")).toBeInTheDocument();
+    expect(screen.queryByText("prefs.title")).not.toBeInTheDocument();
+  });
+
+  it("stays on the screen with the error inside the dialog when the save fails", async () => {
+    mockUpdateProfile.mockRejectedValueOnce(new Error("offline"));
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "prefs.save" }));
+    expect(await screen.findByText("prefs.saveFailed")).toBeVisible();
+    expect(screen.getByRole("dialog")).toContainElement(screen.getByText("prefs.saveFailed"));
+    expect(screen.getByText("prefs.title")).toBeInTheDocument();
+    expect(mockSetLocale).not.toHaveBeenCalled();
+    expect(localStorage.getItem("onboarding:u1:intro")).toBeNull();
+  });
+
+  it("treats a failed refresh after the save as a failed save, so the language is not switched back", async () => {
+    mockRefetchUser.mockResolvedValueOnce(undefined);
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "prefs.save" }));
+    expect(await screen.findByText("prefs.saveFailed")).toBeVisible();
+    expect(mockSetLocale).not.toHaveBeenCalled();
+    expect(localStorage.getItem("onboarding:u1:intro")).toBeNull();
+  });
+
+  it("cannot be closed while the save is in flight", async () => {
+    mockUpdateProfile.mockReturnValueOnce(new Promise(() => {}));
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "prefs.save" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "dismiss" })).toBeDisabled());
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("skip saves nothing and moves on to creating the first context", async () => {
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "prefs.skip" }));
+    expect(await screen.findByText("context.createButton")).toBeInTheDocument();
+    expect(mockUpdateProfile).not.toHaveBeenCalled();
+    expect(mockSetLocale).not.toHaveBeenCalled();
+  });
+
+  it("shows the chat screen right after the first context is created, then the optional practice", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    mockCreateContext.mockResolvedValue({ id: "ctx-1", workspace_id: "ws-1", is_private: true, created_by: "u1" });
+    render(<OnboardingCard />);
+    expect(await screen.findByText("context.createButton")).toBeInTheDocument();
+    expect(screen.queryByText("chat.title")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("context.createButton"));
+
+    expect(await screen.findByText("chat.title")).toBeInTheDocument();
+    expect(screen.queryByText("memory.saveButton")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "chat.next" }));
+    expect(await screen.findByText("memory.saveButton")).toBeInTheDocument();
+    expect(screen.getByText("memory.optional")).toBeInTheDocument();
+    expect(localStorage.getItem("onboarding:u1:intro")).toBe("done");
+  });
+
+  it("shows the MCP URL to paste into a chat client and the per-client steps", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    render(<OnboardingCard />);
+    expect(await screen.findByText("chat.title")).toBeInTheDocument();
+    const url = screen.getByText(/\/mcp$/);
+    fireEvent.click(screen.getByRole("button", { name: "chat.copy" }));
+    expect(mockCopy).toHaveBeenCalledWith(url.textContent, expect.any(String));
+    expect(screen.getByRole("link", { name: "chat.guide" })).toHaveAttribute(
+      "href",
+      "/workspace/integrations#mcp-connection",
+    );
+  });
+
+  it("keeps a failed copy inside the dialog with the copy-by-hand hint", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    mockCopy.mockRejectedValueOnce(new Error("denied"));
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "chat.copy" }));
+    expect(await screen.findByText("copyFailedManualHint")).toBeVisible();
+    expect(screen.getByRole("dialog")).toContainElement(screen.getByText("copyFailedManualHint"));
+    expect(mockToast).not.toHaveBeenCalled();
+  });
+
+  it("counts the chat screen as seen when the user leaves for the per-client steps", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("link", { name: "chat.guide" }));
+    expect(localStorage.getItem("onboarding:u1:intro")).toBe("done");
+  });
+
+  it("shows the embedding-key notice before the chat screen", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    mockCheckKey.mockResolvedValue({ has_key: false, embedding_available: false });
+    render(<OnboardingCard />);
+    expect(await screen.findByText("needsKey.title")).toBeInTheDocument();
+    expect(screen.queryByText("chat.title")).not.toBeInTheDocument();
+  });
+
+  it("ignores a browser timezone the platform does not know", async () => {
+    browserIn(["en-US"], "Etc/Unknown");
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "prefs.save" }));
+    await screen.findByText("context.createButton");
+    expect(mockUpdateProfile).toHaveBeenCalledWith({ locale: "en", timezone: "UTC" });
+  });
+
+  it("keeps the chat screen when the per-client steps open in a new tab", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    render(<OnboardingCard />);
+    fireEvent.click(await screen.findByRole("link", { name: "chat.guide" }), { ctrlKey: true });
+    expect(localStorage.getItem("onboarding:u1:intro")).toBe("chat");
+    expect(screen.getByText("chat.title")).toBeInTheDocument();
+  });
+
+  it("a replay from Getting started goes straight to the practice", async () => {
+    render(<OnboardingCard replay />);
+    expect(await screen.findByText("context.createButton")).toBeInTheDocument();
+    expect(screen.queryByText("prefs.title")).not.toBeInTheDocument();
   });
 });

@@ -66,3 +66,26 @@ function writeProgress(scope: string, progress: PracticeProgress): boolean {
     return false;
   }
 }
+
+/**
+ * #2701: the screens before the practice: "prefs", then "chat", then "done".
+ * Kept per user, not per workspace: the language and timezone belong to the
+ * account, so a second workspace must not ask for them again.
+ */
+export type IntroStage = "prefs" | "chat" | "done";
+
+function introKey(userId: string) {
+  return `onboarding:${encodeURIComponent(userId)}:intro`;
+}
+
+export function readIntro(userId: string): IntroStage {
+  try {
+    const value = localStorage.getItem(introKey(userId));
+    if (value === "chat" || value === "done") return value;
+  } catch { /* Optional onboarding must not block the workspace. */ }
+  return "prefs";
+}
+
+export function writeIntro(userId: string, stage: IntroStage): void {
+  try { localStorage.setItem(introKey(userId), stage); } catch { /* Session-only fallback. */ }
+}

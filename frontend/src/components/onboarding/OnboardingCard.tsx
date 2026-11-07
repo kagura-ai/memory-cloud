@@ -22,16 +22,26 @@
  *    card and (with 1 context now) hide it, killing the stepper.
  *  - remember/recall need available embeddings; if absent we show a
  *    non-error "set up embeddings" notice instead of a guaranteed-to-fail flow.
+ *  - First screens (#2701), once per user: language and timezone before the
+ *    practice, then connecting an AI chat client over MCP (IntroSteps) right
+ *    after the first context is created, since that is where the AI saves.
+ *    Saving and recalling in the web app after that is optional. A replay
+ *    skips them; a workspace without an embedding key gets the key notice
+ *    first.
+ *  - MCP links (#2698) point at the connection card on the Integrations
+ *    entry: clients register over OAuth, so a new user needs no API key.
  */
 
+import Link from "next/link";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { advancePractice, claimPractice, onboardingScope, practiceContextName, readProgress, updateProgress } from "./progress";
+import { advancePractice, claimPractice, onboardingScope, practiceContextName, readIntro, readProgress, updateProgress, writeIntro, type IntroStage } from "./progress";
+import { ChatStep, MCP_CONNECTION_HREF, PreferencesStep, PRIMARY_BUTTON } from "./IntroSteps";
+import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { ApiError } from "@/lib/api/base";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
-  Sparkles,
   ArrowRight,
   Check,
   Search,
@@ -92,12 +102,24 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
 
   const [step, setStep] = useState<Step>("context");
   const [contextId, setContextId] = useState<string | null>(null);
-  // Seed the editable sample copy from i18n ONCE via lazy initializers — never
-  // in an effect keyed on `t`, which would clobber the user's edits whenever the
-  // `t` identity changes (locale switch / provider re-render).
-  const [summary, setSummary] = useState(() => t("memory.sampleSummary"));
-  const [content, setContent] = useState(() => t("memory.sampleContent"));
-  const [query, setQuery] = useState(() => t("recall.sampleQuery"));
+  // #2701: language and timezone first, then the chat screen once the first
+  // context exists (the AI saves into it); once per user. A replay from
+  // Getting started goes straight to the practice.
+  const [intro, setIntro] = useState<IntroStage>(() => (replay ? "done" : readIntro(userId)));
+  const advanceIntro = (next: IntroStage) => {
+    writeIntro(userId, next);
+    setIntro(next);
+  };
+  // The sample copy follows the UI language until the user edits it (the
+  // language can change on the first screen, #2701): state holds only the
+  // edit, and the shown value falls back to the current translation. Never
+  // re-seed it from an effect keyed on `t`, which would clobber the edits.
+  const [summaryEdit, setSummary] = useState<string | null>(null);
+  const [contentEdit, setContent] = useState<string | null>(null);
+  const [queryEdit, setQuery] = useState<string | null>(null);
+  const summary = summaryEdit ?? t("memory.sampleSummary");
+  const content = contentEdit ?? t("memory.sampleContent");
+  const query = queryEdit ?? t("recall.sampleQuery");
   const [results, setResults] = useState<RecallResultItem[]>([]);
   const [busy, setBusy] = useState(false);
   // A pending create or save keeps the guide open (a second write must not
@@ -272,7 +294,9 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
         onInteractOutside={event => { if (writePending) event.preventDefault(); }}>
         <DialogHeader className="pr-6">
           <DialogTitle className="flex items-center gap-2">
-            <Sparkles className="h-5 w-5 text-brand-green-600 dark:text-brand-green-400" />
+            <span aria-hidden="true" className="shrink-0">
+              <KaguraLogo variant="mark" className="h-6 w-6" />
+            </span>
             {t("title")}
           </DialogTitle>
           <DialogDescription className="text-slate-600 dark:text-slate-300">{t("subtitle")}</DialogDescription>
@@ -285,6 +309,8 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
             <Button variant="link" onClick={() => { dismiss(); router.push("/workspace/contexts"); }}>{t("openContexts")}</Button>
             <Button variant="ghost" onClick={endPractice}>{t("endPractice")}</Button>
           </AlertDescription></Alert>
+        ) : intro === "prefs" ? (
+          <PreferencesStep onDone={() => advanceIntro("chat")} onBusyChange={setWritePending} />
         ) : !hasKey ? (
           // Informational gating notice (not an error): remember/recall need a
           // workspace embedding key. Point at the existing key-setup surface.
@@ -307,6 +333,10 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               </Button>
             </AlertDescription>
           </Alert>
+        ) : intro === "chat" && step !== "context" ? (
+          // Once the first context exists, which is where the AI saves, and
+          // after the key notice: MCP writes need the same embedding key.
+          <ChatStep onNext={() => advanceIntro("done")} onGuide={() => advanceIntro("done")} />
         ) : (
           <div className="space-y-4">
             {step !== "done" && (
@@ -319,10 +349,12 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               <div className="space-y-3">
                 <div>
                   <h3 className="font-semibold">{t("context.title")}</h3>
+                  <p className="text-sm text-muted-foreground">{t("context.lead")}</p>
                 </div>
                 <Button
                   onClick={handleCreateContext}
                   disabled={busy}
+                  className={PRIMARY_BUTTON}
                 >
                   {busy && <InlineSpinner />}
                   {t("context.createButton")}
@@ -335,6 +367,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               <div className="space-y-3">
                 <div>
                   <h3 className="font-semibold">{t("memory.title")}</h3>
+                  <p className="text-sm text-muted-foreground">{t("memory.optional")}</p>
                   <p className="text-sm text-muted-foreground">
                     {t("memory.body")}
                   </p>
@@ -362,6 +395,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
                 </div>
                 <Button
                   onClick={handleSaveMemory}
+                  className={PRIMARY_BUTTON}
                   disabled={
                     busy || summary.trim().length < 10 || !content.trim()
                   }
@@ -391,7 +425,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
                     onChange={(e) => setQuery(e.target.value)}
                   />
                 </div>
-                <Button onClick={handleRecall} disabled={busy || !query.trim()}>
+                <Button onClick={handleRecall} disabled={busy || !query.trim()} className={PRIMARY_BUTTON}>
                   {busy && <InlineSpinner />}
                   <Search className="mr-2 h-4 w-4" />
                   {t("recall.searchButton")}
@@ -464,21 +498,15 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
                   <p className="text-sm text-muted-foreground">
                     {t("mcp.body")}
                   </p>
-                  <Button
-                    variant="link"
-                    className="h-auto p-0"
-                    onClick={() =>
-                      router.push(
-                        "/workspace/integrations/credentials?tab=api-keys",
-                      )
-                    }
-                  >
-                    {t("mcp.link")}
-                    <ExternalLink className="ml-1 h-3 w-3" />
+                  <Button asChild variant="link" className="h-auto p-0">
+                    <Link href={MCP_CONNECTION_HREF}>
+                      {t("mcp.link")}
+                      <ExternalLink className="ml-1 h-3 w-3" />
+                    </Link>
                   </Button>
                 </div>
 
-                <Button onClick={finish}>{t("finish")}</Button>
+                <Button onClick={finish} className={PRIMARY_BUTTON}>{t("finish")}</Button>
               </div>
             )}
           </div>

@@ -33,7 +33,7 @@ import { useLocale, type Locale } from "@/i18n";
 import { useToast } from "@/hooks/use-toast";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { User, Moon, Sun, Save, RefreshCw } from "lucide-react";
-import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
+import { timezoneOptions } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageSectionNavigation } from "@/components/common/PageSectionNavigation";
@@ -417,7 +417,7 @@ export default function ProfilePage() {
                     <SelectValue placeholder={t("selectTimezone")} />
                   </SelectTrigger>
                   <SelectContent>
-                    {COMMON_TIMEZONES.map((tz) => (
+                    {timezoneOptions(user?.timezone, timezone).map((tz) => (
                       <SelectItem key={tz.value} value={tz.value}>
                         {tz.label}
                       </SelectItem>
