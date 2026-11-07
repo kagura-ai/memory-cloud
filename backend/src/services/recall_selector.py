@@ -36,7 +36,8 @@ query" rule with "about what the query asks", which kept conversational pages
 whole; ``selector-v3`` restores the #2144 rule and adds the store-is-true
 sentence, which is what stops the judge reading "helps answer" as "gives the
 answer I believe is correct". ``selector-v4`` (#2330) adds the ``observed``
-header and says which date the prefer-newer rule compares.
+header and says which date the prefer-newer rule compares. ``selector-v5``
+(#2689) puts the weekday after the observed day.
 
 Bounds (C3, C4): at most ``LLM_SELECTOR_MAX_ROWS`` rows are sent (later rows
 are kept unchanged); over ``LLM_SELECTOR_MAX_PROMPT_CHARS`` of summaries and
@@ -75,6 +76,7 @@ from services.sleep.prompts import (
 )
 from utils.datetime import utcnow
 from utils.logger import get_logger
+from utils.observed_at import observed_weekday
 from utils.prompt_text import neutralise_control_tokens
 
 if TYPE_CHECKING:
@@ -86,7 +88,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Bump on every wording change of the prompt (ledger rows carry it).
-PROMPT_REVISION = "selector-v4"
+PROMPT_REVISION = "selector-v5"
 # The only characters of a selected row's content that are not stored text.
 SEPARATOR = " … "
 # Segmentation: at most this many segments per row; a piece with fewer
@@ -213,7 +215,8 @@ def row_header(i: int, response: MemoryResponse) -> str:
     """The ``Row n`` line of one page row (#2171).
 
     Gives one UTC day: ``observed`` with the day the fact held
-    (``observed_at``, #2330) when the memory has one, else ``written`` with
+    (``observed_at``, #2330) and its weekday (#2689, computed here, never by a
+    model) when the memory has one, else ``written`` with
     the day the row was last written — ``updated_at`` (the last real change,
     #1047) or else ``created_at``: an edited fact must not look older than a
     stale row created after it. No time of day, id or
@@ -225,7 +228,9 @@ def row_header(i: int, response: MemoryResponse) -> str:
     tail = ", summary only" if not response.content else ""
     if response.observed_at:
         # Both stored forms start with the UTC day (YYYY-MM-DD).
-        return f"Row {i} (observed {response.observed_at[:10]}{tail})"
+        weekday = observed_weekday(response.observed_at)
+        day = f"{response.observed_at[:10]} {weekday}" if weekday else response.observed_at[:10]
+        return f"Row {i} (observed {day}{tail})"
     written = response.updated_at or response.created_at
     if written.tzinfo is not None:  # naive is UTC (the stored convention)
         written = written.astimezone(UTC)

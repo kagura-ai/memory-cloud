@@ -22,6 +22,8 @@ from utils.observed_at import (
     column_value,
     normalize_observed_at,
     observed_at_from_details,
+    observed_fields,
+    observed_weekday,
     parse_observed_bound,
 )
 
@@ -162,6 +164,85 @@ class TestReaders:
     def test_bad_bound_names_the_filter(self, value):
         with pytest.raises(ObservedAtValidationError, match="observed_after"):
             parse_observed_bound(value, "observed_after")
+
+
+class TestWeekday:
+    """#2689: the weekday of the stored day, computed by the server."""
+
+    @pytest.mark.parametrize(
+        ("written", "expected"),
+        [
+            ("2024-03-11", "Mon"),
+            ("2024-03-14", "Thu"),
+            ("2024-03-11T23:30:00Z", "Mon"),
+            ("2024-03-14T00:00:00Z", "Thu"),
+            ("2024-03-11T23:30:00+00:00", "Mon"),
+            ("2024-03-14T08:15:00.250", "Thu"),  # naive = UTC
+        ],
+    )
+    def test_both_stored_forms(self, written, expected):
+        stored = canonical_observed_at(written)
+        assert stored[:10] in ("2024-03-11", "2024-03-14")
+        assert observed_weekday(stored) == expected
+
+    def test_the_stored_day_is_read_with_no_conversion(self):
+        # An offset was applied once, on write (canonical_observed_at); the
+        # weekday is the stored UTC day's, never shifted again.
+        stored = canonical_observed_at("2024-03-11T23:30:00-05:00")
+        assert stored == "2024-03-12T04:30:00Z"
+        assert observed_weekday(stored) == "Tue"
+
+    def test_every_day_of_a_week(self):
+        week = [f"2024-03-{day:02d}" for day in range(11, 18)]
+        assert [observed_weekday(day) for day in week] == [
+            "Mon",
+            "Tue",
+            "Wed",
+            "Thu",
+            "Fri",
+            "Sat",
+            "Sun",
+        ]
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            "",
+            "soon",
+            5,
+            True,
+            ["2024-03-11"],
+            "2024-02-30",  # the column regex matches it; no calendar date
+            "2024-W11-1",  # a week date: not a stored form
+            "20240311",  # the basic form: not a stored form
+            "2024/03/11",
+        ],
+    )
+    def test_anything_else_is_none(self, value):
+        assert observed_weekday(value) is None
+
+
+class TestObservedFields:
+    """#2689: the pair a response carries — present together, absent together."""
+
+    def test_the_weekday_follows_the_day(self):
+        fields = observed_fields("2024-03-11")
+        assert fields == {"observed_at": "2024-03-11", "observed_weekday": "Mon"}
+        assert list(fields) == ["observed_at", "observed_weekday"]
+
+    def test_a_datetime_keeps_its_stored_form(self):
+        assert observed_fields("2024-03-14T23:30:00Z") == {
+            "observed_at": "2024-03-14T23:30:00Z",
+            "observed_weekday": "Thu",
+        }
+
+    @pytest.mark.parametrize("value", [None, "", 5, ["2024-03-11"]])
+    def test_nothing_without_a_value(self, value):
+        assert observed_fields(value) == {}
+
+    def test_a_day_that_is_not_a_date_has_no_weekday_and_no_null(self):
+        assert observed_fields("2024-02-30") == {"observed_at": "2024-02-30"}
 
 
 class TestSqlParity:

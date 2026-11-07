@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from utils.datetime import to_utc_iso
+from utils.observed_at import observed_fields
 
 # #2002: recall's ``verbosity`` values. "compact" is the default — a cheap
 # first pass an agent can afford without certainty, then reference(memory_id).
@@ -114,8 +115,8 @@ def _compact_recall_item(r: Any) -> dict[str, Any]:
     What an agent needs to judge a hit and fetch it: id, the head of the
     summary (``summary_cut: true`` when it was shortened), type, importance,
     score, created_at and updated_at (null on a memory never edited),
-    observed_at when the memory has one, plus the rare annotations it must act
-    on. tags, context_summary and scope stay in
+    observed_at and observed_weekday when the memory has one, plus the rare
+    annotations it must act on. tags, context_summary and scope stay in
     ``verbosity="full"``.
     """
     summary, cut = compact_summary(r.summary)
@@ -138,10 +139,11 @@ def _compact_recall_item(r: Any) -> dict[str, Any]:
 
 
 def _add_observed_at(item: dict[str, Any], r: Any) -> None:
-    """#2330: when the fact held (a date or a UTC datetime); absent when unset."""
-    observed_at = getattr(r, "observed_at", None)
-    if observed_at:
-        item["observed_at"] = observed_at
+    """#2330: when the fact held (a date or a UTC datetime); absent when unset.
+
+    #2689: ``observed_weekday`` (the stored day's ``Mon`` … ``Sun``) follows it.
+    """
+    item.update(observed_fields(getattr(r, "observed_at", None)))
 
 
 def _add_recall_annotations(item: dict[str, Any], r: Any) -> None:

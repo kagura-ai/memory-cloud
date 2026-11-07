@@ -66,6 +66,7 @@ from utils.exceptions import (
     QuotaExceededError,
 )
 from utils.logger import get_logger
+from utils.observed_at import observed_fields
 
 logger = get_logger(__name__)
 
@@ -180,12 +181,16 @@ def item_error(exc: BaseException) -> dict[str, Any]:
 def _success_item(
     result: Any, *, verbose: bool, fitted: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """One written item; ``fitted`` reports a summary cut and mutes the lint it moots."""
+    """One written item; ``fitted`` reports a summary cut and mutes the lint it moots.
+
+    #2689: ``observed_at`` + ``observed_weekday`` when the stored memory has one.
+    """
     fitted = fitted or {}
     return {
         "status": "success",
         "memory_id": str(result.memory_id),
         "scope": result.scope,
+        **observed_fields(getattr(result, "observed_at", None)),
         **_persistence_response_field(result.persistence, verbose=verbose),
         **_lint_response_field(lint_after_fit(result.lint, fitted)),
         **fitted,

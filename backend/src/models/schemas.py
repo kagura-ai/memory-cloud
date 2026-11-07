@@ -334,6 +334,10 @@ class RememberResponse(BaseModel):
     # Issue #1502: advisory write-time recall-ability hints. Empty (and omitted
     # from the MCP response) when the write looks fine — presence is the signal.
     lint: list[WriteLintHint] = Field(default_factory=list)
+    # #2689: the stored details.observed_at (None when unset), handed to the
+    # MCP write responses, which echo it with its weekday. ``exclude=True``:
+    # REST /remember serialises this model, and its response stays as it was.
+    observed_at: str | None = Field(default=None, exclude=True)
 
 
 class RecallRequest(BaseModel):
@@ -1497,6 +1501,9 @@ class UpdateMemoryResponse(BaseModel):
     # Issue #1502: an edit can degrade recall-ability just as a fresh write can,
     # so the same advisory hints apply here.
     lint: list[WriteLintHint] = Field(default_factory=list)
+    # #2689: the memory's stored details.observed_at after the call (None when
+    # unset), as on RememberResponse.
+    observed_at: str | None = Field(default=None, exclude=True)
 
 
 class PatchMemoryRequest(BaseModel):

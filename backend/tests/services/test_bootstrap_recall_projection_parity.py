@@ -11,7 +11,8 @@ One documented exception: bootstrap rows never carry ``supersede_candidate``
 (recall does). Bootstrap is the behaviour-establishing session-start lane —
 an agent does not act on a suggestion there, the field cannot be dropped by
 the max_chars fit, and it would put another memory's summary in the trusted
-lane.
+lane. #2689 adds a second: ``observed_weekday`` (recall rows only, so the
+REST bootstrap response stays as it was).
 """
 
 from __future__ import annotations
@@ -199,6 +200,21 @@ class TestBootstrapRecallRowKeyContract:
         row = await _bootstrap_row(_memory())
 
         assert BOOTSTRAP_RECALL_ROW_REQUIRED_KEYS <= set(row) <= BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS
+
+
+@pytest.mark.asyncio
+async def test_the_observed_weekday_stays_out_of_a_bootstrap_row():
+    """#2689: recall rows carry ``observed_weekday``; the bootstrap row — also
+    served by REST ``/agents/{id}/bootstrap`` — is left as it was."""
+    memory = _memory(observed_at="2024-03-11")
+
+    row = await _bootstrap_row(memory)
+    recall_row = _recall_tool_row(memory, "full")
+
+    assert recall_row["observed_weekday"] == "Mon"
+    assert row["observed_at"] == "2024-03-11"
+    assert "observed_weekday" not in row
+    assert row == {k: v for k, v in recall_row.items() if k != "observed_weekday"}
 
 
 @pytest.mark.asyncio

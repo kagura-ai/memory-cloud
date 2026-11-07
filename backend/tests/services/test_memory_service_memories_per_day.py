@@ -199,6 +199,7 @@ class TestUpsertByExternalId:
         response.scope = "working"
         response.persistence = None
         response.lint = []
+        response.observed_at = None  # #2689: the upsert carries it
         service.remember = AsyncMock(return_value=response)
 
     def _request(self) -> UpdateMemoryRequest:

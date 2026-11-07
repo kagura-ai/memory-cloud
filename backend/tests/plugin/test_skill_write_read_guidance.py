@@ -283,6 +283,36 @@ def test_remember_resolves_relative_dates_into_the_content(relative):
 
 
 @pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_remember_anchors_relative_dates_on_the_material_weekday(relative):
+    """#2689: the weekday of the material date is written, and the server's checks it."""
+    section = _section(
+        _remember_rules(relative), "Resolve relative dates.", "Store what the material states"
+    )
+    assert '"last weekend" is the Saturday–Sunday just before the material date' in section
+    assert "on a Saturday or Sunday, the weekend before the current one" in section
+    assert '"N weekends ago" counts back from there' in section
+    # The worked example is anchored on a Monday.
+    assert "material date Mon 2024-03-11" in section
+    assert "last weekend 2024-03-09–10" in section
+    assert "two weekends ago 2024-03-02–03" in section
+    assert '"last weekend (2024-03-09–10; material date Mon 2024-03-11)"' in section
+    # The server's weekday is the check.
+    assert "`observed_weekday`" in section
+    assert "`update_memory`" in section
+
+
+def test_the_worked_example_dates_are_right():
+    from datetime import date, timedelta
+
+    material = date(2024, 3, 11)
+    assert material.weekday() == 0  # a Monday
+    saturday = material - timedelta(days=material.weekday() + 2)
+    assert (saturday, saturday + timedelta(days=1)) == (date(2024, 3, 9), date(2024, 3, 10))
+    two_ago = saturday - timedelta(days=7)
+    assert (two_ago, two_ago + timedelta(days=1)) == (date(2024, 3, 2), date(2024, 3, 3))
+
+
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
 @pytest.mark.parametrize("memory_type", ["fact", "preference", "event", "time"])
 def test_remember_vocabulary_covers_general_knowledge(relative, memory_type):
     assert f"- `{memory_type}`: " in _remember_rules(relative)

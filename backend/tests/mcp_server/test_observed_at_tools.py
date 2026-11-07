@@ -2,12 +2,14 @@
 
 The top-level argument reaches the service folded into ``details``; a
 conflicting or malformed value comes back as ``validation_error``; the
-remember and update_memory definitions declare it.
+remember and update_memory definitions declare it. #2689: a write whose
+stored memory has one echoes it with ``observed_weekday``.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -35,6 +37,36 @@ class TestDefinitions:
         prop = _definition(name)["inputSchema"]["properties"]["observed_at"]
         assert prop["type"] == "string"
         assert "ISO 8601" in prop["description"]
+
+    @pytest.mark.parametrize("name", ["recall", "list"])
+    def test_returns_name_the_weekday_next_to_it(self, name):
+        """#2689: wherever a Returns line lists observed_at?, the weekday follows."""
+        description = _definition(name)["description"]
+        assert "observed_at?, observed_weekday?" in description
+
+    def test_the_guide_names_the_weekday(self):
+        from mcp_server.tools.guide import GUIDE_TOPICS
+
+        assert "observed_weekday" in GUIDE_TOPICS["remember.observed_at"]
+        for topic in ("recall.returns", "reference.returns"):
+            assert "observed_at?, observed_weekday?" in GUIDE_TOPICS[topic]
+        for topic in ("remember.returns", "update_memory.returns"):
+            assert "observed_at?, observed_weekday?" in GUIDE_TOPICS[topic]
+
+    def test_the_guide_check_is_for_a_date_only_value(self):
+        """A datetime's weekday is its stored UTC day's, which can be the day
+        before the material's local day (2024-03-11T08:00:00+09:00 is stored as
+        2024-03-10T23:00:00Z, a Sunday); the fix-the-row check must not fire on it."""
+        from mcp_server.tools.guide import GUIDE_TOPICS
+
+        topic = GUIDE_TOPICS["remember.observed_at"]
+        assert "a datetime's UTC day" in topic
+        assert "from a date-only observed_at" in topic
+
+    def test_the_bootstrap_description_names_both_exceptions(self):
+        """get_agent_bootstrap's recall rows drop observed_weekday too (#2689)."""
+        description = _definition("get_agent_bootstrap")["description"]
+        assert "without supersede_candidate or observed_weekday" in description
 
 
 class TestRememberArgs:
@@ -138,3 +170,140 @@ class TestHandlers:
         request = service.update_memory.await_args.args[0]
         assert request.observed_at == "2024-03-07"
         assert request.details is None  # folded by the service once the row is loaded
+
+
+# ---------------------------------------------------------------------------
+# #2689: the write responses echo observed_at + observed_weekday
+# ---------------------------------------------------------------------------
+
+
+def _remembered(observed_at: str | None = None):
+    from models.schemas import RememberResponse
+
+    return RememberResponse(memory_id=uuid4(), scope="working", observed_at=observed_at)
+
+
+def _updated(observed_at: str | None = None):
+    from models.schemas import UpdateMemoryResponse
+
+    return UpdateMemoryResponse(
+        memory_id=uuid4(),
+        operation="updated",
+        re_embedded=False,
+        scope="working",
+        version=2,
+        observed_at=observed_at,
+    )
+
+
+@contextmanager
+def _write_handlers(service, module: str):
+    db = _mock_db()
+
+    async def get_db():
+        yield db
+
+    with (
+        patch("db.base.get_db", new=get_db),
+        patch(f"{module}._resolve_context", new=AsyncMock(return_value=MagicMock())),
+        patch(f"{module}._context_response_fields", return_value={}),
+        patch(f"{module}._log_tool_usage", new=AsyncMock()),
+        patch(f"{module}._touch_context_last_used", new=AsyncMock()),
+        patch(f"{module}._plan_headroom_field", new=AsyncMock(return_value={})),
+        patch("services.memory_service.MemoryService", new=MagicMock(return_value=service)),
+    ):
+        yield
+
+
+async def _remember_payload(result) -> dict:
+    from mcp_server.tools.memory import handle_remember
+
+    service = MagicMock(remember=AsyncMock(return_value=result))
+    with _write_handlers(service, "mcp_server.tools.memory"):
+        reply = await handle_remember(
+            {"context_id": _CTX, **REMEMBER_ARGS, "observed_at": "2024-03-11"}, "u1", None
+        )
+    return _payload(reply)
+
+
+async def _update_payload(result) -> dict:
+    from mcp_server.tools.memory import handle_update_memory
+
+    service = MagicMock(update_memory=AsyncMock(return_value=result))
+    with _write_handlers(service, "mcp_server.tools.memory"):
+        reply = await handle_update_memory(
+            {"context_id": _CTX, "memory_id": str(uuid4()), "summary": "an edited summary"},
+            "u1",
+            None,
+        )
+    return _payload(reply)
+
+
+async def _batch_payload(results: list, *, atomic: bool) -> dict:
+    from mcp_server.tools.batch import handle_remember_batch
+
+    service = MagicMock(
+        remember=AsyncMock(side_effect=results),
+        remember_many=AsyncMock(return_value=results),
+    )
+    items = [{**REMEMBER_ARGS, "summary": f"batch item number {i}"} for i in range(len(results))]
+    with _write_handlers(service, "mcp_server.tools.batch"):
+        reply = await handle_remember_batch(
+            {"context_id": _CTX, "items": items, "atomic": atomic}, "u1", None
+        )
+    return _payload(reply)
+
+
+_OBSERVED = [("2024-03-11", "Mon"), ("2024-03-14T23:30:00Z", "Thu")]
+
+
+class TestWriteResponsesEchoTheWeekday:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("observed_at", "weekday"), _OBSERVED)
+    async def test_remember(self, observed_at, weekday):
+        payload = await _remember_payload(_remembered(observed_at))
+        assert payload["observed_at"] == observed_at
+        assert payload["observed_weekday"] == weekday
+        keys = list(payload)
+        assert keys.index("observed_weekday") == keys.index("observed_at") + 1
+
+    @pytest.mark.asyncio
+    async def test_remember_without_it_is_unchanged(self):
+        payload = await _remember_payload(_remembered())
+        assert list(payload) == ["status", "memory_id", "scope", "version"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("observed_at", "weekday"), _OBSERVED)
+    async def test_update_memory(self, observed_at, weekday):
+        payload = await _update_payload(_updated(observed_at))
+        assert payload["observed_at"] == observed_at
+        assert payload["observed_weekday"] == weekday
+        keys = list(payload)
+        assert keys.index("observed_weekday") == keys.index("observed_at") + 1
+
+    @pytest.mark.asyncio
+    async def test_update_memory_without_it_is_unchanged(self):
+        payload = await _update_payload(_updated())
+        assert list(payload) == [
+            "status",
+            "memory_id",
+            "operation",
+            "re_embedded",
+            "scope",
+            "version",
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("atomic", [False, True])
+    async def test_remember_batch_per_item(self, atomic):
+        payload = await _batch_payload(
+            [_remembered("2024-03-11"), _remembered(), _remembered("2024-03-14T23:30:00Z")],
+            atomic=atomic,
+        )
+        assert payload["status"] == "success"
+        first, second, third = payload["results"]
+        assert (first["observed_at"], first["observed_weekday"]) == ("2024-03-11", "Mon")
+        keys = list(first)
+        assert keys.index("observed_weekday") == keys.index("observed_at") + 1
+        assert list(second) == ["index", "status", "memory_id", "scope"]
+        assert third["observed_weekday"] == "Thu"

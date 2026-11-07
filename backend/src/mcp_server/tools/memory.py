@@ -59,6 +59,7 @@ from utils.exceptions import (
     SupersedeEdgeConflictError,
     VersionConflictError,
 )
+from utils.observed_at import observed_fields
 from utils.recall_projection import (
     RECALL_CONTENT_KEYS,
     RECALL_MAX_FULL,
@@ -349,6 +350,9 @@ async def handle_remember(
                             "memory_id": str(result.memory_id),
                             "scope": result.scope,
                             "version": result.version,  # #2043
+                            # #2689: the stored observed_at and its weekday, so
+                            # the writer can check a resolved relative date.
+                            **observed_fields(getattr(result, "observed_at", None)),
                             # #1505: scope alone reads as "not saved yet" — say
                             # what it actually implies for durability.
                             **_persistence_response_field(result.persistence, verbose=verbose),
@@ -583,6 +587,8 @@ async def handle_update_memory(
                             "re_embedded": result.re_embedded,
                             "scope": result.scope,
                             "version": result.version,  # #2043
+                            # #2689: the memory's observed_at after the edit.
+                            **observed_fields(getattr(result, "observed_at", None)),
                             **_persistence_response_field(
                                 result.persistence, verbose=verbose
                             ),  # #1505
@@ -2469,7 +2475,8 @@ async def handle_reference(
                 "created_at": to_utc_iso(result.created_at),
                 "updated_at": to_utc_iso(result.updated_at),
                 # #2330: when the fact held; absent when the memory has none.
-                **({"observed_at": result.observed_at} if result.observed_at else {}),
+                # #2689: observed_weekday right after it.
+                **observed_fields(result.observed_at),
                 "version": result.version,  # #2043: update_memory's expected_version
                 "client": result.client,
                 "source_uri": result.source_uri,

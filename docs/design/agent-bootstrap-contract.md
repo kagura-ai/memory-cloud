@@ -151,10 +151,12 @@ inside the sub-envelope (`load_pinned` → `{memories, total_available, truncate
 item shape (`trigger`, not `details`); `recall` → `results` in the `recall` tool's
 `verbosity="full"` item shape, built by the same projection (#2013: an empty
 `context_summary`, `tags`, `superseded_by` or `contradicts` is absent, never `null` / `[]`,
-and `score` is rounded to 4 decimals). The one exception: a bootstrap row never carries
+and `score` is rounded to 4 decimals). Two exceptions: a bootstrap row never carries
 `supersede_candidate`, which `recall` returns when a live suggestion exists — an agent does
 not act on a suggestion in this session-start lane, the `max_chars` fit cannot drop it, and
-it would put another memory's summary in the trusted lane. `folded` (#2123: ids and a count of
+it would put another memory's summary in the trusted lane; nor `observed_weekday` (#2689),
+which follows `observed_at` on `recall` rows — REST `/agents/{id}/bootstrap` serves these
+rows too, and the REST responses stay as they were. `folded` (#2123: ids and a count of
 the judge-verified older versions folded under the row, no other memory's text) is carried
 like in `recall`; keyless `get_state` →
 `{states, count, has_more, next_cursor}`), so clients reuse one parser per primitive whether they call it directly
