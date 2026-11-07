@@ -12,8 +12,14 @@ import { useTranslations } from "next-intl";
 import { ArrowRight, Check, Copy } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
-import { localeNames, locales, useLocale, type Locale } from "@/i18n";
-import { updateUserProfile } from "@/lib/api/base";
+import {
+  defaultLocale,
+  localeNames,
+  locales,
+  useLocale,
+  type Locale,
+} from "@/i18n";
+import { API_BASE_URL, updateUserProfile } from "@/lib/api/base";
 import { mcpEndpoints } from "@/lib/mcp/url";
 import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -32,9 +38,8 @@ import { InlineSpinner } from "@/components/common/LoadingState";
 export const MCP_CONNECTION_HREF = "/workspace/integrations#mcp-connection";
 
 const COPY_KEY = "onboarding-mcp-url";
-
-const offersTimezone = (zone: string | null | undefined): zone is string =>
-  COMMON_TIMEZONES.some((tz) => tz.value === zone);
+/** The timezone a new account starts with (backend column default). */
+const DEFAULT_TIMEZONE = "UTC";
 
 /** The first of the browser's preferred languages the app offers, else null. */
 export function browserLocale(): Locale | null {
@@ -54,48 +59,92 @@ export function browserLocale(): Locale | null {
   return null;
 }
 
-/** The browser's IANA timezone when the profile offers it, else null. */
+/** The browser's IANA timezone, else null. */
 export function browserTimezone(): string | null {
   try {
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    return offersTimezone(zone) ? zone : null;
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
   } catch {
     return null;
   }
 }
 
-export function PreferencesStep({ onDone }: { onDone: () => void }) {
+/**
+ * The values the screen starts with. A value the user already chose (anything
+ * but the account defaults) wins over the browser, so saving never overwrites
+ * it; the browser fills in only what was never set.
+ */
+function initialPreferences(
+  saved: { locale?: string | null; timezone?: string | null } | null,
+  uiLocale: Locale,
+) {
+  const browserLanguage = browserLocale();
+  const browserZone = browserTimezone();
+  const savedLanguage = locales.find((locale) => locale === saved?.locale);
+  const savedZone = saved?.timezone || null;
+  const keepLanguage =
+    savedLanguage !== undefined && savedLanguage !== defaultLocale;
+  const keepZone = savedZone !== null && savedZone !== DEFAULT_TIMEZONE;
+  return {
+    language: keepLanguage
+      ? savedLanguage
+      : (browserLanguage ?? savedLanguage ?? uiLocale),
+    timezone: keepZone
+      ? savedZone
+      : (browserZone ?? savedZone ?? DEFAULT_TIMEZONE),
+    detected:
+      (!keepLanguage && browserLanguage !== null) ||
+      (!keepZone && browserZone !== null),
+  };
+}
+
+export function PreferencesStep({
+  onDone,
+  onBusyChange,
+}: {
+  onDone: () => void;
+  /** True while the save is in flight, so the dialog cannot close under it. */
+  onBusyChange?: (busy: boolean) => void;
+}) {
   const t = useTranslations("onboarding");
   const { user, refetchUser } = useAuth();
   const { locale: uiLocale, setLocale } = useLocale();
   const languageId = useId();
   const timezoneId = useId();
-  const [detected] = useState(() => ({
-    locale: browserLocale(),
-    timezone: browserTimezone(),
-  }));
-  const [language, setLanguage] = useState<Locale>(detected.locale ?? uiLocale);
-  const [timezone, setTimezone] = useState(() => {
-    const saved = user?.timezone;
-    return detected.timezone ?? (offersTimezone(saved) ? saved : "UTC");
-  });
+  const [initial] = useState(() => initialPreferences(user, uiLocale));
+  const [language, setLanguage] = useState<Locale>(initial.language);
+  const [timezone, setTimezone] = useState(initial.timezone);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  // The common list, plus the starting zone when it is not on it (a saved or
+  // detected zone such as Europe/Berlin), so it is never swapped for UTC.
+  const [zones] = useState(() =>
+    COMMON_TIMEZONES.some((tz) => tz.value === initial.timezone)
+      ? [...COMMON_TIMEZONES]
+      : [
+          ...COMMON_TIMEZONES,
+          { value: initial.timezone, label: initial.timezone },
+        ],
+  );
 
   const save = async () => {
     setBusy(true);
     setFailed(false);
+    onBusyChange?.(true);
     try {
       await updateUserProfile({ locale: language, timezone });
       // Refresh before applying: the layout applies the signed-in user's saved
-      // locale whenever it differs from the UI, so switching first would be
-      // switched straight back by the stale user record (Profile page order).
-      await refetchUser();
+      // locale whenever it differs from the UI, so switching over a stale
+      // record would be switched straight back. refetchUser resolves
+      // undefined on a transient failure instead of throwing.
+      const fresh = await refetchUser();
+      if (!fresh) throw new Error("The signed-in user was not refreshed");
       setLocale(language);
       onDone();
     } catch {
       setFailed(true);
       setBusy(false);
+    } finally {
+      onBusyChange?.(false);
     }
   };
 
@@ -135,7 +184,7 @@ export function PreferencesStep({ onDone }: { onDone: () => void }) {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {COMMON_TIMEZONES.map((tz) => (
+            {zones.map((tz) => (
               <SelectItem key={tz.value} value={tz.value}>
                 {tz.label}
               </SelectItem>
@@ -143,7 +192,7 @@ export function PreferencesStep({ onDone }: { onDone: () => void }) {
           </SelectContent>
         </Select>
       </div>
-      {(detected.locale || detected.timezone) && (
+      {initial.detected && (
         <p className="text-xs text-muted-foreground">{t("prefs.detected")}</p>
       )}
       <div className="flex flex-wrap gap-2">
@@ -160,17 +209,21 @@ export function PreferencesStep({ onDone }: { onDone: () => void }) {
   );
 }
 
-export function ChatStep({ onNext }: { onNext: () => void }) {
+export function ChatStep({
+  onNext,
+  onGuide,
+}: {
+  onNext: () => void;
+  /** The user leaves for the per-client steps: count the screen as seen. */
+  onGuide: () => void;
+}) {
   const t = useTranslations("onboarding");
   const common = useTranslations("common");
   const { isCopied, copyToTarget } = useCopyFeedback();
   const [copyFailed, setCopyFailed] = useState(false);
   // The bare URL follows the workspace selected in the web UI, which is all a
   // new owner has; pinning lives on the Integrations entry.
-  const { mcpUrl } = mcpEndpoints(
-    process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080",
-    null,
-  );
+  const { mcpUrl } = mcpEndpoints(API_BASE_URL, null);
 
   const copy = async () => {
     setCopyFailed(false);
@@ -216,6 +269,7 @@ export function ChatStep({ onNext }: { onNext: () => void }) {
       </div>
       <Link
         href={MCP_CONNECTION_HREF}
+        onClick={onGuide}
         className="inline-block text-sm text-primary underline"
       >
         {t("chat.guide")}

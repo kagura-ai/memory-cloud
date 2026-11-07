@@ -23,8 +23,9 @@
  *  - remember/recall need available embeddings; if absent we show a
  *    non-error "set up embeddings" notice instead of a guaranteed-to-fail flow.
  *  - First screens (#2701): language and timezone, then connecting an AI chat
- *    client over MCP (IntroSteps), once per user and workspace before the
- *    practice, which is optional. A replay or a practice under way skips them.
+ *    client over MCP (IntroSteps), once per user before the practice, which
+ *    is optional. A replay or a practice under way skips them; a workspace
+ *    without an embedding key gets the key notice before the chat screen.
  *  - MCP links (#2698) point at the connection card on the Integrations
  *    entry: clients register over OAuth, so a new user needs no API key.
  */
@@ -99,14 +100,14 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
 
   const [step, setStep] = useState<Step>("context");
   const [contextId, setContextId] = useState<string | null>(null);
-  // #2701: the first screens come once per user and workspace, before the
-  // practice; a replay or a practice already under way goes straight to it.
+  // #2701: the first screens come once per user, before the practice; a
+  // replay or a practice already under way goes straight to it.
   const [intro, setIntro] = useState<IntroStage>(() => {
     const saved = readProgress(scope);
-    return replay || saved.step !== "context" || saved.contextId ? "done" : readIntro(scope);
+    return replay || saved.step !== "context" || saved.contextId ? "done" : readIntro(userId);
   });
   const advanceIntro = (next: IntroStage) => {
-    writeIntro(scope, next);
+    writeIntro(userId, next);
     setIntro(next);
   };
   // The sample copy follows the UI language until the user edits it (the
@@ -307,9 +308,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
             <Button variant="ghost" onClick={endPractice}>{t("endPractice")}</Button>
           </AlertDescription></Alert>
         ) : intro === "prefs" ? (
-          <PreferencesStep onDone={() => advanceIntro("chat")} />
-        ) : intro === "chat" ? (
-          <ChatStep onNext={() => advanceIntro("done")} />
+          <PreferencesStep onDone={() => advanceIntro("chat")} onBusyChange={setWritePending} />
         ) : !hasKey ? (
           // Informational gating notice (not an error): remember/recall need a
           // workspace embedding key. Point at the existing key-setup surface.
@@ -332,6 +331,9 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               </Button>
             </AlertDescription>
           </Alert>
+        ) : intro === "chat" ? (
+          // After the key notice: MCP writes need the same embedding key.
+          <ChatStep onNext={() => advanceIntro("done")} onGuide={() => advanceIntro("done")} />
         ) : (
           <div className="space-y-4">
             {step !== "done" && (
