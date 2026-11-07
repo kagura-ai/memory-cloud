@@ -112,6 +112,27 @@ def no_redis(monkeypatch):
 
 
 class TestKillSwitch:
+    def test_page_parameters_and_cursor(self, client, enabled, monkeypatch):
+        get_summary = AsyncMock(return_value=_summary(next_offset=4))
+        monkeypatch.setattr(f"{SERVICE}.get_summary", get_summary)
+        response = client.get("/api/v1/beta-invites/me?limit=2&offset=2")
+        assert response.status_code == 200
+        assert response.json()["next_offset"] == 4
+        assert get_summary.await_args.kwargs == {"limit": 2, "offset": 2}
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "limit=0",
+            "limit=101",
+            "offset=-1",
+            "offset=9223372036854775808",
+            "offset=99999999999999999999",
+        ],
+    )
+    def test_invalid_page(self, client, enabled, query):
+        assert client.get(f"/api/v1/beta-invites/me?{query}").status_code == 422
+
     @pytest.mark.parametrize(("method", "path"), ROUTES)
     def test_every_route_404s_when_disabled(self, client, monkeypatch, method, path) -> None:
         monkeypatch.setattr(get_settings(), "enable_beta_invites", False)
@@ -265,6 +286,7 @@ class TestSummary:
         assert body == {
             "quota": None,
             "used": 9,
+            "next_offset": None,
             "active": 7,
             "redeemed": 2,
             "remaining": None,

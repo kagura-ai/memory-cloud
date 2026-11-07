@@ -61,6 +61,7 @@ from services.downgrade_eligibility_service import (
     DowngradeEligibilityService,
     TierDowngradeEligibility,
 )
+from utils.datetime import to_utc_iso
 from utils.exceptions import (
     AuthenticationError,
     MemoryCloudException,
@@ -257,12 +258,16 @@ async def set_workspace_plan_from_billing(
 
 
 class WorkspaceEntitlementView(BaseModel):
-    """Read model for the reconciler (#1095): the current entitlement + provenance."""
+    """Current entitlement, provenance and workspace creation time (#1095, #2706)."""
 
     workspace_id: str
     plan_name: str
     addons: dict[str, int]
     entitlement_source: str
+    created_at: str = Field(
+        description="Workspace creation time (ISO 8601 with explicit UTC)",
+        json_schema_extra={"format": "date-time"},
+    )
 
 
 @router.get("/workspaces/{workspace_id}/plan", response_model=WorkspaceEntitlementView)
@@ -277,6 +282,8 @@ async def get_workspace_entitlement(
     decide whether to reconcile a workspace (``external_billing``) or leave it
     untouched (``admin_grant``) — so a periodic billing reconcile never reverts a
     locally-owned admin/comp grant.
+    ``created_at`` is the workspace's creation time with an explicit UTC offset
+    for billing-side time-based eligibility checks (#2706).
     """
     try:
         ws_uuid = UUID(workspace_id)
@@ -303,6 +310,7 @@ async def get_workspace_entitlement(
         plan_name=workspace.plan_name,
         addons=current_addons,
         entitlement_source=workspace.entitlement_source,
+        created_at=to_utc_iso(workspace.created_at),
     )
 
 

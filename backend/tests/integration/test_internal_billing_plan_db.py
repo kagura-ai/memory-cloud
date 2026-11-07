@@ -7,6 +7,7 @@ Workspace row.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -160,6 +161,9 @@ async def test_get_entitlement_returns_source(db_session):
     before = await get_workspace_entitlement(workspace_id=str(ws.id), _=None, db=db_session)
     assert before.plan_name == "basic"
     assert before.entitlement_source == "admin_grant"
+    assert datetime.fromisoformat(before.model_dump(mode="json")["created_at"]) == (
+        ws.created_at.replace(tzinfo=UTC)
+    )
 
     await set_workspace_plan_from_billing(
         workspace_id=str(ws.id),
@@ -170,6 +174,7 @@ async def test_get_entitlement_returns_source(db_session):
     after = await get_workspace_entitlement(workspace_id=str(ws.id), _=None, db=db_session)
     assert after.plan_name == "pro"
     assert after.entitlement_source == "external_billing"
+    assert after.created_at == before.created_at
 
 
 @pytest.mark.asyncio

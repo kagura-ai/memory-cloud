@@ -27,6 +27,7 @@ if str(_BACKEND_SRC) not in sys.path:
 from cli import (  # noqa: E402
     apply_rerank_defaults,
     backfill_deleted_context_files,
+    beta_invite_batches,
     cleanup_erased_vectors,
     observed_at_backfill,
     rekey_encrypted_secrets,
@@ -142,7 +143,32 @@ _CLI_ARGV = [
     (rekey_erasure_pseudonyms, []),
     (rekey_encrypted_secrets, []),
     (supersede_catch_up, ["--context", "00000000-0000-0000-0000-000000000003"]),
+    (
+        beta_invite_batches,
+        [
+            "mint",
+            "--inviter",
+            "admin-id",
+            "--start",
+            "2030-01-01",
+            "--days",
+            "1",
+            "--per-day",
+            "1",
+            "--label-prefix",
+            "waitlist",
+        ],
+    ),
+    (beta_invite_batches, ["revoke", "--inviter", "admin-id", "--label", "waitlist"]),
 ]
+
+# These CLIs intentionally reject --log-level; their adapters can handle
+# private data. Invite batches keep the scaffold's default INFO policy.
+_FIXED_LOG_LEVELS = {
+    cleanup_erased_vectors: "ERROR",
+    sweep_orphan_objects: "ERROR",
+    beta_invite_batches: "INFO",
+}
 
 
 def _imports_run_plan_apply(path: Path) -> bool:
@@ -181,7 +207,7 @@ def test_every_one_shot_cli_is_covered_by_the_logging_tests():
 
 @pytest.mark.parametrize(("module", "argv"), _CLI_ARGV)
 def test_parse_enforces_the_cli_log_level_policy(module, argv):
-    if module in (cleanup_erased_vectors, sweep_orphan_objects):
+    if module in _FIXED_LOG_LEVELS:
         module._parse(argv)
         for level in ("DEBUG", "INFO", "WARNING", "ERROR", "TRACE"):
             with pytest.raises(SystemExit):
@@ -196,12 +222,11 @@ def test_parse_enforces_the_cli_log_level_policy(module, argv):
 @pytest.mark.parametrize(("module", "argv"), _CLI_ARGV)
 async def test_main_configures_logging_before_the_scaffold_runs(module, argv, monkeypatch):
     order: list[str] = []
-    counts_only = module in (cleanup_erased_vectors, sweep_orphan_objects)
-    # Both repair CLIs fix ERROR because private identifiers can reach adapters.
+    fixed_level = _FIXED_LOG_LEVELS.get(module)
     if module is sweep_orphan_objects:
         monkeypatch.setattr(module, "get_blob_storage", object)
-    expected_level = "ERROR" if counts_only else "WARNING"
-    command_argv = argv if counts_only else [*argv, "--log-level", expected_level]
+    expected_level = fixed_level or "WARNING"
+    command_argv = argv if fixed_level else [*argv, "--log-level", expected_level]
     with (
         patch.object(
             module, "configure_logging", side_effect=lambda level: order.append(level)

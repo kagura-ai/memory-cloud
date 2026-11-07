@@ -4291,6 +4291,7 @@
       },
       "list": {
         "heading": "Your invites",
+        "loadMore": "Load more invites",
         "empty": "No invites yet",
         "emptyHint": "Create a link above to invite someone.",
         "expiresAt": "Expires {date}",

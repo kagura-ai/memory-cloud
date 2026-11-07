@@ -1,7 +1,8 @@
 """Closed-beta invite link service (Issues #1581, #1595).
 
 A signed-in user mints a one-time ``/join/{token}`` URL; whoever opens it may
-pass the admin-configured signup gate once, within :data:`BETA_INVITE_TTL`.
+pass the admin-configured signup gate once before its expiry. Single invites
+use :data:`BETA_INVITE_TTL`; admin CLI batches use dated expiries (#2704).
 This module owns every statement against ``beta_invites``. The redemption
 itself is driven by ``SignupGateService`` (it owns ``signup_allowlist`` writes
 and knows when the gate would otherwise block); it calls
@@ -11,16 +12,17 @@ one place.
 
 Security contract, in one paragraph: the token is ``secrets.token_urlsafe(32)``
 and only ``sha256_hex(token)`` is ever stored (the API-key pattern,
-``auth/api_keys.py``). The plaintext leaves this module exactly once, inside the
-URL returned by :meth:`BetaInviteService.create` (or
-:meth:`BetaInviteService.reissue`). Nothing here logs or audits the token, its
+``auth/api_keys.py``). Each plaintext URL is returned only at mint time: by
+:meth:`BetaInviteService.create` or :meth:`BetaInviteService.reissue` for an API
+response, or by :meth:`BetaInviteService.create_batches` for the admin CLI's
+CSV export on stdout. Nothing here logs or audits the token, its
 hash, or the URL — the invite ``id`` is the only identifier that may appear in a
 log line.
 
 Privacy contract (#1595): an invite's ``label`` is the inviter's free-text note
 and may hold a name or an address; ``redeemed_email`` is the admitted account's
-address. Both go to the inviter's own responses and nowhere else — never a log
-line, an audit row or an exception message.
+address. They go to the inviter's own responses (and batch labels to the admin
+CLI's CSV export) — never a log line, an audit row or an exception message.
 """
 
 from __future__ import annotations
@@ -54,9 +56,10 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Fixed by design (#1581) — a code constant, not a setting: a link that lingers
-# for months is a standing credential, and nothing about a deployment changes
-# how long "come join the beta" stays a reasonable thing to act on.
+# Single create/reissue TTL (#1581): a code constant, not a deployment setting.
+# Admin CLI dated batches (#2704) instead expire on sending day + valid days
+# at the selected local time. To bound how long that stock remains a credential,
+# every batch expiry must be in the future and at most 60 days after minting.
 BETA_INVITE_TTL = timedelta(days=7)
 
 # 32 bytes -> 43 URL-safe characters, 256 bits. Enumerating the public preview
@@ -238,6 +241,7 @@ class BetaInviteSummary:
     remaining: int | None
     invites: list[BetaInvite]
     redeemed_emails: dict[uuid.UUID, str]
+    next_offset: int | None = None
 
 
 @dataclass(frozen=True)
@@ -264,7 +268,9 @@ class BetaInviteService:
     # Inviter-facing
     # ------------------------------------------------------------------
 
-    async def get_summary(self, user_id: str) -> BetaInviteSummary:
+    async def get_summary(
+        self, user_id: str, *, limit: int = 50, offset: int = 0
+    ) -> BetaInviteSummary:
         """Return the caller's quota standing and their invites, newest first.
 
         Args:
@@ -276,6 +282,8 @@ class BetaInviteService:
         Raises:
             NotFoundException: The caller's ``users`` row is missing.
         """
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError("Invalid invite page")
         role = await self._inviter_role(user_id, lock=False)
         now = utcnow()
         active, redeemed = await self._count_slots(user_id, now)
@@ -306,9 +314,13 @@ class BetaInviteService:
                 )
                 .outerjoin(User, User.user_id == UserOAuthProvider.user_id)
                 .where(BetaInvite.inviter_user_id == user_id)
-                .order_by(BetaInvite.created_at.desc())
+                .order_by(BetaInvite.created_at.desc(), BetaInvite.id.desc())
+                .limit(limit + 1)
+                .offset(offset)
             )
         ).all()
+        next_offset = offset + limit if len(rows) > limit else None
+        rows = rows[:limit]
         invites = [invite for invite, _email in rows]
         redeemed_emails = {
             invite.id: email
@@ -325,7 +337,136 @@ class BetaInviteService:
             remaining=None if quota is None else max(0, quota - used),
             invites=invites,
             redeemed_emails=redeemed_emails,
+            next_offset=next_offset,
         )
+
+    async def create_batch(
+        self, inviter_user_id: str, label: str, expires_at: datetime, count: int
+    ) -> list[MintedBetaInvite]:
+        """Mint one admin batch atomically; reject even previously revoked labels."""
+        return await self.create_batches(inviter_user_id, [(label, expires_at, count)])
+
+    async def create_batches(
+        self,
+        inviter_user_id: str,
+        batches: list[tuple[str, datetime, int]],
+        *,
+        dry_run: bool = False,
+    ) -> list[MintedBetaInvite]:
+        """Validate all dated batches before minting any, in one transaction.
+
+        The inviter lock serializes label checks with all other invite creates.
+        Plans only read and release their lock. Audit rows contain ids and expiry,
+        never labels or credentials. Expiry instants use the DB's naive UTC convention.
+        """
+        try:
+            await self._require_batch_admin(inviter_user_id)
+            now = utcnow()
+            labels: set[str] = set()
+            for label, expiry, count in batches:
+                if normalize_beta_invite_label(label) != label or not label:
+                    raise ValueError("A nonempty normalized batch label is required")
+                if label in labels:
+                    raise ValueError("Duplicate batch labels")
+                labels.add(label)
+                if expiry.tzinfo is not None or not now < expiry <= now + timedelta(days=60):
+                    raise ValueError("Expiry must be a UTC instant in the next 60 days")
+                if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 1000:
+                    raise ValueError("Batch count must be between 1 and 1000")
+            if not batches or sum(count for _, _, count in batches) > 10000:
+                raise ValueError("A run must mint between 1 and 10000 invites")
+            existing = await self.db.scalar(
+                select(BetaInvite.id)
+                .where(
+                    BetaInvite.inviter_user_id == inviter_user_id,
+                    BetaInvite.label.in_(labels),
+                )
+                .limit(1)
+            )
+            if existing is not None:
+                raise ValueError("A target batch label already has invites; nothing minted")
+            if dry_run:
+                await self.db.rollback()
+                return []
+            email = await self.db.scalar(select(User.email).where(User.user_id == inviter_user_id))
+            minted = []
+            for label, expiry, count in batches:
+                for _ in range(count):
+                    invite, token = self._mint(
+                        user_id=inviter_user_id, label=label, now=now, expires_at=expiry
+                    )
+                    self.db.add(
+                        self._audit(
+                            action="beta_invite.created",
+                            invite_id=invite.id,
+                            user_id=inviter_user_id,
+                            user_email=email or inviter_user_id,
+                            user_metadata={"expires_at": to_utc_iso(expiry)},
+                            ip_address=None,
+                            user_agent=None,
+                        )
+                    )
+                    minted.append(MintedBetaInvite(invite, build_beta_invite_url(token)))
+            await self.db.commit()
+            return minted
+        except Exception:
+            await self.db.rollback()
+            raise
+
+    async def _require_batch_admin(self, user_id: str) -> None:
+        if await self._lock_inviter_role(user_id) != Role.ADMIN:
+            raise PermissionError("Batch operations require a system admin")
+
+    async def revoke_unused_by_label(
+        self, inviter_user_id: str, label: str, *, dry_run: bool = False
+    ) -> int:
+        """Revoke only this admin's unused batch; a concurrent redemption wins safely."""
+        try:
+            await self._require_batch_admin(inviter_user_id)
+            if not label or normalize_beta_invite_label(label) != label:
+                raise ValueError("A nonempty normalized batch label is required")
+            predicates = (
+                BetaInvite.inviter_user_id == inviter_user_id,
+                BetaInvite.label == label,
+                BetaInvite.redeemed_at.is_(None),
+                BetaInvite.revoked_at.is_(None),
+            )
+            if dry_run:
+                count = await self.db.scalar(
+                    select(func.count()).select_from(BetaInvite).where(*predicates)
+                )
+                await self.db.rollback()
+                return int(count or 0)
+            ids = (
+                (
+                    await self.db.execute(
+                        update(BetaInvite)
+                        .where(*predicates)
+                        .values(revoked_at=utcnow())
+                        .returning(BetaInvite.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            email = await self.db.scalar(select(User.email).where(User.user_id == inviter_user_id))
+            for invite_id in ids:
+                self.db.add(
+                    self._audit(
+                        action="beta_invite.revoked",
+                        invite_id=invite_id,
+                        user_id=inviter_user_id,
+                        user_email=email or inviter_user_id,
+                        user_metadata=None,
+                        ip_address=None,
+                        user_agent=None,
+                    )
+                )
+            await self.db.commit()
+            return len(ids)
+        except Exception:
+            await self.db.rollback()
+            raise
 
     async def create(
         self,
@@ -662,7 +803,14 @@ class BetaInviteService:
             logger.info("beta_invite_quota_exceeded", inviter_user_id=user_id, used=used)
             raise BetaInviteQuotaExceededError(quota=quota)
 
-    def _mint(self, *, user_id: str, label: str | None, now: datetime) -> tuple[BetaInvite, str]:
+    def _mint(
+        self,
+        *,
+        user_id: str,
+        label: str | None,
+        now: datetime,
+        expires_at: datetime | None = None,
+    ) -> tuple[BetaInvite, str]:
         """Add a fresh invite to the session; return it with its plaintext token.
 
         No quota check, no audit row, no commit — the caller owns all three.
@@ -674,7 +822,7 @@ class BetaInviteService:
             token_hash=sha256_hex(token),
             inviter_user_id=user_id,
             created_at=now,
-            expires_at=now + BETA_INVITE_TTL,
+            expires_at=expires_at if expires_at is not None else now + BETA_INVITE_TTL,
             label=label,
         )
         self.db.add(invite)

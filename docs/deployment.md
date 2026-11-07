@@ -4637,3 +4637,53 @@ compose files pin.
 
 To rotate the password, change it and run steps 2–3 again. To turn auth off,
 remove it and do the same.
+
+## Dated beta invite batches
+
+Run `python -m src.cli.beta_invite_batches` in the API environment with its
+database settings. `--inviter` is the **system admin user id**, not an email.
+The role is checked from the locked database row on every operation.
+The command only produces stock; sending the invites is a separate operation.
+The beta invite feature must be enabled for recipients to use the links.
+
+```bash
+# Read-only plan: 20 daily batches, 50 invites per batch.
+python -m src.cli.beta_invite_batches mint --inviter <ADMIN_USER_ID> \
+  --start 2026-11-10 --days 20 --per-day 50 --valid-days 7 --label-prefix waitlist
+
+# Apply and capture the one-time credential export in a private file.
+umask 077
+python -m src.cli.beta_invite_batches mint --inviter <ADMIN_USER_ID> \
+  --start 2026-11-10 --days 20 --per-day 50 --valid-days 7 --label-prefix waitlist \
+  --apply --yes > invites.csv
+
+# Plan, then revoke an unused batch if the export leaks.
+python -m src.cli.beta_invite_batches revoke --inviter <ADMIN_USER_ID> --label waitlist-2026-11-12
+python -m src.cli.beta_invite_batches revoke --inviter <ADMIN_USER_ID> \
+  --label waitlist-2026-11-12 --apply --yes
+```
+
+Labels are `<prefix>-YYYY-MM-DD`. Expiry is the sending date plus `--valid-days`
+at `--expiry-time` (default `10:00`) in `--timezone` (default `Asia/Tokyo`).
+For example, the November 10 batch expires November 17 at 10:00 JST, regardless
+of its mint date. Timezones use IANA names; ambiguous or nonexistent DST times
+are rejected. Every expiry must be in the future and within 60 days of minting.
+Limits are 60 sending days, 1,000 invites per day, and 10,000 per invocation.
+
+Both `--apply --yes` are required to write; omit both for a read-only plan.
+All dates are validated and committed in one transaction. If **any** target
+label already exists for that inviter (even expired, revoked or redeemed), the
+whole mint is refused. Restock using new dates or a new prefix; repeating the
+same labels never doubles the stock. Use letters, digits, `_` and `-` in the
+prefix, starting with a letter or digit (maximum 89 characters).
+
+Mint stdout contains only CSV (`label,expires_at,invite_id,url`), with UTC expiry
+instants; plans and diagnostics go to stderr. URLs are credentials and cannot
+be retrieved after creation. Keep the export out of logs, source control and
+shared storage. If output is lost after a successful commit, revoke its labels
+and mint with a new prefix. Revoke prints the number changed and leaves used
+invites, other labels and other inviters untouched. It is safe to repeat.
+
+The dashboard loads 50 invites at a time with **Load more invites**. The
+`GET /api/v1/beta-invites/me` endpoint accepts `limit` (1–100) and `offset` and
+returns `next_offset` (`null` on the last page); quota counters cover all invites.

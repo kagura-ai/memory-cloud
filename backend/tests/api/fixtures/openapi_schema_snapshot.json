@@ -1284,6 +1284,7 @@
         "properties": {
           "active": {},
           "invites": {},
+          "next_offset": {},
           "quota": {},
           "redeemed": {},
           "remaining": {},
@@ -13279,6 +13280,10 @@
             },
             "type": "object"
           },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
           "entitlement_source": {
             "type": "string"
           },
@@ -13291,6 +13296,7 @@
         },
         "required": [
           "addons",
+          "created_at",
           "entitlement_source",
           "plan_name",
           "workspace_id"
@@ -18585,6 +18591,28 @@
       "get": {
         "operationId": "get_my_beta_invites_api_v1_beta_invites_me_get",
         "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           {
             "in": "header",
             "name": "authorization",
