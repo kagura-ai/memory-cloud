@@ -214,6 +214,8 @@ describe("OnboardingCard trigger gating", () => {
       expect(screen.getByText("needsKey.title")).toBeInTheDocument(),
     );
     expect(screen.queryByText("context.createButton")).not.toBeInTheDocument();
+    // MCP writes need the same embedding key, so the key comes first.
+    expect(screen.queryByRole("link", { name: "mcp.link" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText("needsKey.button"));
     expect(mockPush).toHaveBeenCalledWith(
@@ -269,6 +271,12 @@ describe("OnboardingCard value-moment happy path", () => {
     );
     expect(screen.getByRole("dialog")).toBeVisible();
     expect(screen.queryByLabelText("context.nameLabel")).not.toBeInTheDocument();
+    // A new user can go straight to connecting an AI client (#2698).
+    expect(screen.getByText("connectNow")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "mcp.link" })).toHaveAttribute(
+      "href",
+      "/workspace/integrations#mcp-connection",
+    );
     fireEvent.click(screen.getByText("context.createButton"));
 
     // Step 2: save memory
@@ -304,11 +312,13 @@ describe("OnboardingCard value-moment happy path", () => {
     );
     expect(screen.getByText("done.title")).toBeInTheDocument();
 
-    // The MCP pointer opens the API keys tab of the credentials page.
-    fireEvent.click(screen.getByText("mcp.link"));
-    expect(mockPush).toHaveBeenCalledWith(
-      "/workspace/integrations/credentials?tab=api-keys",
-    );
+    // The MCP pointer opens the connection card on the Integrations entry,
+    // not the API keys tab: clients register over OAuth (#2698). The step
+    // link is gone here, so the done step carries exactly one.
+    expect(screen.queryByText("connectNow")).not.toBeInTheDocument();
+    const links = screen.getAllByRole("link", { name: "mcp.link" });
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAttribute("href", "/workspace/integrations#mcp-connection");
   });
 
   it("shows a fallback (not a blank screen) when recall returns no results", async () => {

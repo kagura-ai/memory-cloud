@@ -22,8 +22,12 @@
  *    card and (with 1 context now) hide it, killing the stepper.
  *  - remember/recall need available embeddings; if absent we show a
  *    non-error "set up embeddings" notice instead of a guaranteed-to-fail flow.
+ *  - MCP setup link (#2698): shown from the first step and on the done step,
+ *    pointing at the connection card on the Integrations entry. Clients
+ *    register over OAuth, so a new user needs no API key to connect.
  */
 
+import Link from "next/link";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { advancePractice, claimPractice, onboardingScope, practiceContextName, readProgress, updateProgress } from "./progress";
@@ -58,6 +62,8 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { InlineSpinner } from "@/components/common/LoadingState";
 
 type Step = "context" | "memory" | "recall" | "done" | "recovery";
+
+const MCP_CONNECTION_HREF = "/workspace/integrations#mcp-connection";
 
 interface PracticeOptions {
   replay?: boolean;
@@ -399,6 +405,15 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
               </div>
             )}
 
+            {step !== "done" && (
+              <p className="border-t pt-3 text-sm text-muted-foreground">
+                {t("connectNow")}{" "}
+                <Link href={MCP_CONNECTION_HREF} className="text-primary underline">
+                  {t("mcp.link")}
+                </Link>
+              </p>
+            )}
+
             {step === "done" && (
               <div className="space-y-4">
                 <Alert>
@@ -464,17 +479,11 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
                   <p className="text-sm text-muted-foreground">
                     {t("mcp.body")}
                   </p>
-                  <Button
-                    variant="link"
-                    className="h-auto p-0"
-                    onClick={() =>
-                      router.push(
-                        "/workspace/integrations/credentials?tab=api-keys",
-                      )
-                    }
-                  >
-                    {t("mcp.link")}
-                    <ExternalLink className="ml-1 h-3 w-3" />
+                  <Button asChild variant="link" className="h-auto p-0">
+                    <Link href={MCP_CONNECTION_HREF}>
+                      {t("mcp.link")}
+                      <ExternalLink className="ml-1 h-3 w-3" />
+                    </Link>
                   </Button>
                 </div>
 

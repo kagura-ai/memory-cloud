@@ -121,6 +121,7 @@
       "exploreTitle": "explore",
       "exploreBody": "discovery — separately walks the neural graph to surface related memories you didn't search for."
     },
+    "connectNow": "You can also connect your AI client first.",
     "mcp": {
       "heading": "Make it automatic with MCP",
       "body": "In real use, your AI assistant writes memories for you via MCP tools — connect a client and it remembers as you work.",
