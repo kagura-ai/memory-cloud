@@ -506,6 +506,7 @@ export function BetaInviteDialog({
                 </ul>
                 {Boolean(error) && (
                   <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
                     <AlertDescription>{t("dialog.loadFailed")}</AlertDescription>
                   </Alert>
                 )}

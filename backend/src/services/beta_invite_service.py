@@ -82,6 +82,9 @@ BETA_INVITE_LABEL_MAX_LENGTH = 100
 _LABEL_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
+BETA_INVITE_BATCH_MAX_TTL = timedelta(days=60)
+
+
 def normalize_beta_invite_label(raw: str | None) -> str | None:
     """Normalise an inviter-supplied label, or refuse it (#1595).
 
@@ -369,7 +372,7 @@ class BetaInviteService:
                 if label in labels:
                     raise ValueError("Duplicate batch labels")
                 labels.add(label)
-                if expiry.tzinfo is not None or not now < expiry <= now + timedelta(days=60):
+                if expiry.tzinfo is not None or not now < expiry <= now + BETA_INVITE_BATCH_MAX_TTL:
                     raise ValueError("Expiry must be a UTC instant in the next 60 days")
                 if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 1000:
                     raise ValueError("Batch count must be between 1 and 1000")
@@ -765,7 +768,7 @@ class BetaInviteService:
     async def _inviter_role(self, user_id: str, *, lock: bool) -> str:
         stmt = select(User.role).where(User.user_id == user_id)
         if lock:
-            stmt = stmt.with_for_update()
+            stmt = stmt.with_for_update(key_share=True)
         role = await self.db.scalar(stmt)
         if role is None:
             # A live session whose ``users`` row is gone (erased account).

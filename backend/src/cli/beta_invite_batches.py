@@ -22,8 +22,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from cli._oneshot import configure_logging, run_plan_apply  # noqa: E402
-from services.beta_invite_service import BetaInviteService, MintedBetaInvite  # noqa: E402
-from utils.datetime import to_utc_iso  # noqa: E402
+from services.beta_invite_service import (  # noqa: E402
+    BETA_INVITE_BATCH_MAX_TTL,
+    BetaInviteService,
+    MintedBetaInvite,
+)
+from utils.datetime import to_utc_iso, utcnow  # noqa: E402
 from utils.exceptions import NotFoundException  # noqa: E402
 
 
@@ -46,6 +50,7 @@ def dated_batches(args: argparse.Namespace) -> list[tuple[str, datetime, int]]:
     if expiry_time.tzinfo is not None or expiry_time.second or expiry_time.microsecond:
         raise ValueError("Expiry time must be HH:MM without an offset")
     batches = []
+    now = utcnow()
     for day in range(args.days):
         sending = args.start + timedelta(days=day)
         expiry = datetime.combine(sending + timedelta(days=args.valid_days), expiry_time, zone)
@@ -56,10 +61,13 @@ def dated_batches(args: argparse.Namespace) -> list[tuple[str, datetime, int]]:
             or expiry.astimezone(UTC).astimezone(zone) != expiry
         ):
             raise ValueError("Expiry falls in a DST transition; choose another time")
+        expiry_utc = expiry.astimezone(UTC).replace(tzinfo=None)
+        if not now < expiry_utc <= now + BETA_INVITE_BATCH_MAX_TTL:
+            raise ValueError("Every batch expiry must be in the future and within 60 days of now")
         batches.append(
             (
                 f"{args.label_prefix}-{sending.isoformat()}",
-                expiry.astimezone(UTC).replace(tzinfo=None),
+                expiry_utc,
                 args.per_day,
             )
         )
@@ -72,7 +80,10 @@ async def _main(args: argparse.Namespace) -> int:
     reported = False
     try:
         batches = dated_batches(args) if args.command == "mint" else []
-    except (ValueError, OverflowError, ZoneInfoNotFoundError):
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (OverflowError, ZoneInfoNotFoundError):
         print("error: invalid batch schedule, prefix, time or timezone", file=sys.stderr)
         return 2
 
@@ -113,8 +124,8 @@ async def _main(args: argparse.Namespace) -> int:
 
     def print_plan(result: BatchResult) -> None:
         print(f"{args.command}: {result.count} invite(s)")
-        for index, (_, expiry, count) in enumerate(batches, start=1):
-            print(f"  batch {index}: {count} invite(s), expires {to_utc_iso(expiry)}")
+        for label, expiry, count in batches:
+            print(f"  {label}: {count} invite(s), expires {to_utc_iso(expiry)}")
 
     # _oneshot's plan, confirmation and status lines must never contaminate CSV.
     with redirect_stdout(sys.stderr):
@@ -124,6 +135,7 @@ async def _main(args: argparse.Namespace) -> int:
             changes=lambda result: result.count,
             noun="invite",
             verb=args.command,
+            past_tense="minted" if args.command == "mint" else "revoked",
             apply=args.apply,
             assume_yes=args.yes,
             print_applied=print_applied,
@@ -148,7 +160,7 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     mint.add_argument("--valid-days", type=int, default=7)
     mint.add_argument("--label-prefix", required=True)
     mint.add_argument("--expiry-time", default="10:00", help="local HH:MM (default 10:00)")
-    mint.add_argument("--timezone", default="Asia/Tokyo", help="IANA zone (default Asia/Tokyo)")
+    mint.add_argument("--timezone", required=True, help="IANA zone, e.g. Asia/Tokyo or UTC")
     revoke.add_argument("--label", required=True)
     args = parser.parse_args(argv)
     if args.apply != args.yes:
