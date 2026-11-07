@@ -96,8 +96,10 @@ STORE_AUTHORITY_LINE = "Kagura Memory: " + STORE_AUTHORITY
 # #2690: the connection's default context, when server_url's context= names the
 # plugin's own context. The skills accept this line as a source for "skip
 # list_contexts" next to the server instructions.
-# SYNC: claude-skills/remember.md / recall.md / session-summary.md step 1 and
-# SKILL.md "Recall" / "Remember" quote the prefix below; change them together.
+# SYNC: claude-skills/remember.md / recall.md step 1, session-summary.md step 3,
+# session-start.md (Memory Cloud) and SKILL.md "Recall" / "Remember" quote the
+# prefix below; claude-skills/guide.md, docs/mcp-tools.md and docs/mcp-clients.md
+# show the whole line. Change them together.
 DEFAULT_CONTEXT_PREFIX = "Kagura Memory: default context "
 DEFAULT_CONTEXT_NAME_CAP = 40
 DEFAULT_CONTEXT_TAIL = (

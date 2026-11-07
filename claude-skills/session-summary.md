@@ -32,7 +32,7 @@ Open the run with one line naming the mode and, for `auto`, why — for example 
 
 **Load the tools once.** When this client lists the kagura-memory tools as deferred (a `ToolSearch` tool is present), load every tool this skill may call in one call before step 1:
 `ToolSearch(query="select:mcp__kagura-memory__remember_batch,mcp__kagura-memory__remember,mcp__kagura-memory__update_memory,mcp__kagura-memory__create_edge,mcp__kagura-memory__forget,mcp__kagura-memory__reference")`
-— add `mcp__kagura-memory__list_contexts` to that same list only when step 3 has no default context to skip to; `load_pinned` is loaded only when step 4a pins. `mcp__kagura-memory__` is the prefix the client gives the tools of the server entry named `kagura-memory`; when your deferred tool list shows another prefix for these tools, use that one. A client that lists the tools directly has no `ToolSearch`: skip this paragraph. Never call `ToolSearch` a second time for these tools.
+— add `mcp__kagura-memory__list_contexts` and `mcp__kagura-memory__get_context_info` to that same list only when step 3 has no default context to skip to; `load_pinned` is loaded only when step 4a pins. `mcp__kagura-memory__` is the prefix the client gives the tools of the server entry named `kagura-memory`; when your deferred tool list shows another prefix for these tools, use that one. A client that lists the tools directly has no `ToolSearch`: skip this paragraph. Never call `ToolSearch` a second time for these tools.
 
 ### 1. Identify related GitHub issues
 

@@ -25,6 +25,7 @@ from utils.time_trigger import normalize_trigger
 RECALL = "claude-skills/recall.md"
 REMEMBER = "claude-skills/remember.md"
 SESSION_SUMMARY = "claude-skills/session-summary.md"
+SESSION_START = "claude-skills/session-start.md"
 CODEX = "plugins/kagura-memory/skills/kagura-memory/SKILL.md"
 DEFAULT_CONTEXT = "Default context: <name>; omit context_id"
 
@@ -55,6 +56,15 @@ def test_default_context_skips_list_contexts_before_the_listing(relative, hook_m
     assert "skip this step" in step and "without `context_id`" in step
     # The skip comes first; list_contexts() is the "Otherwise" path.
     assert step.index(DEFAULT_CONTEXT) < step.index("Otherwise:") < step.index("list_contexts()")
+
+
+def test_session_start_skip_quotes_the_hook_prefix(hook_module):
+    """#2690: session-start's default-context skip accepts the hook line too."""
+    text = _flat(SESSION_START)
+    head = text.index("**When the connection has a default context**")
+    skip = text[head : text.index("Otherwise:", head)]
+    assert DEFAULT_CONTEXT in skip and "skip `list_contexts()`" in skip
+    assert f'"{hook_module.DEFAULT_CONTEXT_PREFIX.strip()}"' in skip
 
 
 def _codex(name: str) -> str:
@@ -136,6 +146,8 @@ def test_claude_skills_load_the_tools_in_one_toolsearch_call(relative):
     names = {n.removeprefix("mcp__kagura-memory__") for n in query[len("select:") :].split(",")}
     assert names == set(TOOL_LOADS[relative])
     assert "`mcp__kagura-memory__list_contexts`" in load
+    # The no-default path may also call get_context_info before the first write.
+    assert "`mcp__kagura-memory__get_context_info`" in load
     assert "Never call `ToolSearch` a second time" in load
     assert "has no `ToolSearch`: skip this paragraph" in load
 
