@@ -8,10 +8,11 @@ erasure's own calls as in ``test_account_erasure_integration``, the re-key's
 payload patch through the command module's ``erasure_scope_points`` /
 ``erase_point_author``.
 
-The database is shared by the whole session, so the re-key sees every
-request row other modules left; the assertions read this module's own rows,
-and the "nothing to do" checks hold for the whole table (every row is under B
-once an apply ran).
+The database is shared by the whole session and the re-key reads and rewrites
+the whole ``erasure_requests`` table, so a request row another module left
+behind would be counted, stamped and re-keyed here (#2686). Every test
+therefore starts from an empty table (``_empty_erasure_requests``) and the
+counts below are about the rows the test itself creates.
 """
 
 from __future__ import annotations
@@ -46,6 +47,22 @@ from utils.hashing import sha256_hex
 
 SALT_B = "rotated-private-salt-for-2598"
 COLLECTION = "kagura_memories"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _empty_erasure_requests(db_session: AsyncSession) -> None:
+    """Start the test with no erasure request in the table (#2686).
+
+    The stamp and the re-key pick up every request row, whichever module wrote
+    it. A request an earlier module left (its own cleanup missed it, or a new
+    module forgot one) would add to the counts, and the first apply here would
+    move it to the rotated salt, so a later test finds a request under a salt
+    it does not expect. A row found here is a leftover, never state another
+    test waits for; the vector-erasure scopes go with their request
+    (``ON DELETE CASCADE``).
+    """
+    await db_session.execute(delete(ErasureRequest))
+    await db_session.commit()
 
 
 @pytest.fixture
@@ -252,6 +269,33 @@ async def _erase(db: AsyncSession, world: dict[str, Any], sub: str) -> UUID:
     return request_id
 
 
+async def _bystander(db: AsyncSession, world: dict[str, Any]) -> UUID:
+    """A finished request stamped with another salt's fingerprint (B).
+
+    Rotating off B is the re-key's job; the stamp only marks requests that
+    carry no fingerprint, so it must leave this row exactly as it is.
+    """
+    tag = uuid4().hex[:8]
+    pseudonym = sha256_hex(f"bystander-{tag}", salt=SALT_B)
+    request = ErasureRequest(
+        user_id=pseudonym,
+        user_email_hash=sha256_hex(f"bystander-{tag}@example.com"),
+        initiated_by=pseudonym,
+        is_self_service=False,
+        reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+        status=STATUS_COMPLETE,
+        deleted_data_summary={
+            "postgres": {},
+            NOTE_PSEUDONYM_SALT_KEY: pseudonym_salt_fingerprint(SALT_B),
+        },
+    )
+    db.add(request)
+    await db.commit()
+    request_id = request.id
+    world["requests"].append(request_id)
+    return request_id
+
+
 async def _request(db: AsyncSession, request_id: UUID) -> ErasureRequest:
     return (
         await db.execute(
@@ -423,7 +467,11 @@ async def test_stamp_current_marks_the_unmarked_rows_and_rewrites_nothing(
 ) -> None:
     """A deployment that did not rotate: rows written before the fingerprint
     get it and nothing else changes; a re-key under the same salt then has
-    nothing to do."""
+    nothing to do.
+
+    The table holds only this test's requests (``_empty_erasure_requests``):
+    the one to stamp and a bystander under another salt, which the stamp must
+    leave alone."""
     salt_a = _audit_salt()
     request_id = await _erase(db_session, subject, subject["sub"])
     # what a row written before v0.141.0 looks like: no fingerprint
@@ -437,6 +485,7 @@ async def test_stamp_current_marks_the_unmarked_rows_and_rewrites_nothing(
         )
     )
     await db_session.commit()
+    bystander_id = await _bystander(db_session, subject)
     before = {table: await _snapshot(db_session, table) for table in _TABLES}
     vectors = _Vectors({subject["authored"]: sha256_hex(subject["sub"], salt=salt_a)})
     scope, points, author = vectors.patches()
@@ -444,9 +493,14 @@ async def test_stamp_current_marks_the_unmarked_rows_and_rewrites_nothing(
     with _salt(salt_a), scope, points, author:
         plan = await cli.rekey_erasure_pseudonyms(db_session, dry_run=True, stamp_current=True)
         applied = await cli.rekey_erasure_pseudonyms(db_session, dry_run=False, stamp_current=True)
-        assert plan.unmarked >= 1 and plan.stamped == applied.stamped == plan.unmarked
+        assert plan.unmarked == plan.stamped == applied.stamped == 1
+        assert plan.other_salt == applied.other_salt == 1  # the bystander: counted, not stamped
         assert applied.columns == {} and applied.payload is None
         after = {table: await _snapshot(db_session, table) for table in _TABLES}
+        # a request under another salt is the re-key's to rewrite: take it out,
+        # so the re-key below is about the rows the stamp covered
+        await db_session.execute(delete(ErasureRequest).where(ErasureRequest.id == bystander_id))
+        await db_session.commit()
         # the salt is the shipped default here: let the re-key run under it
         with patch.object(cli, "is_placeholder_secret", return_value=False):
             rekey = await cli.rekey_erasure_pseudonyms(db_session, dry_run=False)
@@ -467,6 +521,8 @@ async def test_stamp_current_marks_the_unmarked_rows_and_rewrites_nothing(
             k: v for k, v in old.items() if k != "deleted_data_summary"
         }
     assert requests[request_id]["deleted_data_summary"][NOTE_PSEUDONYM_SALT_KEY] == fingerprint
+    # the stamp left the other salt's request byte-identical, fingerprint included
+    assert requests.pop(bystander_id) == before["erasure_requests"][bystander_id]
     assert await _snapshot(db_session, "erasure_requests") == requests
 
 
