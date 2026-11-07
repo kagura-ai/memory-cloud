@@ -156,6 +156,20 @@ def test_codex_skill_carries_no_toolsearch_text():
     assert "ToolSearch" not in _flat(CODEX)
 
 
+def test_server_text_points_a_write_at_tags_normalize():
+    """#2690: the tool text and guide topics no longer send a write to list_tags first."""
+    from mcp_server.tools.guide import GUIDE_TOPICS
+
+    tools = {tool["name"]: tool for tool in get_tool_definitions()}
+    tags = tools["remember"]["inputSchema"]["properties"]["tags"]["description"]
+    assert "tags_normalize" in tags and "list_tags" not in tags
+    assert "remember" not in tools["list_tags"]["description"]
+    for topic in ("remember.layers", "list_tags.usage"):
+        text = GUIDE_TOPICS[topic]
+        assert "tags_normalize=true" in text
+        assert "BEFORE remember" not in text and "list_tags() first" not in text
+
+
 @pytest.mark.parametrize("relative", [REMEMBER, CODEX])
 def test_remember_stores_facts_as_stated(relative):
     text = _remember_rules(relative)
