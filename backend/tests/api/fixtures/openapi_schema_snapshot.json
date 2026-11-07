@@ -32664,6 +32664,12 @@
       "name": "resource-ingest"
     },
     {
+      "name": "resource-management"
+    },
+    {
+      "name": "resource-management-grants"
+    },
+    {
       "name": "resource-schema"
     },
     {

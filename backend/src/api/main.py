@@ -415,6 +415,8 @@ openapi_tags = [
     },
     {"name": "resources", "description": "Resource listing and event-history inspection"},
     {"name": "resource-tokens", "description": "Resource token management"},
+    {"name": "resource-management", "description": "Scoped integration management"},
+    {"name": "resource-management-grants", "description": "Owner-provisioned management grants"},
     {
         "name": "observation-credentials",
         "description": "Scoped read-only credentials for the observability API",
