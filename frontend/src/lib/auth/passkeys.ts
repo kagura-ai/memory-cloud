@@ -1,6 +1,8 @@
 import { apiClient } from "@/lib/api/base";
 
 export const passkeyPath = "/api/v1/auth/passkeys";
+/** Passkeys per account; mirrors `_LIMIT` in backend/src/api/routes/passkeys.py. */
+export const passkeyLimit = 10;
 export type Passkey = {
   id: string;
   name: string;

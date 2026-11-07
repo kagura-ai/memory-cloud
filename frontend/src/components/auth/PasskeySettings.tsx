@@ -4,10 +4,11 @@ import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { startAddAccount } from "@/hooks/useAccountSwitcher";
 import { useAuth } from "@/contexts/AuthContext";
-import { hasPasswordSignIn } from "@/lib/auth/auth";
-import { apiClient } from "@/lib/api/base";
+import { hasPasswordSignIn, requestPasswordSetup } from "@/lib/auth/auth";
+import { apiClient, ApiError } from "@/lib/api/base";
 import {
   managementProof,
+  passkeyLimit,
   passkeyPath,
   registerPasskey,
   type Passkey,
@@ -16,6 +17,9 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { InlineSpinner } from "@/components/common/LoadingState";
+
+type Operation = "add" | "remove" | "rename";
 
 export default function PasskeySettings({
   onAvailabilityChange,
@@ -23,7 +27,8 @@ export default function PasskeySettings({
   onAvailabilityChange: (hasPasskey: boolean) => void;
 }) {
   const t = useTranslations("passkeys");
-  const { user } = useAuth();
+  const tPassword = useTranslations("passwordSettings");
+  const { user, refetchUser } = useAuth();
   const [supported, setSupported] = useState(false);
   const [keys, setKeys] = useState<Passkey[]>([]);
   const [ready, setReady] = useState(false);
@@ -32,11 +37,16 @@ export default function PasskeySettings({
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [setupEmail, setSetupEmail] = useState<"idle" | "sending" | "sent">(
+    "idle",
+  );
   useEffect(() => {
     if (typeof PublicKeyCredential === "undefined" || !user?.id) return;
     setSupported(true);
     let current = true;
     setReady(false);
+    setLoadFailed(false);
     setPassword("");
     setKeys([]);
     apiClient
@@ -47,8 +57,8 @@ export default function PasskeySettings({
           setReady(true);
         }
       })
-      .catch((e) => {
-        if (current) setError(e.message);
+      .catch(() => {
+        if (current) setLoadFailed(true);
       });
     return () => {
       current = false;
@@ -63,17 +73,76 @@ export default function PasskeySettings({
   );
   const needsRemovalMethod = !hasPassword && keys.length === 1;
   if (!supported) return null;
-  async function change(operation: () => Promise<void>) {
+  // #2699: the card shows its own copy, never the server's prose (English, for
+  // API clients) or the browser's. What a 403 or 409 means depends on what was
+  // being done and with which proof, which only this card knows.
+  function errorText(e: unknown, operation: Operation): string {
+    if (!(e instanceof ApiError)) {
+      // WebAuthn rejects with a DOMException: a closed or timed-out prompt is
+      // NotAllowedError; a device that already holds a key for this account
+      // refuses to create another with InvalidStateError.
+      const name =
+        e instanceof DOMException || e instanceof Error ? e.name : "";
+      if (name === "NotAllowedError" || name === "AbortError") {
+        return t("errors.cancelled");
+      }
+      if (name === "InvalidStateError") return t("errors.alreadyRegistered");
+      return t("error");
+    }
+    if (e.status === 429) return t("errors.tooManyAttempts");
+    if (e.status === 404) return t("errors.changed");
+    if (operation === "rename") return t("error");
+    // An assertion that did not verify, or a challenge that expired.
+    if (e.status === 401) return t("errors.verifyFailed");
+    if (e.status === 403) {
+      if (password) return t("errors.wrongPassword");
+      // Removal never accepts a recent sign-in; adding does.
+      if (operation === "remove") return t("errors.removeProof");
+      return t(hasPassword ? "errors.passwordRequired" : "errors.signInAgain");
+    }
+    if (e.status === 409) {
+      // The other 409s (no other passkey, already registered, only sign-in
+      // method) mean the list on screen is out of date.
+      return operation === "add" && keys.length >= passkeyLimit
+        ? t("errors.limitReached")
+        : t("errors.changed");
+    }
+    return t("error");
+  }
+  async function change(operation: Operation, run: () => Promise<void>) {
     setBusy(true);
     setError("");
     try {
-      await operation();
+      await run();
       setEditing(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : t("error"));
+      setError(errorText(e, operation));
     } finally {
       setPassword("");
       setBusy(false);
+    }
+  }
+  // The same request as the Password section's button, sent from here so the
+  // link does something visible (#2699).
+  async function sendSetupEmail() {
+    setSetupEmail("sending");
+    setError("");
+    try {
+      await requestPasswordSetup();
+      setSetupEmail("sent");
+    } catch (e) {
+      setSetupEmail("idle");
+      const status = e instanceof ApiError ? e.status : 0;
+      if (status === 409) {
+        // A password was set elsewhere: refresh, and the card offers it.
+        await refetchUser();
+      } else {
+        setError(
+          status === 429
+            ? tPassword("tooManyRequests")
+            : tPassword("setupError"),
+        );
+      }
     }
   }
   return (
@@ -82,7 +151,9 @@ export default function PasskeySettings({
         <CardTitle>{t("title")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        {error && <p role="alert">{error}</p>}
+        {(error || loadFailed) && (
+          <p role="alert">{error || t("errors.load")}</p>
+        )}
         {keys.map((key) => (
           <div key={key.id} className="space-y-2 border-b pb-3">
             <p className="font-medium">{key.name}</p>
@@ -102,7 +173,7 @@ export default function PasskeySettings({
                 className="flex gap-2"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  void change(async () => {
+                  void change("rename", async () => {
                     const updated = await apiClient.patch<Passkey>(
                       passkeyPath + "/" + key.id,
                       { name },
@@ -149,7 +220,7 @@ export default function PasskeySettings({
                     needsRemovalMethod ? "passkey-removal-help" : undefined
                   }
                   onClick={() =>
-                    void change(async () => {
+                    void change("remove", async () => {
                       const proof = await managementProof(
                         password,
                         keys.length > 1,
@@ -192,11 +263,24 @@ export default function PasskeySettings({
                 {t("confirmGoogle")}
               </Button>
             )}
-            {canSetUpByEmail && (
-              <a href="#profile-password" className="underline">
-                {t("setupPassword")}
-              </a>
-            )}
+            {canSetUpByEmail &&
+              (setupEmail === "sent" ? (
+                <p role="status" className="text-sm">
+                  {tPassword("setupSent", { email: user?.email ?? "" })}
+                </p>
+              ) : (
+                <Button
+                  variant="link"
+                  className="h-auto p-0 underline"
+                  disabled={setupEmail === "sending"}
+                  onClick={() => void sendSetupEmail()}
+                >
+                  {setupEmail === "sending" && <InlineSpinner />}
+                  {setupEmail === "sending"
+                    ? tPassword("setupSending")
+                    : t("setupPassword")}
+                </Button>
+              ))}
           </div>
         )}
         {hasPassword && (
@@ -214,7 +298,7 @@ export default function PasskeySettings({
         <Button
           disabled={!ready || busy}
           onClick={() =>
-            void change(async () => {
+            void change("add", async () => {
               const added = await registerPasskey(
                 await managementProof(password, keys.length > 0),
               );
