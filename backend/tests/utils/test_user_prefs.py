@@ -8,11 +8,11 @@ hostile input into a 500.
 
 from __future__ import annotations
 
-import importlib.util
 import ast
-from pathlib import Path
+import importlib.util
 import re
 import zoneinfo
+from pathlib import Path
 
 import pytest
 

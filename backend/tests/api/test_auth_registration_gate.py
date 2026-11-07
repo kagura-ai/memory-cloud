@@ -77,7 +77,9 @@ async def test_plan_blocked_invitation_does_not_admit_a_new_address(db_session):
 
     email = f"invited-{uuid.uuid4()}@example.com"
     invite = await _workspace_with_invitation(db_session, email)
-    workspace = await db_session.scalar(select(Workspace).where(Workspace.id == invite.workspace_id))
+    workspace = await db_session.scalar(
+        select(Workspace).where(Workspace.id == invite.workspace_id)
+    )
     workspace.plan_name = "free"
     await db_session.flush()
 

@@ -73,7 +73,7 @@ credential IDs and WebAuthn binary fields travel in base64url form.
 | `POST /register/verify` | Submit the options' `challenge` and the browser's `credential`. Returns 201 with the registered key's ID, label, and timestamps. |
 | `POST /authenticate/options` | Anonymous. Returns assertion options and sets the browser ceremony cookie. |
 | `POST /authenticate/verify` | Anonymous. Submit `challenge`, `credential`, and optional `accepted_terms`, with cookies included. Success sets the session cookie and returns `redirect_url`. The optional `return_to` query uses the ordinary sign-in redirect rules. Five assertions per account per five minutes, counted separately from the password sign-in budget; a completed sign-in clears the account's password sign-in failures as well. |
-| `GET /` (prefix without trailing slash) | Lists the active account's IDs, labels and timestamps. |
+| `GET /` (prefix without trailing slash) | Lists the active account's IDs, labels and timestamps. `?include_limit=true` returns `{keys: [...], limit: N}` so clients can disable registration at the server's limit; the default remains an array. |
 | `PATCH /{key_id}` | Supply `name` (1–100 characters). |
 | `POST /proof/options` | Obtain assertion options for another registration, or use `?removing={key_id}` to prove a different key for removal. `?linking={provider}` proves a key for connecting a sign-in provider (`POST /api/v1/me/account/link-provider`). Submit the assertion as `assertion` alongside `challenge` on the management request. |
 | `DELETE /{key_id}` | Submit `current_password` or the scoped assertion proof. Returns 204. Removing the last available sign-in method returns 409. |
@@ -86,6 +86,20 @@ remove the key. Alternatively, register another passkey and confirm removal with
 
 A passkey assertion requires local user verification and signs in an existing account
 without a subsequent TOTP prompt. Account deletion cascades to all its credentials.
+
+Registration checks the account limit before password or passkey proof and again
+when persisting the credential. A limit refusal returns 409 with
+`details.reason="passkey_limit"` and `details.limit`. The two password setup
+buttons on Profile share their pending/sent state; a replacement link can be
+requested explicitly if the first link is lost.
+
+### Workspace invitation availability
+
+Pending invitations and token previews include `plan_blocked` when the workspace's
+current plan prevents acceptance. The invitation stays visible, with guidance to
+contact its owner. Such an invitation does not admit a new account while registration
+is closed, and does not suppress creation of a new user's personal workspace.
+Acceptance still checks the workspace's current plan at the time of the request.
 
 ## Memory APIs
 

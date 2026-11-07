@@ -113,7 +113,9 @@ class TestProfileTimezoneValidation:
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", ["Nope/Zone", "", "/etc/passwd", "../x", "Asia/Tokyo; x", "localtime", "Factory"])
+    @pytest.mark.parametrize(
+        "value", ["Nope/Zone", "", "/etc/passwd", "../x", "Asia/Tokyo; x", "localtime", "Factory"]
+    )
     async def test_invalid_timezone_is_a_400(self, value):
         user = _db_user()
         db = _mock_db(user)
@@ -121,7 +123,9 @@ class TestProfileTimezoneValidation:
         with pytest.raises(HTTPException) as exc_info:
             await update_user_profile(data=data, user=_user_session(), db=db)
         assert exc_info.value.status_code == 400
-        assert exc_info.value.detail == "Invalid timezone. Must be an IANA timezone (e.g., Asia/Tokyo)"
+        assert (
+            exc_info.value.detail == "Invalid timezone. Must be an IANA timezone (e.g., Asia/Tokyo)"
+        )
         assert user.timezone == "UTC"
         db.commit.assert_not_awaited()
 

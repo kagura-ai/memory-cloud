@@ -168,10 +168,21 @@ async def test_revoke_prints_count_including_noop(monkeypatch, capsys, count):
 
 def test_timezone_is_required():
     with pytest.raises(SystemExit):
-        cli._parse([
-            "mint", "--inviter", "admin", "--start", "2030-01-01",
-            "--days", "1", "--per-day", "1", "--label-prefix", "batch",
-        ])
+        cli._parse(
+            [
+                "mint",
+                "--inviter",
+                "admin",
+                "--start",
+                "2030-01-01",
+                "--days",
+                "1",
+                "--per-day",
+                "1",
+                "--label-prefix",
+                "batch",
+            ]
+        )
 
 
 @pytest.mark.parametrize("length,valid", [(89, True), (90, False)])
@@ -184,11 +195,14 @@ def test_prefix_boundary(length, valid):
             cli.dated_batches(parsed)
 
 
-@pytest.mark.parametrize("options", [
-    ("--start", "2029-12-01"),
-    ("--days", "60", "--valid-days", "7"),
-    ("--start", "2030-03-01"),
-])
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--start", "2029-12-01"),
+        ("--days", "60", "--valid-days", "7"),
+        ("--start", "2030-03-01"),
+    ],
+)
 async def test_whole_schedule_refused_before_database(options, monkeypatch, capsys):
     run = AsyncMock()
     monkeypatch.setattr(cli, "run_plan_apply", run)
@@ -198,9 +212,9 @@ async def test_whole_schedule_refused_before_database(options, monkeypatch, caps
 
 
 def test_exact_sixty_day_boundary_is_allowed():
-    batches = cli.dated_batches(args(
-        "--days", "60", "--valid-days", "1", "--timezone", "UTC", "--expiry-time", "00:00"
-    ))
+    batches = cli.dated_batches(
+        args("--days", "60", "--valid-days", "1", "--timezone", "UTC", "--expiry-time", "00:00")
+    )
     assert batches[-1][1] == datetime(2030, 3, 2)
 
 

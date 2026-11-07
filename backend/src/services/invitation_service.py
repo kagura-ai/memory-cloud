@@ -654,7 +654,7 @@ class InvitationService:
                         WorkspaceInvitation.expires_at.is_(None),
                         WorkspaceInvitation.expires_at > utcnow(),
                     ),
-                )
+                ),
             )
             .order_by(WorkspaceInvitation.created_at.desc())
         )

@@ -133,6 +133,7 @@ class TestPaging:
     def test_invalid_page(self, client, enabled, query):
         assert client.get(f"/api/v1/beta-invites/me?{query}").status_code == 422
 
+
 class TestKillSwitch:
     @pytest.mark.parametrize(("method", "path"), ROUTES)
     def test_every_route_404s_when_disabled(self, client, monkeypatch, method, path) -> None:

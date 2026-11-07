@@ -34,5 +34,6 @@ async def test_list_option_reports_server_limit_without_breaking_array_clients(m
     monkeypatch.setattr(pk, "_keys", AsyncMock(return_value=[]))
     assert await pk.list_passkeys({"user_id": "u"}, AsyncMock()) == []
     assert await pk.list_passkeys({"user_id": "u"}, AsyncMock(), include_limit=True) == {
-        "keys": [], "limit": 3,
+        "keys": [],
+        "limit": 3,
     }
