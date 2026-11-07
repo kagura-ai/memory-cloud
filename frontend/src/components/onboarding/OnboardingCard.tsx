@@ -35,7 +35,7 @@
 import Link from "next/link";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { advancePractice, claimPractice, onboardingScope, practiceContextName, readIntro, readProgress, updateProgress, writeIntro, type IntroStage } from "./progress";
+import { advancePractice, claimPractice, endPracticeProgress, onboardingScope, practiceContextName, readIntro, readProgress, updateProgress, writeIntro, type IntroStage } from "./progress";
 import { ChatStep, MCP_CONNECTION_HREF, PreferencesStep, PRIMARY_BUTTON } from "./IntroSteps";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { ApiError } from "@/lib/api/base";
@@ -67,7 +67,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { InlineSpinner } from "@/components/common/LoadingState";
 
-type Step = "context" | "memory" | "recall" | "done" | "recovery";
+type Step = "context" | "memory" | "recall" | "done" | "recovery" | "stopped";
 
 interface PracticeOptions {
   replay?: boolean;
@@ -99,6 +99,9 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   const [ready, setReady] = useState(false);
   const [visible, setVisible] = useState(false);
   const [hasKey, setHasKey] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [probing, setProbing] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   const [step, setStep] = useState<Step>("context");
   const [contextId, setContextId] = useState<string | null>(null);
@@ -148,9 +151,11 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
       return;
     }
     (async () => {
+      setProbing(true);
       try {
         const { contexts } = await getContexts();
         if (!alive) return;
+        setLoadFailed(false);
         // The server lists only this user's accessible contexts in the selected workspace.
         const sample = contexts.find(ctx => ctx.id === saved.contextId && ctx.is_private && !ctx.is_public && ctx.workspace_id === currentWorkspaceId && ctx.created_by === userId);
         if (saved.step === "creating" || saved.step === "saving" || (saved.contextId && !sample)) {
@@ -158,7 +163,11 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
           setVisible(true);
           return;
         }
-        if (contexts.length > 0 && !sample) return;
+        if (contexts.length > 0 && !sample) {
+          setVisible(false);
+          onClose?.();
+          return;
+        }
         if (sample) {
           setContextId(sample.id);
           setStep(saved.step === "recall" ? "recall" : "memory");
@@ -168,10 +177,12 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
         if (status) setHasKey(status.embedding_available !== false);
         setVisible(true);
       } catch {
-        // Best-effort: a failed probe just leaves the card hidden rather than
-        // risking a broken onboarding over the user's real dashboard.
+        if (alive) {
+          setLoadFailed(true);
+          setVisible(true);
+        }
       } finally {
-        if (alive) setReady(true);
+        if (alive) { setReady(true); setProbing(false); }
       }
     })();
 
@@ -180,7 +191,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
     };
     // byokEnabled is derived from systemFeatures, so listing systemFeatures
     // alone covers both.
-  }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures, scope, userId, replay, byokEnabled]);
+  }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures, scope, userId, replay, byokEnabled, loadAttempt, onClose]);
 
   const dismiss = useCallback(() => {
     void updateProgress(scope, current => ({ ...current, dismissed: true }));
@@ -189,7 +200,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   }, [scope, onClose]);
 
   const endPractice = async () => {
-    await updateProgress(scope, () => ({ step: "ended", dismissed: true }));
+    await endPracticeProgress(scope);
     setVisible(false);
     if (onClose) onClose();
     else router.push("/workspace/contexts");
@@ -213,9 +224,15 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
       setContextId(ctx.id);
       setStep("memory");
     } catch (error) {
-      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) await advancePractice(scope, claimed, { step: "context" });
-      else setStep("recovery");
-      setActionError(t("errors.createFailed"));
+      if (error instanceof ApiError && error.status === 409) {
+        await endPracticeProgress(scope);
+        setStep("stopped");
+        setActionError(t(error.details?.reason === "workspace_changed" ? "errors.workspaceChanged" : "errors.conflict"));
+      } else {
+        if (error instanceof ApiError && error.status >= 400 && error.status < 500) await advancePractice(scope, claimed, { step: "context" });
+        else setStep("recovery");
+        setActionError(t("errors.createFailed"));
+      }
     } finally {
       writing.current = false;
       setWritePending(false);
@@ -243,9 +260,15 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
       if (!await advancePractice(scope, claimed, { step: "recall", contextId })) { setStep("recovery"); return; }
       setStep("recall");
     } catch (error) {
-      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 409) await advancePractice(scope, claimed, { step: "memory", contextId });
-      else setStep("recovery");
-      setActionError(t("errors.saveFailed"));
+      if (error instanceof ApiError && error.status === 409) {
+        await endPracticeProgress(scope, contextId);
+        setStep("stopped");
+        setActionError(t(error.details?.reason === "workspace_changed" ? "errors.workspaceChanged" : "errors.conflict"));
+      } else {
+        if (error instanceof ApiError && error.status >= 400 && error.status < 500) await advancePractice(scope, claimed, { step: "memory", contextId });
+        else setStep("recovery");
+        setActionError(t("errors.saveFailed"));
+      }
     } finally {
       writing.current = false;
       setWritePending(false);
@@ -264,6 +287,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
         filters: { context_id: contextId },
       });
       setResults(res.results);
+      await endPracticeProgress(scope, contextId);
       setStep("done");
     } catch {
       setActionError(t("errors.recallFailed"));
@@ -303,7 +327,16 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
         </DialogHeader>
         <div>
           {actionError && <Alert variant="destructive" className="mb-4"><AlertDescription>{actionError}</AlertDescription></Alert>}
-        {step === "recovery" ? (
+        {loadFailed ? (
+          <Alert variant="destructive"><AlertDescription>
+            <p>{t("errors.loadFailed")}</p>
+            <Button variant="outline" disabled={probing} onClick={() => setLoadAttempt(attempt => attempt + 1)}>
+              {probing && <InlineSpinner />}{t("retryLoad")}
+            </Button>
+          </AlertDescription></Alert>
+        ) : step === "stopped" ? (
+          <Button variant="outline" onClick={endPractice}>{t("endPractice")}</Button>
+        ) : step === "recovery" ? (
           <Alert><AlertDescription>
             <p>{t("recovery")}</p>
             <Button variant="link" onClick={() => { dismiss(); router.push("/workspace/contexts"); }}>{t("openContexts")}</Button>

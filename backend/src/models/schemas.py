@@ -158,6 +158,10 @@ class RememberRequest(BaseModel):
     importance: float = Field(default=0.5, ge=0.0, le=1.0, description="重要度 (0.0-1.0)")
     tags: list[str] = Field(default_factory=list, description="タグ")
     context: dict | None = Field(default=None, description="コンテキスト情報")
+    private_workspace_id: UUID | None = Field(
+        default=None,
+        description="Require the caller's own private context in this selected workspace at commit time.",
+    )
 
     # Issue #886: orthogonal delivery attribute (NOT a memory type). 'always'
     # pins the memory to persistent on write (deterministic always-load); the

@@ -22,6 +22,7 @@ async def test_stale_create_rejected_before_quota_or_insertion():
             service=service,
         )
     assert error.value.status_code == 409
+    assert error.value.details["reason"] == "workspace_changed"
     assert not service.mock_calls
 
 

@@ -83,6 +83,7 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
 }));
 
 import { OnboardingCard } from "./OnboardingCard";
+import { ApiError } from "@/lib/api/base";
 
 function setWorkspace(role: string = "owner") {
   mockUseWorkspace.mockReturnValue({
@@ -120,6 +121,57 @@ afterEach(() => {
 });
 
 describe("OnboardingCard trigger gating", () => {
+  it("keeps a failed context lookup retryable from the practice launcher", async () => {
+    mockGetContexts.mockRejectedValueOnce(new Error("offline"));
+    render(<OnboardingCard replay />);
+    expect(await screen.findByText("errors.loadFailed")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "retryLoad" }));
+    expect(await screen.findByText("context.createButton")).toBeVisible();
+    expect(mockGetContexts).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes practice when a retry discovers existing non-practice contexts", async () => {
+    mockGetContexts.mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ contexts: [{ id: "existing" }] });
+    const onClose = vi.fn();
+    render(<OnboardingCard replay onClose={onClose} />);
+    fireEvent.click(await screen.findByRole("button", { name: "retryLoad" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(mockCreateContext).not.toHaveBeenCalled();
+  });
+
+  it.each(["create", "save"])("ends a definite %s conflict without uncertain-write recovery", async operation => {
+    const conflict = new ApiError({ status: 409, error: "RES-002", message: "English server prose", details: { reason: "workspace_changed" } });
+    if (operation === "save") {
+      window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "memory", contextId: "c1" }));
+      mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", workspace_id: "ws-1", is_private: true, created_by: "u1" }] });
+      mockRemember.mockRejectedValueOnce(conflict);
+    } else {
+      mockCreateContext.mockRejectedValueOnce(conflict);
+    }
+    render(<OnboardingCard replay />);
+    fireEvent.click(await screen.findByText(operation === "create" ? "context.createButton" : "memory.saveButton"));
+    expect(await screen.findByText("errors.workspaceChanged")).toBeVisible();
+    expect(screen.queryByText("recovery")).not.toBeInTheDocument();
+    expect(screen.queryByText("English server prose")).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem("onboarding:u1:ws-1:wizard")!).step).toBe("ended");
+  });
+
+  it("keeps completed practice terminal after its context is deleted", async () => {
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "recall", contextId: "c1" }));
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", workspace_id: "ws-1", is_private: true, created_by: "u1" }] });
+    mockRecall.mockResolvedValueOnce({ results: [] });
+    const first = render(<OnboardingCard replay />);
+    fireEvent.click(await screen.findByText("recall.searchButton"));
+    await screen.findByText("done.title");
+    first.unmount();
+    mockGetContexts.mockClear().mockResolvedValue({ contexts: [] });
+    const second = render(<OnboardingCard replay />);
+    await waitFor(() => expect(second.container).toBeEmptyDOMElement());
+    expect(mockGetContexts).not.toHaveBeenCalled();
+    expect(mockCreateContext).not.toHaveBeenCalled();
+  });
   it("shows the create-context step for an owner with zero contexts + a key", async () => {
     render(<OnboardingCard />);
     await waitFor(() =>

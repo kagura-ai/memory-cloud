@@ -1305,7 +1305,7 @@ class MemoryService:
 
         message = "The selected workspace or private context changed."
         if context_id is None or str(selected) != str(expected):
-            raise ConflictError(message)
+            raise ConflictError(message, reason="workspace_changed")
         query = (
             select(Context.id)
             .join(WorkspaceMember, WorkspaceMember.workspace_id == Context.workspace_id)
@@ -1328,7 +1328,7 @@ class MemoryService:
         if lock:
             query = query.with_for_update(read=True, of=Context)
         if await self.db.scalar(query) is None:
-            raise ConflictError(message)
+            raise ConflictError(message, reason="workspace_changed")
 
     async def _prepare_remember(
         self,

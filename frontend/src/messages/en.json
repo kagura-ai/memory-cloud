@@ -92,6 +92,7 @@
     "currentlyUnavailable": "This feature is currently unavailable."
   },
   "onboarding": {
+    "retryLoad": "Try loading again",
     "recovery": "The last practice write could not be confirmed. Review your contexts to see what was saved, or continue with the read-only guide.",
     "openContexts": "Review my contexts",
     "endPractice": "Continue with the read-only guide",
@@ -166,6 +167,9 @@
     },
     "errors": {
       "createFailed": "Couldn't create the context. Please try again.",
+      "loadFailed": "Couldn't check your practice contexts. Try loading again.",
+      "workspaceChanged": "The workspace or private context changed. This practice has ended. Continue from the contexts list.",
+      "conflict": "The server declined this practice operation. This practice has ended; continue with the read-only guide.",
       "saveFailed": "Couldn't save the memory. Please try again.",
       "recallFailed": "Couldn't run recall. Please try again."
     }
