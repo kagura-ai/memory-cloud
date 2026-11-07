@@ -612,7 +612,7 @@ class InvitationService:
         return count
 
     async def get_pending_invitations_for_email(
-        self, email: str | None
+        self, email: str | None, *, include_plan_blocked: bool = False
     ) -> list[WorkspaceInvitation]:
         """Get pending invitations addressed to an email address.
 
@@ -625,6 +625,9 @@ class InvitationService:
         Args:
             email: User email address (case-insensitive). Empty or None
                 returns an empty list without a query.
+            include_plan_blocked: Include invitations the recipient cannot accept
+                on the workspace's current plan, for display only. Registration
+                and personal-workspace creation use the default eligible set.
 
         Returns:
             List of pending, non-expired invitations sorted by creation date (newest first)
@@ -634,9 +637,13 @@ class InvitationService:
 
         from sqlalchemy import and_, or_
 
+        from config import plan_tiers
+
         stmt = (
             select(WorkspaceInvitation)
+            .join(Workspace, Workspace.id == WorkspaceInvitation.workspace_id)
             .where(
+                Workspace.deleted_at.is_(None),
                 and_(
                     # Addressed to this email (case-insensitive)
                     WorkspaceInvitation.addressed_to(email),
@@ -652,9 +659,15 @@ class InvitationService:
             .order_by(WorkspaceInvitation.created_at.desc())
         )
 
+        if not include_plan_blocked:
+            eligible_plans = [
+                name for name in plan_tiers.PLAN_TIERS if has_feature(name, "team_invitations")
+            ]
+            stmt = stmt.where(Workspace.plan_name.in_(eligible_plans))
+
         result = await self.db.execute(stmt)
         invitations = result.scalars().all()
 
-        logger.info(f"Found {len(invitations)} pending invitations for email {email}")
+        logger.info("pending_invitations_found", count=len(invitations))
 
         return list(invitations)

@@ -2694,6 +2694,11 @@
     "networkError": "Network error"
   },
   "invitation": {
+    "planBlocked": {
+      "title": "This invitation is currently unavailable",
+      "message": "The plan for {workspace} does not currently allow new members. Ask the workspace owner to enable team invitations, then try again.",
+      "retry": "Check again"
+    },
     "status": {
       "loading": "Checking invitation...",
       "accepting": "Accepting invitation..."

@@ -2437,6 +2437,9 @@ class PendingInvitationItem(TZAwareBaseModel):
     id: str = Field(..., pattern=public_id_pattern(PublicIdPrefix.INVITATION))  # #1008: winv_...
     workspace_id: str
     workspace_name: str
+    plan_blocked: bool = Field(
+        default=False, description="The workspace plan currently prevents accepting this invitation"
+    )
     role: str
     invited_by: str
     expires_at: datetime | None

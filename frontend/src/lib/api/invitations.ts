@@ -43,6 +43,7 @@ export interface AcceptInvitationResponse {
 
 export interface InvitationInfo {
   workspace_name: string;
+  plan_blocked?: boolean;
   role: string;
   expires_at: string | null;
   email_restricted: boolean;
@@ -118,6 +119,7 @@ export async function getInvitationInfo(
  * Issue #179: In-app invitation notifications
  */
 export interface PendingInvitation {
+  plan_blocked?: boolean;
   id: string; // Public id: "winv_..." (#1008)
   workspace_id: string;
   workspace_name: string;
