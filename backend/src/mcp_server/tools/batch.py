@@ -59,6 +59,7 @@ from services.memory_service import (
 )
 from services.permission_service import VIEWER_READ_ONLY_REASON
 from services.plan_headroom import MEMORIES, drop_quota_reading
+from utils.event_dates import event_write_fields
 from utils.exceptions import (
     AuthorizationError,
     ContentSizeExceededError,
@@ -183,7 +184,8 @@ def _success_item(
 ) -> dict[str, Any]:
     """One written item; ``fitted`` reports a summary cut and mutes the lint it moots.
 
-    #2689: ``observed_at`` + ``observed_weekday`` when the stored memory has one.
+    #2689: ``observed_at`` + ``observed_weekday`` when the stored memory has one;
+    the event dates (or ``event_unresolved``) the same way.
     """
     fitted = fitted or {}
     return {
@@ -191,6 +193,7 @@ def _success_item(
         "memory_id": str(result.memory_id),
         "scope": result.scope,
         **observed_fields(getattr(result, "observed_at", None)),
+        **event_write_fields(result),
         **_persistence_response_field(result.persistence, verbose=verbose),
         **_lint_response_field(lint_after_fit(result.lint, fitted)),
         **fitted,

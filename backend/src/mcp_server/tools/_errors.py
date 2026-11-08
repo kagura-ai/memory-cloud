@@ -39,6 +39,7 @@ from sqlalchemy import exc as sa_exc
 
 from mcp_server.tools._helpers import ToolErrorContent, _ContextNotFoundError, _error_response
 from utils.db_helpers import is_deadlock
+from utils.event_dates import EventDateValidationError
 from utils.exceptions import (
     AdminProtectionError,
     AuthorizationError,
@@ -98,6 +99,7 @@ _CALLER_VALUE_ERRORS: tuple[type[ValueError], ...] = (
     LocationValidationError,
     ToolTriggerValidationError,
     ObservedAtValidationError,
+    EventDateValidationError,
 )
 
 # Envelope keys a forwarded ``details`` block must not overwrite.

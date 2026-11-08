@@ -123,6 +123,7 @@ from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA, uncondition
 from services.supersede_fold import fold_linked_versions, fold_links, fold_nodes
 from services.write_provenance import current_provenance
 from utils.datetime import to_naive_utc, to_utc_iso, utcnow
+from utils.event_dates import event_response_kwargs
 from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
@@ -907,6 +908,28 @@ class MemoryService:
             raise ValueError(f"invalid details.observed_at: {exc}") from exc
 
     @staticmethod
+    def _apply_event_dates(details: dict | None) -> dict | None:
+        """Resolve ``details.event_phrase`` into ``event_start`` / ``event_end``.
+
+        ``_apply_observed_at``'s sibling, run right after it so the phrase is
+        counted from the stored ``observed_at`` day. Fires only when one of
+        the event keys is present, on caller-supplied details only; a phrase
+        the rule set does not cover leaves the dates absent (the server never
+        guesses). An explicit pair without a phrase is validated as calendar
+        dates and kept.
+
+        Raises:
+            ValueError: ``invalid details.event_phrase: ...`` (the established
+                "bad request" signal inside MemoryService).
+        """
+        from utils.event_dates import EventDateValidationError, normalize_event_dates
+
+        try:
+            return normalize_event_dates(details)
+        except EventDateValidationError as exc:
+            raise ValueError(f"invalid details.event_phrase: {exc}") from exc
+
+    @staticmethod
     def _fold_observed_at(
         request_details: dict | None, stored_details: Any, observed_at: str | None
     ) -> dict | None:
@@ -1499,6 +1522,9 @@ class MemoryService:
         # WHEN axis (#2330): validate/normalize details.observed_at (orthogonal
         # gate, any type).
         request.details = self._apply_observed_at(request.details)
+        # A relative event date stated in the material (details.event_phrase)
+        # is resolved from that observed_at into event_start / event_end.
+        request.details = self._apply_event_dates(request.details)
         # Tool guardrails: validate/normalize details.tool_trigger (orthogonal
         # gate, any type). Marking a memory as a guardrail is a protection
         # change every member's client hook acts on, so it also needs context
@@ -1630,6 +1656,7 @@ class MemoryService:
             scope=memory.scope,
             version=memory.version,  # #2043
             observed_at=observed_at_from_details(memory.details),  # #2689
+            **event_response_kwargs(memory.details),  # the resolved event dates
             # #1505: say what 'working' means for durability instead of
             # leaving the caller to guess.
             persistence=persistence_info(
@@ -1853,6 +1880,7 @@ class MemoryService:
             scope=memory.scope,
             version=memory.version,  # #2043
             observed_at=observed_at_from_details(memory.details),  # #2689
+            **event_response_kwargs(memory.details),
             persistence=persistence_info(
                 memory.scope,
                 pinned=memory.is_pinned,
@@ -2310,6 +2338,7 @@ class MemoryService:
             scope=memory.scope,
             version=memory.version,  # #2043
             observed_at=observed_at_from_details(memory.details),  # #2689
+            **event_response_kwargs(memory.details),  # the event dates after the edit
             persistence=persistence_info(  # #1505
                 memory.scope,
                 pinned=memory.is_pinned,
@@ -2761,6 +2790,9 @@ class MemoryService:
         if request.details is not None:
             effective_details = self._apply_location(effective_details)
             effective_details = self._apply_observed_at(effective_details)
+            # details are replaced wholesale, so a carried event_phrase is
+            # resolved again against the details' observed_at.
+            effective_details = self._apply_event_dates(effective_details)
             # Tool guardrails: same caller-supplied-only rule (the role gate
             # ran in _update_in_place before any field was touched).
             effective_details = self._apply_tool_trigger(effective_details)
@@ -2978,6 +3010,7 @@ class MemoryService:
         if "details" in provided_fields:
             effective_details = self._apply_location(effective_details)
             effective_details = self._apply_observed_at(effective_details)
+            effective_details = self._apply_event_dates(effective_details)
             # Tool guardrails: same caller-supplied-only rule (the role gate
             # ran in patch_memory before any field was touched).
             effective_details = self._apply_tool_trigger(effective_details)
@@ -3457,6 +3490,9 @@ class MemoryService:
             scope=result.scope,
             version=result.version,  # #2043: the new row's version (1)
             observed_at=result.observed_at,  # #2689: the new row's
+            event_start=result.event_start,
+            event_end=result.event_end,
+            event_phrase=result.event_phrase,
             # #1505/#1519: remember() already built the block from the row it
             # actually wrote (pinned flag included) — reuse it like lint below.
             persistence=result.persistence,

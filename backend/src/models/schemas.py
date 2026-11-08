@@ -343,6 +343,13 @@ class RememberResponse(BaseModel):
     # MCP write responses, which echo it with its weekday. ``exclude=True``:
     # REST /remember serialises this model, and its response stays as it was.
     observed_at: str | None = Field(default=None, exclude=True)
+    # The stored event dates (details.event_start / event_end, resolved from
+    # details.event_phrase) and the phrase itself, for the MCP write responses:
+    # the dates with their weekday, or event_unresolved when the phrase did not
+    # resolve. Excluded from REST like observed_at.
+    event_start: str | None = Field(default=None, exclude=True)
+    event_end: str | None = Field(default=None, exclude=True)
+    event_phrase: str | None = Field(default=None, exclude=True)
 
 
 class RecallRequest(BaseModel):
@@ -1509,6 +1516,10 @@ class UpdateMemoryResponse(BaseModel):
     # #2689: the memory's stored details.observed_at after the call (None when
     # unset), as on RememberResponse.
     observed_at: str | None = Field(default=None, exclude=True)
+    # The event dates after the call, as on RememberResponse.
+    event_start: str | None = Field(default=None, exclude=True)
+    event_end: str | None = Field(default=None, exclude=True)
+    event_phrase: str | None = Field(default=None, exclude=True)
 
 
 class PatchMemoryRequest(BaseModel):

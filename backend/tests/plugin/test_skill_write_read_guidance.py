@@ -323,44 +323,68 @@ def test_remember_batch_guidance_splits_and_falls_back(relative):
     assert "one `remember` per item" in text
 
 
-@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
-def test_remember_resolves_relative_dates_into_the_content(relative):
-    """#2465: ``observed_at`` stays the material's date, not the resolved one."""
-    text = _remember_rules(relative)
-    assert "Resolve relative dates." in text
-    assert "`observed_at` stays the material's date" in text
-    assert 'the one exception to "as it states it"' in text
-    assert "With no material date, leave the phrase as stated." in text
+RELATIVE_DATE_RULES = (
+    "Relative dates.",
+    "pass the phrase as stated in `details.event_phrase`",
+    "do not compute the dates yourself",
+    '"last weekend" is the Saturday–Sunday just before the material date',
+    "on a Saturday or Sunday, the weekend before the current one",
+    "returns `event_start`, `event_end` and `event_weekday`",
+    'written "last weekend (2024-03-09–10)"',
+    '`event_unresolved: "unknown_phrase"`',
+    '`event_unresolved: "no_observed_at"`',
+    "`observed_at` stays the material's date",
+    "With no material date, leave the phrase as stated",
+    "the server never counts from the time you write",
+)
 
 
 @pytest.mark.parametrize("relative", [REMEMBER, CODEX])
-def test_remember_anchors_relative_dates_on_the_material_weekday(relative):
-    """#2689: the weekday of the material date is written, and the server's checks it."""
+@pytest.mark.parametrize("rule", RELATIVE_DATE_RULES)
+def test_remember_passes_relative_dates_as_event_phrase(relative, rule):
+    """The server resolves ``details.event_phrase``; the writer no longer computes dates."""
     section = _section(
-        _remember_rules(relative), "Resolve relative dates.", "Store what the material states"
+        _remember_rules(relative), "Relative dates.", "Store what the material states"
     )
-    assert '"last weekend" is the Saturday–Sunday just before the material date' in section
-    assert "on a Saturday or Sunday, the weekend before the current one" in section
-    assert '"N weekends ago" counts back from there' in section
-    # The worked example is anchored on a Monday.
-    assert "material date Mon 2024-03-11" in section
-    assert "last weekend 2024-03-09–10" in section
-    assert "two weekends ago 2024-03-02–03" in section
-    assert '"last weekend (2024-03-09–10; material date Mon 2024-03-11)"' in section
-    # The server's weekday is the check.
-    assert "`observed_weekday`" in section
-    assert "`update_memory`" in section
+    assert rule in section
 
 
-def test_the_worked_example_dates_are_right():
-    from datetime import date, timedelta
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_remember_no_longer_asks_the_writer_to_resolve_dates(relative):
+    text = _remember_rules(relative)
+    assert "Resolve relative dates." not in text
+    assert "recompute the dates" not in text
 
-    material = date(2024, 3, 11)
-    assert material.weekday() == 0  # a Monday
-    saturday = material - timedelta(days=material.weekday() + 2)
-    assert (saturday, saturday + timedelta(days=1)) == (date(2024, 3, 9), date(2024, 3, 10))
-    two_ago = saturday - timedelta(days=7)
-    assert (two_ago, two_ago + timedelta(days=1)) == (date(2024, 3, 2), date(2024, 3, 3))
+
+def test_the_worked_example_matches_the_resolver():
+    from datetime import date
+
+    from utils.event_dates import resolve_event_phrase
+
+    assert date(2024, 3, 11).weekday() == 0  # a Monday
+    assert resolve_event_phrase("last weekend", date(2024, 3, 11)) == (
+        date(2024, 3, 9),
+        date(2024, 3, 10),
+    )
+
+
+@pytest.mark.parametrize("relative", [SESSION_SUMMARY, CODEX])
+def test_session_summary_passes_relative_dates_as_event_phrase(relative):
+    """session-summary writes dated memories too: the same rule, one line."""
+    text = _codex("Session Summary") if relative == CODEX else _write_rules(relative)
+    assert "`details.event_phrase` as stated" in text
+    assert "do not compute it" in text
+    assert "returns `event_start` / `event_end`" in text
+    assert "resolve relative dates" not in text
+
+
+@pytest.mark.parametrize("name", ["remember", "remember_batch", "update_memory"])
+def test_write_tool_descriptions_carry_the_relative_date_rule(name):
+    """Writers call the tools without the skills: the description holds the rule."""
+    tools = {tool["name"]: tool for tool in get_tool_definitions()}
+    description = tools[name]["description"]
+    assert "details.event_phrase" in description
+    assert "do not compute dates" in description
 
 
 @pytest.mark.parametrize("relative", [REMEMBER, CODEX])
