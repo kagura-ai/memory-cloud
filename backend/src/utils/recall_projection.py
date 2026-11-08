@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from utils.datetime import to_utc_iso
+from utils.event_dates import event_fields
 from utils.observed_at import observed_fields
 
 # #2002: recall's ``verbosity`` values. "compact" is the default — a cheap
@@ -142,8 +143,11 @@ def _add_observed_at(item: dict[str, Any], r: Any) -> None:
     """#2330: when the fact held (a date or a UTC datetime); absent when unset.
 
     #2689: ``observed_weekday`` (the stored day's ``Mon`` … ``Sun``) follows it.
+    Then the event's own days, when the memory has them: ``event_start``,
+    ``event_end`` and ``event_weekday`` (of ``event_start``).
     """
     item.update(observed_fields(getattr(r, "observed_at", None)))
+    item.update(event_fields(getattr(r, "event_start", None), getattr(r, "event_end", None)))
 
 
 def _add_recall_annotations(item: dict[str, Any], r: Any) -> None:

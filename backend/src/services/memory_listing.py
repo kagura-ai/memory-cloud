@@ -45,6 +45,7 @@ from services.agent_binding_service import binding_memory_sql_predicate
 from services.identity_link_service import owned_by
 from services.write_provenance import SessionPrincipal, principal_predicate
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
+from utils.event_dates import parse_event_bound
 from utils.observed_at import parse_observed_bound
 from utils.tag_normalize import mechanical_variant_key
 
@@ -54,7 +55,11 @@ ORDER_COLUMNS = {
     "importance": Memory.importance,
     # #2330: the event time; rows without one go last in both directions.
     "observed_at": Memory.observed_at,
+    # The day the event began (details.event_start); rows without one go last.
+    "event_start": Memory.event_start,
 }
+# The sort keys that are NULL on some rows: NULLS LAST in both directions.
+_NULLABLE_ORDER = frozenset({"observed_at", "event_start"})
 DIRECTIONS = ("asc", "desc")
 MAX_LIMIT = 100
 DEFAULT_LIMIT = 50
@@ -87,6 +92,14 @@ _OBSERVED_FILTERS = {
     "observed_after": (Memory.observed_at, ">="),
     "observed_before": (Memory.observed_at, "<"),
 }
+# The event's own days (details.event_start / event_end, ``YYYY-MM-DD``): a
+# row matches when its [event_start, event_end] overlaps [after, before) —
+# event_end >= after AND event_start < before. A row without an event date
+# never matches.
+_EVENT_FILTERS = {
+    "event_after": (Memory.event_end, ">="),
+    "event_before": (Memory.event_start, "<"),
+}
 _KNOWN_FILTERS = {
     "type",
     "scope",
@@ -100,6 +113,7 @@ _KNOWN_FILTERS = {
     "trust_tier",
     *_TIME_FILTERS,
     *_OBSERVED_FILTERS,
+    *_EVENT_FILTERS,
 }
 _RECALL_ONLY = {"near", "within"}
 
@@ -224,7 +238,10 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
     importance {gte, lte, gt, lt}; created_/updated_/observed_ after/before (ISO
     8601, after inclusive, before exclusive; an observed_* date means the start
     of that day, UTC, and a memory without an event time never matches);
-    source_uri_prefix; trust_tier='trusted';
+    event_after / event_before (the event's own days: a memory matches when its
+    event_start..event_end overlaps the window, after inclusive, before
+    exclusive; a datetime bound is reduced to its UTC day; a memory without an
+    event date never matches); source_uri_prefix; trust_tier='trusted';
     ``details.<key>`` equality for a scalar value (see ``_details_equals``: same
     JSON type, and for a number the same spelling). ``near`` / ``within`` are
     recall_nearby's job and are refused by name. ``updated_after`` / ``updated_before`` read the
@@ -287,6 +304,9 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
         elif key in _OBSERVED_FILTERS:
             column, op = _OBSERVED_FILTERS[key]
             out.append(column.op(op)(parse_observed_bound(value, key)[0]))
+        elif key in _EVENT_FILTERS:
+            column, op = _EVENT_FILTERS[key]
+            out.append(column.op(op)(parse_event_bound(value, key)))
         elif key == "source_uri_prefix":
             if not isinstance(value, str) or not value:
                 raise ValueError("source_uri_prefix must be a non-empty string")
@@ -349,7 +369,7 @@ def recall_row_predicates(filters: Mapping[str, Any] | None) -> list[ColumnEleme
     apart, because the resolver's pool exemption must never relax it),
     ``analysis_cluster`` (a pool membership, not a row property), ``near`` /
     ``within`` / ``score_threshold`` / ``client`` (query shape), and the time
-    windows (``created_*``, ``updated_*``, ``observed_*``) — a target is older
+    windows (``created_*``, ``updated_*``, ``observed_*``, ``event_*``) — a target is older
     than its source by construction, so ``created_after`` would drop almost
     every suggestion.
 
@@ -470,8 +490,8 @@ async def list_memories(
     # database round trip; other callers may still pass the raw dict.
     where.extend(predicates if predicates is not None else compile_memory_filters(filters))
     column = ORDER_COLUMNS[order_by]
-    if order_by == "observed_at":
-        # #2330: the only nullable sort key — NULLS LAST both ways (Postgres
+    if order_by in _NULLABLE_ORDER:
+        # #2330: the nullable sort keys — NULLS LAST both ways (Postgres
         # puts NULLs first on DESC by default).
         order = (
             (column.asc().nulls_last(), Memory.id.asc())

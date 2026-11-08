@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
-from services.memory_service import MemoryService
+from services.memory_service import MemoryService, build_memory_point, metadata_payload_patch
 from tests.services.test_observed_at_write_response import (
     _remember,
     _stored_memory,
@@ -171,6 +172,59 @@ class TestUpdateInPlace:
         memory = _stored_memory(dict(_STORED))
         result = await _update_in_place(service, memory, details={"observed_at": "2024-03-11"})
         assert (result.event_start, result.event_end, result.event_phrase) == (None, None, None)
+
+
+def _payload_request(details):
+    return SimpleNamespace(tags=None, importance=None, type=None, details=details)
+
+
+class TestPayloadSync:
+    """The search payload carries the event days (filters.event_after / event_before)."""
+
+    def test_a_details_write_sends_the_days_as_utc_midnights(self):
+        details = {"observed_at": "2024-03-11", **_STORED}
+        updates, delete_keys = metadata_payload_patch(_payload_request(details), None, details)
+        assert updates["event_start"] == "2024-03-09T00:00:00Z"
+        assert updates["event_end"] == "2024-03-10T00:00:00Z"
+        assert not {"event_start", "event_end"} & set(delete_keys)
+
+    def test_details_without_them_clear_both(self):
+        updates, delete_keys = metadata_payload_patch(
+            _payload_request({"event_phrase": "soon"}), None, {"event_phrase": "soon"}
+        )
+        assert not {"event_start", "event_end"} & set(updates)
+        assert {"event_start", "event_end"} <= set(delete_keys)
+
+    def test_no_details_write_leaves_them(self):
+        updates, delete_keys = metadata_payload_patch(_payload_request(None), None, None)
+        assert not {"event_start", "event_end"} & (set(updates) | set(delete_keys))
+
+    def test_the_point_payload_reads_the_generated_columns(self):
+        memory = SimpleNamespace(
+            summary="went hiking with the team",
+            context_summary=None,
+            content="last weekend",
+            user_id="u",
+            type="event",
+            importance=0.5,
+            tags=[],
+            scope="working",
+            client="mcp",
+            created_at=None,
+            updated_at=None,
+            context=None,
+            location_lat=None,
+            location_lon=None,
+            observed_at="2024-03-11T00:00:00Z",
+            event_start="2024-03-09",
+            event_end="2024-03-10",
+        )
+        payload, _, _ = build_memory_point(memory)  # type: ignore[arg-type]
+        assert payload["event_start"] == "2024-03-09T00:00:00Z"
+        assert payload["event_end"] == "2024-03-10T00:00:00Z"
+        memory.event_start = memory.event_end = None
+        payload, _, _ = build_memory_point(memory)  # type: ignore[arg-type]
+        assert "event_start" not in payload and "event_end" not in payload
 
 
 def test_every_write_response_construction_carries_the_event_dates():

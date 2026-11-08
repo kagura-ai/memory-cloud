@@ -162,6 +162,11 @@ BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS = frozenset(
         # UTC datetime from the memory's own details) — a scalar, no other
         # memory's text.
         "observed_at",
+        # Added on purpose: the event's own days (details.event_start /
+        # event_end, YYYY-MM-DD) — two scalars; the weekday stays out like
+        # observed_weekday.
+        "event_start",
+        "event_end",
     }
 )
 # Present on every row, whatever the memory holds.
@@ -178,6 +183,8 @@ class TestBootstrapRecallRowKeyContract:
             tags=["auth", "jwt"],
             updated_at=datetime(2026, 8, 20, 12, 0, tzinfo=UTC),
             observed_at="2026-08-19",
+            event_start="2026-08-15",
+            event_end="2026-08-16",
             superseded_by=uuid.uuid4(),
             contradicts=[uuid.uuid4()],
             supersede_candidate=SupersedeCandidate(
@@ -215,6 +222,23 @@ async def test_the_observed_weekday_stays_out_of_a_bootstrap_row():
     assert row["observed_at"] == "2024-03-11"
     assert "observed_weekday" not in row
     assert row == {k: v for k, v in recall_row.items() if k != "observed_weekday"}
+
+
+@pytest.mark.asyncio
+async def test_the_event_weekday_stays_out_of_a_bootstrap_row():
+    """The event's own days ride into the bootstrap row; their weekday, like
+    ``observed_weekday``, is recall-only (the REST bootstrap stays as it was)."""
+    memory = _memory(observed_at="2024-03-11", event_start="2024-03-09", event_end="2024-03-10")
+
+    row = await _bootstrap_row(memory)
+    recall_row = _recall_tool_row(memory, "full")
+
+    assert recall_row["event_weekday"] == "Sat"
+    assert (row["event_start"], row["event_end"]) == ("2024-03-09", "2024-03-10")
+    assert "event_weekday" not in row and "observed_weekday" not in row
+    assert row == {
+        k: v for k, v in recall_row.items() if k not in ("observed_weekday", "event_weekday")
+    }
 
 
 @pytest.mark.asyncio

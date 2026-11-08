@@ -553,6 +553,11 @@ class MemoryResponse(TZAwareBaseModel):
     updated_at: datetime | None = None
     # #2330: when the fact held (details.observed_at: a date or a UTC datetime).
     observed_at: str | None = None
+    # The event's own days (details.event_start / event_end, YYYY-MM-DD); the
+    # MCP rows carry them with event_weekday. Excluded from REST, whose rows
+    # stay as they were.
+    event_start: str | None = Field(default=None, exclude=True)
+    event_end: str | None = Field(default=None, exclude=True)
     client: str
     tags: list[str]
     context: dict | None
@@ -956,6 +961,10 @@ class ReferenceResponse(TZAwareBaseModel):
     # datetime); None when the details carry none. A historical version shows
     # its own value.
     observed_at: str | None = None
+    # The event's own days at that version (details.event_start / event_end);
+    # the MCP reference carries them with event_weekday, REST stays as it was.
+    event_start: str | None = Field(default=None, exclude=True)
+    event_end: str | None = Field(default=None, exclude=True)
     # #2043: the version read here — the expected_version of an edit based on it.
     version: int
     # #2043: true when ``version`` is an earlier version (reference with

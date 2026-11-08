@@ -10,21 +10,33 @@ the response readers.
 
 from __future__ import annotations
 
+import importlib.util
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from models.memory import EVENT_END_SQL, EVENT_START_SQL, Memory
 from utils.event_dates import (
+    EVENT_DATE_RE,
     MAX_PHRASE_CHARS,
     EventDateValidationError,
     event_dates_from_details,
     event_fields,
+    event_payload_value,
+    event_payload_values,
     event_response_kwargs,
+    event_row_kwargs,
     event_weekday,
     event_write_fields,
     normalize_event_dates,
+    parse_event_bound,
     resolve_event_phrase,
+)
+
+_MIGRATION = (
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "f31_2724_event_dates.py"
 )
 
 # A Friday nine days into the year: every "last ..." crosses into 2025.
@@ -407,6 +419,10 @@ class TestReaders:
             "event_end": None,
             "event_phrase": "soon",
         }
+        assert event_row_kwargs({"event_start": "2024-03-09", "event_phrase": "x"}) == {
+            "event_start": "2024-03-09",
+            "event_end": "2024-03-09",
+        }
 
     def test_weekday(self):
         assert event_weekday("2024-03-09") == "Sat"
@@ -455,3 +471,76 @@ class TestReaders:
         )
         assert event_write_fields(bare) == {}
         assert event_write_fields(object()) == {}
+
+
+# ---------------------------------------------------------- filters, payload
+
+
+class TestBounds:
+    def test_a_date_is_the_day(self):
+        assert parse_event_bound("2024-03-09", "event_after") == "2024-03-09"
+        assert parse_event_bound("2024-03-09", "event_before") == "2024-03-09"
+
+    def test_a_datetime_is_reduced_to_its_utc_day(self):
+        # after: the day itself (an event ending that day still overlaps).
+        assert parse_event_bound("2024-03-09T12:00:00Z", "event_after") == "2024-03-09"
+        assert parse_event_bound("2024-03-10T08:00:00+09:00", "event_after") == "2024-03-09"
+        # before: midnight is the day; any later time means the day after
+        # (an event starting that day still overlaps a window ending during it).
+        assert parse_event_bound("2024-03-09T00:00:00Z", "event_before") == "2024-03-09"
+        assert parse_event_bound("2024-03-09T00:00:01Z", "event_before") == "2024-03-10"
+        assert parse_event_bound("2024-03-10T09:00:00+09:00", "event_before") == "2024-03-10"
+
+    @pytest.mark.parametrize("value", [None, 1, True, "soon", "20240309", ["2024-03-09"]])
+    def test_a_bad_bound_names_the_filter(self, value):
+        with pytest.raises(EventDateValidationError, match="event_after"):
+            parse_event_bound(value, "event_after")
+
+
+class TestPayload:
+    def test_the_payload_form_is_the_days_utc_midnight(self):
+        assert event_payload_value("2024-03-09") == "2024-03-09T00:00:00Z"
+        for value in (None, "", "March 9", "2024-03-09T00:00:00Z"):
+            assert event_payload_value(value) is None
+
+    def test_from_details(self):
+        assert event_payload_values({"event_start": "2024-03-09", "event_end": "2024-03-10"}) == (
+            "2024-03-09T00:00:00Z",
+            "2024-03-10T00:00:00Z",
+        )
+        assert event_payload_values({"event_start": "2024-03-09"}) == (
+            "2024-03-09T00:00:00Z",
+            "2024-03-09T00:00:00Z",
+        )
+        assert event_payload_values({"event_phrase": "soon"}) == (None, None)
+        assert event_payload_values(None) == (None, None)
+
+
+class TestSqlParity:
+    def test_the_regex_is_the_columns(self):
+        assert f"'{EVENT_DATE_RE}'" in EVENT_START_SQL
+        assert f"'{EVENT_DATE_RE}'" in EVENT_END_SQL
+
+    def test_the_model_columns_use_the_expressions(self):
+        for name, sql in (("event_start", EVENT_START_SQL), ("event_end", EVENT_END_SQL)):
+            computed = Memory.__table__.c[name].computed
+            assert computed is not None
+            assert str(computed.sqltext) == sql
+            assert computed.persisted is True
+
+    def test_the_migration_expressions_are_byte_identical(self):
+        spec = importlib.util.spec_from_file_location("f31_2724_event_dates", _MIGRATION)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.EVENT_START_SQL == EVENT_START_SQL
+        assert module.EVENT_END_SQL == EVENT_END_SQL
+        assert "WHERE event_start IS NOT NULL AND deleted_at IS NULL" in module._INDEX_DDL
+
+    def test_the_model_index_predicate_matches_the_migration(self):
+        index = next(i for i in Memory.__table__.indexes if i.name == "idx_memories_event_start")
+        assert [c.name for c in index.columns] == ["context_id", "event_start"]
+        assert (
+            str(index.dialect_options["postgresql"]["where"])
+            == "event_start IS NOT NULL AND deleted_at IS NULL"
+        )

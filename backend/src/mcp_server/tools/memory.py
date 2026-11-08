@@ -51,7 +51,7 @@ from services.memory_service import (
 from services.permission_service import VIEWER_READ_ONLY_REASON
 from services.plan_headroom import MEMORIES, drop_quota_reading
 from utils.datetime import to_utc_iso, utcnow
-from utils.event_dates import event_write_fields
+from utils.event_dates import event_fields, event_write_fields
 from utils.exceptions import (
     AuthorizationError,
     ContentSizeExceededError,
@@ -2480,8 +2480,12 @@ async def handle_reference(
                 "created_at": to_utc_iso(result.created_at),
                 "updated_at": to_utc_iso(result.updated_at),
                 # #2330: when the fact held; absent when the memory has none.
-                # #2689: observed_weekday right after it.
+                # #2689: observed_weekday right after it. Then the event's own
+                # days with the weekday of event_start, when present.
                 **observed_fields(result.observed_at),
+                **event_fields(
+                    getattr(result, "event_start", None), getattr(result, "event_end", None)
+                ),
                 "version": result.version,  # #2043: update_memory's expected_version
                 "client": result.client,
                 "source_uri": result.source_uri,

@@ -123,7 +123,12 @@ from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA, uncondition
 from services.supersede_fold import fold_linked_versions, fold_links, fold_nodes
 from services.write_provenance import current_provenance
 from utils.datetime import to_naive_utc, to_utc_iso, utcnow
-from utils.event_dates import event_response_kwargs
+from utils.event_dates import (
+    event_payload_value,
+    event_payload_values,
+    event_response_kwargs,
+    event_row_kwargs,
+)
 from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
@@ -312,7 +317,18 @@ def metadata_payload_patch(
             payload_updates["observed_at"] = observed
         else:
             delete_keys.append("observed_at")
+        # The event's own days (filters.event_after/before), the same way.
+        _sync_event_payload(effective_details, payload_updates, delete_keys)
     return payload_updates, delete_keys
+
+
+def _sync_event_payload(details: Any, payload_updates: dict, delete_keys: list[str]) -> None:
+    """Set or clear the ``event_start`` / ``event_end`` payload keys for ``details``."""
+    for key, value in zip(("event_start", "event_end"), event_payload_values(details), strict=True):
+        if value is not None:
+            payload_updates[key] = value
+        else:
+            delete_keys.append(key)
 
 
 def restore_payload_request(memory: Any, changed: set[str]) -> Any:
@@ -3120,6 +3136,7 @@ class MemoryService:
                 payload_updates["observed_at"] = observed
             else:
                 delete_keys.append("observed_at")
+            _sync_event_payload(effective_details, payload_updates, delete_keys)
 
         if not (payload_updates or delete_keys):
             return
@@ -3188,6 +3205,7 @@ class MemoryService:
             created_at=memory.created_at,
             updated_at=memory.updated_at or memory.created_at,
             observed_at=observed_at_from_details(memory.details),  # #2330
+            **event_row_kwargs(memory.details),
             version=memory.version,  # #2043
             client=memory.client,
             source_uri=memory.source_uri,
@@ -3796,6 +3814,7 @@ class MemoryService:
             created_at=memory.created_at,
             updated_at=snapshot_updated_at,
             observed_at=observed_at_from_details(memory.details),  # #2330
+            **event_row_kwargs(memory.details),
             version=snapshot_version,
             client=memory.client,
             source_uri=memory.source_uri,
@@ -3885,6 +3904,7 @@ class MemoryService:
             # #2330: the value at that version, from its rebuilt details
             # (None when erasure removed them), never the live column.
             observed_at=observed_at_from_details(values["details"]),
+            **event_row_kwargs(values["details"]),
             version=historical.version,
             historical=True,
             current_version=memory.version,
@@ -6023,8 +6043,10 @@ class MemoryService:
                     scope=memory.scope,
                     created_at=memory.created_at,
                     updated_at=snapshot_updated_at,  # #1047: staleness cue (pre-bump snapshot)
-                    # #2330: when the fact held, the details form.
+                    # #2330: when the fact held, the details form; then the
+                    # event's own days.
                     observed_at=observed_at_from_details(memory.details),
+                    **event_row_kwargs(memory.details),
                     client=memory.client,
                     tags=memory.tags or [],
                     context=memory.context,
@@ -10710,6 +10732,12 @@ def build_memory_point(memory: Memory) -> tuple[dict[str, Any], list[int], list[
     # the PG-validated source (always the 20-char UTC form).
     if memory.observed_at is not None:
         payload["observed_at"] = memory.observed_at
+    # The event's own days, from the f31 generated columns (the PG-validated
+    # source), each padded to its UTC midnight for the datetime payload index
+    # behind filters.event_after / event_before.
+    if memory.event_start is not None:
+        payload["event_start"] = event_payload_value(memory.event_start)
+        payload["event_end"] = event_payload_value(memory.event_end or memory.event_start)
     return payload, sparse_indices, sparse_values
 
 

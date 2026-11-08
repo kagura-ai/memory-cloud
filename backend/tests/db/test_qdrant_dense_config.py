@@ -83,6 +83,8 @@ def _info(*, quantization=None, on_disk=None, named=True, dense_quantization=Non
             "tags": object(),
             "location": object(),
             "observed_at": object(),
+            "event_start": object(),
+            "event_end": object(),
             "chunk_of": object(),
         },
     )

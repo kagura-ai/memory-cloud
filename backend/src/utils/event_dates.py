@@ -57,12 +57,16 @@ import re
 from datetime import date, timedelta
 from typing import Any
 
-from utils.observed_at import DATE_RE, WEEKDAYS
+from utils.observed_at import DATE_RE, WEEKDAYS, ObservedAtValidationError, canonical_observed_at
 
 # Regex literal of the generated columns ``memories.event_start`` /
 # ``event_end`` (models/memory.py); a parity test keeps them equal.
 EVENT_DATE_RE = DATE_RE
 MAX_PHRASE_CHARS = 100
+# The recall / list filter keys over the event's own days: a row matches when
+# its ``[event_start, event_end]`` overlaps ``[event_after, event_before)``.
+EVENT_FILTER_KEYS = ("event_after", "event_before")
+_PAYLOAD_SUFFIX = "T00:00:00Z"
 
 _EVENT_DATE = re.compile(EVENT_DATE_RE)
 _WORD_NUMBERS = {
@@ -368,6 +372,62 @@ def event_response_kwargs(details: Any) -> dict[str, str | None]:
     write response model, read from the stored details (each None when absent)."""
     start, end, phrase = event_dates_from_details(details)
     return {"event_start": start, "event_end": end, "event_phrase": phrase}
+
+
+def event_row_kwargs(details: Any) -> dict[str, str | None]:
+    """The ``event_start`` / ``event_end`` keyword arguments of a read model
+    (``MemoryResponse``, ``ReferenceResponse``), from the stored details."""
+    start, end, _ = event_dates_from_details(details)
+    return {"event_start": start, "event_end": end}
+
+
+# ------------------------------------------------------------ filters, payload
+
+
+def event_payload_value(day: str | None) -> str | None:
+    """The search-payload form of a stored event day: the start of that day, UTC.
+
+    ``YYYY-MM-DDT00:00:00Z`` — the 20-char form of ``observed_at``'s payload,
+    so Qdrant's datetime index and LanceDB's lexical compare serve the overlap
+    range the same way. None for None.
+    """
+    if not isinstance(day, str) or not _EVENT_DATE.fullmatch(day):
+        return None
+    return day + _PAYLOAD_SUFFIX
+
+
+def event_payload_values(details: Any) -> tuple[str | None, str | None]:
+    """``(event_start, event_end)`` in the payload form, from details; both None without a start."""
+    start, end, _ = event_dates_from_details(details)
+    return event_payload_value(start), event_payload_value(end)
+
+
+def parse_event_bound(value: Any, name: str) -> str:
+    """A filter bound (``event_after`` / ``event_before``) as a ``YYYY-MM-DD`` day.
+
+    Accepts what ``observed_at`` accepts: an ISO 8601 extended date or datetime
+    (naive = UTC). A date is the day itself. A datetime is reduced to a day so
+    that the window ``[event_after, event_before)`` over time keeps its meaning
+    over whole days: ``event_after`` takes its UTC day (an event ending on that
+    day still overlaps), ``event_before`` takes its UTC day at midnight and the
+    day after otherwise (an event starting on that day still overlaps a window
+    that ends during it).
+
+    Raises:
+        EventDateValidationError: not an ISO 8601 date or datetime string.
+    """
+    if isinstance(value, bool) or not isinstance(value, str):
+        raise EventDateValidationError(f"{name} must be an ISO 8601 date or datetime string")
+    try:
+        canonical = canonical_observed_at(value)
+        day = date.fromisoformat(canonical[:10])
+        if name == "event_before" and len(canonical) > 10 and canonical[11:19] != "00:00:00":
+            day += timedelta(days=1)
+    except (ObservedAtValidationError, ValueError, OverflowError) as exc:
+        raise EventDateValidationError(
+            f"{name} must be an ISO 8601 date (2024-03-07) or datetime (2024-03-07T10:00:00Z)"
+        ) from exc
+    return day.isoformat()
 
 
 def event_weekday(value: Any) -> str | None:

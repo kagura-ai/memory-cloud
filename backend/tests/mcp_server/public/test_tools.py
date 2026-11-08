@@ -56,6 +56,8 @@ def _memory(**over: Any) -> Memory:
     )
     m.resource_doc_id = over.pop("doc_id", "sku-1")
     m.observed_at = over.pop("observed_at", None)
+    m.event_start = over.pop("event_start", None)
+    m.event_end = over.pop("event_end", None)
     assert not over, over
     return m
 
@@ -182,7 +184,12 @@ async def test_recall_projects_only_rows_the_predicate_returns(session, search) 
 
 async def test_recall_optional_fields_are_omitted(session, search) -> None:
     bare = _memory(tags=[], source_uri="file:///etc/passwd", updated_at=None)
-    observed = _memory(source_uri="javascript:alert(1)", observed_at="2026-10-01T00:00:00Z")
+    observed = _memory(
+        source_uri="javascript:alert(1)",
+        observed_at="2026-10-01T00:00:00Z",
+        event_start="2026-09-27",
+        event_end="2026-09-28",
+    )
     search.return_value = [
         {"id": str(bare.id), "score": 0.5},
         {"id": str(observed.id), "score": 0.4},
@@ -202,6 +209,9 @@ async def test_recall_optional_fields_are_omitted(session, search) -> None:
     assert first["updated_at"] is None
     assert "source_url" not in second
     assert second["observed_at"] == "2026-10-01T00:00:00Z"
+    # The event's own days: the two dates, no weekday on the public rows.
+    assert (second["event_start"], second["event_end"]) == ("2026-09-27", "2026-09-28")
+    assert "event_weekday" not in second
 
 
 @pytest.mark.parametrize(

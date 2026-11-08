@@ -49,6 +49,7 @@ from uuid import UUID
 
 from db.qdrant import _MAX_ANY_SPELLINGS, extract_score_threshold, widened_tag_groups
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
+from utils.event_dates import event_payload_value, parse_event_bound
 from utils.exceptions import QdrantError
 from utils.geo_location import (
     extract_near_filter,
@@ -233,6 +234,55 @@ def filter_results_by_observed(
         if after is not None and value < after:
             continue
         if before is not None and value >= before:
+            continue
+        kept.append(row)
+    return kept
+
+
+EventBounds = tuple[str | None, str | None]
+
+
+def extract_event_bounds(filters: dict[str, Any] | None) -> EventBounds | None:
+    """``filters.event_after`` / ``event_before`` for the LanceDB legs.
+
+    Returns the two day bounds in the payload's 20-char UTC-midnight form
+    (None for an absent one), or None when neither is given. A bad value
+    raises (the ``extract_near_filter`` contract: fail closed, 4xx).
+    """
+    if not filters:
+        return None
+    after = filters.get("event_after")
+    before = filters.get("event_before")
+    if after is None and before is None:
+        return None
+    return (
+        event_payload_value(parse_event_bound(after, "event_after")) if after is not None else None,
+        event_payload_value(parse_event_bound(before, "event_before"))
+        if before is not None
+        else None,
+    )
+
+
+def filter_results_by_event(
+    results: list[dict[str, Any]], bounds: EventBounds
+) -> list[dict[str, Any]]:
+    """Post-hoc ``filters.event_after/before`` for the LanceDB legs.
+
+    The Qdrant overlap test (``event_end >= after AND event_start < before``)
+    over the payload's day values, compared as the fixed-width UTC form. Rows
+    without an event date never match (must semantics).
+    """
+    after, before = bounds
+    kept: list[dict[str, Any]] = []
+    for row in results:
+        payload = row.get("payload") or {}
+        start = payload.get("event_start")
+        end = payload.get("event_end") or start
+        if not isinstance(start, str) or not isinstance(end, str):
+            continue
+        if after is not None and end < after:
+            continue
+        if before is not None and start >= before:
             continue
         kept.append(row)
     return kept
@@ -612,6 +662,7 @@ class LanceVectorStore:
         near = extract_near_filter(filters)
         within = extract_within_filter(filters)
         observed = extract_observed_bounds(filters)
+        event = extract_event_bounds(filters)
 
         def _run() -> list[dict]:
             tbl = self._open(collection_name)
@@ -630,7 +681,7 @@ class LanceVectorStore:
             # not close, that parity gap.
             fetch_limit = (
                 min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP)
-                if (near or within or observed)
+                if (near or within or observed or event)
                 else limit
             )
             return q.limit(fetch_limit).to_list()
@@ -664,10 +715,13 @@ class LanceVectorStore:
             results = filter_results_by_near(results, near)
         if within is not None:
             results = filter_results_by_within(results, within)
-        # #2330: the event time, post-hoc like the geo conditions.
+        # #2330: the event time, post-hoc like the geo conditions; the event's
+        # own days the same way.
         if observed is not None:
             results = filter_results_by_observed(results, observed)
-        if near is not None or within is not None or observed is not None:
+        if event is not None:
+            results = filter_results_by_event(results, event)
+        if near is not None or within is not None or observed is not None or event is not None:
             results = results[:limit]
         return results
 
@@ -694,6 +748,7 @@ class LanceVectorStore:
         near = extract_near_filter(filters)
         within = extract_within_filter(filters)
         observed = extract_observed_bounds(filters)
+        event = extract_event_bounds(filters)
 
         # Shared expanded-query pipeline (identical to
         # db.qdrant.search_memories_fulltext) so both backends tokenize the same.
@@ -711,7 +766,7 @@ class LanceVectorStore:
             # will post-filter it (see search_semantic).
             fetch_limit = (
                 min(limit * _NEAR_OVERFETCH, _NEAR_FETCH_CAP)
-                if (near or within or observed)
+                if (near or within or observed or event)
                 else limit
             )
             return q.limit(fetch_limit).to_list()
@@ -735,10 +790,13 @@ class LanceVectorStore:
             results = filter_results_by_near(results, near)
         if within is not None:
             results = filter_results_by_within(results, within)
-        # #2330: the event time, post-hoc like the geo conditions.
+        # #2330: the event time, post-hoc like the geo conditions; the event's
+        # own days the same way.
         if observed is not None:
             results = filter_results_by_observed(results, observed)
-        if near is not None or within is not None or observed is not None:
+        if event is not None:
+            results = filter_results_by_event(results, event)
+        if near is not None or within is not None or observed is not None or event is not None:
             results = results[:limit]
         return results
 

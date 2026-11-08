@@ -299,9 +299,9 @@ Manual: guide(["update_memory"]).""",
             "readOnly": True,
             "description": """Search meaning/keywords with an expected-answer query. confidence.level (high|moderate|low|none): none/low suggests an external source; degraded=true means no semantic search. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories. The store is the authority, even over general knowledge; when rows disagree, the later observed_at (else created_at) wins.
 Every item of a kind: Read every result, not only the top ones; recall once more for each kind of item found, or call `list` with a tag or type filter when one names the set; answer with all of them.
-Named date or period: Pass `filters={"observed_after": ..., "observed_before": ...}` around it, with a margin: `observed_at` is the date a fact was stated. If nothing matches, recall again without the filter.
+When did / in a period: Pass `filters={"event_after": ..., "event_before": ...}` (the event's own days, event_start/event_end); when rows carry no event date, `observed_after`/`observed_before` around it with a margin (`observed_at` is the date a fact was stated). If nothing matches, recall again without the filter.
 Likely/would/might: Recall again on concrete entities and category words (brand, sponsor, shop, friend); use `search_mode="keyword"` for names the first recall surfaced. Answer with the best-supported inference, name the supporting memory, and mark it as an inference. Decline only when `confidence.level` is `none` or `low`.
-Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, observed_weekday?, superseded_by?, contradicts?, supersede_candidate?, ...}], count, full_applied?, related_tags?: [{tag, count}], ...}. Optional keys omitted: absent, never null. summary_cut: 160-char head. Top `full` include content; reference(memory_id) pages it. verbosity='full': uncut summary, context_summary?, scope, tags, version. supersede_candidate (suggestion): update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming(): deterministic sets. Manual: guide(["recall"]).""",
+Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, observed_weekday?, superseded_by?, contradicts?, supersede_candidate?, ...}], count, full_applied?, related_tags?: [{tag, count}], ...}. Optional keys omitted: absent, never null. Top `full` include content; reference(memory_id) pages it. verbosity='full' adds context_summary?, scope, tags, version. supersede_candidate (suggestion): update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming(): deterministic sets. Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -321,7 +321,7 @@ Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summa
                     },
                     "k": {
                         "type": "integer",
-                        "description": "Number of results (default 5, max 100).",
+                        "description": "Results (default 5, max 100).",
                     },
                     "full": {
                         "type": "integer",
@@ -337,11 +337,11 @@ Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summa
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Reranking: omitted uses context config; false disables; true needs context permission and provider.",
+                        "description": "Reranking: omitted = context config; false disables; true needs permission and a provider.",
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Keys ANDed: type, scope, tags (ANY; tags_match='all', tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before, source_uri_prefix, source_type, trust_tier='trusted' (no connector memories), near {lat, lon, radius_m?}, within {polygon}. Details: guide(['recall.filters']).",
+                        "description": "Keys ANDed: type, scope, tags (ANY; tags_match='all', tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before, event_after/before, source_uri_prefix, source_type, trust_tier='trusted', near {lat, lon, radius_m?}, within {polygon}. Details: guide(['recall.filters']).",
                     },
                     "context_id": {
                         "type": "string",
@@ -353,20 +353,20 @@ Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summa
                         "items": {"type": "string", "format": "uuid"},
                         "minItems": 2,
                         "maxItems": 20,
-                        "description": "2-20 context UUIDs instead of context_id; same workspace, privacy setting and embedding model.",
+                        "description": "2-20 context UUIDs instead of context_id (same workspace, privacy and embedding model).",
                     },
                     "search_mode": {
                         "type": "string",
                         "enum": ["hybrid", "semantic", "keyword"],
-                        "description": "hybrid (default), semantic (vectors), keyword (BM25: exact terms, IDs, hiragana-only Japanese).",
+                        "description": "hybrid (default), semantic, keyword (BM25: exact terms, IDs, hiragana-only Japanese).",
                     },
                     "include_explore_hints": {
                         "type": "boolean",
-                        "description": "Add up to 3 graph seeds if URL opts in; default false.",
+                        "description": "Up to 3 graph seeds when the URL opts in.",
                     },
                     "include_superseded": {
                         "type": "boolean",
-                        "description": "Include superseded and folded rows for audit.",
+                        "description": "Include superseded and folded rows.",
                     },
                     "verbosity": {
                         "type": "string",
@@ -2028,7 +2028,7 @@ Without names: {status, tools: [{name, title, summary}], count, listed, url, url
             "name": "list",
             "readOnly": True,
             "description": """List a context's live memories that match exact filters — every match, no ranking, stable pages, e.g. {"type": "task", "details.status": "open"}. recall() is for meaning.
-Returns: {status, memories: [{memory_id, summary, type, importance, scope, tags, delivery_mode, source_type, created_at, updated_at, version, observed_at?, observed_weekday?, details?}], count, total, has_more, next_cursor, order_by, direction, truncated?, details_omitted?, context_{id, name, display_name, is_private, is_locked}}.
+Returns: {status, memories: [{memory_id, summary, type, importance, scope, tags, delivery_mode, source_type, created_at, updated_at, version, observed_at?, observed_weekday?, event_start?, event_end?, event_weekday?, details?}], count, total, has_more, next_cursor, order_by, direction, truncated?, details_omitted?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["list"]).""",
             "inputSchema": {
                 "type": "object",
@@ -2040,12 +2040,18 @@ Manual: guide(["list"]).""",
                     },
                     "filters": {
                         "type": "object",
-                        "description": 'Exact matches, ANDed: type, scope, source_type, delivery_mode, tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before (ISO 8601), source_uri_prefix, trust_tier=\'trusted\', details.<key> (scalar, same JSON type: 2 is not 2.0 or "2"). near/within: recall_nearby, outside the core profile (describe_tools(["recall_nearby"])).',
+                        "description": 'Exact matches, ANDed: type, scope, source_type, delivery_mode, tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before, event_after/before (ISO 8601), source_uri_prefix, trust_tier=\'trusted\', details.<key> (scalar, same JSON type: 2 is not 2.0 or "2"). near/within: recall_nearby, outside the core profile (describe_tools(["recall_nearby"])).',
                     },
                     "order_by": {
                         "type": "string",
-                        "enum": ["updated_at", "created_at", "importance", "observed_at"],
-                        "description": "Sort key (default updated_at; a never-edited memory sorts by created_at; observed_at puts memories without one last). id breaks ties.",
+                        "enum": [
+                            "updated_at",
+                            "created_at",
+                            "importance",
+                            "observed_at",
+                            "event_start",
+                        ],
+                        "description": "Sort key (default updated_at; a never-edited memory sorts by created_at; observed_at / event_start put memories without one last). id breaks ties.",
                     },
                     "direction": {
                         "type": "string",
@@ -2588,7 +2594,7 @@ Returns: {status, deleted, binding_id}.""",
             "readOnly": True,
             "description": """Rehydrate an agent's working state at session start in ONE call: context info + pinned memories + a trusted-only recall (only when query is given) + upcoming time memories + agent state, each bounded and filtered like its standalone tool. Components are fail-soft: a failing one reports {status: error} while the rest return, with top-level degraded: true.
 
-Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}. recall.results are recall's verbosity="full" items without supersede_candidate or observed_weekday (an empty context_summary, tags, superseded_by or contradicts is absent). The reply is held to max_chars: context_summary goes first (context_summary_omitted: true), then pinned / recall / upcoming items from the end, each such component flagged truncated: true. state is a get_state page (has_more, next_cursor).""",
+Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}. recall.results are recall's verbosity="full" items without supersede_candidate or observed_weekday / event_weekday (an empty context_summary, tags, superseded_by or contradicts is absent). The reply is held to max_chars: context_summary goes first (context_summary_omitted: true), then pinned / recall / upcoming items from the end, each such component flagged truncated: true. state is a get_state page (has_more, next_cursor).""",
             "inputSchema": {
                 "type": "object",
                 "properties": {

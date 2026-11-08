@@ -205,6 +205,10 @@ def test_recall_time_and_count_questions(relative):
     # #2330: the server filters and orders by the event time.
     assert '"observed_after": "2024-03-01", "observed_before": "2024-04-01"' in text
     assert 'order_by="observed_at", direction="asc")' in text
+    # The event's own days come first when the row has them.
+    assert '"event_after": "2024-03-01", "event_before": "2024-04-01"' in text
+    assert 'order_by="event_start", direction="asc")' in text
+    assert "`event_start` / `event_end` with `event_weekday`" in text
     assert "Sort the rows by that date yourself" not in text
     assert "the later `observed_at`, else the later `created_at`, is current" in text
     assert "`include_superseded=true`" in text
@@ -224,9 +228,10 @@ def test_recall_signals_point_at_the_time_section():
         "Read every result, not only the top ones; recall once more for each kind of item "
         "found, or call `list` with a tag or type filter when one names the set; answer "
         "with all of them.",
-        'Pass `filters={"observed_after": ..., "observed_before": ...}` around it, with a '
-        "margin: `observed_at` is the date a fact was stated. If nothing matches, recall "
-        "again without the filter.",
+        'Pass `filters={"event_after": ..., "event_before": ...}` (the event\'s own days, '
+        "event_start/event_end); when rows carry no event date, "
+        "`observed_after`/`observed_before` around it with a margin (`observed_at` is the "
+        "date a fact was stated). If nothing matches, recall again without the filter.",
         "Recall again on concrete entities and category words (brand, sponsor, shop, friend); "
         'use `search_mode="keyword"` for names the first recall surfaced. Answer with the '
         "best-supported inference, name the supporting memory, and mark it as an inference. "
@@ -273,11 +278,12 @@ def test_the_guidance_uses_real_tool_parameters():
     listing = tools["list"]["inputSchema"]["properties"]
     assert "created_at" in listing["order_by"]["enum"]
     assert "observed_at" in listing["order_by"]["enum"]  # #2330
+    assert "event_start" in listing["order_by"]["enum"]
     assert "observed_after/before" in listing["filters"]["description"]
-    assert (
-        "observed_after/before"
-        in tools["recall"]["inputSchema"]["properties"]["filters"]["description"]
-    )
+    assert "event_after/before" in listing["filters"]["description"]
+    recall_filters = tools["recall"]["inputSchema"]["properties"]["filters"]["description"]
+    assert "observed_after/before" in recall_filters
+    assert "event_after/before" in recall_filters
     assert "observed_at" in tools["remember"]["inputSchema"]["properties"]
     assert "include_details" in listing
     assert "details.<key>" in listing["filters"]["description"]

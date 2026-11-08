@@ -696,8 +696,9 @@ def _requeue_statement(
 #: memory has the value: a payload sync removes them from the chunk points
 #: when the memory no longer does (a cleared location must not keep matching
 #: ``filters.near`` through a chunk, nor a cleared observed_at
-#: ``filters.observed_after``, #2330).
-_OPTIONAL_PAYLOAD_KEYS = ("context", "location", "observed_at")
+#: ``filters.observed_after``, #2330, nor cleared event days
+#: ``filters.event_after``).
+_OPTIONAL_PAYLOAD_KEYS = ("context", "location", "observed_at", "event_start", "event_end")
 
 
 async def sync_content_chunk_payload(
