@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Condition,
     DatetimeRange,
@@ -89,9 +90,8 @@ KAGURA_MEMORIES_BM25_VECTOR_NAME = "bm25"
 # and from ensure_payload_indexes_on_all (every API start, #2729) — both read
 # this one table. A new late index goes here and into the creation path of
 # ensure_kagura_memories_collection (and its indexes log list), nowhere else.
-# Order matters only on failure: each field is tried on its own, and chunk_of
-# — which every dense search, delete and payload update filters on — is last
-# so that nothing it depends on comes after it.
+# Each field is created on its own, so the order only sets the order of the
+# created_missing_index log lines and of the returned lists.
 LATE_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
     ("tags", "keyword"),  # #67: exact tag match
     ("location", "geo"),  # #1332: filters.near / within
@@ -1837,9 +1837,12 @@ async def ensure_kagura_memories_collection(
                 # reconciled here: this runs on the request path in every
                 # worker, and update_collection must be sent once per
                 # deployment — the startup pass owns that.
-                # Collection is up-to-date, ensure late-added indexes
-                existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
-                await _create_missing_payload_indexes(client, collection_name, existing_fields)
+                # Collection is up-to-date, ensure late-added indexes. A refused
+                # index is logged and skipped (the startup pass retries it); a
+                # transport failure propagates as the collection error below.
+                await _create_missing_payload_indexes(
+                    client, collection_name, _payload_fields(info)
+                )
                 return
 
             # Old collection without sparse vectors — requires manual migration
@@ -2353,18 +2356,31 @@ async def list_memory_collections() -> list[str]:
     )
 
 
+def _payload_fields(info: Any) -> set[str]:
+    """The indexed payload fields of a ``get_collection`` result (by name)."""
+    schema = getattr(info, "payload_schema", None)
+    return set(schema.keys()) if schema else set()
+
+
 async def _create_missing_payload_indexes(
     client: AsyncQdrantClient, collection_name: str, existing_fields: set[str]
 ) -> list[str]:
-    """Create every ``LATE_PAYLOAD_INDEXES`` entry absent from ``existing_fields``.
+    """Request every ``LATE_PAYLOAD_INDEXES`` entry absent from ``existing_fields``.
 
-    Each field is tried on its own: one that Qdrant refuses is logged
-    (``payload_index_create_failed``, with the field and the error) and
-    skipped, so the fields after it — ``chunk_of`` last — are still created
-    and the next API start retries the failed one. Nothing is raised.
+    The build is requested with ``wait=False``: the REST client runs on its
+    default (short) timeout and a large collection builds an index for longer
+    than that; Qdrant finishes it in the background and lists the field in
+    ``payload_schema`` from then on.
+
+    An index Qdrant *refuses* (it answered: ``UnexpectedResponse``) is logged
+    as ``payload_index_create_failed`` with the field and the error, and the
+    next fields are still requested — the next API start retries it. A
+    transport failure (unreachable, timeout) propagates: the collection is
+    not worth more attempts against a dead connection, and the caller decides
+    (the startup pass skips the collection; the request path fails).
 
     Returns:
-        The fields created, in table order (empty when the collection is complete).
+        The fields requested, in table order (empty when the collection is complete).
     """
     created: list[str] = []
     for field_name, field_schema in LATE_PAYLOAD_INDEXES:
@@ -2375,14 +2391,15 @@ async def _create_missing_payload_indexes(
                 collection_name=collection_name,
                 field_name=field_name,
                 field_schema=field_schema,  # type: ignore[arg-type]
+                wait=False,
             )
-        except Exception as e:  # noqa: BLE001 — one index must not block the others
+        except UnexpectedResponse as e:
             logger.warning(
                 "payload_index_create_failed",
                 collection=collection_name,
                 field=field_name,
                 type=field_schema,
-                error_class=type(e).__name__,
+                status=e.status_code,
                 error=str(e),
             )
             continue
@@ -2406,12 +2423,14 @@ async def ensure_payload_indexes_on_all() -> dict[str, list[str]]:
     ``event_start`` / ``event_end``; before it, #2015's ``chunk_of``). Startup
     pass, once per process: idempotent (an existing index is left alone;
     Qdrant also accepts a repeated create) and fail-soft — a collection that
-    cannot be read is logged and skipped, a field that cannot be created is
-    logged and the others are still tried, and nothing is raised. A no-op on
-    a non-Qdrant store.
+    cannot be read or reached is logged and skipped, a field Qdrant refuses is
+    logged and the others are still requested, and nothing is raised. Ends
+    with one ``payload_index_pass_done`` line (collections, fields, failures)
+    so a boot where nothing was missing is still accounted for. A no-op on a
+    non-Qdrant store.
 
     Returns:
-        Collection name -> fields created, for the collections that got any.
+        Collection name -> fields requested, for the collections that got any.
     """
     if _active_store() is not None:
         return {}
@@ -2422,20 +2441,28 @@ async def ensure_payload_indexes_on_all() -> dict[str, list[str]]:
         logger.warning("payload_index_pass_failed", error_class=type(e).__name__)
         return added
     client = get_qdrant_client()
+    failed = 0
     for name in names:
         try:
             info = await client.get_collection(name)
+            created = await _create_missing_payload_indexes(client, name, _payload_fields(info))
         except Exception as e:  # noqa: BLE001 — one collection must not stop the pass
+            failed += 1
             logger.warning(
-                "payload_index_collection_unreadable",
+                "payload_index_collection_failed",
                 collection=name,
                 error_class=type(e).__name__,
+                error=str(e),
             )
             continue
-        existing = set(info.payload_schema.keys()) if info.payload_schema else set()
-        created = await _create_missing_payload_indexes(client, name, existing)
         if created:
             added[name] = created
+    logger.info(
+        "payload_index_pass_done",
+        collections=len(names),
+        fields_requested=sum(len(fields) for fields in added.values()),
+        collections_failed=failed,
+    )
     return added
 
 

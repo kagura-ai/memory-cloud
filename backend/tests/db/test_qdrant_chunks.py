@@ -232,6 +232,7 @@ async def test_startup_pass_adds_the_chunk_of_index_where_missing(mock_client):
         "collection_name": "kagura_memories",
         "field_name": CHUNK_OF_FIELD,
         "field_schema": "keyword",
+        "wait": False,
     }
 
 

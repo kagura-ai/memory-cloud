@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 import db.qdrant as qmod
 from db.qdrant import (
@@ -20,8 +21,17 @@ from db.qdrant import (
     ensure_payload_indexes_on_all,
 )
 from utils.content_chunks import CHUNK_OF_FIELD
+from utils.exceptions import QdrantError
 
 pytestmark = pytest.mark.asyncio
+
+
+def _refused() -> UnexpectedResponse:
+    """Qdrant answered and refused the index (a 4xx), as opposed to a transport failure."""
+    return UnexpectedResponse(
+        status_code=400, reason_phrase="Bad Request", content=b"refused", headers=None
+    )
+
 
 # The payload schema of a collection created by v0.151.0: every index of the
 # creation path except the two event-date indexes added in v0.152.0.
@@ -90,6 +100,9 @@ async def test_startup_pass_adds_the_event_date_indexes_to_an_upgraded_collectio
     assert _created(mock_client) == {
         upgraded: {"event_start": "datetime", "event_end": "datetime"},
     }
+    # The build is requested, not awaited: the REST client has the default
+    # (short) timeout and a large collection builds an index for longer.
+    assert {c.kwargs["wait"] for c in mock_client.create_payload_index.await_args_list} == {False}
 
 
 async def test_startup_pass_creates_the_same_indexes_as_the_ensure_retrofit(mock_client):
@@ -124,17 +137,16 @@ async def test_startup_pass_creates_the_same_indexes_as_the_ensure_retrofit(mock
     }
 
 
-async def test_startup_pass_continues_past_one_failing_index(mock_client):
-    """One index that Qdrant refuses must not block the ones after it — chunk_of
-    is last in the table and every dense search / delete filters on it — and
-    what was created is still reported."""
+async def test_startup_pass_continues_past_one_refused_index(mock_client):
+    """One index that Qdrant refuses (it answered: 4xx) must not block the ones
+    after it, and what was created is still reported."""
     mock_client.get_collections.return_value = _collections("kagura_memories")
     schema = {k: v for k, v in _V0151_SCHEMA.items() if k != CHUNK_OF_FIELD}
     mock_client.get_collection.return_value = SimpleNamespace(payload_schema=schema)
 
-    async def _create(*, collection_name: str, field_name: str, field_schema: str) -> None:
+    async def _create(*, field_name: str, **_kw: object) -> None:
         if field_name == "event_start":
-            raise RuntimeError("refused")
+            raise _refused()
 
     mock_client.create_payload_index.side_effect = _create
 
@@ -145,7 +157,36 @@ async def test_startup_pass_continues_past_one_failing_index(mock_client):
     assert attempted == ["event_start", "event_end", CHUNK_OF_FIELD]
 
 
-async def test_ensure_retrofit_does_not_fail_context_creation_on_one_index(mock_client):
+async def test_startup_pass_skips_the_collection_on_a_transport_error(mock_client):
+    """A transport failure (Qdrant unreachable, timeout) is not a refused index:
+    the remaining fields of that collection are not each tried against a dead
+    connection; the pass moves on to the next collection."""
+    mock_client.get_collections.return_value = _collections("kagura_memories", "kagura_memories_b")
+    schema = {k: v for k, v in _V0151_SCHEMA.items() if k != CHUNK_OF_FIELD}
+    mock_client.get_collection.return_value = SimpleNamespace(payload_schema=schema)
+
+    async def _create(*, collection_name: str, **_kw: object) -> None:
+        if collection_name == "kagura_memories":
+            raise RuntimeError("connection reset")
+
+    mock_client.create_payload_index.side_effect = _create
+
+    added = await ensure_payload_indexes_on_all()
+
+    assert added == {"kagura_memories_b": ["event_start", "event_end", CHUNK_OF_FIELD]}
+    attempted = [
+        (c.kwargs["collection_name"], c.kwargs["field_name"])
+        for c in mock_client.create_payload_index.await_args_list
+    ]
+    assert attempted == [
+        ("kagura_memories", "event_start"),
+        ("kagura_memories_b", "event_start"),
+        ("kagura_memories_b", "event_end"),
+        ("kagura_memories_b", CHUNK_OF_FIELD),
+    ]
+
+
+async def test_ensure_retrofit_does_not_fail_context_creation_on_a_refused_index(mock_client):
     """The retrofit on the request path (context creation) shares the helper:
     a refused late index is logged, the collection is still usable, and the
     next API start retries it. Before #2729 it surfaced as a collection
@@ -156,13 +197,30 @@ async def test_ensure_retrofit_does_not_fail_context_creation_on_one_index(mock_
         config=SimpleNamespace(params=params),
         payload_schema={k: v for k, v in _V0151_SCHEMA.items() if k != CHUNK_OF_FIELD},
     )
-    mock_client.create_payload_index.side_effect = RuntimeError("refused")
+    mock_client.create_payload_index.side_effect = _refused()
 
     await ensure_kagura_memories_collection()
 
     attempted = [c.kwargs["field_name"] for c in mock_client.create_payload_index.await_args_list]
     assert attempted == ["event_start", "event_end", CHUNK_OF_FIELD]
     mock_client.create_collection.assert_not_awaited()
+
+
+async def test_ensure_retrofit_still_fails_on_a_transport_error(mock_client):
+    """Qdrant unreachable during the retrofit is a real failure of context
+    creation (as before #2729), not a refused index to log and skip."""
+    mock_client.get_collections.return_value = _collections("kagura_memories")
+    params = SimpleNamespace(sparse_vectors={KAGURA_MEMORIES_BM25_VECTOR_NAME: object()})
+    mock_client.get_collection.return_value = SimpleNamespace(
+        config=SimpleNamespace(params=params),
+        payload_schema={k: v for k, v in _V0151_SCHEMA.items() if k != CHUNK_OF_FIELD},
+    )
+    mock_client.create_payload_index.side_effect = RuntimeError("connection reset")
+
+    with pytest.raises(QdrantError):
+        await ensure_kagura_memories_collection()
+
+    assert mock_client.create_payload_index.await_count == 1
 
 
 async def test_startup_pass_leaves_a_complete_collection_alone(mock_client):
