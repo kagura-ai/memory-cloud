@@ -47,7 +47,8 @@ period and a leading ``on`` / ``in`` / ``the``. Anything else is unresolved.
 Responses: :func:`event_fields` puts ``event_start``, ``event_end`` and
 ``event_weekday`` (the weekday of ``event_start``) on a row or a write
 response when the memory has them; :func:`event_write_fields` adds
-``event_unresolved: true`` to a write response whose phrase did not resolve.
+``event_unresolved`` (``no_observed_at`` or ``unknown_phrase``) to a write
+response whose phrase did not resolve.
 """
 
 from __future__ import annotations
@@ -297,10 +298,13 @@ def normalize_event_dates(details: dict[str, Any] | None) -> dict[str, Any] | No
     ``event_start``, ``event_end`` is present; absent keys or ``None`` details
     pass through untouched. A ``None`` value removes its key.
 
-    With a phrase the server owns both dates: they are set when the phrase
-    resolves against the ``observed_at`` day and removed otherwise, so a
-    re-sent pair never outlives a changed phrase. Without a phrase an explicit
-    pair is validated and kept (``event_end`` defaults to ``event_start``).
+    With a phrase that resolves against the ``observed_at`` day the server
+    owns both dates (a re-sent pair never outlives a changed phrase). A phrase
+    that does not resolve (outside the rule set, no ``observed_at``, or a date
+    outside the calendar) leaves an explicit pair the caller supplied, so
+    dates the writer knew are not lost; without one the dates stay absent.
+    Without a phrase an explicit pair is validated and kept (``event_end``
+    defaults to ``event_start``).
 
     Raises:
         EventDateValidationError: a phrase that is not a non-empty string of at
@@ -322,14 +326,20 @@ def normalize_event_dates(details: dict[str, Any] | None) -> dict[str, Any] | No
         if len(phrase) > MAX_PHRASE_CHARS:
             raise EventDateValidationError(f"event_phrase is longer than {MAX_PHRASE_CHARS} chars")
         anchor = _anchor(details)
-        resolved = resolve_event_phrase(phrase, anchor) if anchor is not None else None
-        if resolved is None:
-            details.pop("event_start", None)
-            details.pop("event_end", None)
-        else:
+        try:
+            resolved = resolve_event_phrase(phrase, anchor) if anchor is not None else None
+        except OverflowError:
+            # The arithmetic left the calendar (an anchor at year 1 or 9999):
+            # unresolved, like any phrase the server cannot count.
+            resolved = None
+        if resolved is not None:
             details["event_start"] = resolved[0].isoformat()
             details["event_end"] = resolved[1].isoformat()
-        return details
+            return details
+        if "event_start" not in details:
+            details.pop("event_end", None)
+            return details
+        # Unresolved with an explicit pair: validate and keep it, below.
     if "event_end" in details and "event_start" not in details:
         raise EventDateValidationError("event_end needs event_start")
     if "event_start" in details:

@@ -163,6 +163,15 @@ class TestUpsertByExternalId:
         # #1519: RememberResponse always carries `persistence`; the upsert reuses it.
         mock_remember_response.persistence = None
         mock_remember_response.observed_at = None  # #2689: carried as well
+        # The upsert carries the event dates of the new memory as well.
+        for _event_field in (
+            "event_start",
+            "event_end",
+            "event_phrase",
+            "event_weekday",
+            "event_unresolved",
+        ):
+            setattr(mock_remember_response, _event_field, None)
         service.remember = AsyncMock(return_value=mock_remember_response)
 
         ctx_id = uuid4()
@@ -203,6 +212,15 @@ class TestUpsertByExternalId:
         # #1519: RememberResponse always carries `persistence`; the upsert reuses it.
         mock_remember_response.persistence = None
         mock_remember_response.observed_at = None  # #2689: carried as well
+        # The upsert carries the event dates of the new memory as well.
+        for _event_field in (
+            "event_start",
+            "event_end",
+            "event_phrase",
+            "event_weekday",
+            "event_unresolved",
+        ):
+            setattr(mock_remember_response, _event_field, None)
         service.remember = AsyncMock(return_value=mock_remember_response)
 
         mock_forget_response = MagicMock()

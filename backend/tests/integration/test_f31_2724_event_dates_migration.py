@@ -19,8 +19,12 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+# The B03 class is imported for its seeding helper only; the alias keeps pytest
+# from collecting its tests a second time under this module.
 from tests.integration.test_alembic_migrations import (
-    TestB03NeuralEdgesBackfillMigration,
+    TestB03NeuralEdgesBackfillMigration as _B03,
+)
+from tests.integration.test_alembic_migrations import (
     _downgrade_to,
     _reset_alembic_state,
     _sync_engine,
@@ -200,9 +204,7 @@ def test_f31_round_trip_builds_the_columns_and_the_index() -> None:
         with engine.begin() as conn:
             assert _column_names(conn) == set()
             assert _indexdef(conn) is None
-            ws_id, ctx_id = TestB03NeuralEdgesBackfillMigration._seed_workspace_and_context(
-                conn, OWNER
-            )
+            ws_id, ctx_id = _B03._seed_workspace_and_context(conn, OWNER)
             # Two events of the same day in one context, so the concurrent
             # build runs over data (and a UNIQUE one below fails on them).
             seeded = [
@@ -270,9 +272,7 @@ def test_f31_rerun_over_an_invalid_leftover_rebuilds_the_index() -> None:
     try:
         _upgrade_to(PRIOR_HEAD)
         with engine.begin() as conn:
-            ws_id, ctx_id = TestB03NeuralEdgesBackfillMigration._seed_workspace_and_context(
-                conn, OWNER
-            )
+            ws_id, ctx_id = _B03._seed_workspace_and_context(conn, OWNER)
         _upgrade_to(F31_REVISION)
         with engine.begin() as conn:
             for _ in range(2):

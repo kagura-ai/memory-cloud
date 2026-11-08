@@ -113,3 +113,35 @@ async def test_the_generated_columns_hold_the_days(db_session, events):
 def test_a_bad_bound_is_refused(filters):
     with pytest.raises(ValueError, match="event_"):
         compile_memory_filters(filters)
+
+
+@pytest.mark.asyncio
+async def test_a_row_with_a_start_but_no_end_matches_event_after(db_session):
+    """``event_after`` reads ``event_end`` as ``event_start`` when the end is absent.
+
+    The service writes both days, so this is the defence path: a row whose
+    details carry a start only (raw SQL, a legacy write) must answer the SQL
+    window the way the point payload and the row readers already read it.
+    """
+    from sqlalchemy import text
+
+    owner = f"evt-{uuid4().hex[:8]}"
+    ws, ctx = await _scope(db_session, owner, private=False)
+    await _row(
+        db_session, owner, ws, ctx, summary="start-only", details={"event_start": "2024-03-15"}
+    )
+    await db_session.execute(
+        # ``details`` is json, not jsonb: cast to drop a key, cast back.
+        text(
+            "UPDATE memories SET details = (details::jsonb - 'event_end')::json"
+            " WHERE context_id = :ctx"
+        ),
+        {"ctx": ctx},
+    )
+    assert await _summaries(db_session, ctx, filters={"event_after": "2024-03-15"}) == [
+        "start-only"
+    ]
+    assert await _summaries(db_session, ctx, filters={"event_after": "2024-03-16"}) == []
+    assert await _summaries(db_session, ctx, filters={"event_before": "2024-03-16"}) == [
+        "start-only"
+    ]

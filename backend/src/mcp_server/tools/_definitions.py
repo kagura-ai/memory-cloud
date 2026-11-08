@@ -57,7 +57,7 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
         },
         {
             "name": "remember",
-            "description": """Store a new memory; edit a known id with update_memory, replace an outdated fact with supersedes=<old_memory_id>. Write a searchable conclusion in summary, full text in content.
+            "description": """Store a new memory; edit a known id with update_memory, replace an outdated fact with supersedes=<old_memory_id>.
 Named speakers: start summaries with the subject's name; record both people and direction; attribute facts to their speaker; check subjects against speaker labels.
 Dates: observed_at is always the material's date (ISO YYYY-MM-DD, when the fact was stated), never the write time. A relative date ('last weekend') goes as stated in details.event_phrase; do not compute dates yourself — the server resolves it from observed_at into event_start/event_end (else event_unresolved).
 SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
@@ -110,7 +110,7 @@ Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Tags for filtering (recall matches them exactly); at most 50, 100 chars each. Mix 'category:x' and entity tags; set tags_normalize to reuse stored spellings.",
+                        "description": "Tags for filtering (recall matches them exactly); at most 50, 100 chars each. Mix 'category:x' and entity tags; set tags_normalize to reuse stored spellings. For Japanese include script variants.",
                     },
                     "context": {
                         "type": "object",

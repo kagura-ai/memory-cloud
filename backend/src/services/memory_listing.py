@@ -95,9 +95,10 @@ _OBSERVED_FILTERS = {
 # The event's own days (details.event_start / event_end, ``YYYY-MM-DD``): a
 # row matches when its [event_start, event_end] overlaps [after, before) —
 # event_end >= after AND event_start < before. A row without an event date
-# never matches.
+# never matches. ``event_end`` falls back to ``event_start`` (a row written
+# with the start only, as the point payload and the row readers read it).
 _EVENT_FILTERS = {
-    "event_after": (Memory.event_end, ">="),
+    "event_after": (func.coalesce(Memory.event_end, Memory.event_start), ">="),
     "event_before": (Memory.event_start, "<"),
 }
 _KNOWN_FILTERS = {
@@ -240,8 +241,9 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
     of that day, UTC, and a memory without an event time never matches);
     event_after / event_before (the event's own days: a memory matches when its
     event_start..event_end overlaps the window, after inclusive, before
-    exclusive; a datetime bound is reduced to its UTC day; a memory without an
-    event date never matches); source_uri_prefix; trust_tier='trusted';
+    exclusive; a datetime event_after is its UTC day, a datetime event_before
+    past midnight the day after it; a memory without an event date never
+    matches); source_uri_prefix; trust_tier='trusted';
     ``details.<key>`` equality for a scalar value (see ``_details_equals``: same
     JSON type, and for a number the same spelling). ``near`` / ``within`` are
     recall_nearby's job and are refused by name. ``updated_after`` / ``updated_before`` read the

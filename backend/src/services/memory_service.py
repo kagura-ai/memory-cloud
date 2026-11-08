@@ -124,10 +124,12 @@ from services.supersede_fold import fold_linked_versions, fold_links, fold_nodes
 from services.write_provenance import current_provenance
 from utils.datetime import to_naive_utc, to_utc_iso, utcnow
 from utils.event_dates import (
+    EventDateValidationError,
     event_payload_value,
     event_payload_values,
     event_response_kwargs,
     event_row_kwargs,
+    normalize_event_dates,
 )
 from utils.exceptions import (
     ConfigurationError,
@@ -938,8 +940,6 @@ class MemoryService:
             ValueError: ``invalid details.event_phrase: ...`` (the established
                 "bad request" signal inside MemoryService).
         """
-        from utils.event_dates import EventDateValidationError, normalize_event_dates
-
         try:
             return normalize_event_dates(details)
         except EventDateValidationError as exc:

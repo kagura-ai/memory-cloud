@@ -184,7 +184,11 @@ class TestUpdateSyncsTheRowsOwnPoint:
         assert updates["tags"] == ["q3"]
         assert not set(updates) & _INDEXER_KEYS
         # The details carry no observed_at: that key is cleared (#2330).
-        assert write.await_args.kwargs["delete_keys"] == ["observed_at"]
+        assert write.await_args.kwargs["delete_keys"] == [
+            "observed_at",
+            "event_start",
+            "event_end",
+        ]
 
 
 class TestPatchSyncsTheRowsOwnPoint:
@@ -226,7 +230,12 @@ class TestPatchSyncsTheRowsOwnPoint:
         assert not set(updates) & _INDEXER_KEYS
         # The details carry no location and no observed_at (#2330): those
         # keys are cleared, nothing else.
-        assert write.await_args.kwargs["delete_keys"] == ["location", "observed_at"]
+        assert write.await_args.kwargs["delete_keys"] == [
+            "location",
+            "observed_at",
+            "event_start",
+            "event_end",
+        ]
 
     async def test_a_failed_shared_lookup_is_logged_not_raised(self):
         memory = _indexer_row()

@@ -328,7 +328,8 @@ class TestNormalize:
         details = normalize_event_dates({"observed_at": "March 7", "event_phrase": "yesterday"})
         assert "event_start" not in details and details["event_phrase"] == "yesterday"
 
-    def test_an_unknown_phrase_leaves_the_dates_absent_and_drops_a_stale_pair(self):
+    def test_an_unknown_phrase_keeps_an_explicit_pair_the_caller_supplied(self):
+        """Dates the writer knew are not lost to a phrase the server cannot count."""
         details = normalize_event_dates(
             {
                 "observed_at": "2024-03-11",
@@ -337,7 +338,43 @@ class TestNormalize:
                 "event_end": "2024-03-02",
             }
         )
+        assert details == {
+            "observed_at": "2024-03-11",
+            "event_phrase": "a few days ago",
+            "event_start": "2024-03-01",
+            "event_end": "2024-03-02",
+        }
+
+    def test_an_unknown_phrase_without_a_pair_leaves_the_dates_absent(self):
+        details = normalize_event_dates(
+            {"observed_at": "2024-03-11", "event_phrase": "a few days ago"}
+        )
         assert details == {"observed_at": "2024-03-11", "event_phrase": "a few days ago"}
+        # A lone end never survives (there is no start to pair it with).
+        details = normalize_event_dates(
+            {
+                "observed_at": "2024-03-11",
+                "event_phrase": "a few days ago",
+                "event_end": "2024-03-02",
+            }
+        )
+        assert details == {"observed_at": "2024-03-11", "event_phrase": "a few days ago"}
+
+    def test_no_observed_at_keeps_an_explicit_pair(self):
+        details = normalize_event_dates({"event_phrase": "yesterday", "event_start": "2024-03-10"})
+        assert details == {
+            "event_phrase": "yesterday",
+            "event_start": "2024-03-10",
+            "event_end": "2024-03-10",
+        }
+
+    @pytest.mark.parametrize(
+        ("anchor", "phrase"),
+        [("0001-01-01", "yesterday"), ("9999-12-31", "tomorrow"), ("0001-01-03", "two weeks ago")],
+    )
+    def test_arithmetic_that_leaves_the_calendar_is_unresolved_not_an_error(self, anchor, phrase):
+        details = normalize_event_dates({"observed_at": anchor, "event_phrase": phrase})
+        assert details == {"observed_at": anchor, "event_phrase": phrase}
 
     def test_a_phrase_overrides_a_client_pair(self):
         details = normalize_event_dates(

@@ -609,6 +609,15 @@ async def test_upsert_populates_persistence(service, sleep_pass):
     remembered = MagicMock()
     remembered.memory_id = uuid4()
     remembered.observed_at = None  # #2689: RememberResponse's is a str or None
+    # The upsert carries the event dates of the new memory as well.
+    for _event_field in (
+        "event_start",
+        "event_end",
+        "event_phrase",
+        "event_weekday",
+        "event_unresolved",
+    ):
+        setattr(remembered, _event_field, None)
     remembered.scope = "working"
     remembered.persistence = persistence_info("working")
     service.remember = AsyncMock(return_value=remembered)
@@ -642,6 +651,15 @@ async def test_upsert_forwards_delivery_mode_and_reuses_remember_persistence(ser
     remembered = MagicMock()
     remembered.memory_id = uuid4()
     remembered.observed_at = None  # #2689: RememberResponse's is a str or None
+    # The upsert carries the event dates of the new memory as well.
+    for _event_field in (
+        "event_start",
+        "event_end",
+        "event_phrase",
+        "event_weekday",
+        "event_unresolved",
+    ):
+        setattr(remembered, _event_field, None)
     remembered.scope = "persistent"
     remembered.persistence = persistence_info("persistent", pinned=True)
     service.remember = AsyncMock(return_value=remembered)
@@ -678,6 +696,15 @@ async def test_upsert_replacement_inherits_existing_pin_when_omitted(service, sl
     remembered = MagicMock()
     remembered.memory_id = uuid4()
     remembered.observed_at = None  # #2689: RememberResponse's is a str or None
+    # The upsert carries the event dates of the new memory as well.
+    for _event_field in (
+        "event_start",
+        "event_end",
+        "event_phrase",
+        "event_weekday",
+        "event_unresolved",
+    ):
+        setattr(remembered, _event_field, None)
     remembered.scope = "persistent"
     remembered.persistence = persistence_info("persistent", pinned=True)
     service.remember = AsyncMock(return_value=remembered)
@@ -711,6 +738,15 @@ async def test_upsert_explicit_delivery_mode_overrides_existing_pin(service, sle
     remembered = MagicMock()
     remembered.memory_id = uuid4()
     remembered.observed_at = None  # #2689: RememberResponse's is a str or None
+    # The upsert carries the event dates of the new memory as well.
+    for _event_field in (
+        "event_start",
+        "event_end",
+        "event_phrase",
+        "event_weekday",
+        "event_unresolved",
+    ):
+        setattr(remembered, _event_field, None)
     remembered.scope = "persistent"
     remembered.persistence = persistence_info("persistent")
     service.remember = AsyncMock(return_value=remembered)
