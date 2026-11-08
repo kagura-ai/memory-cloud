@@ -4,6 +4,16 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.152.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.152.1) — 2026-11-08
+
+Patch: an existing Qdrant collection now receives the v0.152.0 event-date indexes at API startup. v0.152.0 added them only to newly created collections and to a collection that saw a `create_context` or an embedding migration after the upgrade; a deployment that did neither kept filtering on `event_after` / `event_before` without an index.
+
+### Fixed
+- **Late payload indexes added at startup** ([#2729](https://github.com/kagura-ai/memory-cloud/issues/2729)): every API start now adds the missing late-added payload indexes (`tags`, `location`, `created_at`, `updated_at`, `observed_at`, `event_start`, `event_end`, `chunk_of`) to every `kagura_memories*` collection, in the background, from one table that the context-creation retrofit reads as well. Index builds are requested without waiting (the REST client runs on a short default timeout). An index Qdrant refuses is logged as `payload_index_create_failed` and skipped, the others are still created, and the next start retries it; a refused index no longer fails `create_context` with "Failed to create kagura_memories collection". A collection that cannot be reached is skipped (`payload_index_collection_failed`). The pass ends with one `payload_index_pass_done` line (collections, fields requested, failures), so a boot where nothing was missing is accounted for.
+
+### Notes
+- No migration, no new environment variables, no operator action. After the deploy, the API log shows `created_missing_index field=event_start` and `field=event_end` once per existing collection, then `payload_index_pass_done`. The v0.152.0 release note said these indexes were added automatically at startup; that becomes true with this release.
+
 ## [v0.152.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.152.0) — 2026-11-08
 
 Dated memories and beta readiness. A memory can now carry the date of the event it describes, resolved on the server from the phrase as stated ("last weekend"), and readers can filter and sort on that event date. The beta-invite batch CLI requires an explicit timezone and checks the whole schedule up front. Invitations to a workspace whose plan no longer takes new members are shown as blocked. Passkeys report their limit before the identity proof. Every usage readout checks workspace membership.
