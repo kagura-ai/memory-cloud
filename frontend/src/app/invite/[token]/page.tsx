@@ -194,7 +194,8 @@ export default function AcceptInvitationPage({
       console.error("[INVITE] ❌ Acceptance failed:", err);
 
       const apiError = err instanceof ApiError ? err : null;
-      if (apiError?.error === "FEAT-001") {
+      // Only the team-invitations gate means the workspace cannot take members.
+      if (apiError?.error === "FEAT-001" && apiError.gate?.feature === "team_invitations") {
         setState("plan_blocked");
         return;
       }

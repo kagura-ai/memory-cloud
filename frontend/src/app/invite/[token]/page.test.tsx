@@ -97,10 +97,22 @@ describe("plan-blocked invitations", () => {
     mockApiClientGet.mockResolvedValue({ user_id: "invitee" });
     mockAcceptInvitation.mockRejectedValue(new ApiError({
       error: "FEAT-001", message: "Upgrade required", status: 403,
+      gate: { state: "plan", feature: "team_invitations" },
     }));
     render(<AcceptInvitationPage params={{ token: TOKEN } as unknown as Promise<{ token: string }>} />);
     expect(await screen.findByText("planBlocked.message")).toBeInTheDocument();
     expect(screen.queryByText("Upgrade required")).not.toBeInTheDocument();
+  });
+
+  it("does not read another feature's refusal as a plan-blocked invitation", async () => {
+    mockApiClientGet.mockResolvedValue({ user_id: "invitee" });
+    mockAcceptInvitation.mockRejectedValue(new ApiError({
+      error: "FEAT-001", message: "Upgrade required", status: 403,
+      gate: { state: "plan", feature: "some_other_feature" },
+    }));
+    render(<AcceptInvitationPage params={{ token: TOKEN } as unknown as Promise<{ token: string }>} />);
+    expect(await screen.findByText(/Upgrade required/)).toBeInTheDocument();
+    expect(screen.queryByText("planBlocked.message")).not.toBeInTheDocument();
   });
 });
 
