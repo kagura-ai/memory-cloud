@@ -53,6 +53,21 @@ OBSERVED_AT_SQL = (
     "ELSE NULL END"
 )
 
+# Generated expressions of ``Memory.event_start`` / ``event_end``: the days an
+# event began and ended (details.event_start / event_end, ``YYYY-MM-DD``,
+# resolved from details.event_phrase by MemoryService._apply_event_dates).
+# Copied byte for byte into migration f31_2724_event_dates;
+# tests/utils/test_event_dates.py pins both and the regex literal of
+# utils/event_dates.py against them.
+EVENT_START_SQL = (
+    "CASE WHEN details->>'event_start' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "
+    "THEN details->>'event_start' ELSE NULL END"
+)
+EVENT_END_SQL = (
+    "CASE WHEN details->>'event_end' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "
+    "THEN details->>'event_end' ELSE NULL END"
+)
+
 # Delivery mode constants (Issue #886, design memory 242cb28a) — an ORTHOGONAL
 # delivery attribute on Memory, deliberately NOT a new memory ``type``. It
 # controls *when* a memory is surfaced, independent of *what* it is about:
@@ -515,6 +530,26 @@ class Memory(Base):
         index=False,
     )
 
+    # The event's own days: details.event_start / event_end (``YYYY-MM-DD``,
+    # written by MemoryService._apply_event_dates from details.event_phrase or
+    # given by the client), NULL for anything else (raw SQL never errors).
+    # Ten fixed characters, so lexical order is chronological. The partial
+    # btree (context_id, event_start) WHERE event_start IS NOT NULL AND
+    # deleted_at IS NULL is created in migration f31_2724_event_dates; the
+    # event_after / event_before overlap test (event_start < before AND
+    # event_end >= after) walks it by event_start and checks event_end on the
+    # rows it selects.
+    event_start: Mapped[str | None] = mapped_column(
+        String(10),
+        Computed(EVENT_START_SQL, persisted=True),
+        index=False,
+    )
+    event_end: Mapped[str | None] = mapped_column(
+        String(10),
+        Computed(EVENT_END_SQL, persisted=True),
+        index=False,
+    )
+
     # Constraints
     __table_args__ = (
         CheckConstraint("importance BETWEEN 0 AND 1", name="valid_importance"),
@@ -692,6 +727,16 @@ class Memory(Base):
             "context_id",
             "observed_at",
             postgresql_where=text("observed_at IS NOT NULL AND deleted_at IS NULL"),
+        ),
+        # The event's own days: partial btree serving the event_after /
+        # event_before overlap range per context. Created CONCURRENTLY in
+        # migration f31_2724_event_dates; the predicate text must stay
+        # byte-identical.
+        Index(
+            "idx_memories_event_start",
+            "context_id",
+            "event_start",
+            postgresql_where=text("event_start IS NOT NULL AND deleted_at IS NULL"),
         ),
         CheckConstraint(
             "(location_lat IS NULL OR (location_lat >= -90 AND location_lat <= 90)) "

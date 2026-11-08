@@ -120,6 +120,8 @@ class TestEnsureCollectionGeoIndex:
                 "tags": object(),
                 "location": object(),
                 "observed_at": object(),
+                "event_start": object(),
+                "event_end": object(),
                 "chunk_of": object(),
             },
         )

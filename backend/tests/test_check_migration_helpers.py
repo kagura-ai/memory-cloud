@@ -40,7 +40,7 @@ _SESSION_SET_LOCK_TIMEOUT = re.compile(r"\bSET\s+lock_timeout\b", re.I)
 # CONCURRENTLY sites the walker finds across ``alembic/versions``. A new
 # revision that builds or drops an index concurrently bumps it; a drop means
 # the walker lost a shape.
-_KNOWN_CONCURRENTLY_SITE_COUNT = 53
+_KNOWN_CONCURRENTLY_SITE_COUNT = 56  # f31: one create and two drop reads
 
 # Revisions that carry their own copy of a helper (written before #2240).
 _LEGACY_INVALID_INDEX_PROBE = frozenset(

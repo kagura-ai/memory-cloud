@@ -51,6 +51,7 @@ from services.memory_service import (
 from services.permission_service import VIEWER_READ_ONLY_REASON
 from services.plan_headroom import MEMORIES, drop_quota_reading
 from utils.datetime import to_utc_iso, utcnow
+from utils.event_dates import event_fields, event_write_fields
 from utils.exceptions import (
     AuthorizationError,
     ContentSizeExceededError,
@@ -353,6 +354,9 @@ async def handle_remember(
                             # #2689: the stored observed_at and its weekday, so
                             # the writer can check a resolved relative date.
                             **observed_fields(getattr(result, "observed_at", None)),
+                            # The event dates resolved from details.event_phrase
+                            # (or event_unresolved when the phrase did not resolve).
+                            **event_write_fields(result),
                             # #1505: scope alone reads as "not saved yet" — say
                             # what it actually implies for durability.
                             **_persistence_response_field(result.persistence, verbose=verbose),
@@ -589,6 +593,7 @@ async def handle_update_memory(
                             "version": result.version,  # #2043
                             # #2689: the memory's observed_at after the edit.
                             **observed_fields(getattr(result, "observed_at", None)),
+                            **event_write_fields(result),
                             **_persistence_response_field(
                                 result.persistence, verbose=verbose
                             ),  # #1505
@@ -2475,8 +2480,12 @@ async def handle_reference(
                 "created_at": to_utc_iso(result.created_at),
                 "updated_at": to_utc_iso(result.updated_at),
                 # #2330: when the fact held; absent when the memory has none.
-                # #2689: observed_weekday right after it.
+                # #2689: observed_weekday right after it. Then the event's own
+                # days with the weekday of event_start, when present.
                 **observed_fields(result.observed_at),
+                **event_fields(
+                    getattr(result, "event_start", None), getattr(result, "event_end", None)
+                ),
                 "version": result.version,  # #2043: update_memory's expected_version
                 "client": result.client,
                 "source_uri": result.source_uri,

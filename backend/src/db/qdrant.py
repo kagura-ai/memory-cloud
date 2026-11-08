@@ -54,6 +54,7 @@ from qdrant_client.models import (
 from config.database import QDRANT_URL
 from db.loop_binding import keep_for_loop, owned_by_another_loop, running_loop, tag_loop
 from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates, chunk_point_id
+from utils.event_dates import parse_event_bound
 from utils.exceptions import QdrantError
 from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.hashing import sha256_hex
@@ -493,6 +494,13 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
 # The recall filter keys of the event time (#2330) and their Qdrant range
 # operator: after inclusive, before exclusive.
 OBSERVED_FILTER_OPERATORS = {"observed_after": "gte", "observed_before": "lt"}
+# The recall filter keys of the event's own days and the payload key + range
+# operator each compares: a point matches when [event_start, event_end]
+# overlaps [after, before), i.e. event_end >= after AND event_start < before.
+EVENT_FILTER_CONDITIONS = {
+    "event_after": ("event_end", "gte"),
+    "event_before": ("event_start", "lt"),
+}
 
 
 def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:
@@ -540,6 +548,17 @@ def _build_date_filter_conditions(filters: dict[str, Any]) -> list[FieldConditio
         conditions.append(
             FieldCondition(key="observed_at", range=DatetimeRange(**{operator: bound}))
         )
+
+    # The event's own days (details.event_start / event_end): the payload
+    # holds each day as its UTC midnight, so the day bounds compare as
+    # datetimes. Points without the payload never match.
+    for filter_key, (field, operator) in EVENT_FILTER_CONDITIONS.items():
+        value = filters.get(filter_key)
+        if value is None:
+            continue
+        day = parse_event_bound(value, filter_key)
+        bound = datetime.fromisoformat(day + "T00:00:00+00:00")
+        conditions.append(FieldCondition(key=field, range=DatetimeRange(**{operator: bound})))
 
     return conditions
 
@@ -1821,6 +1840,15 @@ async def ensure_kagura_memories_collection(
                         field_schema="datetime",  # type: ignore[arg-type]
                     )
                     logger.info("created_missing_index", field="observed_at", type="datetime")
+                for event_field in ("event_start", "event_end"):
+                    if event_field not in existing_fields:
+                        # The event's own days, for filters.event_after / event_before.
+                        await client.create_payload_index(
+                            collection_name=collection_name,
+                            field_name=event_field,
+                            field_schema="datetime",  # type: ignore[arg-type]
+                        )
+                        logger.info("created_missing_index", field=event_field, type="datetime")
                 if CHUNK_OF_FIELD not in existing_fields:
                     # #2015: content chunk points are selected by chunk_of
                     # (exclusion in search, cascade deletes / payload updates).
@@ -1959,8 +1987,9 @@ async def ensure_kagura_memories_collection(
         )
 
         # Issue #78: Datetime indexes for date range filtering (#2330: and
-        # the event time observed_at)
-        for dt_field in ("created_at", "updated_at", "observed_at"):
+        # the event time observed_at; the event's own days event_start /
+        # event_end for filters.event_after / event_before)
+        for dt_field in ("created_at", "updated_at", "observed_at", "event_start", "event_end"):
             await client.create_payload_index(
                 collection_name=collection_name,
                 field_name=dt_field,
@@ -1997,6 +2026,8 @@ async def ensure_kagura_memories_collection(
                 "created_at",
                 "updated_at",
                 "observed_at",
+                "event_start",
+                "event_end",
                 CHUNK_OF_FIELD,
             ],
         )

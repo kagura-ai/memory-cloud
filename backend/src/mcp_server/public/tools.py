@@ -214,6 +214,10 @@ def _project(memory: Memory, score: float | None = None) -> dict[str, Any]:
     item["updated_at"] = to_utc_iso(memory.updated_at)
     if memory.observed_at:
         item["observed_at"] = memory.observed_at
+    # The event's own days (the generated columns, YYYY-MM-DD), when present.
+    if memory.event_start:
+        item["event_start"] = memory.event_start
+        item["event_end"] = memory.event_end or memory.event_start
     return item
 
 

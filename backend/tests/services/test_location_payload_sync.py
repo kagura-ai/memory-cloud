@@ -113,7 +113,8 @@ class TestUpdateInPlaceLocationSync:
         kwargs = mock_payload_update.await_args.kwargs
         assert "location" not in kwargs.get("payload_updates", {})
         # observed_at (#2330) is cleared the same way: the details carry none.
-        assert kwargs["delete_keys"] == ["location", "observed_at"]
+        # The event dates (details.event_start / event_end) are payload keys too.
+        assert kwargs["delete_keys"] == ["location", "observed_at", "event_start", "event_end"]
 
     @pytest.mark.asyncio
     async def test_no_details_in_request_leaves_geo_payload_untouched(self, service):

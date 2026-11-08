@@ -232,7 +232,10 @@ def test_session_summary_stamps_observed_at_in_every_mode():
     # A live session is dated today, so the rule cannot forbid today's date.
     assert "never today's date" not in text
     # ``light`` content is one evidence line, so a resolved date goes in the summary.
-    assert "into the content (`light`: the summary)" in save
+    # A relative date is handed to the server as details.event_phrase, not computed.
+    assert "goes in `details.event_phrase` as stated" in save
+    assert "do not compute it" in save
+    assert "into the content (`light`: the summary)" not in save
 
 
 def test_codex_session_summary_carries_the_personal_fact_rules():
@@ -244,7 +247,9 @@ def test_codex_session_summary_carries_the_personal_fact_rules():
     assert "and so does `details.observed_at`" in section
     assert "`details.trigger` on a `time` item" in section
     assert "never today's date" not in section
-    assert "into the content (`light`: the summary)" in section
+    assert "goes in `details.event_phrase` as stated" in section
+    assert "do not compute it" in section
+    assert "into the content (`light`: the summary)" not in section
 
 
 MEMO_TAGS = (

@@ -200,6 +200,12 @@ class TestUpsertByExternalId:
         response.persistence = None
         response.lint = []
         response.observed_at = None  # #2689: the upsert carries it
+        # The upsert carries the event dates of the new memory as well.
+        response.event_start = None
+        response.event_end = None
+        response.event_phrase = None
+        response.event_weekday = None
+        response.event_unresolved = None
         service.remember = AsyncMock(return_value=response)
 
     def _request(self) -> UpdateMemoryRequest:

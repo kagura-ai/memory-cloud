@@ -40,6 +40,7 @@ from services.memory_listing import (
     list_memories,
 )
 from utils.datetime import parse_iso8601_to_aware, to_naive_utc, to_utc_iso
+from utils.event_dates import event_dates_from_details, event_fields
 from utils.observed_at import observed_at_from_details, observed_fields
 from utils.response_budget import (
     BudgetArgumentError,
@@ -65,8 +66,11 @@ def _memory_item(m: Any, *, include_details: bool) -> dict[str, Any]:
         "version": m.version,  # #2043
     }
     # #2330: when the fact held, the details form; absent when unset.
-    # #2689: its weekday right after it.
+    # #2689: its weekday right after it. Then the event's own days with the
+    # weekday of event_start, when the memory has them.
     item.update(observed_fields(observed_at_from_details(m.details)))
+    start, end, _ = event_dates_from_details(m.details)
+    item.update(event_fields(start, end))
     if include_details:
         item["details"] = m.details
     return item

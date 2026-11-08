@@ -205,10 +205,27 @@ def test_recall_time_and_count_questions(relative):
     # #2330: the server filters and orders by the event time.
     assert '"observed_after": "2024-03-01", "observed_before": "2024-04-01"' in text
     assert 'order_by="observed_at", direction="asc")' in text
+    # The event's own days come first when the row has them.
+    assert '"event_after": "2024-03-01", "event_before": "2024-04-01"' in text
+    assert 'order_by="event_start", direction="asc")' in text
+    assert "`event_start` / `event_end` with `event_weekday`" in text
     assert "Sort the rows by that date yourself" not in text
     assert "the later `observed_at`, else the later `created_at`, is current" in text
     assert "`include_superseded=true`" in text
     assert "the store is the authority; never drop a row" in text
+
+
+@pytest.mark.parametrize("relative", [RECALL, CODEX])
+def test_recall_searches_again_before_answering_not_recorded(relative):
+    """The plain case next to the likely / would / might rule: a second search by
+    the subject before "not recorded", and a general statement answers "how often"."""
+    text = _recall_rules(relative)
+    assert "**Not recorded**" in text
+    assert "first recall again with the subject's name and the fact's key noun" in text
+    assert "`list` with a tag naming the subject" in text
+    assert 'beats single instances for "how often"' in text
+    tools = {tool["name"]: tool for tool in get_tool_definitions()}
+    assert "Not recorded: first recall again" in tools["recall"]["description"]
 
 
 def test_recall_signals_point_at_the_time_section():
@@ -221,16 +238,21 @@ def test_recall_signals_point_at_the_time_section():
 @pytest.mark.parametrize(
     "rule",
     [
-        "Read every result, not only the top ones; recall once more for each kind of item "
-        "found, or call `list` with a tag or type filter when one names the set; answer "
-        "with all of them.",
-        'Pass `filters={"observed_after": ..., "observed_before": ...}` around it, with a '
-        "margin: `observed_at` is the date a fact was stated. If nothing matches, recall "
-        "again without the filter.",
-        "Recall again on concrete entities and category words (brand, sponsor, shop, friend); "
-        'use `search_mode="keyword"` for names the first recall surfaced. Answer with the '
-        "best-supported inference, name the supporting memory, and mark it as an inference. "
-        "Decline only when `confidence.level` is `none` or `low`.",
+        "read every result, not only the top ones; recall once more per kind found, or "
+        "`list` with a tag or type filter naming the set; answer with all of them.",
+        '`filters={"event_after": ..., "event_before": ...}` (the event\'s own days, '
+        "event_start/event_end); rows without one: `observed_after`/`observed_before` "
+        "around it with a margin (`observed_at` = the date a fact was stated); nothing "
+        "matches: recall again without the filter.",
+        "recall again on concrete entities and category words (brand, sponsor, shop, friend), "
+        '`search_mode="keyword"` for surfaced names; answer with the best-supported '
+        "inference, name the memory, mark it as an inference; decline only at "
+        "`confidence.level` `none`/`low`.",
+        # Before answering "not recorded", search once more by the subject.
+        "first recall again with the subject's name and the fact's key noun "
+        '(`search_mode="keyword"`), or `list` with a tag naming the subject; a row that '
+        'states it answers — name it. A general statement beats single instances for "how '
+        'often".',
     ],
 )
 def test_answering_rules_match_the_tool_and_both_skills(relative, rule):
@@ -273,11 +295,12 @@ def test_the_guidance_uses_real_tool_parameters():
     listing = tools["list"]["inputSchema"]["properties"]
     assert "created_at" in listing["order_by"]["enum"]
     assert "observed_at" in listing["order_by"]["enum"]  # #2330
+    assert "event_start" in listing["order_by"]["enum"]
     assert "observed_after/before" in listing["filters"]["description"]
-    assert (
-        "observed_after/before"
-        in tools["recall"]["inputSchema"]["properties"]["filters"]["description"]
-    )
+    assert "event_after/before" in listing["filters"]["description"]
+    recall_filters = tools["recall"]["inputSchema"]["properties"]["filters"]["description"]
+    assert "observed_after/before" in recall_filters
+    assert "event_after/before" in recall_filters
     assert "observed_at" in tools["remember"]["inputSchema"]["properties"]
     assert "include_details" in listing
     assert "details.<key>" in listing["filters"]["description"]
@@ -323,44 +346,68 @@ def test_remember_batch_guidance_splits_and_falls_back(relative):
     assert "one `remember` per item" in text
 
 
-@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
-def test_remember_resolves_relative_dates_into_the_content(relative):
-    """#2465: ``observed_at`` stays the material's date, not the resolved one."""
-    text = _remember_rules(relative)
-    assert "Resolve relative dates." in text
-    assert "`observed_at` stays the material's date" in text
-    assert 'the one exception to "as it states it"' in text
-    assert "With no material date, leave the phrase as stated." in text
+RELATIVE_DATE_RULES = (
+    "Relative dates.",
+    "pass the phrase as stated in `details.event_phrase`",
+    "do not compute the dates yourself",
+    '"last weekend" is the Saturday–Sunday just before the material date',
+    "on a Saturday or Sunday, the weekend before the current one",
+    "returns `event_start`, `event_end` and `event_weekday`",
+    'written "last weekend (2024-03-09–10)"',
+    '`event_unresolved: "unknown_phrase"`',
+    '`event_unresolved: "no_observed_at"`',
+    "`observed_at` stays the material's date",
+    "With no material date, leave the phrase as stated",
+    "the server never counts from the time you write",
+)
 
 
 @pytest.mark.parametrize("relative", [REMEMBER, CODEX])
-def test_remember_anchors_relative_dates_on_the_material_weekday(relative):
-    """#2689: the weekday of the material date is written, and the server's checks it."""
+@pytest.mark.parametrize("rule", RELATIVE_DATE_RULES)
+def test_remember_passes_relative_dates_as_event_phrase(relative, rule):
+    """The server resolves ``details.event_phrase``; the writer no longer computes dates."""
     section = _section(
-        _remember_rules(relative), "Resolve relative dates.", "Store what the material states"
+        _remember_rules(relative), "Relative dates.", "Store what the material states"
     )
-    assert '"last weekend" is the Saturday–Sunday just before the material date' in section
-    assert "on a Saturday or Sunday, the weekend before the current one" in section
-    assert '"N weekends ago" counts back from there' in section
-    # The worked example is anchored on a Monday.
-    assert "material date Mon 2024-03-11" in section
-    assert "last weekend 2024-03-09–10" in section
-    assert "two weekends ago 2024-03-02–03" in section
-    assert '"last weekend (2024-03-09–10; material date Mon 2024-03-11)"' in section
-    # The server's weekday is the check.
-    assert "`observed_weekday`" in section
-    assert "`update_memory`" in section
+    assert rule in section
 
 
-def test_the_worked_example_dates_are_right():
-    from datetime import date, timedelta
+@pytest.mark.parametrize("relative", [REMEMBER, CODEX])
+def test_remember_no_longer_asks_the_writer_to_resolve_dates(relative):
+    text = _remember_rules(relative)
+    assert "Resolve relative dates." not in text
+    assert "recompute the dates" not in text
 
-    material = date(2024, 3, 11)
-    assert material.weekday() == 0  # a Monday
-    saturday = material - timedelta(days=material.weekday() + 2)
-    assert (saturday, saturday + timedelta(days=1)) == (date(2024, 3, 9), date(2024, 3, 10))
-    two_ago = saturday - timedelta(days=7)
-    assert (two_ago, two_ago + timedelta(days=1)) == (date(2024, 3, 2), date(2024, 3, 3))
+
+def test_the_worked_example_matches_the_resolver():
+    from datetime import date
+
+    from utils.event_dates import resolve_event_phrase
+
+    assert date(2024, 3, 11).weekday() == 0  # a Monday
+    assert resolve_event_phrase("last weekend", date(2024, 3, 11)) == (
+        date(2024, 3, 9),
+        date(2024, 3, 10),
+    )
+
+
+@pytest.mark.parametrize("relative", [SESSION_SUMMARY, CODEX])
+def test_session_summary_passes_relative_dates_as_event_phrase(relative):
+    """session-summary writes dated memories too: the same rule, one line."""
+    text = _codex("Session Summary") if relative == CODEX else _write_rules(relative)
+    assert "`details.event_phrase` as stated" in text
+    assert "do not compute it" in text
+    assert "returns `event_start` / `event_end`" in text
+    assert "resolve relative dates" not in text
+
+
+@pytest.mark.parametrize("name", ["remember", "remember_batch", "update_memory"])
+def test_write_tool_descriptions_carry_the_relative_date_rule(name):
+    """Writers call the tools without the skills: the description holds the rule."""
+    tools = {tool["name"]: tool for tool in get_tool_definitions()}
+    description = tools[name]["description"]
+    assert "details.event_phrase" in description
+    assert "do not compute dates" in description
 
 
 @pytest.mark.parametrize("relative", [REMEMBER, CODEX])

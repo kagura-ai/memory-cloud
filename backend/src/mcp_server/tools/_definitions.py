@@ -57,18 +57,18 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
         },
         {
             "name": "remember",
-            "description": """Store a new memory; edit a known id with update_memory, replace an outdated fact with supersedes=<old_memory_id>. Write a searchable conclusion in summary, full text in content.
+            "description": """Store a new memory; edit a known id with update_memory, replace an outdated fact with supersedes=<old_memory_id>.
 Named speakers: start summaries with the subject's name; record both people and direction; attribute facts to their speaker; check subjects against speaker labels.
+Dates: observed_at is always the material's date (ISO YYYY-MM-DD, when the fact was stated), never the write time. A relative date ('last weekend') goes as stated in details.event_phrase; do not compute dates yourself — the server resolves it from observed_at into event_start/event_end (else event_unresolved).
 SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}; dedupe='check' may return {status: 'duplicate_candidate', candidate}. Committed before return. Missing supersedes may surface as supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (>1,000,000 chars: split), validation_error.
-Manual: guide(["remember"]).""",
+Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}; dedupe='check': {status: 'duplicate_candidate', candidate}. Committed before return. Errors: quota_exceeded, payload_too_large (>1,000,000 chars: split), validation_error. Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["summary", "content", "type"],
                 "properties": {
                     "verbose": {
                         "type": "boolean",
-                        "description": "true keeps persistence.detail (the lifecycle prose); default false — see guide(['persistence']).",
+                        "description": "true keeps persistence.detail (lifecycle prose); default false. See guide(['persistence']).",
                     },
                     "tags_normalize": {
                         "type": "boolean",
@@ -77,11 +77,11 @@ Manual: guide(["remember"]).""",
                     "dedupe": {
                         "type": "string",
                         "enum": ["suggest", "check", "off"],
-                        "description": "suggest (default): write, flag a near-duplicate later. check: a near-duplicate comes back as duplicate_candidate and nothing is written. off: never suggest for this memory (permanent).",
+                        "description": "suggest (default): write, flag a near-duplicate later as supersede_candidate. check: a near-duplicate returns duplicate_candidate, nothing is written. off: never suggest.",
                     },
                     "summary": {
                         "type": "string",
-                        "description": "Search summary, 10-500 chars (best 100-250); longer is cut at a sentence end (summary_truncated; full text kept in content). This is what recall matches.",
+                        "description": "Search summary (what recall matches), 10-500 chars, best 100-250; longer is cut at a sentence end (summary_truncated; full text kept in content).",
                     },
                     "content": {
                         "type": "string",
@@ -89,7 +89,7 @@ Manual: guide(["remember"]).""",
                     },
                     "type": {
                         "type": "string",
-                        "description": "Free-form type (max 50 chars), e.g. 'decision', 'pattern', 'bug-fix', 'troubleshooting', 'learning', 'note', 'code'; 'time' makes a Time Memory (needs details.trigger).",
+                        "description": "Free-form type (max 50 chars), e.g. 'decision', 'pattern', 'bug-fix', 'note', 'fact', 'event'; 'time' makes a Time Memory (needs details.trigger).",
                     },
                     "context_summary": {
                         "type": "string",
@@ -97,11 +97,11 @@ Manual: guide(["remember"]).""",
                     },
                     "details": {
                         "type": "object",
-                        "description": "Structured details (JSON object). Reserved keys: location (lat/lon, see SECURITY), trigger (type='time'), tool_trigger (guardrail), observed_at (ISO 8601 date, when the fact held).",
+                        "description": "Structured details (JSON object). Reserved keys: location (lat/lon, see SECURITY), trigger (type='time'), tool_trigger (guardrail), observed_at (ISO 8601 date, when the fact held), event_phrase (a relative date as stated, resolved from observed_at into event_start/event_end; pass those two for absolute dates).",
                     },
                     "observed_at": {
                         "type": "string",
-                        "description": "When the fact held or the event happened, ISO 8601: a date (2024-03-07) or a UTC datetime. Stored as details.observed_at; never the write time.",
+                        "description": "The material's date (the day the fact was stated), ISO 8601 date 2024-03-07 or UTC datetime; never the write time. Stored as details.observed_at; event_phrase resolves against it.",
                     },
                     "importance": {
                         "type": "number",
@@ -114,7 +114,7 @@ Manual: guide(["remember"]).""",
                     },
                     "context": {
                         "type": "object",
-                        "description": "Extra metadata (JSON object), e.g. related issue numbers or custom fields. Never coordinates.",
+                        "description": "Extra metadata (JSON object), e.g. related issue numbers. Never coordinates.",
                     },
                     "delivery_mode": {
                         "type": "string",
@@ -133,29 +133,29 @@ Manual: guide(["remember"]).""",
                     "source_type": {
                         "type": "string",
                         "enum": ["file", "url", "vault", "api", "manual"],
-                        "description": "Origin: file, url, vault (Obsidian), api (API-ingested), manual (user-entered).",
+                        "description": "Origin kind (vault: Obsidian).",
                     },
                     "linked_memory_ids": {
                         "type": "array",
                         "items": {"type": "string", "format": "uuid"},
-                        "description": "Existing memory IDs to link: creates declared_link edges (weight 1.0).",
+                        "description": "Existing memory IDs to link (declared_link edges).",
                     },
                     "linked_source_uris": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Link by source_uri, resolved to memory IDs now; unresolved URIs are silently skipped.",
+                        "description": "Link by source_uri (resolved now; unresolved skipped).",
                     },
                     "supersedes": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "ID of the outdated memory this one replaces: it is shadowed out of default recall, not deleted (deleting the supersedes edge restores it).",
+                        "description": "ID of the outdated memory this one replaces: shadowed out of default recall, not deleted (deleting the edge restores it).",
                     },
                 },
             },
         },
         {
             "name": "remember_batch",
-            "description": """Store up to 50 memories in one call (the end-of-session save). Each item takes remember's arguments and limits; an unknown item key fails only that item (invalid_argument). atomic=false (default): each item is written and reported on its own. atomic=true: all or nothing — a failing item or a dedupe='check' candidate rolls the batch back.
+            "description": """Store up to 50 memories in one call (the end-of-session save). Each item takes remember's arguments and limits; an unknown item key fails only that item (invalid_argument). atomic=true: all or nothing (a failing item or a dedupe='check' candidate rolls the batch back); default false: each item on its own. Relative dates as in remember: details.event_phrase as stated plus observed_at; do not compute dates.
 Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["remember_batch"]).""",
             "inputSchema": {
@@ -196,7 +196,7 @@ Manual: guide(["remember_batch"]).""",
         },
         {
             "name": "update_memory",
-            "description": """Update a memory in place (memory_id) or upsert by external_id (new if not found, else replaced under a NEW memory_id; needs summary, content, type). Use it, not remember, to correct or enrich a memory whose id you have.
+            "description": """Update a memory in place (memory_id) or upsert by external_id (new if not found, else replaced under a NEW memory_id; needs summary, content, type). Use it, not remember, for a memory whose id you have. Relative dates as in remember: details.event_phrase as stated plus observed_at; do not compute dates.
 SECURITY: never store secrets, credentials or PII: refuse and ask the user to redact; coordinates go only in details.location, never in context.
 Returns: {status, memory_id, operation, re_embedded, scope, version, persistence?, supersede_candidate_dismissed?, superseded_memory_id?, lint?, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}. Errors: memory_not_found, validation_error, version_conflict, edge_exists.
 Manual: guide(["update_memory"]).""",
@@ -248,7 +248,7 @@ Manual: guide(["update_memory"]).""",
                     },
                     "details": {
                         "type": "object",
-                        "description": "Replaces the stored details (resend details.location or it is dropped).",
+                        "description": "Replaces the stored details (resend location, observed_at and event_phrase or they are dropped).",
                     },
                     "details_patch": {
                         "type": "object",
@@ -297,11 +297,11 @@ Manual: guide(["update_memory"]).""",
         {
             "name": "recall",
             "readOnly": True,
-            "description": """Search meaning/keywords with an expected-answer query. confidence.level (high|moderate|low|none): none/low suggests an external source; degraded=true means no semantic search. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories. The store is the authority, even over general knowledge; when rows disagree, the later observed_at (else created_at) wins.
-Every item of a kind: Read every result, not only the top ones; recall once more for each kind of item found, or call `list` with a tag or type filter when one names the set; answer with all of them.
-Named date or period: Pass `filters={"observed_after": ..., "observed_before": ...}` around it, with a margin: `observed_at` is the date a fact was stated. If nothing matches, recall again without the filter.
-Likely/would/might: Recall again on concrete entities and category words (brand, sponsor, shop, friend); use `search_mode="keyword"` for names the first recall surfaced. Answer with the best-supported inference, name the supporting memory, and mark it as an inference. Decline only when `confidence.level` is `none` or `low`.
-Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, observed_weekday?, superseded_by?, contradicts?, supersede_candidate?, ...}], count, full_applied?, related_tags?: [{tag, count}], ...}. Optional keys omitted: absent, never null. summary_cut: 160-char head. Top `full` include content; reference(memory_id) pages it. verbosity='full': uncut summary, context_summary?, scope, tags, version. supersede_candidate (suggestion): update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming(): deterministic sets. Manual: guide(["recall"]).""",
+            "description": """Search by meaning and keywords. confidence.level (high|moderate|low|none): none/low suggests an external source; degraded=true: no semantic search. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories. The store is the authority, even over general knowledge; when rows disagree, the later observed_at (else created_at) wins.
+Every item of a kind: read every result, not only the top ones; recall once more per kind found, or `list` with a tag or type filter naming the set; answer with all of them.
+When did / in a period: `filters={"event_after": ..., "event_before": ...}` (the event's own days, event_start/event_end); rows without one: `observed_after`/`observed_before` around it with a margin (`observed_at` = the date a fact was stated); nothing matches: recall again without the filter.
+Likely/would/might: recall again on concrete entities and category words (brand, sponsor, shop, friend), `search_mode="keyword"` for surfaced names; answer with the best-supported inference, name the memory, mark it as an inference; decline only at `confidence.level` `none`/`low`. Not recorded: first recall again with the subject's name and the fact's key noun (`search_mode="keyword"`), or `list` with a tag naming the subject; a row that states it answers — name it. A general statement beats single instances for "how often".
+Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, observed_weekday?, superseded_by?, contradicts?, supersede_candidate?, ...}], count, full_applied?, related_tags?: [{tag, count}], ...}. Optional keys omitted: absent, never null. reference(memory_id) pages content. verbosity='full' adds context_summary?, scope, tags, version. supersede_candidate (suggestion): update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming(): deterministic. Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -317,62 +317,62 @@ Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summa
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Query (max 8000 chars).",
+                        "description": "Max 8000 chars.",
                     },
                     "k": {
                         "type": "integer",
-                        "description": "Number of results (default 5, max 100).",
+                        "description": "Default 5, max 100.",
                     },
                     "full": {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 100,
-                        "description": "Top results with content, 1500 chars each (default 3; 0: none). Lowered to fit max_chars.",
+                        "description": "Top results carrying content, 1500 chars each (default 3; 0 none); cut to fit max_chars.",
                     },
                     "max_chars": {
                         "type": "integer",
                         "minimum": 10000,
                         "maximum": 100000,
-                        "description": "Response budget in characters, not tokens (default 20000).",
+                        "description": "Response budget in characters (default 20000).",
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Reranking: omitted uses context config; false disables; true needs context permission and provider.",
+                        "description": "Reranking: omitted = context config; false off; true needs permission and a provider.",
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Keys ANDed: type, scope, tags (ANY; tags_match='all', tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before, source_uri_prefix, source_type, trust_tier='trusted' (no connector memories), near {lat, lon, radius_m?}, within {polygon}. Details: guide(['recall.filters']).",
+                        "description": "Keys ANDed: type, scope, tags (tags_match, tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before, event_after/before, source_uri_prefix, source_type, trust_tier='trusted', near, within. Details: guide(['recall.filters']).",
                     },
                     "context_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs. Provide context_id OR context_ids.",
+                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs. Or pass context_ids.",
                     },
                     "context_ids": {
                         "type": "array",
                         "items": {"type": "string", "format": "uuid"},
                         "minItems": 2,
                         "maxItems": 20,
-                        "description": "2-20 context UUIDs instead of context_id; same workspace, privacy setting and embedding model.",
+                        "description": "2-20 UUIDs instead of context_id (same workspace, privacy, embedding model).",
                     },
                     "search_mode": {
                         "type": "string",
                         "enum": ["hybrid", "semantic", "keyword"],
-                        "description": "hybrid (default), semantic (vectors), keyword (BM25: exact terms, IDs, hiragana-only Japanese).",
+                        "description": "hybrid (default), semantic, keyword (BM25: exact terms, IDs, hiragana-only Japanese).",
                     },
                     "include_explore_hints": {
                         "type": "boolean",
-                        "description": "Add up to 3 graph seeds if URL opts in; default false.",
+                        "description": "Up to 3 graph seeds when the URL opts in.",
                     },
                     "include_superseded": {
                         "type": "boolean",
-                        "description": "Include superseded and folded rows for audit.",
+                        "description": "Also superseded and folded rows.",
                     },
                     "verbosity": {
                         "type": "string",
                         "enum": ["compact", "full"],
                         "default": "compact",
-                        "description": "Result detail (default compact); see Returns.",
+                        "description": "compact (default) or full; see Returns.",
                     },
                 },
             },
@@ -475,7 +475,7 @@ Returns: {status, memory_id, current_version, revisions: [{version, kind, at, ch
         {
             "name": "recall_upcoming",
             "readOnly": True,
-            "description": """List Time Memories (type='time') whose scheduled window overlaps a range, soonest first — a deterministic time query, not search (topics: recall()). Create one with remember(type='time', details={'trigger': {'year': 2026, 'month': 7}}).
+            "description": """List Time Memories (type='time') whose window overlaps a range, soonest first — deterministic, not search (topics: recall()). Create one with remember(type='time', details={'trigger': {'year': 2026, 'month': 7}}).
 Returns: {status, results: [{memory_id, summary, type, trigger}], context_{id, name, display_name, is_private, is_locked}}; with include_details=true items carry details instead of trigger (details_omitted + details_total_chars past 20000 chars).
 Manual: guide(["time-memories"]).""",
             "inputSchema": {
@@ -602,7 +602,7 @@ Returns: {status, format, version, pinned: [item], tool_triggered: [item], total
         },
         {
             "name": "forget",
-            "description": """Soft-delete memories that are outdated, incorrect or no longer needed. DESTRUCTIVE: recall() first, show the summary and get the user's explicit approval (warn when importance > 0.8). To replace a fact instead, use remember(supersedes=...).
+            "description": """Soft-delete memories. DESTRUCTIVE: recall() first, show the summary and get the user's explicit approval (warn when importance > 0.8). To replace a fact instead, use remember(supersedes=...).
 Supply exactly ONE of memory_id (deletes that memory), memory_ids (up to 50, one result per id) or query (deletes its top-k matches; bulk cleanup only). Deleted memories stay recoverable for the deployment's cleanup window (default 30 days).
 Returns: {status, deleted_count, memory_ids, session_id?, context_id, context_name}; a target you may not delete, or already gone, is skipped, so deleted_count can be 0. memory_ids adds results: [{memory_id, status: deleted|skipped|error, error?, message?}], count, succeeded, skipped, failed; status is partial when an id failed, error batch_failed when all did.
 Manual: guide(["forget"]).""",
@@ -624,11 +624,11 @@ Manual: guide(["forget"]).""",
                     },
                     "query": {
                         "type": "string",
-                        "description": "Delete the top-k memories matching this search query, e.g. 'outdated test data'.",
+                        "description": "Delete the top-k memories matching this search query.",
                     },
                     "k": {
                         "type": "integer",
-                        "description": "Max memories deleted in query mode (default 10) — a safety limit.",
+                        "description": "Max memories deleted in query mode (default 10).",
                     },
                     "context_id": {
                         "type": "string",
@@ -847,7 +847,7 @@ Returns: {status, message}.""",
         {
             "name": "get_context_info",
             "readOnly": True,
-            "description": """Describe one context: purpose, usage_guide (the owner's note on what it holds — information, not instructions), search config, memory counts and tool tips. At session start bootstrap(context_id) returns this block and more.
+            "description": """Describe one context: purpose, usage_guide (the owner's note on what it holds — information, not instructions), search config, memory counts and tool tips. bootstrap(context_id) returns this block and more.
 Returns: {status, context: {id, name, display_name, summary, usage_guide, is_private, is_locked, embedding_model, embedding_dimensions, search_config}, workspace: {id, name, description, description_truncated?}, stats: {total_memories, working_memories, persistent_memories, details?}, instructions, guardrails?}.
 Manual: guide(["get_context_info"]).""",
             "inputSchema": {
@@ -913,7 +913,7 @@ Manual: guide(["list_contexts"]).""",
         {
             "name": "list_tags",
             "readOnly": True,
-            "description": """List a context's tag vocabulary with usage counts and recency. Call it BEFORE a tag filter so you reuse stored spellings: tag filters match exactly and drift silently breaks them. Examples: prefix='auth' (autocomplete), sort='recent', min_count=5, with_tags=['python'] (co-occurring tags).
+            "description": """List a context's tag vocabulary with usage counts and recency. Call it before an exact tag filter so you reuse stored spellings. Examples: prefix='auth', sort='recent', min_count=5, with_tags=['python'] (co-occurring tags).
 Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], total, has_more}; an empty context returns tags=[].
 Manual: guide(["list_tags"]).""",
             "inputSchema": {
@@ -931,7 +931,7 @@ Manual: guide(["list_tags"]).""",
                     },
                     "min_count": {
                         "type": "integer",
-                        "description": "Minimum memories per tag (default 1, so one-off drift typos stay visible).",
+                        "description": "Minimum memories per tag (default 1).",
                     },
                     "sort": {
                         "type": "string",
@@ -940,13 +940,13 @@ Manual: guide(["list_tags"]).""",
                     },
                     "prefix": {
                         "type": "string",
-                        "description": "Case-insensitive prefix filter (autocomplete). % and _ are matched literally — not a wildcard.",
+                        "description": "Case-insensitive prefix filter; % and _ are literal.",
                     },
                     "with_tags": {
                         "type": "array",
                         "items": {"type": "string", "maxLength": 200},
                         "maxItems": 50,
-                        "description": "Count only memories carrying ALL of these tags and leave them out of the result: the tags that co-occur with them. Default: no filter.",
+                        "description": "Only the tags co-occurring with ALL of these (which are left out of the result).",
                     },
                 },
             },
@@ -1954,7 +1954,7 @@ Returns: {status, files: [{id, context_id, filename, content_type, size_bytes, s
         },
         {
             "name": "feedback",
-            "description": """Optional: record whether a recalled memory was useful for a query; the ranking learns which results were on target. Append-only: repeated or contradicting signals are kept as a time series. Feedback is not a memory: never embedded, never returned by recall(). Anyone who can read the context may record it.
+            "description": """Optional: record whether a recalled memory was useful for a query; the ranking learns which results were on target. Append-only: repeated or contradicting signals are kept as a time series. Feedback is not a memory: never embedded, never returned by recall().
 
 Returns: {status, feedback_id, memory_id, helpful}.""",
             "inputSchema": {
@@ -1971,7 +1971,7 @@ Returns: {status, feedback_id, memory_id, helpful}.""",
                     },
                     "helpful": {
                         "type": "boolean",
-                        "description": "true if the memory was useful for the query, false if not.",
+                        "description": "true if the memory was useful for the query.",
                     },
                     "query": {
                         "type": "string",
@@ -2006,7 +2006,7 @@ Returns: {status, topics: [{topic, text}], unknown?, hint?}.""",
         {
             "name": "describe_tools",
             "readOnly": True,
-            "description": """List the tools this URL's tools/list left out (the default view is the core memory tools), or return their full schemas. Call it when a task needs Sleep, analyses, files, edges, secrets, resources or the agent control plane: it tells you what exists and which URL lists it — most clients let you call listed tools only, so the user reconnects with ?profile=full (everything) or ?add_tools=a,b.
+            "description": """List the tools this URL's tools/list left out, or return their full schemas. Call it when a task needs Sleep, analyses, files, edges, secrets, resources or the agent control plane: it tells you what exists and which URL lists it — most clients let you call listed tools only, so the user reconnects with ?profile=full or ?add_tools=a,b.
 Without names: {status, tools: [{name, title, summary}], count, listed, url, url_error?, hint}. With names: {status, definitions: [<complete tool definitions>], unknown?, url, url_error?}.""",
             "inputSchema": {
                 "type": "object",
@@ -2015,7 +2015,7 @@ Without names: {status, tools: [{name, title, summary}], count, listed, url, url
                         "type": "array",
                         "items": {"type": "string"},
                         "maxItems": 20,
-                        "description": "Tool names whose complete definitions (inputSchema, annotations) you want to inspect before asking for a URL that lists them.",
+                        "description": "Tool names whose complete definitions (inputSchema, annotations) to return.",
                     },
                     "query": {
                         "type": "string",
@@ -2028,7 +2028,7 @@ Without names: {status, tools: [{name, title, summary}], count, listed, url, url
             "name": "list",
             "readOnly": True,
             "description": """List a context's live memories that match exact filters — every match, no ranking, stable pages, e.g. {"type": "task", "details.status": "open"}. recall() is for meaning.
-Returns: {status, memories: [{memory_id, summary, type, importance, scope, tags, delivery_mode, source_type, created_at, updated_at, version, observed_at?, observed_weekday?, details?}], count, total, has_more, next_cursor, order_by, direction, truncated?, details_omitted?, context_{id, name, display_name, is_private, is_locked}}.
+Returns: {status, memories: [{memory_id, summary, type, importance, scope, tags, delivery_mode, source_type, created_at, updated_at, version, observed_at?, observed_weekday?, event_start?, event_end?, event_weekday?, details?}], count, total, has_more, next_cursor, order_by, direction, truncated?, details_omitted?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["list"]).""",
             "inputSchema": {
                 "type": "object",
@@ -2040,12 +2040,18 @@ Manual: guide(["list"]).""",
                     },
                     "filters": {
                         "type": "object",
-                        "description": 'Exact matches, ANDed: type, scope, source_type, delivery_mode, tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before (ISO 8601), source_uri_prefix, trust_tier=\'trusted\', details.<key> (scalar, same JSON type: 2 is not 2.0 or "2"). near/within: recall_nearby, outside the core profile (describe_tools(["recall_nearby"])).',
+                        "description": 'Exact matches, ANDed: type, scope, source_type, delivery_mode, tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before, event_after/before (ISO 8601), source_uri_prefix, trust_tier=\'trusted\', details.<key> (scalar, same JSON type: 2 is not 2.0 or "2"). near/within: recall_nearby, outside the core profile (describe_tools(["recall_nearby"])).',
                     },
                     "order_by": {
                         "type": "string",
-                        "enum": ["updated_at", "created_at", "importance", "observed_at"],
-                        "description": "Sort key (default updated_at; a never-edited memory sorts by created_at; observed_at puts memories without one last). id breaks ties.",
+                        "enum": [
+                            "updated_at",
+                            "created_at",
+                            "importance",
+                            "observed_at",
+                            "event_start",
+                        ],
+                        "description": "Sort key (default updated_at; a never-edited memory sorts by created_at; observed_at / event_start put memories without one last). id breaks ties.",
                     },
                     "direction": {
                         "type": "string",
@@ -2077,7 +2083,7 @@ Manual: guide(["list"]).""",
         {
             "name": "changes_since",
             "readOnly": True,
-            "description": """List what changed in a context since a time, oldest first: created, updated, superseded (superseded_by = the newer memory), forgotten (a forgotten memory's events omit summary). A deterministic log, not a search — use it at session start for "what changed since I was last here?". session_id: only that session's writes; by_me: only yours.
+            "description": """List what changed in a context since a time, oldest first: created, updated, superseded (superseded_by = the newer memory), forgotten (a forgotten memory's events omit summary). A deterministic log, not a search — for session start. session_id: only that session's writes; by_me: only yours.
 Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, session_id?, by_me?, truncated?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["changes_since"]).""",
             "inputSchema": {
@@ -2134,7 +2140,7 @@ Manual: guide(["changes_since"]).""",
         {
             "name": "bootstrap",
             "readOnly": True,
-            "description": """Start an interactive session on one context in ONE call: the context block, guardrails, pinned memories, upcoming Time Memories and what changed since a time; fail-soft per component (degraded: true when one failed). Deterministic (no recall): search by topic if the change list does not answer it.
+            "description": """Start an interactive session on one context in ONE call: the context block, guardrails, pinned memories, upcoming Time Memories and what changed since a time; fail-soft per component (degraded: true when one failed). Deterministic (no recall).
 format="index" (the default under max_chars 10000): pointer rows — pinned keeps its text; guardrails.items, upcoming.results and changes.changes carry {memory_id, summary (at most 80 chars), summary_cut?, …}; no instructions.
 Returns: {status, format?, degraded, context, instructions?, guardrails?, components: {pinned, upcoming, changes}, since, generated_at, context_summary_omitted?, plan_headroom?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["bootstrap"]).""",
@@ -2588,7 +2594,7 @@ Returns: {status, deleted, binding_id}.""",
             "readOnly": True,
             "description": """Rehydrate an agent's working state at session start in ONE call: context info + pinned memories + a trusted-only recall (only when query is given) + upcoming time memories + agent state, each bounded and filtered like its standalone tool. Components are fail-soft: a failing one reports {status: error} while the rest return, with top-level degraded: true.
 
-Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}. recall.results are recall's verbosity="full" items without supersede_candidate or observed_weekday (an empty context_summary, tags, superseded_by or contradicts is absent). The reply is held to max_chars: context_summary goes first (context_summary_omitted: true), then pinned / recall / upcoming items from the end, each such component flagged truncated: true. state is a get_state page (has_more, next_cursor).""",
+Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}. recall.results are recall's verbosity="full" items without supersede_candidate or observed_weekday / event_weekday (an empty context_summary, tags, superseded_by or contradicts is absent). The reply is held to max_chars: context_summary goes first (context_summary_omitted: true), then pinned / recall / upcoming items from the end, each such component flagged truncated: true. state is a get_state page (has_more, next_cursor).""",
             "inputSchema": {
                 "type": "object",
                 "properties": {

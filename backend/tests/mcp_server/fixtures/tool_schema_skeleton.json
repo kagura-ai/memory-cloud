@@ -1750,7 +1750,8 @@
             "updated_at",
             "created_at",
             "importance",
-            "observed_at"
+            "observed_at",
+            "event_start"
           ]
         },
         "direction": {
