@@ -116,12 +116,16 @@ async def test_quota_counts_stay_in_workspace_and_use_live_populations(db_sessio
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("removed", [False, True])
-async def test_usage_refuses_ineligible_membership(db_session, monkeypatch, removed):
+async def test_usage_admits_a_suspended_seat_and_refuses_a_removed_member(
+    db_session, monkeypatch, removed
+):
     """A free plan seats only the owner: the admin's seat is suspended.
 
     The cost-meter role check refuses that admin with ``FEAT-001``; the
-    endpoint refuses access before building any usage meters. A stale current
-    workspace after membership removal also receives the standard refusal.
+    endpoint still answers 200 with the non-monetary meters, as before the
+    quota meters existed (#2632). Once the admin is removed, a stale current
+    workspace gets the standard non-member refusal before any meter is read
+    (#2714).
     """
     from httpx import ASGITransport, AsyncClient
 
@@ -177,6 +181,12 @@ async def test_usage_refuses_ineligible_membership(db_session, monkeypatch, remo
         app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_user_from_api_key_or_session, None)
 
-    assert response.status_code == 403, response.text
-    assert "quota_usage" not in response.json()
-    assert ("AUTH-101" if removed else "FEAT-001") in response.text
+    if removed:
+        assert response.status_code == 403, response.text
+        assert "quota_usage" not in response.json()
+        assert "AUTH-101" in response.text
+    else:
+        assert response.status_code == 200, response.text
+        quota = response.json()["quota_usage"]
+        assert any(m["id"] == "storage" for m in quota)
+        assert not any(m["unit"] == "usd" for m in quota)

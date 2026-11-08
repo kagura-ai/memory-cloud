@@ -192,6 +192,8 @@ class PermissionService:
         user_id: str,
         workspace_id: UUID,
         required_role: WorkspaceRole | str = WorkspaceRole.MEMBER,
+        *,
+        require_seat: bool = True,
     ) -> WorkspaceMember:
         """Check if user has required workspace access.
 
@@ -201,6 +203,10 @@ class PermissionService:
             user_id: User ID
             workspace_id: Workspace ID
             required_role: Minimum required role (owner/admin/member/viewer)
+            require_seat: Also refuse a member without a seat on the plan
+                (#1943). Only the usage readouts pass ``False``: a
+                seat-suspended member still reads the non-monetary usage
+                meters (#2632, #2714).
 
         Returns:
             Workspace membership
@@ -263,7 +269,8 @@ class PermissionService:
 
         # #1943: a member without a seat on the workspace's plan is refused —
         # after membership and role, so a non-member keeps the uniform refusal.
-        await ensure_member_seated(self.db, workspace, member)
+        if require_seat:
+            await ensure_member_seated(self.db, workspace, member)
 
         return member
 

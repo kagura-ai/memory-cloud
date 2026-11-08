@@ -12,6 +12,7 @@ Performance Note:
 
 import logging
 from datetime import timedelta
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -337,6 +338,21 @@ async def get_workspace_stats(
 # ============================================================================
 
 
+async def _check_usage_access(db: AsyncSession, user: dict, workspace_id: UUID) -> None:
+    """Refuse a caller who no longer belongs to the selected workspace (#2714).
+
+    ``current_workspace_id`` alone is not proof of membership, so every usage
+    readout checks it before reading. The seat check is skipped: a
+    seat-suspended member still reads the non-monetary usage (#2632).
+
+    Raises:
+        AuthorizationError: 403 for a non-member or a deleted workspace.
+    """
+    await PermissionService(db).check_workspace_access(
+        user["user_id"], workspace_id, required_role="viewer", require_seat=False
+    )
+
+
 @router.get("/usage/current", response_model=UsageCurrentResponse)
 async def get_workspace_usage_current(
     user: dict = Depends(get_user_from_api_key_or_session),
@@ -364,9 +380,7 @@ async def get_workspace_usage_current(
         )
 
     async with db_transaction(db, "get_workspace_usage_current", "Failed to get workspace usage"):
-        await PermissionService(db).check_workspace_access(
-            user["user_id"], workspace_id, required_role="viewer"
-        )
+        await _check_usage_access(db, user, workspace_id)
         # Get workspace with plan limits
         workspace_result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
         workspace = workspace_result.scalar_one_or_none()
@@ -569,6 +583,7 @@ async def get_workspace_usage_history(
     async with db_transaction(
         db, "get_workspace_usage_history", "Failed to get workspace usage history"
     ):
+        await _check_usage_access(db, user, workspace_id)
         # Calculate date range
         end_date = utcnow().date()
         start_date = end_date - timedelta(days=days - 1)
@@ -635,6 +650,7 @@ async def get_workspace_usage_breakdown(
     async with db_transaction(
         db, "get_workspace_usage_breakdown", "Failed to get workspace usage breakdown"
     ):
+        await _check_usage_access(db, user, workspace_id)
         # Calculate date range
         end_date = utcnow().date()
         start_date = end_date - timedelta(days=days - 1)
@@ -715,6 +731,7 @@ async def get_workspace_member_usage(
         raise HTTPException(status_code=400, detail="No workspace selected")
 
     async with db_transaction(db, "get_member_usage", "Failed to get member usage"):
+        await _check_usage_access(db, user, workspace_id)
         # Get all members with user info
         members_result = await db.execute(
             select(WorkspaceMember.user_id, User.name, User.email)
