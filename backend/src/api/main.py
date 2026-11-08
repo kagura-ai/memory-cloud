@@ -193,12 +193,14 @@ async def lifespan(app: FastAPI):
 
     app.state.dense_vector_config_task = asyncio.create_task(run_dense_vector_config_reconcile())
 
-    # #2015: every dense search / delete / payload update filters on chunk_of,
-    # so collections created before it need the payload index. Idempotent and
-    # fail-soft, once per process, in the background.
-    from db.qdrant import ensure_chunk_of_index_on_all
+    # #2729: a payload index added after a collection was created (#2015
+    # chunk_of, #2724 event_start / event_end, ...) is otherwise retrofitted
+    # only when a context is created or migrated, so every API start adds the
+    # missing ones to every collection. Idempotent and fail-soft, once per
+    # process, in the background.
+    from db.qdrant import ensure_payload_indexes_on_all
 
-    app.state.chunk_of_index_task = asyncio.create_task(ensure_chunk_of_index_on_all())
+    app.state.payload_index_task = asyncio.create_task(ensure_payload_indexes_on_all())
 
     # #2020 / #2033: one cheap calibration smoke check of the local rerank
     # model — /v1/rerank, or the Ollama path for a self_hosted default — (a
@@ -241,11 +243,11 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             logger.info("dense_vector_config_cancelled_on_shutdown")
 
-    chunk_index_task = getattr(app.state, "chunk_of_index_task", None)
-    if chunk_index_task is not None and not chunk_index_task.done():
-        chunk_index_task.cancel()
+    payload_index_task = getattr(app.state, "payload_index_task", None)
+    if payload_index_task is not None and not payload_index_task.done():
+        payload_index_task.cancel()
         try:
-            await chunk_index_task
+            await payload_index_task
         except asyncio.CancelledError:
             pass  # expected: we cancelled it ourselves
 

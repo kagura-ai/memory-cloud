@@ -60,7 +60,7 @@ def leader_on_pooled_engine(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, 
 
     monkeypatch.setattr(geo_backfill, "run_location_payload_backfill", _noop)
     monkeypatch.setattr(dense_vector_config, "run_dense_vector_config_reconcile", _noop)
-    monkeypatch.setattr(qdrant_db, "ensure_chunk_of_index_on_all", _noop)
+    monkeypatch.setattr(qdrant_db, "ensure_payload_indexes_on_all", _noop)
 
     calls: list[tuple[str, object]] = []
     real_stop = sl.SchedulerLeader.stop

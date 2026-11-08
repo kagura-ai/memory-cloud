@@ -205,8 +205,10 @@ async def test_cascade_can_be_skipped_for_a_context_without_chunks(mock_client):
     assert mock_client.set_payload.await_count == 1
 
 
-async def test_chunk_of_index_pass_adds_the_index_where_missing(mock_client):
-    from db.qdrant import ensure_chunk_of_index_on_all
+async def test_startup_pass_adds_the_chunk_of_index_where_missing(mock_client):
+    """#2729 generalized the chunk_of startup pass to every late-added index;
+    test_qdrant_payload_index_pass.py covers it. Here: chunk_of still rides it."""
+    from db.qdrant import LATE_PAYLOAD_INDEXES, ensure_payload_indexes_on_all
 
     mock_client.get_collections.return_value = SimpleNamespace(
         collections=[
@@ -215,40 +217,22 @@ async def test_chunk_of_index_pass_adds_the_index_where_missing(mock_client):
             SimpleNamespace(name="other"),
         ]
     )
+    late = {field for field, _schema in LATE_PAYLOAD_INDEXES} - {CHUNK_OF_FIELD}
     schemas = {
-        "kagura_memories": {"tags": object()},
-        "kagura_memories_x_8": {CHUNK_OF_FIELD: object()},
+        "kagura_memories": {f: object() for f in late},
+        "kagura_memories_x_8": {f: object() for f in late | {CHUNK_OF_FIELD}},
     }
     mock_client.get_collection.side_effect = lambda name: SimpleNamespace(
         payload_schema=schemas[name]
     )
 
-    assert await ensure_chunk_of_index_on_all() == ["kagura_memories"]
+    assert await ensure_payload_indexes_on_all() == {"kagura_memories": [CHUNK_OF_FIELD]}
     kwargs = mock_client.create_payload_index.await_args.kwargs
     assert kwargs == {
         "collection_name": "kagura_memories",
         "field_name": CHUNK_OF_FIELD,
         "field_schema": "keyword",
     }
-
-
-async def test_chunk_of_index_pass_is_fail_soft(mock_client):
-    from db.qdrant import ensure_chunk_of_index_on_all
-
-    mock_client.get_collections.return_value = SimpleNamespace(
-        collections=[
-            SimpleNamespace(name="kagura_memories"),
-            SimpleNamespace(name="kagura_memories_b"),
-        ]
-    )
-    mock_client.get_collection.side_effect = [
-        RuntimeError("down"),
-        SimpleNamespace(payload_schema={}),
-    ]
-    assert await ensure_chunk_of_index_on_all() == ["kagura_memories_b"]
-
-    mock_client.get_collections.side_effect = RuntimeError("down")
-    assert await ensure_chunk_of_index_on_all() == []
 
 
 async def test_list_context_point_ids_leaves_chunk_points_out(mock_client):

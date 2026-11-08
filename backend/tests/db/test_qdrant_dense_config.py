@@ -82,6 +82,8 @@ def _info(*, quantization=None, on_disk=None, named=True, dense_quantization=Non
         payload_schema={
             "tags": object(),
             "location": object(),
+            "created_at": object(),
+            "updated_at": object(),
             "observed_at": object(),
             "event_start": object(),
             "event_end": object(),
