@@ -37,6 +37,20 @@ INDEX = "idx_memories_event_start"
 OWNER = "f31-migration-test"
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _schema_at_head():
+    """Put the schema at alembic head before the column tests.
+
+    A sibling migration test can leave ``memories`` at an older revision, and
+    the ``db_session`` fixture's ``create_all`` only adds missing tables, so
+    the generated columns would be absent and every test below would fail with
+    ``column "event_start" does not exist`` (seen in CI once the erasure tests
+    stopped failing first). The round-trip tests reset the schema themselves.
+    """
+    _reset_alembic_state()
+    _upgrade_to("head")
+
+
 def _insert_stmt(cast: str):
     return text(
         f"""
