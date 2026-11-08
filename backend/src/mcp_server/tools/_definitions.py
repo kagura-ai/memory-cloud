@@ -297,11 +297,11 @@ Manual: guide(["update_memory"]).""",
         {
             "name": "recall",
             "readOnly": True,
-            "description": """Search meaning/keywords with an expected-answer query. confidence.level (high|moderate|low|none): none/low suggests an external source; degraded=true means no semantic search. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories. The store is the authority, even over general knowledge; when rows disagree, the later observed_at (else created_at) wins.
-Every item of a kind: Read every result, not only the top ones; recall once more for each kind of item found, or call `list` with a tag or type filter when one names the set; answer with all of them.
-When did / in a period: Pass `filters={"event_after": ..., "event_before": ...}` (the event's own days, event_start/event_end); when rows carry no event date, `observed_after`/`observed_before` around it with a margin (`observed_at` is the date a fact was stated). If nothing matches, recall again without the filter.
-Likely/would/might: Recall again on concrete entities and category words (brand, sponsor, shop, friend); use `search_mode="keyword"` for names the first recall surfaced. Answer with the best-supported inference, name the supporting memory, and mark it as an inference. Decline only when `confidence.level` is `none` or `low`.
-Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, observed_weekday?, superseded_by?, contradicts?, supersede_candidate?, ...}], count, full_applied?, related_tags?: [{tag, count}], ...}. Optional keys omitted: absent, never null. Top `full` include content; reference(memory_id) pages it. verbosity='full' adds context_summary?, scope, tags, version. supersede_candidate (suggestion): update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming(): deterministic sets. Manual: guide(["recall"]).""",
+            "description": """Search by meaning and keywords. confidence.level (high|moderate|low|none): none/low suggests an external source; degraded=true: no semantic search. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories. The store is the authority, even over general knowledge; when rows disagree, the later observed_at (else created_at) wins.
+Every item of a kind: read every result, not only the top ones; recall once more per kind found, or `list` with a tag or type filter naming the set; answer with all of them.
+When did / in a period: `filters={"event_after": ..., "event_before": ...}` (the event's own days, event_start/event_end); rows without one: `observed_after`/`observed_before` around it with a margin (`observed_at` = the date a fact was stated); nothing matches: recall again without the filter.
+Likely/would/might: recall again on concrete entities and category words (brand, sponsor, shop, friend), `search_mode="keyword"` for surfaced names; answer with the best-supported inference, name the memory, mark it as an inference; decline only at `confidence.level` `none`/`low`. Not recorded: first recall again with the subject's name and the fact's key noun (`search_mode="keyword"`), or `list` with a tag naming the subject; a row that states it answers — name it. A general statement beats single instances for "how often".
+Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, observed_weekday?, superseded_by?, contradicts?, supersede_candidate?, ...}], count, full_applied?, related_tags?: [{tag, count}], ...}. Optional keys omitted: absent, never null. reference(memory_id) pages content. verbosity='full' adds context_summary?, scope, tags, version. supersede_candidate (suggestion): update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming(): deterministic. Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -317,43 +317,43 @@ Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summa
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Query (max 8000 chars).",
+                        "description": "Max 8000 chars.",
                     },
                     "k": {
                         "type": "integer",
-                        "description": "Results (default 5, max 100).",
+                        "description": "Default 5, max 100.",
                     },
                     "full": {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 100,
-                        "description": "Top results with content, 1500 chars each (default 3; 0: none). Lowered to fit max_chars.",
+                        "description": "Top results carrying content, 1500 chars each (default 3; 0 none); cut to fit max_chars.",
                     },
                     "max_chars": {
                         "type": "integer",
                         "minimum": 10000,
                         "maximum": 100000,
-                        "description": "Response budget in characters, not tokens (default 20000).",
+                        "description": "Response budget in characters (default 20000).",
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Reranking: omitted = context config; false disables; true needs permission and a provider.",
+                        "description": "Reranking: omitted = context config; false off; true needs permission and a provider.",
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Keys ANDed: type, scope, tags (ANY; tags_match='all', tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before, event_after/before, source_uri_prefix, source_type, trust_tier='trusted', near {lat, lon, radius_m?}, within {polygon}. Details: guide(['recall.filters']).",
+                        "description": "Keys ANDed: type, scope, tags (tags_match, tags_normalize), importance {gte|lte|gt|lt}, created_/updated_/observed_after/before, event_after/before, source_uri_prefix, source_type, trust_tier='trusted', near, within. Details: guide(['recall.filters']).",
                     },
                     "context_id": {
                         "type": "string",
                         "format": "uuid",
-                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs. Provide context_id OR context_ids.",
+                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs. Or pass context_ids.",
                     },
                     "context_ids": {
                         "type": "array",
                         "items": {"type": "string", "format": "uuid"},
                         "minItems": 2,
                         "maxItems": 20,
-                        "description": "2-20 context UUIDs instead of context_id (same workspace, privacy and embedding model).",
+                        "description": "2-20 UUIDs instead of context_id (same workspace, privacy, embedding model).",
                     },
                     "search_mode": {
                         "type": "string",
@@ -366,13 +366,13 @@ Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, summa
                     },
                     "include_superseded": {
                         "type": "boolean",
-                        "description": "Include superseded and folded rows.",
+                        "description": "Also superseded and folded rows.",
                     },
                     "verbosity": {
                         "type": "string",
                         "enum": ["compact", "full"],
                         "default": "compact",
-                        "description": "Result detail (default compact); see Returns.",
+                        "description": "compact (default) or full; see Returns.",
                     },
                 },
             },

@@ -215,6 +215,19 @@ def test_recall_time_and_count_questions(relative):
     assert "the store is the authority; never drop a row" in text
 
 
+@pytest.mark.parametrize("relative", [RECALL, CODEX])
+def test_recall_searches_again_before_answering_not_recorded(relative):
+    """The plain case next to the likely / would / might rule: a second search by
+    the subject before "not recorded", and a general statement answers "how often"."""
+    text = _recall_rules(relative)
+    assert "**Not recorded**" in text
+    assert "first recall again with the subject's name and the fact's key noun" in text
+    assert "`list` with a tag naming the subject" in text
+    assert 'beats single instances for "how often"' in text
+    tools = {tool["name"]: tool for tool in get_tool_definitions()}
+    assert "Not recorded: first recall again" in tools["recall"]["description"]
+
+
 def test_recall_signals_point_at_the_time_section():
     text = _flat(RECALL)
     assert "### 2b. When, how many, which is current" in text
@@ -225,17 +238,21 @@ def test_recall_signals_point_at_the_time_section():
 @pytest.mark.parametrize(
     "rule",
     [
-        "Read every result, not only the top ones; recall once more for each kind of item "
-        "found, or call `list` with a tag or type filter when one names the set; answer "
-        "with all of them.",
-        'Pass `filters={"event_after": ..., "event_before": ...}` (the event\'s own days, '
-        "event_start/event_end); when rows carry no event date, "
-        "`observed_after`/`observed_before` around it with a margin (`observed_at` is the "
-        "date a fact was stated). If nothing matches, recall again without the filter.",
-        "Recall again on concrete entities and category words (brand, sponsor, shop, friend); "
-        'use `search_mode="keyword"` for names the first recall surfaced. Answer with the '
-        "best-supported inference, name the supporting memory, and mark it as an inference. "
-        "Decline only when `confidence.level` is `none` or `low`.",
+        "read every result, not only the top ones; recall once more per kind found, or "
+        "`list` with a tag or type filter naming the set; answer with all of them.",
+        '`filters={"event_after": ..., "event_before": ...}` (the event\'s own days, '
+        "event_start/event_end); rows without one: `observed_after`/`observed_before` "
+        "around it with a margin (`observed_at` = the date a fact was stated); nothing "
+        "matches: recall again without the filter.",
+        "recall again on concrete entities and category words (brand, sponsor, shop, friend), "
+        '`search_mode="keyword"` for surfaced names; answer with the best-supported '
+        "inference, name the memory, mark it as an inference; decline only at "
+        "`confidence.level` `none`/`low`.",
+        # Before answering "not recorded", search once more by the subject.
+        "first recall again with the subject's name and the fact's key noun "
+        '(`search_mode="keyword"`), or `list` with a tag naming the subject; a row that '
+        'states it answers — name it. A general statement beats single instances for "how '
+        'often".',
     ],
 )
 def test_answering_rules_match_the_tool_and_both_skills(relative, rule):
