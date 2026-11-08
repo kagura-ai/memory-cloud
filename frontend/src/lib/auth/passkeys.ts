@@ -8,6 +8,13 @@ export type Passkey = {
   last_used_at: string | null;
 };
 
+/** The account's passkeys with the server's per-account limit (#2713). */
+export type PasskeyList = { keys: Passkey[]; limit: number };
+
+export function listPasskeys(): Promise<PasskeyList> {
+  return apiClient.get<PasskeyList>(`${passkeyPath}?include_limit=true`);
+}
+
 type Descriptor = {
   type: "public-key";
   id: string;

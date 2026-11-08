@@ -8,6 +8,7 @@ import { hasPasswordSignIn } from "@/lib/auth/auth";
 import { usePasswordSetup, type PasswordSetup } from "@/hooks/usePasswordSetup";
 import { apiClient, ApiError } from "@/lib/api/base";
 import {
+  listPasskeys,
   managementProof,
   passkeyPath,
   registerPasskey,
@@ -56,8 +57,7 @@ export default function PasskeySettings({
     setLimit(null);
     setPassword("");
     setKeys([]);
-    apiClient
-      .get<{ keys: Passkey[]; limit: number }>(passkeyPath + "?include_limit=true")
+    listPasskeys()
       .then((data) => {
         if (current) {
           setKeys(data.keys);
@@ -128,9 +128,7 @@ export default function PasskeySettings({
     } catch (e) {
       if (e instanceof ApiError && (e.status === 404 || e.status === 409)) {
         try {
-          const data = await apiClient.get<{ keys: Passkey[]; limit: number }>(
-            passkeyPath + "?include_limit=true",
-          );
+          const data = await listPasskeys();
           setKeys(data.keys);
           setLimit(data.limit);
           setReady(true);
