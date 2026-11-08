@@ -137,6 +137,13 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   const systemFeatures = useSystemFeatures();
   const byokEnabled = systemFeatures?.byok === true;
 
+  // Getting started passes an inline onClose; reading it through a ref keeps a
+  // parent re-render from re-running the probe below in the middle of a write.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
   useEffect(() => {
     let alive = true;
     // Wait for the workspace to hydrate — current_user_role is null mid-load.
@@ -165,7 +172,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
         }
         if (contexts.length > 0 && !sample) {
           setVisible(false);
-          onClose?.();
+          onCloseRef.current?.();
           return;
         }
         if (sample) {
@@ -177,7 +184,10 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
         if (status) setHasKey(status.embedding_available !== false);
         setVisible(true);
       } catch {
-        if (alive) {
+        // Only a launch from Getting started shows the retry (#2710). On the
+        // dashboard a failed probe keeps the card hidden rather than opening
+        // an error over the user's real dashboard.
+        if (alive && replay) {
           setLoadFailed(true);
           setVisible(true);
         }
@@ -191,7 +201,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
     };
     // byokEnabled is derived from systemFeatures, so listing systemFeatures
     // alone covers both.
-  }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures, scope, userId, replay, byokEnabled, loadAttempt, onClose]);
+  }, [workspaceLoading, currentWorkspace, currentWorkspaceId, systemFeatures, scope, userId, replay, byokEnabled, loadAttempt]);
 
   const dismiss = useCallback(() => {
     void updateProgress(scope, current => ({ ...current, dismissed: true }));
@@ -311,7 +321,11 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
   const stepIndex = step === "context" ? 1 : step === "memory" ? 2 : 3;
 
   return (
-    <Dialog open={visible} onOpenChange={open => { if (!open && !writePending) dismiss(); }}>
+    <Dialog open={visible} onOpenChange={open => {
+      if (open || writePending) return;
+      // A load error is not a decision to skip onboarding: close without saving.
+      if (loadFailed) { setVisible(false); onClose?.(); } else dismiss();
+    }}>
       {/* Keep the panel opaque while it slides in so text stays legible over the backdrop. */}
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl data-[state=open]:!fade-in-100"
         onEscapeKeyDown={event => { if (writePending) event.preventDefault(); }}

@@ -33,8 +33,9 @@ vi.mock("@/lib/api/base", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/base")>()),
   updateUserProfile: (...a: unknown[]) => mockUpdateProfile(...a),
 }));
+let mockCopied = false;
 vi.mock("@/hooks/useCopyFeedback", () => ({
-  useCopyFeedback: () => ({ isCopied: () => false, copyToTarget: (...a: unknown[]) => mockCopy(...a) }),
+  useCopyFeedback: () => ({ isCopied: () => mockCopied, copyToTarget: (...a: unknown[]) => mockCopy(...a) }),
 }));
 const mockPush = vi.fn();
 const mockToast = vi.fn();
@@ -103,6 +104,7 @@ beforeEach(() => {
   mockRefetchUser.mockResolvedValue({ id: "u1" });
   mockUpdateProfile.mockResolvedValue({});
   mockCopy.mockResolvedValue(undefined);
+  mockCopied = false;
   mockUserId = "u1";
   setWorkspace("owner");
   mockFeatures = { byok: true };
@@ -139,6 +141,36 @@ describe("OnboardingCard trigger gating", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(onClose).toHaveBeenCalledOnce();
     expect(mockCreateContext).not.toHaveBeenCalled();
+  });
+
+  it("keeps the dashboard card hidden when the context lookup fails", async () => {
+    mockGetContexts.mockRejectedValueOnce(new Error("offline"));
+    render(<OnboardingCard />);
+    await waitFor(() => expect(mockGetContexts).toHaveBeenCalledOnce());
+    // Let the rejected probe settle; the dialog renders in a portal, so look at the screen.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("errors.loadFailed")).not.toBeInTheDocument();
+    expect(window.localStorage.getItem("onboarding:u1:ws-1:wizard")).toBeNull();
+  });
+
+  it("closes a load error without recording a dismissal", async () => {
+    mockGetContexts.mockRejectedValueOnce(new Error("offline"));
+    const onClose = vi.fn();
+    render(<OnboardingCard replay onClose={onClose} />);
+    await screen.findByText("errors.loadFailed");
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(window.localStorage.getItem("onboarding:u1:ws-1:wizard")).toBeNull();
+  });
+
+  it("does not probe again when the parent re-renders with a new onClose", async () => {
+    const { rerender } = render(<OnboardingCard replay onClose={() => {}} />);
+    await screen.findByText("context.createButton");
+    rerender(<OnboardingCard replay onClose={() => {}} />);
+    await screen.findByText("context.createButton");
+    expect(mockGetContexts).toHaveBeenCalledOnce();
   });
 
   it.each(["create", "save"])("ends a definite %s conflict without uncertain-write recovery", async operation => {
@@ -636,6 +668,15 @@ describe("OnboardingCard first screens (#2701)", () => {
       "href",
       "/workspace/integrations#mcp-connection",
     );
+  });
+
+  it("announces a successful copy to screen readers", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    mockCopied = true;
+    render(<OnboardingCard />);
+    const status = await screen.findByText("chat.copied");
+    expect(status).toHaveAttribute("aria-live", "polite");
   });
 
   it("keeps a failed copy inside the dialog with the copy-by-hand hint", async () => {

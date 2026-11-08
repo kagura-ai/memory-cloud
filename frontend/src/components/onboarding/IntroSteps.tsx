@@ -245,6 +245,10 @@ export function ChatStep({
           onCopy={() => void copy()}
           className="shrink-0"
         />
+        {/* The icon button's label change is not announced; this region is. */}
+        <span className="sr-only" aria-live="polite">
+          {isCopied(COPY_KEY) ? t("chat.copied") : ""}
+        </span>
       </div>
       <Link
         href={MCP_CONNECTION_HREF}
