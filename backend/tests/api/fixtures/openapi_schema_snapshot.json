@@ -5436,6 +5436,24 @@
         ],
         "type": "object"
       },
+      "KeyList": {
+        "properties": {
+          "keys": {
+            "items": {
+              "$ref": "#/components/schemas/KeyInfo"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "keys",
+          "limit"
+        ],
+        "type": "object"
+      },
       "LinkProviderRequest": {
         "properties": {
           "assertion": {
@@ -7672,6 +7690,7 @@
           "id": {},
           "invitation_url": {},
           "invited_by": {},
+          "plan_blocked": {},
           "role": {},
           "token": {},
           "workspace_id": {},
@@ -17992,6 +18011,15 @@
         "operationId": "list_passkeys_api_v1_auth_passkeys_get",
         "parameters": [
           {
+            "in": "query",
+            "name": "include_limit",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -18012,10 +18040,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/KeyInfo"
-                  },
-                  "type": "array"
+                  "anyOf": [
+                    {
+                      "items": {
+                        "$ref": "#/components/schemas/KeyInfo"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "$ref": "#/components/schemas/KeyList"
+                    }
+                  ]
                 }
               }
             }

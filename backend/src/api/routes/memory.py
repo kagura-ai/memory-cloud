@@ -10,7 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,12 +35,10 @@ from models.schemas import (
     RecallResponse,
     ReferenceRequest,
     ReferenceResponse,
+    RememberRequest,
     RememberResponse,
     decode_forget_bulk_cursor,
     encode_forget_bulk_cursor,
-)
-from models.schemas import (
-    RememberRequest as BaseRememberRequest,
 )
 from services.agent_binding_service import binding_memory_sql_predicate
 from services.capacity_lock import CapacityPolicy
@@ -81,13 +79,6 @@ MemoryServiceDep = Annotated[MemoryService, Depends(get_memory_service)]
 # ============================================================================
 # Memory API Endpoints
 # ============================================================================
-
-
-class RememberRequest(BaseRememberRequest):
-    private_workspace_id: UUID | None = Field(
-        default=None,
-        description="Require the caller's own private context in this selected workspace at commit time.",
-    )
 
 
 @router.post("/remember", response_model=RememberResponse)

@@ -280,6 +280,7 @@ export interface UserProfile {
 }
 
 export interface UpdateUserProfileRequest {
+  name?: string;
   display_name?: string;
   locale?: string;
   timezone?: string;

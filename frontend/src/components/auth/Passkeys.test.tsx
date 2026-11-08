@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api/base";
 import PasskeyLogin from "./PasskeyLogin";
 import PasskeySettings from "./PasskeySettings";
+import PasswordSettings from "./PasswordSettings";
+import { usePasswordSetup } from "@/hooks/usePasswordSetup";
 
 const {
   user,
@@ -38,7 +40,15 @@ vi.mock("@/contexts/AuthContext", () => ({
 vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast }) }));
 vi.mock("@/lib/api/base", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/base")>()),
-  apiClient: { get, post, patch, delete: del },
+  apiClient: {
+    get: async (url: string) => {
+      const value = await get(url);
+      return Array.isArray(value)
+        ? url.includes("passkeys") ? { keys: value, limit: 10 } : { providers: value }
+        : value;
+    },
+    post, patch, delete: del,
+  },
 }));
 vi.mock("@/lib/auth/auth", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/auth/auth")>()),
@@ -312,10 +322,14 @@ describe("passkey card errors (#2699)", () => {
     expect(await addPasskey("secret")).toBe("errors.tooManyAttempts");
   });
 
-  it("names the passkey limit when a full account adds another (409)", async () => {
-    get.mockResolvedValue(keyRows(10));
-    post.mockRejectedValue(apiError(409, "RES-002", "Passkey limit reached"));
-    expect(await addPasskey("secret")).toBe("errors.limitReached");
+  it("disables Add at the limit supplied by the server, before any proof", async () => {
+    get.mockResolvedValue({ keys: keyRows(2), limit: 2 });
+    render(<PasskeySettings onAvailabilityChange={vi.fn()} />);
+    await screen.findByText("errors.limitReached");
+    fireEvent.click(screen.getByRole("button", { name: "add" }));
+    expect(screen.getByRole("button", { name: "add" })).toBeDisabled();
+    expect(post).not.toHaveBeenCalled();
+    expect(getCredential).not.toHaveBeenCalled();
   });
 
   it("asks for a reload when the server already holds the new key (409)", async () => {
@@ -389,7 +403,7 @@ describe("passkey card errors (#2699)", () => {
   });
 
   it("asks for a reload when a renamed key is gone (404)", async () => {
-    get.mockResolvedValue(keyRows(1));
+    get.mockResolvedValueOnce(keyRows(1)).mockResolvedValue([]);
     patch.mockRejectedValue(apiError(404, "RES-001", "Passkey not found"));
     await renderCard();
     fireEvent.click(screen.getByRole("button", { name: "rename" }));
@@ -398,6 +412,8 @@ describe("passkey card errors (#2699)", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "save" }));
     expect(await toastedError()).toBe("errors.changed");
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "remove" })).not.toBeInTheDocument();
   });
 
   it("shows its own copy in a banner when the list cannot be loaded", async () => {
@@ -416,6 +432,31 @@ describe("setting up a password from the passkey card (#2699)", () => {
     user.has_password = false;
     user.auth_provider = "github";
     get.mockResolvedValue(keyRows(1));
+  });
+
+  it("shares sending and sent state between both cards and offers a replacement", async () => {
+    function Cards() {
+      const setup = usePasswordSetup(user.id);
+      return <>
+        <PasskeySettings passwordSetup={setup} onAvailabilityChange={vi.fn()} />
+        <PasswordSettings passwordSetup={setup} />
+      </>;
+    }
+    let finish = () => {};
+    setupRequest.mockReturnValue(new Promise<void>((resolve) => { finish = resolve; }));
+    render(<Cards />);
+    await screen.findByRole("button", { name: "passwordSettings.setupButton" });
+    fireEvent.click(screen.getByRole("button", { name: "setupPassword" }));
+    for (const button of screen.getAllByRole("button", { name: "passwordSettings.setupSending" })) {
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+    }
+    expect(setupRequest).toHaveBeenCalledTimes(1);
+    finish();
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "passwordSettings.replaceSetupLink" })).toHaveLength(2));
+    setupRequest.mockResolvedValue(undefined);
+    fireEvent.click(screen.getAllByRole("button", { name: "passwordSettings.replaceSetupLink" })[0]);
+    await waitFor(() => expect(setupRequest).toHaveBeenCalledTimes(2));
   });
 
   it("sends the setup email from the card and says where it went", async () => {
@@ -437,7 +478,7 @@ describe("setting up a password from the passkey card (#2699)", () => {
     expect((await screen.findByRole("status")).textContent).toBe(
       "passwordSettings.setupSent|user@example.org",
     );
-    expect(screen.queryByRole("button", { name: /setup/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "passwordSettings.replaceSetupLink" })).toBeEnabled();
     expect(toast).not.toHaveBeenCalled();
   });
 

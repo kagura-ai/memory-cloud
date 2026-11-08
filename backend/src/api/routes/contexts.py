@@ -543,7 +543,7 @@ async def create_context(
         if request.expected_workspace_id is not None and str(request.expected_workspace_id) != str(
             workspace_id
         ):
-            raise ConflictError("The selected workspace changed.")
+            raise ConflictError("The selected workspace changed.", reason="workspace_changed")
 
         # Issue #149: Check if workspace can create another context (Free plan: max 1 context)
         from services.quota_service import QuotaService

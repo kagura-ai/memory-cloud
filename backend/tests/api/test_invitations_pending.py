@@ -8,7 +8,9 @@ user. The handler runs against a real ``db_session``.
 import uuid
 from datetime import timedelta
 
-from api.routes.invitations import get_pending_invitations
+import pytest
+
+from api.routes.invitations import get_invitation_info, get_pending_invitations
 from models.auth import User, Workspace, WorkspaceInvitation
 from utils.datetime import utcnow
 
@@ -69,3 +71,23 @@ async def test_invitation_addressed_to_the_caller_is_listed(db_session):
     assert response.count == 1
     assert [item.id for item in response.pending_invitations] == [addressed.public_id]
     assert response.pending_invitations[0].workspace_id == str(ws_b.id)
+
+
+@pytest.mark.parametrize("plan,blocked", [("free", True), ("pro", False)])
+async def test_plan_blocked_invites_stay_visible_but_are_not_eligible(db_session, plan, blocked):
+    from services.invitation_service import InvitationService
+
+    owner, ws = await _workspace(db_session)
+    ws.plan_name = plan
+    email = f"invitee-{uuid.uuid4()}@example.com"
+    invitation = _invitation(ws, owner, email)
+    db_session.add(invitation)
+    await db_session.flush()
+
+    response = await get_pending_invitations(current_user={"email": email}, db=db_session)
+    assert response.count == 1
+    assert response.pending_invitations[0].plan_blocked is blocked
+    info = await get_invitation_info(invitation.token, db=db_session)
+    assert info["plan_blocked"] is blocked
+    eligible = await InvitationService(db_session).get_pending_invitations_for_email(email)
+    assert [inv.id for inv in eligible] == ([] if blocked else [invitation.id])

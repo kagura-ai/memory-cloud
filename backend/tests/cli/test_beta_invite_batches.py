@@ -13,6 +13,11 @@ from services.beta_invite_service import MintedBetaInvite
 from utils.exceptions import NotFoundException
 
 
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    monkeypatch.setattr(cli, "utcnow", lambda: datetime(2030, 1, 1))
+
+
 def args(*extra):
     return cli._parse(
         [
@@ -27,6 +32,8 @@ def args(*extra):
             "3",
             "--label-prefix",
             "waitlist",
+            "--timezone",
+            "Asia/Tokyo",
             *extra,
         ]
     )
@@ -88,7 +95,9 @@ async def test_stdout_is_only_csv_and_plan_mints_nothing(monkeypatch, capsys):
     rows = list(csv.DictReader(io.StringIO(captured.out)))
     assert rows[0]["url"] == "https://app/join/secret"
     assert "secret" not in captured.err
-    assert "waitlist" not in captured.err
+    assert "waitlist-2030-01-01" in captured.err
+    assert "expires 2030-01-08T01:00:00Z" in captured.err
+    assert "minted 6 invite(s)" in captured.err
     assert svc.create_batches.await_args_list[0].kwargs == {"dry_run": True}
     assert svc.create_batches.await_args_list[1].kwargs == {"dry_run": False}
 
@@ -153,6 +162,60 @@ async def test_revoke_prints_count_including_noop(monkeypatch, capsys, count):
     captured = capsys.readouterr()
     assert captured.out == f"{count}\n"
     assert "private" not in captured.err
+    if count:
+        assert "revoked 3 invite(s)" in captured.err
+
+
+def test_timezone_is_required():
+    with pytest.raises(SystemExit):
+        cli._parse(
+            [
+                "mint",
+                "--inviter",
+                "admin",
+                "--start",
+                "2030-01-01",
+                "--days",
+                "1",
+                "--per-day",
+                "1",
+                "--label-prefix",
+                "batch",
+            ]
+        )
+
+
+@pytest.mark.parametrize("length,valid", [(89, True), (90, False)])
+def test_prefix_boundary(length, valid):
+    parsed = args("--label-prefix", "a" * length)
+    if valid:
+        assert len(cli.dated_batches(parsed)[0][0]) == 100
+    else:
+        with pytest.raises(ValueError, match="1-89"):
+            cli.dated_batches(parsed)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--start", "2029-12-01"),
+        ("--days", "60", "--valid-days", "7"),
+        ("--start", "2030-03-01"),
+    ],
+)
+async def test_whole_schedule_refused_before_database(options, monkeypatch, capsys):
+    run = AsyncMock()
+    monkeypatch.setattr(cli, "run_plan_apply", run)
+    assert await cli._main(args(*options)) == 2
+    assert "60 days" in capsys.readouterr().err
+    run.assert_not_awaited()
+
+
+def test_exact_sixty_day_boundary_is_allowed():
+    batches = cli.dated_batches(
+        args("--days", "60", "--valid-days", "1", "--timezone", "UTC", "--expiry-time", "00:00")
+    )
+    assert batches[-1][1] == datetime(2030, 3, 2)
 
 
 def test_rejects_nonexistent_dst_expiry():

@@ -32,6 +32,11 @@ export function advancePractice(scope: string, claimed: PracticeProgress, next: 
   return updateProgress(scope, current => current.step === claimed.step && current.contextId === claimed.contextId ? next : null);
 }
 
+/** Completed or definitively refused practice never becomes a pending write again. */
+export function endPracticeProgress(scope: string, contextId?: string): Promise<boolean> {
+  return updateProgress(scope, () => ({ step: "ended", contextId, dismissed: true }));
+}
+
 /** Internal name of the practice context; `crypto.randomUUID` needs a secure context. */
 export function practiceContextName(): string {
   if (typeof crypto.randomUUID === "function") return `my-first-context-${crypto.randomUUID()}`;

@@ -94,6 +94,16 @@ class KeyInfo(BaseModel):
     last_used_at: datetime | None
 
 
+class KeyList(BaseModel):
+    keys: list[KeyInfo]
+    limit: int
+
+
+def _check_key_limit(keys: list[WebAuthnCredential]) -> None:
+    if len(keys) >= _LIMIT:
+        raise ConflictError("Passkey limit reached", reason="passkey_limit", limit=_LIMIT)
+
+
 def _rp() -> tuple[str, list[str]]:
     settings = get_settings()
     host = settings.webauthn_rp_id or urlsplit(settings.frontend_url).hostname
@@ -276,10 +286,13 @@ async def _prove(
     )
 
 
-@router.get("", response_model=list[KeyInfo])
-async def list_passkeys(user: SessionUser, db: AsyncSession = Depends(get_db)):
-    """List personal passkeys, without key material."""
-    return await _keys(db, user["user_id"])
+@router.get("", response_model=list[KeyInfo] | KeyList)
+async def list_passkeys(
+    user: SessionUser, db: AsyncSession = Depends(get_db), include_limit: bool = False
+):
+    """List personal passkeys; include_limit adds the server's account limit."""
+    keys = await _keys(db, user["user_id"])
+    return {"keys": keys, "limit": _LIMIT} if include_limit else keys
 
 
 @router.post("/proof/options")
@@ -295,6 +308,8 @@ async def proof_options(
     if removing and linking:
         raise ValidationError("Choose one proof purpose")
     keys = [k for k in await _keys(db, user["user_id"]) if k.id != removing]
+    if not removing and not linking:
+        _check_key_limit(keys)
     if not keys:
         raise ConflictError("No other passkey is available")
     options = generate_authentication_options(
@@ -315,10 +330,9 @@ async def register_options(
 ):
     """Begin registration after fresh proof of the active account."""
     account = await _owner(db, user["user_id"])
-    await _prove(db, account, request, body, "add")
     keys = await _keys(db, account.user_id)
-    if len(keys) >= _LIMIT:
-        raise ConflictError("Passkey limit reached")
+    _check_key_limit(keys)
+    await _prove(db, account, request, body, "add")
     options = generate_registration_options(
         rp_id=_rp()[0],
         rp_name=get_settings().webauthn_rp_name,
@@ -363,8 +377,7 @@ async def register_verify(
         _binding(request, account.user_id, "register"),
         await _registration_state(db, account, keys),
     )
-    if len(keys) >= _LIMIT:
-        raise ConflictError("Passkey limit reached")
+    _check_key_limit(keys)
     rp, origins = _rp()
     try:
         registration = parse_registration_credential_json(body.credential)

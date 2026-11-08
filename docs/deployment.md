@@ -4649,13 +4649,13 @@ The beta invite feature must be enabled for recipients to use the links.
 ```bash
 # Read-only plan: 20 daily batches, 50 invites per batch.
 python -m src.cli.beta_invite_batches mint --inviter <ADMIN_USER_ID> \
-  --start 2026-11-10 --days 20 --per-day 50 --valid-days 7 --label-prefix waitlist
+  --start 2026-11-10 --days 20 --per-day 50 --valid-days 7 --label-prefix waitlist --timezone Asia/Tokyo
 
 # Apply and capture the one-time credential export in a private file.
 umask 077
 python -m src.cli.beta_invite_batches mint --inviter <ADMIN_USER_ID> \
   --start 2026-11-10 --days 20 --per-day 50 --valid-days 7 --label-prefix waitlist \
-  --apply --yes > invites.csv
+  --timezone Asia/Tokyo --apply --yes > invites.csv
 
 # Plan, then revoke an unused batch if the export leaks.
 python -m src.cli.beta_invite_batches revoke --inviter <ADMIN_USER_ID> --label waitlist-2026-11-12
@@ -4664,7 +4664,7 @@ python -m src.cli.beta_invite_batches revoke --inviter <ADMIN_USER_ID> \
 ```
 
 Labels are `<prefix>-YYYY-MM-DD`. Expiry is the sending date plus `--valid-days`
-at `--expiry-time` (default `10:00`) in `--timezone` (default `Asia/Tokyo`).
+at `--expiry-time` (default `10:00`) in the required `--timezone` (e.g. `Asia/Tokyo`).
 For example, the November 10 batch expires November 17 at 10:00 JST, regardless
 of its mint date. Timezones use IANA names; ambiguous or nonexistent DST times
 are rejected. Every expiry must be in the future and within 60 days of minting.

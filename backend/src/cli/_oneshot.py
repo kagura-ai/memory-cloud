@@ -95,6 +95,7 @@ async def run_plan_apply(
     apply: bool,
     assume_yes: bool,
     verb: str = "change",
+    past_tense: str | None = None,
     print_applied: Callable[[R], None] | None = None,
     summary: Callable[[R], str] | None = None,
 ) -> int:
@@ -113,6 +114,7 @@ async def run_plan_apply(
         assume_yes: ``--yes`` was given.
         verb: What happens to it, for the prompt and the report ("change",
             "delete").
+        past_tense: Explicit report verb, e.g. "minted". Defaults to verb + "d".
         print_applied: Renders the applied result after the one-line report,
             for a command whose outcome is more than a count.
         summary: Names what the result changes, for a command that changes
@@ -156,7 +158,7 @@ async def run_plan_apply(
                 print("  skipped")
                 return 0
             applied = await run(db, False)
-            print(f"{verb}d {describe(applied)}")
+            print(f"{past_tense or verb + 'd'} {describe(applied)}")
             if print_applied is not None:
                 print_applied(applied)
     except Exception as exc:  # noqa: BLE001 - CLI boundary: report and exit non-zero

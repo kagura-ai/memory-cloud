@@ -29,7 +29,7 @@
       "removeProof": "To remove this passkey, enter your current password or confirm with another passkey.",
       "verifyFailed": "The passkey could not be verified, or your session has expired. Try again, and sign in again if it keeps failing.",
       "limitReached": "You have reached the passkey limit. Remove a passkey you no longer use, then add the new one.",
-      "changed": "Your passkeys were changed in another tab or on another device. Reload the page and try again.",
+      "changed": "Your passkeys changed in another tab or on another device. Review the list and try again. If the list cannot refresh, reload the page.",
       "load": "Could not load your passkeys. Reload the page to try again."
     }
   },
@@ -92,6 +92,7 @@
     "currentlyUnavailable": "This feature is currently unavailable."
   },
   "onboarding": {
+    "retryLoad": "Try loading again",
     "recovery": "The last practice write could not be confirmed. Review your contexts to see what was saved, or continue with the read-only guide.",
     "openContexts": "Review my contexts",
     "endPractice": "Continue with the read-only guide",
@@ -166,6 +167,9 @@
     },
     "errors": {
       "createFailed": "Couldn't create the context. Please try again.",
+      "loadFailed": "Couldn't check your practice contexts. Try loading again.",
+      "workspaceChanged": "The workspace or private context changed. This practice has ended. Continue from the contexts list.",
+      "conflict": "The server declined this practice operation. This practice has ended; continue with the read-only guide.",
       "saveFailed": "Couldn't save the memory. Please try again.",
       "recallFailed": "Couldn't run recall. Please try again."
     }
@@ -1226,6 +1230,7 @@
     "updatePassword": "Update Password",
     "profileUpdated": "Profile updated",
     "profileUpdatedDesc": "Your profile information has been saved successfully.",
+    "profileSavedNotRefreshed": "Your profile was saved, but this page could not refresh. Reload to see your changes.",
     "themeUpdated": "Theme updated",
     "themeUpdatedLight": "Switched to light mode.",
     "themeUpdatedDark": "Switched to dark mode.",
@@ -2694,6 +2699,11 @@
     "networkError": "Network error"
   },
   "invitation": {
+    "planBlocked": {
+      "title": "This invitation is currently unavailable",
+      "message": "The plan for {workspace} does not currently allow new members. Ask the workspace owner to enable team invitations, then try again.",
+      "retry": "Check again"
+    },
     "status": {
       "loading": "Checking invitation...",
       "accepting": "Accepting invitation..."
@@ -3788,6 +3798,12 @@
     }
   },
   "contextDetail": {
+    "switchWorkspace": {
+      "title": "This context belongs to another workspace",
+      "message": "Switch to its workspace to open this context.",
+      "action": "Switch workspace and open",
+      "failed": "Could not switch workspaces. Please try again."
+    },
     "title": "Context Detail",
     "loading": "Loading context...",
     "failedToLoad": "Failed to load context",
@@ -5013,6 +5029,7 @@
     "statusNotSet": "No password is set for this account.",
     "loadError": "Couldn't load your sign-in methods. Please refresh and try again.",
     "setupButton": "Set up a password",
+    "replaceSetupLink": "Send a replacement link",
     "setupSending": "Sending…",
     "setupSent": "Check your email: we sent a link to {email} to set your password. It expires shortly, so use it soon.",
     "setupError": "Couldn't send the email. Please try again.",

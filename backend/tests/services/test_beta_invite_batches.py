@@ -99,3 +99,25 @@ async def test_invalid_count(count):
     with pytest.raises(ValueError):
         await svc.create_batch("admin", "batch", utcnow() + timedelta(days=1), count)
     svc.db.add.assert_not_called()
+
+
+@pytest.mark.parametrize("label", [" padded ", "a" * 101, "", "   "])
+@pytest.mark.parametrize("operation", ["mint", "revoke"])
+async def test_batch_label_must_already_be_normalized(label, operation):
+    svc = service()
+    with pytest.raises(ValueError):
+        if operation == "mint":
+            await svc.create_batches("admin", [(label, utcnow() + timedelta(days=1), 1)])
+        else:
+            await svc.revoke_unused_by_label("admin", label)
+    svc.db.add.assert_not_called()
+    svc.db.commit.assert_not_awaited()
+
+
+async def test_inviter_lock_allows_foreign_key_checks():
+    from sqlalchemy.dialects import postgresql
+
+    svc = service()
+    await svc._lock_inviter_role("admin")
+    statement = svc.db.scalar.await_args.args[0]
+    assert "FOR NO KEY UPDATE" in str(statement.compile(dialect=postgresql.dialect()))

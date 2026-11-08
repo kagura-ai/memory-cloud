@@ -157,6 +157,8 @@ _CLI_ARGV = [
             "1",
             "--label-prefix",
             "waitlist",
+            "--timezone",
+            "UTC",
         ],
     ),
     (beta_invite_batches, ["revoke", "--inviter", "admin-id", "--label", "waitlist"]),
@@ -225,6 +227,10 @@ async def test_main_configures_logging_before_the_scaffold_runs(module, argv, mo
     fixed_level = _FIXED_LOG_LEVELS.get(module)
     if module is sweep_orphan_objects:
         monkeypatch.setattr(module, "get_blob_storage", object)
+    if module is beta_invite_batches:
+        from datetime import datetime
+
+        monkeypatch.setattr(module, "utcnow", lambda: datetime(2030, 1, 1))
     expected_level = fixed_level or "WARNING"
     command_argv = argv if fixed_level else [*argv, "--log-level", expected_level]
     with (

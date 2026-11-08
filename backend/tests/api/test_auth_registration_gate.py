@@ -70,3 +70,19 @@ async def test_email_less_invitation_does_not_pass_an_unrelated_address(db_sessi
     assert isinstance(blocked, RedirectResponse)
     assert blocked.status_code == 303
     assert "error=registration_disabled" in blocked.headers["location"]
+
+
+async def test_plan_blocked_invitation_does_not_admit_a_new_address(db_session):
+    from sqlalchemy import select
+
+    email = f"invited-{uuid.uuid4()}@example.com"
+    invite = await _workspace_with_invitation(db_session, email)
+    workspace = await db_session.scalar(
+        select(Workspace).where(Workspace.id == invite.workspace_id)
+    )
+    workspace.plan_name = "free"
+    await db_session.flush()
+
+    blocked = await _check_registration_allowed(email, db_session)
+    assert isinstance(blocked, RedirectResponse)
+    assert "error=registration_disabled" in blocked.headers["location"]

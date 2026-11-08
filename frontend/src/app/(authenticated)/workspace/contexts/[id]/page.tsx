@@ -27,6 +27,7 @@ import type { Context } from "@/lib/types/context";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useToast } from "@/hooks/use-toast";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import {
   Lock,
@@ -98,7 +99,11 @@ function ScopedContextDetail() {
   const tAnalyses = useTranslations("analyses");
   const { user } = useAuth();
   const { currentContext } = useMemoryContext();
-  const { currentWorkspace } = useWorkspace();
+  const { currentWorkspace, workspaces, switchWorkspace } = useWorkspace();
+  const { toast } = useToast();
+  const [targetWorkspaceId, setTargetWorkspaceId] = useState<string | null>(null);
+  const [switching, setSwitching] = useState(false);
+  const targetWorkspace = workspaces?.find(ws => ws.id === targetWorkspaceId);
 
   // All roles can discover a tab; only authorized roles mount its panel.
   const canSeeAdminTabs = hasWorkspaceRole(
@@ -124,11 +129,12 @@ function ScopedContextDetail() {
     try {
       setLoading(true);
       setError(null);
+      setTargetWorkspaceId(null);
       if (!currentWorkspace?.id) return;
       const ctx = await getContext(contextId);
       if (!ctx.workspace_id || ctx.workspace_id !== currentWorkspace.id) {
         setContext(null);
-        setError(t("failedToLoad"));
+        setTargetWorkspaceId(ctx.workspace_id ?? null);
         return;
       }
       setContext(ctx);
@@ -161,6 +167,35 @@ function ScopedContextDetail() {
     );
   }
 
+  if (targetWorkspace) {
+    return (
+      <PageContainer>
+        <Alert>
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>{t("switchWorkspace.title")}</AlertTitle>
+          <AlertDescription>
+            <p>{t("switchWorkspace.message")}</p>
+            <p className="font-medium">{targetWorkspace.name}</p>
+            <Button className="mt-4" disabled={switching} onClick={async () => {
+              setSwitching(true);
+              try {
+                // The provider verifies membership, refreshes the selected
+                // workspace, and reopens this same URL (including its tab).
+                await switchWorkspace(targetWorkspace.id);
+              } catch {
+                toast({ title: t("switchWorkspace.failed"), variant: "destructive" });
+              } finally {
+                setSwitching(false);
+              }
+            }}>
+              {t("switchWorkspace.action")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      </PageContainer>
+    );
+  }
+
   if (error || !context) {
     return (
       <PageContainer>
@@ -168,7 +203,7 @@ function ScopedContextDetail() {
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>{t("notFoundTitle")}</AlertTitle>
           <AlertDescription>
-            {error || t("notFoundDescription")}
+            {error || t(targetWorkspaceId ? "failedToLoad" : "notFoundDescription")}
           </AlertDescription>
         </Alert>
         <Link href="/workspace/contexts">

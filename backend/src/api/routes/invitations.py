@@ -400,7 +400,9 @@ async def get_pending_invitations(
     user_email = current_user.get("email")
 
     invitation_service = InvitationService(db)
-    invitations = await invitation_service.get_pending_invitations_for_email(user_email)
+    invitations = await invitation_service.get_pending_invitations_for_email(
+        user_email, include_plan_blocked=True
+    )
 
     # Build response with workspace info
     from sqlalchemy import select
@@ -427,6 +429,7 @@ async def get_pending_invitations(
                 id=inv.public_id,
                 workspace_id=str(inv.workspace_id),
                 workspace_name=workspace.name,
+                plan_blocked=not has_feature(workspace.plan_name, "team_invitations"),
                 role=inv.role,
                 invited_by=inv.invited_by,
                 expires_at=inv.expires_at,
@@ -495,6 +498,7 @@ async def get_invitation_info(
             "role": invitation.role,
             "expires_at": to_utc_iso(invitation.expires_at),
             "email_restricted": invitation.email is not None,
+            "plan_blocked": not has_feature(workspace.plan_name, "team_invitations"),
         }
 
     except NotFoundException as e:

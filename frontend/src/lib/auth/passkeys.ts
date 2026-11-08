@@ -1,14 +1,19 @@
 import { apiClient } from "@/lib/api/base";
 
 export const passkeyPath = "/api/v1/auth/passkeys";
-/** Passkeys per account; mirrors `_LIMIT` in backend/src/api/routes/passkeys.py. */
-export const passkeyLimit = 10;
 export type Passkey = {
   id: string;
   name: string;
   created_at: string;
   last_used_at: string | null;
 };
+
+/** The account's passkeys with the server's per-account limit (#2713). */
+export type PasskeyList = { keys: Passkey[]; limit: number };
+
+export function listPasskeys(): Promise<PasskeyList> {
+  return apiClient.get<PasskeyList>(`${passkeyPath}?include_limit=true`);
+}
 
 type Descriptor = {
   type: "public-key";

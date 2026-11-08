@@ -124,7 +124,7 @@ async def update_user_profile(
         if not is_valid_timezone(data.timezone):
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid timezone: {data.timezone}. Must be IANA timezone (e.g., Asia/Tokyo)",
+                detail="Invalid timezone. Must be an IANA timezone (e.g., Asia/Tokyo)",
             )
         db_user.timezone = data.timezone
 

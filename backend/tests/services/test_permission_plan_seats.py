@@ -89,6 +89,18 @@ class TestWorkspaceAccess:
         assert member.id == 7
         seat.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_require_seat_false_skips_only_the_seat(self, service) -> None:
+        # #2714 / #2632: the usage readouts admit a seat-suspended member ...
+        with _seat(_refused()) as seat:
+            member = await service.check_workspace_access(USER, WS, require_seat=False)
+        assert member.id == 7
+        seat.assert_not_awaited()
+        # ... but still refuse a non-member.
+        service.workspace_service.get_member = AsyncMock(return_value=None)
+        with pytest.raises(AuthorizationError):
+            await service.check_workspace_access(USER, WS, require_seat=False)
+
 
 class TestContextRbac:
     @pytest.fixture

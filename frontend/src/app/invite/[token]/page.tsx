@@ -50,6 +50,7 @@ type PageState =
   | "email_mismatch"
   | "accepting"
   | "terms_required"
+  | "plan_blocked"
   | "success"
   | "error";
 
@@ -109,6 +110,10 @@ export default function AcceptInvitationPage({
       // Step 1: Load invitation info (public endpoint)
       const info = await getInvitationInfo(token);
       setInvitationInfo(info);
+      if (info.plan_blocked) {
+        setState("plan_blocked");
+        return;
+      }
 
       // Step 2: Check authentication
       const user = await checkAuthentication();
@@ -189,6 +194,11 @@ export default function AcceptInvitationPage({
       console.error("[INVITE] ❌ Acceptance failed:", err);
 
       const apiError = err instanceof ApiError ? err : null;
+      // Only the team-invitations gate means the workspace cannot take members.
+      if (apiError?.error === "FEAT-001" && apiError.gate?.feature === "team_invitations") {
+        setState("plan_blocked");
+        return;
+      }
       const errorMessage =
         apiError?.details?.detail ||
         (err instanceof Error ? err.message : "Failed to accept invitation");
@@ -285,6 +295,21 @@ export default function AcceptInvitationPage({
               state === "loading" ? t("status.loading") : t("status.accepting")
             }
           />
+        </div>
+      </div>
+    );
+  }
+
+  if (state === "plan_blocked") {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <div className="max-w-md space-y-4 text-center">
+          <LanguageSelector />
+          <h1 className="text-xl font-semibold">{t("planBlocked.title")}</h1>
+          <p>{t("planBlocked.message", { workspace: invitationInfo?.workspace_name ?? "" })}</p>
+          <Button variant="outline" onClick={() => void initializeAcceptanceFlow()}>
+            {t("planBlocked.retry")}
+          </Button>
         </div>
       </div>
     );

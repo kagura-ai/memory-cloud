@@ -18,8 +18,11 @@ from fastapi import HTTPException
 from api.routes.workspace import (
     ContextStats,
     WorkspaceStatsResponse,
+    get_workspace_member_usage,
     get_workspace_stats,
+    get_workspace_usage_breakdown,
     get_workspace_usage_current,
+    get_workspace_usage_history,
 )
 from api.routes.workspaces import (
     UpdateMemberRoleRequest,
@@ -27,7 +30,7 @@ from api.routes.workspaces import (
     update_member_role,
 )
 from auth.workspace_roles import WorkspaceRole
-from utils.exceptions import AuthenticationError
+from utils.exceptions import AuthenticationError, AuthorizationError
 
 
 class TestWorkspaceStats:
@@ -419,8 +422,69 @@ class TestSwitchWorkspace:
         assert kwargs["required_role"] == WorkspaceRole.VIEWER
 
 
+class TestUsageReadoutsCheckMembership:
+    """#2714: every usage readout checks the selected workspace's membership first."""
+
+    @pytest.fixture(autouse=True)
+    def workspace_access(self):
+        refusal = AuthorizationError("Insufficient permissions", reason="not_a_member")
+        with patch(
+            "services.permission_service.PermissionService.check_workspace_access",
+            new=AsyncMock(side_effect=refusal),
+        ) as access:
+            yield access
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ["history", "breakdown", "members"])
+    async def test_a_non_member_is_refused_before_any_read(self, route, workspace_access):
+        db = AsyncMock()
+        workspace_id = uuid4()
+        user = {"user_id": "u1", "current_workspace_id": workspace_id}
+        calls = {
+            "history": lambda: get_workspace_usage_history(days=7, user=user, db=db),
+            "breakdown": lambda: get_workspace_usage_breakdown(days=30, user=user, db=db),
+            "members": lambda: get_workspace_member_usage(user=user, db=db),
+        }
+        with pytest.raises(AuthorizationError):
+            await calls[route]()
+
+        workspace_access.assert_awaited_once_with(
+            "u1", workspace_id, required_role="viewer", require_seat=False
+        )
+        db.execute.assert_not_awaited()
+
+
 class TestWorkspaceUsageCurrent:
     """Tests for get_workspace_usage_current endpoint (Issue #65 optimization)."""
+
+    @pytest.fixture(autouse=True)
+    def workspace_access(self):
+        with patch(
+            "services.permission_service.PermissionService.check_workspace_access",
+            new=AsyncMock(),
+        ) as access:
+            yield access
+
+    @pytest.mark.asyncio
+    async def test_stale_workspace_is_refused_before_usage_reads(
+        self, mock_db, mock_user, workspace_access, quota_meters
+    ):
+        from utils.exceptions import AuthorizationError
+
+        workspace_access.side_effect = AuthorizationError(
+            "Insufficient permissions", reason="not_a_member"
+        )
+        with pytest.raises(AuthorizationError):
+            await get_workspace_usage_current(user=mock_user, db=mock_db)
+
+        workspace_access.assert_awaited_once_with(
+            mock_user["user_id"],
+            mock_user["current_workspace_id"],
+            required_role="viewer",
+            require_seat=False,
+        )
+        mock_db.execute.assert_not_awaited()
+        quota_meters.assert_not_awaited()
 
     @pytest.fixture(autouse=True)
     def quota_meters(self):

@@ -73,11 +73,48 @@ vi.mock("react", async () => {
 });
 
 import AcceptInvitationPage from "./page";
+import { ApiError } from "@/lib/api/base";
 
 const TOKEN = "test-invitation-token";
 const originalLocation = window.location;
 const FRONTEND_ORIGIN = "http://localhost:3000";
 const INVITE_URL = `${FRONTEND_ORIGIN}/invite/${TOKEN}`;
+
+describe("plan-blocked invitations", () => {
+  it("keeps the invitation visible with owner guidance before sign-in", async () => {
+    mockGetInvitationInfo.mockResolvedValue({
+      workspace_name: "Example Workspace", plan_blocked: true,
+    });
+    render(<AcceptInvitationPage params={{ token: TOKEN } as unknown as Promise<{ token: string }>} />);
+    expect(await screen.findByText("planBlocked.message")).toBeInTheDocument();
+    expect(mockApiClientGet).not.toHaveBeenCalled();
+    expect(mockAcceptInvitation).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "planBlocked.retry" }));
+    await waitFor(() => expect(mockGetInvitationInfo).toHaveBeenCalledTimes(2));
+  });
+
+  it("also handles a plan change after the preview without an upgrade prompt", async () => {
+    mockApiClientGet.mockResolvedValue({ user_id: "invitee" });
+    mockAcceptInvitation.mockRejectedValue(new ApiError({
+      error: "FEAT-001", message: "Upgrade required", status: 403,
+      gate: { state: "plan", feature: "team_invitations" },
+    }));
+    render(<AcceptInvitationPage params={{ token: TOKEN } as unknown as Promise<{ token: string }>} />);
+    expect(await screen.findByText("planBlocked.message")).toBeInTheDocument();
+    expect(screen.queryByText("Upgrade required")).not.toBeInTheDocument();
+  });
+
+  it("does not read another feature's refusal as a plan-blocked invitation", async () => {
+    mockApiClientGet.mockResolvedValue({ user_id: "invitee" });
+    mockAcceptInvitation.mockRejectedValue(new ApiError({
+      error: "FEAT-001", message: "Upgrade required", status: 403,
+      gate: { state: "plan", feature: "some_other_feature" },
+    }));
+    render(<AcceptInvitationPage params={{ token: TOKEN } as unknown as Promise<{ token: string }>} />);
+    expect(await screen.findByText(/Upgrade required/)).toBeInTheDocument();
+    expect(screen.queryByText("planBlocked.message")).not.toBeInTheDocument();
+  });
+});
 
 let hrefAssignments: string[] = [];
 

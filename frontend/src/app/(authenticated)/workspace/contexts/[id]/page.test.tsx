@@ -1,7 +1,7 @@
 /** Role-restricted tabs stay discoverable; their protected panels never mount (#2630). */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 
 import ContextDetailPage from "./page";
 
@@ -164,6 +164,25 @@ describe("ContextDetailPage tab visibility (#398)", () => {
 });
 
 describe("ContextDetailPage deep-link tab guard (#398)", () => {
+  it("offers a verified member's workspace and keeps the context URL when switching", async () => {
+    setupWithRole("owner", "settings");
+    const other = { id: "other", name: "Project North", current_user_role: "admin" };
+    const switchWorkspace = vi.fn().mockResolvedValue(undefined);
+    const active = { ...mockUseWorkspace(), workspaces: [other], switchWorkspace };
+    mockUseWorkspace.mockReturnValue(active);
+    mockGetContext.mockResolvedValue({ ...makeContext(), workspace_id: "other" });
+    const view = render(<ContextDetailPage />);
+    expect(await screen.findByText("Project North")).toBeVisible();
+    expect(screen.queryByText("failedToLoad")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("settings-panel")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "switchWorkspace.action" }));
+    await waitFor(() => expect(switchWorkspace).toHaveBeenCalledWith("other"));
+    mockUseWorkspace.mockReturnValue({ ...active, currentWorkspace: other });
+    view.rerender(<ContextDetailPage />);
+    expect(await screen.findByTestId("settings-panel")).toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalled();
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
   it("never mounts a restricted panel for a different workspace’s context", async () => {
     setupWithRole("owner", "settings");
     mockGetContext.mockResolvedValue({ ...makeContext(), workspace_id: "other" });
