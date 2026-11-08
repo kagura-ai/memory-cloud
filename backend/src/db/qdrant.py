@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Condition,
     DatetimeRange,
@@ -82,6 +83,25 @@ KAGURA_MEMORIES_COLLECTION = "kagura_memories"
 # vectors will fail with "Not existing vector name error".
 KAGURA_MEMORIES_VECTOR_NAME = "dense"
 KAGURA_MEMORIES_BM25_VECTOR_NAME = "bm25"
+
+# Filter indexes added after the first collections were created, as
+# (field, schema). An existing collection receives the ones it lacks from
+# ensure_kagura_memories_collection (context creation, embedding migration)
+# and from ensure_payload_indexes_on_all (every API start, #2729) — both read
+# this one table. A new late index goes here and into the creation path of
+# ensure_kagura_memories_collection (and its indexes log list), nowhere else.
+# Each field is created on its own, so the order only sets the order of the
+# created_missing_index log lines and of the returned lists.
+LATE_PAYLOAD_INDEXES: tuple[tuple[str, str], ...] = (
+    ("tags", "keyword"),  # #67: exact tag match
+    ("location", "geo"),  # #1332: filters.near / within
+    ("created_at", "datetime"),  # #78: filters.created_after / created_before
+    ("updated_at", "datetime"),  # #78: filters.updated_after / updated_before
+    ("observed_at", "datetime"),  # #2330: filters.observed_after / observed_before
+    ("event_start", "datetime"),  # #2724: filters.event_after / event_before
+    ("event_end", "datetime"),
+    (CHUNK_OF_FIELD, "keyword"),  # #2015: chunk points, excluded from search
+)
 
 # ============================================================================
 # Dense vector storage layout (#1990)
@@ -1776,9 +1796,13 @@ async def ensure_kagura_memories_collection(
         - user_id (keyword) - CRITICAL for user-level isolation
         - summary (text, multilingual)
         - context_summary (text, multilingual)
+        - summary_tokens, context_summary_tokens, content_tokens (text, word)
         - scope (keyword)
         - type (keyword)
         - importance (float)
+        - every ``LATE_PAYLOAD_INDEXES`` entry: tags, location, created_at,
+          updated_at, observed_at, event_start, event_end, chunk_of — an
+          existing collection receives the ones it lacks (#2729)
 
     Args:
         embedding_dim: Embedding dimension (default: 512 for text-embedding-3-small)
@@ -1813,51 +1837,12 @@ async def ensure_kagura_memories_collection(
                 # reconciled here: this runs on the request path in every
                 # worker, and update_collection must be sent once per
                 # deployment — the startup pass owns that.
-                # Collection is up-to-date, ensure late-added indexes
-                existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
-                if "tags" not in existing_fields:
-                    await client.create_payload_index(
-                        collection_name=collection_name,
-                        field_name="tags",
-                        field_schema="keyword",  # type: ignore[arg-type]
-                    )
-                    logger.info("created_missing_index", field="tags", type="keyword")
-                if "location" not in existing_fields:
-                    # WHERE axis (#1332): geo index retrofit for collections
-                    # created before the location payload existed.
-                    await client.create_payload_index(
-                        collection_name=collection_name,
-                        field_name="location",
-                        field_schema="geo",  # type: ignore[arg-type]
-                    )
-                    logger.info("created_missing_index", field="location", type="geo")
-                if "observed_at" not in existing_fields:
-                    # WHEN axis (#2330): datetime index retrofit for
-                    # filters.observed_after / observed_before.
-                    await client.create_payload_index(
-                        collection_name=collection_name,
-                        field_name="observed_at",
-                        field_schema="datetime",  # type: ignore[arg-type]
-                    )
-                    logger.info("created_missing_index", field="observed_at", type="datetime")
-                for event_field in ("event_start", "event_end"):
-                    if event_field not in existing_fields:
-                        # The event's own days, for filters.event_after / event_before.
-                        await client.create_payload_index(
-                            collection_name=collection_name,
-                            field_name=event_field,
-                            field_schema="datetime",  # type: ignore[arg-type]
-                        )
-                        logger.info("created_missing_index", field=event_field, type="datetime")
-                if CHUNK_OF_FIELD not in existing_fields:
-                    # #2015: content chunk points are selected by chunk_of
-                    # (exclusion in search, cascade deletes / payload updates).
-                    await client.create_payload_index(
-                        collection_name=collection_name,
-                        field_name=CHUNK_OF_FIELD,
-                        field_schema="keyword",  # type: ignore[arg-type]
-                    )
-                    logger.info("created_missing_index", field=CHUNK_OF_FIELD, type="keyword")
+                # Collection is up-to-date, ensure late-added indexes. A refused
+                # index is logged and skipped (the startup pass retries it); a
+                # transport failure propagates as the collection error below.
+                await _create_missing_payload_indexes(
+                    client, collection_name, _payload_fields(info)
+                )
                 return
 
             # Old collection without sparse vectors — requires manual migration
@@ -2019,6 +2004,9 @@ async def ensure_kagura_memories_collection(
                 "user_id",
                 "summary",
                 "context_summary",
+                "summary_tokens",
+                "context_summary_tokens",
+                "content_tokens",
                 "scope",
                 "type",
                 "importance",
@@ -2028,6 +2016,7 @@ async def ensure_kagura_memories_collection(
                 "observed_at",
                 "event_start",
                 "event_end",
+                "location",
                 CHUNK_OF_FIELD,
             ],
         )
@@ -2367,44 +2356,114 @@ async def list_memory_collections() -> list[str]:
     )
 
 
-async def ensure_chunk_of_index_on_all() -> list[str]:
-    """Add the ``chunk_of`` payload index (#2015) to every ``kagura_memories*``
-    collection that lacks it; return the collections it was added to.
+def _payload_fields(info: Any) -> set[str]:
+    """The indexed payload fields of a ``get_collection`` result (by name)."""
+    schema = getattr(info, "payload_schema", None)
+    return set(schema.keys()) if schema else set()
 
-    Every dense search, point delete and payload update now filters on
-    ``chunk_of``, so a collection created before #2015 needs the index even
-    when it never holds a chunk point. Startup pass, once per process:
-    idempotent (an existing index is left alone; Qdrant also accepts a
-    repeated create) and fail-soft — a collection that fails is logged and
-    skipped, and nothing is raised. A no-op on a non-Qdrant store.
+
+async def _create_missing_payload_indexes(
+    client: AsyncQdrantClient, collection_name: str, existing_fields: set[str]
+) -> list[str]:
+    """Request every ``LATE_PAYLOAD_INDEXES`` entry absent from ``existing_fields``.
+
+    The build is requested with ``wait=False``: the REST client runs on its
+    default (short) timeout and a large collection builds an index for longer
+    than that; Qdrant finishes it in the background and lists the field in
+    ``payload_schema`` from then on.
+
+    An index Qdrant *refuses* (it answered: ``UnexpectedResponse``) is logged
+    as ``payload_index_create_failed`` with the field and the error, and the
+    next fields are still requested — the next API start retries it. A
+    transport failure (unreachable, timeout) propagates: the collection is
+    not worth more attempts against a dead connection, and the caller decides
+    (the startup pass skips the collection; the request path fails).
+
+    Returns:
+        The fields requested, in table order (empty when the collection is complete).
+    """
+    created: list[str] = []
+    for field_name, field_schema in LATE_PAYLOAD_INDEXES:
+        if field_name in existing_fields:
+            continue
+        try:
+            await client.create_payload_index(
+                collection_name=collection_name,
+                field_name=field_name,
+                field_schema=field_schema,  # type: ignore[arg-type]
+                wait=False,
+            )
+        except UnexpectedResponse as e:
+            logger.warning(
+                "payload_index_create_failed",
+                collection=collection_name,
+                field=field_name,
+                type=field_schema,
+                status=e.status_code,
+                error=str(e),
+            )
+            continue
+        created.append(field_name)
+        logger.info(
+            "created_missing_index",
+            field=field_name,
+            type=field_schema,
+            collection=collection_name,
+        )
+    return created
+
+
+async def ensure_payload_indexes_on_all() -> dict[str, list[str]]:
+    """Add every late-added payload index (``LATE_PAYLOAD_INDEXES``) to each
+    ``kagura_memories*`` collection that lacks it; return what was added.
+
+    ``ensure_kagura_memories_collection`` retrofits the same indexes, but only
+    when a context is created or migrated — a deployment that does neither
+    after an upgrade would run without the new index (#2729: v0.152.0's
+    ``event_start`` / ``event_end``; before it, #2015's ``chunk_of``). Startup
+    pass, once per process: idempotent (an existing index is left alone;
+    Qdrant also accepts a repeated create) and fail-soft — a collection that
+    cannot be read or reached is logged and skipped, a field Qdrant refuses is
+    logged and the others are still requested, and nothing is raised. Ends
+    with one ``payload_index_pass_done`` line (collections, fields, failures)
+    so a boot where nothing was missing is still accounted for. A no-op on a
+    non-Qdrant store.
+
+    Returns:
+        Collection name -> fields requested, for the collections that got any.
     """
     if _active_store() is not None:
-        return []
-    created: list[str] = []
+        return {}
+    added: dict[str, list[str]] = {}
     try:
         names = await list_memory_collections()
     except Exception as e:  # noqa: BLE001 — best-effort startup pass
-        logger.warning("chunk_of_index_pass_failed", error_class=type(e).__name__)
-        return created
+        logger.warning("payload_index_pass_failed", error_class=type(e).__name__)
+        return added
     client = get_qdrant_client()
+    failed = 0
     for name in names:
         try:
             info = await client.get_collection(name)
-            existing = set(info.payload_schema.keys()) if info.payload_schema else set()
-            if CHUNK_OF_FIELD in existing:
-                continue
-            await client.create_payload_index(
-                collection_name=name,
-                field_name=CHUNK_OF_FIELD,
-                field_schema="keyword",  # type: ignore[arg-type]
-            )
-            created.append(name)
-            logger.info("created_missing_index", field=CHUNK_OF_FIELD, collection=name)
+            created = await _create_missing_payload_indexes(client, name, _payload_fields(info))
         except Exception as e:  # noqa: BLE001 — one collection must not stop the pass
+            failed += 1
             logger.warning(
-                "chunk_of_index_create_failed", collection=name, error_class=type(e).__name__
+                "payload_index_collection_failed",
+                collection=name,
+                error_class=type(e).__name__,
+                error=str(e),
             )
-    return created
+            continue
+        if created:
+            added[name] = created
+    logger.info(
+        "payload_index_pass_done",
+        collections=len(names),
+        fields_requested=sum(len(fields) for fields in added.values()),
+        collections_failed=failed,
+    )
+    return added
 
 
 async def delete_context_points_everywhere(

@@ -713,6 +713,8 @@ class TestEnsureCollection:
             payload_schema={
                 "tags": object(),
                 "location": object(),
+                "created_at": object(),
+                "updated_at": object(),
                 "observed_at": object(),
                 "event_start": object(),
                 "event_end": object(),
@@ -735,9 +737,10 @@ class TestEnsureCollection:
             payload_schema={"scope": object()},
         )
         await ensure_kagura_memories_collection()
-        # Every retrofit branch fires: tags (keyword), location (geo, #1332),
-        # observed_at (datetime, #2330), the event days (datetime) and
-        # chunk_of (keyword, #2015).
+        # Every late index (LATE_PAYLOAD_INDEXES, #2729) fires: tags (keyword),
+        # location (geo, #1332), the datetime range filters created_at /
+        # updated_at (#78), observed_at (#2330) and the event days (#2724),
+        # and chunk_of (keyword, #2015).
         created = {
             c.kwargs["field_name"]: c.kwargs["field_schema"]
             for c in mock_client.create_payload_index.await_args_list
@@ -745,6 +748,8 @@ class TestEnsureCollection:
         assert created == {
             "tags": "keyword",
             "location": "geo",
+            "created_at": "datetime",
+            "updated_at": "datetime",
             "observed_at": "datetime",
             "event_start": "datetime",
             "event_end": "datetime",
