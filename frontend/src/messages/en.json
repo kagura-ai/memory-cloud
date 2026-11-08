@@ -1230,6 +1230,7 @@
     "updatePassword": "Update Password",
     "profileUpdated": "Profile updated",
     "profileUpdatedDesc": "Your profile information has been saved successfully.",
+    "profileSavedNotRefreshed": "Your profile was saved, but this page could not refresh. Reload to see your changes.",
     "themeUpdated": "Theme updated",
     "themeUpdatedLight": "Switched to light mode.",
     "themeUpdatedDark": "Switched to dark mode.",

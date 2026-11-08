@@ -1230,6 +1230,7 @@
     "updatePassword": "パスワードを更新",
     "profileUpdated": "プロフィールを更新しました",
     "profileUpdatedDesc": "プロフィール情報が正常に保存されました。",
+    "profileSavedNotRefreshed": "プロフィールは保存されましたが、このページを更新できませんでした。再読み込みすると変更が反映されます。",
     "themeUpdated": "テーマを更新しました",
     "themeUpdatedLight": "ライトモードに切り替えました。",
     "themeUpdatedDark": "ダークモードに切り替えました。",

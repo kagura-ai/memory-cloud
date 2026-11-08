@@ -41,7 +41,7 @@ import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import LinkedAccounts from "@/components/auth/LinkedAccounts";
 import PasskeySettings from "@/components/auth/PasskeySettings";
 import { usePasswordSetup } from "@/hooks/usePasswordSetup";
-import { saveUserPreferences } from "@/lib/auth/saveUserPreferences";
+import { PreferencesRefreshError, saveUserPreferences } from "@/lib/auth/saveUserPreferences";
 import PasswordSettings from "@/components/auth/PasswordSettings";
 import { MfaSettings } from "@/components/auth/MfaSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
@@ -248,7 +248,17 @@ export default function ProfilePage() {
         description: t("profileUpdatedDesc"),
       });
       setIsEditMode(false);
-    } catch {
+    } catch (error) {
+      if (error instanceof PreferencesRefreshError) {
+        // The PUT succeeded; only the refresh failed. Say so, and leave the
+        // UI language alone so the layout does not switch it back (#2712).
+        toast({
+          title: t("profileUpdated"),
+          description: t("profileSavedNotRefreshed"),
+        });
+        setIsEditMode(false);
+        return;
+      }
       toast({
         title: tCommon("error"),
         description: t("failedToUpdateProfile"),
