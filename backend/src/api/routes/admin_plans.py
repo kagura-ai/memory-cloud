@@ -23,6 +23,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin as auth_require_admin
 from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, get_plan_tier, has_feature
+from config.retention import (
+    OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS,
+    OPERATION_HISTORY_RETENTION_DAYS,
+)
 from db.base import get_db
 from models.auth import (
     ENTITLEMENT_SOURCE_ADMIN_GRANT,
@@ -116,6 +120,8 @@ class QuotaBreakdown(BaseModel):
     max_resource_tokens: int = 0  # Issue #663: tier-fixed (no addon), surfaced read-only
     max_connectors: int = 0  # Spec 2026-06-02: tier base for the extra_connectors addon
     memories_per_day: int = 0  # #1975: tier base for the extra_memories_per_day addon
+    # #2739: operation history retention in days (90 on every tier) + the days add-on.
+    history_retention_days: int = 0
     # #2103: tier-fixed (no addon); read only where CONTENT_CHUNKS_REQUIRE_PLAN is on.
     max_content_chunk_contexts: int = 0
     # #2144: tier-fixed (no addon); read only where LLM_SELECTOR_REQUIRE_PLAN is on.
@@ -141,6 +147,7 @@ class AddonValues(BaseModel):
     sleep_contexts_bonus: int = 0
     connector_bonus: int = 0
     memories_per_day_bonus: int = 0  # #1975
+    history_retention_days_bonus: int = 0  # #2739, in days
 
 
 class UsageValues(BaseModel):
@@ -219,6 +226,10 @@ class UpdateAddonRequest(BaseModel):
     addon_sleep_contexts_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
     addon_connector_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
     addon_memories_per_day_bonus: int | None = Field(None, ge=0, le=2_000_000_000)  # #1975
+    # #2739: days added to the 90-day operation history retention (about ten years at most).
+    addon_history_retention_days_bonus: int | None = Field(
+        None, ge=0, le=OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS
+    )
 
 
 class UpdateSpendCapRequest(BaseModel):
@@ -865,6 +876,7 @@ async def get_workspace_quotas(
                 max_resource_tokens=plan_tier.max_resource_tokens,
                 max_connectors=plan_tier.max_connectors,
                 memories_per_day=plan_tier.memories_per_day,
+                history_retention_days=OPERATION_HISTORY_RETENTION_DAYS,
                 max_content_chunk_contexts=plan_tier.max_content_chunk_contexts,
                 max_llm_selector_contexts=plan_tier.max_llm_selector_contexts,
             ),
@@ -880,6 +892,7 @@ async def get_workspace_quotas(
                 sleep_contexts_bonus=workspace.addon_sleep_contexts_bonus,
                 connector_bonus=workspace.addon_connector_bonus,
                 memories_per_day_bonus=workspace.addon_memories_per_day_bonus,
+                history_retention_days_bonus=workspace.addon_history_retention_days_bonus,
             ),
             effective=QuotaBreakdown(
                 memory_limit=effective["memory_limit"],
@@ -894,6 +907,7 @@ async def get_workspace_quotas(
                 max_resource_tokens=effective["max_resource_tokens"],
                 max_connectors=workspace.effective_max_connectors,
                 memories_per_day=effective["memories_per_day"],
+                history_retention_days=workspace.effective_history_retention_days,
                 # #2103: no addon column; 0 when the tier lacks content_chunks.
                 max_content_chunk_contexts=content_chunk_context_limit(workspace.plan_name),
                 # #2144: likewise; 0 when the tier lacks llm_selector.
@@ -1010,6 +1024,13 @@ _ADDON_FIELD_SPECS: tuple[_AddonFieldSpec, ...] = (
         "extra_memories_per_day",
         ADDON_UNIT_VALUES["extra_memories_per_day"],
         None,  # #1975: daily Redis-reset counter; admin reduction mid-day is acceptable
+    ),
+    _AddonFieldSpec(
+        "addon_history_retention_days_bonus",
+        "extra_history_retention_days",
+        ADDON_UNIT_VALUES["extra_history_retention_days"],
+        None,  # #2739: a shorter retention only lets the daily purge delete sooner
+        required_feature="operation_history",  # nothing is recorded below L
     ),
 )
 

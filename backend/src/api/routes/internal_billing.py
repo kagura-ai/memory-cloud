@@ -53,6 +53,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.plan_tiers import PLAN_TIERS, PlanName
+from config.retention import OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -89,12 +90,18 @@ _ADDON_COLUMNS: dict[str, str] = {
     "sleep_contexts": "addon_sleep_contexts_bonus",  # Issue #560
     "connector": "addon_connector_bonus",
     "memories_per_day": "addon_memories_per_day_bonus",  # #1975
+    "history_retention_days": "addon_history_retention_days_bonus",  # #2739, in days
 }
 
 # Upper bound on any addon bonus, matching the admin quota endpoint's
 # ``le=2_000_000_000``. Keeps an oversized push a clean 422 instead of letting it
 # overflow the INTEGER column and surface as a 500 at commit.
 _ADDON_MAX_BONUS = 2_000_000_000
+# Dimensions with a tighter, domain bound than the column's (same bound as the
+# admin quota endpoint). #2739: about ten years of extra history retention.
+_ADDON_MAX_BY_KEY: dict[str, int] = {
+    "history_retention_days": OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS,
+}
 
 
 async def verify_billing_service_token(authorization: str | None = Header(None)) -> None:
@@ -145,7 +152,9 @@ class BillingPlanPush(BaseModel):
         description=(
             "Absolute addon bonus values keyed by addon dimension "
             "(memory, mcp_quota, rest_quota, public_quota, member, context, "
-            "analysis, storage_mb, sleep_contexts, connector). FULL REPLACE: when "
+            "analysis, storage_mb, sleep_contexts, connector, memories_per_day, "
+            "history_retention_days — days added to the 90-day operation history "
+            "retention, at most 3650). FULL REPLACE: when "
             "provided this is the complete addon state — dimensions omitted from "
             "the map are reset to 0 (an empty object zeros all). Omit the field "
             "entirely (null) to leave existing addons unchanged (tier-only change)."
@@ -197,9 +206,10 @@ async def set_workspace_plan_from_billing(
                 raise ValidationError(
                     f"Addon '{key}' bonus must be >= 0, got {value}", field="addons"
                 )
-            if value > _ADDON_MAX_BONUS:
+            maximum = _ADDON_MAX_BY_KEY.get(key, _ADDON_MAX_BONUS)
+            if value > maximum:
                 raise ValidationError(
-                    f"Addon '{key}' bonus exceeds the maximum {_ADDON_MAX_BONUS}, got {value}",
+                    f"Addon '{key}' bonus exceeds the maximum {maximum}, got {value}",
                     field="addons",
                 )
 

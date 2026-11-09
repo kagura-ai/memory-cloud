@@ -278,6 +278,10 @@
             "default": 0,
             "type": "integer"
           },
+          "history_retention_days_bonus": {
+            "default": 0,
+            "type": "integer"
+          },
           "mcp_quota_bonus": {
             "default": 0,
             "type": "integer"
@@ -8916,6 +8920,10 @@
           "analysis_runs_per_day": {
             "type": "integer"
           },
+          "history_retention_days": {
+            "default": 0,
+            "type": "integer"
+          },
           "max_connectors": {
             "default": 0,
             "type": "integer"
@@ -11658,6 +11666,18 @@
             "anyOf": [
               {
                 "maximum": 2000000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "addon_history_retention_days_bonus": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
                 "minimum": 0.0,
                 "type": "integer"
               },

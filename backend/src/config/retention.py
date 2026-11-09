@@ -22,6 +22,34 @@ CLEANUP_SCHEDULE = "daily"  # daily, hourly, weekly
 
 
 # ============================================================================
+# Workspace operation history retention (#2739)
+# ============================================================================
+
+# Every entitled workspace keeps its operation history for this many days. The
+# ``history_retention_days`` add-on (``Workspace.addon_history_retention_days_bonus``)
+# adds to it. The read API hides older rows and the daily purge deletes them.
+OPERATION_HISTORY_RETENTION_DAYS = 90
+# Upper bound of the add-on bonus (about ten years), checked by the billing push
+# and the admin quota endpoint and applied again when the retention is computed,
+# so a sum of several add-on rows cannot exceed it either.
+OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS = 3650
+
+
+def operation_history_retention_days(bonus_days: int | None) -> int:
+    """Effective operation history retention: the base plus the add-on bonus.
+
+    Args:
+        bonus_days: ``Workspace.addon_history_retention_days_bonus``; ``None``
+            (a workspace row that no longer exists) reads as no bonus.
+
+    Returns:
+        Days, at least ``OPERATION_HISTORY_RETENTION_DAYS``.
+    """
+    bonus = min(max(bonus_days or 0, 0), OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS)
+    return OPERATION_HISTORY_RETENTION_DAYS + bonus
+
+
+# ============================================================================
 # Working → Persistent 自動移行条件
 # ============================================================================
 

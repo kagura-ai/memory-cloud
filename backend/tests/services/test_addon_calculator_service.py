@@ -224,3 +224,28 @@ class TestAddonCalculatorMemoriesPerDayBonus:
         assert bonuses["addon_memories_per_day_bonus"] == 300
         assert workspace.addon_memories_per_day_bonus == 300
         mock_db.commit.assert_awaited_once()
+
+
+class TestAddonCalculatorHistoryRetentionBonus:
+    """#2739: extra_history_retention_days → addon_history_retention_days_bonus (days)."""
+
+    @pytest.fixture
+    def mock_db(self):
+        db = MagicMock()
+        db.execute = AsyncMock()
+        db.commit = AsyncMock()
+        return db
+
+    @pytest.mark.asyncio
+    async def test_history_retention_days_addon_bonus_is_persisted(self, mock_db):
+        assert ADDON_UNIT_VALUES["extra_history_retention_days"] == 1
+        workspace_id = uuid4()
+        addons = [_make_addon("extra_history_retention_days", quantity=275)]
+        workspace = _make_workspace(workspace_id)
+        workspace.addon_history_retention_days_bonus = 0
+        mock_db.execute.side_effect = _make_side_effects(addons, workspace)
+
+        bonuses = await AddonCalculatorService(mock_db).recalculate_workspace_bonuses(workspace_id)
+
+        assert bonuses["addon_history_retention_days_bonus"] == 275
+        assert workspace.addon_history_retention_days_bonus == 275

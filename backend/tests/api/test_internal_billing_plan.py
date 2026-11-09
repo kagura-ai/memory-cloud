@@ -40,6 +40,7 @@ def _make_ws():
         "addon_sleep_contexts_bonus",
         "addon_connector_bonus",
         "addon_memories_per_day_bonus",
+        "addon_history_retention_days_bonus",
     ):
         setattr(ws, col, 0)
     # #1095: the protective default; a push flips it to external_billing. Set it
@@ -146,6 +147,25 @@ def test_oversized_addon_returns_422(billing):
         headers={"Authorization": "Bearer secret"},
     )
     assert resp.status_code == 422
+
+
+def test_history_retention_days_addon_is_bounded_to_ten_years(billing):
+    """#2739: the days bonus has its own ceiling, far below the INTEGER one."""
+    ws = _make_ws()
+    resp = billing.client(ws).put(
+        _PATH,
+        json={"plan_name": "pro", "addons": {"history_retention_days": 3650}},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["addons"]["history_retention_days"] == 3650
+    assert ws.addon_history_retention_days_bonus == 3650
+    too_long = billing.client(_make_ws()).put(
+        _PATH,
+        json={"plan_name": "pro", "addons": {"history_retention_days": 3651}},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert too_long.status_code == 422
 
 
 def test_workspace_not_found_returns_404(billing):

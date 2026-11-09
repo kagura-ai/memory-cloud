@@ -183,6 +183,29 @@ class TestEffectiveMemoriesPerDay:
         assert Workspace.effective_memories_per_day.fget(ws) == 0
 
 
+class TestEffectiveHistoryRetentionDays:
+    """#2739: operation history retention is 90 days plus the days add-on."""
+
+    @pytest.mark.parametrize("plan_name", ["free", "basic", "pro", "promax"])
+    def test_base_is_ninety_days_on_every_tier(self, plan_name):
+        from config.plan_tiers import get_plan_tier
+
+        ws = MagicMock()
+        ws._plan_tier = get_plan_tier(plan_name)
+        ws.addon_history_retention_days_bonus = 0
+        assert Workspace.effective_history_retention_days.fget(ws) == 90
+
+    def test_addon_extends_and_is_capped(self):
+        ws = MagicMock()
+        ws.addon_history_retention_days_bonus = 275
+        assert Workspace.effective_history_retention_days.fget(ws) == 365
+        # Several add-on rows can sum past the per-push bound; the cap holds.
+        ws.addon_history_retention_days_bonus = 9_000
+        assert Workspace.effective_history_retention_days.fget(ws) == 90 + 3650
+        ws.addon_history_retention_days_bonus = None
+        assert Workspace.effective_history_retention_days.fget(ws) == 90
+
+
 class TestEffectiveMaxConnectors:
     """Spec 2026-06-02: the ai-worker connector seat cap is plan tier base +
     the ``extra_connectors`` addon (mirrors ``effective_max_members``).
