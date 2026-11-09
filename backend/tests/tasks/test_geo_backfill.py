@@ -300,12 +300,15 @@ async def test_backfill_pages_the_located_rows_and_looks_up_once_per_page(monkey
 
 @pytest.mark.asyncio
 async def test_a_failed_sharing_lookup_fails_its_page_not_the_sweep(monkeypatch):
-    """Per-page isolation: a lookup error skips that page's rows (counted as
-    failed) and the next page is still written."""
+    """Per-page isolation: a lookup error fails that page's rows that name
+    another point (counted as failed); an own-id row needs no lookup and is
+    still written, as before the batching, and the next page is still written."""
     import tasks.geo_backfill as geo
 
     monkeypatch.setattr(geo, "_PAGE_SIZE", 2)
-    pages = [[_row(1.0, 2.0), _row(3.0, 4.0)], [_row(5.0, 6.0)]]
+    own, document = _row(1.0, 2.0), _row(3.0, 4.0)
+    document.summary_embedding_id = uuid4()
+    pages = [[own, document], [_row(5.0, 6.0)]]
     db = MagicMock()
     db.execute = AsyncMock(side_effect=[_result(pages[0]), _result(pages[1])])
     lookup = AsyncMock(side_effect=[RuntimeError("lookup blip"), {pages[1][0].id: pages[1][0].id}])
@@ -320,11 +323,11 @@ async def test_a_failed_sharing_lookup_fails_its_page_not_the_sweep(monkeypatch)
     ):
         count = await backfill_location_payloads(db)
 
-    assert count == 1
-    assert mock_update.await_args.kwargs["memory_id"] == pages[1][0].id
+    assert count == 2
+    assert [c.kwargs["memory_id"] for c in mock_update.await_args_list] == [own.id, pages[1][0].id]
     warnings = {c.args[0]: c.kwargs for c in log.warning.call_args_list}
-    assert warnings["geo_payload_backfill_page_failed"]["rows"] == 2
-    assert warnings["geo_payload_backfill_partial"] == {"written": 1, "failed": 2}
+    assert warnings["geo_payload_backfill_page_failed"]["rows"] == 1
+    assert warnings["geo_payload_backfill_partial"] == {"written": 2, "failed": 1}
 
 
 def _guard(acquired: bool, keys: list[str]):
@@ -508,6 +511,19 @@ class TestLocatedPointIds:
         assert await located_point_ids(db_session, []) == set()
 
 
+def _scope_walk_to(monkeypatch, geo, context_ids):
+    """Limit the forward walk to ``context_ids``, keeping the real page query:
+    the session-wide test DB may hold located rows other tests committed."""
+    from models.memory import Memory
+
+    page = geo._located_rows_page
+    monkeypatch.setattr(
+        geo,
+        "_located_rows_page",
+        lambda after: page(after).where(Memory.context_id.in_(context_ids)),
+    )
+
+
 class TestBackfillBatchedSharingLookup:
     """#2459, against the real DB: one point-sharing lookup per page of
     located rows, by the rule of ``unshared_point_id``."""
@@ -571,6 +587,7 @@ class TestBackfillBatchedSharingLookup:
 
         # Six located rows in pages of three: two full pages, then an empty one.
         monkeypatch.setattr(geo, "_PAGE_SIZE", 3)
+        _scope_walk_to(monkeypatch, geo, [ctx.id])
         statements: list[str] = []
 
         def _statement(conn, cursor, statement, parameters, context, executemany):
@@ -613,3 +630,68 @@ class TestBackfillBatchedSharingLookup:
             if c.args[0] == "geo_payload_backfill_shared_point_skipped"
         ]
         assert skipped == [{"memory_id": str(shared_located.id)}]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_collection_lookup_leaves_the_session_usable(
+        self, db_session, monkeypatch
+    ):
+        """The per-context ``resolve_collection_name`` read runs in a SAVEPOINT:
+        a DB error there fails its row, and the later pages still run."""
+        from sqlalchemy import text
+
+        import tasks.geo_backfill as geo
+        from models.auth import Context, Workspace
+        from models.memory import Memory
+
+        owner = f"owner-{uuid4().hex[:8]}"
+        ws = Workspace(id=uuid4(), name=f"ws-{uuid4().hex[:8]}", owner_user_id=owner)
+        db_session.add(ws)
+        await db_session.flush()
+        broken, healthy = (
+            Context(
+                id=uuid4(),
+                workspace_id=ws.id,
+                name=f"ctx-{uuid4().hex[:8]}",
+                created_by=owner,
+                is_private=False,
+            )
+            for _ in range(2)
+        )
+        db_session.add_all([broken, healthy])
+        await db_session.flush()
+        # The broken context's row comes first in id order, on a page of its own.
+        first, second = sorted([uuid4(), uuid4()])
+        db_session.add_all(
+            [
+                Memory(
+                    id=memory_id,
+                    user_id=owner,
+                    workspace_id=ws.id,
+                    context_id=ctx.id,
+                    summary="s",
+                    content="c",
+                    type="note",
+                    client="pytest",
+                    details={"location": {"lat": 35.5, "lon": 139.25}},
+                    embedding_status="success",
+                )
+                for memory_id, ctx in ((first, broken), (second, healthy))
+            ]
+        )
+        await db_session.flush()
+        monkeypatch.setattr(geo, "_PAGE_SIZE", 1)
+        _scope_walk_to(monkeypatch, geo, [broken.id, healthy.id])
+
+        async def _resolve(db, context_id):
+            if context_id == broken.id:
+                await db.execute(text("SELECT 1/0"))
+            return "kagura_memories"
+
+        with (
+            patch("services.context_routing.resolve_collection_name", new=_resolve),
+            patch("db.qdrant.update_memory_payload_in_qdrant", new=AsyncMock()) as update,
+        ):
+            count = await backfill_location_payloads(db_session)
+
+        assert count == 1
+        assert update.await_args.kwargs["memory_id"] == second

@@ -115,24 +115,24 @@ async def backfill_location_payloads(db: AsyncSession) -> int:
         if not rows:
             break
         after = rows[-1].id
+        # #2218: the point the row names (``Memory.point_id``). An own-id
+        # point skips the sharing lookup; a document point another live
+        # row names too is left as it is, like the metadata patch (#2100).
+        pairs = [(row.id, row.summary_embedding_id or row.id) for row in rows]
         try:
-            # #2218: the point the row names (``Memory.point_id``). An own-id
-            # point skips the sharing lookup; a document point another live
-            # row names too is left as it is, like the metadata patch (#2100).
-            points = await unshared_point_ids(
-                db, [(row.id, row.summary_embedding_id or row.id) for row in rows]
-            )
+            points = await unshared_point_ids(db, pairs)
         except Exception as e:  # noqa: BLE001 — best-effort per page
             # The lookup runs in a SAVEPOINT: a failure costs this page's
-            # rows, and the next page still runs.
-            failed += len(rows)
+            # rows that name another point, and the next page still runs.
+            # An own-id point needs no lookup and is still written.
+            points = {memory_id: point_id for memory_id, point_id in pairs if point_id == memory_id}
+            failed += len(rows) - len(points)
             logger.warning(
                 "geo_payload_backfill_page_failed",
-                rows=len(rows),
+                rows=len(rows) - len(points),
                 first_memory_id=str(rows[0].id),
                 error=str(e),
             )
-            points = {}
         for row in rows:
             if row.id not in points:
                 continue  # its page's lookup failed (counted above)
