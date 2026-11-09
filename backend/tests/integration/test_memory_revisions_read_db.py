@@ -223,12 +223,20 @@ async def test_erasure_strips_the_details_the_subject_wrote_not_the_ones_they_ov
             (2, {"details": {"c": 1}}),
             (3, {"details": {"b": 1}}),  # B's value, kept
             (4, {"summary": "a's"}),
-            (5, {"details": {}, "erased_details_keys": [details_key_digest("a")]}),  # A's key
+            (5, {"details": {}, "erased_details_keys": [details_key_digest("a", mem_id)]}),
         ]
         assert rebuilt[4].values["details"] == {} and rebuilt[4].unavailable == ()
         assert rebuilt[3].values["details"] == {} and rebuilt[3].unavailable == ()
         assert rebuilt[2].values["details"] == {"b": 1} and rebuilt[2].unavailable == ()
         assert rebuilt[1].values["details"] == {"c": 1}
+        # #2389: A's key is missing from versions 4 and 3 (every key: {}), and
+        # said so; versions 2 and 1 lost nothing
+        assert [rebuilt[v].partially_unavailable for v in (4, 3, 2, 1)] == [
+            (("details", 1),),
+            (("details", 1),),
+            (),
+            (),
+        ]
     finally:
         async with _maker(async_engine)() as session:
             await session.execute(delete(Workspace).where(Workspace.id == ws_id))

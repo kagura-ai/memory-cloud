@@ -1730,7 +1730,7 @@ async def test_a_session_over_an_erased_members_keys_rolls_back_without_them(
             )
         )
     ).scalar_one()
-    assert prior == {"details": {"a": 1}, "erased_details_keys": [details_key_digest("s")]}
+    assert prior == {"details": {"a": 1}, "erased_details_keys": [details_key_digest("s", target)]}
 
     done = await _rollback(w, "RB", SessionPrincipal(w.owner, None), dry_run=False)
     await w.session.commit()

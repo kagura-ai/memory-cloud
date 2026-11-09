@@ -22,6 +22,7 @@ from sqlalchemy.dialects import postgresql
 from models.memory import VERSIONED_FIELDS
 from services.memory_service import MemoryService
 from services.memory_versions import (
+    PRIOR_ERASED_DETAILS_KEYS_KEY,
     PRIOR_ERASED_KEY,
     PRIOR_SCRUBBED_KEY,
     UnknownVersionError,
@@ -167,6 +168,79 @@ class TestReconstructVersion:
         got = reconstruct_version(LIVE, 3, updates, 1)
         assert got.values["details"] == {"old": True}
         assert got.unavailable == ()
+
+
+class TestPartiallyUnavailable:
+    """#2389: a rebuilt ``details`` that account erasure took keys out of
+    (``erased_details_keys``, digests only) says so: the field and how many
+    keys are missing. Not unavailable — the other members' keys are there."""
+
+    D1, D2 = "1" * 64, "2" * 64
+
+    def _live(self, details: Any) -> dict[str, Any]:
+        return {**LIVE, "details": details}
+
+    def test_partial_at_and_below_the_row_until_an_older_complete_prior(self) -> None:
+        updates = [
+            _rev(5, {"details": {"a": 2, "c": True}, "restored_from": 2}),
+            _rev(4, {"details": {"a": 2}, PRIOR_ERASED_DETAILS_KEYS_KEY: [self.D1]}),
+            _rev(3, {"summary": "no details change"}),
+            _rev(2, {"details": {"a": 1}}),
+        ]
+        live = self._live({"a": 2, "c": True})
+
+        def at(target: int) -> Any:
+            return reconstruct_version(live, 5, updates, target)
+
+        assert at(5).partially_unavailable == ()  # the live row
+        assert at(4).partially_unavailable == ()  # row 5's prior lost nothing
+        assert (at(3).values["details"], at(3).partially_unavailable) == (
+            {"a": 2},
+            (("details", 1),),
+        )
+        assert at(2).partially_unavailable == (("details", 1),)  # row 3 kept details
+        assert at(2).unavailable == ()
+        assert at(1).partially_unavailable == ()  # row 2 sets details again, whole
+
+    def test_every_key_stripped_reads_empty_and_partial_not_unavailable(self) -> None:
+        updates = [_rev(2, {"details": {}, PRIOR_ERASED_DETAILS_KEYS_KEY: [self.D1, self.D2]})]
+        got = reconstruct_version(self._live({"x": 1}), 2, updates, 1)
+        assert got.values["details"] == {}
+        assert got.unavailable == ()
+        assert got.partially_unavailable == (("details", 2),)
+
+    @pytest.mark.parametrize("marker", [PRIOR_ERASED_KEY, PRIOR_SCRUBBED_KEY])
+    def test_an_older_erasure_marker_makes_it_unavailable_not_partial(self, marker: str) -> None:
+        updates = [
+            _rev(3, {"details": {"a": 2}, PRIOR_ERASED_DETAILS_KEYS_KEY: [self.D1]}),
+            _rev(2, {marker: ["details"]}),
+        ]
+        got = reconstruct_version(self._live({"a": 2}), 3, updates, 1)
+        assert got.unavailable == ("details",)
+        assert got.partially_unavailable == ()
+
+    def test_a_partial_value_below_an_unavailable_one_is_partial_again(self) -> None:
+        updates = [
+            _rev(3, {PRIOR_ERASED_KEY: ["details"]}),
+            _rev(2, {"details": {}, PRIOR_ERASED_DETAILS_KEYS_KEY: [self.D1]}),
+        ]
+        got = reconstruct_version(self._live({"a": 2}), 3, updates, 1)
+        assert (got.values["details"], got.unavailable) == ({}, ())
+        assert got.partially_unavailable == (("details", 1),)
+        assert reconstruct_version(self._live({"a": 2}), 3, updates, 2).partially_unavailable == ()
+
+    @pytest.mark.parametrize(
+        ("listed", "count"),
+        [([], 0), (None, 0), ("x", 0), ({"a": 1}, 0), ([1, None], 0), (["1" * 64, "1" * 64], 1)],
+    )
+    def test_only_a_list_of_digests_counts_each_once(self, listed: Any, count: int) -> None:
+        updates = [_rev(2, {"details": {"a": 1}, PRIOR_ERASED_DETAILS_KEYS_KEY: listed})]
+        got = reconstruct_version(self._live({"a": 1}), 2, updates, 1)
+        assert got.partially_unavailable == ((("details", count),) if count else ())
+
+    def test_the_list_on_a_row_that_did_not_change_details_is_ignored(self) -> None:
+        updates = [_rev(2, {"summary": "s", PRIOR_ERASED_DETAILS_KEYS_KEY: [self.D1]})]
+        assert reconstruct_version(LIVE, 2, updates, 1).partially_unavailable == ()
 
 
 class TestPriorReaders:
@@ -430,6 +504,7 @@ class TestReferenceVersion:
         assert ref.scope == "working" and ref.context == {"file": "x"}
         assert ref.outgoing_links == [] and ref.supersede_candidate is None
         assert ref.unavailable_fields is None
+        assert ref.partially_unavailable_fields is None  # #2389: nothing lost
         service._fetch_declared_link_refs.assert_not_awaited()
         service.memory_repo.update_access_stats.assert_not_awaited()
         emit.assert_awaited_once()
@@ -448,6 +523,30 @@ class TestReferenceVersion:
         ):
             ref = await service.reference(memory.id, "u", version=1)
         assert ref.updated_at == memory.created_at
+
+    @pytest.mark.asyncio
+    async def test_a_partial_details_names_how_many_keys_erasure_removed(self) -> None:
+        """#2389: ``partially_unavailable_fields`` maps the field to the count
+        of its keys account erasure removed from that version."""
+        memory = _memory()
+        service, perm = _service(memory)
+        result = MagicMock()
+        stripped = {
+            "summary": "second summary",
+            "context_summary": "why",
+            "details": {"k": "v"},
+            PRIOR_ERASED_DETAILS_KEYS_KEY: ["1" * 64, "2" * 64],
+        }
+        result.all.return_value = [_rev(4, stripped, at=T4), *UPDATES[1:3]]
+        service.db.execute = AsyncMock(return_value=result)
+        with (
+            patch("services.permission_service.PermissionService", return_value=perm),
+            patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
+        ):
+            ref = await service.reference(memory.id, "u", version=3)
+        assert ref.details == {"k": "v"}
+        assert ref.partially_unavailable_fields == {"details": 2}
+        assert ref.unavailable_fields is None
 
     @pytest.mark.asyncio
     async def test_an_unknown_version_is_a_validation_error_with_the_current_version(

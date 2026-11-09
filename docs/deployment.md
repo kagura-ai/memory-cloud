@@ -2188,6 +2188,18 @@ kept (stripped history, see runbook)` and nothing is applied for those keys.
 After upgrading to v0.129.0, run the plan (`--all`, no `--apply`) once to read
 these counts; a non-zero count is the input to a follow-up decision, not
 something to apply.
+`--revert-ambiguous` (#2389, opt-in) is that decision's switch: those live
+keys are then removed — the value to go back to is in the stripped state, so
+each is handled like a key whose value an earlier erasure removed — by the
+same restore (a new version and one `writer='erasure'` row whose prior lists
+the key's digest). The plan prints `would remove ambiguous details keys
+<request id>  N key(s)`, the apply `removed ambiguous details keys …`, and the
+audit row counts `details_keys_ambiguous_reverted`; a second run finds
+nothing. The key leaves the live value and, like the erased member's keys,
+every older revision prior that carried that value (counted in
+`details_stripped`, its digest listed), so a rebuilt version no
+longer shows it and counts it in `partially_unavailable_fields`. The live
+erasure never removes them.
 
 **Requests that failed after the Postgres step.** From v0.124.0, a request
 whose payload, audit-log, Redis, audit-row or finalize step fails after the
@@ -2423,6 +2435,18 @@ added to this metadata. New code reads legacy rows without the map using
 the existing scalar `restored_from`. Older code ignores the map and can
 misattribute a restored value, so do not roll erasure executors back after
 new-format rows are written. No schema migration is required.
+
+**Erasure rollout for #2389.** The same pause applies. New erasure revisions
+store the `details` key digests in `erased_details_keys` and as the keys of
+`details_restored_from` salted with the memory id (`sha256(memory id + NUL +
+key)`), so one table of short key names no longer reverses every memory's
+list. Rows written before keep the unsalted digests; nothing re-hashes them,
+and new code matches a key by both spellings. Older code cannot match a
+salted digest (it would read an erased key as a removal and miss a key's own
+restore version, so its result could depend on the erasure order): drain the
+old processes before resuming erasure execution and `reprocess_erasures`, and
+do not roll erasure executors back after salted rows are written. No schema
+migration is required.
 
 All surviving authored rows now receive the erased-author terminal marker,
 including a row an earlier embedding run had already completed. An old run

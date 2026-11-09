@@ -50,7 +50,11 @@ Rules, per memory (``replay``):
   put-back row), the key is **ambiguous**: it may be the subject's value
   carried through, or the survivor's own change, and the stripped state
   cannot tell. Ambiguous keys are kept and counted, never reverted: a
-  survivor's write is never destroyed on a guess.
+  survivor's write is never destroyed on a guess. Only an operator's
+  ``reprocess_erasures --revert-ambiguous`` (#2389, ``revert_ambiguous``)
+  removes the live ones, as an unavailable key is removed (the value to go
+  back to is in the stripped state), and strips that value from every prior
+  that holds it, as the subject's keys are stripped.
 - **The subject's keys** are the live keys whose writer is the subject.
   Each goes back to the value it had right below the edit that wrote it,
   walking further down past every value an erased member (the subject or
@@ -66,11 +70,14 @@ Rules, per memory (``replay``):
 - **Strip**: every intermediate state's keys whose writer is the subject
   leave the prior that holds the state; the rest of the dict stays. The
   prior lists the removed keys' digests under ``erased_details_keys``
-  (``details_key_digest``; never a key name): a later walk passes a
-  stripped key like the erased member's value it was, and does not take it
-  for a removal. Readers of the version history ignore the list (a rebuilt
-  version shows the other members' keys, nothing unavailable). With it the
-  result does not depend on which of two erasures runs first.
+  (``details_key_digest``, salted with the memory id since #2389; never a
+  key name): a later walk passes a stripped key like the erased member's
+  value it was, and does not take it for a removal. A row written before
+  #2389 holds the unsalted digest; the walk and the restore-map lookup
+  match a key by either spelling (``details_key_digests``). A rebuilt
+  version shows the other members' keys, nothing unavailable, and reads
+  only how many keys the list names (``partially_unavailable``, #2389).
+  With it the result does not depend on which of two erasures runs first.
 
 A re-run over the result plans nothing: no state, and no live key, is
 attributed to the subject any more.
@@ -93,10 +100,34 @@ _PUT_BACK: Final = (REVISION_WRITER_ERASURE, REVISION_WRITER_ROLLBACK)
 _KEY_DIGEST: Final = re.compile(SHA256_HEX_PATTERN)
 
 
-def details_key_digest(key: str) -> str:
-    """How a prior lists a ``details`` key an erasure removed from it
-    (``PRIOR_ERASED_DETAILS_KEYS_KEY``): the key's sha256, never its name."""
+def details_key_digest(key: str, memory_id: UUID) -> str:
+    """How a prior names a ``details`` key of ``memory_id``: in the keys an
+    erasure removed from it (``PRIOR_ERASED_DETAILS_KEYS_KEY``) and the keys
+    of the per-key restore map (``PRIOR_DETAILS_RESTORED_FROM_KEY``). Never
+    the key's name.
+
+    ``sha256(str(memory_id) + "\\0" + key)`` (#2389): salted with the memory,
+    so one table of short key names does not reverse every memory's list,
+    and the same key on two memories has two digests. The NUL keeps the
+    salted digests apart from the legacy ones (``legacy_details_key_digest``):
+    no stored key holds a NUL (``jsonb`` refuses ``\\u0000``), so no key's
+    unsalted digest is another key's salted one. Every writer uses this one.
+    """
+    return sha256_hex(key, salt=f"{memory_id}\x00")
+
+
+def legacy_details_key_digest(key: str) -> str:
+    """The unsalted ``sha256(key)`` the rows written before #2389 hold
+    (#2275, #2393). Read, never written: there is no migration, a reader
+    matches a key by both spellings (``details_key_digests``)."""
     return sha256_hex(key)
+
+
+def details_key_digests(key: str, memory_id: UUID) -> tuple[str, str]:
+    """Both spellings a stored digest of ``key`` on ``memory_id`` may have:
+    the salted one (``details_key_digest``, written since #2389), then the
+    legacy one (``legacy_details_key_digest``)."""
+    return details_key_digest(key, memory_id), legacy_details_key_digest(key)
 
 
 @dataclass(frozen=True)
@@ -217,6 +248,9 @@ class KeyRevert:
             is removed.
         from_version: The version of the lowest edit the walk went past (the
             edit right above the state the value comes from).
+        ambiguous: Not the subject's key but an ambiguous one
+            (``Origin.ambiguous``), removed because the plan was asked to
+            (``revert_ambiguous``, #2389); ``unavailable`` too.
     """
 
     key: str
@@ -224,6 +258,7 @@ class KeyRevert:
     present: bool
     unavailable: bool
     from_version: int
+    ambiguous: bool = False
 
 
 @dataclass(frozen=True)
@@ -232,14 +267,15 @@ class MemoryRevert:
 
     Attributes:
         memory_id: The memory.
-        reverts: The subject's live keys, in key order.
+        reverts: The subject's live keys (and, with ``revert_ambiguous``, the
+            ambiguous ones), in key order.
         from_version: The lowest ``KeyRevert.from_version``: the erasure
             row's ``restored_from``.
         result: The live value with the reverts applied (NULL when nothing is
             left and the value below was NULL or unavailable, else ``{}``).
-        prior: The live value minus the subject's keys: the erasure row's
+        prior: The live value minus the reverted keys: the erasure row's
             ``prior.details``, stripped like every other prior.
-        erased_keys: The digests of the subject's keys: the erasure row's
+        erased_keys: The digests of the reverted keys: the erasure row's
             ``PRIOR_ERASED_DETAILS_KEYS_KEY``.
     """
 
@@ -253,7 +289,7 @@ class MemoryRevert:
     @property
     def restored_from_by_key(self) -> dict[str, int]:
         """Only key digests and versions; never key names, values or actors."""
-        return {details_key_digest(r.key): r.from_version for r in self.reverts}
+        return {details_key_digest(r.key, self.memory_id): r.from_version for r in self.reverts}
 
     @property
     def unavailable(self) -> bool:
@@ -263,10 +299,23 @@ class MemoryRevert:
 
 @dataclass(frozen=True)
 class PriorStrip:
-    """The subject's keys to remove from one revision row's ``prior.details``."""
+    """The subject's keys to remove from one revision row's ``prior.details``.
+
+    Attributes:
+        row_id: The revision row.
+        keys: The keys, sorted.
+        memory_id: The row's memory: the salt of ``digests``.
+    """
 
     row_id: int
     keys: tuple[str, ...]
+    memory_id: UUID
+
+    @property
+    def digests(self) -> tuple[str, ...]:
+        """What the row's ``PRIOR_ERASED_DETAILS_KEYS_KEY`` gets: the keys'
+        salted digests, sorted (#2389). Never a key name."""
+        return tuple(sorted(details_key_digest(k, self.memory_id) for k in self.keys))
 
 
 @dataclass(frozen=True)
@@ -276,10 +325,12 @@ class DetailsErasurePlan:
     Attributes:
         reverts: Memories whose live ``details`` holds a key of the subject's,
             in memory id order.
-        strips: Revision rows whose prior holds a key of the subject's, in
-            row id order.
+        strips: Revision rows whose prior holds a key of the subject's (or,
+            with ``revert_ambiguous``, the value of a live ambiguous key it
+            removes), in row id order.
         keys_ambiguous: Live keys kept because a stripped state below them
-            may hold the subject's value (never reverted).
+            may hold the subject's value (never reverted; 0 with
+            ``revert_ambiguous``, which puts them in ``reverts``).
         memory_ids: The candidate memories replayed, in id order.
     """
 
@@ -373,7 +424,7 @@ def replay(
         )
         mapping: dict[str, Origin] = {}
         for key, value in _keys(after).items():
-            restored_from = _restored_from(edit, details_key_digest(key)) if put_back else None
+            restored_from = _restored_from(edit, key) if put_back else None
             pre = _pre(versions, restored_from, i) if restored_from is not None else None
             mapping[key] = _attribute(
                 key,
@@ -392,15 +443,26 @@ def replay(
     return Replay(tuple(edits), tuple(states), tuple(writers), stripped, tuple(versions))
 
 
-def _restored_from(edit: DetailsEdit, digest: str) -> int | None:
+def _restored_from(edit: DetailsEdit, key: str) -> int | None:
     """A new put-back's per-key origin; use the scalar only for legacy rows.
 
     A key missing from a present map was carried or synthesized, never
-    restored from the unrelated oldest version named by the scalar.
+    restored from the unrelated oldest version named by the scalar. The map
+    is keyed by the key's salted digest, or by its legacy one on a row
+    written before #2389 (``details_key_digests``).
     """
     if edit.restored_from_by_key is not None:
-        return edit.restored_from_by_key.get(digest)
+        by_key = edit.restored_from_by_key
+        for digest in details_key_digests(key, edit.memory_id):
+            if digest in by_key:
+                return by_key[digest]
+        return None
     return edit.restored_from
+
+
+def _stripped(run: Replay, j: int, digests: Collection[str]) -> bool:
+    """An erasure removed the key ``digests`` spell from ``S_j``'s prior."""
+    return not run.stripped[j].isdisjoint(digests)
 
 
 def _attribute(
@@ -457,7 +519,8 @@ def _revert(
         The revert, and the index of the state its value comes from.
     """
     states, writers, edits = run.states, run.writers, run.edits
-    digest = details_key_digest(key)
+    # either spelling: the rows below may predate the salted digest (#2389)
+    digests = details_key_digests(key, edits[0].memory_id)
 
     def erased_wrote(j: int) -> bool:
         return (
@@ -482,8 +545,8 @@ def _revert(
                 return KeyRevert(key, None, False, False, edits[j].version), j
             j = below.state - 1
             continue
-        if below is None and j >= 1 and digest in run.stripped[j]:
-            j = _below_stripped(run, j, key, digest)  # an erased member's value
+        if below is None and j >= 1 and _stripped(run, j, digests):
+            j = _below_stripped(run, j, key, digests)  # an erased member's value
             continue
         keys = _keys(states[j])
         present = key in keys
@@ -491,7 +554,7 @@ def _revert(
         return revert, j
 
 
-def _below_stripped(run: Replay, j: int, key: str, digest: str) -> int:
+def _below_stripped(run: Replay, j: int, key: str, digests: Collection[str]) -> int:
     """The state the stripped value of ``key`` in ``S_j`` came from.
 
     The edit that wrote ``S_j`` carried it from ``S_{j-1}``, or wrote it
@@ -501,7 +564,7 @@ def _below_stripped(run: Replay, j: int, key: str, digest: str) -> int:
     the walk goes on there, not in the state the put-back replaced.
     """
     producer = run.edits[j - 1]
-    restored_from = _restored_from(producer, digest)
+    restored_from = _restored_from(producer, key)
     if producer.writer not in _PUT_BACK or restored_from is None:
         return j - 1
     if producer.writer == REVISION_WRITER_ERASURE and producer.restored_from_by_key is None:
@@ -509,9 +572,23 @@ def _below_stripped(run: Replay, j: int, key: str, digest: str) -> int:
         # prior. New rows say exactly which keys they reverted, even when
         # another erasure has since stripped the overwritten value too.
         prior = run.states[j - 1]
-        if prior is UNKNOWN or key in _keys(prior) or digest in run.stripped[j - 1]:
+        if prior is UNKNOWN or key in _keys(prior) or _stripped(run, j - 1, digests):
             return j - 1  # carried by the erasure row
     return _pre(run.versions, restored_from, j - 1)
+
+
+def _ambiguous_revert(key: str, origin: Origin) -> tuple[KeyRevert, int]:
+    """An ambiguous live ``key`` removed (``revert_ambiguous``, #2389).
+
+    Classified by the replay (``Origin.ambiguous``), not walked again: the
+    survivor's edit that wrote it sits right above a stripped state, where
+    the value to go back to would be — unavailable, as when the subject's
+    own key walks into such a state (``_revert``).
+
+    Returns:
+        The revert, and the index of that stripped state.
+    """
+    return KeyRevert(key, None, False, True, origin.version, ambiguous=True), origin.state - 1
 
 
 def _plan_memory(
@@ -521,22 +598,39 @@ def _plan_memory(
     author: str,
     subject: str,
     erased: Collection[str],
+    *,
+    revert_ambiguous: bool = False,
 ) -> tuple[MemoryRevert | None, list[PriorStrip], int]:
     run = replay(edits, live, author, subject=subject, erased=erased)
+    live_writers = run.writers[-1] or {}
+    # #2389: with ``revert_ambiguous`` the live ambiguous keys go, and so does
+    # that same value (the same origin) from every prior that holds it, as
+    # the subject's keys do; an ambiguous value a later edit replaced is not
+    # removed live and stays in the priors
+    removed = {k: o for k, o in live_writers.items() if o.ambiguous and revert_ambiguous}
     strips = []
     for i, edit in enumerate(edits):
         mapping = run.writers[i]
         if mapping is None:
             continue
-        keys = tuple(sorted(k for k, o in mapping.items() if o.actor == subject))
+        keys = tuple(
+            sorted(k for k, o in mapping.items() if o.actor == subject or removed.get(k) == o)
+        )
         if keys:
-            strips.append(PriorStrip(edit.id, keys))
-    live_writers = run.writers[-1] or {}
-    ambiguous = sum(1 for o in live_writers.values() if o.ambiguous)
+            strips.append(PriorStrip(edit.id, keys, memory_id))
+    ambiguous = sorted(k for k, o in live_writers.items() if o.ambiguous)
+    kept = 0 if revert_ambiguous else len(ambiguous)
     mine = sorted(k for k, o in live_writers.items() if o.actor == subject)
-    if not mine:
-        return None, strips, ambiguous
-    walked = [_revert(k, live_writers[k], run, erased) for k in mine]
+    gone = sorted({*mine, *ambiguous}) if revert_ambiguous else mine
+    if not gone:
+        return None, strips, kept
+    walked = sorted(
+        [
+            *(_revert(k, live_writers[k], run, erased) for k in mine),
+            *(_ambiguous_revert(k, live_writers[k]) for k in ambiguous if revert_ambiguous),
+        ],
+        key=lambda w: w[0].key,
+    )
     reverts = tuple(r for r, _ in walked)
     result: dict[str, Any] = dict(_keys(live))
     for r in reverts:
@@ -548,7 +642,7 @@ def _plan_memory(
     value: Any = result
     if not result and (lowest.unavailable or run.states[below] is None):
         value = None  # nothing left, and the value below was NULL (or gone)
-    prior = {k: v for k, v in _keys(live).items() if k not in mine}
+    prior = {k: v for k, v in _keys(live).items() if k not in gone}
     return (
         MemoryRevert(
             memory_id,
@@ -556,10 +650,10 @@ def _plan_memory(
             lowest.from_version,
             value,
             prior,
-            tuple(sorted(details_key_digest(k) for k in mine)),
+            tuple(sorted(details_key_digest(k, memory_id) for k in gone)),
         ),
         strips,
-        ambiguous,
+        kept,
     )
 
 
@@ -569,6 +663,7 @@ def plan_details_erasure(
     subject: str,
     *,
     erased_actors: Collection[str] = frozenset(),
+    revert_ambiguous: bool = False,
 ) -> DetailsErasurePlan:
     """The per-key restore and strip of ``subject``'s ``details`` (#2275).
 
@@ -584,10 +679,15 @@ def plan_details_erasure(
             re-run).
         erased_actors: Other erased members' pseudonyms: their values are
             walked past, never reverted here.
+        revert_ambiguous: Remove the live ambiguous keys too, as unavailable
+            ones (#2389: ``reprocess_erasures --revert-ambiguous`` only; the
+            live erasure keeps them). They join the reverts
+            (``KeyRevert.ambiguous``) and are no longer counted as kept, and
+            their values leave every prior that holds them (``strips``).
 
     Returns:
         The reverts (memory id order), the strips (row id order) and the
-        ambiguous key count.
+        count of ambiguous keys kept.
     """
     by_memory: dict[UUID, list[DetailsEdit]] = defaultdict(list)
     for row in rows:
@@ -607,7 +707,7 @@ def plan_details_erasure(
         replayed.append(memory_id)
         edits = sorted(by_memory[memory_id], key=lambda e: (e.version, e.id))
         revert, memory_strips, memory_ambiguous = _plan_memory(
-            memory_id, edits, details, author, subject, erased
+            memory_id, edits, details, author, subject, erased, revert_ambiguous=revert_ambiguous
         )
         if revert is not None:
             reverts.append(revert)

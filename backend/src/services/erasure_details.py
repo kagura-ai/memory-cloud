@@ -153,7 +153,6 @@ from services.details_provenance import (
     DetailsEdit,
     DetailsErasurePlan,
     PriorStrip,
-    details_key_digest,
     plan_details_erasure,
 )
 from services.memory_versions import (
@@ -1892,9 +1891,10 @@ async def strip_subject_details(
        by a session rollback). The rest of each dict stays — a rebuilt
        version shows the other members' keys — and the removed keys'
        digests join ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (no key name; read
-       only by a later erasure's replay). One lock phase over all those
+       by a later erasure's replay, and counted by a version rebuild's
+       ``partially_unavailable``, #2389). One lock phase over all those
        rows, in id order, then one ``jsonb - text[]`` UPDATE per distinct
-       key set (``_strip_editor_keys``).
+       key set and memory (``_strip_editor_keys``).
     2. On memories the subject authored: ``prior.details`` is removed from
        every revision and replaced by ``{"erased": ["details"]}``
        (``PRIOR_ERASED_KEY``) so a rebuilt earlier version reports its
@@ -1993,10 +1993,12 @@ async def _strip_editor_keys(db: AsyncSession, strips: Sequence[PriorStrip]) -> 
 
     The rows are locked first, all of them in one id-ordered ``FOR UPDATE``
     (the order every revision statement takes, #2242); every one belongs
-    to a memory the caller holds. Then one UPDATE per distinct key set:
+    to a memory the caller holds. Then one UPDATE per distinct key set and
+    memory (the digests are salted with the memory id, #2389):
     ``jsonb_set(prior, '{details}', prior->'details' - keys)``, and the keys'
-    digests appended to ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (a later erasure's
-    walk reads them as an erased member's values, not as removals). The guards
+    digests (``PriorStrip.digests``) appended to
+    ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (a later erasure's walk reads them as an
+    erased member's values, not as removals). The guards
     keep a row whose ``details`` is gone or not an object (NULL: ``-`` on a
     scalar raises) as it is.
 
@@ -2018,19 +2020,23 @@ async def _strip_editor_keys(db: AsyncSession, strips: Sequence[PriorStrip]) -> 
         .order_by(MemoryRevision.id)
         .with_for_update()
     )
-    groups: dict[tuple[str, ...], list[int]] = defaultdict(list)
+    groups: dict[tuple[tuple[str, ...], tuple[str, ...]], list[int]] = defaultdict(list)
     for strip in strips:
-        groups[strip.keys].append(strip.row_id)
+        groups[(strip.keys, strip.digests)].append(strip.row_id)
     total = 0
     details = MemoryRevision.prior["details"]
-    for keys in sorted(groups):
+    for keys, digests in sorted(groups):
         result = cast(
             CursorResult[Any],
             await db.execute(
                 update(MemoryRevision)
                 .where(
                     MemoryRevision.id
-                    == any_(bindparam("ids", groups[keys], type_=ARRAY(BigInteger), unique=True)),
+                    == any_(
+                        bindparam(
+                            "ids", groups[(keys, digests)], type_=ARRAY(BigInteger), unique=True
+                        )
+                    ),
                     MemoryRevision.prior.has_key("details"),
                     func.jsonb_typeof(details) == "object",
                 )
@@ -2053,9 +2059,7 @@ async def _strip_editor_keys(db: AsyncSession, strips: Sequence[PriorStrip]) -> 
                         func.coalesce(
                             MemoryRevision.prior[PRIOR_ERASED_DETAILS_KEYS_KEY],
                             type_coerce([], JSONB),
-                        ).op("||", return_type=JSONB)(
-                            type_coerce(sorted(details_key_digest(k) for k in keys), JSONB)
-                        ),
+                        ).op("||", return_type=JSONB)(type_coerce(list(digests), JSONB)),
                         type_=JSONB,
                     )
                 )
@@ -2138,6 +2142,10 @@ class RestoreReport:
         keys_ambiguous: Live keys kept because a state an erasure before
             v0.129.0 stripped whole may hold the subject's value
             (``plan_details_erasure``); never reverted.
+        keys_ambiguous_reverted: Such keys removed instead, because the plan
+            was made with ``revert_ambiguous`` (#2389,
+            ``reprocess_erasures --revert-ambiguous``): a memory where one was
+            counts in ``unavailable``. Not in ``keys_reverted``.
         embedding_requeued: Restored live memories whose embedding had not
             succeeded, re-queued in the restore's transaction so the next
             embed writes the payload from the restored row. Always 0 on a
@@ -2168,6 +2176,7 @@ class RestoreReport:
     unavailable: int = 0
     keys_reverted: int = 0
     keys_ambiguous: int = 0
+    keys_ambiguous_reverted: int = 0
     embedding_requeued: int = 0
     payload_synced: int = 0
     payload_skipped_tombstone: int = 0
@@ -2509,13 +2518,15 @@ async def plan_subject_details(
     *,
     erased_actors: Collection[str] = frozenset(),
     rows: Sequence[DetailsEdit] | None = None,
+    revert_ambiguous: bool = False,
 ) -> DetailsErasurePlan:
     """``plan_details_erasure`` over the logs of the memories ``subject``
     edited and did not author (#2275).
 
     Reads ``_updated_rows`` (unless given) and the live ``details`` and
     author of each of those memories — under the caller's memory locks
-    during erasure, as of the statement on a dry run.
+    during erasure, as of the statement on a dry run. ``revert_ambiguous``
+    is ``plan_details_erasure``'s (#2389: the re-run's opt-in only).
     """
     if rows is None:
         rows = await _updated_rows(db, subject)
@@ -2532,7 +2543,9 @@ async def plan_subject_details(
             )
         ).all()
     }
-    return plan_details_erasure(rows, live, subject, erased_actors=erased_actors)
+    return plan_details_erasure(
+        rows, live, subject, erased_actors=erased_actors, revert_ambiguous=revert_ambiguous
+    )
 
 
 async def restore_editor_details(
@@ -2631,6 +2644,8 @@ async def restore_editor_details(
         memory = memories.get(revert.memory_id)
         if memory is None:
             continue  # gone since the plan read (never under the locks)
+        # #2389: ambiguous keys a ``revert_ambiguous`` plan removes
+        ambiguous = sum(1 for r in revert.reverts if r.ambiguous)
         value, trigger_kept = _with_live_trigger(memory, copy.deepcopy(revert.result))
         # A value equal to the live one is still written (#2393): the plan
         # lists only memories holding a live key of the subject's, so that
@@ -2646,12 +2661,14 @@ async def restore_editor_details(
             and trigger_kept
             and all(r.key == "trigger" for r in revert.reverts)
         ):
+            report.keys_ambiguous += ambiguous  # the live trigger stays: kept
             continue
         if revert.unavailable:
             report.unavailable += 1
         else:
             report.restored += 1
-        report.keys_reverted += len(revert.reverts)
+        report.keys_reverted += len(revert.reverts) - ambiguous
+        report.keys_ambiguous_reverted += ambiguous
         report.memory_ids.append(memory.id)
         if dry_run:
             continue
@@ -2679,6 +2696,7 @@ async def restore_editor_details(
             "erasure_details_restored",
             memory_id=str(memory.id),
             keys=len(revert.reverts),
+            ambiguous=ambiguous,
             from_version=revert.from_version,
             unavailable=revert.unavailable,
             trigger_kept=trigger_kept,
@@ -2704,6 +2722,7 @@ async def erase_subject_details(
     erased_actors: Collection[str],
     existed_at: datetime | None = None,
     dry_run: bool = False,
+    revert_ambiguous: bool = False,
 ) -> SubjectDetailsErasure:
     """Restore, then strip, ``subject``'s ``details`` — one log read (#2268).
 
@@ -2726,6 +2745,9 @@ async def erase_subject_details(
         existed_at: The re-run's bound for the authored arm of the strip
             (``_authored_by``); None during erasure.
         dry_run: Count; write and lock nothing.
+        revert_ambiguous: Also remove the live keys the plan finds ambiguous
+            (#2389): only ``reprocess_erasures --revert-ambiguous`` passes it;
+            the live erasure keeps them.
 
     Returns:
         The restore report (its ``to_sync`` for ``sync_restored_payloads``
@@ -2733,7 +2755,9 @@ async def erase_subject_details(
     """
     locked = 0 if dry_run else await lock_subject_memories(db, subject)
     rows = await _updated_rows(db, subject)
-    plan = await plan_subject_details(db, subject, erased_actors=erased_actors, rows=rows)
+    plan = await plan_subject_details(
+        db, subject, erased_actors=erased_actors, rows=rows, revert_ambiguous=revert_ambiguous
+    )
     logger.info(
         "erasure_details_rows",
         locked=locked,
@@ -2742,6 +2766,7 @@ async def erase_subject_details(
         reverts=len(plan.reverts),
         strips=len(plan.strips),
         ambiguous=plan.keys_ambiguous,
+        ambiguous_reverted=sum(1 for m in plan.reverts for r in m.reverts if r.ambiguous),
     )
     restore = await restore_editor_details(
         db, subject, actor=actor, dry_run=dry_run, erased_actors=erased_actors, plan=plan

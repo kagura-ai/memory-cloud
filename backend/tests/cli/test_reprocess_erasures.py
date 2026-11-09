@@ -552,6 +552,37 @@ def test_reverted_and_ambiguous_details_keys_are_counted_never_named(capsys):
     assert "key(s)" not in cli._summary(quiet)
 
 
+@pytest.mark.parametrize(("argv", "flag"), [([], False), (["--revert-ambiguous"], True)])
+def test_revert_ambiguous_is_opt_in_and_reaches_the_plan_and_the_apply(argv, flag, capsys):
+    """#2389: off by default; with the flag, the plan and the apply both run
+    with it (the plan's counts are the apply's)."""
+    worker = AsyncMock(side_effect=[_result(dry_run=True), _result(dry_run=False)])
+
+    assert _run(["--all", *argv, "--apply", "--yes"], worker) == 0
+
+    assert [call.kwargs["revert_ambiguous"] for call in worker.await_args_list] == [flag, flag]
+
+
+def test_removed_ambiguous_details_keys_are_counted_never_named(capsys):
+    """#2389: ``--revert-ambiguous`` removes the ambiguous keys: the plan says
+    it would, the apply that it did, counts only; none is left as kept."""
+    for dry_run, verb in (
+        (True, "would remove ambiguous details keys"),
+        (False, "removed ambiguous details keys"),
+    ):
+        result = cli.ReprocessResult(dry_run=dry_run, scanned=1)
+        result.changed.append(
+            _change(details_restored_unavailable=1, details_keys_ambiguous_reverted=2)
+        )
+        assert result.changes == 1
+        (cli._print_plan if dry_run else cli._print_applied)(result)
+        out = capsys.readouterr().out
+        assert f"{verb}  {REQUEST_ID}  2 key(s)" in out
+        assert "kept" not in out and "would revert details keys" not in out
+        assert ", 2 ambiguous key(s) removed" in cli._summary(result)
+        assert "ambiguous key(s) kept" not in cli._summary(result)
+
+
 @pytest.mark.parametrize("repair", ["_repair", "_repair_note_row"])
 def test_a_repaired_row_gets_the_salt_fingerprint(repair):
     """#2598: a row the re-run pseudonymizes gets the fingerprint of the salt

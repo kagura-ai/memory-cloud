@@ -38,13 +38,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from models.auth import Context, Workspace
 from models.memory import Memory, MemoryRevision
 from services.account_erasure_service import AccountErasureService
-from services.details_provenance import details_key_digest
+from services.details_provenance import details_key_digest, legacy_details_key_digest
 from services.erasure_details import (
     PayloadSync,
     RestoreReport,
@@ -159,17 +159,19 @@ async def _seed(session: AsyncSession, memories: list[Memory], edits: list[Memor
 MARK = "erased_details_keys"
 
 
-def _digests(*keys: str) -> list[str]:
-    return sorted(details_key_digest(k) for k in keys)
+def _digests(memory_id: uuid.UUID, *keys: str) -> list[str]:
+    """The keys' digests as the erasure writes them: salted with the memory id (#2389)."""
+    return sorted(details_key_digest(k, memory_id) for k in keys)
 
 
-def _gone(details: dict[str, Any], *keys: str) -> dict[str, Any]:
+def _gone(memory_id: uuid.UUID, details: dict[str, Any], *keys: str) -> dict[str, Any]:
     """A prior the per-key strip rewrote (#2275): the rest of the value, and
     the removed keys' digests."""
-    return {"details": details, MARK: _digests(*keys)}
+    return {"details": details, MARK: _digests(memory_id, *keys)}
 
 
 def _put_back(
+    memory_id: uuid.UUID,
     restored_from: int,
     details: dict[str, Any] | None = None,
     *,
@@ -181,10 +183,10 @@ def _put_back(
     was written at."""
     return {
         "details": details or {},
-        MARK: _digests(*keys),
+        MARK: _digests(memory_id, *keys),
         "restored_from": restored_from,
         "details_restored_from": {
-            details_key_digest(k): v
+            details_key_digest(k, memory_id): v
             for k, v in (versions or dict.fromkeys(keys, restored_from)).items()
         },
     }
@@ -309,7 +311,14 @@ async def test_the_authors_value_comes_back_with_its_own_revision(
             (memory.id, 3, "api", author, {"importance": 0.4}, None),
             # the subject's own row holds the author's value: kept, pseudonymized
             (memory.id, 4, "api", pseudonym, {"details": AUTHORS}, None),
-            (memory.id, 5, "erasure", pseudonym, _put_back(4, keys=("by", "location")), None),
+            (
+                memory.id,
+                5,
+                "erasure",
+                pseudonym,
+                _put_back(memory.id, 4, keys=("by", "location")),
+                None,
+            ),
         ]
         # the subject's version reads without the subject's keys (#2275); the
         # author's reads back
@@ -357,13 +366,13 @@ async def test_the_subjects_earlier_edits_are_walked_past(
             (memory.id, 3, "api", pseudonym, {"details": AUTHORS}, None),
             (memory.id, 4, "api", pseudonym, {"summary": "not details"}, None),
             # the subject's first value: both keys are theirs, stripped
-            (memory.id, 5, "api", pseudonym, _gone({}, *("by", "location")), None),
+            (memory.id, 5, "api", pseudonym, _gone(memory.id, {}, *("by", "location")), None),
             (
                 memory.id,
                 6,
                 "erasure",
                 pseudonym,
-                _put_back(3, keys=("by", "secret"), versions={"by": 3, "secret": 5}),
+                _put_back(memory.id, 3, keys=("by", "secret"), versions={"by": 3, "secret": 5}),
                 None,
             ),
         ]
@@ -398,7 +407,7 @@ async def test_a_value_an_earlier_erasure_removed_gives_null(
             4,
             "erasure",
             pseudonym,
-            _put_back(3, keys=("by", "location")),
+            _put_back(memory.id, 3, keys=("by", "location")),
             None,
         )
     kwargs = sync.await_args.kwargs
@@ -489,7 +498,7 @@ async def test_the_subjects_tombstones_leave_before_the_strip(
             (live.id, 2, "api", third, {"erased": ["details"], "scrubbed": ["details"]}, None),
             (edited.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
             # #2275: both keys of the subject's value leave the prior
-            (edited.id, 3, "api", third, _gone({}, *("by", "location")), None),
+            (edited.id, 3, "api", third, _gone(edited.id, {}, *("by", "location")), None),
         ]
         assert (await _live(session, edited.id)).details == {"by": "third"}
         assert await _snapshot(session, _REVISIONS_OUTSIDE, in_scope) == revisions_before
@@ -664,7 +673,14 @@ async def test_a_strip_by_pseudonym_keeps_a_later_value_over_an_erasure_row(
         await session.commit()
         assert await _log(session, memory.id) == [
             (memory.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
-            (memory.id, 3, "erasure", pseudonym, _put_back(2, keys=("by", "location")), None),
+            (
+                memory.id,
+                3,
+                "erasure",
+                pseudonym,
+                _put_back(memory.id, 2, keys=("by", "location")),
+                None,
+            ),
             (memory.id, 4, "api", third, {"details": AUTHORS}, None),
         ]
 
@@ -767,9 +783,23 @@ async def _assert_scope(
         assert await _log(session, restored.id, overwritten.id, own.id, summary_only.id) == [
             (restored.id, 2, "api", author, {"details": CREATION}, None),
             (restored.id, 3, "api", pseudonym, {"details": AUTHORS}, None),
-            (restored.id, 4, "erasure", pseudonym, _put_back(3, keys=("by", "location")), None),
+            (
+                restored.id,
+                4,
+                "erasure",
+                pseudonym,
+                _put_back(restored.id, 3, keys=("by", "location")),
+                None,
+            ),
             (overwritten.id, 2, "api", pseudonym, {"details": AUTHORS}, None),
-            (overwritten.id, 3, "api", third, _gone({}, *("by", "location")), "sess-t"),
+            (
+                overwritten.id,
+                3,
+                "api",
+                third,
+                _gone(overwritten.id, {}, *("by", "location")),
+                "sess-t",
+            ),
             (
                 own.id,
                 2,
@@ -906,9 +936,16 @@ async def test_a_second_erasure_finds_the_value_the_first_one_put_back(
         assert await _log(session, memory.id) == [
             (memory.id, 2, "api", p_second, {"details": AUTHORS}, None),
             # V's value, stripped by V's erasure
-            (memory.id, 3, "api", p_first, _gone({}, "by", "secret"), None),
-            (memory.id, 4, "erasure", p_first, _put_back(3, keys=("by", "location")), None),
-            (memory.id, 5, "erasure", p_second, _put_back(2, keys=("by",)), None),
+            (memory.id, 3, "api", p_first, _gone(memory.id, {}, "by", "secret"), None),
+            (
+                memory.id,
+                4,
+                "erasure",
+                p_first,
+                _put_back(memory.id, 3, keys=("by", "location")),
+                None,
+            ),
+            (memory.id, 5, "erasure", p_second, _put_back(memory.id, 2, keys=("by",)), None),
         ]
         log = await _log(session, memory.id)
         await session.commit()
@@ -1012,7 +1049,7 @@ async def test_a_time_memory_keeps_the_live_trigger(
             3,
             "erasure",
             pseudonym,
-            _put_back(2, keys=("by", "location", "trigger")),
+            _put_back(memory.id, 2, keys=("by", "location", "trigger")),
             None,
         )
         assert await _snapshot(session, _REVISIONS_OUTSIDE, everything_else) == revisions_before
@@ -1305,20 +1342,25 @@ async def test_a_carried_key_is_reverted_and_stripped_per_key(
             (memory.id, 1, "api", author, {}, None),
             (memory.id, 2, "api", pseudonym, {"details": {"a": 1}}, None),
             # S's location and t (carried by B) leave B's and C's priors
-            (memory.id, 3, "api", b, _gone({"a": 1}, "location", "t"), None),
-            (memory.id, 4, "api", c, _gone({"a": 2}, "location", "t"), None),
+            (memory.id, 3, "api", b, _gone(memory.id, {"a": 1}, "location", "t"), None),
+            (memory.id, 4, "api", c, _gone(memory.id, {"a": 2}, "location", "t"), None),
             (
                 memory.id,
                 5,
                 "erasure",
                 pseudonym,
-                _put_back(2, live.details, keys=("location",)),
+                _put_back(memory.id, 2, live.details, keys=("location",)),
                 None,
             ),
         ]
         assert (await load_version(session, live, 4)).values["details"] == live.details
         assert (await load_version(session, live, 3)).values["details"] == {"a": 2}
         assert (await load_version(session, live, 2)).values["details"] == {"a": 1}
+        # #2389: how many of each version's keys the erasure took (S's
+        # location, and t where B carried it); version 1 lost nothing
+        assert [
+            (await load_version(session, live, v)).partially_unavailable for v in (4, 3, 2, 1)
+        ] == [(("details", 1),), (("details", 2),), (("details", 2),), ()]
         # nothing outside the memory moved
         assert await _outside(session, [memory.id]) == before
     sync.assert_awaited_once()
@@ -1346,8 +1388,15 @@ async def test_a_carried_key_goes_back_to_the_authors_value(
         assert (report.restored, report.keys_reverted) == (1, 1)
         assert (await _live(session, memory.id)).details == {"a": 3, "location": L_A}
         assert (await _log(session, memory.id))[1:] == [
-            (memory.id, 3, "api", b, _gone({"a": 1}, "location"), None),
-            (memory.id, 4, "erasure", pseudonym, _put_back(2, {"a": 3}, keys=("location",)), None),
+            (memory.id, 3, "api", b, _gone(memory.id, {"a": 1}, "location"), None),
+            (
+                memory.id,
+                4,
+                "erasure",
+                pseudonym,
+                _put_back(memory.id, 2, {"a": 3}, keys=("location",)),
+                None,
+            ),
         ]
     assert sync.await_args.kwargs["payload_updates"]["location"] == L_A
 
@@ -1370,13 +1419,16 @@ async def test_a_second_erasure_reverts_only_its_own_keys(
         assert await _log(session, memory.id) == [
             (memory.id, 1, "api", author, {}, None),
             (memory.id, 2, "api", p_s, {"details": {"a": 1}}, None),
-            (memory.id, 3, "api", p_b, _gone({"a": 1}, "location", "t"), None),
+            (memory.id, 3, "api", p_b, _gone(memory.id, {"a": 1}, "location", "t"), None),
             (
                 memory.id,
                 4,
                 "api",
                 c,
-                {"details": {}, MARK: [*_digests("location", "t"), *_digests("a")]},
+                {
+                    "details": {},
+                    MARK: [*_digests(memory.id, "location", "t"), *_digests(memory.id, "a")],
+                },
                 None,
             ),
             (
@@ -1386,14 +1438,26 @@ async def test_a_second_erasure_reverts_only_its_own_keys(
                 p_s,
                 {
                     "details": {"t": "z", "c": True},
-                    MARK: [*_digests("location"), *_digests("a")],
+                    MARK: [*_digests(memory.id, "location"), *_digests(memory.id, "a")],
                     "restored_from": 2,
-                    "details_restored_from": {details_key_digest("location"): 2},
+                    "details_restored_from": {details_key_digest("location", memory.id): 2},
                 },
                 None,
             ),
-            (memory.id, 6, "erasure", p_b, _put_back(3, {"t": "z", "c": True}, keys=("a",)), None),
+            (
+                memory.id,
+                6,
+                "erasure",
+                p_b,
+                _put_back(memory.id, 3, {"t": "z", "c": True}, keys=("a",)),
+                None,
+            ),
         ]
+        # #2389: version 3 lost keys to both erasures (S's location and t,
+        # B's a), each counted once
+        assert [
+            (await load_version(session, live, v)).partially_unavailable for v in (5, 4, 3, 2, 1)
+        ] == [(("details", 1),), (("details", 2),), (("details", 3),), (("details", 2),), ()]
         everything = [uuid.uuid4()]
         after = await _outside(session, everything)
         sync = AsyncMock()
@@ -1412,6 +1476,77 @@ async def test_a_second_erasure_reverts_only_its_own_keys(
         await session.commit()
         assert await _outside(session, everything) == after
     sync.assert_not_awaited()
+
+
+async def _unsalt(session: AsyncSession, memory_id: uuid.UUID, keys: tuple[str, ...]) -> None:
+    """Rewrite the memory's stored digests of ``keys`` as an erasure before
+    #2389 wrote them: unsalted, in the strip list and the restore map."""
+    legacy = {details_key_digest(k, memory_id): legacy_details_key_digest(k) for k in keys}
+    rows = (
+        await session.execute(
+            select(MemoryRevision.id, MemoryRevision.prior).where(
+                MemoryRevision.memory_id == memory_id
+            )
+        )
+    ).all()
+    for row_id, prior in rows:
+        changed = dict(prior)
+        if MARK in prior:
+            changed[MARK] = [legacy.get(d, d) for d in prior[MARK]]
+        if "details_restored_from" in prior:
+            changed["details_restored_from"] = {
+                legacy.get(d, d): v for d, v in prior["details_restored_from"].items()
+            }
+        if changed != prior:
+            await session.execute(
+                update(MemoryRevision).where(MemoryRevision.id == row_id).values(prior=changed)
+            )
+
+
+async def test_a_second_erasure_reads_the_first_ones_unsalted_digests(
+    async_engine: AsyncEngine, world: dict[str, Any]
+) -> None:
+    """#2389: S's erasure ran before the salt (its rows hold unsalted
+    digests, no migration rewrites them); B's erasure over them ends where it
+    ends over salted rows. The digests it appends are salted; S's stay as
+    they were, so one list holds both spellings."""
+    subject, b, c = world["subject"], world["third"], world["fourth"]
+    async with _maker(async_engine)() as session:
+        memory, _ = await _seed_worked_example(session, world)
+        with patch(_QDRANT, AsyncMock()):
+            p_s, _ = await _erase_memories(session, subject)
+        await _unsalt(session, memory.id, ("location", "t"))
+        await session.commit()
+        with patch(_QDRANT, AsyncMock()):
+            p_b, report = await _erase_memories(session, b)
+        assert (report.restored, report.keys_reverted) == (2, 2)
+        live = await _live(session, memory.id)
+        assert (live.details, live.version) == ({"a": 1, "t": "z", "c": True}, 6)
+        # in the order S's erasure wrote them (by salted digest), now unsalted
+        old = [
+            legacy_details_key_digest(k)
+            for k in sorted(("location", "t"), key=lambda k: details_key_digest(k, memory.id))
+        ]
+        location = legacy_details_key_digest("location")
+        assert [row[4] for row in (await _log(session, memory.id))[2:]] == [
+            {"details": {"a": 1}, MARK: old},
+            {"details": {}, MARK: [*old, *_digests(memory.id, "a")]},
+            {
+                "details": {"t": "z", "c": True},
+                MARK: [location, *_digests(memory.id, "a")],
+                "restored_from": 2,
+                "details_restored_from": {location: 2},
+            },
+            _put_back(memory.id, 3, {"t": "z", "c": True}, keys=("a",)),
+        ]
+        assert [row[3] for row in (await _log(session, memory.id))[2:]] == [p_b, c, p_s, p_b]
+        # neither pseudonym finds anything left over the mixed rows
+        for pseudonym, others in ((p_s, {p_b}), (p_b, {p_s})):
+            again = await erase_subject_details(
+                session, pseudonym, actor=pseudonym, erased_actors=others, dry_run=True
+            )
+            assert again.restore == RestoreReport()
+            assert again.strip == StripCounts(0, 0)
 
 
 async def test_the_dry_run_counts_per_key_and_writes_nothing(
@@ -1514,8 +1649,8 @@ async def test_per_key_restore_origins_survive_commit_and_reprocessing(
                 put_back = next(e for e in edits if e.writer == "erasure")
                 assert put_back.restored_from == 2
                 assert put_back.restored_from_by_key == {
-                    details_key_digest("k"): 5,
-                    details_key_digest("x"): 2,
+                    details_key_digest("k", memory.id): 5,
+                    details_key_digest("x", memory.id): 2,
                 }
 
     async with _maker(async_engine)() as session:
@@ -1623,7 +1758,9 @@ async def test_a_restore_to_the_live_value_still_records_its_origin(
                 log = await _log(session, memory.id)
             erasure_rows = [r for r in log if r[2] == "erasure"]
             assert len(erasure_rows) == 1
-            assert erasure_rows[0][4]["details_restored_from"] == {details_key_digest("a"): 3}
+            assert erasure_rows[0][4]["details_restored_from"] == {
+                details_key_digest("a", memory.id): 3
+            }
             assert (await _live_details(async_engine, memory.id)) == {"a": 0}
 
     async with _maker(async_engine)() as session:

@@ -975,6 +975,10 @@ class ReferenceResponse(TZAwareBaseModel):
     historical: bool = False
     current_version: int | None = None
     unavailable_fields: list[str] | None = None
+    # #2389: field -> how many of its top-level keys account erasure removed
+    # from the value at that version (the value shows the rest; ``{}`` when it
+    # took them all). Only ``details``; None when nothing is missing.
+    partially_unavailable_fields: dict[str, int] | None = None
     client: str
     # Optional origin metadata (Issue #215). Surfaced so the detail UI can
     # show where a memory came from (vault://, file://, https://, etc.).

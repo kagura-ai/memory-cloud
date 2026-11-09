@@ -43,6 +43,7 @@ from models.erasure import ErasureRequest
 from models.memory import Memory, MemoryRevision
 from services.details_provenance import details_key_digest
 from services.erasure_details import HeldAddress, pseudonym_salt_note
+from services.memory_versions import load_version
 from utils.exceptions import QdrantError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -54,9 +55,18 @@ AUTHORS = {"by": "author", "location": {"lat": 10.5, "lon": 20.25}}
 SUBJECTS = {"by": "subject", "location": {"lat": 35.0, "lon": 139.0}}
 THIRDS = {"by": "third"}
 STRIPPED = {"erased": ["details"]}  # the whole-value strip (authored arm, before v0.129.0)
-# #2275: a prior whose keys were all the subject's, stripped per key
-_BY_LOCATION = sorted(details_key_digest(k) for k in ("by", "location"))
-KEYS_STRIPPED: dict[str, Any] = {"details": {}, "erased_details_keys": _BY_LOCATION}
+
+
+def _by_location(memory_id: uuid.UUID) -> list[str]:
+    """#2389: the digests of ``by`` and ``location``, salted with the memory id."""
+    return sorted(details_key_digest(k, memory_id) for k in ("by", "location"))
+
+
+def _keys_stripped(memory_id: uuid.UUID) -> dict[str, Any]:
+    """#2275: a prior whose keys were all the subject's, stripped per key."""
+    return {"details": {}, "erased_details_keys": _by_location(memory_id)}
+
+
 SCRUBBED = {"erased": ["details"], "scrubbed": ["details"]}
 
 COMPLETED_AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
@@ -346,15 +356,15 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
                 p,
                 {
                     "details": {},
-                    "erased_details_keys": _BY_LOCATION,
+                    "erased_details_keys": _by_location(live.id),
                     "restored_from": 3,
-                    "details_restored_from": dict.fromkeys(_BY_LOCATION, 3),
+                    "details_restored_from": dict.fromkeys(_by_location(live.id), 3),
                 },
             ),
         ]
         assert await _log(session, leftover.id) == [
             (2, "api", p, {"details": AUTHORS}),
-            (3, "api", world["fourth"], KEYS_STRIPPED),
+            (3, "api", world["fourth"], _keys_stripped(leftover.id)),
         ]
         assert await _details(session, leftover.id) == {"by": "fourth"}
         # every other row — the S1 rows on the scrubbed memory, the B3 chain
@@ -586,7 +596,7 @@ async def test_a_double_erasure_chain_ends_with_the_authors_value_in_either_orde
             log = await _log(session, memory.id)
             assert log[:2] == [
                 (2, "api", p2, {"details": AUTHORS}),
-                (3, "api", p1, KEYS_STRIPPED),
+                (3, "api", p1, _keys_stripped(memory.id)),
             ]
             # exactly one erasure row, by the request that restored, naming
             # the whole run of erased members' edits
@@ -597,9 +607,9 @@ async def test_a_double_erasure_chain_ends_with_the_authors_value_in_either_orde
                     p1,
                     {
                         "details": {},
-                        "erased_details_keys": _BY_LOCATION,
+                        "erased_details_keys": _by_location(memory.id),
                         "restored_from": 2,
-                        "details_restored_from": dict.fromkeys(_BY_LOCATION, 2),
+                        "details_restored_from": dict.fromkeys(_by_location(memory.id), 2),
                     },
                 )
             ]
@@ -773,7 +783,7 @@ async def test_a_legacy_failed_after_commit_request_is_repaired_and_reprocessed(
                     3,
                     "api",
                     world["fourth"],
-                    KEYS_STRIPPED,
+                    _keys_stripped(leftover.id),
                 )
                 (audit,) = await _reprocess_audit_rows(session, p)
                 assert audit.user_metadata["request_repaired"] is True
@@ -2455,6 +2465,206 @@ async def test_a_pre_v0129_ambiguous_key_is_printed_and_never_written(
             assert await _reprocess_audit_rows(session, p) == []
     finally:
         async with _maker(async_engine)() as session:
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == request.id))
+            await session.execute(delete(Memory).where(Memory.id == memory.id))
+            await session.commit()
+
+
+async def test_revert_ambiguous_removes_a_pre_v0129_ambiguous_key_once(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2389: the state of the test above, with ``--revert-ambiguous``. The
+    plan says the key would be removed and writes nothing; the apply removes
+    it through the restore's write path (one ``erasure`` row: the key out of
+    its prior, its salted digest listed and mapped) and the audit row counts
+    it; a second apply finds nothing. Counts only, never the key."""
+    p = _pseudonym()
+    memory = _memory(world["ws"], world["ctx"], world["author"], {"a": 1, "s": "x"}, 3)
+    request = _request(p, minutes=7)
+    async with _maker(async_engine)() as session:
+        session.add(memory)
+        await session.flush()
+        session.add_all(
+            [
+                _edit(memory, 2, p, {"details": {"a": 1}}),
+                _edit(memory, 3, world["third"], STRIPPED),
+                request,
+            ]
+        )
+        await session.commit()
+    argv = ["--request", str(request.id), "--revert-ambiguous"]
+    try:
+        async with _maker(async_engine)() as session:
+            before = await _snapshots(session, [])
+        code, sync = await _run(async_engine, argv)
+        assert code == 0
+        out = capsys.readouterr().out
+        assert f"would remove ambiguous details keys  {request.id}  1 key(s)\n" in out
+        assert "details keys ambiguous" not in out
+        assert "1 completed erasure(s): would change 1, skipped 0" in out
+        assert p not in out and '"s"' not in out
+        sync.assert_not_awaited()
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == before
+
+        code, _ = await _run(async_engine, [*argv, "--apply", "--yes"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert f"removed ambiguous details keys  {request.id}  1 key(s)\n" in out
+        assert "0 cleared (unavailable)" not in out and "1 cleared (unavailable)" in out
+        assert ", 1 ambiguous key(s) removed" in out
+        assert "ambiguous key(s) kept" not in out and "details keys ambiguous" not in out
+        assert p not in out and '"s"' not in out
+        digest = details_key_digest("s", memory.id)
+        async with _maker(async_engine)() as session:
+            assert await _details(session, memory.id) == {"a": 1}
+            assert await _log(session, memory.id) == [
+                (2, "api", p, {"details": {"a": 1}}),
+                (3, "api", world["third"], STRIPPED),
+                (
+                    4,
+                    "erasure",
+                    p,
+                    {
+                        "details": {"a": 1},
+                        "erased_details_keys": [digest],
+                        "restored_from": 3,
+                        "details_restored_from": {digest: 3},
+                    },
+                ),
+            ]
+            (audit,) = await _reprocess_audit_rows(session, p)
+            counts = audit.user_metadata
+            assert (
+                counts["details_restored"],
+                counts["details_restored_unavailable"],
+                counts["details_keys_reverted"],
+                counts["details_keys_ambiguous"],
+                counts["details_keys_ambiguous_reverted"],
+            ) == (0, 1, 0, 0, 1)
+            assert "s" not in counts and '"s"' not in repr(counts)
+            done = await _snapshots(session, [])
+
+        code, sync = await _run(async_engine, [*argv, "--apply", "--yes"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "1 completed erasure(s): would change 0, skipped 0" in out
+        assert "ambiguous details keys" not in out and "details keys ambiguous" not in out
+        sync.assert_not_awaited()
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == done
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.user_id == p))
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == request.id))
+            await session.execute(delete(Memory).where(Memory.id == memory.id))
+            await session.commit()
+
+
+async def test_revert_ambiguous_strips_the_key_from_the_later_priors(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2389: the survivor edited again after the edit the ambiguous key
+    came in with, so a later prior carries it. Without the flag nothing is
+    written. With it, the key leaves the live value, the new row's prior and
+    that later prior (its salted digest listed), so no rebuilt version from
+    the survivor's edit on shows it and each counts it as partially
+    unavailable; below, the stripped state stays unavailable. A second apply
+    finds nothing."""
+    p = _pseudonym()
+    memory = _memory(world["ws"], world["ctx"], world["author"], {"a": 2, "s": "x"}, 4)
+    request = _request(p, minutes=8)
+    async with _maker(async_engine)() as session:
+        session.add(memory)
+        await session.flush()
+        session.add_all(
+            [
+                _edit(memory, 2, p, {"details": {"a": 1}}),
+                _edit(memory, 3, world["third"], STRIPPED),
+                _edit(memory, 4, world["third"], {"details": {"a": 1, "s": "x"}}),
+                request,
+            ]
+        )
+        await session.commit()
+    argv = ["--request", str(request.id), "--apply", "--yes"]
+    try:
+        async with _maker(async_engine)() as session:
+            before = await _snapshots(session, [])
+        # the default: kept and counted, nothing written
+        code, sync = await _run(async_engine, argv)
+        assert code == 0
+        out = capsys.readouterr().out
+        assert f"details keys ambiguous  {request.id}  1 key(s) kept" in out
+        assert "1 completed erasure(s): would change 0, skipped 0" in out
+        sync.assert_not_awaited()
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == before
+
+        code, _ = await _run(async_engine, [*argv, "--revert-ambiguous"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert f"removed ambiguous details keys  {request.id}  1 key(s)\n" in out
+        assert "1 cleared (unavailable), 1 revision prior(s) stripped" in out
+        assert p not in out and '"s"' not in out
+        digest = details_key_digest("s", memory.id)
+        async with _maker(async_engine)() as session:
+            assert await _details(session, memory.id) == {"a": 2}
+            assert await _log(session, memory.id) == [
+                (2, "api", p, {"details": {"a": 1}}),
+                (3, "api", world["third"], STRIPPED),
+                (4, "api", world["third"], {"details": {"a": 1}, "erased_details_keys": [digest]}),
+                (
+                    5,
+                    "erasure",
+                    p,
+                    {
+                        "details": {"a": 2},
+                        "erased_details_keys": [digest],
+                        "restored_from": 3,
+                        "details_restored_from": {digest: 3},
+                    },
+                ),
+            ]
+            live = (
+                await session.execute(
+                    select(Memory)
+                    .where(Memory.id == memory.id)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            rebuilt = {v: await load_version(session, live, v) for v in (4, 3, 2, 1)}
+            assert [rebuilt[v].values["details"] for v in (4, 3, 2, 1)] == [
+                {"a": 2},
+                {"a": 1},
+                None,
+                {"a": 1},
+            ]
+            assert [rebuilt[v].partially_unavailable for v in (4, 3, 2, 1)] == [
+                (("details", 1),),
+                (("details", 1),),
+                (),
+                (),
+            ]
+            assert [rebuilt[v].unavailable for v in (4, 3, 2, 1)] == [(), (), ("details",), ()]
+            (audit,) = await _reprocess_audit_rows(session, p)
+            counts = audit.user_metadata
+            assert (
+                counts["details_keys_ambiguous"],
+                counts["details_keys_ambiguous_reverted"],
+                counts["details_stripped"],
+            ) == (0, 1, 1)
+            done = await _snapshots(session, [])
+
+        code, sync = await _run(async_engine, [*argv, "--revert-ambiguous"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "1 completed erasure(s): would change 0, skipped 0" in out
+        sync.assert_not_awaited()
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == done
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.user_id == p))
             await session.execute(delete(ErasureRequest).where(ErasureRequest.id == request.id))
             await session.execute(delete(Memory).where(Memory.id == memory.id))
             await session.commit()

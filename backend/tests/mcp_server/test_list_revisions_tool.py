@@ -229,6 +229,30 @@ class TestReferenceVersion:
         assert service.reference.await_args.kwargs["version"] == 2
 
     @pytest.mark.asyncio
+    async def test_a_partial_field_is_named_next_to_the_unavailable_ones(self) -> None:
+        """#2389: ``partially_unavailable_fields`` (field -> keys erasure
+        removed) beside ``unavailable_fields``; absent, never null, when empty."""
+        mem_id = uuid4()
+        partial = _historical(mem_id).model_copy(
+            update={
+                "details": {"a": 1},
+                "unavailable_fields": None,
+                "partially_unavailable_fields": {"details": 2},
+            }
+        )
+        service = MagicMock(reference=AsyncMock(return_value=partial))
+        args = {"context_id": _CTX, "memory_id": str(mem_id), "version": 2}
+        m = (await _reference(args, service))["memory"]
+        assert m["partially_unavailable_fields"] == {"details": 2}
+        assert "unavailable_fields" not in m
+        assert m["details"] == {"a": 1}
+
+        service = MagicMock(reference=AsyncMock(return_value=_historical(mem_id)))
+        m = (await _reference(args, service))["memory"]
+        assert m["unavailable_fields"] == ["details"]
+        assert "partially_unavailable_fields" not in m
+
+    @pytest.mark.asyncio
     async def test_fields_links_alone_still_answers(self) -> None:
         mem_id = uuid4()
         service = MagicMock(reference=AsyncMock(return_value=_historical(mem_id)))

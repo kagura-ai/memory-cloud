@@ -3910,6 +3910,8 @@ class MemoryService:
             historical=True,
             current_version=memory.version,
             unavailable_fields=list(historical.unavailable) or None,
+            # #2389: fields that lost some keys to account erasure, and how many
+            partially_unavailable_fields=dict(historical.partially_unavailable) or None,
             client=memory.client,
             source_uri=memory.source_uri,
             source_type=memory.source_type,

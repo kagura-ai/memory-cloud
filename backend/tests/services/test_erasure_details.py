@@ -24,6 +24,7 @@ from services.details_provenance import (
     MemoryRevert,
     PriorStrip,
     details_key_digest,
+    legacy_details_key_digest,
     plan_details_erasure,
 )
 from services.erasure_details import DetailsEdit
@@ -283,7 +284,7 @@ def test_other_memories_and_actors_never_produce_a_revert_and_order_is_irrelevan
             from_version=3,
             result={"a": 2},
             prior={},
-            erased_keys=(details_key_digest("a"),),
+            erased_keys=(details_key_digest("a", mine),),
         ),
     )
     assert plan_details_erasure(rows, live, SUBJECT).reverts == expected
@@ -303,7 +304,7 @@ def test_the_next_details_edit_after_the_subjects_holds_their_keys() -> None:
         _edit(m, 4, AUTHOR, {"by": "other"}),
     ]
     plan = plan_details_erasure(rows, {m: ({"by": "author-2"}, AUTHOR)}, SUBJECT)
-    assert plan.strips == (PriorStrip(30, ("by",)),)
+    assert plan.strips == (PriorStrip(30, ("by",), m),)
 
 
 def test_a_rollback_the_subject_requested_holds_no_value_of_theirs() -> None:
@@ -354,10 +355,20 @@ def test_a_chain_of_erased_actors_is_walked_past_to_the_authors_value() -> None:
     assert _reverts(rows, live, s2, erased_actors=frozenset({s1})) == []
     assert _strips(rows, live, s2, erased_actors=frozenset({s1})) == [30]
     # the strip removed S2's ``by`` from S1's prior and listed its digest
-    stripped = [rows[0], replace(_edit(m, 3, s1, {}), erased_keys=frozenset({digest("by")}))]
+    stripped = [rows[0], replace(_edit(m, 3, s1, {}), erased_keys=frozenset({digest("by", m)}))]
     assert _reverts(stripped, live, s1, erased_actors=frozenset({s2})) == [
         ({"by": "author"}, 2, False)
     ]
+    # #2389: a row stripped before the salt holds the unsalted digest, read alike;
+    # another memory's salted digest of the same key is not this one's
+    for marker in (legacy_details_key_digest("by"), digest("by", uuid4())):
+        other = [rows[0], replace(_edit(m, 3, s1, {}), erased_keys=frozenset({marker}))]
+        expected = (
+            [({"by": "author"}, 2, False)]
+            if marker == legacy_details_key_digest("by")
+            else [({}, 3, False)]
+        )
+        assert _reverts(other, live, s1, erased_actors=frozenset({s2})) == expected
     # without the digest the prior reads as S2 having removed ``by``: deletions
     # stand, so the key would go instead of coming back
     unmarked = [rows[0], _edit(m, 3, s1, {})]
@@ -451,9 +462,10 @@ async def test_the_editor_strip_locks_once_then_one_update_per_key_set() -> None
 
     from services.erasure_details import _strip_editor_keys
 
+    m = uuid4()
     db = MagicMock()
     db.execute = AsyncMock(side_effect=[MagicMock(), MagicMock(rowcount=2), MagicMock(rowcount=1)])
-    strips = [PriorStrip(9, ("s", "t")), PriorStrip(4, ("s",)), PriorStrip(12, ("s", "t"))]
+    strips = [PriorStrip(9, ("s", "t"), m), PriorStrip(4, ("s",), m), PriorStrip(12, ("s", "t"), m)]
     assert await _strip_editor_keys(db, strips) == 3
 
     stmts = [c.args[0] for c in db.execute.await_args_list]
@@ -477,13 +489,42 @@ async def test_the_editor_strip_locks_once_then_one_update_per_key_set() -> None
         # the keys' digests join the marker list, never their names
         assert params["marker_path_1"] == ["erased_details_keys"]
         assert params["prior_2"] == "erased_details_keys"
-        assert params["param_2"] == sorted(details_key_digest(k) for k in params["keys_1"])
+        # #2389: salted with the memory id, never the unsalted spelling
+        assert params["param_2"] == sorted(details_key_digest(k, m) for k in params["keys_1"])
+        assert not {legacy_details_key_digest(k) for k in params["keys_1"]} & set(params["param_2"])
         assert not set(params["keys_1"]) & set(params["param_2"])
         assert params["jsonb_typeof_1"] == "object"
         assert params["path_1"] == ["details"]
         ids = next(v for k, v in params.items() if k.startswith("ids"))
         groups.append((tuple(params["keys_1"]), sorted(ids)))
     assert groups == [(("s",), [4]), (("s", "t"), [9, 12])]
+
+
+async def test_the_same_keys_on_two_memories_get_their_own_digests() -> None:
+    """#2389: the digests are salted per memory, so one key set on two
+    memories is two UPDATEs, each appending its memory's digests."""
+    from services.erasure_details import _strip_editor_keys
+
+    first, second = sorted(uuid4() for _ in range(2))
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[MagicMock(), MagicMock(rowcount=1), MagicMock(rowcount=2)])
+    strips = [
+        PriorStrip(3, ("s",), first),
+        PriorStrip(5, ("s",), second),
+        PriorStrip(7, ("s",), second),
+    ]
+    assert await _strip_editor_keys(db, strips) == 3
+
+    written = {}
+    for call in db.execute.await_args_list[1:]:
+        _, params = _pg(call.args[0])
+        ids = next(v for k, v in params.items() if k.startswith("ids"))
+        written[tuple(sorted(ids))] = params["param_2"]
+    assert written == {
+        (3,): [details_key_digest("s", first)],
+        (5, 7): [details_key_digest("s", second)],
+    }
+    assert details_key_digest("s", first) != details_key_digest("s", second)
 
 
 async def test_an_empty_plan_strips_nothing() -> None:
@@ -536,7 +577,7 @@ async def test_the_restore_row_holds_the_overwritten_dict_without_the_subjects_k
                 from_version=2,
                 result={"a": 2, "t": "z"},
                 prior={"a": 2, "t": "z"},
-                erased_keys=(details_key_digest("s"),),
+                erased_keys=(details_key_digest("s", m),),
             ),
         ),
         keys_ambiguous=3,
@@ -552,9 +593,9 @@ async def test_the_restore_row_holds_the_overwritten_dict_without_the_subjects_k
     (call,) = record.call_args_list
     assert call.kwargs["prior"] == {
         "details": {"a": 2, "t": "z"},
-        "erased_details_keys": [details_key_digest("s")],
+        "erased_details_keys": [details_key_digest("s", m)],
         "restored_from": 2,
-        "details_restored_from": {details_key_digest("s"): 2},
+        "details_restored_from": {details_key_digest("s", m): 2},
     }
     assert call.kwargs["writer"] == "erasure" and call.kwargs["actor_user_id"] == "p" * 64
     assert (report.restored, report.unavailable, report.keys_reverted) == (1, 0, 1)
@@ -595,6 +636,113 @@ async def test_a_dry_run_restore_counts_and_writes_nothing(unavailable: bool) ->
     assert memory.details == {"s": 1} and memory.version == 4
     assert (report.restored, report.unavailable) == ((0, 1) if unavailable else (1, 0))
     assert report.to_sync == []
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_removed_ambiguous_keys_are_counted_apart_from_the_subjects(dry_run: bool) -> None:
+    """#2389 (``--revert-ambiguous``): an ambiguous key is removed through
+    the restore's own write path — version, ``erasure`` row, its digest in
+    the list and the map — and counted in ``keys_ambiguous_reverted``, not
+    in ``keys_reverted``; the memory counts as unavailable."""
+    from types import SimpleNamespace
+
+    from services import erasure_details
+
+    m = uuid4()
+    memory = SimpleNamespace(
+        id=m,
+        type="fact",
+        details={"a": 1, "s": "x", "t": 5},
+        version=4,
+        updated_at=None,
+        deleted_at=None,
+        context_id=uuid4(),
+        embedding_status="success",
+    )
+    plan = DetailsErasurePlan(
+        reverts=(
+            MemoryRevert(
+                memory_id=m,
+                reverts=(
+                    KeyRevert("s", None, False, True, 3, ambiguous=True),
+                    KeyRevert("t", None, False, False, 4),
+                ),
+                from_version=3,
+                result={"a": 1},
+                prior={"a": 1},
+                erased_keys=tuple(sorted(digest(k, m) for k in ("s", "t"))),
+            ),
+        )
+    )
+    result = MagicMock()
+    result.scalars.return_value = [memory]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    db.flush = AsyncMock()
+    with patch.object(erasure_details, "record_revision") as record:
+        report = await erasure_details.restore_editor_details(
+            db, "sub", actor="p" * 64, dry_run=dry_run, plan=plan
+        )
+    assert (report.restored, report.unavailable) == (0, 1)
+    assert (report.keys_reverted, report.keys_ambiguous_reverted, report.keys_ambiguous) == (
+        1,
+        1,
+        0,
+    )
+    if dry_run:
+        record.assert_not_called()
+        assert memory.details == {"a": 1, "s": "x", "t": 5}
+        return
+    assert memory.details == {"a": 1} and memory.version == 5
+    (call,) = record.call_args_list
+    assert call.kwargs["prior"] == {
+        "details": {"a": 1},
+        "erased_details_keys": sorted(digest(k, m) for k in ("s", "t")),
+        "restored_from": 3,
+        "details_restored_from": {digest("s", m): 3, digest("t", m): 4},
+    }
+    assert call.kwargs["writer"] == "erasure"
+
+
+async def test_an_ambiguous_trigger_whose_window_goes_back_in_is_still_kept() -> None:
+    """#2389: removing an ambiguous ``trigger`` from a time memory merges the
+    live window back; when that is the whole live value nothing is written,
+    and the key counts as kept, not as removed."""
+    from types import SimpleNamespace
+
+    from services import erasure_details
+
+    m = uuid4()
+    window = {
+        "year": 2026,
+        "month": 1,
+        "day": 2,
+        "hour": None,
+        "minute": None,
+        "from": "2026-01-02T00:00:00Z",
+        "until": "2026-01-03T00:00:00Z",
+    }
+    memory = SimpleNamespace(id=m, type="time", details={"trigger": window}, version=4)
+    plan = DetailsErasurePlan(
+        reverts=(
+            MemoryRevert(
+                memory_id=m,
+                reverts=(KeyRevert("trigger", None, False, True, 3, ambiguous=True),),
+                from_version=3,
+                result=None,
+                prior={},
+                erased_keys=(digest("trigger", m),),
+            ),
+        )
+    )
+    result = MagicMock()
+    result.scalars.return_value = [memory]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    with patch.object(erasure_details, "record_revision") as record:
+        report = await erasure_details.restore_editor_details(db, "sub", actor="p" * 64, plan=plan)
+    record.assert_not_called()
+    assert (report.unavailable, report.keys_ambiguous_reverted, report.keys_ambiguous) == (0, 0, 1)
 
 
 # ---------------------------------------------------------------------------
