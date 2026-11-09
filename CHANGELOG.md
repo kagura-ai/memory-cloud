@@ -4,6 +4,24 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.153.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.153.0) — 2026-11-09
+
+Recall in the web UI and an opt-in related index. The Memories tab can widen a recall to 100 results, read older versions by their summaries and search from the Graph tab, and onboarding links to the plugin and skill setup guide. A Sleep-built, source-backed related index for bounded recall expansion ships turned off, to be measured locally first.
+
+### Added
+- **More Recall results in the web UI** ([#2517](https://github.com/kagura-ai/memory-cloud/issues/2517)): "Show more matches" re-runs the search with a larger limit, 20 at a time up to 100, and replaces the ranking. The page on screen stays visible, marked busy, while the larger one loads, and the button keeps keyboard focus. It is offered only after a full page; changing the context, the tags or the superseded switch starts again at 20.
+- **Older versions by summary** ([#2517](https://github.com/kagura-ai/memory-cloud/issues/2517)): expanding a row's folded older versions loads their summaries, at most 20 per expansion and 4 at a time, without counting as a reference of those memories. Each link opens its version even while the summary is loading or after it failed, and pending loads are cancelled when the results are replaced.
+- **Recall from the Graph tab** ([#2517](https://github.com/kagura-ai/memory-cloud/issues/2517)): the Graph tab offers the same Recall panel; the Text match / Recall switch is a labelled radio group.
+- **Plugin setup guide links** ([#2736](https://github.com/kagura-ai/memory-cloud/issues/2736)): onboarding and the MCP connection card in Integrations link to the plugin and bundled-skill setup guide in the user's language (https://www.kagura-ai.com/help/guide/#plugins, https://www.kagura-ai.com/ja/help/guide/#plugins). Opening the guide does not advance onboarding.
+- **Opt-in Sleep related index** ([#2728](https://github.com/kagura-ai/memory-cloud/issues/2728)): with `SLEEP_RELATED_INDEX_ENABLED=true`, Sleep records one-hop links between memories of the same context from the semantic edges it discovered. A link stores identifiers, content fingerprints and summary offsets, never another copy of the text, and each run indexes at most 25 new pairs within a quarter of the remaining Sleep budget. With `RECALL_RELATED_INDEX_ENABLED=true`, the MCP `recall` tool and `POST /api/v1/memory/recall` may add at most two linked candidates from the top two results, within the existing filters, permissions, folding, `k` and `max_chars`; `confidence` still comes from the original search scores. A link whose source changed, was deleted or was superseded is not used, and forget-by-query, bootstrap and share-key reads never use the index. The lookup runs in its own session with a timeout (`RECALL_RELATED_INDEX_TIMEOUT_MS`, default 150, clamped to 25–500) and falls back to the unchanged result. Both flags are off by default. A local comparison protocol is in `backend/tests/eval/RELATED_INDEX.md`; no measurement has been made yet.
+
+### Changed
+- **Dependencies** ([#2735](https://github.com/kagura-ai/memory-cloud/pull/2735), [#2732](https://github.com/kagura-ai/memory-cloud/pull/2732), [#2733](https://github.com/kagura-ai/memory-cloud/pull/2733), [#2734](https://github.com/kagura-ai/memory-cloud/pull/2734)): backend lock updates including FastAPI 0.162.0, Starlette 1.10.0, the Anthropic SDK 2.3.0 (from 1.15.0), OpenAI 3.37.0 and google-genai 2.33.0; CI actions setup-python 7.1.0, setup-uv 10.3.2, upload-artifact 7.0.2 and paths-filter 4.0.3.
+
+### Notes
+- Migration `f32_2728_sleep_related_index` creates the `sleep_related_indexes` table (derived data, never exported; rows go with their memories, edges, context and workspace). Additive; the table stays empty while `SLEEP_RELATED_INDEX_ENABLED` is unset.
+- New optional environment variables, all inactive when unset: `SLEEP_RELATED_INDEX_ENABLED`, `RECALL_RELATED_INDEX_ENABLED`, `RECALL_RELATED_INDEX_TIMEOUT_MS`. No operator action.
+
 ## [v0.152.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.152.1) — 2026-11-08
 
 Patch: an existing Qdrant collection now receives the v0.152.0 event-date indexes at API startup. v0.152.0 added them only to newly created collections and to a collection that saw a `create_context` or an embedding migration after the upgrade; a deployment that did neither kept filtering on `event_after` / `event_before` without an index.
