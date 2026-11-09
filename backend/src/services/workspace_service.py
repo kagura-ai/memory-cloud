@@ -1342,9 +1342,17 @@ class WorkspaceService:
         }
 
         # A distinct count does not add up across contexts: a user active in
-        # several contexts is one active user of the workspace (#2744).
+        # several contexts is one active user of the workspace (#2744). It
+        # covers exactly the listed contexts, so a soft-deleted one's rows
+        # (which the per-context lookup below never reaches) stay out too.
+        live_context_ids = select(Context.id).where(
+            Context.workspace_id == workspace_id,
+            Context.deleted_at.is_(None),
+        )
         active_users_total = await self.db.execute(
-            select(func.count(func.distinct(UsageStats.user_id))).where(*usage_where)
+            select(func.count(func.distinct(UsageStats.user_id))).where(
+                *usage_where, UsageStats.context_id.in_(live_context_ids)
+            )
         )
         active_users_week = int(active_users_total.scalar() or 0)
 

@@ -167,3 +167,26 @@ async def test_no_usage_gives_a_zero_total(db_session) -> None:
 
     assert stats["contexts"] == []
     assert stats["workspace_totals"] == {"memory_count": 0, "active_users_week": 0}
+
+
+@pytest.mark.asyncio
+async def test_a_soft_deleted_context_is_left_out_of_the_total(seeded, db_session) -> None:
+    """The total covers exactly the contexts the response lists: a usage row
+    in a soft-deleted context counts neither as a row nor in the total, for
+    an owner (no ``context_ids``) or a member whose list still names it."""
+    gone = _context(seeded.ws)
+    gone.deleted_at = utcnow()
+    db_session.add(gone)
+    await db_session.flush()
+    db_session.add(_usage(f"g_{uuid4().hex[:8]}", seeded.ws, gone.id, utcnow().date()))
+    await db_session.commit()
+
+    owner = await WorkspaceService(db_session).get_context_stats(seeded.ws)
+    assert str(gone.id) not in _by_context(owner)
+    assert owner["workspace_totals"]["active_users_week"] == 3  # a, b, c; not g
+
+    member = await WorkspaceService(db_session).get_context_stats(
+        seeded.ws, context_ids={seeded.c1, gone.id}
+    )
+    assert set(_by_context(member)) == {str(seeded.c1)}
+    assert member["workspace_totals"]["active_users_week"] == 2  # a, b; not g
