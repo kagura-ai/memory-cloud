@@ -50,6 +50,7 @@ async def test_index_query_scope_and_live_supersession(db_session):
             summary=f"Fictional source number {n}",
             content=f"Fictional content {n}",
             type="fact",
+            client="pytest",
         )
         for n in range(3)
     ]
