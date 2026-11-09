@@ -21,6 +21,7 @@ def _config(**over):
         "supersede_verify_mode": "llm",
         "supersede_verify_min_confidence": 0.7,
         "supersede_verify_max_calls_per_day": 200,
+        "supersede_verify_max_bulk_calls_per_day": 500,
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -369,15 +370,20 @@ class TestJudgePair:
                 )
                 assert out is None
         llm.complete_json.assert_not_called()
-        warned = [c.args[0] for c in log.warning.call_args_list]
-        assert warned.count("supersede_verify_cap_reached") == 1
+        warned = [
+            c for c in log.warning.call_args_list if c.args[0] == "supersede_verify_cap_reached"
+        ]
+        assert len(warned) == 1
+        # #2510: the warning names the lane whose cap was reached.
+        assert warned[0].kwargs["lane"] == "live"
+        assert warned[0].kwargs["max_calls_per_day"] == 2
         # The reported set is per UTC day: a new day starts empty.
-        assert sv._CAP_REPORTED == {"w"}
+        assert sv._CAP_REPORTED == {("w", "live")}
         with patch("services.supersede_verify.utcnow", return_value=datetime(2099, 1, 1)):
             assert sv.counter_key("w").endswith("2099-01-01")
             with patch("db.redis.incrby_counter", new=AsyncMock(return_value=5)):
                 assert await sv._under_daily_cap("other", 2) is False
-        assert sv._CAP_REPORTED == {"other"}
+        assert sv._CAP_REPORTED == {("other", "live")}
 
     @pytest.mark.asyncio
     async def test_verdict_is_stamped_before_the_call(self):
@@ -532,6 +538,160 @@ class TestJudgePair:
         assert llm.complete_json.await_args.kwargs["platform_only"] is True
 
 
+class TestJudgeLanes:
+    """#2510: bulk work (the catch-up pass) counts on its own daily cap, so a
+    bulk run can no longer spend the budget live ingest needs."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_once_flags(self):
+        with (
+            patch.object(sv, "_CAP_REPORTED", set()),
+            patch.object(sv, "_CAP_REPORTED_DAY", ""),
+            patch.object(sv, "_NO_PROVIDER_REPORTED", False),
+        ):
+            yield
+
+    @staticmethod
+    def _llm():
+        llm = MagicMock()
+        llm.complete_json = AsyncMock(
+            return_value=SimpleNamespace(
+                parsed={"verdict": "parallel", "confidence": 0.8, "reason": "r"},
+                provider="openai",
+                model="gpt-5-nano",
+                total_tokens=42,
+            )
+        )
+        llm.resolve_paid_by = MagicMock(return_value="platform")
+        return llm
+
+    @staticmethod
+    def _counters():
+        """A fake ``incrby_counter`` with one count per Redis key."""
+        counts: dict[str, int] = {}
+
+        async def incrby(key, amount, ttl=None):
+            counts[key] = counts.get(key, 0) + amount
+            return counts[key]
+
+        return counts, AsyncMock(side_effect=incrby)
+
+    async def _judge(self, llm, config, *, lane=None):
+        kwargs = {} if lane is None else {"lane": lane}
+        return await sv.judge_pair(
+            MagicMock(),
+            config=config,
+            user_id="u",
+            workspace_id="w",
+            context_id="c",
+            new=_memory(),
+            old=_memory(),
+            **kwargs,
+        )
+
+    def test_the_live_key_is_unchanged_and_bulk_has_its_own(self):
+        with patch("services.supersede_verify.utcnow", return_value=datetime(2026, 11, 9)):
+            assert sv.counter_key("w") == "supersede_verify:w:2026-11-09"
+            assert sv.counter_key("w", lane="live") == "supersede_verify:w:2026-11-09"
+            assert sv.counter_key("w", lane="bulk") == "supersede_verify:w:2026-11-09:bulk"
+
+    @pytest.mark.asyncio
+    async def test_a_bulk_run_past_its_cap_leaves_the_live_cap_untouched(self):
+        llm = self._llm()
+        counts, incrby = self._counters()
+        config = _config(
+            supersede_verify_max_calls_per_day=2, supersede_verify_max_bulk_calls_per_day=3
+        )
+        with (
+            patch("services.llm_service.LLMService", return_value=llm),
+            patch("db.redis.incrby_counter", new=incrby),
+            patch.object(sv, "_record_judge_call", new=AsyncMock()),
+            patch("services.supersede_verify.logger") as log,
+        ):
+            bulk = [await self._judge(llm, config, lane="bulk") for _ in range(5)]
+            # Bulk is capped at 3: the last two get no verdict and no call.
+            assert [r is not None for r in bulk] == [True, True, True, False, False]
+            assert llm.complete_json.await_count == 3
+            assert counts == {sv.counter_key("w", lane="bulk"): 5}
+
+            # Live ingest still has its whole budget.
+            live = [await self._judge(llm, config) for _ in range(2)]
+            assert all(r is not None for r in live)
+            assert llm.complete_json.await_count == 5
+            assert counts[sv.counter_key("w")] == 2
+            assert counts[sv.counter_key("w", lane="bulk")] == 5
+
+        capped = [
+            c for c in log.warning.call_args_list if c.args[0] == "supersede_verify_cap_reached"
+        ]
+        assert len(capped) == 1
+        assert capped[0].kwargs["lane"] == "bulk"
+        assert capped[0].kwargs["max_calls_per_day"] == 3
+
+    @pytest.mark.asyncio
+    async def test_live_past_its_cap_leaves_bulk_allowed(self):
+        llm = self._llm()
+        counts, incrby = self._counters()
+        config = _config(
+            supersede_verify_max_calls_per_day=1, supersede_verify_max_bulk_calls_per_day=5
+        )
+        with (
+            patch("services.llm_service.LLMService", return_value=llm),
+            patch("db.redis.incrby_counter", new=incrby),
+            patch.object(sv, "_record_judge_call", new=AsyncMock()),
+        ):
+            assert await self._judge(llm, config) is not None
+            assert await self._judge(llm, config) is None
+            assert await self._judge(llm, config, lane="bulk") is not None
+        assert counts == {sv.counter_key("w"): 2, sv.counter_key("w", lane="bulk"): 1}
+
+    @pytest.mark.asyncio
+    async def test_each_lane_reports_its_cap_once_a_day(self):
+        counts, incrby = self._counters()
+        with (
+            patch("db.redis.incrby_counter", new=incrby),
+            patch("services.supersede_verify.logger") as log,
+        ):
+            for _ in range(3):
+                assert await sv._under_daily_cap("w", 0, lane="bulk") is False
+                assert await sv._under_daily_cap("w", 0) is False
+        capped = [
+            c.kwargs["lane"]
+            for c in log.warning.call_args_list
+            if c.args[0] == "supersede_verify_cap_reached"
+        ]
+        assert sorted(capped) == ["bulk", "live"]
+        assert sv._CAP_REPORTED == {("w", "bulk"), ("w", "live")}
+
+    @pytest.mark.asyncio
+    async def test_a_bulk_counter_outage_still_skips_the_paid_call(self):
+        """Fail-closed on the bulk lane too."""
+        llm = self._llm()
+        with (
+            patch("services.llm_service.LLMService", return_value=llm),
+            patch("db.redis.incrby_counter", new=AsyncMock(side_effect=ConnectionError("down"))),
+            patch("services.supersede_verify.logger") as log,
+        ):
+            assert await self._judge(llm, _config(), lane="bulk") is None
+        llm.complete_json.assert_not_called()
+        failed = [
+            c for c in log.warning.call_args_list if c.args[0] == "supersede_verify_counter_failed"
+        ]
+        assert failed and failed[0].kwargs["lane"] == "bulk"
+
+    @pytest.mark.asyncio
+    async def test_the_ledger_row_names_the_lane(self):
+        llm = self._llm()
+        ledger = AsyncMock()
+        with (
+            patch("services.llm_service.LLMService", return_value=llm),
+            patch("db.redis.incrby_counter", new=AsyncMock(return_value=1)),
+            patch.object(sv, "_record_judge_call", new=ledger),
+        ):
+            assert await self._judge(llm, _config(), lane="bulk") is not None
+        assert ledger.await_args.kwargs["call_metadata"]["lane"] == "bulk"
+
+
 class TestJudgeLedger:
     """#2019: every billed judge call leaves one ``llm_call_log`` row."""
 
@@ -620,6 +780,7 @@ class TestJudgeLedger:
         assert meta["verdict"] == "supersedes"
         assert meta["confidence"] == 0.9 and meta["verified"] is True
         assert meta["prompt_revision"] == sv.PROMPT_REVISION
+        assert meta["lane"] == "live"  # #2510
         # Never the memory text.
         assert "SECRET" not in str(kwargs)
         session.commit.assert_awaited_once()
@@ -646,6 +807,7 @@ class TestJudgeLedger:
         assert kwargs["call_metadata"] == {
             "outcome": "failed",
             "prompt_revision": sv.PROMPT_REVISION,
+            "lane": "live",
         }
         assert (kwargs["input_tokens"], kwargs["output_tokens"]) == (100, 40)
         assert kwargs["paid_by"] == "byok"
@@ -661,6 +823,7 @@ class TestJudgeLedger:
         assert kwargs["call_metadata"] == {
             "outcome": "unparseable",
             "prompt_revision": sv.PROMPT_REVISION,
+            "lane": "live",
         }
         assert kwargs["input_tokens"] == 100
 

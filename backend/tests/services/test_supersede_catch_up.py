@@ -186,7 +186,8 @@ class TestApply:
             assert call.args[1] is memory
             assert call.args[2] == [0.1]
             assert call.args[3] == "kagura_memories"
-            assert call.kwargs == {"mechanical_reembed": False, "seed": False}
+            # #2510: the pass judges on the bulk lane, not live ingest's cap.
+            assert call.kwargs == {"mechanical_reembed": False, "seed": False, "lane": "bulk"}
         retrieve.assert_awaited_once_with("kagura_memories", [str(m.id) for m in rows])
         assert (result.eligible, result.planned, result.processed) == (5, 2, 2)
 
@@ -347,7 +348,9 @@ class TestApply:
         assert result.last_created_at == datetime(2026, 1, 2)
 
     @pytest.mark.asyncio
-    async def test_reads_the_workspace_counter_key(self) -> None:
+    async def test_reads_the_workspace_bulk_counter_key(self) -> None:
+        """#2510: the budget is read on the bulk lane's key, the one the
+        pass's judge calls count on; live ingest's key is never read."""
         from services.supersede_verify import counter_key
 
         workspace_id = uuid4()
@@ -355,7 +358,10 @@ class TestApply:
 
         _, _, _, read = await _run(db)
 
-        assert {c.args[0] for c in read.await_args_list} == {counter_key(str(workspace_id))}
+        assert {c.args[0] for c in read.await_args_list} == {
+            counter_key(str(workspace_id), lane="bulk")
+        }
+        assert counter_key(str(workspace_id), lane="bulk") != counter_key(str(workspace_id))
 
     @pytest.mark.asyncio
     async def test_a_run_across_midnight_carries_the_old_days_count(self) -> None:
@@ -367,7 +373,9 @@ class TestApply:
         async def read(key: str) -> int:
             return values[key].pop(0)
 
-        with patch("services.supersede_verify.counter_key", side_effect=lambda _ws: next(keys)):
+        with patch(
+            "services.supersede_verify.counter_key", side_effect=lambda _ws, **_kw: next(keys)
+        ):
             result, *_ = await _run(db, counter=AsyncMock(side_effect=read))
 
         # day1 advanced 5 → 7 (2), then day2 0 → 2 (2).
