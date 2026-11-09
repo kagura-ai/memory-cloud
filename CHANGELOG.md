@@ -4,6 +4,20 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.154.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.154.0) — 2026-11-09
+
+Operation history for team workspaces. Owners and admins of Pro and Max workspaces can review and search the important changes made in their workspace over the last 90 days.
+
+### Added
+- **Operation history** ([#2739](https://github.com/kagura-ai/memory-cloud/issues/2739)): Pro and Max workspaces, and custom plans that include the feature, record important changes to memories, contexts, members, credentials (API keys, OAuth clients and management grants), integrations, and Sleep runs. Each entry holds the time, the account and the credential or client used, a verified agent when there is one, how the change was made (web, API, MCP or system), the operation, its target, the affected member, the result, a count for bulk work, and the names of the changed fields. Memory contents, before/after values, secrets, reads and searches are never stored. Owners and admins open it under Workspace settings → Operation history (browser sign-in only), search actor names, IDs and field names, and filter by time, context, actor ID, agent, operation, target type and result. History of a private context is shown only to its creator; changes made with a shared credential identify the credential and its account, not the person. Free and Starter workspaces are not recorded; recording starts with this release and earlier activity is not backfilled.
+- **90-day retention** ([#2739](https://github.com/kagura-ai/memory-cloud/issues/2739)): entries older than 90 days are no longer shown and are deleted by a daily job. A workspace that moves to a plan without operation history keeps its entries until they expire, without access to them; returning to Pro or Max shows them again. There is no export. A per-workspace retention add-on (billing key `history_retention_days`, also settable on the admin plans page) can extend the period; it is not on sale yet.
+
+### Notes
+- Migrations `f33_2739_operation_history` (new history table) and `f34_2739_history_retention_addon` (a retention add-on column on workspaces and the add-on type check) are additive. No new environment variables.
+- A daily purge job (05:10 UTC) runs on the scheduler leader; the first entries expire 90 days after the deploy.
+- The account-erasure pseudonym re-key CLI now covers operation history.
+- The site's help pages and the revised Privacy Policy (effective 2026-11-10) are published after this release is deployed.
+
 ## [v0.153.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.153.0) — 2026-11-09
 
 Recall in the web UI and an opt-in related index. The Memories tab can widen a recall to 100 results, read older versions by their summaries and search from the Graph tab, and onboarding links to the plugin and skill setup guide. A Sleep-built, source-backed related index for bounded recall expansion ships turned off, to be measured locally first.
