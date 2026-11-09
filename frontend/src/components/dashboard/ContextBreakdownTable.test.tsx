@@ -63,7 +63,7 @@ const mockContextStats: ContextStatsResponse = {
     },
   ],
   total_contexts: 2,
-  workspace_totals: { memory_count: 300 },
+  workspace_totals: { memory_count: 300, active_users_week: 6 },
 };
 
 const ORIGINAL_URL = {
@@ -423,7 +423,7 @@ describe("ContextBreakdownTable", () => {
             },
           ],
           total_contexts: 1,
-          workspace_totals: { memory_count: 1 },
+          workspace_totals: { memory_count: 1, active_users_week: 0 },
         }}
       />,
     );
@@ -467,7 +467,7 @@ describe("ContextBreakdownTable", () => {
               },
             ],
             total_contexts: 1,
-            workspace_totals: { memory_count: 0 },
+            workspace_totals: { memory_count: 0, active_users_week: 0 },
           }}
         />,
       );

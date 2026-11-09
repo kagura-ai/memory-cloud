@@ -156,9 +156,15 @@ class WorkspaceTotals(BaseModel):
     """Workspace-wide totals.
 
     Issue #249: Summary totals for all contexts.
+
+    ``active_users_week`` is the number of distinct users over the same
+    7-day, context-scoped usage rows as the per-context counts (#2744); a
+    user active in several contexts is counted once, so it is not the sum
+    of the per-context values.
     """
 
     memory_count: int
+    active_users_week: int = 0
 
 
 class WorkspaceContextStatsResponse(BaseModel):

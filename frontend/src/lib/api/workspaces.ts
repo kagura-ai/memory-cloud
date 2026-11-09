@@ -113,6 +113,9 @@ export interface ContextStatsItem {
 
 export interface WorkspaceTotals {
   memory_count: number;
+  // #2744: distinct users over the same 7-day rows as the per-context
+  // counts (not their sum: a user active in several contexts counts once).
+  active_users_week: number;
 }
 
 // Dashboard context stat (workspace-level, distinct from Qdrant ContextStats in types/context.ts)

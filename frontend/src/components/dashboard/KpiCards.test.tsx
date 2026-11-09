@@ -35,7 +35,9 @@ const mockContextStats: ContextStatsResponse = {
     },
   ],
   total_contexts: 2,
-  workspace_totals: { memory_count: 300 },
+  // #2744: one user active in both contexts. The per-context distinct counts
+  // (3 and 4) do not add up; the backend sends the workspace's own count.
+  workspace_totals: { memory_count: 300, active_users_week: 6 },
 };
 
 describe("KpiCards", () => {
@@ -50,10 +52,11 @@ describe("KpiCards", () => {
 
     expect(screen.getByText("1,234")).toBeInTheDocument();
     expect(screen.getByText("5")).toBeInTheDocument();
-    // 50 + 150 = 200
+    // API calls add up across contexts: 50 + 150 = 200
     expect(screen.getByText("200")).toBeInTheDocument();
-    // 3 + 4 = 7
-    expect(screen.getByText("7")).toBeInTheDocument();
+    // Active users is the workspace total, not 3 + 4 (#2744)
+    expect(screen.getByText("6")).toBeInTheDocument();
+    expect(screen.queryByText("7")).toBeNull();
   });
 
   it("renders all 4 i18n labels", () => {

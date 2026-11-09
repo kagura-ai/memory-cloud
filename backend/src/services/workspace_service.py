@@ -1263,7 +1263,11 @@ class WorkspaceService:
             Dict with context-level statistics:
                 - contexts: List of context stats items
                 - total_contexts: Total number of contexts
-                - workspace_totals: Aggregate totals
+                - workspace_totals: Aggregate totals (``memory_count``, and
+                  ``active_users_week``: distinct users over the same usage
+                  rows as the per-context counts, not their sum)
+
+            The usage numbers cover 7 calendar days, today included.
         """
         # Query contexts with aggregated memory stats
         # Single Collection Migration: Use workspace_id/context_id instead of collection_name
@@ -1308,8 +1312,14 @@ class WorkspaceService:
         # Aggregate API calls, active users, and response times
         from datetime import timedelta
 
-        today = utcnow().date()
-        week_ago = today - timedelta(days=7)
+        # 7 calendar days: today and the 6 days before it (#2744).
+        window_start = utcnow().date() - timedelta(days=6)
+        usage_where = (
+            UsageStats.workspace_id == workspace_id,
+            UsageStats.date >= window_start,
+            UsageStats.context_id.isnot(None),
+            *(() if context_ids is None else (UsageStats.context_id.in_(context_ids),)),
+        )
 
         usage_stats_stmt = (
             select(
@@ -1318,12 +1328,7 @@ class WorkspaceService:
                 func.count(func.distinct(UsageStats.user_id)).label("active_users"),
                 func.avg(UsageStats.response_time_ms).label("avg_response_time"),
             )
-            .where(
-                UsageStats.workspace_id == workspace_id,
-                UsageStats.date >= week_ago,
-                UsageStats.context_id.isnot(None),
-                *(() if context_ids is None else (UsageStats.context_id.in_(context_ids),)),
-            )
+            .where(*usage_where)
             .group_by(UsageStats.context_id)
         )
         usage_result = await self.db.execute(usage_stats_stmt)
@@ -1335,6 +1340,13 @@ class WorkspaceService:
             }
             for row in usage_result.all()
         }
+
+        # A distinct count does not add up across contexts: a user active in
+        # several contexts is one active user of the workspace (#2744).
+        active_users_total = await self.db.execute(
+            select(func.count(func.distinct(UsageStats.user_id))).where(*usage_where)
+        )
+        active_users_week = int(active_users_total.scalar() or 0)
 
         # Build context stats list
         contexts = []
@@ -1373,6 +1385,7 @@ class WorkspaceService:
             "total_contexts": len(contexts),
             "workspace_totals": {
                 "memory_count": total_memories,
+                "active_users_week": active_users_week,
             },
         }
 

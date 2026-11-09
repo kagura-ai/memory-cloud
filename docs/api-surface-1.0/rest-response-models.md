@@ -1659,6 +1659,7 @@ Notes:
 ### WorkspaceTotals (BaseModel, L115)
 > Workspace-wide totals.
 - `memory_count: int` — required
+- `active_users_week: int` — optional (default `0`; distinct users over the same 7-day context-scoped rows as `ContextStatsItem.active_users_week`, not their sum, #2744)
 
 ### ContextStatsResponse (BaseModel, L124)
 > Response model for context statistics. (Collision resolved in #991 — this `workspaces.py` model was renamed `WorkspaceContextStatsResponse`; the differently-shaped `contexts.py` model keeps the canonical name.)
