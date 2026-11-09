@@ -18,13 +18,14 @@ counts below are about the rows the test itself creates.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import Text, cast, delete, func, select, text, update
+from sqlalchemy import Text, cast, delete, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
@@ -39,6 +40,7 @@ from models.erasure import (
     ErasureRequest,
 )
 from models.memory import Memory, MemoryRevision
+from models.operation_history import OperationHistory
 from models.vector_erasure import VectorErasureJob
 from services.account_erasure_service import AccountErasureService, _audit_salt
 from services.erasure_details import pseudonym_salt_fingerprint
@@ -221,6 +223,34 @@ async def subject(db_session: AsyncSession) -> AsyncIterator[dict[str, Any]]:
         ),
     ]
     db_session.add_all(audit)
+    # #2739: retained workspace history naming the subject (inserted directly:
+    # the writer records nothing for this Free workspace). A member target is
+    # the account id; a credential target is an opaque id that only looks like it.
+    history = {"member": uuid4(), "credential": uuid4()}
+    await db_session.execute(
+        insert(OperationHistory.__table__),
+        [
+            {
+                "id": event_id,
+                "workspace_id": workspace.id,
+                "context_id": context.id,
+                "context_private": True,
+                "context_owner_id": sub,
+                "occurred_at": utcnow().replace(tzinfo=UTC),
+                "actor_user_id": sub,
+                "subject_user_id": sub,
+                "principal_kind": "session",
+                "surface": "web",
+                "operation": f"{kind}.added" if kind == "member" else "credential.issued",
+                "target_type": kind,
+                "target_id": sub,
+                "outcome": "success",
+                "count": 1,
+                "changed_fields": [],
+            }
+            for kind, event_id in history.items()
+        ],
+    )
     await db_session.commit()
     world = {
         "sub": sub,
@@ -230,6 +260,7 @@ async def subject(db_session: AsyncSession) -> AsyncIterator[dict[str, Any]]:
         "authored": authored.id,
         "edited": edited.id,
         "audit": [row.id for row in audit],
+        "history": history,
         "requests": [],
     }
     yield world
@@ -249,6 +280,9 @@ async def _cleanup(db: AsyncSession, world: dict[str, Any]) -> None:
         )
     )
     await db.execute(delete(ErasureRequest).where(ErasureRequest.id.in_(world["requests"])))
+    await db.execute(
+        delete(OperationHistory).where(OperationHistory.workspace_id == world["workspace"])
+    )
     await db.execute(delete(Workspace).where(Workspace.id == world["workspace"]))
     # an account the test did not erase
     await db.execute(delete(User).where(User.user_id.in_([world["sub"], *world.get("subs", ())])))
@@ -342,6 +376,7 @@ async def _snapshot(db: AsyncSession, table: str) -> dict:
 
 
 _TABLES = (
+    "workspace_operation_history",
     "memories",
     "memory_revisions",
     "audit_logs",
@@ -380,6 +415,9 @@ async def test_after_the_rekey_the_old_salt_matches_no_row(
         "erasure_requests.initiated_by",
         "audit_logs.user_id",
         "audit_logs.user_metadata",
+        "workspace_operation_history.actor_user_id",
+        "workspace_operation_history.subject_user_id",
+        "workspace_operation_history.context_owner_id",
     } <= set(await _carriers(db_session, p_a))
     assert "audit_logs.resource" in await _carriers(db_session, p_a[:16])
     assert {"audit_logs.user_email", "audit_logs.resource"} <= set(await _carriers(db_session, e_a))
@@ -447,6 +485,28 @@ async def test_after_the_rekey_the_old_salt_matches_no_row(
     assert erasure_row.user_email == e_b
     assert erasure_row.resource == f"user_pseudonym:{p_b[:16]}"
     assert erasure_row.user_metadata["initiated_by"] == p_b
+    # #2739: the history rows follow, the member target included; the
+    # credential's opaque target id was never a pseudonym and stays as it was
+    events = {
+        e.id: e
+        for e in (
+            await db_session.execute(
+                select(OperationHistory)
+                .where(OperationHistory.id.in_(subject["history"].values()))
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    }
+    member, credential = (events[subject["history"][k]] for k in ("member", "credential"))
+    for event in (member, credential):
+        assert (event.actor_user_id, event.subject_user_id, event.context_owner_id) == (
+            p_b,
+            p_b,
+            p_b,
+        )
+    assert member.target_id == p_b
+    assert credential.target_id == sub
+    assert applied.columns["workspace_operation_history.target_id"] == 1
 
     # the re-run of today's erasure rules finds nothing to do under B
     with _salt(SALT_B):
