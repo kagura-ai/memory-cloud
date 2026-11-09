@@ -55,7 +55,8 @@ Create a local configuration file **outside the checkout**, for example:
     "correctness_drop": 0.0,
     "irrelevance_increase": 0.05,
     "latency_ratio": 1.25,
-    "tokens_ratio": 1.10
+    "tokens_ratio": 1.10,
+    "min_improvement": 0.05
   },
   "usd_per_million": {"embedding": 0.0, "input": 0.0, "output": 0.0}
 }
@@ -83,7 +84,9 @@ and remove the disposable database if an interrupted run leaves data behind.
 
 ## What is measured
 
-Only fictional source statements enter ingestion and Sleep. Questions,
+Only fictional source statements enter ingestion and Sleep, under opaque ids:
+the ingester tags each memory with its document id and tags reach the answer
+model with the evidence, so source labels stay in the runner. Questions,
 required-source labels and expected facts remain separate. Discovery uses the
 normal embedding/judge phase, followed by the related-index phase, once. The
 result is a single post-Sleep snapshot shared by both arms. Model IDs,
@@ -113,8 +116,19 @@ serialized response tokens, provider-reported online tokens, tool/provider
 calls, declared online cost, and retrieval/end-to-end p50/p95 latency. Sleep
 phase usage and cost are separate from online totals. Negative or inconclusive
 results are valid. No verdict enables the feature automatically.
-Each trial also counts related candidates actually added; no contribution
-cannot produce a promising verdict even when Sleep wrote index entries.
+Each trial records the related candidates the expansion added, how many of
+them reached the bounded evidence the model saw, and a digest of that
+evidence. Off/on trials of the same probe and repetition are paired: only a
+pair whose on-arm evidence holds an index extra and differs from the off arm
+credits the index, and a pair with identical evidence but a different score
+counts as answer-model noise. "promising-local-only" needs at least one
+changed pair and a coverage or correctness gain above `min_improvement` plus
+that noise rate; otherwise the result is inconclusive. Regression gates use
+serialized response tokens and retrieval and end-to-end p95 latency, and
+provider-reported tokens only when both arms report them
+(`provider_tokens_measured`). A failed or malformed answer is recorded on its
+trial (`answer_error`) and scores as wrong; a higher error rate on the on arm
+is a regression.
 Declared Sleep cost excludes ingestion and hardware and uses the same local
 input rate for standard, cached and cache-write tokens.
 
@@ -129,4 +143,5 @@ The first command uses mocks and pure protocol checks; it is **not** evidence
 of retrieval quality. The second uses `TEST_DATABASE_URL` and skips explicitly
 if PostgreSQL is unavailable (CI sets `REQUIRE_TEST_DATABASE=1`). A successful
 `--check` validates only the protocol; only a completed live run produces
-`results.json`. No live measurement is included in version control.
+`results.json`. Measured trials are appended to `trials.jsonl` as they finish,
+so an aborted run keeps them. No live measurement is included in version control.

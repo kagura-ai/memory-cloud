@@ -40,6 +40,19 @@ def digest(value) -> str:
     ).hexdigest()
 
 
+def opaque_documents() -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """Source texts under ids that reveal nothing.
+
+    The shared ingester tags every memory with its document id, and tags reach
+    the answer model with the evidence, so a source label there would tell it
+    which memory answers which probe. The label stays in the runner's map.
+    """
+    label_of = {
+        "src-" + hashlib.sha256(label.encode()).hexdigest()[:12]: label for label in SOURCES
+    }
+    return [(doc_id, SOURCES[label]) for doc_id, label in label_of.items()], label_of
+
+
 def percentile(values: list[float], q: float) -> float:
     ordered = sorted(values)
     return ordered[max(0, math.ceil(len(ordered) * q) - 1)]
@@ -74,6 +87,8 @@ def offline_usage(phases: list, rates: dict) -> dict:
 
 def score(probe: dict, retrieved: set[str], answer: dict, id_map: dict[str, str]) -> dict:
     required = set(probe["sources"])
+    if not isinstance(answer, dict):
+        answer = {}
     facts = answer.get("facts")
     citations = answer.get("source_ids")
 
@@ -117,6 +132,7 @@ def validate_config(config: dict, output: Path) -> dict:
         "irrelevance_increase",
         "latency_ratio",
         "tokens_ratio",
+        "min_improvement",
     ):
         if (
             key not in config["tolerances"]
@@ -214,7 +230,9 @@ def aggregate(rows: list[dict]) -> dict:
                 "tool_calls",
                 "embedding_calls",
                 "answer_calls",
+                "answer_errors",
                 "extra_candidates",
+                "extras_in_evidence",
             )
         }
         for key in ("retrieval_ms", "end_to_end_ms"):
@@ -225,24 +243,60 @@ def aggregate(rows: list[dict]) -> dict:
     return result
 
 
-def verdict(metrics: dict, tolerances: dict, indexed: int) -> str:
+def pair_summary(rows: list[dict]) -> dict:
+    """Pair each off trial with its on trial (same probe and repetition).
+
+    Only a pair whose on-arm evidence holds an index extra AND differs from
+    the off arm can credit the index. A pair with identical evidence but a
+    different score measures answer-model noise.
+    """
+    arms: dict[tuple, dict[str, dict]] = {}
+    for row in rows:
+        arms.setdefault((row["probe"], row["repetition"]), {})[row["arm"]] = row
+    pairs = [pair for pair in arms.values() if {"off", "on"} <= pair.keys()]
+    changed = flips = 0
+    for pair in pairs:
+        off, on = pair["off"], pair["on"]
+        if off["evidence_sha256"] != on["evidence_sha256"]:
+            changed += int(on["extras_in_evidence"] > 0)
+        elif (off["grounded_correct"], off["required_source_coverage"]) != (
+            on["grounded_correct"],
+            on["required_source_coverage"],
+        ):
+            flips += 1
+    return {"total": len(pairs), "evidence_changed": changed, "same_evidence_flips": flips}
+
+
+def verdict(metrics: dict, tolerances: dict, pairs: dict) -> dict:
     off, on = metrics["off"], metrics["on"]
+    # Provider usage may be absent (local endpoints); zero is not measured.
+    provider = off["online_reported_tokens"] > 0 and on["online_reported_tokens"] > 0
+    noise = pairs["same_evidence_flips"] / pairs["total"] if pairs["total"] else 1.0
+    report = {"provider_tokens_measured": provider, "pairs": pairs, "noise_rate": noise}
     if (
         on["required_source_coverage"]
         < off["required_source_coverage"] - tolerances["coverage_drop"]
         or on["grounded_correct"] < off["grounded_correct"] - tolerances["correctness_drop"]
+        or on["answer_errors"] > off["answer_errors"] + tolerances["correctness_drop"]
         or on["irrelevant_evidence"]
         > off["irrelevant_evidence"] + tolerances["irrelevance_increase"]
         or on["end_to_end_ms"]["p95"] > off["end_to_end_ms"]["p95"] * tolerances["latency_ratio"]
-        or on["online_reported_tokens"] > off["online_reported_tokens"] * tolerances["tokens_ratio"]
+        or on["retrieval_ms"]["p95"] > off["retrieval_ms"]["p95"] * tolerances["latency_ratio"]
+        or on["response_tokens"] > off["response_tokens"] * tolerances["tokens_ratio"]
+        or (
+            provider
+            and on["online_reported_tokens"]
+            > off["online_reported_tokens"] * tolerances["tokens_ratio"]
+        )
     ):
-        return "regression"
-    if not indexed or (
-        on["required_source_coverage"] <= off["required_source_coverage"]
-        and on["grounded_correct"] <= off["grounded_correct"]
-    ):
-        return "inconclusive"
-    return "promising-local-only"
+        return {**report, "verdict": "regression"}
+    gain = max(
+        on["required_source_coverage"] - off["required_source_coverage"],
+        on["grounded_correct"] - off["grounded_correct"],
+    )
+    if not pairs["evidence_changed"] or gain <= tolerances["min_improvement"] + noise:
+        return {**report, "verdict": "inconclusive"}
+    return {**report, "verdict": "promising-local-only"}
 
 
 async def run(config: dict, output: Path) -> dict:
@@ -280,14 +334,16 @@ async def run(config: dict, output: Path) -> dict:
                 dimensions, get_collection_name(model, dimensions)
             )
             # No question, expected answer or relevance label enters ingestion.
+            documents, label_of = opaque_documents()
             corpus = Corpus(
                 meta={},
                 documents=tuple(
-                    Document(id=key, source="memory", text=value) for key, value in SOURCES.items()
+                    Document(id=doc_id, source="memory", text=text) for doc_id, text in documents
                 ),
                 queries=(),
             )
             await _ingest_corpus(svc, corpus, owner, ctx.id, ws.id, ids)
+            ids.update({mid: label_of[doc_id] for mid, doc_id in ids.items()})
             source_ids = {label: UUID(mid) for mid, label in ids.items()}
             db.add(
                 NeuralMemoryEdge(
@@ -347,7 +403,7 @@ async def run(config: dict, output: Path) -> dict:
             }
             snapshot = await ranking_snapshot(db, ctx.id)
             rows = []
-            usage = {"tokens": 0, "calls": 0, "extra_candidates": 0}
+            usage = {"tokens": 0, "calls": 0, "extra_candidates": 0, "extra_ids": set()}
             original_embed = EmbeddingService.embed_with_usage
 
             async def embed(service, *args, _original=original_embed, _usage=usage, **kwargs):
@@ -363,6 +419,7 @@ async def run(config: dict, output: Path) -> dict:
             async def measured_expand(*args, _usage=usage, **kwargs):
                 result = await expand_recall(*args, **kwargs)
                 _usage["extra_candidates"] += len(result[0])
+                _usage["extra_ids"].update(str(hit["id"]) for hit in result[0])
                 return result
 
             with (
@@ -379,7 +436,7 @@ async def run(config: dict, output: Path) -> dict:
                                 raise RuntimeError(
                                     "ranking state drifted; stop instead of comparing unequal snapshots"
                                 )
-                            usage.update(tokens=0, calls=0, extra_candidates=0)
+                            usage.update(tokens=0, calls=0, extra_candidates=0, extra_ids=set())
                             start = time.perf_counter()
                             with flag("RECALL_RELATED_INDEX_ENABLED", enabled):
                                 response = await svc.recall(
@@ -392,6 +449,7 @@ async def run(config: dict, output: Path) -> dict:
                                     owner,
                                     ctx.id,
                                     ws.id,
+                                    related_index=True,
                                 )
                             envelope = _bound_recall_envelope(
                                 {
@@ -405,25 +463,29 @@ async def run(config: dict, output: Path) -> dict:
                             )
                             serialized = json.dumps(envelope, ensure_ascii=False)
                             retrieval_ms = (time.perf_counter() - start) * 1000
-                            answer = await llm.complete_json(
-                                owner,
-                                json.dumps(
-                                    {
-                                        "question": probe["query"],
-                                        "fields": probe["fields"],
-                                        "evidence": envelope,
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                                SYSTEM,
-                                context_id=str(ctx.id),
-                                workspace_id=str(ws.id),
-                                provider="self_hosted",
-                                model=config["answer_model"],
-                                temperature=0,
-                                max_tokens=512,
-                                max_attempts=1,
-                            )
+                            answer, answer_error = None, None
+                            try:
+                                answer = await llm.complete_json(
+                                    owner,
+                                    json.dumps(
+                                        {
+                                            "question": probe["query"],
+                                            "fields": probe["fields"],
+                                            "evidence": envelope,
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                    SYSTEM,
+                                    context_id=str(ctx.id),
+                                    workspace_id=str(ws.id),
+                                    provider="self_hosted",
+                                    model=config["answer_model"],
+                                    temperature=0,
+                                    max_tokens=512,
+                                    max_attempts=1,
+                                )
+                            except Exception as exc:  # noqa: BLE001 - recorded per trial
+                                answer_error = type(exc).__name__
                             elapsed = (time.perf_counter() - start) * 1000
                             retrieved = {
                                 ids.get(str(row["memory_id"]), "unknown")
@@ -433,30 +495,43 @@ async def run(config: dict, output: Path) -> dict:
                                 "arm": "on" if enabled else "off",
                                 "probe": probe["id"],
                                 "repetition": repetition,
-                                **score(probe, retrieved, answer.parsed, ids),
+                                **score(probe, retrieved, getattr(answer, "parsed", None), ids),
                                 "response_tokens": len(tokenizer.encode(serialized).ids),
-                                "online_reported_tokens": usage["tokens"] + answer.total_tokens,
+                                "online_reported_tokens": usage["tokens"]
+                                + getattr(answer, "total_tokens", 0),
                                 "embedding_calls": usage["calls"],
                                 "answer_calls": 1,
                                 "tool_calls": 1,
                                 "extra_candidates": usage["extra_candidates"],
+                                # Extras that reached the evidence the model saw.
+                                "extras_in_evidence": len(
+                                    usage["extra_ids"]
+                                    & {str(r["memory_id"]) for r in envelope["results"]}
+                                ),
+                                "evidence_sha256": digest(envelope),
+                                "answer_errors": int(answer_error is not None),
+                                "answer_error": answer_error,
                                 "online_usd": declared_cost(
                                     usage["tokens"],
-                                    answer.input_tokens
-                                    + answer.cached_input_tokens
-                                    + answer.cache_write_tokens,
-                                    answer.output_tokens,
+                                    getattr(answer, "input_tokens", 0)
+                                    + getattr(answer, "cached_input_tokens", 0)
+                                    + getattr(answer, "cache_write_tokens", 0),
+                                    getattr(answer, "output_tokens", 0),
                                     config["usd_per_million"],
                                 ),
                                 "retrieval_ms": retrieval_ms,
                                 "end_to_end_ms": elapsed,
                                 "retrieved": sorted(retrieved),
-                                "answer": answer.parsed,
+                                "answer": getattr(answer, "parsed", None),
                             }
                             if await ranking_snapshot(db, ctx.id) != snapshot:
                                 raise RuntimeError("ranking state changed during trial")
                             if repetition >= 0:
                                 rows.append(row)
+                                with (output / "trials.jsonl").open("a", encoding="utf-8") as log:
+                                    log.write(
+                                        json.dumps(row, ensure_ascii=False, default=str) + "\n"
+                                    )
             metrics = aggregate(rows)
             result = {
                 "manifest": config,
@@ -464,9 +539,7 @@ async def run(config: dict, output: Path) -> dict:
                 "offline_sleep": offline,
                 "metrics": metrics,
                 "trials": rows,
-                "verdict": verdict(
-                    metrics, config["tolerances"], sum(row["extra_candidates"] for row in rows)
-                ),
+                **verdict(metrics, config["tolerances"], pair_summary(rows)),
                 "limitations": "Local read-only experiment, not deployment latency. Provider-reported online tokens may omit embedding usage; zero is not proof of zero work. Exact-fact scoring is intentionally conservative. Never enables rollout.",
             }
             (output / "results.json").write_text(

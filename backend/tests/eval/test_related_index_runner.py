@@ -9,6 +9,8 @@ from tests.eval.related_index_runner import (
     aggregate,
     local_only,
     offline_usage,
+    opaque_documents,
+    pair_summary,
     percentile,
     score,
     trial_order,
@@ -51,6 +53,8 @@ def test_source_split_and_metrics_are_deterministic():
         "embedding_calls": 1,
         "answer_calls": 1,
         "extra_candidates": 1,
+        "extras_in_evidence": 1,
+        "answer_errors": 0,
         "retrieval_ms": 5,
         "end_to_end_ms": 10,
     }
@@ -61,10 +65,13 @@ def test_source_split_and_metrics_are_deterministic():
         "irrelevance_increase": 0,
         "latency_ratio": 1.2,
         "tokens_ratio": 1.2,
+        "min_improvement": 0,
     }
-    assert verdict(metrics, tolerances, 0) == "inconclusive"
+    none_changed = {"total": 1, "evidence_changed": 0, "same_evidence_flips": 0}
+    assert verdict(metrics, tolerances, none_changed)["verdict"] == "inconclusive"
     metrics["on"]["grounded_correct"] = 0
-    assert verdict(metrics, tolerances, 1) == "regression"
+    changed = {**none_changed, "evidence_changed": 1}
+    assert verdict(metrics, tolerances, changed)["verdict"] == "regression"
 
 
 def test_live_runner_refuses_remote_databases(monkeypatch):
@@ -120,6 +127,7 @@ def test_protocol_records_hashes_and_rejects_unbalanced_or_git_output(tmp_path):
             "irrelevance_increase": 0,
             "latency_ratio": 1.1,
             "tokens_ratio": 1.1,
+            "min_improvement": 0.05,
         },
         "usd_per_million": {"embedding": 0, "input": 0, "output": 0},
     }
@@ -136,3 +144,94 @@ def test_protocol_records_hashes_and_rejects_unbalanced_or_git_output(tmp_path):
     (tmp_path / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
     with pytest.raises(ValueError, match="outside every git checkout"):
         validate_config(config, tmp_path / "output")
+
+
+def test_ingested_documents_never_carry_source_labels():
+    """Tags reach the answer model with the evidence: labels must stay out."""
+    documents, label_of = opaque_documents()
+    assert sorted(label_of.values()) == sorted(SOURCES)
+    for doc_id, text in documents:
+        assert SOURCES[label_of[doc_id]] == text
+        assert not any(label in doc_id for label in SOURCES)
+        assert not any(value in doc_id for p in PROBES for value in p["sources"])
+
+
+def _trial(arm, probe="p", repetition=0, evidence="e", extras=0, correct=1, coverage=1.0):
+    return {
+        "arm": arm,
+        "probe": probe,
+        "repetition": repetition,
+        "evidence_sha256": evidence,
+        "extras_in_evidence": extras,
+        "grounded_correct": correct,
+        "required_source_coverage": coverage,
+    }
+
+
+def test_pairs_credit_only_evidence_the_index_changed_and_count_flips():
+    rows = [
+        # Same evidence, different answer: answer-model noise, not the index.
+        _trial("off", "a", evidence="x", correct=0),
+        _trial("on", "a", evidence="x", correct=1),
+        # The index put an extra into the on-arm evidence.
+        _trial("off", "b", evidence="y"),
+        _trial("on", "b", evidence="z", extras=1),
+        # Added to the pool but cut before the page: no evidence change.
+        _trial("off", "c", evidence="w"),
+        _trial("on", "c", evidence="w", extras=0),
+    ]
+    assert pair_summary(rows) == {"total": 3, "evidence_changed": 1, "same_evidence_flips": 1}
+
+
+def _metrics(**on_changes):
+    base = {
+        "required_source_coverage": 0.5,
+        "irrelevant_evidence": 0.2,
+        "grounded_correct": 0.5,
+        "response_tokens": 100,
+        "online_reported_tokens": 0,
+        "answer_errors": 0,
+        "retrieval_ms": {"p50": 5, "p95": 10},
+        "end_to_end_ms": {"p50": 50, "p95": 100},
+    }
+    return {"off": dict(base), "on": {**base, **on_changes}}
+
+
+TOLERANCES = {
+    "coverage_drop": 0,
+    "correctness_drop": 0,
+    "irrelevance_increase": 0.05,
+    "latency_ratio": 1.25,
+    "tokens_ratio": 1.10,
+    "min_improvement": 0.05,
+}
+CHANGED = {"total": 20, "evidence_changed": 10, "same_evidence_flips": 0}
+
+
+def test_gain_must_beat_the_declared_minimum_plus_observed_noise():
+    assert verdict(_metrics(grounded_correct=0.6), TOLERANCES, CHANGED)["verdict"] == (
+        "promising-local-only"
+    )
+    assert verdict(_metrics(grounded_correct=0.54), TOLERANCES, CHANGED)["verdict"] == (
+        "inconclusive"
+    )
+    noisy = {**CHANGED, "same_evidence_flips": 2}  # 10% flip rate
+    assert verdict(_metrics(grounded_correct=0.6), TOLERANCES, noisy)["verdict"] == ("inconclusive")
+
+
+def test_response_tokens_and_retrieval_latency_gate_without_provider_usage():
+    tripled = verdict(_metrics(grounded_correct=0.9, response_tokens=300), TOLERANCES, CHANGED)
+    assert tripled["verdict"] == "regression"
+    assert tripled["provider_tokens_measured"] is False
+    slow = _metrics(grounded_correct=0.9, retrieval_ms={"p50": 5, "p95": 50})
+    assert verdict(slow, TOLERANCES, CHANGED)["verdict"] == "regression"
+
+
+def test_more_answer_errors_on_the_on_arm_is_a_regression():
+    assert verdict(_metrics(answer_errors=0.1), TOLERANCES, CHANGED)["verdict"] == "regression"
+
+
+def test_non_object_answers_score_as_wrong_instead_of_crashing():
+    probe = PROBES[1]
+    for parsed in (None, [], "text"):
+        assert score(probe, set(probe["sources"]), parsed, {})["grounded_correct"] == 0
