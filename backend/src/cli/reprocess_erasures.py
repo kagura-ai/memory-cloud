@@ -45,10 +45,12 @@ stripped state, so each is handled like a key whose value an earlier
 erasure removed — taken out of the live ``details`` by the same restore
 (a new version, one ``erasure`` revision row listing its digest) and
 counted (``would remove ambiguous details keys`` / ``removed ambiguous
-details keys``). A second run with the flag finds nothing. The live value
-and the new row's prior lose such a key; the older priors that carried it
-(edits after the survivor's, before the re-run) keep it, as without the
-flag. The live erasure never removes them.
+details keys``). A second run with the flag finds nothing. Such a key
+leaves the live value and the new row's prior, and its value leaves every
+older prior that carried it (the edits from the survivor's on), as the
+erased member's keys do (counted in ``details_stripped``, digests listed):
+a rebuilt version no longer shows it and counts it in
+``partially_unavailable_fields``. The live erasure never removes them.
 
     python -m src.cli.reprocess_erasures --all --revert-ambiguous          # plan the removal
     python -m src.cli.reprocess_erasures --all --revert-ambiguous --apply  # remove them

@@ -373,7 +373,42 @@ def test_revert_ambiguous_joins_the_subjects_own_keys_in_one_revert() -> None:
     assert (revert.result, revert.prior, revert.from_version) == ({"a": 1}, {"a": 1}, 3)
     assert revert.erased_keys == tuple(sorted(details_key_digest(k, m) for k in ("s", "t")))
     assert plan.keys_ambiguous == 0
+    # the subject's edit carried the ambiguous ``s``: it leaves that prior too
+    assert default.strips == ()
+    assert plan.strips == (PriorStrip(40, ("s",), m),)
     rows, after = _apply(rows, {m: (live, AUTH)}, plan, subject=P_S, pseudonym=P_S)
+    for flag in (False, True):
+        again = plan_details_erasure(rows, after, P_S, revert_ambiguous=flag)
+        assert (again.reverts, again.strips, again.keys_ambiguous) == ((), (), 0)
+
+
+def test_revert_ambiguous_strips_the_removed_value_from_the_later_priors() -> None:
+    """#2389: the survivor's later edits carried the ambiguous ``s`` to the
+    live row; removing it live and leaving it in their priors would show it
+    again in a rebuilt version. It leaves every prior holding that value. An
+    ambiguous value a later edit replaced (``r``) is not removed live and
+    stays in the priors; the default strips nothing."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, P_S, {"a": 1}),
+        _edit(m, 3, B, erased=True),
+        _edit(m, 4, B, {"a": 1, "s": "x", "r": 1}),
+        _edit(m, 5, C, {"a": 2, "s": "x", "r": 1}),
+    ]
+    live = {"a": 2, "s": "x", "r": 2}
+    default = _plan(rows, live, P_S)
+    assert (default.reverts, default.strips, default.keys_ambiguous) == ((), (), 1)
+    plan = plan_details_erasure(rows, {m: (live, AUTH)}, P_S, revert_ambiguous=True)
+    assert plan.strips == (PriorStrip(40, ("s",), m), PriorStrip(50, ("s",), m))
+    (revert,) = plan.reverts
+    assert [r.key for r in revert.reverts] == ["s"]
+    assert (revert.result, revert.prior) == ({"a": 2, "r": 2}, {"a": 2, "r": 2})
+    rows, after = _apply(rows, {m: (live, AUTH)}, plan, subject=P_S, pseudonym=P_S)
+    assert [r.details for r in rows[2:]] == [
+        {"a": 1, "r": 1},
+        {"a": 2, "r": 1},
+        {"a": 2, "r": 2},
+    ]
     for flag in (False, True):
         again = plan_details_erasure(rows, after, P_S, revert_ambiguous=flag)
         assert (again.reverts, again.strips, again.keys_ambiguous) == ((), (), 0)

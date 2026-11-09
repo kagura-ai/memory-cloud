@@ -2180,7 +2180,10 @@ same restore (a new version and one `writer='erasure'` row whose prior lists
 the key's digest). The plan prints `would remove ambiguous details keys
 <request id>  N key(s)`, the apply `removed ambiguous details keys …`, and the
 audit row counts `details_keys_ambiguous_reverted`; a second run finds
-nothing. Older revision priors that carried such a key keep it. The live
+nothing. The key leaves the live value and, like the erased member's keys,
+every older revision prior that carried that value (counted in
+`details_stripped`, its digest listed), so a rebuilt version no
+longer shows it and counts it in `partially_unavailable_fields`. The live
 erasure never removes them.
 
 **Requests that failed after the Postgres step.** From v0.124.0, a request

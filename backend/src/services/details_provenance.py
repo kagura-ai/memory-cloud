@@ -52,8 +52,9 @@ Rules, per memory (``replay``):
   cannot tell. Ambiguous keys are kept and counted, never reverted: a
   survivor's write is never destroyed on a guess. Only an operator's
   ``reprocess_erasures --revert-ambiguous`` (#2389, ``revert_ambiguous``)
-  removes the live ones, as an unavailable key is removed: the value to go
-  back to is in the stripped state.
+  removes the live ones, as an unavailable key is removed (the value to go
+  back to is in the stripped state), and strips that value from every prior
+  that holds it, as the subject's keys are stripped.
 - **The subject's keys** are the live keys whose writer is the subject.
   Each goes back to the value it had right below the edit that wrote it,
   walking further down past every value an erased member (the subject or
@@ -324,8 +325,9 @@ class DetailsErasurePlan:
     Attributes:
         reverts: Memories whose live ``details`` holds a key of the subject's,
             in memory id order.
-        strips: Revision rows whose prior holds a key of the subject's, in
-            row id order.
+        strips: Revision rows whose prior holds a key of the subject's (or,
+            with ``revert_ambiguous``, the value of a live ambiguous key it
+            removes), in row id order.
         keys_ambiguous: Live keys kept because a stripped state below them
             may hold the subject's value (never reverted; 0 with
             ``revert_ambiguous``, which puts them in ``reverts``).
@@ -600,15 +602,22 @@ def _plan_memory(
     revert_ambiguous: bool = False,
 ) -> tuple[MemoryRevert | None, list[PriorStrip], int]:
     run = replay(edits, live, author, subject=subject, erased=erased)
+    live_writers = run.writers[-1] or {}
+    # #2389: with ``revert_ambiguous`` the live ambiguous keys go, and so does
+    # that same value (the same origin) from every prior that holds it, as
+    # the subject's keys do; an ambiguous value a later edit replaced is not
+    # removed live and stays in the priors
+    removed = {k: o for k, o in live_writers.items() if o.ambiguous and revert_ambiguous}
     strips = []
     for i, edit in enumerate(edits):
         mapping = run.writers[i]
         if mapping is None:
             continue
-        keys = tuple(sorted(k for k, o in mapping.items() if o.actor == subject))
+        keys = tuple(
+            sorted(k for k, o in mapping.items() if o.actor == subject or removed.get(k) == o)
+        )
         if keys:
             strips.append(PriorStrip(edit.id, keys, memory_id))
-    live_writers = run.writers[-1] or {}
     ambiguous = sorted(k for k, o in live_writers.items() if o.ambiguous)
     kept = 0 if revert_ambiguous else len(ambiguous)
     mine = sorted(k for k, o in live_writers.items() if o.actor == subject)
@@ -673,7 +682,8 @@ def plan_details_erasure(
         revert_ambiguous: Remove the live ambiguous keys too, as unavailable
             ones (#2389: ``reprocess_erasures --revert-ambiguous`` only; the
             live erasure keeps them). They join the reverts
-            (``KeyRevert.ambiguous``) and are no longer counted as kept.
+            (``KeyRevert.ambiguous``) and are no longer counted as kept, and
+            their values leave every prior that holds them (``strips``).
 
     Returns:
         The reverts (memory id order), the strips (row id order) and the
