@@ -78,6 +78,9 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # entity deletion); user_id/session_id/run_id/event_metadata
         # pseudonymized+scrubbed on erasure via the append-only carve-out.
         "memory_access_events",
+        # #2739: safe workspace mutation metadata, without memory contents or
+        # learned structure. Actor/subject identities are pseudonymized on erasure.
+        "workspace_operation_history",
         # rollback_session records (#2044) — control plumbing (which session
         # was rolled back, by whom, running counts); no memory text. Goes with
         # its context; principal/requester pseudonymized on erasure.
