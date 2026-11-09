@@ -2862,7 +2862,8 @@
         "addon": "アドオン",
         "usageEffective": "使用量 / 有効値",
         "connector": "コネクタ",
-        "memoriesPerDay": "メモリー作成数/日"
+        "memoriesPerDay": "メモリー作成数/日",
+        "historyRetention": "操作履歴の保持期間（日）"
       },
       "addonDialog": {
         "title": "アドオン編集",
@@ -2890,10 +2891,12 @@
         "featureWarning": {
           "title": "保存しましたが、現在のプランではこのアドオンは効果がありません",
           "connectorsFeatureMissing": "追加コネクタ枠を付与しましたが、このワークスペースのプランにはコネクタ機能がないため、新規コネクタの作成は引き続き拒否されます。コネクタ機能を含むプランへアップグレードすると枠が有効になります。",
+          "operationHistoryFeatureMissing": "操作履歴の保持期間を延長しましたが、このワークスペースのプランには操作履歴が含まれないため、まだ何も記録されません。操作履歴を含むプランになると延長分が適用されます。",
           "generic": "警告付きでアドオンを付与しました: {code}"
         },
         "connector": "コネクタ",
-        "memoriesPerDay": "メモリー作成数/日ボーナス"
+        "memoriesPerDay": "メモリー作成数/日ボーナス",
+        "historyRetention": "操作履歴の保持期間ボーナス（日）"
       },
       "spendCapDialog": {
         "title": "上限額を編集",

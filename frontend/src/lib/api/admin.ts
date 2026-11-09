@@ -364,6 +364,8 @@ export interface QuotaBreakdown {
   max_connectors: number;
   // #1975: tier base for the extra_memories_per_day addon.
   memories_per_day: number;
+  // #2739: operation history retention in days (90 on every tier) + the days add-on.
+  history_retention_days: number;
 }
 
 export interface WorkspaceQuotaDetail {
@@ -388,6 +390,7 @@ export interface WorkspaceQuotaDetail {
     sleep_contexts_bonus: number;
     connector_bonus: number;
     memories_per_day_bonus: number; // #1975
+    history_retention_days_bonus: number; // #2739, in days
   };
   effective: QuotaBreakdown;
   usage: { memories: number; contexts: number; members: number };
@@ -417,6 +420,7 @@ export interface UpdateAddonRequest {
   addon_sleep_contexts_bonus?: number;
   addon_connector_bonus?: number;
   addon_memories_per_day_bonus?: number; // #1975
+  addon_history_retention_days_bonus?: number; // #2739, in days (at most 3650)
 }
 
 /**

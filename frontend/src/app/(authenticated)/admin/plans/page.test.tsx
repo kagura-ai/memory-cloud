@@ -249,6 +249,7 @@ const QUOTA_DETAIL_PRO = {
     max_connectors: 10,
     max_resource_tokens: 30,
     memories_per_day: 2_000,
+    history_retention_days: 90,
   },
   addon: {
     memory_bonus: 10_000,
@@ -262,6 +263,7 @@ const QUOTA_DETAIL_PRO = {
     sleep_contexts_bonus: 0,
     connector_bonus: 0,
     memories_per_day_bonus: 0,
+    history_retention_days_bonus: 0,
   },
   effective: {
     memory_limit: 110_000,
@@ -276,6 +278,7 @@ const QUOTA_DETAIL_PRO = {
     max_connectors: 10,
     max_resource_tokens: 30,
     memories_per_day: 2_000,
+    history_retention_days: 90,
   },
   usage: { memories: 50_000, contexts: 5, members: 3 },
   spend_cap: null,
@@ -648,7 +651,7 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
     const saveButton = screen.getByText("admin.plans.addonDialog.save");
     fireEvent.click(saveButton);
 
-    // The PUT body must include all 11 addon_* fields so the backend's
+    // The PUT body must include all 12 addon_* fields so the backend's
     // no-touch contract (#665 review-fix #2) treats the request as
     // "send absolute values, no implicit deletes". The dialog is a
     // full-form submission, not a delta.
@@ -667,6 +670,7 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
       addon_sleep_contexts_bonus: 0,
       addon_connector_bonus: 0,
       addon_memories_per_day_bonus: 0,
+      addon_history_retention_days_bonus: 0,
     });
   });
 

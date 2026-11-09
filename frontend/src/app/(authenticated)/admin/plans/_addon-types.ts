@@ -35,7 +35,8 @@ export type AddonKey =
   | "storage"
   | "sleep"
   | "connector"
-  | "memoriesPerDay";
+  | "memoriesPerDay"
+  | "historyRetention";
 
 export type AddonValuesByKey = Record<AddonKey, number>;
 
@@ -172,6 +173,16 @@ export const ADDON_TYPES: readonly AddonTypeMeta[] = [
     addonField: "memories_per_day_bonus",
     updateField: "addon_memories_per_day_bonus",
   },
+  {
+    // #2739: days added to the 90-day operation history retention; +1 per unit.
+    // Inert on plans without operation history (the PUT warns, never refuses).
+    key: "historyRetention",
+    perUnit: 1,
+    unitSuffix: "",
+    baseField: "history_retention_days",
+    addonField: "history_retention_days_bonus",
+    updateField: "addon_history_retention_days_bonus",
+  },
 ];
 
 /**
@@ -206,6 +217,7 @@ export const EMPTY_ADDON_VALUES: AddonValuesByKey = {
   sleep: 0,
   connector: 0,
   memoriesPerDay: 0,
+  historyRetention: 0,
 };
 
 /**

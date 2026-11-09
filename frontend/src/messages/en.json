@@ -2862,7 +2862,8 @@
         "addon": "Addon",
         "usageEffective": "Usage / Effective",
         "connector": "Connectors",
-        "memoriesPerDay": "Memories Created/day"
+        "memoriesPerDay": "Memories Created/day",
+        "historyRetention": "Operation History Retention (days)"
       },
       "addonDialog": {
         "title": "Edit Addons",
@@ -2890,10 +2891,12 @@
         "featureWarning": {
           "title": "Saved, but this addon has no effect on the current plan",
           "connectorsFeatureMissing": "Extra connector seats were granted, but this workspace's plan lacks the connectors feature, so creating new connectors is still refused. The seats take effect once the workspace is upgraded to a plan that includes connectors.",
+          "operationHistoryFeatureMissing": "Extra history retention was granted, but this workspace's plan does not include operation history, so nothing is recorded yet. The extra days apply once the workspace is on a plan that includes it.",
           "generic": "Addon granted with a warning: {code}"
         },
         "connector": "Connectors",
-        "memoriesPerDay": "Memories Created/day Bonus"
+        "memoriesPerDay": "Memories Created/day Bonus",
+        "historyRetention": "Operation History Retention Bonus (days)"
       },
       "spendCapDialog": {
         "title": "Edit Spend Cap",
