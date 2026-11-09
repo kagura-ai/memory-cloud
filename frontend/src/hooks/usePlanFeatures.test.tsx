@@ -45,6 +45,7 @@ function tier(name: string, gates: Partial<PlanTierFeature>): PlanTierFeature {
     public_contexts: false,
     content_chunks: false,
     llm_selector: false,
+      operation_history: false,
     ...gates,
   };
 }
@@ -101,6 +102,7 @@ describe("planFeaturesFor (#1560)", () => {
       secret_store: false,
       content_chunks: false,
       llm_selector: false,
+      operation_history: false,
     });
     expect(planFeaturesFor(MATRIX, "promax")).toEqual({
       resources: false,
@@ -114,6 +116,7 @@ describe("planFeaturesFor (#1560)", () => {
       secret_store: false,
       content_chunks: false,
       llm_selector: false,
+      operation_history: false,
     });
     expect(planFeaturesFor(MATRIX, "free").secret_store).toBe(true);
   });
@@ -132,6 +135,7 @@ describe("planFeaturesFor (#1560)", () => {
       secret_store: false,
       content_chunks: false,
       llm_selector: false,
+      operation_history: false,
     };
     expect(planFeaturesFor(MATRIX, "enterprise")).toEqual(closed);
     expect(planFeaturesFor(MATRIX, undefined)).toEqual(closed);

@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import DBAPIError
 
+from models.resource import WorkspaceConnector
 from services.connector_provisioning import (
     ConnectorProvisioningService,
     validate_connector_idempotency_key,
@@ -263,7 +264,10 @@ class TestConnectorProvisioningService:
         assert result.plaintext_token == "kagura_resource_plain"
         assert result.token is token
         create_token.assert_awaited_once()
-        assert mock_db.add.call_args.args[0].resource_pk == resource_pk
+        assert any(
+            isinstance(call.args[0], WorkspaceConnector) and call.args[0].resource_pk == resource_pk
+            for call in mock_db.add.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_seat_lock_timeout_fails_closed_503(self, mock_db):
@@ -612,6 +616,7 @@ async def test_update_runtime_config_is_workspace_scoped_and_bumps_revision():
         id=connector_id,
         workspace_id=workspace_id,
         runtime_config={"vision_enabled": True},
+        context_id=None,
         config_version=7,
     )
     db = MagicMock()
@@ -658,6 +663,7 @@ async def test_update_runtime_config_null_clears_back_to_worker_defaults():
         id=connector_id,
         workspace_id=workspace_id,
         runtime_config={"vision_enabled": False},
+        context_id=None,
         config_version=3,
     )
     db = MagicMock()
@@ -717,6 +723,7 @@ async def test_update_runtime_config_survives_drifted_stored_document():
         id=uuid4(),
         workspace_id=uuid4(),
         runtime_config={"future_field": True, "buffer": {"max_len": 10**15}},
+        context_id=None,
         config_version=1,
     )
     db = MagicMock()
@@ -1126,6 +1133,7 @@ async def test_update_settings_repoint_context_binds_and_bumps():
     db = MagicMock()
     # First execute: context validation SELECT (found). Second: connector lock.
     db.execute = AsyncMock(side_effect=[_result(one=new_ctx), _result(one=conn)])
+    db.scalar = AsyncMock(return_value=new_ctx)
     db.flush = AsyncMock()
 
     with patch("services.connector_provisioning.logger.info") as log_info:

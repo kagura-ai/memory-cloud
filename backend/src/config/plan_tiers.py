@@ -311,7 +311,8 @@ PLAN_PROMAX = PlanTier(
     # setup_resource / resource-token creation, ``connectors`` gates
     # setup_connector, ``public_contexts`` gates set_public and bound public
     # keys. Lower tiers keep serving what they already have.
-    features=PLAN_PRO.features | {"resources", "connectors", "public_contexts"},
+    features=PLAN_PRO.features
+    | {"resources", "connectors", "public_contexts", "operation_history"},
 )
 
 # Plan tier registry. Insertion order IS the upgrade order (free → ... → promax):
@@ -353,6 +354,7 @@ def plan_at_least(plan_name: str | None, minimum: str) -> bool:
 # each entry actually does at runtime is declared in ``FEATURE_ENFORCEMENT``
 # below (#1648) — read the two together.
 FEATURE_MIN_PLANS: dict[str, str] = {
+    "operation_history": "promax",  # #2739: workspace mutation history (Max+).
     "api_keys": "free",
     "reranking": "basic",
     "oauth": "free",  # Free plan includes OAuth (updated from basic)
@@ -432,6 +434,11 @@ class FeatureGate:
 # apart. Changing a mode is a DOCUMENTATION change — add or remove the gate
 # in the same PR, never the label alone.
 FEATURE_ENFORCEMENT: dict[str, FeatureGate] = {
+    "operation_history": FeatureGate(
+        FeatureEnforcement.ENFORCED,
+        "api/routes/operation_history.py checks workspace entitlement on every read; "
+        "recording is independent of the plan.",
+    ),
     "api_keys": FeatureGate(
         FeatureEnforcement.ADVERTISED,
         "No gate: every tier may create API keys. Listed for the plan pages only.",

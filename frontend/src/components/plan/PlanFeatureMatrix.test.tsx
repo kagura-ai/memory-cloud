@@ -389,7 +389,7 @@ describe("PlanFeatureMatrix and deployment flags (#1654)", () => {
     const reranking = rowOf("planMatrix.row_reranking");
     expect(reranking.getAllByText("✓").length).toBe(3);
     expect(reranking.getAllByText("✗").length).toBe(1);
-    expect(rowLabels()).toHaveLength(22); // every row the matrix defines
+    expect(rowLabels()).toHaveLength(23); // every row the matrix defines
   });
 
   it("an older backend with no reranking flag keeps the row (#1580 polarity)", async () => {
@@ -429,7 +429,7 @@ describe("PlanFeatureMatrix and deployment flags (#1654)", () => {
     await screen.findByText("planMatrix.row_reranking");
 
     expect(screen.queryByText("planMatrix.row_managedLlm")).toBeNull();
-    expect(rowLabels()).toHaveLength(21);
+    expect(rowLabels()).toHaveLength(22);
   });
 
   it("a failed /system/info ({}) hides default-off rows and keeps the default-on reranker", async () => {
@@ -510,7 +510,7 @@ describe("PlanFeatureMatrix — every matrix x /system/info cell (#1654)", () =>
     }
     // The unflagged rows are the matrix as served, in every resolved cell.
     const listedRows = screen.getAllByRole("row").length - 1; // minus header
-    expect(listedRows).toBe(20 + Object.values(shown).filter(Boolean).length);
+    expect(listedRows).toBe(21 + Object.values(shown).filter(Boolean).length);
   });
 });
 

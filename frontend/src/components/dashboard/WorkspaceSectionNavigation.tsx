@@ -73,6 +73,11 @@ export function WorkspaceSectionNavigation() {
       href: "/workspace/settings/general",
       active: path.endsWith("/general"),
     },
+    {
+      label: "operationHistory",
+      href: "/workspace/settings/history",
+      active: path.endsWith("/history"),
+    },
   ];
 
   return (

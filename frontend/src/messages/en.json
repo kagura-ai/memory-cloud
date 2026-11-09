@@ -1470,7 +1470,8 @@
       "row_teamInvitations": "Team invitations",
       "row_connectorSeats": "Connector seats",
       "row_resources": "Resources (setup + tokens)",
-      "row_publicFeatures": "Public features"
+      "row_publicFeatures": "Public features",
+      "row_operationHistory": "Operation history"
     },
     "secretStore": {
       "title": "Secrets",
@@ -1953,7 +1954,8 @@
     "workspaceSettings": "General",
     "plan": "Plan",
     "providerKeys": "External API keys",
-    "connectedApps": "Connected apps"
+    "connectedApps": "Connected apps",
+    "operationHistory": "Operation history"
   },
   "integrationEntry": {
     "title": "Integrations",
@@ -4989,6 +4991,11 @@
         "label": "LLM result selection",
         "plural": "LLM result selection contexts",
         "singular": "LLM result selection context"
+      },
+      "operation_history": {
+        "label": "Operation history",
+        "plural": "Operation history",
+        "singular": "Operation history"
       }
     }
   },
@@ -5393,5 +5400,124 @@
     "fullMode": "All tools (full)",
     "ingestionHelp": "Adds the same five tools as the Data ingestion preset on Overview.",
     "fullHelp": "Enables every MCP tool, including resource tools."
+  },
+  "operationHistory": {
+    "title": "Operation history",
+    "description": "See who changed this workspace and what happened.",
+    "coverage": "Important changes recorded after this feature was enabled. Memory contents and secrets are not stored here. Read and search activity is excluded. Records remain after a downgrade; viewing requires Max or an eligible higher plan. Deleted targets may no longer open.",
+    "filters": "Filter operation history",
+    "query": "Search names, IDs or changes",
+    "context_id": "Context ID",
+    "actor": "Actor",
+    "agent_id": "Agent ID",
+    "since": "From (local time)",
+    "until": "Until (local time)",
+    "operation": "Operation",
+    "target_type": "Target type",
+    "outcome": "Result",
+    "all": "All",
+    "apply": "Apply filters",
+    "reset": "Clear filters",
+    "refresh": "Refresh",
+    "error": "Could not load operation history. Try refreshing.",
+    "empty": "No matching operations",
+    "emptyDescription": "Clear the filters or check again after an important change. Earlier activity is not backfilled.",
+    "total": "{count, plural, one {# operation} other {# operations}}",
+    "time": "Time",
+    "target": "Target",
+    "system": "System",
+    "unknown": "Unknown actor",
+    "agent": "Agent: {id}",
+    "count": "{count, plural, one {# item} other {# items}}",
+    "multiple": "Multiple targets",
+    "context": "Context: {id}",
+    "details": "Open details",
+    "previous": "Previous",
+    "next": "Next",
+    "page": "Page {page}",
+    "types": {
+      "memory": "Memory",
+      "context": "Context",
+      "member": "Member",
+      "credential": "Credential",
+      "integration": "Integration",
+      "sleep": "Sleep"
+    },
+    "outcomes": {
+      "success": "Success",
+      "failure": "Failed",
+      "denied": "Denied"
+    },
+    "surfaces": {
+      "web": "Web",
+      "api": "API",
+      "mcp": "MCP",
+      "system": "System",
+      "unknown": "Unknown source"
+    },
+    "operations": {
+      "memory": {
+        "created": "Memory created",
+        "updated": "Memory updated",
+        "deleted": "Memories deleted",
+        "restored": "Memory restored"
+      },
+      "context": {
+        "created": "Context created",
+        "updated": "Context settings changed",
+        "deleted": "Context deleted",
+        "restored": "Context restored"
+      },
+      "member": {
+        "invited": "Member invited",
+        "added": "Member joined",
+        "removed": "Member removed",
+        "role_changed": "Member role changed",
+        "access_changed": "Member access changed"
+      },
+      "credential": {
+        "issued": "Credential issued or rotated",
+        "revoked": "Credential revoked"
+      },
+      "integration": {
+        "created": "Integration created",
+        "updated": "Integration updated",
+        "deleted": "Integration deleted"
+      },
+      "sleep": {
+        "completed": "Sleep completed",
+        "failed": "Sleep failed",
+        "undo": "Sleep changes undone"
+      }
+    },
+    "fields": {
+      "content": "Content",
+      "summary": "Summary",
+      "details": "Details",
+      "tags": "Tags",
+      "type": "Type",
+      "importance": "Importance",
+      "scope": "Scope",
+      "is_private": "Privacy",
+      "is_public": "Public sharing",
+      "is_locked": "Lock",
+      "name": "Name",
+      "display_name": "Display name",
+      "description": "Description",
+      "usage_guide": "Usage guide",
+      "resource_id": "Resource ID",
+      "sleep_mode": "Sleep mode",
+      "role": "Role",
+      "allowed_context_ids": "Context access",
+      "runtime": "Runtime settings",
+      "settings": "Settings",
+      "credential": "Credential",
+      "pinned": "Pinned state",
+      "expires_at": "Expiration",
+      "event_start": "Event start",
+      "event_end": "Event end",
+      "delivery_mode": "Delivery mode"
+    },
+    "accountAttribution": "Authenticated account; a shared credential does not identify the individual caller."
   }
 }

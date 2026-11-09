@@ -1,0 +1,105 @@
+"""Read-only workspace operation history for Max+ owners/admins (#2739)."""
+
+from datetime import datetime
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from auth.dependencies import SessionUser
+from config.plan_tiers import has_feature
+from db.base import get_db
+from models.api_base import TZAwareBaseModel
+from models.auth import Workspace
+from services.operation_history import read_history
+from services.operation_history_writer import OPERATIONS
+from services.permission_service import PermissionService
+from utils.exceptions import FeatureNotAvailableError, ValidationError
+
+router = APIRouter(tags=["workspace-operation-history"])
+
+
+class OperationHistoryItem(TZAwareBaseModel):
+    id: UUID
+    occurred_at: datetime
+    context_id: UUID | None
+    actor_user_id: str | None
+    actor_name: str | None
+    subject_user_id: str | None
+    agent_id: UUID | None
+    surface: str
+    operation: str
+    target_type: str
+    target_id: str | None
+    outcome: str
+    count: int
+    changed_fields: list[str]
+
+
+class OperationHistoryPage(TZAwareBaseModel):
+    items: list[OperationHistoryItem]
+    total: int
+    next_cursor: str | None
+
+
+@router.get("/workspaces/{workspace_id}/operation-history", response_model=OperationHistoryPage)
+async def get_operation_history(
+    workspace_id: UUID,
+    user: SessionUser,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    query: str = Query("", max_length=120),
+    limit: int = Query(30, ge=1, le=100),
+    cursor: str | None = Query(None, max_length=512),
+    context_id: UUID | None = None,
+    actor: str | None = Query(None, max_length=255),
+    agent_id: UUID | None = None,
+    operation: str | None = Query(None, max_length=40),
+    target_type: str | None = Query(
+        None, pattern="^(memory|context|member|credential|integration|sleep)$"
+    ),
+    outcome: str | None = Query(None, pattern="^(success|failure|denied)$"),
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> OperationHistoryPage:
+    """Search safe identifiers/actor names/field names, never memory or credential contents.
+
+    Authorization and the selected workspace's effective entitlement are checked
+    on every request, including pagination and requests after a downgrade.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    await PermissionService(db).check_workspace_admin(user["user_id"], workspace_id)
+    plan = await db.scalar(
+        select(Workspace.plan_name).where(
+            Workspace.id == workspace_id,
+            Workspace.deleted_at.is_(None),
+        )
+    )
+    if not plan or not has_feature(plan, "operation_history"):
+        raise FeatureNotAvailableError.for_feature(plan or "free", "operation_history")
+    if operation is not None and operation not in OPERATIONS:
+        raise ValidationError("Invalid operation", field="operation")
+    for value in (since, until):
+        if value is not None and value.tzinfo is None:
+            raise ValidationError("Time filters require a timezone", field="since")
+    if since and until and since > until:
+        raise ValidationError("Start must not be after end", field="since")
+    return OperationHistoryPage(
+        **await read_history(
+            db,
+            workspace_id=workspace_id,
+            user_id=user["user_id"],
+            limit=limit,
+            query=query,
+            cursor=cursor,
+            context_id=context_id,
+            actor=actor,
+            agent_id=agent_id,
+            operation=operation,
+            target_type=target_type,
+            outcome=outcome,
+            since=since,
+            until=until,
+        )
+    )

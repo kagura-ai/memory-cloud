@@ -433,6 +433,17 @@ async def undo_merge_action(
             },
         )
         db.add(undo_action)
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            db,
+            operation="sleep.undo",
+            actor_user_id=acting_user_id,
+            workspace_id=report.workspace_id,
+            context_id=report.context_id,
+            target_id=report.id,
+            event_key=f"sleep-undo:{action.id}",
+        )
         await db.commit()
         logger.info(
             "dedup_shadow_merge_undone",
@@ -528,6 +539,17 @@ async def undo_merge_action(
         },
     )
     db.add(undo_action)
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation="sleep.undo",
+        actor_user_id=acting_user_id,
+        workspace_id=report.workspace_id,
+        context_id=report.context_id,
+        target_id=report.id,
+        event_key=f"sleep-undo:{action.id}",
+    )
     await db.commit()
 
     logger.info(

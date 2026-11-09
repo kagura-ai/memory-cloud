@@ -317,6 +317,7 @@ class ContextService:
         create_collection: bool = True,
         embedding_model: str | None = None,  # DEPRECATED: Use EMBEDDING_MODEL env var
         is_private: bool = True,
+        actor_user_id: str | None = None,
     ) -> Context:
         """Create a new context for workspace.
 
@@ -461,6 +462,16 @@ class ContextService:
             is_private=is_private,
         )
         self.db.add(context)
+        await self.db.flush()
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="context.created",
+            actor_user_id=actor_user_id if actor_user_id is not None else created_by,
+            context=context,
+            target_id=context.id,
+        )
         await self.db.commit()
         await self.db.refresh(context)
 
@@ -846,6 +857,18 @@ class ContextService:
             NotFoundException: If context not found
         """
         context = await self.get_context(user_id, context_id)
+        history_fields = (
+            "is_private",
+            "is_public",
+            "is_locked",
+            "display_name",
+            "description",
+            "summary",
+            "usage_guide",
+            "resource_id",
+            "sleep_mode",
+        )
+        before_history = {field: getattr(context, field) for field in history_fields}
 
         if display_name is not None:
             context.display_name = display_name
@@ -924,6 +947,21 @@ class ContextService:
             )
             context.sleep_mode = sleep_mode
 
+        from services.operation_history_writer import record_operation
+
+        changed = [
+            field for field in history_fields if before_history[field] != getattr(context, field)
+        ]
+        if changed:
+            record_operation(
+                self.db,
+                operation="context.updated",
+                actor_user_id=user_id,
+                context=context,
+                target_id=context.id,
+                changed_fields=changed,
+                private_before=before_history["is_private"],
+            )
         await self.db.commit()
         await self.db.refresh(context)
 
@@ -1737,6 +1775,17 @@ class ContextService:
         """Drop the context from member whitelists, cancel its running analyses,
         and stamp the row deleted (``deleted_at`` / ``deleted_by``). Does not commit.
         """
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="context.deleted",
+            actor_user_id=actor,
+            context=context,
+            target_id=context.id,
+            at=deleted_at,
+            event_key=f"context-delete:{context.id}:{deleted_at!s}",
+        )
         # Remove context from all members' allowed_context_ids
         await self.db.execute(
             update(WorkspaceMember)

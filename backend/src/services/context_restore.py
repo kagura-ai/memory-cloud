@@ -437,6 +437,15 @@ async def restore_deleted_context(
             },
         )
     )
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation="context.restored",
+        actor_user_id=actor_id,
+        context=context,
+        target_id=context.id,
+    )
     try:
         await db.commit()
     except IntegrityError as e:

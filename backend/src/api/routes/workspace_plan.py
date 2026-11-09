@@ -154,6 +154,7 @@ class PlanTierFeature(BaseModel):
     public_contexts: bool
     content_chunks: bool  # Issue #2103
     llm_selector: bool  # Issue #2144
+    operation_history: bool = False  # #2739: workspace history read entitlement.
     # Issue #1648: what each feature name actually DOES at runtime —
     # ``"enforced"`` (a check refuses the request), ``"conditional"`` (a check
     # refuses only where a deployment setting turns it on), ``"degrades"`` (the
@@ -330,6 +331,7 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         public_contexts=has_public,
         content_chunks=has_chunks,
         llm_selector=has_selector,
+        operation_history="operation_history" in tier.features,
         # #1648: the same tier-independent map on every row — see the field's
         # comment. A UI may hard-disable a control only for an ``enforced``
         # feature; ``conditional``, ``degrades`` and ``advertised`` rows have

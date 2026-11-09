@@ -2792,6 +2792,11 @@ class AccountErasureService:
         counts["memory_access_events_pseudonymized"] = await self._erase_memory_access_events(
             user_id
         )
+        from services.operation_history_erasure import erase_operation_history
+
+        counts["operation_history_pseudonymized"] = await erase_operation_history(
+            self.db, user_id, self._pseudonym(user_id)
+        )
 
         # #2287: the subject's audit rows, inside this transaction — a failure
         # rolls the whole erasure back with it (the user row stays, the request

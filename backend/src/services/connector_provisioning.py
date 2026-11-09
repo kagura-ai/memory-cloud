@@ -416,6 +416,7 @@ class ConnectorProvisioningService:
                 resource_pk=resource_pk,
                 workspace_id=workspace_id,
                 description=f"Connector token for {connector_type}:{connector.id}",
+                actor_user_id=user_id,
                 quota_events_per_hour=quota_events_per_hour,
                 created_by=user_id,
             )
@@ -460,6 +461,17 @@ class ConnectorProvisioningService:
             runtime_fields=runtime_fields,
         )
 
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="integration.created",
+            actor_user_id=user_id,
+            workspace_id=workspace_id,
+            context_id=connector.context_id,
+            target_id=connector.id,
+            event_key=f"connector-created:{connector.id}",
+        )
         return ConnectorProvisioningResult(
             connector=connector,
             token=token_record,
@@ -514,6 +526,7 @@ class ConnectorProvisioningService:
                 workspace_id=workspace.id,
                 name=auto_create_context_name,
                 created_by=workspace.owner_user_id,
+                actor_user_id=user_id,
             )
             return context.id
         return None
@@ -1044,7 +1057,9 @@ class ConnectorProvisioningService:
         )
         return result.scalar_one_or_none()
 
-    async def delete_connector(self, workspace_id: UUID, connector_id: UUID) -> bool:
+    async def delete_connector(
+        self, workspace_id: UUID, connector_id: UUID, *, actor_user_id: str | None = None
+    ) -> bool:
         """Delete a connector: drop its resource, and with it its KMC write key.
 
         Deletes the owning ``resources`` row; CASCADE removes the connector,
@@ -1071,6 +1086,17 @@ class ConnectorProvisioningService:
         if connector is None:
             return False
 
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="integration.deleted",
+            actor_user_id=actor_user_id,
+            workspace_id=workspace_id,
+            context_id=connector.context_id,
+            target_id=connector.id,
+            event_key=f"connector-deleted:{connector.id}",
+        )
         # #1952: only unlinked rows — linked ones go with the cascade below.
         await self.db.execute(
             update(APIKey)
@@ -1138,6 +1164,18 @@ class ConnectorProvisioningService:
             if _runtime_field(previous, key) != _runtime_field(effective_new, key)
         )
         connector.runtime_config = normalized_runtime_config
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="integration.updated",
+            actor_user_id=user_id,
+            workspace_id=workspace_id,
+            context_id=connector.context_id,
+            target_id=connector.id,
+            changed_fields=["runtime"],
+            event_key=f"connector-update:{connector.id}:{connector.config_version + 1}",
+        )
         connector.config_version += 1
         await self.db.flush()
 
@@ -1367,8 +1405,37 @@ class ConnectorProvisioningService:
             connector.set_llm_config(llm_config)
         if locale is not _UNSET:
             connector.locale = locale
+        from services.operation_history_writer import record_operation
+
+        # Keep the old boundary on a rebind/unbind; otherwise a private
+        # connector's actor and identifier would become workspace-wide.
+        history_context_id = connector.context_id
         if context_id is not _UNSET:
             connector.context_id = context_id
+            if context_id is not None and context_id != history_context_id:
+                from models.auth import Context
+
+                history_context_id = await self.db.scalar(
+                    select(Context.id)
+                    .where(
+                        Context.workspace_id == workspace_id,
+                        Context.id.in_([history_context_id, context_id]),
+                    )
+                    .order_by(Context.is_private.desc())
+                    .limit(1)
+                )
+        if history_context_id is None:
+            history_context_id = connector.context_id
+        record_operation(
+            self.db,
+            operation="integration.updated",
+            actor_user_id=user_id,
+            workspace_id=workspace_id,
+            context_id=history_context_id,
+            target_id=connector.id,
+            changed_fields=["settings"],
+            event_key=f"connector-update:{connector.id}:{connector.config_version + 1}",
+        )
         connector.config_version += 1
         await self.db.flush()
 

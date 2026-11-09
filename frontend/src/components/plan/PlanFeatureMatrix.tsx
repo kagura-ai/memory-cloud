@@ -103,6 +103,7 @@ const ROWS: MatrixRow[] = [
   { key: "resources", field: "resources", kind: "bool" },
   { key: "connectors", field: "connectors", kind: "bool", beta: true },
   { key: "publicFeatures", field: "public_contexts", kind: "bool" },
+  { key: "operationHistory", field: "operation_history", kind: "bool" },
 ];
 
 /**

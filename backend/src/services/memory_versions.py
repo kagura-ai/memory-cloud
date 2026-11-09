@@ -235,6 +235,25 @@ def record_revision(
     stamp_writer(memory, prov)
     if memory.context_id is None:
         return
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation={
+            "created": "memory.created",
+            "updated": "memory.updated",
+            "forgotten": "memory.deleted",
+            "restored": "memory.restored",
+        }[kind],
+        actor_user_id=actor_user_id,
+        context_id=memory.context_id,
+        target_id=memory.id,
+        at=at,
+        agent_id=prov.agent_id,
+        changed_fields=list(prior or {}),
+        surface="system" if writer in {"erasure", "sleep"} else None,
+        event_key=f"memory:{memory.id}:{memory.version}:{kind}:{at!s}",
+    )
     db.add(
         MemoryRevision(
             **revision_values(

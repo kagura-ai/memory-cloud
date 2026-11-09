@@ -351,6 +351,7 @@ async def create_resource_token(
             description=data.description,
             quota_events_per_hour=data.quota_events_per_hour,
             created_by=user_id,
+            actor_user_id=user_id,
         )
 
         # Commit transaction (Issue #242: Fix - tokens not persisted)
@@ -527,7 +528,7 @@ async def revoke_resource_token(
             )
 
         # Revoke token (soft delete)
-        await manager.revoke_token(target_token.id)
+        await manager.revoke_token(target_token.id, actor_user_id=user_id)
         await db.commit()
 
         logger.info(

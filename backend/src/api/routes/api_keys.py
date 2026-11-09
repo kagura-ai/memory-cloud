@@ -60,6 +60,21 @@ async def get_api_key_manager(db: AsyncSession = Depends(get_db)) -> APIKeyManag
 # ============================================================================
 
 
+def _record_workspace_key(db: AsyncSession, key: APIKey, actor: str, operation: str) -> None:
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation=operation,
+        actor_user_id=actor,
+        workspace_id=key.workspace_id,
+        context_id=key.bound_context_id,
+        target_id=key.public_id,
+        surface="web",
+        event_key=f"api-key:{key.id}:{operation}",
+    )
+
+
 class APIKeyCreate(BaseModel):
     """Request model for creating an API key."""
 
@@ -347,6 +362,8 @@ async def delete_api_key(
                 detail="API key not found or not owned by you",
             )
 
+        if target_key.revoked_at is None:
+            _record_workspace_key(db, target_key, user_id, "credential.revoked")
         await db.delete(target_key)
         await db.commit()
 
@@ -392,6 +409,9 @@ async def revoke_api_key(
             )
 
         # Revoke the key
+        if target_key.revoked_at is not None:
+            return
+        _record_workspace_key(db, target_key, user_id, "credential.revoked")
         target_key.revoked_at = utcnow()
         await db.commit()
 
@@ -576,6 +596,8 @@ async def regenerate_api_key(
             default_context_id=key_default_context_id,
         )
 
+        _record_workspace_key(db, old_key, user_id, "credential.revoked")
+        _record_workspace_key(db, new_key, user_id, "credential.issued")
         await db.commit()
         schedule_security_notification(
             background_tasks,

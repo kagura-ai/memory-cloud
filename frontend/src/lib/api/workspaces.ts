@@ -492,6 +492,7 @@ export interface PlanTierFeature {
   resources: boolean;
   connectors: boolean;
   public_contexts: boolean;
+  operation_history?: boolean;
   // #2103: content chunk vectors. Enforced only where the deployment sets
   // CONTENT_CHUNKS_REQUIRE_PLAN (`feature_enforcement.content_chunks` is
   // "conditional"), so no control hard-disables on this column alone.

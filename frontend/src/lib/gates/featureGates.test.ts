@@ -460,7 +460,7 @@ describe("normalizeGate — fields", () => {
 
 describe("GATE_KEYS / QUOTA_TYPE_TO_GATE_KEY", () => {
   it("lists every gate key exactly once", () => {
-    expect(GATE_KEYS).toHaveLength(25);
+    expect(GATE_KEYS).toHaveLength(26);
     expect(new Set(GATE_KEYS).size).toBe(GATE_KEYS.length);
   });
 
@@ -1461,13 +1461,14 @@ describe("GATE_SPECS key space (#1645)", () => {
     "secret_store",
     "content_chunks",
     "llm_selector",
+    "operation_history",
   ];
 
   it("every plan GateKey is a server feature key", () => {
     const planKeys = GATE_KEYS.filter(
       (k) => "matrix" in GATE_SPECS[k] && k !== "sleep_reports",
     );
-    expect(planKeys.length).toBe(10);
+    expect(planKeys.length).toBe(11);
     for (const key of planKeys) {
       expect(SERVER_KNOWN_FEATURES).toContain(key);
     }
@@ -1501,6 +1502,7 @@ describe("GATE_SPECS key space (#1645)", () => {
         "api_calls",
         "content_chunks",
         "llm_selector",
+    "operation_history",
       ].sort(),
     );
   });

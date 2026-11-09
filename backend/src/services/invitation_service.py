@@ -250,6 +250,16 @@ class InvitationService:
 
         self.db.add(invitation)
         await self.db.flush()
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="member.invited",
+            actor_user_id=invited_by,
+            workspace_id=workspace_id,
+            target_id=str(invitation.id),
+            event_key=f"invitation:{invitation.id}",
+        )
 
         logger.info(
             f"Created invitation for workspace={workspace_id} role={role} "
@@ -512,6 +522,16 @@ class InvitationService:
         )
 
         self.db.add(member)
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="member.added",
+            actor_user_id=user_id,
+            workspace_id=invitation.workspace_id,
+            subject_user_id=user_id,
+            event_key=f"invitation-accepted:{invitation.id}",
+        )
 
         # Mark invitation as accepted
         invitation.accepted_at = utcnow()

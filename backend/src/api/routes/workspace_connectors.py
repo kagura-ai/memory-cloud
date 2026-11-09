@@ -966,7 +966,7 @@ async def delete_workspace_connector(
         )
     try:
         deleted = await ConnectorProvisioningService(db).delete_connector(
-            workspace_id, connector_id
+            workspace_id, connector_id, actor_user_id=admin["user_id"]
         )
         if not deleted:
             await db.rollback()

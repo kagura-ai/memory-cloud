@@ -1061,6 +1061,19 @@ async def handle_rollback_sleep_run(
                 )
 
             ctx_id = report.context_id
+            from services.operation_history_writer import record_operation
+
+            record_operation(
+                db,
+                operation="sleep.undo",
+                actor_user_id=user_id,
+                workspace_id=report.workspace_id,
+                context_id=ctx_id,
+                target_id=report.id,
+                outcome="failure" if has_errors else "success",
+                surface="mcp",
+                event_key=f"sleep-rollback:{report.id}",
+            )
             await _log_tool_usage(
                 db,
                 user_id,

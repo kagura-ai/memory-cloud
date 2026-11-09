@@ -1470,7 +1470,8 @@
       "row_teamInvitations": "チーム招待",
       "row_connectorSeats": "コネクタ数",
       "row_resources": "リソース（セットアップ + トークン）",
-      "row_publicFeatures": "公開機能"
+      "row_publicFeatures": "公開機能",
+      "row_operationHistory": "操作履歴"
     },
     "secretStore": {
       "title": "シークレット",
@@ -1953,7 +1954,8 @@
     "workspaceSettings": "基本情報",
     "plan": "プラン",
     "providerKeys": "外部APIキー",
-    "connectedApps": "接続済みアプリ"
+    "connectedApps": "接続済みアプリ",
+    "operationHistory": "操作履歴"
   },
   "integrationEntry": {
     "title": "インテグレーション",
@@ -4989,6 +4991,11 @@
         "label": "LLM による結果の選別",
         "plural": "LLM 選別のコンテキスト",
         "singular": "LLM 選別のコンテキスト"
+      },
+      "operation_history": {
+        "label": "操作履歴",
+        "plural": "操作履歴",
+        "singular": "操作履歴"
       }
     }
   },
@@ -5393,5 +5400,124 @@
     "fullMode": "すべてのツール（full）",
     "ingestionHelp": "概要の「データ取り込み」と同じ5つのツールを追加します。",
     "fullHelp": "リソースを含む、すべてのMCPツールを有効にします。"
+  },
+  "operationHistory": {
+    "title": "操作履歴",
+    "description": "このワークスペースで誰が何を変更したかを確認します。",
+    "coverage": "この機能の導入後に記録された重要な変更を表示します。メモリ本文や秘密情報、閲覧・検索操作は記録しません。ダウングレード後も記録は保持され、閲覧には Max 以上の対象プランが必要です。削除済みの対象は詳細を開けない場合があります。",
+    "filters": "操作履歴の絞り込み",
+    "query": "名前・ID・変更内容を検索",
+    "context_id": "コンテキスト ID",
+    "actor": "実行者",
+    "agent_id": "エージェント ID",
+    "since": "開始日時（現地時間）",
+    "until": "終了日時（現地時間）",
+    "operation": "操作",
+    "target_type": "対象の種類",
+    "outcome": "結果",
+    "all": "すべて",
+    "apply": "絞り込む",
+    "reset": "条件をクリア",
+    "refresh": "再読み込み",
+    "error": "操作履歴を読み込めませんでした。再読み込みしてください。",
+    "empty": "条件に一致する操作はありません",
+    "emptyDescription": "条件をクリアするか、変更操作後に確認してください。導入前の履歴は補完されません。",
+    "total": "{count} 件の操作",
+    "time": "日時",
+    "target": "対象",
+    "system": "システム",
+    "unknown": "実行者不明",
+    "agent": "エージェント: {id}",
+    "count": "{count} 件",
+    "multiple": "複数の対象",
+    "context": "コンテキスト: {id}",
+    "details": "詳細を開く",
+    "previous": "前へ",
+    "next": "次へ",
+    "page": "{page} ページ",
+    "types": {
+      "memory": "メモリ",
+      "context": "コンテキスト",
+      "member": "メンバー",
+      "credential": "認証情報",
+      "integration": "連携設定",
+      "sleep": "Sleep"
+    },
+    "outcomes": {
+      "success": "成功",
+      "failure": "失敗",
+      "denied": "拒否"
+    },
+    "surfaces": {
+      "web": "Web",
+      "api": "API",
+      "mcp": "MCP",
+      "system": "システム",
+      "unknown": "経路不明"
+    },
+    "operations": {
+      "memory": {
+        "created": "メモリを作成",
+        "updated": "メモリを更新",
+        "deleted": "メモリを削除",
+        "restored": "メモリを復元"
+      },
+      "context": {
+        "created": "コンテキストを作成",
+        "updated": "コンテキスト設定を変更",
+        "deleted": "コンテキストを削除",
+        "restored": "コンテキストを復元"
+      },
+      "member": {
+        "invited": "メンバーを招待",
+        "added": "メンバーが参加",
+        "removed": "メンバーを削除",
+        "role_changed": "メンバー権限を変更",
+        "access_changed": "メンバーのアクセス範囲を変更"
+      },
+      "credential": {
+        "issued": "認証情報を発行・更新",
+        "revoked": "認証情報を失効"
+      },
+      "integration": {
+        "created": "連携設定を作成",
+        "updated": "連携設定を更新",
+        "deleted": "連携設定を削除"
+      },
+      "sleep": {
+        "completed": "Sleep が完了",
+        "failed": "Sleep が失敗",
+        "undo": "Sleep の変更を取り消し"
+      }
+    },
+    "fields": {
+      "content": "本文",
+      "summary": "要約",
+      "details": "詳細",
+      "tags": "タグ",
+      "type": "種別",
+      "importance": "重要度",
+      "scope": "スコープ",
+      "is_private": "公開範囲",
+      "is_public": "一般公開",
+      "is_locked": "ロック",
+      "name": "名前",
+      "display_name": "表示名",
+      "description": "説明",
+      "usage_guide": "利用ガイド",
+      "resource_id": "リソース ID",
+      "sleep_mode": "Sleep モード",
+      "role": "権限",
+      "allowed_context_ids": "コンテキストへのアクセス",
+      "runtime": "実行設定",
+      "settings": "設定",
+      "credential": "認証情報",
+      "pinned": "ピン留め",
+      "expires_at": "有効期限",
+      "event_start": "イベント開始",
+      "event_end": "イベント終了",
+      "delivery_mode": "配信モード"
+    },
+    "accountAttribution": "認証に使われたアカウントです。共有認証情報では、実際に操作した個人は特定できません。"
   }
 }

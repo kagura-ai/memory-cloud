@@ -170,6 +170,10 @@ export interface GateSpec {
  * vocabulary. A test pins the matrix-bearing subset to the server's names.
  */
 export const GATE_SPECS = {
+  operation_history: {
+    matrix: { field: "operation_history", kind: "boolean" },
+    role: WorkspaceRole.Admin,
+  },
   // ── plan create-gates already on the matrix (#1551 / #1560 / #1583) ──
   resources: {
     matrix: { field: "resources", kind: "boolean" },
