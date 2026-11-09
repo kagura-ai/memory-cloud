@@ -124,9 +124,13 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
   // effective request its rows answer, so loading is derived, not stored.
   const [searchMode, setSearchMode] = useState<SearchMode>(recallOnly ? "recall" : "text");
   const [includeSuperseded, setIncludeSuperseded] = useState(false);
-  const [recallRequest, setRecallRequest] = useState<{ query: string; k: number; scopeKey: string } | null>(
-    null,
-  );
+  // `grow`: set only by "show more"; a refresh or filter reset clears it.
+  const [recallRequest, setRecallRequest] = useState<{
+    query: string;
+    k: number;
+    scopeKey: string;
+    grow?: boolean;
+  } | null>(null);
   const [recallOutcome, setRecallOutcome] = useState<{
     request: object;
     scope: string;
@@ -138,7 +142,8 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
   // Re-run the submitted recall after an edit / delete / accepted supersede
   // (no-op before one).
   const refreshRecall = useCallback(() => {
-    setRecallRequest((r) => (r ? { ...r } : r));
+    // Not a "show more": the refreshed page must not show pre-refresh rows.
+    setRecallRequest((r) => (r ? { ...r, grow: false } : r));
   }, []);
 
   const dialog = useMemoryDetailDialog({
@@ -315,7 +320,7 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
   const scopeKey = JSON.stringify([contextId, selectedTags, includeSuperseded]);
   if (recallRequest && recallRequest.scopeKey !== scopeKey) {
     // Reset when filters change, including when returning to an earlier filter set.
-    setRecallRequest({ ...recallRequest, k: RECALL_K, scopeKey });
+    setRecallRequest({ ...recallRequest, k: RECALL_K, scopeKey, grow: false });
   }
   const recallK = recallRequest?.scopeKey === scopeKey ? recallRequest.k : RECALL_K;
   const recallParams = useMemo(
@@ -410,6 +415,7 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
   // page stays (busy) and so does its button, so focus and scroll stay put.
   const recallGrowing =
     recallLoading &&
+    recallRequest?.grow === true &&
     recallParams !== null &&
     recallOutcome !== null &&
     recallOutcome.error === null &&
@@ -426,14 +432,18 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
   // A page shorter than k: the ranking ran out (the fold and shadowing run
   // on the pool before the top-k cut). With a k-sized pool (neural off) a
   // fold can still shorten it, so the hint only says how many are shown.
+  // While a larger page loads the button stays (aria-disabled), including
+  // the last step to MAX_RECALL_K.
   const canLoadMore =
-    recallK < MAX_RECALL_K && (recallGrowing || recallResults.length >= recallK);
+    recallGrowing || (recallK < MAX_RECALL_K && recallResults.length >= recallK);
   const loadMoreClickedRef = useRef(false);
   const limitHintRef = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
     // The button the user just pressed is gone (the ranking ran out or hit
-    // the maximum): keep keyboard focus next to it instead of on <body>.
-    if (!canLoadMore && loadMoreClickedRef.current) limitHintRef.current?.focus();
+    // the maximum) and focus fell to <body>: keep it next to the button.
+    // Focus the user moved elsewhere meanwhile stays where it is.
+    const focusLost = !document.activeElement || document.activeElement === document.body;
+    if (!canLoadMore && loadMoreClickedRef.current && focusLost) limitHintRef.current?.focus();
     loadMoreClickedRef.current = false;
     // Runs when a page lands (a new outcome) or the button's availability changes.
   }, [canLoadMore, recallOutcome]);
@@ -728,7 +738,12 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
                   onClick={() => {
                     if (recallGrowing) return;
                     loadMoreClickedRef.current = true;
-                    setRecallRequest({ ...recallRequest, k: Math.min(recallK + RECALL_K, MAX_RECALL_K), scopeKey });
+                    setRecallRequest({
+                      ...recallRequest,
+                      k: Math.min(recallK + RECALL_K, MAX_RECALL_K),
+                      scopeKey,
+                      grow: true,
+                    });
                   }}
                 >
                   {recallGrowing && <InlineSpinner className="mr-2" />}

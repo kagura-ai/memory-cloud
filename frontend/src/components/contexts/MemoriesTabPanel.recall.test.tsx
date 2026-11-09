@@ -424,6 +424,93 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByText("limitHintAll:25")));
   });
 
+  it("keeps the button and focus on the last step to 100", async () => {
+    mockRecallMemories.mockResolvedValueOnce({ results: fullPage(20, "Ranking 20") });
+    await enterRecallMode();
+    submitQuery("deploy");
+    await screen.findByText("Ranking 20");
+    for (const k of [40, 60, 80]) {
+      mockRecallMemories.mockResolvedValueOnce({ results: fullPage(k, `Ranking ${k}`) });
+      fireEvent.click(screen.getByRole("button", { name: "loadMore" }));
+      await screen.findByText(`Ranking ${k}`);
+    }
+    let resolve!: (value: unknown) => void;
+    mockRecallMemories.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const button = screen.getByRole("button", { name: "loadMore" });
+    button.focus();
+    fireEvent.click(button);
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenLastCalledWith(expect.objectContaining({ k: 100 })));
+    expect(screen.getByRole("button", { name: "loadMore" })).toBe(button);
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(document.activeElement).toBe(button);
+    // The hint describes the page on screen while the larger one loads.
+    expect(screen.getByText("limitHint:80")).toBeInTheDocument();
+    await act(async () => resolve({ results: fullPage(100, "Ranking 100") }));
+    expect(await screen.findByText("Ranking 100")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "loadMore" })).not.toBeInTheDocument();
+    expect(screen.getByText("limitHintMax:100")).toBeInTheDocument();
+  });
+
+  it("does not keep pre-refresh rows when a refresh lands during show more", async () => {
+    mockRecallMemories.mockResolvedValueOnce({ results: fullPage(20, "First page") });
+    await enterRecallMode();
+    submitQuery("deploy");
+    await screen.findByText("First page");
+    mockRecallMemories.mockReturnValue(new Promise(() => {}));
+    fireEvent.click(screen.getByRole("button", { name: "loadMore" }));
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenCalledTimes(2));
+    const newest = {
+      memory_id: NEWEST,
+      summary: "First page",
+      context_summary: null,
+      content: "body",
+      details: null,
+      type: "fact",
+      scope: "persistent",
+      importance: 0.6,
+      tags: [],
+      context: null,
+      created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-01T00:00:00Z",
+      client: "api",
+    };
+    mockReferenceMemory.mockResolvedValueOnce({
+      ...newest,
+      supersede_candidate: {
+        memory_id: OLDER,
+        summary: "Deploy target is region A",
+        similarity: 0.93,
+        detected_at: "2026-10-01T00:00:00Z",
+        acceptance: { allowed: true },
+      },
+    });
+    mockUpdateMemoryById.mockResolvedValueOnce({ ...newest, supersede_candidate: null });
+    // Rows stay usable during show more: accept a supersede from one.
+    fireEvent.click(screen.getAllByRole("button", { name: "view" })[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "supersede.confirm" }));
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenCalledTimes(3));
+    expect(mockRecallMemories).toHaveBeenLastCalledWith(expect.objectContaining({ k: 40 }));
+    // The refresh is not a show more: rows from before the accept are gone
+    // (the detail dialog still shows the accepted memory's own summary).
+    await waitFor(() => expect(screen.queryByText("First page row 1")).not.toBeInTheDocument());
+    expect(screen.getByText("loading")).toBeInTheDocument();
+  });
+
+  it("leaves focus where the user moved it when the ranking runs out", async () => {
+    mockRecallMemories.mockResolvedValueOnce({ results: fullPage(20, "First page") });
+    await enterRecallMode();
+    submitQuery("deploy");
+    await screen.findByText("First page");
+    let resolve!: (value: unknown) => void;
+    mockRecallMemories.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    fireEvent.click(screen.getByRole("button", { name: "loadMore" }));
+    const search = screen.getByRole("searchbox", { name: "search.label" });
+    search.focus();
+    await act(async () => resolve({ results: fullPage(25, "Last page") }));
+    await screen.findByText("Last page");
+    expect(document.activeElement).toBe(search);
+  });
+
   it("offers no show more when the first page is not full", async () => {
     await enterRecallMode();
     submitQuery("deploy");
