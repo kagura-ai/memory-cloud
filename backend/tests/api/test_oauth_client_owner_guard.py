@@ -100,6 +100,7 @@ def _make_client(owner_id: str | None) -> SimpleNamespace:
         scope="openid",
         token_endpoint_auth_method="client_secret_post",
         owner_id=owner_id,
+        workspace_id=None,  # a personal client without a workspace records no history
         provider="custom",
         created_at=utcnow(),
         hidden_at=None,

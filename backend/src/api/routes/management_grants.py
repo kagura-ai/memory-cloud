@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import timedelta
-from uuid import UUID
+from typing import Any
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy import select
@@ -28,6 +29,27 @@ router = APIRouter(
     tags=["resource-management-grants"],
     route_class=BoundedManagementRoute,
 )
+
+
+def record_grant(db: AsyncSession, grant: Any, actor_user_id: str, operation: str) -> None:
+    """Queue operation history for a grant's issue or revocation (#2739).
+
+    The grant is a delegated credential: its id is the target and its
+    delegated context sets the privacy boundary. One event per grant and
+    operation (event key), so a replayed revocation adds nothing.
+    """
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation=operation,
+        actor_user_id=actor_user_id,
+        workspace_id=grant.workspace_id,
+        context_id=grant.context_id,
+        target_id=grant.id,
+        changed_fields=["credential"],
+        event_key=f"management-grant:{grant.id}:{operation}",
+    )
 
 
 def metadata(grant: ManagementGrant) -> dict:
@@ -78,6 +100,7 @@ async def create_grant(
         raise ConflictError("Approved schema required")
     secret = "kagura_mgmt_" + secrets.token_urlsafe(32)
     grant = ManagementGrant(
+        id=uuid4(),  # known before the INSERT, for its history event
         workspace_id=workspace_id,
         resource_pk=resource.id,
         context_id=body.context_id,
@@ -95,6 +118,7 @@ async def create_grant(
     )
     await current_binding(db, grant)
     db.add(grant)
+    record_grant(db, grant, user_id, "credential.issued")
     await db.commit()
     await db.refresh(grant)
     response.headers["Cache-Control"] = "no-store"
@@ -137,5 +161,7 @@ async def revoke_grant(
     ).scalar_one_or_none()
     if grant is None:
         raise NotFoundException("Management grant")
-    grant.revoked_at = grant.revoked_at or utcnow()
+    if grant.revoked_at is None:
+        grant.revoked_at = utcnow()
+        record_grant(db, grant, owner[0], "credential.revoked")
     await db.commit()

@@ -464,6 +464,33 @@ def get_current_user_id(request: Request) -> str:
     return user_id
 
 
+def _record_client_history(
+    db_session: Any,
+    client: OAuth2Client,
+    actor_user_id: str,
+    operation: str,
+    changed_fields: list[str],
+) -> None:
+    """Queue operation history for a workspace-scoped OAuth client (#2739).
+
+    A client without a workspace (a global or DCR client) has no workspace
+    history. Only field NAMES are recorded, never the client's name or URIs.
+    """
+    if client.workspace_id is None:
+        return
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db_session,
+        operation=operation,
+        actor_user_id=actor_user_id,
+        workspace_id=UUID(str(client.workspace_id)),
+        subject_user_id=client.owner_id,
+        target_id=client.client_id,
+        changed_fields=changed_fields,
+    )
+
+
 # ============================================================================
 # OAuth2 Client Management Endpoints
 # ============================================================================
@@ -631,6 +658,7 @@ async def create_oauth2_client(
             )
 
             db_session.add(client)
+            _record_client_history(db_session, client, user_id, "credential.issued", ["credential"])
             db_session.commit()
             db_session.refresh(client)
             schedule_security_notification(
@@ -1316,18 +1344,25 @@ async def update_oauth2_client(
             if client.owner_id is None or client.owner_id != current_user_id:
                 raise AuthorizationError(message="You are not allowed to modify this client")
 
-            # Update fields
-            if data.client_name is not None:
-                client.client_name = data.client_name
-
-            if data.redirect_uris is not None:
-                client.redirect_uris = data.redirect_uris
-
-            if data.scope is not None:
-                client.scope = data.scope
-
-            if data.token_endpoint_auth_method is not None:
-                client.token_endpoint_auth_method = data.token_endpoint_auth_method
+            # Update fields; history names the fields that actually changed.
+            changed: list[str] = []
+            for attribute, field, value in (
+                ("client_name", "name", data.client_name),
+                ("redirect_uris", "redirect_uris", data.redirect_uris),
+                ("scope", "scope", data.scope),
+                (
+                    "token_endpoint_auth_method",
+                    "token_endpoint_auth_method",
+                    data.token_endpoint_auth_method,
+                ),
+            ):
+                if value is not None and getattr(client, attribute) != value:
+                    setattr(client, attribute, value)
+                    changed.append(field)
+            if changed:
+                _record_client_history(
+                    db_session, client, current_user_id, "credential.updated", changed
+                )
 
             db_session.commit()
             db_session.refresh(client)
@@ -1509,6 +1544,12 @@ async def regenerate_oauth2_client_secret(
             client.plaintext_secret_encrypted = plaintext_secret_encrypted  # Migration 035
             client.hidden_at = None  # Make visible
             client.visibility_expires_at = utcnow() + timedelta(minutes=10)  # 10 minutes
+            # The old secret stops working now: revoked, then a new one issued
+            # (as the admin rotation of a member's credential records it).
+            for operation in ("credential.revoked", "credential.issued"):
+                _record_client_history(
+                    db_session, client, current_user_id, operation, ["credential"]
+                )
 
             db_session.commit()
             db_session.refresh(client)
@@ -1614,6 +1655,9 @@ async def delete_oauth2_client(
             if client.owner_id is None or client.owner_id != current_user_id:
                 raise AuthorizationError(message="You are not allowed to delete this client")
 
+            _record_client_history(
+                db_session, client, current_user_id, "credential.revoked", ["credential"]
+            )
             db_session.delete(client)
             db_session.commit()
 

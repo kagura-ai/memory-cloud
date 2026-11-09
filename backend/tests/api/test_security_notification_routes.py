@@ -381,6 +381,7 @@ class TestOAuthRoutes:
             scope="memory:read",
             token_endpoint_auth_method="client_secret_post",
             owner_id="owner-1",
+            workspace_id=None,
             provider="custom",
             created_at=utcnow(),
             client_secret_hash="",

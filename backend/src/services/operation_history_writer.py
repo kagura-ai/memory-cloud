@@ -105,6 +105,7 @@ OPERATIONS = frozenset(
         "member.role_changed",
         "member.access_changed",
         "credential.issued",
+        "credential.updated",
         "credential.revoked",
         "integration.created",
         "integration.updated",
@@ -142,6 +143,8 @@ SAFE_FIELDS = frozenset(
         "event_start",
         "event_end",
         "delivery_mode",
+        "redirect_uris",
+        "token_endpoint_auth_method",
     }
 )
 
