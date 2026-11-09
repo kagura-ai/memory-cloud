@@ -12,21 +12,35 @@ by either id (#2218).
 
 Cost note: the sweep is unconditional-idempotent (set_payload of the same
 value is a no-op server-side) and runs as a fire-and-forget task at API
-startup. Production currently has zero located rows, so this is a no-op
-boot log line; an install accumulating many located memories pays one
-payload write per located row per boot — revisit with a sync watermark if
-that population ever grows large.
+startup, in one process at a time (#2459): every API process runs the
+lifespan, so it takes the ``geo_payload_backfill`` single-flight lock
+(``tasks.single_flight``) and a process that finds it held skips the boot
+sweep. During a blue/green deploy, or when replicas boot together, the
+second process skips; a sweep cut short (its process stopped mid-run) is
+redone by the next boot. The forward pass reads the located rows in keyset
+pages of ``_PAGE_SIZE`` with one point-sharing lookup per page
+(``unshared_point_ids``); the reconcile does one ``located_point_ids`` query
+per scrolled page. What stays per row is the payload write — one per
+located row per boot — so revisit with a sync watermark if that population
+ever grows large.
 """
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
+from tasks.single_flight import single_flight
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# The single-flight key (unique among the advisory-lock users, see
+# tasks.single_flight) and the rows read per page of the forward pass.
+_LOCK_KEY = "geo_payload_backfill"
+_PAGE_SIZE = 256
 
 
 async def located_point_ids(db: AsyncSession, point_ids: list[UUID]) -> set[UUID]:
@@ -52,69 +66,111 @@ async def located_point_ids(db: AsyncSession, point_ids: list[UUID]) -> set[UUID
     return {summary_point or memory_id for memory_id, summary_point in rows}
 
 
+def _located_rows_page(after: UUID | None) -> Any:
+    """The next ``_PAGE_SIZE`` located, embedded, live rows after ``after`` (by id)."""
+    query = (
+        select(
+            Memory.id,
+            Memory.summary_embedding_id,
+            Memory.context_id,
+            Memory.location_lat,
+            Memory.location_lon,
+        )
+        .where(
+            Memory.location_lat.is_not(None),
+            Memory.location_lon.is_not(None),
+            Memory.deleted_at.is_(None),
+            Memory.embedding_status == "success",
+        )
+        .order_by(Memory.id)
+        .limit(_PAGE_SIZE)
+    )
+    if after is not None:
+        query = query.where(Memory.id > after)
+    return query
+
+
 async def backfill_location_payloads(db: AsyncSession) -> int:
     """Write the ``location`` geo payload for every located, embedded row.
+
+    Reads the rows in keyset pages of ``_PAGE_SIZE`` and asks which of a
+    page's points another live row shares in one query
+    (``unshared_point_ids``, #2459); the payload writes stay per row.
 
     Returns the number of points written. Never logs coordinates — count
     and memory ids only (the geo privacy invariant from services/geo_memory).
     """
     from db.qdrant import update_memory_payload_in_qdrant
     from services.context_routing import resolve_collection_name
-    from services.resource_indexer import unshared_point_id
-
-    rows = (
-        await db.execute(
-            select(
-                Memory.id,
-                Memory.summary_embedding_id,
-                Memory.context_id,
-                Memory.location_lat,
-                Memory.location_lon,
-            ).where(
-                Memory.location_lat.is_not(None),
-                Memory.location_lon.is_not(None),
-                Memory.deleted_at.is_(None),
-                Memory.embedding_status == "success",
-            )
-        )
-    ).all()
+    from services.resource_indexer import unshared_point_ids
 
     count = 0
     failed = 0
     # resolve_collection_name is an uncached per-call lookup — memoize per
     # context so N located rows in one context cost one resolution.
     collections: dict = {}
-    for row in rows:
-        # Per-row isolation: one poisoned row (missing point, transient
-        # Qdrant error) must not strand the rest of the sweep until the
-        # next boot. Ids only in logs — never coordinates.
+    after: UUID | None = None
+    while True:
+        rows = (await db.execute(_located_rows_page(after))).all()
+        if not rows:
+            break
+        after = rows[-1].id
         try:
             # #2218: the point the row names (``Memory.point_id``). An own-id
             # point skips the sharing lookup; a document point another live
             # row names too is left as it is, like the metadata patch (#2100).
-            point_id = await unshared_point_id(db, row.id, row.summary_embedding_id or row.id)
-            if point_id is None:
-                logger.info("geo_payload_backfill_shared_point_skipped", memory_id=str(row.id))
-                continue
-            collection = collections.get(row.context_id)
-            if collection is None:
-                collection = await resolve_collection_name(db, row.context_id)
-                collections[row.context_id] = collection
-            await update_memory_payload_in_qdrant(
-                memory_id=point_id,
-                payload_updates={"location": {"lat": row.location_lat, "lon": row.location_lon}},
-                collection_name=collection,
-                # #2015: chunk points copy location when they are written.
-                cascade_chunks=False,
+            points = await unshared_point_ids(
+                db, [(row.id, row.summary_embedding_id or row.id) for row in rows]
             )
-            count += 1
-        except Exception as e:  # noqa: BLE001 — best-effort per row
-            failed += 1
+        except Exception as e:  # noqa: BLE001 — best-effort per page
+            # The lookup runs in a SAVEPOINT: a failure costs this page's
+            # rows, and the next page still runs.
+            failed += len(rows)
             logger.warning(
-                "geo_payload_backfill_row_failed",
-                memory_id=str(row.id),
+                "geo_payload_backfill_page_failed",
+                rows=len(rows),
+                first_memory_id=str(rows[0].id),
                 error=str(e),
             )
+            points = {}
+        for row in rows:
+            if row.id not in points:
+                continue  # its page's lookup failed (counted above)
+            # Per-row isolation: one poisoned row (missing point, transient
+            # Qdrant error) must not strand the rest of the sweep until the
+            # next boot. Ids only in logs — never coordinates.
+            try:
+                point_id = points[row.id]
+                if point_id is None:
+                    logger.info("geo_payload_backfill_shared_point_skipped", memory_id=str(row.id))
+                    continue
+                collection = collections.get(row.context_id)
+                if collection is None:
+                    # A SAVEPOINT like the sharing lookup: a failed read must
+                    # not leave the session's transaction aborted for the
+                    # rows and pages after it.
+                    async with db.begin_nested():
+                        collection = await resolve_collection_name(db, row.context_id)
+                    collections[row.context_id] = collection
+                await update_memory_payload_in_qdrant(
+                    memory_id=point_id,
+                    payload_updates={
+                        "location": {"lat": row.location_lat, "lon": row.location_lon}
+                    },
+                    collection_name=collection,
+                    # #2015: chunk points copy location when they are written.
+                    cascade_chunks=False,
+                )
+                count += 1
+            except Exception as e:  # noqa: BLE001 — best-effort per row
+                failed += 1
+                logger.warning(
+                    "geo_payload_backfill_row_failed",
+                    memory_id=str(row.id),
+                    error=str(e),
+                )
+        if len(rows) < _PAGE_SIZE:
+            break
     if failed:
         logger.warning("geo_payload_backfill_partial", written=count, failed=failed)
     return count
@@ -224,16 +280,29 @@ async def reconcile_stale_location_payloads(db: AsyncSession) -> int:
 
 
 async def run_location_payload_backfill() -> None:
-    """Fire-and-forget lifespan entry point — best-effort, never raises."""
+    """Fire-and-forget lifespan entry point — best-effort, never raises.
+
+    Runs both sweeps under the ``geo_payload_backfill`` single-flight lock
+    (#2459), so of the API processes that boot together (blue and green
+    during a deploy, or several replicas) one sweeps and the others log
+    ``geo_payload_backfill_skipped`` and return. The sweeps are idempotent,
+    so a skipped boot loses nothing the running sweep does not do, and a
+    sweep cut short is redone by the next boot. The lock holds its own pool
+    connection for the run, beside the sweep's session.
+    """
     from db.base import get_db
 
     try:
-        async for db in get_db():
-            count = await backfill_location_payloads(db)
-            cleared = await reconcile_stale_location_payloads(db)
-            if count or cleared:
-                logger.info("geo_payload_backfill_completed", points=count, cleared=cleared)
-            else:
-                logger.debug("geo_payload_backfill_noop")
+        async with single_flight(_LOCK_KEY) as acquired:
+            if not acquired:
+                logger.info("geo_payload_backfill_skipped", lock_key=_LOCK_KEY)
+                return
+            async for db in get_db():
+                count = await backfill_location_payloads(db)
+                cleared = await reconcile_stale_location_payloads(db)
+                if count or cleared:
+                    logger.info("geo_payload_backfill_completed", points=count, cleared=cleared)
+                else:
+                    logger.debug("geo_payload_backfill_noop")
     except Exception as e:  # noqa: BLE001 — startup must never die on backfill
         logger.error("geo_payload_backfill_failed", error=str(e))

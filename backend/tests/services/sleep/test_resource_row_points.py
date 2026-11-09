@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
-from services.resource_indexer import resource_point_id, unshared_point_id
+from services.resource_indexer import resource_point_id, unshared_point_id, unshared_point_ids
 from utils.datetime import utcnow
 
 _USER = "resource-row-points"
@@ -102,6 +102,54 @@ class TestUnsharedPointId:
         await db_session.flush()
 
         assert await unshared_point_id(db_session, row.id, row.point_id) == row.point_id
+
+
+class TestUnsharedPointIds:
+    """#2459: the batched sibling answers each row as ``unshared_point_id`` does, in one query."""
+
+    async def test_points_under_the_rows_own_ids_need_no_lookup(self):
+        db = AsyncMock()
+        a, b = uuid4(), uuid4()
+        assert await unshared_point_ids(db, [(a, a), (b, b)]) == {a: a, b: b}
+        db.execute.assert_not_awaited()
+
+    async def test_each_row_gets_the_single_row_answer(self, db_session: AsyncSession):
+        from sqlalchemy import event
+
+        owner = _indexer_row(doc_id="doc-own")
+        shared_a, shared_b = _indexer_row(doc_id="doc-shared"), _indexer_row(doc_id="doc-shared")
+        kept = _indexer_row(doc_id="doc-kept")
+        tombstone = _indexer_row(doc_id="doc-kept", deleted_at=utcnow() - timedelta(days=1))
+        api_id = uuid4()
+        api = _row(id=api_id, summary_embedding_id=api_id)
+        db_session.add_all([owner, shared_a, shared_b, kept, tombstone, api])
+        await db_session.flush()
+        rows = [owner, shared_a, shared_b, kept, api]
+
+        statements: list[str] = []
+
+        def _statement(conn, cursor, statement, parameters, context, executemany):
+            if "summary_embedding_id" in statement:
+                statements.append(statement)
+
+        engine = db_session.bind.sync_engine
+        event.listen(engine, "before_cursor_execute", _statement)
+        try:
+            batched = await unshared_point_ids(db_session, [(r.id, r.point_id) for r in rows])
+        finally:
+            event.remove(engine, "before_cursor_execute", _statement)
+
+        assert len(statements) == 1
+        assert batched == {
+            r.id: await unshared_point_id(db_session, r.id, r.point_id) for r in rows
+        }
+        assert batched == {
+            owner.id: owner.point_id,
+            shared_a.id: None,
+            shared_b.id: None,
+            kept.id: kept.point_id,
+            api.id: api.id,
+        }
 
 
 class TestArchiveDeletesTheRowsOwnPoint:

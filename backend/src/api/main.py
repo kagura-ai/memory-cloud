@@ -178,9 +178,10 @@ async def lifespan(app: FastAPI):
     app.state.public_mcp_usage_writer = start_usage_writer()
 
     # WHERE axis (#1332): one-shot geo payload backfill for points embedded
-    # before the location payload existed. Best-effort — but hold a strong
-    # reference on app.state: the loop keeps tasks only weakly, and an
-    # unreferenced fire-and-forget task can be garbage-collected mid-run.
+    # before the location payload existed. Best-effort, one process at a time
+    # under a Postgres advisory lock (#2459) — but hold a strong reference on
+    # app.state: the loop keeps tasks only weakly, and an unreferenced
+    # fire-and-forget task can be garbage-collected mid-run.
     from tasks.geo_backfill import run_location_payload_backfill
 
     app.state.geo_backfill_task = asyncio.create_task(run_location_payload_backfill())
