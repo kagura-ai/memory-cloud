@@ -7,6 +7,7 @@
  */
 
 import Link from "next/link";
+import { PluginGuideLink } from "@/components/common/PluginGuideLink";
 import { useId, useState } from "react";
 import { useTranslations } from "next-intl";
 import { ArrowRight } from "lucide-react";
@@ -269,6 +270,7 @@ export function ChatStep({
       >
         {t("chat.guide")}
       </Link>
+      <PluginGuideLink />
       <div>
         <Button onClick={onNext} className={PRIMARY_BUTTON}>
           {t("chat.next")}

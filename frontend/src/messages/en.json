@@ -1,4 +1,9 @@
 {
+  "pluginGuide": {
+    "label": "Install the plugin and skills",
+    "description": "Optional: after connecting over MCP, add the session and memory skills for Codex or Claude Code.",
+    "newTab": " (opens in a new tab)"
+  },
   "passkeys": {
     "confirmGoogle": "Confirm with Google",
     "onlyKeyAddAnother": "To remove this passkey, add a different passkey and use it to confirm removal.",
@@ -3849,6 +3854,13 @@
         "announceCleared": "Cleared all tag filters."
       },
       "recall": {
+        "graphModeLabel": "Graph view mode",
+        "modeGraph": "Graph",
+        "loadMore": "Show more matches",
+        "limitHint": "Showing up to {limit} matches. Show more reruns the search with a larger limit and may reorder results (maximum 100).",
+        "olderVersion": "Older version {number}",
+        "summariesFailed": "Some summaries could not be loaded. Open an older version to view its details.",
+        "moreVersions": "Show more older versions",
         "modeLabel": "Search mode",
         "modeText": "Text match",
         "modeRecall": "Recall",
@@ -3864,7 +3876,6 @@
         "noResultsDesc": "Recall found no memories for \"{query}\".",
         "score": "Score {score}",
         "folded": "{count, plural, one {# older version folded:} other {# older versions folded:}}",
-        "openFolded": "Open older version {id}",
         "superseded": "Superseded",
         "openNewer": "Open newer version",
         "view": "View"

@@ -8,10 +8,13 @@
  */
 
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RecallResultsList } from "./RecallResultsList";
 import type { RecallResultItem } from "@/lib/types/memory";
+import { referenceMemory } from "@/lib/api/memory";
+vi.mock("@/lib/api/memory", () => ({ referenceMemory: vi.fn() }));
+beforeEach(() => { vi.mocked(referenceMemory).mockReset(); });
 
 const { stableT } = vi.hoisted(() => ({
   stableT: (k: string, values?: Record<string, unknown>) => {
@@ -82,7 +85,8 @@ describe("RecallResultsList", () => {
     expect(screen.queryByText(/^folded:/)).not.toBeInTheDocument();
   });
 
-  it("shows the folded count and opens each folded memory by id", () => {
+  it("loads summaries only when expanded, without recording access, and opens each memory", async () => {
+    vi.mocked(referenceMemory).mockImplementation(async (id) => ({ summary: `Summary ${id}` }) as Awaited<ReturnType<typeof referenceMemory>>);
     const onOpen = vi.fn();
     render(
       <RecallResultsList
@@ -95,18 +99,44 @@ describe("RecallResultsList", () => {
       />,
     );
     expect(screen.getByText("folded:2")).toBeInTheDocument();
-    const first = screen.getByRole("button", { name: `openFolded:${OLDER_1}` });
+    expect(referenceMemory).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "folded:2" }));
+    const first = await screen.findByRole("button", { name: `Summary ${OLDER_1}` });
     const second = screen.getByRole("button", {
-      name: `openFolded:${OLDER_2}`,
+      name: `Summary ${OLDER_2}`,
     });
-    // Short id as the visible text; real buttons, so they take keyboard focus.
-    expect(first).toHaveTextContent(OLDER_1.slice(0, 8));
+    expect(referenceMemory).toHaveBeenCalledWith(OLDER_1, expect.objectContaining({ recordAccess: false, signal: expect.any(AbortSignal) }));
     first.focus();
     expect(first).toHaveFocus();
     fireEvent.click(first);
     fireEvent.click(second);
     expect(onOpen).toHaveBeenNthCalledWith(1, OLDER_1);
     expect(onOpen).toHaveBeenNthCalledWith(2, OLDER_2);
+    fireEvent.click(screen.getByRole("button", { name: "folded:2" }));
+    fireEvent.click(screen.getByRole("button", { name: "folded:2" }));
+    expect(referenceMemory).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a readable detail link when a summary cannot be loaded", async () => {
+    vi.mocked(referenceMemory).mockRejectedValue(new Error("unavailable"));
+    const onOpen = vi.fn();
+    render(<RecallResultsList results={[row({ folded: { count: 1, memory_ids: [OLDER_1] } })]} loading={false} query="deploy" onOpen={onOpen} />);
+    fireEvent.click(screen.getByRole("button", { name: "folded:1" }));
+    fireEvent.click(await screen.findByRole("button", { name: "olderVersion:1" }));
+    expect(onOpen).toHaveBeenCalledWith(OLDER_1);
+    expect(screen.getByRole("status")).toHaveTextContent("summariesFailed");
+  });
+
+  it("opens older versions while another summary request is still pending", async () => {
+    vi.mocked(referenceMemory).mockImplementation((id) => id === OLDER_1
+      ? new Promise(() => {})
+      : Promise.resolve({ summary: "Loaded summary" } as Awaited<ReturnType<typeof referenceMemory>>));
+    const onOpen = vi.fn();
+    render(<RecallResultsList results={[row({ folded: { count: 2, memory_ids: [OLDER_1, OLDER_2] } })]} loading={false} query="deploy" onOpen={onOpen} />);
+    fireEvent.click(screen.getByRole("button", { name: "folded:2" }));
+    fireEvent.click(screen.getByRole("button", { name: "olderVersion:1" }));
+    expect(onOpen).toHaveBeenCalledWith(OLDER_1);
+    expect(await screen.findByRole("button", { name: "Loaded summary" })).toBeInTheDocument();
   });
 
   it("keeps the folded count when the id list is capped", () => {

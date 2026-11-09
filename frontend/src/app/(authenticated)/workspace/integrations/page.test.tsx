@@ -6,12 +6,14 @@ import ja from "@/messages/ja.json";
 import IntegrationsPage from "./page";
 
 let byok = true;
+let currentLocale = "en";
+vi.mock("@/i18n", () => ({ useLocale: () => ({ locale: currentLocale }) }));
 vi.mock("@/hooks/useSystemFeatures", () => ({ useSystemFeatures: () => ({ byok }) }));
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({ currentWorkspace: { name: "Studio", current_user_role: "viewer" }, currentWorkspaceId: "studio", workspaces: [{ id: "studio" }] }),
 }));
 afterEach(cleanup);
-beforeEach(() => { byok = true; });
+beforeEach(() => { byok = true; currentLocale = "en"; });
 
 describe("first click from Integrations", () => {
   it("keeps the provider-key entry when the deployment disables BYOK", () => {
@@ -23,6 +25,7 @@ describe("first click from Integrations", () => {
   it.each([["en", en, /MCP client setup guide/i, /connect from a script/i, /bring in external data/i],
     ["ja", ja, /MCP クライアント設定ガイド/, /スクリプトから接続/, /外部データを取り込む/]] as const)(
     "leads with the MCP URL and routes starting tasks in %s", (locale, messages, connect, script, ingest) => {
+      currentLocale = locale;
       render(<NextIntlClientProvider locale={locale} messages={messages}><IntegrationsPage /></NextIntlClientProvider>);
       expect(screen.getByText(/Studio/)).toBeInTheDocument();
       const mcpHeading = screen.getByRole("heading", { name: messages.mcpConnection.quickStart.title });
@@ -49,7 +52,8 @@ describe("first click from Integrations", () => {
       expect(within(tasks[1]).getByText(messages.sectionNavigation.apiKeys)).toBeInTheDocument();
       expect(tasks[1]).toContainElement(screen.getByText(messages.integrationEntry.tasks.script.description));
       expect(tasks[1]).toHaveClass("focus-visible:ring-2", "hover:shadow-sm");
-      expect(screen.getAllByRole("link")).toHaveLength(8);
+      expect(screen.getByRole("link", { name: `${messages.pluginGuide.label} ${messages.pluginGuide.newTab.trim()}` })).toHaveAttribute("href", `https://www.kagura-ai.com${locale === "ja" ? "/ja" : ""}/help/guide/#plugins`);
+      expect(screen.getAllByRole("link")).toHaveLength(9);
     },
   );
 });

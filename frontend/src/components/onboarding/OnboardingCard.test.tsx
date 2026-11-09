@@ -690,6 +690,17 @@ describe("OnboardingCard first screens (#2701)", () => {
     expect(mockToast).not.toHaveBeenCalled();
   });
 
+  it("opens optional plugin instructions without completing the chat screen", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    render(<OnboardingCard />);
+    const link = await screen.findByRole("link", { name: "label newTab" });
+    expect(link).toHaveAttribute("href", "https://www.kagura-ai.com/help/guide/#plugins");
+    fireEvent.click(link);
+    expect(localStorage.getItem("onboarding:u1:intro")).toBe("chat");
+    expect(screen.getByText("chat.title")).toBeInTheDocument();
+  });
+
   it("counts the chat screen as seen when the user leaves for the per-client steps", async () => {
     window.localStorage.setItem("onboarding:u1:intro", "chat");
     withPracticeContext();

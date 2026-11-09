@@ -18,6 +18,7 @@ import { SpinnerLoading } from "@/components/common/LoadingState";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
+import { FoldedMemoryLinks } from "./FoldedMemoryLinks";
 import type { RecallResultItem } from "@/lib/types/memory";
 
 interface RecallResultsListProps {
@@ -101,21 +102,12 @@ export function RecallResultsList({
                   )}
                 </div>
                 {folded && (
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
-                    <span>{t("folded", { count: folded.count })}</span>
-                    {folded.memory_ids.map((id) => (
-                      <button
-                        key={id}
-                        type="button"
-                        className={LINK_CLASS}
-                        onClick={() => onOpen(id)}
-                        aria-label={t("openFolded", { id })}
-                        title={id}
-                      >
-                        {id.slice(0, 8)}
-                      </button>
-                    ))}
-                  </div>
+                  <FoldedMemoryLinks
+                    key={folded.memory_ids.join(",")}
+                    ids={folded.memory_ids}
+                    count={folded.count}
+                    onOpen={onOpen}
+                  />
                 )}
               </div>
               <Button

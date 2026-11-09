@@ -118,6 +118,7 @@ export async function recallMemories(
 }
 
 export interface ReferenceMemoryOptions {
+  signal?: AbortSignal;
   // #2518: false reads without recording access stats (`access_count`, the
   // adoption signal `reference_count`, `last_used_at`) — a re-read of the
   // open memory, not an adoption. Omitted: the server default, true.
@@ -138,7 +139,7 @@ export async function referenceMemory(
     ...(options.recordAccess === undefined
       ? {}
       : { record_access: options.recordAccess }),
-  });
+  }, options.signal ? { signal: options.signal } : undefined);
 }
 
 /**

@@ -40,6 +40,7 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/workspace/contexts/ctx-1",
   useSearchParams: () => ({
     get: (k: string) => mockSearchParams.current.get(k),
+    getAll: (k: string) => mockSearchParams.current.getAll(k),
     toString: () => mockSearchParams.current.toString(),
   }),
 }));
@@ -52,9 +53,14 @@ vi.mock("@/lib/api/graph", () => ({
 }));
 
 const mockReferenceMemory = vi.fn();
+const mockRecallMemories = vi.fn();
+const mockGetMemories = vi.fn();
+vi.mock("@/components/contexts/TagCloud", () => ({ TagCloud: () => null }));
 // #2600: the dialog's accept is the memory's PATCH.
 const mockUpdateMemoryById = vi.fn();
 vi.mock("@/lib/api/memory", () => ({
+  recallMemories: (...a: unknown[]) => mockRecallMemories(...a),
+  getMemories: (...a: unknown[]) => mockGetMemories(...a),
   referenceMemory: (...a: unknown[]) => mockReferenceMemory(...a),
   updateMemoryById: (...a: unknown[]) => mockUpdateMemoryById(...a),
   forgetMemory: vi.fn(),
@@ -204,6 +210,8 @@ beforeEach(() => {
   mockGetGraphData.mockReset();
   mockUpdateMemoryById.mockReset();
   mockReferenceMemory.mockReset();
+  mockRecallMemories.mockReset();
+  mockGetMemories.mockReset();
   mockToast.mockReset();
   mockSearchParams.current = new URLSearchParams();
   simCallbacks.onNodeClick = undefined;
@@ -219,6 +227,22 @@ afterEach(() => {
 // ---------- Tests ------------------------------------------------------------
 
 describe("GraphTabPanel — node click integration (Issue #435)", () => {
+  it("reuses recall results and detail actions after an explicit search", async () => {
+    mockRecallMemories.mockResolvedValue({ results: [{ ...makeRef(NODE_A_ID), summary: "Recalled graph memory", score: 0.8 }] });
+    mockReferenceMemory.mockResolvedValue(makeRef(NODE_A_ID));
+    render(<GraphTabPanel contextId="ctx-1" />);
+    fireEvent.click(screen.getByRole("radio", { name: "modeRecall" }));
+    expect(mockRecallMemories).not.toHaveBeenCalled();
+    expect(mockGetMemories).not.toHaveBeenCalled();
+    expect(screen.queryByRole("radio", { name: "modeText" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "deployment" } });
+    fireEvent.click(screen.getByRole("button", { name: "submit" }));
+    await screen.findByText("Recalled graph memory");
+    expect(screen.getByRole("list", { name: "resultsLabel" })).toBeInTheDocument();
+    expect(mockRecallMemories).toHaveBeenCalledWith(expect.objectContaining({ query: "deployment", k: 20, filters: { context_id: "ctx-1" } }));
+    fireEvent.click(screen.getByRole("button", { name: "view" }));
+    await waitFor(() => expect(mockReferenceMemory).toHaveBeenCalledWith(NODE_A_ID));
+  });
   it("opens MemoryDetailDialog when a node is clicked", async () => {
     mockReferenceMemory.mockResolvedValue(makeRef(NODE_A_ID));
     render(<GraphTabPanel contextId="ctx-1" />);

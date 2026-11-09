@@ -42,6 +42,8 @@ import { MemoryDetailDialog } from "@/components/memories/MemoryDetailDialog";
 import { DeleteMemoryDialog } from "@/components/memories/DeleteMemoryDialog";
 import { EditMemoryDialog } from "@/components/memories/EditMemoryDialog";
 import { GraphEdgeOverlay } from "./GraphEdgeOverlay";
+import { MemoriesTabPanel } from "./MemoriesTabPanel";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 interface GraphTabPanelProps {
   contextId: string;
@@ -83,6 +85,20 @@ interface SelectedEdge {
 }
 
 export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
+  const t = useTranslations("contextDetail.memoriesPanel.recall");
+  const [mode, setMode] = useState("graph");
+  return (
+    <div className="space-y-4">
+      <ToggleGroup type="single" value={mode} onValueChange={(value) => { if (value) setMode(value); }} aria-label={t("graphModeLabel")}>
+        <ToggleGroupItem value="graph">{t("modeGraph")}</ToggleGroupItem>
+        <ToggleGroupItem value="recall">{t("modeRecall")}</ToggleGroupItem>
+      </ToggleGroup>
+      {mode === "graph" ? <GraphCanvas contextId={contextId} /> : <MemoriesTabPanel contextId={contextId} recallOnly />}
+    </div>
+  );
+}
+
+function GraphCanvas({ contextId }: GraphTabPanelProps) {
   const t = useTranslations("contexts");
   const tMem = useTranslations("contextDetail.memoriesPanel");
   const { toast } = useToast();

@@ -170,6 +170,10 @@ describe("McpConnectionCard — workspace pinning", () => {
 });
 
 describe("McpConnectionCard — overview summary", () => {
+  it.each(["summary", "full"] as const)("links the optional plugin guide from %s", (variant) => {
+    render(<McpConnectionCard variant={variant} />);
+    expect(screen.getByRole("link", { name: "label newTab" })).toHaveAttribute("href", "https://www.kagura-ai.com/help/guide/#plugins");
+  });
   it("presents the bare URL with a labelled copy button and a guide link", () => {
     render(<McpConnectionCard variant="summary" />);
     expect(screen.getByRole("heading", { name: "quickStart.title" })).toBeInTheDocument();
