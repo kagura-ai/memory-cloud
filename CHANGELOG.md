@@ -4,6 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.155.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.155.0) — 2026-11-09
+
+Dashboard counts that mean what their labels say, a daily budget of its own for bulk supersede judging, and the follow-ups to the per-key erasure of `details`.
+
+### Added
+- **Bulk lane for the supersede judge** ([#2510](https://github.com/kagura-ai/memory-cloud/issues/2510)): work the server runs over many rows at once — today the supersede catch-up pass — counts its judge calls on a cap of its own, `SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY` (default 500 per workspace per UTC day), so a bulk run no longer spends the budget live ingest needs (`SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY`, still 200). The `supersede_verify_cap_reached` warning and the judge's ledger rows name the lane. A bulk ingest of N facts needs about N + 50 judge calls that day.
+- **Partially unavailable versions** ([#2389](https://github.com/kagura-ai/memory-cloud/issues/2389)): a rebuilt earlier version of a memory whose `details` lost keys to an account erasure now says so. `partially_unavailable_fields` (for example `{"details": 2}`) appears on `reference(version=N)` and on the REST versions response next to `unavailable_fields`; the value shows the other keys (`{}` when every key was removed), and the removed keys are not named.
+- **`reprocess_erasures --revert-ambiguous`** ([#2389](https://github.com/kagura-ai/memory-cloud/issues/2389)): an opt-in for operators to remove the `details` keys an erasure before v0.129.0 left ambiguous (kept and counted until now) from the live value and from the older revisions that carried them, counted as `details_keys_ambiguous_reverted`. Off by default; the live erasure is unchanged.
+
+### Changed
+- **Erasure key digests salted per memory** ([#2389](https://github.com/kagura-ai/memory-cloud/issues/2389)): the digests an erasure stores for removed `details` keys (`erased_details_keys`, the keys of `details_restored_from`) are now `sha256(memory id + NUL + key)`, so one table of short key names no longer reverses every memory's list. Rows written before keep their unsalted digests and are still read.
+- **Geo payload boot sweep** ([#2459](https://github.com/kagura-ai/memory-cloud/issues/2459)): the startup sweep that writes and reconciles the `location` payload runs in one API process at a time (a Postgres advisory lock; the others log `geo_payload_backfill_skipped`), reads located rows in pages of 256 and asks once per page which points another row shares.
+
+### Fixed
+- **Active users (7d)** ([#2744](https://github.com/kagura-ai/memory-cloud/issues/2744)): the dashboard KPI counted a user once per context they had used; it now counts each user once across the workspace (`workspace_totals.active_users_week`, new in the context-stats response). The KPI and the per-context columns cover 7 calendar days (today and the 6 before it) instead of 8.
+- **Weekly usage numbers** ([#2748](https://github.com/kagura-ai/memory-cloud/issues/2748)): `GET /workspace/usage/current` (the "API calls this week" counts and the weekly meter) and `GET /workspace/usage/members` ("API (this week)") also covered 8 days; now 7, the same window as the KPI. The weekly limit is display-only, so nothing that was allowed changes.
+
+### Notes
+- No migration. One new optional environment variable, `SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY` (default 500).
+- Operators: during the upgrade, pause erasure execution and `reprocess_erasures` until the old API processes are drained, and do not roll erasure executors back once this version has written salted digests — older code cannot match them (see deployment.md, "Erasure rollout for #2389").
+- New log events `geo_payload_backfill_skipped` and `geo_payload_backfill_page_failed`; `supersede_verify_cap_reached` and `supersede_verify_counter_failed` carry `lane`.
+
 ## [v0.154.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.154.0) — 2026-11-09
 
 Operation history for team workspaces. Owners and admins of Pro and Max workspaces can review and search the important changes made in their workspace over the last 90 days.
