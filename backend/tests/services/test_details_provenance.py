@@ -327,6 +327,66 @@ def test_a_pre_v0129_stripped_state_with_a_survivors_edit_above_is_ambiguous() -
     assert _plan(other, {"a": 2, "s": "x"}, P_S).keys_ambiguous == 0
 
 
+def test_revert_ambiguous_removes_the_ambiguous_keys_like_unavailable_ones() -> None:
+    """#2389: opt-in. The ambiguous key's value to go back to sits in the
+    stripped state: it is removed (unavailable), its digest joins the
+    erasure row's list, and it leaves the row's prior. The key B carried
+    unchanged from the known state stays the author's. Nothing is stripped:
+    no state's key is the subject's. A re-run over the result finds nothing."""
+    m = uuid4()
+    rows = [_edit(m, 2, P_S, {"a": 1}), _edit(m, 3, B, erased=True)]
+    live = {"a": 1, "s": "x"}
+    assert _plan(rows, live, P_S).reverts == ()  # the default: kept and counted
+    plan = plan_details_erasure(rows, {m: (live, AUTH)}, P_S, revert_ambiguous=True)
+    assert plan.keys_ambiguous == 0  # none kept
+    assert plan.strips == ()
+    (revert,) = plan.reverts
+    assert revert.reverts == (KeyRevert("s", None, False, True, 3, ambiguous=True),)
+    assert revert.unavailable
+    assert (revert.result, revert.prior, revert.from_version) == ({"a": 1}, {"a": 1}, 3)
+    assert revert.erased_keys == (details_key_digest("s", m),)
+    assert revert.restored_from_by_key == {details_key_digest("s", m): 3}
+    rows, after = _apply(rows, {m: (live, AUTH)}, plan, subject=P_S, pseudonym=P_S)
+    again = plan_details_erasure(rows, after, P_S, revert_ambiguous=True)
+    assert (again.reverts, again.strips, again.keys_ambiguous) == ((), (), 0)
+
+
+def test_revert_ambiguous_joins_the_subjects_own_keys_in_one_revert() -> None:
+    """#2389: a memory with a key of the subject's and an ambiguous one: one
+    restore row, both keys in key order, the lowest version below them."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, P_S, {"a": 1}),
+        _edit(m, 3, B, erased=True),
+        _edit(m, 4, P_S, {"a": 1, "s": "x"}),
+    ]
+    live = {"a": 1, "s": "x", "t": 5}
+    default = _plan(rows, live, P_S)
+    assert default.keys_ambiguous == 1
+    assert [r.key for r in default.reverts[0].reverts] == ["t"]
+    plan = plan_details_erasure(rows, {m: (live, AUTH)}, P_S, revert_ambiguous=True)
+    (revert,) = plan.reverts
+    assert revert.reverts == (
+        KeyRevert("s", None, False, True, 3, ambiguous=True),
+        KeyRevert("t", None, False, False, 4),
+    )
+    assert (revert.result, revert.prior, revert.from_version) == ({"a": 1}, {"a": 1}, 3)
+    assert revert.erased_keys == tuple(sorted(details_key_digest(k, m) for k in ("s", "t")))
+    assert plan.keys_ambiguous == 0
+    rows, after = _apply(rows, {m: (live, AUTH)}, plan, subject=P_S, pseudonym=P_S)
+    for flag in (False, True):
+        again = plan_details_erasure(rows, after, P_S, revert_ambiguous=flag)
+        assert (again.reverts, again.strips, again.keys_ambiguous) == ((), (), 0)
+
+
+def test_revert_ambiguous_leaves_a_memory_without_ambiguous_keys_alone() -> None:
+    """#2389: the flag changes only what the default counted as ambiguous."""
+    m, rows, live = _worked_example()
+    assert plan_details_erasure(rows, {m: (live, AUTH)}, S, revert_ambiguous=True) == _plan(
+        rows, live
+    )
+
+
 def test_a_stripped_state_an_erased_member_wrote_is_walked_past() -> None:
     m = uuid4()
     x = "x" * 64

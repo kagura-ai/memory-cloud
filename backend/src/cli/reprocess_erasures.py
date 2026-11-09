@@ -39,7 +39,19 @@ For an erasure that ran before v0.129.0 the state the member wrote was
 stripped whole, so a key they wrote and a later member carried cannot be
 told from the later member's own: it is kept and counted, never reverted
 (``details keys ambiguous ... kept``, printed by the plan as by the apply;
-the plan is enough to read the count).
+the plan is enough to read the count). ``--revert-ambiguous`` (#2389,
+opt-in) removes those live keys instead: the value to go back to is in the
+stripped state, so each is handled like a key whose value an earlier
+erasure removed — taken out of the live ``details`` by the same restore
+(a new version, one ``erasure`` revision row listing its digest) and
+counted (``would remove ambiguous details keys`` / ``removed ambiguous
+details keys``). A second run with the flag finds nothing. The live value
+and the new row's prior lose such a key; the older priors that carried it
+(edits after the survivor's, before the re-run) keep it, as without the
+flag. The live erasure never removes them.
+
+    python -m src.cli.reprocess_erasures --all --revert-ambiguous          # plan the removal
+    python -m src.cli.reprocess_erasures --all --revert-ambiguous --apply  # remove them
 
 A request that changed gets one ``account_erasure_reprocess`` audit row
 (counts only). The command uses the pseudonym stored on the request. The one
@@ -270,6 +282,9 @@ class RequestChange:
     # whole may hold their value (never a change: nothing is written)
     details_keys_reverted: int = 0
     details_keys_ambiguous: int = 0
+    # #2389: those ambiguous keys removed instead (``--revert-ambiguous``),
+    # on ``details_restored_unavailable`` memories; not in the two above
+    details_keys_ambiguous_reverted: int = 0
     # #2266: ``sync_restored_payloads``'s outcome after the commit (the
     # ``details_payload_*`` keys of the erasure summary); empty on a dry run
     payload: dict[str, int] = field(default_factory=dict)
@@ -583,6 +598,7 @@ async def _reprocess_one(
     holdings: EmailHoldings | None = None,
     note_account_id: str | None = None,
     resync_postgres: dict[str, Any] | None = None,
+    revert_ambiguous: bool = False,
 ) -> RequestChange:
     """Repair the row (``account_id``), restore, then strip, by ``pseudonym``,
     then the audit rows (the live erasure's lock order: memories first);
@@ -625,6 +641,8 @@ async def _reprocess_one(
     (``restored_payload_syncs``, bounded by its ``memory_scrub_at``) are
     patched with this run's, and the outcome is recorded on the row
     (``record_resynced_payloads``), so a second run does not patch them again.
+    ``revert_ambiguous`` (#2389, ``--revert-ambiguous``): the restore also
+    removes the live keys its plan finds ambiguous.
     """
     try:
         repaired = account_id is not None
@@ -655,6 +673,7 @@ async def _reprocess_one(
                 erased_actors=erased - {pseudonym},
                 existed_at=existed_at,
                 dry_run=dry_run,
+                revert_ambiguous=revert_ambiguous,
             )
         )
         audited, mentions, kept = 0, 0, 0
@@ -721,6 +740,7 @@ async def _reprocess_one(
             embedding_requeued=restore.embedding_requeued,
             details_keys_reverted=restore.keys_reverted,
             details_keys_ambiguous=restore.keys_ambiguous,
+            details_keys_ambiguous_reverted=restore.keys_ambiguous_reverted,
             repaired=repaired,
             audit_logs_pseudonymized=audited,
             audit_mentions_pseudonymized=mentions,
@@ -763,6 +783,12 @@ async def _reprocess_one(
                     "audit_mentions_kept": change.audit_mentions_kept,
                     "audit_addresses_not_recovered": change.audit_addresses_not_recovered,
                     "tool": TOOL,
+                    # #2389: only when ``--revert-ambiguous`` removed some
+                    **(
+                        {"details_keys_ambiguous_reverted": change.details_keys_ambiguous_reverted}
+                        if change.details_keys_ambiguous_reverted
+                        else {}
+                    ),
                     # #2302: only on the requests they apply to
                     **({"request_note_pseudonymized": True} if change.note_repaired else {}),
                     **(
@@ -786,6 +812,7 @@ async def _reprocess_one(
         scrub_marked=change.scrub_marked,
         details_keys_reverted=change.details_keys_reverted,
         details_keys_ambiguous=change.details_keys_ambiguous,
+        details_keys_ambiguous_reverted=change.details_keys_ambiguous_reverted,
         request_repaired=change.repaired,
         audit_logs_pseudonymized=change.audit_logs_pseudonymized,
         audit_mentions_pseudonymized=change.audit_mentions_pseudonymized,
@@ -811,7 +838,11 @@ async def _reprocess_one(
 
 
 async def reprocess_erasures(
-    db: AsyncSession, *, request_id: UUID | None = None, dry_run: bool = True
+    db: AsyncSession,
+    *,
+    request_id: UUID | None = None,
+    dry_run: bool = True,
+    revert_ambiguous: bool = False,
 ) -> ReprocessResult:
     """Re-apply today's erasure rules to the erasure requests that ran.
 
@@ -827,6 +858,8 @@ async def reprocess_erasures(
         request_id: Only this request; None for every one in scope.
         dry_run: Count what would change; write nothing, call no vector
             store.
+        revert_ambiguous: Remove the live ``details`` keys the replay finds
+            ambiguous instead of keeping them (#2389, ``--revert-ambiguous``).
 
     The subject's audit rows that still carry the account id are
     pseudonymized in the request's transaction (#2287, ``_audit_subs``),
@@ -980,6 +1013,7 @@ async def reprocess_erasures(
                 account_id=request.user_id,
                 audit_account_id=audit_account_id(request.id, pseudonym),
                 holdings=await holdings_of(pseudonym),
+                revert_ambiguous=revert_ambiguous,
                 # #2302: the repair writes the marker in this transaction;
                 # the payload step's backstop runs with it, like the others'
                 resync_postgres=(
@@ -1042,6 +1076,7 @@ async def reprocess_erasures(
                 audit_account_id=audit_account_id(request.id, request.user_id),
                 holdings=await holdings_of(request.user_id),
                 resync_postgres=dict(summary["postgres"]) if resync else None,
+                revert_ambiguous=revert_ambiguous,
             )
         record(change)
     return result
@@ -1059,6 +1094,12 @@ def _print_plan(result: ReprocessResult) -> None:
     for c in result.changed:
         if c.details_keys_reverted:
             print(f"would revert details keys  {c.request_id}  {_keys_reverted(c)}")
+    for c in result.changed:
+        if c.details_keys_ambiguous_reverted:
+            print(
+                f"would remove ambiguous details keys  {c.request_id}  "
+                f"{c.details_keys_ambiguous_reverted} key(s)"
+            )
     _print_ambiguous(result)
     for c in result.changed:
         if c.repaired:
@@ -1101,6 +1142,12 @@ def _print_applied(result: ReprocessResult) -> None:
     for c in result.changed:
         if c.details_keys_reverted:
             print(f"reverted details keys  {c.request_id}  {_keys_reverted(c)}")
+    for c in result.changed:
+        if c.details_keys_ambiguous_reverted:
+            print(
+                f"removed ambiguous details keys  {c.request_id}  "
+                f"{c.details_keys_ambiguous_reverted} key(s)"
+            )
     _print_ambiguous(result)
     _print_left_raw(result)
     for c in result.changed:
@@ -1189,6 +1236,7 @@ def _summary(result: ReprocessResult) -> str:
     resynced = sum(c.payload_resync is not None for c in result.changed)
     keys = sum(c.details_keys_reverted for c in result.changed)
     ambiguous = sum(n for _, n in result.ambiguous)
+    removed = sum(c.details_keys_ambiguous_reverted for c in result.changed)
     return (
         (
             f"{len(result.changed)} erasure request(s): {restored} memory details restored, "
@@ -1197,6 +1245,7 @@ def _summary(result: ReprocessResult) -> str:
         )
         + (f", {keys} details key(s) reverted" if keys else "")
         + (f", {ambiguous} ambiguous key(s) kept" if ambiguous else "")
+        + (f", {removed} ambiguous key(s) removed" if removed else "")
         + (f", {repaired} request row(s) repaired" if repaired else "")
         + (f", {audited} audit row(s) pseudonymized" if audited else "")
         + (f", {mentions} audit mention(s) pseudonymized" if mentions else "")
@@ -1210,7 +1259,12 @@ async def _main(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
 
     async def run(db: AsyncSession, dry_run: bool) -> ReprocessResult:
-        return await reprocess_erasures(db, request_id=args.request, dry_run=dry_run)
+        return await reprocess_erasures(
+            db,
+            request_id=args.request,
+            dry_run=dry_run,
+            revert_ambiguous=args.revert_ambiguous,
+        )
 
     return await run_plan_apply(
         run=run,
@@ -1247,6 +1301,14 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     )
     mode.add_argument("--apply", action="store_true", help="write the changes")
     parser.add_argument("--yes", action="store_true", help="no confirmation prompt")
+    parser.add_argument(
+        "--revert-ambiguous",
+        action="store_true",
+        help=(
+            "remove the live details keys counted as ambiguous (erasures before "
+            "v0.129.0) instead of keeping them; off by default"
+        ),
+    )
     add_log_level_argument(parser)
     return parser.parse_args(argv)
 

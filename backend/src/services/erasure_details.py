@@ -2141,6 +2141,10 @@ class RestoreReport:
         keys_ambiguous: Live keys kept because a state an erasure before
             v0.129.0 stripped whole may hold the subject's value
             (``plan_details_erasure``); never reverted.
+        keys_ambiguous_reverted: Such keys removed instead, because the plan
+            was made with ``revert_ambiguous`` (#2389,
+            ``reprocess_erasures --revert-ambiguous``): a memory where one was
+            counts in ``unavailable``. Not in ``keys_reverted``.
         embedding_requeued: Restored live memories whose embedding had not
             succeeded, re-queued in the restore's transaction so the next
             embed writes the payload from the restored row. Always 0 on a
@@ -2171,6 +2175,7 @@ class RestoreReport:
     unavailable: int = 0
     keys_reverted: int = 0
     keys_ambiguous: int = 0
+    keys_ambiguous_reverted: int = 0
     embedding_requeued: int = 0
     payload_synced: int = 0
     payload_skipped_tombstone: int = 0
@@ -2512,13 +2517,15 @@ async def plan_subject_details(
     *,
     erased_actors: Collection[str] = frozenset(),
     rows: Sequence[DetailsEdit] | None = None,
+    revert_ambiguous: bool = False,
 ) -> DetailsErasurePlan:
     """``plan_details_erasure`` over the logs of the memories ``subject``
     edited and did not author (#2275).
 
     Reads ``_updated_rows`` (unless given) and the live ``details`` and
     author of each of those memories — under the caller's memory locks
-    during erasure, as of the statement on a dry run.
+    during erasure, as of the statement on a dry run. ``revert_ambiguous``
+    is ``plan_details_erasure``'s (#2389: the re-run's opt-in only).
     """
     if rows is None:
         rows = await _updated_rows(db, subject)
@@ -2535,7 +2542,9 @@ async def plan_subject_details(
             )
         ).all()
     }
-    return plan_details_erasure(rows, live, subject, erased_actors=erased_actors)
+    return plan_details_erasure(
+        rows, live, subject, erased_actors=erased_actors, revert_ambiguous=revert_ambiguous
+    )
 
 
 async def restore_editor_details(
@@ -2634,6 +2643,8 @@ async def restore_editor_details(
         memory = memories.get(revert.memory_id)
         if memory is None:
             continue  # gone since the plan read (never under the locks)
+        # #2389: ambiguous keys a ``revert_ambiguous`` plan removes
+        ambiguous = sum(1 for r in revert.reverts if r.ambiguous)
         value, trigger_kept = _with_live_trigger(memory, copy.deepcopy(revert.result))
         # A value equal to the live one is still written (#2393): the plan
         # lists only memories holding a live key of the subject's, so that
@@ -2649,12 +2660,14 @@ async def restore_editor_details(
             and trigger_kept
             and all(r.key == "trigger" for r in revert.reverts)
         ):
+            report.keys_ambiguous += ambiguous  # the live trigger stays: kept
             continue
         if revert.unavailable:
             report.unavailable += 1
         else:
             report.restored += 1
-        report.keys_reverted += len(revert.reverts)
+        report.keys_reverted += len(revert.reverts) - ambiguous
+        report.keys_ambiguous_reverted += ambiguous
         report.memory_ids.append(memory.id)
         if dry_run:
             continue
@@ -2682,6 +2695,7 @@ async def restore_editor_details(
             "erasure_details_restored",
             memory_id=str(memory.id),
             keys=len(revert.reverts),
+            ambiguous=ambiguous,
             from_version=revert.from_version,
             unavailable=revert.unavailable,
             trigger_kept=trigger_kept,
@@ -2707,6 +2721,7 @@ async def erase_subject_details(
     erased_actors: Collection[str],
     existed_at: datetime | None = None,
     dry_run: bool = False,
+    revert_ambiguous: bool = False,
 ) -> SubjectDetailsErasure:
     """Restore, then strip, ``subject``'s ``details`` — one log read (#2268).
 
@@ -2729,6 +2744,9 @@ async def erase_subject_details(
         existed_at: The re-run's bound for the authored arm of the strip
             (``_authored_by``); None during erasure.
         dry_run: Count; write and lock nothing.
+        revert_ambiguous: Also remove the live keys the plan finds ambiguous
+            (#2389): only ``reprocess_erasures --revert-ambiguous`` passes it;
+            the live erasure keeps them.
 
     Returns:
         The restore report (its ``to_sync`` for ``sync_restored_payloads``
@@ -2736,7 +2754,9 @@ async def erase_subject_details(
     """
     locked = 0 if dry_run else await lock_subject_memories(db, subject)
     rows = await _updated_rows(db, subject)
-    plan = await plan_subject_details(db, subject, erased_actors=erased_actors, rows=rows)
+    plan = await plan_subject_details(
+        db, subject, erased_actors=erased_actors, rows=rows, revert_ambiguous=revert_ambiguous
+    )
     logger.info(
         "erasure_details_rows",
         locked=locked,
@@ -2745,6 +2765,7 @@ async def erase_subject_details(
         reverts=len(plan.reverts),
         strips=len(plan.strips),
         ambiguous=plan.keys_ambiguous,
+        ambiguous_reverted=sum(1 for m in plan.reverts for r in m.reverts if r.ambiguous),
     )
     restore = await restore_editor_details(
         db, subject, actor=actor, dry_run=dry_run, erased_actors=erased_actors, plan=plan

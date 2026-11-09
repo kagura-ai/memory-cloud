@@ -2467,3 +2467,94 @@ async def test_a_pre_v0129_ambiguous_key_is_printed_and_never_written(
             await session.execute(delete(ErasureRequest).where(ErasureRequest.id == request.id))
             await session.execute(delete(Memory).where(Memory.id == memory.id))
             await session.commit()
+
+
+async def test_revert_ambiguous_removes_a_pre_v0129_ambiguous_key_once(
+    async_engine: AsyncEngine, world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#2389: the state of the test above, with ``--revert-ambiguous``. The
+    plan says the key would be removed and writes nothing; the apply removes
+    it through the restore's write path (one ``erasure`` row: the key out of
+    its prior, its salted digest listed and mapped) and the audit row counts
+    it; a second apply finds nothing. Counts only, never the key."""
+    p = _pseudonym()
+    memory = _memory(world["ws"], world["ctx"], world["author"], {"a": 1, "s": "x"}, 3)
+    request = _request(p, minutes=7)
+    async with _maker(async_engine)() as session:
+        session.add(memory)
+        await session.flush()
+        session.add_all(
+            [
+                _edit(memory, 2, p, {"details": {"a": 1}}),
+                _edit(memory, 3, world["third"], STRIPPED),
+                request,
+            ]
+        )
+        await session.commit()
+    argv = ["--request", str(request.id), "--revert-ambiguous"]
+    try:
+        async with _maker(async_engine)() as session:
+            before = await _snapshots(session, [])
+        code, sync = await _run(async_engine, argv)
+        assert code == 0
+        out = capsys.readouterr().out
+        assert f"would remove ambiguous details keys  {request.id}  1 key(s)\n" in out
+        assert "details keys ambiguous" not in out
+        assert "1 completed erasure(s): would change 1, skipped 0" in out
+        assert p not in out and '"s"' not in out
+        sync.assert_not_awaited()
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == before
+
+        code, _ = await _run(async_engine, [*argv, "--apply", "--yes"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert f"removed ambiguous details keys  {request.id}  1 key(s)\n" in out
+        assert "0 cleared (unavailable)" not in out and "1 cleared (unavailable)" in out
+        assert ", 1 ambiguous key(s) removed" in out
+        assert "ambiguous key(s) kept" not in out and "details keys ambiguous" not in out
+        assert p not in out and '"s"' not in out
+        digest = details_key_digest("s", memory.id)
+        async with _maker(async_engine)() as session:
+            assert await _details(session, memory.id) == {"a": 1}
+            assert await _log(session, memory.id) == [
+                (2, "api", p, {"details": {"a": 1}}),
+                (3, "api", world["third"], STRIPPED),
+                (
+                    4,
+                    "erasure",
+                    p,
+                    {
+                        "details": {"a": 1},
+                        "erased_details_keys": [digest],
+                        "restored_from": 3,
+                        "details_restored_from": {digest: 3},
+                    },
+                ),
+            ]
+            (audit,) = await _reprocess_audit_rows(session, p)
+            counts = audit.user_metadata
+            assert (
+                counts["details_restored"],
+                counts["details_restored_unavailable"],
+                counts["details_keys_reverted"],
+                counts["details_keys_ambiguous"],
+                counts["details_keys_ambiguous_reverted"],
+            ) == (0, 1, 0, 0, 1)
+            assert "s" not in counts and '"s"' not in repr(counts)
+            done = await _snapshots(session, [])
+
+        code, sync = await _run(async_engine, [*argv, "--apply", "--yes"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "1 completed erasure(s): would change 0, skipped 0" in out
+        assert "ambiguous details keys" not in out and "details keys ambiguous" not in out
+        sync.assert_not_awaited()
+        async with _maker(async_engine)() as session:
+            assert await _snapshots(session, []) == done
+    finally:
+        async with _maker(async_engine)() as session:
+            await session.execute(delete(AuditLog).where(AuditLog.user_id == p))
+            await session.execute(delete(ErasureRequest).where(ErasureRequest.id == request.id))
+            await session.execute(delete(Memory).where(Memory.id == memory.id))
+            await session.commit()

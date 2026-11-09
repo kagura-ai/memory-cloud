@@ -2173,6 +2173,15 @@ kept (stripped history, see runbook)` and nothing is applied for those keys.
 After upgrading to v0.129.0, run the plan (`--all`, no `--apply`) once to read
 these counts; a non-zero count is the input to a follow-up decision, not
 something to apply.
+`--revert-ambiguous` (#2389, opt-in) is that decision's switch: those live
+keys are then removed — the value to go back to is in the stripped state, so
+each is handled like a key whose value an earlier erasure removed — by the
+same restore (a new version and one `writer='erasure'` row whose prior lists
+the key's digest). The plan prints `would remove ambiguous details keys
+<request id>  N key(s)`, the apply `removed ambiguous details keys …`, and the
+audit row counts `details_keys_ambiguous_reverted`; a second run finds
+nothing. Older revision priors that carried such a key keep it. The live
+erasure never removes them.
 
 **Requests that failed after the Postgres step.** From v0.124.0, a request
 whose payload, audit-log, Redis, audit-row or finalize step fails after the

@@ -638,6 +638,113 @@ async def test_a_dry_run_restore_counts_and_writes_nothing(unavailable: bool) ->
     assert report.to_sync == []
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+async def test_removed_ambiguous_keys_are_counted_apart_from_the_subjects(dry_run: bool) -> None:
+    """#2389 (``--revert-ambiguous``): an ambiguous key is removed through
+    the restore's own write path — version, ``erasure`` row, its digest in
+    the list and the map — and counted in ``keys_ambiguous_reverted``, not
+    in ``keys_reverted``; the memory counts as unavailable."""
+    from types import SimpleNamespace
+
+    from services import erasure_details
+
+    m = uuid4()
+    memory = SimpleNamespace(
+        id=m,
+        type="fact",
+        details={"a": 1, "s": "x", "t": 5},
+        version=4,
+        updated_at=None,
+        deleted_at=None,
+        context_id=uuid4(),
+        embedding_status="success",
+    )
+    plan = DetailsErasurePlan(
+        reverts=(
+            MemoryRevert(
+                memory_id=m,
+                reverts=(
+                    KeyRevert("s", None, False, True, 3, ambiguous=True),
+                    KeyRevert("t", None, False, False, 4),
+                ),
+                from_version=3,
+                result={"a": 1},
+                prior={"a": 1},
+                erased_keys=tuple(sorted(digest(k, m) for k in ("s", "t"))),
+            ),
+        )
+    )
+    result = MagicMock()
+    result.scalars.return_value = [memory]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    db.flush = AsyncMock()
+    with patch.object(erasure_details, "record_revision") as record:
+        report = await erasure_details.restore_editor_details(
+            db, "sub", actor="p" * 64, dry_run=dry_run, plan=plan
+        )
+    assert (report.restored, report.unavailable) == (0, 1)
+    assert (report.keys_reverted, report.keys_ambiguous_reverted, report.keys_ambiguous) == (
+        1,
+        1,
+        0,
+    )
+    if dry_run:
+        record.assert_not_called()
+        assert memory.details == {"a": 1, "s": "x", "t": 5}
+        return
+    assert memory.details == {"a": 1} and memory.version == 5
+    (call,) = record.call_args_list
+    assert call.kwargs["prior"] == {
+        "details": {"a": 1},
+        "erased_details_keys": sorted(digest(k, m) for k in ("s", "t")),
+        "restored_from": 3,
+        "details_restored_from": {digest("s", m): 3, digest("t", m): 4},
+    }
+    assert call.kwargs["writer"] == "erasure"
+
+
+async def test_an_ambiguous_trigger_whose_window_goes_back_in_is_still_kept() -> None:
+    """#2389: removing an ambiguous ``trigger`` from a time memory merges the
+    live window back; when that is the whole live value nothing is written,
+    and the key counts as kept, not as removed."""
+    from types import SimpleNamespace
+
+    from services import erasure_details
+
+    m = uuid4()
+    window = {
+        "year": 2026,
+        "month": 1,
+        "day": 2,
+        "hour": None,
+        "minute": None,
+        "from": "2026-01-02T00:00:00Z",
+        "until": "2026-01-03T00:00:00Z",
+    }
+    memory = SimpleNamespace(id=m, type="time", details={"trigger": window}, version=4)
+    plan = DetailsErasurePlan(
+        reverts=(
+            MemoryRevert(
+                memory_id=m,
+                reverts=(KeyRevert("trigger", None, False, True, 3, ambiguous=True),),
+                from_version=3,
+                result=None,
+                prior={},
+                erased_keys=(digest("trigger", m),),
+            ),
+        )
+    )
+    result = MagicMock()
+    result.scalars.return_value = [memory]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    with patch.object(erasure_details, "record_revision") as record:
+        report = await erasure_details.restore_editor_details(db, "sub", actor="p" * 64, plan=plan)
+    record.assert_not_called()
+    assert (report.unavailable, report.keys_ambiguous_reverted, report.keys_ambiguous) == (0, 0, 1)
+
+
 # ---------------------------------------------------------------------------
 # #2287: pseudonymize_audit_logs, compiled
 # ---------------------------------------------------------------------------

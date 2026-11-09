@@ -50,7 +50,10 @@ Rules, per memory (``replay``):
   put-back row), the key is **ambiguous**: it may be the subject's value
   carried through, or the survivor's own change, and the stripped state
   cannot tell. Ambiguous keys are kept and counted, never reverted: a
-  survivor's write is never destroyed on a guess.
+  survivor's write is never destroyed on a guess. Only an operator's
+  ``reprocess_erasures --revert-ambiguous`` (#2389, ``revert_ambiguous``)
+  removes the live ones, as an unavailable key is removed: the value to go
+  back to is in the stripped state.
 - **The subject's keys** are the live keys whose writer is the subject.
   Each goes back to the value it had right below the edit that wrote it,
   walking further down past every value an erased member (the subject or
@@ -243,6 +246,9 @@ class KeyRevert:
             is removed.
         from_version: The version of the lowest edit the walk went past (the
             edit right above the state the value comes from).
+        ambiguous: Not the subject's key but an ambiguous one
+            (``Origin.ambiguous``), removed because the plan was asked to
+            (``revert_ambiguous``, #2389); ``unavailable`` too.
     """
 
     key: str
@@ -250,6 +256,7 @@ class KeyRevert:
     present: bool
     unavailable: bool
     from_version: int
+    ambiguous: bool = False
 
 
 @dataclass(frozen=True)
@@ -258,14 +265,15 @@ class MemoryRevert:
 
     Attributes:
         memory_id: The memory.
-        reverts: The subject's live keys, in key order.
+        reverts: The subject's live keys (and, with ``revert_ambiguous``, the
+            ambiguous ones), in key order.
         from_version: The lowest ``KeyRevert.from_version``: the erasure
             row's ``restored_from``.
         result: The live value with the reverts applied (NULL when nothing is
             left and the value below was NULL or unavailable, else ``{}``).
-        prior: The live value minus the subject's keys: the erasure row's
+        prior: The live value minus the reverted keys: the erasure row's
             ``prior.details``, stripped like every other prior.
-        erased_keys: The digests of the subject's keys: the erasure row's
+        erased_keys: The digests of the reverted keys: the erasure row's
             ``PRIOR_ERASED_DETAILS_KEYS_KEY``.
     """
 
@@ -318,7 +326,8 @@ class DetailsErasurePlan:
         strips: Revision rows whose prior holds a key of the subject's, in
             row id order.
         keys_ambiguous: Live keys kept because a stripped state below them
-            may hold the subject's value (never reverted).
+            may hold the subject's value (never reverted; 0 with
+            ``revert_ambiguous``, which puts them in ``reverts``).
         memory_ids: The candidate memories replayed, in id order.
     """
 
@@ -565,6 +574,20 @@ def _below_stripped(run: Replay, j: int, key: str, digests: Collection[str]) -> 
     return _pre(run.versions, restored_from, j - 1)
 
 
+def _ambiguous_revert(key: str, origin: Origin) -> tuple[KeyRevert, int]:
+    """An ambiguous live ``key`` removed (``revert_ambiguous``, #2389).
+
+    Classified by the replay (``Origin.ambiguous``), not walked again: the
+    survivor's edit that wrote it sits right above a stripped state, where
+    the value to go back to would be — unavailable, as when the subject's
+    own key walks into such a state (``_revert``).
+
+    Returns:
+        The revert, and the index of that stripped state.
+    """
+    return KeyRevert(key, None, False, True, origin.version, ambiguous=True), origin.state - 1
+
+
 def _plan_memory(
     memory_id: UUID,
     edits: Sequence[DetailsEdit],
@@ -572,6 +595,8 @@ def _plan_memory(
     author: str,
     subject: str,
     erased: Collection[str],
+    *,
+    revert_ambiguous: bool = False,
 ) -> tuple[MemoryRevert | None, list[PriorStrip], int]:
     run = replay(edits, live, author, subject=subject, erased=erased)
     strips = []
@@ -583,11 +608,19 @@ def _plan_memory(
         if keys:
             strips.append(PriorStrip(edit.id, keys, memory_id))
     live_writers = run.writers[-1] or {}
-    ambiguous = sum(1 for o in live_writers.values() if o.ambiguous)
+    ambiguous = sorted(k for k, o in live_writers.items() if o.ambiguous)
+    kept = 0 if revert_ambiguous else len(ambiguous)
     mine = sorted(k for k, o in live_writers.items() if o.actor == subject)
-    if not mine:
-        return None, strips, ambiguous
-    walked = [_revert(k, live_writers[k], run, erased) for k in mine]
+    gone = sorted({*mine, *ambiguous}) if revert_ambiguous else mine
+    if not gone:
+        return None, strips, kept
+    walked = sorted(
+        [
+            *(_revert(k, live_writers[k], run, erased) for k in mine),
+            *(_ambiguous_revert(k, live_writers[k]) for k in ambiguous if revert_ambiguous),
+        ],
+        key=lambda w: w[0].key,
+    )
     reverts = tuple(r for r, _ in walked)
     result: dict[str, Any] = dict(_keys(live))
     for r in reverts:
@@ -599,7 +632,7 @@ def _plan_memory(
     value: Any = result
     if not result and (lowest.unavailable or run.states[below] is None):
         value = None  # nothing left, and the value below was NULL (or gone)
-    prior = {k: v for k, v in _keys(live).items() if k not in mine}
+    prior = {k: v for k, v in _keys(live).items() if k not in gone}
     return (
         MemoryRevert(
             memory_id,
@@ -607,10 +640,10 @@ def _plan_memory(
             lowest.from_version,
             value,
             prior,
-            tuple(sorted(details_key_digest(k, memory_id) for k in mine)),
+            tuple(sorted(details_key_digest(k, memory_id) for k in gone)),
         ),
         strips,
-        ambiguous,
+        kept,
     )
 
 
@@ -620,6 +653,7 @@ def plan_details_erasure(
     subject: str,
     *,
     erased_actors: Collection[str] = frozenset(),
+    revert_ambiguous: bool = False,
 ) -> DetailsErasurePlan:
     """The per-key restore and strip of ``subject``'s ``details`` (#2275).
 
@@ -635,10 +669,14 @@ def plan_details_erasure(
             re-run).
         erased_actors: Other erased members' pseudonyms: their values are
             walked past, never reverted here.
+        revert_ambiguous: Remove the live ambiguous keys too, as unavailable
+            ones (#2389: ``reprocess_erasures --revert-ambiguous`` only; the
+            live erasure keeps them). They join the reverts
+            (``KeyRevert.ambiguous``) and are no longer counted as kept.
 
     Returns:
         The reverts (memory id order), the strips (row id order) and the
-        ambiguous key count.
+        count of ambiguous keys kept.
     """
     by_memory: dict[UUID, list[DetailsEdit]] = defaultdict(list)
     for row in rows:
@@ -658,7 +696,7 @@ def plan_details_erasure(
         replayed.append(memory_id)
         edits = sorted(by_memory[memory_id], key=lambda e: (e.version, e.id))
         revert, memory_strips, memory_ambiguous = _plan_memory(
-            memory_id, edits, details, author, subject, erased
+            memory_id, edits, details, author, subject, erased, revert_ambiguous=revert_ambiguous
         )
         if revert is not None:
             reverts.append(revert)
