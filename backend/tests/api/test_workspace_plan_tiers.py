@@ -304,7 +304,7 @@ def test_llm_selector_row(client: TestClient) -> None:
     assert tiers[0]["feature_enforcement"]["llm_selector"] == "conditional"
 
 
-def test_operation_history_is_max_only_and_enforced(client: TestClient) -> None:
+def test_operation_history_is_pro_and_max_and_enforced(client: TestClient) -> None:
     tiers = client.get(ENDPOINT).json()
-    assert [tier["operation_history"] for tier in tiers] == [False, False, False, True]
+    assert [tier["operation_history"] for tier in tiers] == [False, False, True, True]
     assert all(tier["feature_enforcement"]["operation_history"] == "enforced" for tier in tiers)

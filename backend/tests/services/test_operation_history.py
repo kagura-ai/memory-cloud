@@ -93,11 +93,57 @@ def test_unscoped_legacy_data_is_not_guessed_into_a_workspace():
 
 @pytest.mark.parametrize(
     "plan,enabled",
-    [("free", False), ("basic", False), ("pro", False), ("promax", True), ("unknown", False)],
+    [("free", False), ("basic", False), ("pro", True), ("promax", True), ("unknown", False)],
 )
-def test_history_is_an_enforced_max_entitlement(plan, enabled):
+def test_history_is_an_enforced_pro_and_max_entitlement(plan, enabled):
     assert has_feature(plan, "operation_history") is enabled
     assert feature_enforcement("operation_history") == FeatureEnforcement.ENFORCED
+
+
+def test_entitled_plans_follow_the_live_registry(monkeypatch):
+    from dataclasses import replace
+
+    from config.plan_tiers import PLAN_TIERS, get_required_plan_for_feature, plans_with_feature
+
+    assert get_required_plan_for_feature("operation_history") == "pro"
+    assert plans_with_feature("operation_history") == ("pro", "promax")
+    monkeypatch.setitem(
+        PLAN_TIERS, "custom", replace(PLAN_TIERS["promax"], name="custom", display_name="Team")
+    )
+    monkeypatch.setitem(
+        PLAN_TIERS, "pro", replace(PLAN_TIERS["pro"], features=frozenset({"secret_store"}))
+    )
+    assert plans_with_feature("operation_history") == ("promax", "custom")
+
+
+def test_queueing_does_not_scan_pending_objects(monkeypatch):
+    """A bulk path queues thousands of events before one flush (#2739 review)."""
+    from sqlalchemy.orm import Session
+
+    db = AsyncSession()
+    monkeypatch.setattr(
+        Session, "new", property(lambda _self: pytest.fail("session.new scanned per event"))
+    )
+    workspace = uuid4()
+    rows = [
+        record_operation(
+            db,
+            workspace_id=workspace,
+            operation="memory.created",
+            actor_user_id="user",
+            event_key=f"bulk:{index}",
+        )
+        for index in range(2000)
+    ]
+    again = record_operation(
+        db,
+        workspace_id=workspace,
+        operation="memory.created",
+        actor_user_id="user",
+        event_key="bulk:7",
+    )
+    assert again is rows[7]
+    assert len({row.id for row in rows}) == 2000
 
 
 def test_cursor_is_timezone_aware_and_stable():

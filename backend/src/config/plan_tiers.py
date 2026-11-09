@@ -274,6 +274,7 @@ PLAN_PRO = PlanTier(
             "secret_store",  # Issue #1128: zero-knowledge secret store (all tiers)
             "content_chunks",  # Issue #2103: content chunk vectors (M and above)
             "llm_selector",  # Issue #2144: recall LLM selector (M and above)
+            "operation_history",  # Issue #2739: workspace operation history (L and above)
         }
     ),
 )
@@ -311,8 +312,7 @@ PLAN_PROMAX = PlanTier(
     # setup_resource / resource-token creation, ``connectors`` gates
     # setup_connector, ``public_contexts`` gates set_public and bound public
     # keys. Lower tiers keep serving what they already have.
-    features=PLAN_PRO.features
-    | {"resources", "connectors", "public_contexts", "operation_history"},
+    features=PLAN_PRO.features | {"resources", "connectors", "public_contexts"},
 )
 
 # Plan tier registry. Insertion order IS the upgrade order (free → ... → promax):
@@ -354,7 +354,7 @@ def plan_at_least(plan_name: str | None, minimum: str) -> bool:
 # each entry actually does at runtime is declared in ``FEATURE_ENFORCEMENT``
 # below (#1648) — read the two together.
 FEATURE_MIN_PLANS: dict[str, str] = {
-    "operation_history": "promax",  # #2739: workspace mutation history (Max+).
+    "operation_history": "pro",  # #2739: workspace operation history (L and above).
     "api_keys": "free",
     "reranking": "basic",
     "oauth": "free",  # Free plan includes OAuth (updated from basic)
@@ -436,8 +436,11 @@ class FeatureGate:
 FEATURE_ENFORCEMENT: dict[str, FeatureGate] = {
     "operation_history": FeatureGate(
         FeatureEnforcement.ENFORCED,
-        "api/routes/operation_history.py checks workspace entitlement on every read; "
-        "recording is independent of the plan.",
+        "Recording and reading are limited to entitled workspaces (#2739): "
+        "services/operation_history_writer.py inserts an event only while the event's "
+        "workspace is on a tier with the feature, and api/routes/operation_history.py "
+        "checks the entitlement on every read. A downgrade keeps the recorded rows until "
+        "they expire.",
     ),
     "api_keys": FeatureGate(
         FeatureEnforcement.ADVERTISED,
@@ -815,6 +818,22 @@ def has_feature(plan_name: str, feature: str) -> bool:
         return feature in plan.features
     except ValueError:
         return False
+
+
+def plans_with_feature(feature: str) -> tuple[str, ...]:
+    """Every configured tier whose feature set includes ``feature``.
+
+    Reads the live registry, so ``PLAN_<KEY>_FEATURES`` overrides and any tier
+    registered beside the code defaults are included. Order follows
+    ``PLAN_TIERS``.
+
+    Args:
+        feature: Feature name.
+
+    Returns:
+        The tier keys, possibly empty.
+    """
+    return tuple(name for name in PLAN_TIERS if has_feature(name, feature))
 
 
 def feature_enforcement(feature: str) -> FeatureEnforcement:

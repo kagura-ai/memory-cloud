@@ -327,14 +327,17 @@ async def test_workspace_entitlement_and_role_rechecked_after_changes(history_db
     )
     await db.commit()
     assert (await route(db, s)).total == 1
-    for plan in ("pro", "basic", "free"):
+    await db.execute(update(Workspace).where(Workspace.id == s.workspace).values(plan_name="pro"))
+    await db.commit()
+    assert (await route(db, s)).total == 1
+    for plan in ("basic", "free"):
         await db.execute(
             update(Workspace).where(Workspace.id == s.workspace).values(plan_name=plan)
         )
         await db.commit()
         with pytest.raises(FeatureNotAvailableError):
             await route(db, s)
-    # Another Max workspace never unlocked this one; upgrading this one does.
+    # Another entitled workspace never unlocked this one; upgrading this one does.
     await db.execute(
         update(Workspace).where(Workspace.id == s.workspace).values(plan_name="promax")
     )
@@ -752,3 +755,90 @@ async def test_http_validates_timezone_and_treats_blank_actor_as_unset(history_h
     assert naive.status_code == 422
     assert naive.json()["details"]["field"] == "until"
     assert (await client.get(url, params={"actor": "  "})).status_code == 200
+
+
+async def _set_plan(db, workspace, plan):
+    await db.execute(update(Workspace).where(Workspace.id == workspace).values(plan_name=plan))
+    await db.commit()
+
+
+async def _stored(db, workspace):
+    return (await db.scalars(select(Event).where(Event.workspace_id == workspace))).all()
+
+
+@pytest.mark.parametrize("plan,recorded", [("free", 0), ("basic", 0), ("pro", 1), ("promax", 1)])
+async def test_only_entitled_workspaces_record(history_db, plan, recorded):
+    db = history_db
+    s = await seed(db)
+    await _set_plan(db, s.workspace, plan)
+    record_operation(db, operation="member.added", actor_user_id=s.owner, workspace_id=s.workspace)
+    # A context-only event resolves its workspace (and so its entitlement) in SQL.
+    record_operation(
+        db, operation="memory.updated", actor_user_id=s.owner, context_id=s.shared, target_id="m"
+    )
+    await db.commit()
+    assert len(await _stored(db, s.workspace)) == 2 * recorded
+    # The other workspace stays entitled and keeps recording.
+    record_operation(db, operation="member.added", actor_user_id=s.owner, workspace_id=s.elsewhere)
+    await db.commit()
+    assert len(await _stored(db, s.elsewhere)) == 1
+
+
+async def test_downgrade_keeps_rows_refuses_reads_and_upgrade_shows_them_again(history_db):
+    db = history_db
+    s = await seed(db)
+    await _set_plan(db, s.workspace, "pro")
+    record_operation(db, operation="member.added", actor_user_id=s.owner, workspace_id=s.workspace)
+    await db.commit()
+    assert (await route(db, s)).total == 1
+    await _set_plan(db, s.workspace, "basic")
+    with pytest.raises(FeatureNotAvailableError):
+        await route(db, s)
+    # Nothing new is recorded while the workspace is not entitled ...
+    record_operation(
+        db, operation="member.removed", actor_user_id=s.owner, workspace_id=s.workspace
+    )
+    await db.commit()
+    # ... and the downgrade deleted nothing.
+    assert [e.operation for e in await _stored(db, s.workspace)] == ["member.added"]
+    await _set_plan(db, s.workspace, "pro")
+    result = await route(db, s)
+    assert [item.operation for item in result.items] == ["member.added"]
+
+
+async def test_tier_override_that_grants_the_feature_records(history_db, monkeypatch):
+    from dataclasses import replace
+
+    from config.plan_tiers import PLAN_TIERS
+
+    db = history_db
+    s = await seed(db)
+    await _set_plan(db, s.workspace, "basic")
+    basic = PLAN_TIERS["basic"]
+    # The registry after a PLAN_BASIC_FEATURES override that adds the feature.
+    monkeypatch.setitem(
+        PLAN_TIERS, "basic", replace(basic, features=basic.features | {"operation_history"})
+    )
+    record_operation(db, operation="member.added", actor_user_id=s.owner, workspace_id=s.workspace)
+    await db.commit()
+    assert len(await _stored(db, s.workspace)) == 1
+    assert (await route(db, s)).total == 1
+
+
+async def test_savepoint_rollback_discards_the_queued_event_and_a_retry_records(history_db):
+    db = history_db
+    s = await seed(db)
+    key = "savepoint:" + uuid4().hex
+    kwargs = {
+        "operation": "member.added",
+        "actor_user_id": s.owner,
+        "workspace_id": s.workspace,
+        "event_key": key,
+    }
+    savepoint = await db.begin_nested()
+    first = record_operation(db, **kwargs)
+    await savepoint.rollback()
+    retried = record_operation(db, **kwargs)
+    assert retried is not first
+    await db.commit()
+    assert len(await _stored(db, s.workspace)) == 1

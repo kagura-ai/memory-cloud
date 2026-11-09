@@ -1,4 +1,4 @@
-"""Read-only workspace operation history for Max+ owners/admins (#2739)."""
+"""Read-only workspace operation history for entitled owners/admins (#2739)."""
 
 from datetime import datetime
 from uuid import UUID

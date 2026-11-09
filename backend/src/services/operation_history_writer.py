@@ -1,49 +1,92 @@
 """Add allowlisted mutation evidence to the caller's transaction (#2739).
 
-Never commits independently or checks a subscription: recording runs on all
-tiers. The paid feature is reading. A rollback discards both change and event.
+Recording is limited to workspaces entitled to ``operation_history`` at write
+time: the INSERT itself checks the workspace's plan, so an event of a workspace
+on another tier is simply not stored. Never commits independently. A rollback
+discards both change and event.
 """
 
 from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import event, func, select
+from sqlalchemy import cast, event, exists, func, literal, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from auth.history_principal import HistoryPrincipal, get_history_principal
-from models.auth import Context
+from config.plan_tiers import plans_with_feature
+from models.auth import Context, Workspace
 from models.operation_history import OperationHistory
 from services.write_provenance import current_provenance
 
 _UNSET_AGENT = object()
+FEATURE = "operation_history"
+# Events queued in a session and not flushed yet, by event id (``Session.info``).
+_QUEUE_KEY = "operation_history_queue"
+
+
+def _queue(db: AsyncSession | Session) -> dict[UUID, OperationHistory]:
+    """The session's not-yet-flushed events. A session's ``info`` is always a
+    dict; anything else (a test double) just goes without deduplication."""
+    info = db.info
+    return info.setdefault(_QUEUE_KEY, {}) if isinstance(info, dict) else {}
+
+
+def _bound(column: Any, value: Any) -> Any:
+    """``value`` as a typed SELECT-list expression for ``INSERT ... SELECT``."""
+    if isinstance(value, ColumnElement) or hasattr(value, "__clause_element__"):
+        return value
+    return cast(literal(value, type_=column.type), column.type)
 
 
 @event.listens_for(Session, "before_flush")
 def _insert_history_once(session: Session, _flush_context: Any, _instances: Any) -> None:
     """Persist queued evidence in the caller's transaction, including replays.
 
-    Revision recording is synchronous. Keep its queue API while PostgreSQL
-    arbitrates concurrent source keys without aborting the business mutation.
-    Context-ID-only callers must reference a persisted context; creation paths
-    flush their context first or supply a concrete privacy snapshot. Returned
-    evidence objects are detached after flush and must not be refreshed.
+    Revision recording is synchronous, so it keeps a queue API; the INSERT is
+    issued here in the same transaction as the business write. ``ON CONFLICT
+    DO NOTHING`` on the event id makes a replayed or concurrently delivered
+    source key a no-op. Any other failure of this INSERT fails the flush and
+    so aborts the business mutation with it: a covered change never commits
+    without its evidence (intentional coupling, no best-effort savepoint).
+
+    The INSERT is ``INSERT ... SELECT ... WHERE EXISTS``: it stores the event
+    only while its workspace is on a tier entitled to ``operation_history``
+    (registry tiers, ``PLAN_<KEY>_FEATURES`` overrides included). Context-ID-only
+    callers must reference a persisted context; creation paths flush their
+    context first or supply a concrete privacy snapshot. Returned evidence
+    objects are detached after flush and must not be refreshed.
     """
-    for pending in list(session.new):
-        if not isinstance(pending, OperationHistory):
+    session.info.pop(_QUEUE_KEY, None)
+    pending = [obj for obj in session.new if isinstance(obj, OperationHistory)]
+    if not pending:
+        return
+    plans = plans_with_feature(FEATURE)
+    table = OperationHistory.__table__
+    for row in pending:
+        values = {column.name: getattr(row, column.name) for column in table.columns}
+        session.expunge(row)
+        if not plans:
             continue
-        values = {
-            column.name: getattr(pending, column.name)
-            for column in OperationHistory.__table__.columns
-        }
-        session.expunge(pending)
+        entitled = exists().where(
+            Workspace.id == values["workspace_id"], Workspace.plan_name.in_(plans)
+        )
+        source = select(*(_bound(column, values[column.name]) for column in table.columns))
         session.connection(bind_arguments={"mapper": OperationHistory}).execute(
-            insert(OperationHistory.__table__)
-            .values(**values)
+            insert(table)
+            .from_select([column.name for column in table.columns], source.where(entitled))
             .on_conflict_do_nothing(index_elements=["id"])
         )
+
+
+@event.listens_for(Session, "after_soft_rollback")
+def _forget_rolled_back_events(session: Session, _previous_transaction: Any) -> None:
+    """A rollback (savepoints included) expunges the events queued inside it,
+    so a retry of the same source must queue a fresh one."""
+    session.info.pop(_QUEUE_KEY, None)
 
 
 OPERATIONS = frozenset(
@@ -104,7 +147,7 @@ SAFE_FIELDS = frozenset(
 
 
 def record_operation(
-    db: AsyncSession,
+    db: AsyncSession | Session,
     *,
     operation: str,
     actor_user_id: str | None,
@@ -128,6 +171,9 @@ def record_operation(
     boundary in the INSERT, without an extra asynchronous lookup. Callers that
     delete/detach a context pass its pre-change snapshot instead. Event keys
     identify a committed source operation, never a client-supplied label.
+    Whether the event is stored at all is decided at flush time by the
+    workspace's entitlement (see ``_insert_history_once``). Works on an
+    ``AsyncSession`` and on the synchronous OAuth2 ``Session`` alike.
     """
     if operation not in OPERATIONS or outcome not in {"success", "failure", "denied"}:
         raise ValueError("Unsupported operation history vocabulary")
@@ -168,10 +214,11 @@ def record_operation(
     )
     identifier = uuid5(NAMESPACE_URL, "kmc-operation:" + event_key) if event_key else uuid4()
     # A caller may queue the same source twice before flushing. The PK also
-    # prevents a source from acquiring two persisted representations.
-    for pending in db.new:
-        if isinstance(pending, OperationHistory) and pending.id == identifier:
-            return pending
+    # prevents a source from acquiring two persisted representations. A dict
+    # lookup, not a scan of ``session.new``: a bulk path queues thousands.
+    queue = _queue(db)
+    if (queued := queue.get(identifier)) is not None:
+        return queued
     values: dict[str, Any] = {
         "id": identifier,
         "workspace_id": workspace_id,
@@ -208,6 +255,7 @@ def record_operation(
             select(Context.is_private).where(predicate).scalar_subquery(), True
         )
         values["context_owner_id"] = select(Context.created_by).where(predicate).scalar_subquery()
-    event = OperationHistory(**values)
-    db.add(event)
-    return event
+    evidence = OperationHistory(**values)
+    queue[identifier] = evidence
+    db.add(evidence)
+    return evidence

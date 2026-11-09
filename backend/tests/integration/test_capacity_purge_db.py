@@ -101,6 +101,9 @@ async def test_chunked_history_preserves_each_context_privacy(db_session, free_w
     from models.operation_history import OperationHistory
 
     ws, public, owner = free_ws
+    # The sweep itself only reaches Free workspaces, which record no history
+    # (#2739); an entitled plan exercises the chunked writer's per-context rows.
+    ws.plan_name = "pro"
     private = make_context(workspace_id=ws.id, created_by=owner.user_id)
     public.is_private = False
     private.is_private = True
