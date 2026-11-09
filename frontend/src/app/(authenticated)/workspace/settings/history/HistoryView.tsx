@@ -38,7 +38,7 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [revision, setRevision] = useState(0);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [result, setResult] = useState<{ key: string; page: HistoryPage } | null>(null);
+  const [result, setResult] = useState<{ key: string; workspaceId: string; page: HistoryPage } | null>(null);
   const [failure, setFailure] = useState<{ key: string; error: unknown } | null>(null);
   const cursor = cursors[cursors.length - 1];
   const requestKey = JSON.stringify([workspaceId, filters, cursor, timezone]);
@@ -51,8 +51,9 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
   const tiers = usePlanTierMatrix();
   const minimumTier = tiers ? requiredTierFor(tiers, tier => tier.operation_history === true) : null;
   const planLabel = minimumTier ? resolvedPlanLabel(minimumTier.name, tiers, undefined, locale) : null;
-  // The last served window stays shown while the same view revalidates.
-  const retentionDays = result?.page.retention_days;
+  // The last served window stays shown while the same workspace revalidates;
+  // another workspace's window (its add-on) is never shown after a switch.
+  const retentionDays = result?.workspaceId === workspaceId ? result.page.retention_days : undefined;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -72,7 +73,7 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
     }
     if (cursor) params.set("cursor", cursor);
     getOperationHistory(workspaceId, params, controller.signal)
-      .then(data => { if (active) { setFailure(null); setResult({ key: requestKey, page: data }); } })
+      .then(data => { if (active) { setFailure(null); setResult({ key: requestKey, workspaceId, page: data }); } })
       .catch(err => { if (active) { setResult(null); setFailure({ key: requestKey, error: err }); } });
     return () => { active = false; controller.abort(); };
   }, [workspaceId, filters, cursor, requestKey, revision, timezone]);

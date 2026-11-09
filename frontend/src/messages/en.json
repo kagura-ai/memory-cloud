@@ -5411,7 +5411,7 @@
     "title": "Operation history",
     "description": "See who changed this workspace and what happened.",
     "coverage": "Records important changes while this workspace is on {plan} or another plan that includes operation history; nothing is recorded on other plans, and earlier activity is not backfilled. Memory contents and secrets are not stored here, and read and search activity is excluded. After a downgrade the records are kept until they expire, and viewing them needs an eligible plan again. Deleted targets may no longer open.",
-    "retention": "Records are kept for {days, plural, one {# day} other {# days}} and then deleted automatically. A retention add-on extends this period. There is no export.",
+    "retention": "Records are kept for {days, plural, one {# day} other {# days}} and then deleted automatically. There is no export.",
     "filters": "Filter operation history",
     "filterToggle": "Filters",
     "query": "Search actor names, IDs or field names",
