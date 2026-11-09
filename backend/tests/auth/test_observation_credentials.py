@@ -131,9 +131,13 @@ async def test_resource_credential_history_preserves_private_scope_and_revoking_
         assert all(event.context_id == world.ctx["a1"] for event in events)
         assert secret not in str([event.__dict__ for event in events])
         assert "private credential label" not in str([event.__dict__ for event in events])
-        owner_view = await read_history(s, workspace_id=world.ws, user_id=world.owner, limit=30)
+        owner_view = await read_history(
+            s, workspace_id=world.ws, user_id=world.owner, limit=30, retention_days=90
+        )
         assert owner_view["items"] == []
-        member_view = await read_history(s, workspace_id=world.ws, user_id=world.member, limit=30)
+        member_view = await read_history(
+            s, workspace_id=world.ws, user_id=world.member, limit=30, retention_days=90
+        )
         assert len(member_view["items"]) == 2
 
 
