@@ -474,6 +474,50 @@ async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -
     return point_id
 
 
+async def unshared_point_ids(
+    db: AsyncSession, rows: Sequence[tuple[UUID, UUID]]
+) -> dict[UUID, UUID | None]:
+    """:func:`unshared_point_id` for many rows, in one query (#2459).
+
+    Args:
+        db: The session; the lookup runs in a SAVEPOINT, like the single-row
+            function, so a failure does not abort the caller's transaction.
+        rows: ``(memory_id, point_id)`` pairs, the point each row names. The
+            caller pages its input; this sends one ``IN`` list for it.
+
+    Returns:
+        Each ``memory_id`` mapped to its ``point_id``, or to ``None`` when
+        another live row names that point. The rule is the single-row one: a
+        point under the row's own id skips the lookup, and the lookup is
+        scoped by neither context nor collection.
+    """
+    result: dict[UUID, UUID | None] = {}
+    lookup: dict[UUID, UUID] = {}
+    for memory_id, point_id in rows:
+        result[memory_id] = point_id
+        if point_id != memory_id:
+            lookup[memory_id] = point_id
+    if not lookup:
+        return result
+    async with db.begin_nested():
+        namers = await db.execute(
+            select(Memory.id, Memory.summary_embedding_id).where(
+                Memory.summary_embedding_id.in_(set(lookup.values())),
+                Memory.deleted_at.is_(None),
+            )
+        )
+    named_by: dict[UUID, set[UUID]] = {}
+    for namer_id, point_id in namers:
+        named_by.setdefault(point_id, set()).add(namer_id)
+    for memory_id, point_id in lookup.items():
+        if named_by.get(point_id, set()) - {memory_id}:
+            logger.info(
+                "memory_point_shared_kept", memory_id=str(memory_id), point_id=str(point_id)
+            )
+            result[memory_id] = None
+    return result
+
+
 # The ``Memory.source`` and ``Memory.type`` of a row the indexer creates.
 INDEXER_SOURCE = "resource_ingest"
 RESOURCE_MEMORY_TYPE = "resource_data"
