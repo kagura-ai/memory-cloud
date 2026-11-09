@@ -52,6 +52,7 @@ DERIVED_MOAT_TABLES: frozenset[str] = frozenset(
         "neural_config",  # neural tuning parameters
         "sleep_reports",  # Sleep consolidation phase results
         "sleep_actions",  # individual consolidation decisions
+        "sleep_related_indexes",  # Sleep-built one-hop recall links (#2728)
         "hub_tag_cache",  # computed tag co-occurrence hubs
         "memory_analyses",  # Memory Analysis runs
         "memory_analysis_assignments",  # memory→cluster assignments
