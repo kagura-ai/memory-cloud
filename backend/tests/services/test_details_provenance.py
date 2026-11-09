@@ -8,6 +8,7 @@ and author. Each prior is the whole dict the edit overwrote.
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 from uuid import UUID, uuid4
@@ -21,6 +22,8 @@ from services.details_provenance import (
     KeyRevert,
     PriorStrip,
     details_key_digest,
+    details_key_digests,
+    legacy_details_key_digest,
     plan_details_erasure,
     replay,
 )
@@ -100,7 +103,7 @@ def _apply(
             row = replace(
                 row,
                 details={k: v for k, v in row.details.items() if k not in keys},
-                erased_keys=row.erased_keys | {details_key_digest(k) for k in keys},
+                erased_keys=row.erased_keys | {details_key_digest(k, row.memory_id) for k in keys},
             )
         if row.actor_user_id == subject:
             row = replace(row, actor_user_id=pseudonym)
@@ -147,7 +150,7 @@ def test_the_worked_example_reverts_the_carried_key_and_strips_per_key() -> None
     assert revert.result == {"a": 2, "t": "z", "c": True}
     assert revert.prior == {"a": 2, "t": "z", "c": True}
     # row 2's prior (the author's {a:1}) is untouched; rows 3 and 4 lose s and t
-    assert plan.strips == (PriorStrip(30, ("s", "t")), PriorStrip(40, ("s", "t")))
+    assert plan.strips == (PriorStrip(30, ("s", "t"), m), PriorStrip(40, ("s", "t"), m))
     assert plan.keys_ambiguous == 0
     assert plan.memory_ids == (m,)
 
@@ -159,7 +162,7 @@ def test_a_carried_key_goes_back_to_its_value_below_the_subjects_write() -> None
     (revert,) = plan.reverts
     assert revert.reverts == (KeyRevert("s", 1, True, False, 2),)
     assert revert.result == {"a": 3, "s": 1}
-    assert plan.strips == (PriorStrip(30, ("s",)),)
+    assert plan.strips == (PriorStrip(30, ("s",), m),)
 
 
 def test_a_key_deleted_and_re_added_with_the_same_value_is_the_re_adders() -> None:
@@ -171,7 +174,7 @@ def test_a_key_deleted_and_re_added_with_the_same_value_is_the_re_adders() -> No
     ]
     plan = _plan(rows, {"k": 1})
     assert plan.reverts == ()
-    assert plan.strips == (PriorStrip(30, ("k",)),)
+    assert plan.strips == (PriorStrip(30, ("k",), m),)
 
 
 def test_the_subjects_consecutive_edits_go_back_to_the_value_before_the_run() -> None:
@@ -186,7 +189,7 @@ def test_the_subjects_consecutive_edits_go_back_to_the_value_before_the_run() ->
     (revert,) = plan.reverts
     assert revert.reverts == (KeyRevert("by", "author", True, False, 3),)
     assert revert.from_version == 3
-    assert plan.strips == (PriorStrip(50, ("by",)), PriorStrip(70, ("by",)))
+    assert plan.strips == (PriorStrip(50, ("by",), m), PriorStrip(70, ("by",), m))
 
 
 def test_a_chain_of_erased_actors_is_walked_past_to_the_survivors_value() -> None:
@@ -203,11 +206,11 @@ def test_a_chain_of_erased_actors_is_walked_past_to_the_survivors_value() -> Non
     (revert,) = plan.reverts
     assert revert.reverts == (KeyRevert("by", "b", True, False, 4),)
     # s1's own states: the prior of B's edit (row 30) holds s1's value
-    assert plan.strips == (PriorStrip(30, ("by",)),)
+    assert plan.strips == (PriorStrip(30, ("by",), m),)
     # s2 first: the live key is s1's — left to s1's erasure; s2's value leaves row 50
     other = _plan(rows, live, s2, erased_actors=frozenset({s1}))
     assert other.reverts == ()
-    assert other.strips == (PriorStrip(50, ("by",)),)
+    assert other.strips == (PriorStrip(50, ("by",), m),)
     # without the set, s2 is a surviving writer and their value comes back
     assert _plan(rows, live, s1).reverts[0].reverts[0].target == "s2"
 
@@ -224,7 +227,7 @@ def test_a_rollback_that_put_the_subjects_value_back_leaves_it_theirs() -> None:
         (revert,) = plan.reverts
         assert revert.reverts == (KeyRevert("k", None, False, False, 2),), requester
         assert revert.result == {}
-        assert plan.strips == (PriorStrip(30, ("k",)),), requester
+        assert plan.strips == (PriorStrip(30, ("k",), m),), requester
 
 
 def test_the_subjects_rollback_of_another_session_is_not_their_writing() -> None:
@@ -290,7 +293,7 @@ def test_a_second_erasure_over_a_new_erasure_row_reverts_only_its_keys() -> None
     assert revert.reverts == (KeyRevert("a", 1, True, False, 3),)
     assert revert.result == {"a": 1, "t": "z", "c": True}
     erasure_row = rows[-1].id
-    assert plan.strips == (PriorStrip(40, ("a",)), PriorStrip(erasure_row, ("a",)))
+    assert plan.strips == (PriorStrip(40, ("a",), m), PriorStrip(erasure_row, ("a",), m))
     # neither pseudonym finds anything once both ran
     rows, after = _apply(rows, after, plan, subject=B, pseudonym="b" * 64)
     for subject in (P_S, "b" * 64):
@@ -372,7 +375,7 @@ def test_a_null_live_value_reverts_nothing_but_strips() -> None:
     rows = [_edit(m, 2, S, {"a": 1}), _edit(m, 3, B, {"a": 1, "s": 1})]
     plan = _plan(rows, None)
     assert plan.reverts == ()
-    assert plan.strips == (PriorStrip(30, ("s",)),)
+    assert plan.strips == (PriorStrip(30, ("s",), m),)
 
 
 def test_a_value_a_put_back_synthesized_is_nobodys() -> None:
@@ -441,8 +444,27 @@ def test_a_re_run_over_the_result_plans_nothing() -> None:
     assert (again.reverts, again.strips, again.keys_ambiguous) == ((), (), 0)
 
 
+def _as_legacy(rows: list[DetailsEdit], keys: Iterable[str]) -> list[DetailsEdit]:
+    """``rows`` as an erasure before #2389 wrote them: every salted digest of
+    ``keys`` in ``erased_keys`` and the restore maps spelled unsalted."""
+    out = []
+    for row in rows:
+        legacy = {details_key_digest(k, row.memory_id): legacy_details_key_digest(k) for k in keys}
+        by_key = row.restored_from_by_key
+        out.append(
+            replace(
+                row,
+                erased_keys=frozenset(legacy.get(d, d) for d in row.erased_keys),
+                restored_from_by_key=(
+                    None if by_key is None else {legacy.get(d, d): v for d, v in by_key.items()}
+                ),
+            )
+        )
+    return out
+
+
 def _erase_in_order(
-    rows: list[DetailsEdit], live: Any, order: list[str]
+    rows: list[DetailsEdit], live: Any, order: list[str], *, legacy_first: bool = False
 ) -> tuple[Any, list[DetailsEdit]]:
     m = rows[0].memory_id
     state = {m: (live, AUTH)}
@@ -453,6 +475,12 @@ def _erase_in_order(
             rows, state, subject, erased_actors=frozenset(p * 64 for p in done)
         )
         rows, state = _apply(rows, state, plan, subject=subject, pseudonym=pseudonym)
+        if legacy_first and not done:
+            # the first erasure ran before #2389: unsalted digests
+            keys = {k for r in rows if isinstance(r.details, dict) for k in r.details}
+            keys |= {k for r in plan.reverts for k in (x.key for x in r.reverts)}
+            keys |= {k for s in plan.strips for k in s.keys}
+            rows = _as_legacy(rows, keys)
         done.append(subject)
     return state[m][0], rows
 
@@ -482,8 +510,13 @@ def test_the_result_does_not_depend_on_which_erasure_runs_first() -> None:
         (carried, {"c": "cT"}, ["S", "T"], {"c": "c0"}),
         (rolled, {"b": "bB", "c": "cS", "a": "aB"}, ["S", "B"], {"b": "bC"}),
     ):
-        results = [_erase_in_order(rows, live, order)[0] for order in (erased, erased[::-1])]
-        assert results == [expected, expected], rows
+        # #2389: also when the first erasure wrote the unsalted digests
+        results = [
+            _erase_in_order(rows, live, order, legacy_first=legacy)[0]
+            for order in (erased, erased[::-1])
+            for legacy in (False, True)
+        ]
+        assert results == [expected] * 4, rows
 
 
 def test_a_removal_stands_whichever_erasure_runs_first() -> None:
@@ -532,9 +565,10 @@ def test_distinct_key_restore_versions_preserve_a_deleted_and_readded_key() -> N
         _edit(m, 4, "C", {"x": 1}),
         _edit(m, 5, "S", {"k": 0, "x": 1}),
     ]
-    for order in (["S", "C"], ["C", "S"]):
-        live, after = _erase_in_order(rows, {"k": 1, "x": 1}, order)
-        assert live == {"x": 0}, order
+    for order, legacy in ((o, lg) for o in (["S", "C"], ["C", "S"]) for lg in (False, True)):
+        # #2389: the first erasure's map may be keyed by the unsalted digests
+        live, after = _erase_in_order(rows, {"k": 1, "x": 1}, order, legacy_first=legacy)
+        assert live == {"x": 0}, (order, legacy)
         for subject in ("S" * 64, "C" * 64):
             again = _plan(after, live, subject, erased_actors=frozenset({"S" * 64, "C" * 64}))
             assert (again.reverts, again.strips, again.keys_ambiguous) == ((), (), 0)
@@ -553,8 +587,8 @@ def test_a_stripped_put_back_walk_uses_each_keys_restore_version() -> None:
     state = {m: ({"k": 1, "x": 1}, AUTH)}
     first = plan_details_erasure(rows, state, "S")
     assert first.reverts[0].restored_from_by_key == {
-        details_key_digest("k"): 5,
-        details_key_digest("x"): 2,
+        details_key_digest("k", m): 5,
+        details_key_digest("x", m): 2,
     }
     rows, state = _apply(rows, state, first, subject="S", pseudonym="S" * 64)
     rows.append(_edit(m, 7, "D", state[m][0]))
@@ -588,7 +622,7 @@ def test_invalid_per_key_restore_versions_are_ignored_without_scalar_fallback(ba
     m = uuid4()
     row = replace(
         _rollback(m, 5, AUTH, {}, restored_from=2),
-        restored_from_by_key={details_key_digest("k"): bad},
+        restored_from_by_key={details_key_digest("k", m): bad},
     )
     assert row.restored_from_by_key == {}
 
@@ -597,3 +631,64 @@ def test_invalid_per_key_restore_versions_are_ignored_without_scalar_fallback(ba
 def test_invalid_restore_map_shapes_and_digests_are_ignored(metadata: Any) -> None:
     row = replace(_rollback(uuid4(), 5, AUTH, {}, restored_from=2), restored_from_by_key=metadata)
     assert row.restored_from_by_key == {}
+
+
+def test_the_key_digest_is_salted_with_the_memory_id() -> None:
+    """#2389: sha256 of the memory id, a NUL and the key; two memories, two
+    digests; never the unsalted (legacy) spelling."""
+    import hashlib
+
+    m, n = uuid4(), uuid4()
+    assert details_key_digest("k", m) == hashlib.sha256(f"{m}\x00k".encode()).hexdigest()
+    assert details_key_digest("k", m) != details_key_digest("k", n)
+    assert legacy_details_key_digest("k") == hashlib.sha256(b"k").hexdigest()
+    assert details_key_digest("k", m) != legacy_details_key_digest("k")
+    # a key spelled like the salt input is still another digest: the NUL
+    # never occurs in a stored key
+    assert details_key_digest("k", m) != legacy_details_key_digest(f"{m}k")
+    assert details_key_digests("k", m) == (
+        details_key_digest("k", m),
+        legacy_details_key_digest("k"),
+    )
+
+
+def test_the_plan_writes_only_salted_digests() -> None:
+    """#2389: the restore row's ``erased_details_keys`` and
+    ``details_restored_from`` and the strip's digests are the salted ones."""
+    m, rows, live = _worked_example()
+    plan = _plan(rows, live)
+    (revert,) = plan.reverts
+    assert revert.erased_keys == (details_key_digest("s", m),)
+    assert revert.restored_from_by_key == {details_key_digest("s", m): 2}
+    assert [s.digests for s in plan.strips] == [
+        tuple(sorted(details_key_digest(k, m) for k in ("s", "t")))
+    ] * 2
+    legacy = {legacy_details_key_digest(k) for k in ("s", "t")}
+    written = {*revert.erased_keys, *revert.restored_from_by_key}
+    written |= {d for s in plan.strips for d in s.digests}
+    assert not written & legacy
+
+
+def test_a_restore_map_is_read_by_either_spelling() -> None:
+    """#2389: a put-back's per-key restore version is found under the salted
+    digest (new rows) and under the unsalted one (rows before #2389)."""
+    m = uuid4()
+    rows = [
+        _edit(m, 2, S, {"k": 0}),
+        _edit(m, 3, B, {"k": 1}),
+        _edit(m, 4, B, {"k": 2}),
+    ]
+    for digest in (details_key_digest("k", m), legacy_details_key_digest("k")):
+        put_back = replace(
+            _rollback(m, 5, AUTH, {"k": 1}, restored_from=3), restored_from_by_key={digest: 3}
+        )
+        run = replay([*rows, put_back], {"k": 1}, AUTH, subject=S, erased={S})
+        # put back from version 3's state: S's ``k``
+        assert run.writers[-1]["k"].actor == S, digest
+    # another memory's salted digest of ``k`` names nothing here: carried, B's
+    other = replace(
+        _rollback(m, 5, AUTH, {"k": 1}, restored_from=3),
+        restored_from_by_key={details_key_digest("k", uuid4()): 3},
+    )
+    run = replay([*rows, other], {"k": 1}, AUTH, subject=S, erased={S})
+    assert run.writers[-1]["k"].actor == B

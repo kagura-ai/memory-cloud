@@ -2409,6 +2409,16 @@ the existing scalar `restored_from`. Older code ignores the map and can
 misattribute a restored value, so do not roll erasure executors back after
 new-format rows are written. No schema migration is required.
 
+**Erasure rollout for #2389.** The same pause applies. New erasure revisions
+store the `details` key digests in `erased_details_keys` and as the keys of
+`details_restored_from` salted with the memory id (`sha256(memory id + NUL +
+key)`), so one table of short key names no longer reverses every memory's
+list. Rows written before keep the unsalted digests; nothing re-hashes them,
+and new code matches a key by both spellings. Older code cannot match a
+salted digest (it would read an erased key as a removal), so do not roll
+erasure executors back after salted rows are written. No schema migration is
+required.
+
 All surviving authored rows now receive the erased-author terminal marker,
 including a row an earlier embedding run had already completed. An old run
 that writes after the erasure cannot use the normal success re-queue to

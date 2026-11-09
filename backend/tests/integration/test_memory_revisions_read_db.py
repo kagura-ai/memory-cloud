@@ -223,7 +223,7 @@ async def test_erasure_strips_the_details_the_subject_wrote_not_the_ones_they_ov
             (2, {"details": {"c": 1}}),
             (3, {"details": {"b": 1}}),  # B's value, kept
             (4, {"summary": "a's"}),
-            (5, {"details": {}, "erased_details_keys": [details_key_digest("a")]}),  # A's key
+            (5, {"details": {}, "erased_details_keys": [details_key_digest("a", mem_id)]}),
         ]
         assert rebuilt[4].values["details"] == {} and rebuilt[4].unavailable == ()
         assert rebuilt[3].values["details"] == {} and rebuilt[3].unavailable == ()

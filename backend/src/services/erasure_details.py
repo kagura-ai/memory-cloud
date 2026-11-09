@@ -153,7 +153,6 @@ from services.details_provenance import (
     DetailsEdit,
     DetailsErasurePlan,
     PriorStrip,
-    details_key_digest,
     plan_details_erasure,
 )
 from services.memory_versions import (
@@ -1993,10 +1992,12 @@ async def _strip_editor_keys(db: AsyncSession, strips: Sequence[PriorStrip]) -> 
 
     The rows are locked first, all of them in one id-ordered ``FOR UPDATE``
     (the order every revision statement takes, #2242); every one belongs
-    to a memory the caller holds. Then one UPDATE per distinct key set:
+    to a memory the caller holds. Then one UPDATE per distinct key set and
+    memory (the digests are salted with the memory id, #2389):
     ``jsonb_set(prior, '{details}', prior->'details' - keys)``, and the keys'
-    digests appended to ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (a later erasure's
-    walk reads them as an erased member's values, not as removals). The guards
+    digests (``PriorStrip.digests``) appended to
+    ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (a later erasure's walk reads them as an
+    erased member's values, not as removals). The guards
     keep a row whose ``details`` is gone or not an object (NULL: ``-`` on a
     scalar raises) as it is.
 
@@ -2018,19 +2019,23 @@ async def _strip_editor_keys(db: AsyncSession, strips: Sequence[PriorStrip]) -> 
         .order_by(MemoryRevision.id)
         .with_for_update()
     )
-    groups: dict[tuple[str, ...], list[int]] = defaultdict(list)
+    groups: dict[tuple[tuple[str, ...], tuple[str, ...]], list[int]] = defaultdict(list)
     for strip in strips:
-        groups[strip.keys].append(strip.row_id)
+        groups[(strip.keys, strip.digests)].append(strip.row_id)
     total = 0
     details = MemoryRevision.prior["details"]
-    for keys in sorted(groups):
+    for keys, digests in sorted(groups):
         result = cast(
             CursorResult[Any],
             await db.execute(
                 update(MemoryRevision)
                 .where(
                     MemoryRevision.id
-                    == any_(bindparam("ids", groups[keys], type_=ARRAY(BigInteger), unique=True)),
+                    == any_(
+                        bindparam(
+                            "ids", groups[(keys, digests)], type_=ARRAY(BigInteger), unique=True
+                        )
+                    ),
                     MemoryRevision.prior.has_key("details"),
                     func.jsonb_typeof(details) == "object",
                 )
@@ -2053,9 +2058,7 @@ async def _strip_editor_keys(db: AsyncSession, strips: Sequence[PriorStrip]) -> 
                         func.coalesce(
                             MemoryRevision.prior[PRIOR_ERASED_DETAILS_KEYS_KEY],
                             type_coerce([], JSONB),
-                        ).op("||", return_type=JSONB)(
-                            type_coerce(sorted(details_key_digest(k) for k in keys), JSONB)
-                        ),
+                        ).op("||", return_type=JSONB)(type_coerce(list(digests), JSONB)),
                         type_=JSONB,
                     )
                 )

@@ -60,12 +60,22 @@ PRIOR_RESTORED_FROM_KEY = "restored_from"
 # provenance replay and stripped-key walks use the scalar only on legacy rows
 # without this map. Version reconstruction and rollback ignore this metadata.
 PRIOR_DETAILS_RESTORED_FROM_KEY = "details_restored_from"
-# #2275: the sha256 digests (``details_provenance.details_key_digest``, never
-# the names) of the ``details`` keys account erasure removed from this prior
-# per key — an erased member's values, not keys the edit found absent. Read
-# only by a later erasure's replay, so the result does not depend on which
-# of two erasures runs first. Not a versioned field and not an
-# ``unavailable`` marker: ``prior_values`` and the marker readers ignore it.
+# #2275: the sha256 digests (never the names) of the ``details`` keys account
+# erasure removed from this prior per key — an erased member's values, not
+# keys the edit found absent. Read by a later erasure's replay, so the result
+# does not depend on which of two erasures runs first. Not a versioned field
+# and not an ``unavailable`` marker: ``prior_values`` and the marker readers
+# ignore it.
+#
+# Two spellings of a digest, here and as the keys of
+# ``PRIOR_DETAILS_RESTORED_FROM_KEY``: since #2389 every writer stores
+# ``details_provenance.details_key_digest(key, memory_id)``, salted with the
+# memory id, so a dictionary of short key names does not reverse them all at
+# once; rows written before hold the unsalted
+# ``legacy_details_key_digest(key)``. Nothing re-hashes the stored rows (no
+# migration): readers match a key against both (``details_key_digests``), and
+# one row may hold both kinds, for different keys, after a later erasure
+# appended to a legacy list.
 PRIOR_ERASED_DETAILS_KEYS_KEY = "erased_details_keys"
 
 

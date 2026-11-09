@@ -54,9 +54,18 @@ AUTHORS = {"by": "author", "location": {"lat": 10.5, "lon": 20.25}}
 SUBJECTS = {"by": "subject", "location": {"lat": 35.0, "lon": 139.0}}
 THIRDS = {"by": "third"}
 STRIPPED = {"erased": ["details"]}  # the whole-value strip (authored arm, before v0.129.0)
-# #2275: a prior whose keys were all the subject's, stripped per key
-_BY_LOCATION = sorted(details_key_digest(k) for k in ("by", "location"))
-KEYS_STRIPPED: dict[str, Any] = {"details": {}, "erased_details_keys": _BY_LOCATION}
+
+
+def _by_location(memory_id: uuid.UUID) -> list[str]:
+    """#2389: the digests of ``by`` and ``location``, salted with the memory id."""
+    return sorted(details_key_digest(k, memory_id) for k in ("by", "location"))
+
+
+def _keys_stripped(memory_id: uuid.UUID) -> dict[str, Any]:
+    """#2275: a prior whose keys were all the subject's, stripped per key."""
+    return {"details": {}, "erased_details_keys": _by_location(memory_id)}
+
+
 SCRUBBED = {"erased": ["details"], "scrubbed": ["details"]}
 
 COMPLETED_AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
@@ -346,15 +355,15 @@ async def test_apply_restores_and_strips_only_the_erased_members_values(
                 p,
                 {
                     "details": {},
-                    "erased_details_keys": _BY_LOCATION,
+                    "erased_details_keys": _by_location(live.id),
                     "restored_from": 3,
-                    "details_restored_from": dict.fromkeys(_BY_LOCATION, 3),
+                    "details_restored_from": dict.fromkeys(_by_location(live.id), 3),
                 },
             ),
         ]
         assert await _log(session, leftover.id) == [
             (2, "api", p, {"details": AUTHORS}),
-            (3, "api", world["fourth"], KEYS_STRIPPED),
+            (3, "api", world["fourth"], _keys_stripped(leftover.id)),
         ]
         assert await _details(session, leftover.id) == {"by": "fourth"}
         # every other row — the S1 rows on the scrubbed memory, the B3 chain
@@ -586,7 +595,7 @@ async def test_a_double_erasure_chain_ends_with_the_authors_value_in_either_orde
             log = await _log(session, memory.id)
             assert log[:2] == [
                 (2, "api", p2, {"details": AUTHORS}),
-                (3, "api", p1, KEYS_STRIPPED),
+                (3, "api", p1, _keys_stripped(memory.id)),
             ]
             # exactly one erasure row, by the request that restored, naming
             # the whole run of erased members' edits
@@ -597,9 +606,9 @@ async def test_a_double_erasure_chain_ends_with_the_authors_value_in_either_orde
                     p1,
                     {
                         "details": {},
-                        "erased_details_keys": _BY_LOCATION,
+                        "erased_details_keys": _by_location(memory.id),
                         "restored_from": 2,
-                        "details_restored_from": dict.fromkeys(_BY_LOCATION, 2),
+                        "details_restored_from": dict.fromkeys(_by_location(memory.id), 2),
                     },
                 )
             ]
@@ -773,7 +782,7 @@ async def test_a_legacy_failed_after_commit_request_is_repaired_and_reprocessed(
                     3,
                     "api",
                     world["fourth"],
-                    KEYS_STRIPPED,
+                    _keys_stripped(leftover.id),
                 )
                 (audit,) = await _reprocess_audit_rows(session, p)
                 assert audit.user_metadata["request_repaired"] is True

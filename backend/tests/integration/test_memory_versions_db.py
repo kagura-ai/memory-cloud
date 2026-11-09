@@ -423,8 +423,10 @@ async def _seed_log(
     await session.commit()
 
 
-# #2275: a prior whose only key, ``by``, was the subject's, stripped per key
-_BY_GONE = {"details": {}, "erased_details_keys": [details_key_digest("by")]}
+def _by_gone(memory_id: uuid.UUID) -> dict[str, Any]:
+    """#2275: a prior whose only key, ``by``, was the subject's, stripped per
+    key (#2389: its digest salted with the memory id)."""
+    return {"details": {}, "erased_details_keys": [details_key_digest("by", memory_id)]}
 
 
 async def _erase_revisions(session: AsyncSession, subject: str) -> str:
@@ -496,7 +498,7 @@ async def test_erasure_strips_the_subjects_details_from_a_memory_they_only_edite
         (edited, 2, pseudonym, {"details": {"by": "author"}}),
         (edited, 3, author, {"importance": 0.4}),
         # #2275: the subject's key leaves the prior, the (empty) rest stays
-        (edited, 4, author, _BY_GONE),
+        (edited, 4, author, _by_gone(edited)),
         (edited, 5, third, {"details": {"by": "author-again"}}),
         (unrelated, 3, third, {"details": {"u": 1}}),
         (unrelated, 4, third, {"details": {"u": 2}}),
@@ -533,8 +535,8 @@ async def test_a_second_erasure_finds_an_edit_the_first_one_stripped(
         log = await _log(session, edited)
     assert log == [
         (edited, 2, first_pseudonym, {"details": {"by": "author"}}),
-        (edited, 4, second_pseudonym, _BY_GONE),
-        (edited, 6, third, _BY_GONE),
+        (edited, 4, second_pseudonym, _by_gone(edited)),
+        (edited, 6, third, _by_gone(edited)),
     ]
 
 
@@ -667,7 +669,7 @@ async def test_erasure_leaves_other_users_revisions_untouched(
         assert await _log(session, authored, edited) == [
             (authored, 2, third, {"erased": ["details"], "scrubbed": ["details"]}),
             (edited, 2, pseudonym, {"details": {"by": "author"}}),
-            (edited, 4, author, _BY_GONE),
+            (edited, 4, author, _by_gone(edited)),
         ]
         assert await _sessions(session, authored, edited) == [
             (authored, 2, "sess-s"),
@@ -1050,7 +1052,7 @@ async def test_strip_by_pseudonym_is_idempotent_after_erasure(
         erased_log = await _log(session, edited, authored)
         assert erased_log == [
             (edited, 2, pseudonym, {"details": {"by": "author"}}),
-            (edited, 4, author, _BY_GONE),
+            (edited, 4, author, _by_gone(edited)),
             (authored, 2, third, {"erased": ["details"], "scrubbed": ["details"]}),
         ]
 
@@ -1074,7 +1076,7 @@ async def test_strip_by_pseudonym_is_idempotent_after_erasure(
         assert await _log(session, edited, authored) == [
             *erased_log[:2],
             (edited, 6, pseudonym, {"details": {"by": "author-again"}}),
-            (edited, 8, third, _BY_GONE),
+            (edited, 8, third, _by_gone(edited)),
             erased_log[2],
         ]
 

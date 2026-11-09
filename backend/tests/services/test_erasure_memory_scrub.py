@@ -11,6 +11,7 @@ trigger_from/until) since they derive from details — except a time memory's
 
 import re
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -319,7 +320,7 @@ async def test_erase_memory_revisions_strips_details_and_pseudonymizes_the_actor
     # replay, read under the memory locks)
     from services.details_provenance import DetailsErasurePlan, PriorStrip
 
-    plan = DetailsErasurePlan(strips=(PriorStrip(12, ("a",)),))
+    plan = DetailsErasurePlan(strips=(PriorStrip(12, ("a",), uuid4()),))
     with (
         patch("services.account_erasure_service._audit_salt", return_value="salt"),
         patch(
