@@ -104,6 +104,7 @@ async def _refresh_connected_slack_install(
     connector_id: str,
     bot_token: str,
     install_handle: str,
+    actor_user_id: str | None = None,
 ) -> bool:
     """Hand a refused Slack install's bot token to the existing connector (#1880).
 
@@ -127,7 +128,7 @@ async def _refresh_connected_slack_install(
 
     try:
         stored = await ConnectorProvisioningService(db).refresh_slack_bot_token(
-            workspace_id, UUID(connector_id), bot_token
+            workspace_id, UUID(connector_id), bot_token, actor_user_id=actor_user_id
         )
         if not stored:
             await db.rollback()
@@ -544,6 +545,7 @@ async def create_workspace_connector(
                 connector_id=str(conflict.details.get("connector_id") or ""),
                 bot_token=str(oauth_tokens["bot_token"]),
                 install_handle=request.slack_install_handle,
+                actor_user_id=user_id,
             )
         ):
             # Present only when confirmed: the UI says "permissions were

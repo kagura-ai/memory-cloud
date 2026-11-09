@@ -2552,6 +2552,11 @@ class AccountErasureService:
         # Workspaces owned by the user. After step 3 ran, only sole-owner
         # workspaces remain pointing here. The cascade chain wipes
         # contexts/memories/edges/etc.
+        from models.operation_history import OperationHistory
+
+        counts["operation_history_deleted"] = await self._count_and_delete(
+            OperationHistory, OperationHistory.workspace_id.in_(owned_ws)
+        )
         counts["workspaces"] = await self._count_and_delete(
             Workspace, Workspace.owner_user_id == user_id
         )

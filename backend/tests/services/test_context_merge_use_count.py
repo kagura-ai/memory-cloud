@@ -126,12 +126,22 @@ async def test_merge_contexts_copies_memory_without_dropped_use_count():
     assert result["merged"] == 1
     # The copy loop built and added exactly one new Memory (no TypeError on the
     # dropped column), retargeted to the destination context with stats reset.
-    mock_db.add.assert_called_once()
-    new_mem = mock_db.add.call_args.args[0]
+    copies = [c.args[0] for c in mock_db.add.call_args_list if isinstance(c.args[0], Memory)]
+    assert len(copies) == 1
+    new_mem = copies[0]
     assert isinstance(new_mem, Memory)
     assert new_mem.context_id == target_id
     assert new_mem.access_count == 0
     assert not hasattr(new_mem, "use_count")
+    from models.operation_history import OperationHistory
+
+    (history,) = [
+        c.args[0] for c in mock_db.add.call_args_list if isinstance(c.args[0], OperationHistory)
+    ]
+    assert history.operation == "memory.created"
+    assert history.count == 1
+    assert history.actor_user_id == user_id
+    assert history.context_id == target_id
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +236,7 @@ async def _run_merge(
         result = await service.merge_contexts(
             user_id, source_id, target_id, delete_source=delete_source
         )
-    rows = [c.args[0] for c in mock_db.add.call_args_list]
+    rows = [c.args[0] for c in mock_db.add.call_args_list if isinstance(c.args[0], Memory)]
     return result, rows, delete_called, target_id
 
 

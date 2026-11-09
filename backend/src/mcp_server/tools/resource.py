@@ -1133,6 +1133,19 @@ async def handle_setup_resource(
                 description=args.get("description"),
                 quota_events_per_hour=quota_events_per_hour,
                 created_by=user_id,
+                actor_user_id=user_id,
+            )
+
+            from services.operation_history_writer import record_operation
+
+            record_operation(
+                db,
+                operation="context.created",
+                actor_user_id=user_id,
+                context=context,
+                target_id=context.id,
+                surface="mcp",
+                event_key=f"context-created:{context.id}",
             )
 
             # 12. Commit everything in one transaction

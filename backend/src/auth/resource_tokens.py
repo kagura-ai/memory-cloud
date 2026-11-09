@@ -267,6 +267,7 @@ class ResourceTokenManager:
             workspace_id=history_workspace,
             context=history_context,
             target_id=new_token.public_id,
+            subject_user_id=created_by,
             event_key=f"resource-token-created:{new_token.id}",
         )
 
@@ -406,6 +407,7 @@ class ResourceTokenManager:
             workspace_id=history_workspace,
             context=history_context,
             target_id=token.public_id,
+            subject_user_id=token.created_by,
             event_key=f"resource-token-revoked:{token.id}",
         )
         token.is_active = False
@@ -424,6 +426,7 @@ class ResourceTokenManager:
         resource_id: str,
         *,
         created_by: str | None = None,
+        actor_user_id: str | None = None,
     ) -> int:
         """Revoke the active tokens of one workspace's resource (#1877).
 
@@ -450,7 +453,7 @@ class ResourceTokenManager:
 
         tokens = list((await self.db.execute(query)).scalars().all())
         for token in tokens:
-            await self.revoke_token(token.id)
+            await self.revoke_token(token.id, actor_user_id=actor_user_id)
         return len(tokens)
 
     async def list_tokens(

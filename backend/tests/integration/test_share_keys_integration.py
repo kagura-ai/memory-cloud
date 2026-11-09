@@ -25,11 +25,13 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager
 from auth.share_keys import ShareKeyManager
 from models.auth import Context, ShareKey, User, Workspace
+from models.operation_history import OperationHistory
 from services.agent_state_service import AgentStateService
 
 
@@ -99,6 +101,50 @@ class TestShareKeyAllowList:
         assert verified is not None
         assert verified.user_id == s.user_a
         assert verified.context_id == s.ctx_id
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_history_commits_and_rolls_back_with_share_key(
+        self, two_users_one_context, db_session
+    ):
+        s = two_users_one_context
+        manager = ShareKeyManager(db_session)
+        secret, key = await manager.create_key(
+            name="history", user_id=s.user_a, context_id=s.ctx_id
+        )
+        public_id = key.public_id
+        await db_session.commit()
+        assert await manager.revoke_key(public_id, s.user_a)
+        await db_session.commit()
+        assert not await manager.revoke_key(public_id, s.user_a)
+        events = (
+            await db_session.scalars(
+                select(OperationHistory)
+                .where(OperationHistory.target_id == public_id)
+                .order_by(OperationHistory.occurred_at)
+            )
+        ).all()
+        assert [event.operation for event in events] == ["credential.issued", "credential.revoked"]
+        assert all(event.context_id == s.ctx_id for event in events)
+        assert all(event.context_private and event.context_owner_id == s.user_a for event in events)
+        assert all(event.actor_user_id == s.user_a for event in events)
+        assert secret not in str([event.__dict__ for event in events])
+
+        _, abandoned = await manager.create_key(
+            name="rollback", user_id=s.user_a, context_id=s.ctx_id
+        )
+        abandoned_id = abandoned.public_id
+        await db_session.flush()
+        await db_session.rollback()
+        assert (
+            await db_session.scalar(select(ShareKey.id).where(ShareKey.public_id == abandoned_id))
+            is None
+        )
+        assert (
+            await db_session.scalar(
+                select(OperationHistory.id).where(OperationHistory.target_id == abandoned_id)
+            )
+            is None
+        )
 
 
 class TestShareKeyListOwnerScope:

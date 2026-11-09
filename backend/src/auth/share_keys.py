@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from models.auth import ShareKey
+from services.operation_history_writer import record_operation
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
@@ -153,6 +154,15 @@ class ShareKeyManager:
         )
         self.db.add(new_key)
         await self.db.flush()
+        record_operation(
+            self.db,
+            operation="credential.issued",
+            actor_user_id=user_id,
+            context_id=context_id,
+            target_id=new_key.public_id,
+            subject_user_id=user_id,
+            event_key=f"share-key-issued:{new_key.public_id}",
+        )
 
         logger.info(
             "share_key_created",
@@ -237,6 +247,15 @@ class ShareKeyManager:
             return False
 
         record.revoked_at = utcnow()
+        record_operation(
+            self.db,
+            operation="credential.revoked",
+            actor_user_id=user_id,
+            context_id=record.context_id,
+            target_id=record.public_id,
+            subject_user_id=record.user_id,
+            event_key=f"share-key-revoked:{record.public_id}",
+        )
         await self.db.flush()
         logger.info("share_key_revoked", key_id=record.id, public_id=public_id, user_id=user_id)
         return True

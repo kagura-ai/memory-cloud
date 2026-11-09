@@ -911,7 +911,15 @@ class _SettingsConn(SimpleNamespace):
     """Connector stub with a real-ish write-only llm_config setter (#1376)."""
 
     def set_llm_config(self, config):
+        self._llm_config = config
         self.llm_config_encrypted = "ENC:test" if config else None
+
+    def get_llm_config(self):
+        return getattr(
+            self,
+            "_llm_config",
+            {"provider": "stored", "model": "stored"} if self.llm_config_encrypted else None,
+        )
 
 
 def _settings_conn(**over):

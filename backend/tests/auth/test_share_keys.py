@@ -35,6 +35,8 @@ from auth.share_keys import (
     ShareKeyManager,
     VerifiedShareKey,
 )
+from models.auth import ShareKey
+from models.operation_history import OperationHistory
 from utils.hashing import sha256_hex
 
 NOW = datetime(2026, 6, 21, 12, 0, 0)
@@ -99,8 +101,19 @@ class TestCreateKey:
         assert row.user_id == "user-1"
         # Mandatory, clamped expiry.
         assert row.expires_at == NOW + timedelta(days=7)
-        db.add.assert_called_once()
-        assert db.add.call_args.args[0] is row
+        keys = [
+            call.args[0] for call in db.add.call_args_list if isinstance(call.args[0], ShareKey)
+        ]
+        assert keys == [row]
+        history = [
+            call.args[0]
+            for call in db.add.call_args_list
+            if isinstance(call.args[0], OperationHistory)
+        ]
+        assert len(history) == 1
+        assert history[0].operation == "credential.issued"
+        assert history[0].actor_user_id == "user-1"
+        assert history[0].context_id == ctx_id
 
     @pytest.mark.asyncio
     async def test_omitted_ttl_defaults_to_30d_expiry(self) -> None:
@@ -244,13 +257,25 @@ class TestVerifyKey:
 class TestRevokeKey:
     @pytest.mark.asyncio
     async def test_revokes_owned_active_key(self) -> None:
-        rec = SimpleNamespace(id=5, user_id="user-1", revoked_at=None)
+        rec = SimpleNamespace(
+            id=5,
+            public_id="skey_" + "a" * 22,
+            user_id="user-1",
+            context_id=uuid.uuid4(),
+            revoked_at=None,
+        )
         db = _make_db_mock(execute_results=[rec])
         manager = ShareKeyManager(db)
         with patch("auth.share_keys.utcnow", return_value=NOW):
             ok = await manager.revoke_key(public_id="skey_" + "a" * 22, user_id="user-1")
         assert ok is True
         assert rec.revoked_at == NOW
+        event = db.add.call_args.args[0]
+        assert isinstance(event, OperationHistory)
+        assert event.operation == "credential.revoked"
+        assert event.target_id == rec.public_id
+        assert event.actor_user_id == event.subject_user_id == "user-1"
+        assert event.context_id == rec.context_id
 
     @pytest.mark.asyncio
     async def test_missing_or_unowned_returns_false(self) -> None:

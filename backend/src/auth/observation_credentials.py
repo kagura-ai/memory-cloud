@@ -153,6 +153,7 @@ class ObservationCredentialManager:
         )
         self.db.add(row)
         await self.db.flush()
+        await self._record_history(row, "credential.issued", created_by)
         logger.info(
             "observation_credential_created",
             public_id=row.public_id,
@@ -216,6 +217,30 @@ class ObservationCredentialManager:
             stmt = stmt.with_for_update()
         return (await self.db.execute(stmt)).scalar_one_or_none()
 
+    async def _record_history(
+        self, row: ObservationCredential, operation: str, actor_user_id: str | None
+    ) -> None:
+        """Keep resource-bound credential evidence behind its context boundary."""
+        from auth.resource_tokens import ResourceTokenManager
+        from services.operation_history_writer import record_operation
+
+        workspace_id, context = row.workspace_id, None
+        if row.resource_pk is not None:
+            workspace_id, context = await ResourceTokenManager(self.db)._history_scope(
+                row.resource_pk, row.workspace_id, ""
+            )
+        record_operation(
+            self.db,
+            operation=operation,
+            actor_user_id=actor_user_id,
+            workspace_id=workspace_id,
+            context=context,
+            target_id=row.public_id,
+            subject_user_id=row.created_by,
+            changed_fields=["credential", "expires_at"],
+            event_key=f"observation-{operation}:{row.public_id}",
+        )
+
     async def rotate(
         self,
         public_id: str,
@@ -274,6 +299,9 @@ class ObservationCredentialManager:
         old.expires_at = min(old.expires_at, current + timedelta(seconds=grace))
         self.db.add(new)
         await self.db.flush()
+        # The old secret can remain valid during the grace period: recording
+        # it as revoked here would misrepresent the committed state.
+        await self._record_history(new, "credential.issued", created_by)
         logger.info(
             "observation_credential_rotated",
             public_id=new.public_id,
@@ -284,7 +312,12 @@ class ObservationCredentialManager:
         return new, secret
 
     async def revoke(
-        self, public_id: str, workspace_id: UUID, *, now: datetime | None = None
+        self,
+        public_id: str,
+        workspace_id: UUID,
+        *,
+        actor_user_id: str | None = None,
+        now: datetime | None = None,
     ) -> bool:
         """Revoke a credential of the workspace; revoking it again is a no-op.
 
@@ -296,6 +329,7 @@ class ObservationCredentialManager:
             return False
         if row.revoked_at is None:
             row.revoked_at = now or utcnow()
+            await self._record_history(row, "credential.revoked", actor_user_id)
             await self.db.flush()
             logger.info(
                 "observation_credential_revoked",

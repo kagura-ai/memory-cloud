@@ -26,4 +26,19 @@ async def erase_operation_history(db: AsyncSession, user_id: str, pseudonym: str
             ),
         )
         count += result.rowcount or 0
+    # Membership events also use the member's account ID as their target.
+    # Other target types identify resources/credentials and must not be rewritten.
+    targets = cast(
+        CursorResult[Any],
+        await db.execute(
+            update(OperationHistory)
+            .where(
+                OperationHistory.target_type == "member",
+                OperationHistory.target_id == user_id,
+            )
+            .values(target_id=pseudonym)
+            .execution_options(synchronize_session=False)
+        ),
+    )
+    count += targets.rowcount or 0
     return count

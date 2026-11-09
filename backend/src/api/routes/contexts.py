@@ -1051,6 +1051,7 @@ async def update_context(
                     existing_context.workspace_id,
                     old_resource_id,
                     created_by=user_id,
+                    actor_user_id=user_id,
                 )
 
                 if revoked_count:
@@ -1255,7 +1256,7 @@ async def delete_context(
         # Note: context is guaranteed to exist (check_context_owner ensures it)
         if context.resource_id:
             revoked_count = await ResourceTokenManager(db).revoke_tokens_for_resource(
-                context.workspace_id, context.resource_id
+                context.workspace_id, context.resource_id, actor_user_id=user_id
             )
 
             if revoked_count:
@@ -1685,6 +1686,17 @@ async def add_context_member(
             invited_at=func.now(),
         )
         db.add(member)
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation="member.access_changed" if existing is not None else "member.added",
+        actor_user_id=user["user_id"],
+        subject_user_id=body.user_id,
+        context=context,
+        target_id=body.user_id,
+        changed_fields=["role", "allowed_context_ids"] if access_list_extended else ["role"],
+    )
     try:
         await db.commit()
     except IntegrityError as exc:
@@ -1742,7 +1754,7 @@ async def update_context_member_role(
 
     # SECURITY: Workspace boundary check
     # Issue #271 Code Review C-2: check_context_owner already verifies ownership
-    await perm_service.check_context_owner(
+    context = await perm_service.check_context_owner(
         current_user["user_id"], context_id, capacity=CapacityPolicy.ALLOWED
     )
 
@@ -1784,6 +1796,18 @@ async def update_context_member_role(
     # regex; the column is Mapped[ContextRole] (a StrEnum). Cast rather than
     # convert so this stays a pure typing fix with no new runtime validation
     # — unifying the request schemas onto the enums is a separate change (#1442).
+    if member.role != body.role:
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            db,
+            operation="member.role_changed",
+            actor_user_id=current_user["user_id"],
+            subject_user_id=user_id,
+            context=context,
+            target_id=user_id,
+            changed_fields=["role"],
+        )
     member.role = cast(ContextRole, body.role)
     member.updated_at = func.now()
 
@@ -1829,7 +1853,7 @@ async def remove_context_member(
 
     # SECURITY: Workspace boundary check
     # Issue #271 Code Review C-2: check_context_owner already verifies ownership
-    await perm_service.check_context_owner(
+    context = await perm_service.check_context_owner(
         current_user["user_id"], context_id, capacity=CapacityPolicy.ALLOWED
     )
 
@@ -1864,6 +1888,16 @@ async def remove_context_member(
         )
 
     # Delete member
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation="member.removed",
+        actor_user_id=current_user["user_id"],
+        subject_user_id=user_id,
+        context=context,
+        target_id=user_id,
+    )
     await db.delete(member)
     await db.commit()
 

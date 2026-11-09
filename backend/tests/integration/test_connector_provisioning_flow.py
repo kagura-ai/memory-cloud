@@ -501,6 +501,28 @@ async def test_rotate_kmc_key_links_the_replacement_and_revokes_the_old_row(
     verified = await APIKeyManager(db_session).verify_key(rotated.plaintext_kmc_api_key)
     assert verified is not None and verified.is_connector_key is True
 
+    from models.operation_history import OperationHistory
+
+    history = list(
+        (
+            await db_session.scalars(
+                select(OperationHistory).where(OperationHistory.workspace_id == workspace.id)
+            )
+        ).all()
+    )
+    revoked = [row for row in history if row.operation == "credential.revoked"]
+    assert len(revoked) == 1
+    assert revoked[0].target_id == old.public_id
+    assert revoked[0].subject_user_id == old.user_id
+    assert revoked[0].actor_user_id == user_id
+    assert any(
+        row.operation == "credential.issued" and row.target_id == new.public_id for row in history
+    )
+    assert any(
+        row.operation == "integration.updated" and row.changed_fields == ["credential"]
+        for row in history
+    )
+
 
 @pytest.mark.asyncio
 async def test_rotate_kmc_key_heals_an_unlinked_backing_row(db_session: AsyncSession):

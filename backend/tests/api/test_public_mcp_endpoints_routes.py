@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
 from models.auth import Context, User, Workspace, WorkspaceMember
+from models.operation_history import OperationHistory
 from models.public_mcp import PublicMcpEndpoint
 from models.resource import Resource
 from utils.public_id import PublicIdPrefix, public_id_pattern
@@ -232,6 +233,11 @@ async def test_owner_publishes_reads_edits_and_unpublishes(world: World, switch_
         assert edited["public_usage_guide"] is None
         assert edited["public_description"] == "Our public product data."
         assert edited["updated_at"] is not None
+        # Empty patches and normalized unchanged values add no false event.
+        assert (await c.patch(_path(world.slugs["public"]), json={})).status_code == 200
+        assert (
+            await c.patch(_path(world.slugs["public"]), json={"public_name": " Catalog v2 "})
+        ).status_code == 200
 
         r = await c.patch(_path(world.slugs["public"]), json={"public_name": "  "})
         assert r.status_code == 422
@@ -264,6 +270,24 @@ async def test_owner_publishes_reads_edits_and_unpublishes(world: World, switch_
         assert all(row.revoked_at is not None for row in rows)
         assert all(row.revoked_by == world.owner for row in rows)
         assert all(row.created_by == world.owner for row in rows)
+        events = (
+            await s.scalars(
+                select(OperationHistory)
+                .where(OperationHistory.workspace_id == world.ws)
+                .order_by(OperationHistory.occurred_at)
+            )
+        ).all()
+        assert [event.operation for event in events] == [
+            "integration.created",
+            "integration.updated",
+            "integration.deleted",
+            "integration.created",
+            "integration.deleted",
+        ]
+        assert events[1].changed_fields == ["name", "usage_guide"]
+        assert all(event.context_id == world.ctx["public"] for event in events)
+        assert all(event.actor_user_id == world.owner for event in events)
+        assert "Product catalog" not in str([event.__dict__ for event in events])
 
 
 async def test_preconditions_are_named(world: World, switch_on) -> None:

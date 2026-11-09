@@ -30,6 +30,7 @@ from models.public_mcp import (
     PUBLIC_USAGE_GUIDE_MAX_CHARS,
     PublicMcpEndpoint,
 )
+from services.operation_history_writer import record_operation
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -173,6 +174,16 @@ async def publish_public_mcp_endpoint(
         # A concurrent publish won the partial unique index.
         await db.rollback()
         raise ConflictError("This resource already has a live public MCP endpoint.") from exc
+    record_operation(
+        db,
+        operation="integration.created",
+        actor_user_id=user_id,
+        context=context,
+        target_id=row.public_id,
+        subject_user_id=row.created_by,
+        changed_fields=["is_public"],
+        event_key=f"public-mcp-published:{row.public_id}",
+    )
     logger.info(
         "public_mcp_endpoint_published",
         user_id=user_id,
@@ -214,6 +225,7 @@ async def update_public_mcp_endpoint(
     if row is None:
         raise NotFoundException("Public MCP endpoint")
     fields = body.model_fields_set
+    previous = (row.public_name, row.public_description, row.public_usage_guide)
     if "public_name" in fields:
         if body.public_name is None or not body.public_name.strip():
             raise ValidationError("public_name must not be blank", field="public_name")
@@ -222,8 +234,28 @@ async def update_public_mcp_endpoint(
         row.public_description = _blank_to_none(body.public_description)
     if "public_usage_guide" in fields:
         row.public_usage_guide = _blank_to_none(body.public_usage_guide)
-    if fields:
+    changed_fields = [
+        name
+        for name, old, new in zip(
+            ("name", "description", "usage_guide"),
+            previous,
+            (row.public_name, row.public_description, row.public_usage_guide),
+            strict=True,
+        )
+        if old != new
+    ]
+    if changed_fields:
         row.updated_at = utcnow()
+        record_operation(
+            db,
+            operation="integration.updated",
+            actor_user_id=user_id,
+            workspace_id=workspace_id,
+            context_id=row.context_id,
+            target_id=row.public_id,
+            subject_user_id=row.created_by,
+            changed_fields=changed_fields,
+        )
     await db.flush()
     logger.info(
         "public_mcp_endpoint_updated",
@@ -248,6 +280,17 @@ async def unpublish_public_mcp_endpoint(
         raise NotFoundException("Public MCP endpoint")
     row.revoked_at = utcnow()
     row.revoked_by = user_id
+    record_operation(
+        db,
+        operation="integration.deleted",
+        actor_user_id=user_id,
+        workspace_id=workspace_id,
+        context_id=row.context_id,
+        target_id=row.public_id,
+        subject_user_id=row.created_by,
+        changed_fields=["is_public"],
+        event_key=f"public-mcp-unpublished:{row.public_id}",
+    )
     await db.flush()
     logger.info(
         "public_mcp_endpoint_unpublished",

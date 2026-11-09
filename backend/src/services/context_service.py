@@ -1490,6 +1490,17 @@ class ContextService:
                 )
 
         # Optional: delete source (_commit=False for atomic transaction)
+        if rows_by_new_id:
+            from services.operation_history_writer import record_operation
+
+            record_operation(
+                self.db,
+                operation="memory.created",
+                actor_user_id=user_id,
+                context=target,
+                count=len(rows_by_new_id),
+                changed_fields=["content"],
+            )
         if delete_source:
             # #1960: the source's files fold into the target with its memories
             # instead of being purged with the source. Dedup is per workspace,
@@ -1692,6 +1703,7 @@ class ContextService:
                 Memory.context_id == context.id,
             ],
             actor=actor,
+            workspace_id=context.workspace_id,
             deleted_at=deleted_at,
             chunk=chunk,
             should_continue=should_continue,
@@ -1702,6 +1714,7 @@ class ContextService:
         where: list[ColumnElement[bool]],
         *,
         actor: str,
+        workspace_id: UUID,
         deleted_at: datetime,
         chunk: int | None = None,
         should_continue: Callable[[], Awaitable[bool]] | None = None,
@@ -1710,7 +1723,10 @@ class ContextService:
 
         See :meth:`_tombstone_memories_chunked` for the contract.
         """
+        from collections import Counter
+
         from models.memory import Memory
+        from services.operation_history_writer import record_operation
 
         chunk = PURGE_MEMORY_CHUNK if chunk is None else chunk
         total = 0
@@ -1723,18 +1739,30 @@ class ContextService:
                 .limit(chunk)
                 .scalar_subquery()
             )
-            result = cast(
-                "CursorResult[Any]",
-                await self.db.execute(
-                    update(Memory)
-                    .where(Memory.id.in_(ids))
-                    .values(deleted_at=deleted_at, deleted_by=actor)
-                    .execution_options(synchronize_session=False)
-                ),
+            result = await self.db.execute(
+                update(Memory)
+                .where(Memory.id.in_(ids))
+                .values(deleted_at=deleted_at, deleted_by=actor)
+                .returning(Memory.context_id)
+                .execution_options(synchronize_session=False)
             )
-            done = result.rowcount or 0
+            boundaries = Counter(result.scalars().all())
+            done = sum(boundaries.values())
             if done == 0:
                 return total, False
+            # A leftover batch may span private/deleted contexts. Keep each
+            # context's count behind its own historical/current boundary.
+            for context_id, count in boundaries.items():
+                record_operation(
+                    self.db,
+                    operation="memory.deleted",
+                    actor_user_id=None,
+                    surface="system",
+                    workspace_id=workspace_id,
+                    context_id=context_id,
+                    count=count,
+                    at=deleted_at,
+                )
             await self.db.commit()
             total += done
 
@@ -1780,7 +1808,8 @@ class ContextService:
         record_operation(
             self.db,
             operation="context.deleted",
-            actor_user_id=actor,
+            actor_user_id=None if actor == CAPACITY_PURGE_ACTOR else actor,
+            surface="system" if actor == CAPACITY_PURGE_ACTOR else None,
             context=context,
             target_id=context.id,
             at=deleted_at,
@@ -1974,6 +2003,7 @@ class ContextService:
             leftover, aborted = await self._tombstone_chunked(
                 [Memory.workspace_id == workspace_id],
                 actor=actor,
+                workspace_id=workspace_id,
                 deleted_at=utcnow(),
                 should_continue=should_continue,
             )

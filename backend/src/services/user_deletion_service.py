@@ -831,7 +831,18 @@ async def delete_user_rows(
             ]
         )
         await db.flush()
+        from models.operation_history import OperationHistory
+
+        await db.execute(
+            delete(OperationHistory).where(OperationHistory.workspace_id.in_(workspace_ids))
+        )
         await db.execute(delete(Workspace).where(Workspace.id.in_(workspace_ids)))
+    from services.erasure_details import erasure_pseudonym
+    from services.operation_history_erasure import erase_operation_history
+
+    # Administrative and CLI deletion share this transaction. Retained history
+    # in surviving workspaces must not keep the departed account's identifiers.
+    await erase_operation_history(db, user_id, erasure_pseudonym(user_id))
     await db.execute(delete(User).where(User.user_id == user_id))
     return result
 
