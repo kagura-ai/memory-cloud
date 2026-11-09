@@ -126,7 +126,7 @@ def test_observability_router_imports_no_session_or_api_key_dependency() -> None
 
 def test_only_the_observability_router_uses_the_principal() -> None:
     users = sorted(
-        str(p.relative_to(SRC))
+        p.relative_to(SRC).as_posix()
         for p in SRC.rglob("*.py")
         if "get_observation_principal" in p.read_text(encoding="utf-8")
     )

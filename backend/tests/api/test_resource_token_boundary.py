@@ -159,7 +159,9 @@ class TestRevokeBoundary:
         owner_client.state_["db"] = _db_returning(token)
         response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
         assert response.status_code == 204, response.text
-        owner_client.manager_.revoke_token.assert_awaited_once_with(token.id)
+        owner_client.manager_.revoke_token.assert_awaited_once_with(
+            token.id, actor_user_id="owner_1"
+        )
         assert _no_contexts_query(owner_client.state_["db"])
         lookup = _lookup_sql(owner_client.state_["db"])
         assert f"WHERE ({_MEMBERSHIP}) AND resource_tokens.public_id = " in lookup
@@ -178,7 +180,9 @@ class TestRevokeBoundary:
         owner_client.state_["db"] = _db_returning(token)
         response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
         assert response.status_code == 204, response.text
-        owner_client.manager_.revoke_token.assert_awaited_once_with(token.id)
+        owner_client.manager_.revoke_token.assert_awaited_once_with(
+            token.id, actor_user_id="owner_1"
+        )
 
     def test_revoke_does_not_depend_on_who_minted_the_token(self, owner_client):
         # #1863 "Done when": the owner can revoke every active token in the

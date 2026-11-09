@@ -275,6 +275,7 @@ def test_feature_enforcement_is_additive_for_older_clients(client: TestClient) -
     # #2103 adds the content chunk row, #2144 the LLM selector row (additive,
     # like #1648's field).
     added_since = {
+        "operation_history",
         "feature_enforcement",
         "content_chunks",
         "max_content_chunk_contexts",
@@ -301,3 +302,9 @@ def test_llm_selector_row(client: TestClient) -> None:
     assert [t["llm_selector"] for t in tiers] == [False, True, True, True]
     assert [t["max_llm_selector_contexts"] for t in tiers] == [0, 1, 5, 20]
     assert tiers[0]["feature_enforcement"]["llm_selector"] == "conditional"
+
+
+def test_operation_history_is_max_only_and_enforced(client: TestClient) -> None:
+    tiers = client.get(ENDPOINT).json()
+    assert [tier["operation_history"] for tier in tiers] == [False, False, False, True]
+    assert all(tier["feature_enforcement"]["operation_history"] == "enforced" for tier in tiers)
