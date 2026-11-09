@@ -444,7 +444,8 @@ async def get_workspace_usage_current(
 
         # Issue #65: Single conditional aggregation query replaces 8 sequential COUNTs
         today = utcnow().date()
-        week_ago = today - timedelta(days=7)
+        # 7 calendar days: today and the 6 days before it, as get_context_stats (#2748).
+        window_start = today - timedelta(days=6)
 
         is_today = UsageStatsModel.date == today
         is_mcp = UsageStatsModel.endpoint.like("mcp:%")
@@ -468,7 +469,7 @@ async def get_workspace_usage_current(
                 func.count(UsageStatsModel.id).filter(is_rest).label("rest_week"),
             ).where(
                 UsageStatsModel.workspace_id == workspace_id,
-                UsageStatsModel.date >= week_ago,
+                UsageStatsModel.date >= window_start,
             )
         )
         usage = usage_result.one()
@@ -745,7 +746,8 @@ async def get_workspace_member_usage(
 
         member_ids = [m.user_id for m in members]
         today = utcnow().date()
-        week_ago = today - timedelta(days=7)
+        # 7 calendar days: today and the 6 days before it, as get_context_stats (#2748).
+        window_start = today - timedelta(days=6)
 
         # Memory counts per user (batch query)
         memory_counts_result = await db.execute(
@@ -775,7 +777,7 @@ async def get_workspace_member_usage(
             select(UsageStatsModel.user_id, func.count(UsageStatsModel.id))
             .where(
                 UsageStatsModel.workspace_id == workspace_id,
-                UsageStatsModel.date >= week_ago,
+                UsageStatsModel.date >= window_start,
             )
             .group_by(UsageStatsModel.user_id)
         )
