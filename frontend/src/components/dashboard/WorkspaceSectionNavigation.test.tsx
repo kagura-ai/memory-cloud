@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   query: "tab=api-keys",
   features: { byok: true, plan_page: true } as Record<string, boolean | undefined> | null,
   listKeys: vi.fn(),
+  role: "owner" as string | undefined,
 }));
 vi.mock("next/navigation", () => ({
   usePathname: () => state.path,
@@ -14,16 +15,29 @@ vi.mock("next/navigation", () => ({
 }));
 vi.mock("next-intl", () => ({ useTranslations: () => (key: string) => key }));
 vi.mock("@/hooks/useSystemFeatures", () => ({ useSystemFeatures: () => state.features }));
+vi.mock("@/contexts/WorkspaceContext", () => ({ useWorkspace: () => ({ currentWorkspace: { current_user_role: state.role } }) }));
 vi.mock("@/lib/api/external-keys", () => ({ listExternalAPIKeys: () => state.listKeys() }));
 
 beforeEach(() => {
   state.path = "/workspace/integrations/credentials";
   state.query = "tab=api-keys";
   state.features = { byok: true, plan_page: true };
+  state.role = "owner";
   state.listKeys.mockReset().mockResolvedValue([{ key_name: "stored" }]);
 });
 
 describe("workspace section navigation", () => {
+  it.each(["owner", "admin"])("shows history to a workspace %s", role => {
+    state.path = "/workspace/settings/history"; state.role = role;
+    render(<WorkspaceSectionNavigation />);
+    expect(screen.getByRole("link", { name: "operationHistory" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it.each(["member", "viewer", undefined])("hides history for role %s", role => {
+    state.path = "/workspace/settings/general"; state.role = role;
+    render(<WorkspaceSectionNavigation />);
+    expect(screen.queryByRole("link", { name: "operationHistory" })).not.toBeInTheDocument();
+  });
   it("places external API keys last in the requested integration order", () => {
     render(<WorkspaceSectionNavigation />);
     const navigation = screen.getByRole("navigation", { name: "integrations" });

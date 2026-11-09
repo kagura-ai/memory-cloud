@@ -14,6 +14,12 @@ import type { PlanTierFeature } from "@/lib/api/workspaces";
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
+  // Pure matrix lookups need neither the application provider graph nor a
+  // live API. Hook cases replace these defaults in setup below.
+  vi.doMock("@/lib/api/workspaces", () => ({ getPlanTierMatrix: vi.fn() }));
+  vi.doMock("@/contexts/WorkspaceContext", () => ({
+    useWorkspace: () => ({ currentWorkspace: null }),
+  }));
 });
 
 // Only the fields the hook reads matter; the rest is filler for the type.
@@ -45,7 +51,7 @@ function tier(name: string, gates: Partial<PlanTierFeature>): PlanTierFeature {
     public_contexts: false,
     content_chunks: false,
     llm_selector: false,
-      operation_history: false,
+    operation_history: false,
     ...gates,
   };
 }

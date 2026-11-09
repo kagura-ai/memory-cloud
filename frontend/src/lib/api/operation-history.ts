@@ -15,6 +15,9 @@ export interface HistoryItem {
   actor_user_id: string | null;
   actor_name: string | null;
   subject_user_id: string | null;
+  principal_kind: "session" | "api_key" | "oauth" | "resource_token" | "management_grant" | "system" | "unknown";
+  credential_id: string | null;
+  client_id: string | null;
   agent_id: string | null;
   surface: string;
   operation: typeof HISTORY_OPERATIONS[number];
@@ -28,6 +31,7 @@ export interface HistoryItem {
 export interface HistoryPage {
   items: HistoryItem[];
   total: number;
+  total_capped: boolean;
   next_cursor: string | null;
 }
 
