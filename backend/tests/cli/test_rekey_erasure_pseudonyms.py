@@ -313,8 +313,38 @@ class TestTheColumnList:
             ("ErasureRequest", "user_id"),
             ("ErasureRequest", "initiated_by"),
         }
-        assert swept | direct <= listed
+        assert swept | direct | self._history_columns() <= listed
         assert len(listed) == len(cli.SUB_COLUMNS) + len(cli.REQUEST_COLUMNS)
+
+    @staticmethod
+    def _history_columns() -> set[tuple[str, str]]:
+        """What ``erase_operation_history`` pseudonymizes, from its source (#2739)."""
+        from services import operation_history_erasure as erasure
+
+        source = (_BACKEND_SRC / "services" / "operation_history_erasure.py").read_text()
+        # the function loops over the module constant ...
+        assert "for field in ERASED_COLUMNS:" in source
+        assert len(erasure.ERASED_COLUMNS) == 3
+        return {("OperationHistory", column) for column in erasure.ERASED_COLUMNS}
+
+    def test_it_covers_the_member_targets_of_operation_history(self):
+        """... and rewrites ``target_id`` on membership events only (#2739)."""
+        from models.operation_history import OperationHistory
+        from services import operation_history_erasure as erasure
+
+        conditional = {
+            (c.class_.__name__, c.key, d.key, value)
+            for entries in cli.CONDITIONAL_SUB_COLUMNS.values()
+            for c, d, value in entries
+        }
+        assert conditional == {
+            ("OperationHistory", "target_id", "target_type", erasure.MEMBER_TARGET_TYPE)
+        }
+        source = (_BACKEND_SRC / "services" / "operation_history_erasure.py").read_text()
+        assert "OperationHistory.target_type == MEMBER_TARGET_TYPE" in source
+        # rewritten right after the unconditional history columns
+        assert set(cli.CONDITIONAL_SUB_COLUMNS) == {OperationHistory.context_owner_id}
+        assert OperationHistory.context_owner_id in cli.SUB_COLUMNS
 
     def test_contexts_come_before_memories_and_memories_before_revisions(self):
         order = [cli._label(c) for c in cli.SUB_COLUMNS]

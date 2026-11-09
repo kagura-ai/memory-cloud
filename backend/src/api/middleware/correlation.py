@@ -17,6 +17,7 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.correlation import build_correlation_from_headers, set_correlation
+from auth.history_principal import set_history_principal
 
 
 class CorrelationMiddleware(BaseHTTPMiddleware):
@@ -26,6 +27,7 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
         # Reset first so a leaked value can never survive into this request,
         # then parse (advisory — never raises).
         set_correlation(None)
+        set_history_principal()
         try:
             ctx = build_correlation_from_headers(
                 traceparent=request.headers.get("traceparent"),
@@ -38,3 +40,4 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         finally:
             set_correlation(None)
+            set_history_principal()

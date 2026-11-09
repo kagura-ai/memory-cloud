@@ -413,6 +413,7 @@ async def test_create_context_stores_the_gated_default(monkeypatch):
     settings = Settings(_env_file=None, default_content_chunks_enabled=True)
     db = MagicMock()
     db.execute = AsyncMock()
+    db.flush = AsyncMock()
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
     service = ContextService(db=db)

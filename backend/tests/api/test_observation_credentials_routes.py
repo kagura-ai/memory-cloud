@@ -12,6 +12,7 @@ from sqlalchemy import select
 from auth.observation_credentials import ObservationCredentialManager
 from config.settings import get_settings
 from models.observation_credential import ObservationCredential
+from models.operation_history import OperationHistory
 from tests.observability_helpers import World, owner_client, world_rows
 from utils.hashing import sha256_hex
 from utils.public_id import PublicIdPrefix, public_id_pattern
@@ -106,6 +107,24 @@ async def test_owner_lifecycle(world: World, monkeypatch) -> None:
     # A revoked credential no longer verifies.
     async with world.factory() as s:
         assert await ObservationCredentialManager(s).verify(rotated["secret"]) is None
+        events = (
+            await s.scalars(
+                select(OperationHistory)
+                .where(OperationHistory.workspace_id == world.ws)
+                .order_by(OperationHistory.occurred_at)
+            )
+        ).all()
+        assert [(event.operation, event.target_id) for event in events] == [
+            ("credential.issued", created["id"]),
+            ("credential.issued", rotated["id"]),
+            ("credential.revoked", rotated["id"]),
+        ]
+        assert all(event.actor_user_id == world.owner for event in events)
+        assert all(event.subject_user_id == world.owner for event in events)
+        assert all(event.context_id is None for event in events)
+        # The grace-period parent is still active, never falsely "revoked".
+        assert secret not in str([event.__dict__ for event in events])
+        assert rotated["secret"] not in str([event.__dict__ for event in events])
 
 
 async def test_resource_scope(world: World) -> None:
@@ -122,6 +141,15 @@ async def test_resource_scope(world: World) -> None:
         assert r.status_code == 201, r.text
         body = r.json()
         assert body["scope"] == "resource" and body["resource_id"] == world.slugs["a1"]
+        async with world.factory() as s:
+            event = (
+                await s.scalars(
+                    select(OperationHistory).where(OperationHistory.target_id == body["id"])
+                )
+            ).one()
+            assert event.workspace_id == world.ws
+            assert event.context_id == world.ctx["a1"]
+            assert event.context_owner_id == world.owner
         # Another workspace's slug and an unknown slug answer the same 404.
         for slug in (world.slugs["b1"], f"nope-{world.tag}"):
             r = await c.post(BASE, json={"name": "x", "scope": "resource", "resource_id": slug})

@@ -548,6 +548,23 @@ class SleepReporter:
             memories=total_memories,
         )
 
+        if report.source == "sleep" and report.context_id is not None:
+            from services.operation_history_writer import record_operation
+
+            record_operation(
+                self.db,
+                operation="sleep.completed" if report.status != "failed" else "sleep.failed",
+                actor_user_id=None,
+                workspace_id=report.workspace_id,
+                context_id=report.context_id,
+                target_id=report.id,
+                surface="system",
+                outcome="failure" if report.status == "failed" else "success",
+                count=max(1, report.memories_processed),
+                at=report.completed_at,
+                event_key=f"sleep:{report.id}:{report.status}",
+            )
+
     async def fail_report(self, report: SleepReport, error: str) -> None:
         """Mark a report as failed."""
         report.status = "failed"
@@ -558,3 +575,19 @@ class SleepReporter:
             report_id=str(report.id),
             error=error,
         )
+
+        if report.source == "sleep" and report.context_id is not None:
+            from services.operation_history_writer import record_operation
+
+            record_operation(
+                self.db,
+                operation="sleep.failed",
+                actor_user_id=None,
+                workspace_id=report.workspace_id,
+                context_id=report.context_id,
+                target_id=report.id,
+                surface="system",
+                outcome="failure",
+                at=report.completed_at,
+                event_key=f"sleep:{report.id}:failed",
+            )

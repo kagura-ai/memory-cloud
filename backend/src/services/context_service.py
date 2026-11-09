@@ -317,6 +317,7 @@ class ContextService:
         create_collection: bool = True,
         embedding_model: str | None = None,  # DEPRECATED: Use EMBEDDING_MODEL env var
         is_private: bool = True,
+        actor_user_id: str | None = None,
     ) -> Context:
         """Create a new context for workspace.
 
@@ -461,6 +462,16 @@ class ContextService:
             is_private=is_private,
         )
         self.db.add(context)
+        await self.db.flush()
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="context.created",
+            actor_user_id=actor_user_id if actor_user_id is not None else created_by,
+            context=context,
+            target_id=context.id,
+        )
         await self.db.commit()
         await self.db.refresh(context)
 
@@ -846,6 +857,18 @@ class ContextService:
             NotFoundException: If context not found
         """
         context = await self.get_context(user_id, context_id)
+        history_fields = (
+            "is_private",
+            "is_public",
+            "is_locked",
+            "display_name",
+            "description",
+            "summary",
+            "usage_guide",
+            "resource_id",
+            "sleep_mode",
+        )
+        before_history = {field: getattr(context, field) for field in history_fields}
 
         if display_name is not None:
             context.display_name = display_name
@@ -924,6 +947,21 @@ class ContextService:
             )
             context.sleep_mode = sleep_mode
 
+        from services.operation_history_writer import record_operation
+
+        changed = [
+            field for field in history_fields if before_history[field] != getattr(context, field)
+        ]
+        if changed:
+            record_operation(
+                self.db,
+                operation="context.updated",
+                actor_user_id=user_id,
+                context=context,
+                target_id=context.id,
+                changed_fields=changed,
+                private_before=before_history["is_private"],
+            )
         await self.db.commit()
         await self.db.refresh(context)
 
@@ -1452,6 +1490,17 @@ class ContextService:
                 )
 
         # Optional: delete source (_commit=False for atomic transaction)
+        if rows_by_new_id:
+            from services.operation_history_writer import record_operation
+
+            record_operation(
+                self.db,
+                operation="memory.created",
+                actor_user_id=user_id,
+                context=target,
+                count=len(rows_by_new_id),
+                changed_fields=["content"],
+            )
         if delete_source:
             # #1960: the source's files fold into the target with its memories
             # instead of being purged with the source. Dedup is per workspace,
@@ -1654,6 +1703,7 @@ class ContextService:
                 Memory.context_id == context.id,
             ],
             actor=actor,
+            workspace_id=context.workspace_id,
             deleted_at=deleted_at,
             chunk=chunk,
             should_continue=should_continue,
@@ -1664,6 +1714,7 @@ class ContextService:
         where: list[ColumnElement[bool]],
         *,
         actor: str,
+        workspace_id: UUID,
         deleted_at: datetime,
         chunk: int | None = None,
         should_continue: Callable[[], Awaitable[bool]] | None = None,
@@ -1672,7 +1723,10 @@ class ContextService:
 
         See :meth:`_tombstone_memories_chunked` for the contract.
         """
+        from collections import Counter
+
         from models.memory import Memory
+        from services.operation_history_writer import record_operation
 
         chunk = PURGE_MEMORY_CHUNK if chunk is None else chunk
         total = 0
@@ -1685,18 +1739,30 @@ class ContextService:
                 .limit(chunk)
                 .scalar_subquery()
             )
-            result = cast(
-                "CursorResult[Any]",
-                await self.db.execute(
-                    update(Memory)
-                    .where(Memory.id.in_(ids))
-                    .values(deleted_at=deleted_at, deleted_by=actor)
-                    .execution_options(synchronize_session=False)
-                ),
+            result = await self.db.execute(
+                update(Memory)
+                .where(Memory.id.in_(ids))
+                .values(deleted_at=deleted_at, deleted_by=actor)
+                .returning(Memory.context_id)
+                .execution_options(synchronize_session=False)
             )
-            done = result.rowcount or 0
+            boundaries = Counter(result.scalars().all())
+            done = sum(boundaries.values())
             if done == 0:
                 return total, False
+            # A leftover batch may span private/deleted contexts. Keep each
+            # context's count behind its own historical/current boundary.
+            for context_id, count in boundaries.items():
+                record_operation(
+                    self.db,
+                    operation="memory.deleted",
+                    actor_user_id=None,
+                    surface="system",
+                    workspace_id=workspace_id,
+                    context_id=context_id,
+                    count=count,
+                    at=deleted_at,
+                )
             await self.db.commit()
             total += done
 
@@ -1737,6 +1803,18 @@ class ContextService:
         """Drop the context from member whitelists, cancel its running analyses,
         and stamp the row deleted (``deleted_at`` / ``deleted_by``). Does not commit.
         """
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="context.deleted",
+            actor_user_id=None if actor == CAPACITY_PURGE_ACTOR else actor,
+            surface="system" if actor == CAPACITY_PURGE_ACTOR else None,
+            context=context,
+            target_id=context.id,
+            at=deleted_at,
+            event_key=f"context-delete:{context.id}:{deleted_at!s}",
+        )
         # Remove context from all members' allowed_context_ids
         await self.db.execute(
             update(WorkspaceMember)
@@ -1925,6 +2003,7 @@ class ContextService:
             leftover, aborted = await self._tombstone_chunked(
                 [Memory.workspace_id == workspace_id],
                 actor=actor,
+                workspace_id=workspace_id,
                 deleted_at=utcnow(),
                 should_continue=should_continue,
             )

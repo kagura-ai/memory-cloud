@@ -14,6 +14,7 @@ from __future__ import annotations
 # Standard library imports (PEP8)
 import asyncio
 import json  # Issue #262: JSON serialization for Memory content
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -726,6 +727,7 @@ class ResourceIndexer:
         # a version delete event), whose points are dropped after the batch
         # commits, cleared when it rolls back.
         self._retired: list[RetiredVersionRow] = []
+        self._history_changes: Counter[str] = Counter()
 
     async def process_incremental(
         self,
@@ -756,6 +758,7 @@ class ResourceIndexer:
         run_failures: list[dict[str, Any]] = []
         self._repointed = []
         self._retired = []
+        self._history_changes.clear()
 
         try:
             # 1. Resolve context first so workspace_id is available for
@@ -909,6 +912,7 @@ class ResourceIndexer:
             for event in events:
                 repointed_mark = len(self._repointed)
                 retired_mark = len(self._retired)
+                history_before = self._history_changes.copy()
                 try:
                     # #2218: one SAVEPOINT per event. A failed event's flush is
                     # rolled back on its own and the session stays usable for
@@ -936,6 +940,7 @@ class ResourceIndexer:
                     # still name their old points, which must stay (#2164).
                     del self._repointed[repointed_mark:]
                     del self._retired[retired_mark:]
+                    self._history_changes = history_before
                     logger.error(
                         "indexer_event_failed",
                         event_id=event.id,
@@ -976,6 +981,18 @@ class ResourceIndexer:
                 run_failures,
             )
             state.metrics = metrics.to_dict()
+            from services.operation_history_writer import record_operation
+
+            for operation, count in self._history_changes.items():
+                if count:
+                    record_operation(
+                        self.db,
+                        operation=operation,
+                        actor_user_id=None,
+                        surface="system",
+                        context=context,
+                        count=count,
+                    )
             await self.db.commit()
             metrics.batch_committed = True
             # #2164 / #2248: only now that the re-points and the old-version
@@ -1001,6 +1018,7 @@ class ResourceIndexer:
             # #2248: so do the old-version rows the rollback brings back.
             self._repointed = []
             self._retired = []
+            self._history_changes.clear()
             await self.db.rollback()
             if not metrics.batch_committed:
                 # The offset went back too: the batch runs again, its failures
@@ -1445,6 +1463,14 @@ class ResourceIndexer:
 
         try:
             if existing_memory:
+                previous_values = (
+                    existing_memory.summary,
+                    existing_memory.context_summary,
+                    existing_memory.content,
+                    existing_memory.details,
+                    existing_memory.source_uri,
+                    existing_memory.source_type,
+                )
                 # Update existing memory (re-indexing case)
                 # P1-5: Truncate summary to 500 chars (database limit)
                 summary = f"[{event.resource_id}] {event.doc_id} v{event.version}"
@@ -1474,6 +1500,16 @@ class ResourceIndexer:
                 previous_point = existing_memory.summary_embedding_id
                 # Bugfix: Use UUID format for summary_embedding_id
                 existing_memory.summary_embedding_id = point_id_uuid
+
+                if previous_values != (
+                    existing_memory.summary,
+                    existing_memory.context_summary,
+                    existing_memory.content,
+                    existing_memory.details,
+                    existing_memory.source_uri,
+                    existing_memory.source_type,
+                ):
+                    self._history_changes["memory.updated"] += 1
 
                 await self.db.flush()
                 if previous_point != point_id_uuid:
@@ -1522,6 +1558,7 @@ class ResourceIndexer:
 
                 self.db.add(memory)
                 await self.db.flush()
+                self._history_changes["memory.created"] += 1
 
                 logger.info(
                     "resource_memory_created",
@@ -1583,6 +1620,7 @@ class ResourceIndexer:
 
                         await self.db.flush()
                 self._retired.extend(retired)
+                self._history_changes["memory.deleted"] += len(retired)
                 self._repointed.extend(unowned)
                 if retired:
                     logger.info(
@@ -1986,6 +2024,7 @@ class ResourceIndexer:
                     resource_id=event.resource_id,
                     deleted_count=len(memories_to_delete),
                 )
+                self._history_changes["memory.deleted"] += len(memories_to_delete)
 
             else:
                 # ================================================================
@@ -2023,6 +2062,7 @@ class ResourceIndexer:
                 for memory in memories:
                     await self.db.delete(memory)
                 await self.db.flush()
+                self._history_changes["memory.deleted"] += len(memories)
 
                 # The rule of the other delete paths (``unshared_point_id``),
                 # applied once the deletes are durable: a rolled-back row must

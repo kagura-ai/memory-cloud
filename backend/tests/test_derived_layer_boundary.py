@@ -42,6 +42,7 @@ import models.llm_call_log  # noqa: F401
 import models.llm_pricing  # noqa: F401
 import models.memory  # noqa: F401
 import models.neural  # noqa: F401
+import models.operation_history  # noqa: F401
 import models.resource  # noqa: F401
 import models.retrieval_feedback  # noqa: F401
 import models.signup_gate  # noqa: F401

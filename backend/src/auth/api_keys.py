@@ -79,6 +79,7 @@ class VerifiedKey(NamedTuple):
     agent_enforcement_mode: str | None = None
     is_connector_key: bool = False
     default_context_id: UUID | None = None
+    public_id: str | None = None
 
 
 def apply_zero_knowledge_hide(key: APIKey) -> None:
@@ -512,6 +513,7 @@ class APIKeyManager:
             agent_enforcement_mode=agent_enforcement_mode,
             is_connector_key=connector_id is not None,
             default_context_id=key_record.default_context_id,
+            public_id=key_record.public_id,
         )
 
     async def list_keys(

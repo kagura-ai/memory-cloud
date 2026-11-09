@@ -1934,6 +1934,9 @@ class Workspace(Base):
     addon_memories_per_day_bonus: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )  # #1975: extra memories created per UTC day addon
+    addon_history_retention_days_bonus: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )  # #2739: days added to the 90-day operation history retention
 
     # Issue #1470: memory-quota bonus earned through the referral program.
     #
@@ -2068,6 +2071,18 @@ class Workspace(Base):
         ``addon_memories_per_day_bonus`` (mirrors ``effective_max_connectors``).
         """
         return _zero_floor(self._plan_tier.memories_per_day, self.addon_memories_per_day_bonus)
+
+    @property
+    def effective_history_retention_days(self) -> int:
+        """Operation history retention in days (#2739): the 90-day base plus the
+        ``extra_history_retention_days`` add-on, capped (``config.retention``).
+
+        Not tier-scaled: the base is the same on every tier. Whether anything is
+        recorded or readable is the ``operation_history`` entitlement's call.
+        """
+        from config.retention import operation_history_retention_days
+
+        return operation_history_retention_days(self.addon_history_retention_days_bonus)
 
     @property
     def effective_mcp_calls_per_day(self) -> int:

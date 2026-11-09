@@ -244,6 +244,18 @@ class WorkspaceOwnershipService:
                 },
             )
         )
+        from services.operation_history_writer import record_operation
+
+        for subject in (previous_owner_id, target_user_id):
+            record_operation(
+                self.db,
+                operation="member.role_changed",
+                actor_user_id=performed_by_user_id or current_owner_id,
+                workspace_id=workspace_id,
+                subject_user_id=subject,
+                changed_fields=["role"],
+                event_key=f"ownership:{workspace_id}:{new_epoch}:{subject}",
+            )
         if commit:
             await self.db.commit()
         else:
@@ -466,6 +478,18 @@ class WorkspaceOwnershipService:
                 user_metadata=metadata,
             )
         )
+        from services.operation_history_writer import record_operation
+
+        for subject in (previous_owner_id, target_user_id):
+            record_operation(
+                self.db,
+                operation="member.role_changed",
+                actor_user_id=performed_by_user_id,
+                workspace_id=workspace_id,
+                subject_user_id=subject,
+                changed_fields=["role"],
+                event_key=f"ownership:{workspace_id}:{new_epoch}:{subject}",
+            )
         return OwnershipTransferResult(
             workspace_id=workspace_id,
             previous_owner_id=previous_owner_id,

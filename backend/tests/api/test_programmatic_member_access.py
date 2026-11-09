@@ -211,7 +211,7 @@ def ws_service(monkeypatch, fake_db):
             user_id=user_id, role=role, joined_at=None, allowed_context_ids=allowed_context_ids
         )
 
-    async def _update(*, workspace_id, user_id, allowed_context_ids):
+    async def _update(*, workspace_id, user_id, allowed_context_ids, actor_user_id):
         fake_db.events.append(("service", "update_member_context_access"))
         return MagicMock(user_id=user_id, allowed_context_ids=allowed_context_ids)
 

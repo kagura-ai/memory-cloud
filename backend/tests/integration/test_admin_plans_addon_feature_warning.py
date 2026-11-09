@@ -98,3 +98,36 @@ class TestConnectorGrantFeatureWarning:
         )
 
         assert result["warnings"] == []
+
+
+class TestHistoryRetentionGrant:
+    """#2739: a retention-days grant is stored like any add-on and read back."""
+
+    @pytest.mark.parametrize("plan_workspace", ["basic", "pro"], indirect=True)
+    @pytest.mark.asyncio
+    async def test_grant_is_stored_read_back_and_warns_only_without_history(
+        self,
+        db_session: AsyncSession,
+        plan_workspace: dict,
+    ) -> None:
+        from api.routes.admin_plans import get_workspace_quotas
+
+        result = await update_workspace_quotas(
+            workspace_id=plan_workspace["workspace_id"],
+            request=UpdateAddonRequest(addon_history_retention_days_bonus=275),
+            admin_user=mock_admin(),
+            db=db_session,
+        )
+        expected = (
+            [] if plan_workspace["plan_name"] == "pro" else ["operation_history_feature_missing"]
+        )
+        assert result["warnings"] == expected
+        ws = await db_session.get(Workspace, plan_workspace["ws_uuid"])
+        assert ws is not None
+        assert ws.addon_history_retention_days_bonus == 275
+        detail = await get_workspace_quotas(
+            workspace_id=plan_workspace["workspace_id"], admin_user=mock_admin(), db=db_session
+        )
+        assert detail.base.history_retention_days == 90
+        assert detail.addon.history_retention_days_bonus == 275
+        assert detail.effective.history_retention_days == 365

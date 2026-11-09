@@ -26,6 +26,8 @@ from auth.workspace_roles import WorkspaceRole
 from models.auth import APIKey, AuditLog, Context, User, Workspace, WorkspaceMember
 from models.file_objects import FileObject
 from models.memory import Memory
+from models.operation_history import OperationHistory
+from services.operation_history_writer import record_operation
 from services.user_deletion_service import WORKSPACE_PURGED_ACTION
 from tests.integration.test_account_erasure_integration import (  # noqa: F401 - fixture
     patched_external_stores,
@@ -111,6 +113,15 @@ async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
     live = await world.workspace(other, **{target: WorkspaceRole.MEMBER})
     live_id = live.id
     mine = await _context(db_session, live_id, target, private=True)
+    for actor in (target, other):
+        record_operation(
+            db_session,
+            operation="member.added",
+            actor_user_id=actor,
+            workspace_id=gone_id,
+            target_id=other,
+            subject_user_id=other,
+        )
     await _soft_delete(db_session, gone_id)
     await _soft_delete(db_session, foreign_id)
     await db_session.commit()
@@ -128,6 +139,7 @@ async def test_admin_delete_purges_a_soft_deleted_owned_workspace(
     assert await _count(db_session, APIKey, APIKey.workspace_id == gone_id) == 0
     assert await _count(db_session, FileObject, FileObject.workspace_id == gone_id) == 0
     assert await _count(db_session, WorkspaceMember, WorkspaceMember.workspace_id == gone_id) == 0
+    assert await _count(db_session, OperationHistory, OperationHistory.workspace_id == gone_id) == 0
     audit = (
         await db_session.execute(
             select(AuditLog).where(
@@ -271,6 +283,15 @@ async def test_erasure_takes_a_soft_deleted_workspace_with_members_and_no_admin(
     member = await world.user("member")
     gone = await world.workspace(target, **{member: WorkspaceRole.MEMBER})
     gone_id = gone.id
+    for actor in (target, member):
+        record_operation(
+            db_session,
+            operation="member.added",
+            actor_user_id=actor,
+            workspace_id=gone_id,
+            target_id=member,
+            subject_user_id=member,
+        )
     await _soft_delete(db_session, gone_id)
     await db_session.commit()
 
@@ -278,6 +299,7 @@ async def test_erasure_takes_a_soft_deleted_workspace_with_members_and_no_admin(
     await world.erase(target)
 
     assert await db_session.get(Workspace, gone_id) is None
+    assert await _count(db_session, OperationHistory, OperationHistory.workspace_id == gone_id) == 0
 
 
 @pytest.mark.asyncio
@@ -443,3 +465,62 @@ async def test_purge_counts_cover_only_each_workspace_s_own_rows(connector_world
         counted_id: (1, 3),
         other_id: (1, 5),
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["admin", "cli", "erasure"])
+@pytest.mark.usefixtures("patched_external_stores")
+async def test_every_user_deletion_path_scrubs_retained_history(connector_world, db_session, path):
+    from services.erasure_details import erasure_pseudonym
+    from services.user_deletion_service import delete_user_rows
+
+    world = connector_world
+    target = await world.user("history-departing")
+    owner = await world.user("history-owner")
+    workspace = await world.workspace(owner, **{target: WorkspaceRole.MEMBER})
+    workspace_id = workspace.id
+    member = record_operation(
+        db_session,
+        operation="member.added",
+        actor_user_id=target,
+        workspace_id=workspace_id,
+        target_id=target,
+        subject_user_id=target,
+    )
+    member.context_owner_id = target
+    credential = record_operation(
+        db_session,
+        operation="credential.issued",
+        actor_user_id=target,
+        workspace_id=workspace_id,
+        target_id=target,  # A non-member target is opaque, not an account ID.
+        subject_user_id=target,
+    )
+    member_id, credential_id = member.id, credential.id
+    await db_session.commit()
+    try:
+        if path == "admin":
+            await delete_user(target, {"user_id": "operator"}, db_session)
+        elif path == "cli":
+            await delete_user_rows(db_session, target, preserve_created_contexts=True)
+            await db_session.commit()
+        else:
+            await world.erase(target)
+        db_session.expire_all()
+        pseudonym = erasure_pseudonym(target)
+        stored_member = await db_session.get(OperationHistory, member_id)
+        stored_credential = await db_session.get(OperationHistory, credential_id)
+        assert stored_member.actor_user_id == pseudonym
+        assert stored_member.subject_user_id == pseudonym
+        assert stored_member.context_owner_id == pseudonym
+        assert stored_member.target_id == pseudonym
+        assert stored_credential.actor_user_id == pseudonym
+        assert stored_credential.subject_user_id == pseudonym
+        assert stored_credential.target_id == target
+        assert await db_session.get(Workspace, workspace_id) is not None
+    finally:
+        await db_session.rollback()
+        await db_session.execute(
+            delete(OperationHistory).where(OperationHistory.workspace_id == workspace_id)
+        )
+        await db_session.commit()

@@ -660,7 +660,9 @@ async def test_delete_workspace_connector_204_on_success():
 
     assert resp.status_code == 204
     db.commit.assert_awaited_once()
-    service_cls.return_value.delete_connector.assert_awaited_once_with(ws_id, conn_id)
+    service_cls.return_value.delete_connector.assert_awaited_once_with(
+        ws_id, conn_id, actor_user_id="user-1"
+    )
 
 
 @pytest.mark.asyncio

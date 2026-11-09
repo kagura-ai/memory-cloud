@@ -1376,6 +1376,9 @@
     "permissionManageBilling": "Manage billing and plans",
     "permissionInviteMembers": "Invite members",
     "permissionManageRoles": "Manage member roles",
+    "permissionViewOperationHistory": "View operation history ({plan}+)",
+    "permissionViewOperationHistoryPlain": "View operation history",
+    "operationHistoryPermissionNote": "Operation history is available under Workspace settings → Operation history. Private-context history remains restricted to its creator, including for owners and admins.",
     "permissionManageContexts": "Create/edit/delete contexts",
     "permissionManagePublicSettings": "Manage Public settings (Resource ID, Public API)",
     "permissionAccessAllContexts": "Access all contexts",
@@ -1470,7 +1473,8 @@
       "row_teamInvitations": "Team invitations",
       "row_connectorSeats": "Connector seats",
       "row_resources": "Resources (setup + tokens)",
-      "row_publicFeatures": "Public features"
+      "row_publicFeatures": "Public features",
+      "row_operationHistory": "Operation history"
     },
     "secretStore": {
       "title": "Secrets",
@@ -1953,7 +1957,8 @@
     "workspaceSettings": "General",
     "plan": "Plan",
     "providerKeys": "External API keys",
-    "connectedApps": "Connected apps"
+    "connectedApps": "Connected apps",
+    "operationHistory": "Operation history"
   },
   "integrationEntry": {
     "title": "Integrations",
@@ -2857,7 +2862,8 @@
         "addon": "Addon",
         "usageEffective": "Usage / Effective",
         "connector": "Connectors",
-        "memoriesPerDay": "Memories Created/day"
+        "memoriesPerDay": "Memories Created/day",
+        "historyRetention": "Operation History Retention (days)"
       },
       "addonDialog": {
         "title": "Edit Addons",
@@ -2885,10 +2891,12 @@
         "featureWarning": {
           "title": "Saved, but this addon has no effect on the current plan",
           "connectorsFeatureMissing": "Extra connector seats were granted, but this workspace's plan lacks the connectors feature, so creating new connectors is still refused. The seats take effect once the workspace is upgraded to a plan that includes connectors.",
+          "operationHistoryFeatureMissing": "Extra history retention was granted, but this workspace's plan does not include operation history, so nothing is recorded yet. The extra days apply once the workspace is on a plan that includes it.",
           "generic": "Addon granted with a warning: {code}"
         },
         "connector": "Connectors",
-        "memoriesPerDay": "Memories Created/day Bonus"
+        "memoriesPerDay": "Memories Created/day Bonus",
+        "historyRetention": "Operation History Retention Bonus (days)"
       },
       "spendCapDialog": {
         "title": "Edit Spend Cap",
@@ -4991,6 +4999,11 @@
         "label": "LLM result selection",
         "plural": "LLM result selection contexts",
         "singular": "LLM result selection context"
+      },
+      "operation_history": {
+        "label": "Operation history",
+        "plural": "Operation history",
+        "singular": "Operation history"
       }
     }
   },
@@ -5395,5 +5408,138 @@
     "fullMode": "All tools (full)",
     "ingestionHelp": "Adds the same five tools as the Data ingestion preset on Overview.",
     "fullHelp": "Enables every MCP tool, including resource tools."
+  },
+  "operationHistory": {
+    "title": "Operation history",
+    "description": "See who changed this workspace and what happened.",
+    "coverage": "Records important changes while this workspace is on {plan} or another plan that includes operation history; nothing is recorded on other plans, and earlier activity is not backfilled. Memory contents and secrets are not stored here, and read and search activity is excluded. After a downgrade the records are kept until they expire, and viewing them needs an eligible plan again. Deleted targets may no longer open.",
+    "retention": "Records are kept for {days, plural, one {# day} other {# days}} and then deleted automatically. There is no export.",
+    "filters": "Filter operation history",
+    "filterToggle": "Filters",
+    "query": "Search actor names, IDs or field names",
+    "context_id": "Context ID",
+    "actor": "Actor",
+    "actorFilter": "Actor ID",
+    "actorPlaceholder": "Exact user ID",
+    "agent_id": "Agent ID",
+    "since": "From ({timezone})",
+    "until": "Through minute ({timezone})",
+    "operation": "Operation",
+    "target_type": "Target type",
+    "outcome": "Result",
+    "all": "All",
+    "apply": "Apply filters",
+    "reset": "Clear filters",
+    "refresh": "Refresh",
+    "error": "Could not load operation history. Try refreshing.",
+    "forbidden": "You no longer have permission to view this workspace's history. Ask a workspace owner to check your access.",
+    "sessionExpired": "Your session has expired. Sign in again to view operation history.",
+    "empty": "No matching operations",
+    "emptyDescription": "Clear the filters or check again after an important change. Earlier activity is not backfilled.",
+    "total": "{count, plural, one {# operation} other {# operations}}",
+    "totalCapped": "{count}+ operations. Narrow the filters for a more precise count.",
+    "time": "Time",
+    "target": "Target",
+    "system": "System",
+    "unknown": "Unknown actor",
+    "credential": "Credential: {id}",
+    "client": "Client: {id}",
+    "principalAccount": "Credential account: {id}",
+    "subject": "Affected member: {id}",
+    "agent": "Agent: {id}",
+    "count": "{count, plural, one {# item} other {# items}}",
+    "multiple": "Multiple targets",
+    "context": "Context: {id}",
+    "details": "Open details",
+    "previous": "Previous",
+    "next": "Next",
+    "page": "Page {page}",
+    "types": {
+      "memory": "Memory",
+      "context": "Context",
+      "member": "Member",
+      "credential": "Credential",
+      "integration": "Integration",
+      "sleep": "Sleep"
+    },
+    "outcomes": {
+      "success": "Success",
+      "failure": "Failed",
+      "denied": "Denied"
+    },
+    "surfaces": {
+      "web": "Web",
+      "api": "API",
+      "mcp": "MCP",
+      "system": "System",
+      "unknown": "Unknown source"
+    },
+    "operations": {
+      "memory": {
+        "created": "Memory created",
+        "updated": "Memory updated",
+        "deleted": "Memories deleted",
+        "restored": "Memory restored"
+      },
+      "context": {
+        "created": "Context created",
+        "updated": "Context settings changed",
+        "deleted": "Context deleted",
+        "restored": "Context restored"
+      },
+      "member": {
+        "invited": "Member invited",
+        "added": "Member joined",
+        "removed": "Member removed",
+        "role_changed": "Member role changed",
+        "access_changed": "Member access changed"
+      },
+      "credential": {
+        "issued": "Credential issued or rotated",
+        "updated": "Credential settings changed",
+        "revoked": "Credential revoked"
+      },
+      "integration": {
+        "created": "Integration created",
+        "updated": "Integration updated",
+        "deleted": "Integration deleted"
+      },
+      "sleep": {
+        "completed": "Sleep completed",
+        "failed": "Sleep failed",
+        "undo": "Sleep changes undone"
+      }
+    },
+    "fields": {
+      "content": "Content",
+      "summary": "Summary",
+      "details": "Details",
+      "tags": "Tags",
+      "type": "Type",
+      "importance": "Importance",
+      "scope": "Scope",
+      "is_private": "Privacy",
+      "is_public": "Public sharing",
+      "is_locked": "Lock",
+      "name": "Name",
+      "display_name": "Display name",
+      "description": "Description",
+      "usage_guide": "Usage guide",
+      "resource_id": "Resource ID",
+      "sleep_mode": "Sleep mode",
+      "role": "Role",
+      "allowed_context_ids": "Context access",
+      "runtime": "Runtime settings",
+      "settings": "Settings",
+      "credential": "Credential",
+      "pinned": "Pinned state",
+      "expires_at": "Expiration",
+      "event_start": "Event start",
+      "event_end": "Event end",
+      "delivery_mode": "Delivery mode",
+      "redirect_uris": "Redirect URIs",
+      "token_endpoint_auth_method": "Token authentication method"
+    },
+    "accountAttribution": "Authenticated account; a shared credential does not identify the individual caller."
   }
 }

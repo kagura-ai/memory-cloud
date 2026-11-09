@@ -301,7 +301,11 @@ class TestAddMember:
             await service.add_member(workspace.id, "u14", role=WorkspaceRole.MEMBER)
 
         assert calls == ["lock", "seat_check"]
-        db.add.assert_called_once()
+        from models.operation_history import OperationHistory
+
+        added = [call.args[0] for call in db.add.call_args_list]
+        assert sum(isinstance(row, WorkspaceMember) for row in added) == 1
+        assert sum(isinstance(row, OperationHistory) for row in added) == 1
 
     @pytest.mark.asyncio
     async def test_add_duplicate_raises(self, db_session) -> None:

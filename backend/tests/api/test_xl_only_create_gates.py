@@ -569,11 +569,14 @@ class TestBoundPublicKeyCreate:
             name="ws-key",
             revoked_at=None,
             default_context_id=None,
+            bound_context_id=None,
             agent_id=None,
             expires_at=None,
             connector_id=None,
         )
-        new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")
+        new_key = SimpleNamespace(
+            id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new", bound_context_id=None
+        )
         db = MagicMock()
         db.execute = AsyncMock(return_value=_result(one=old_key))
         db.commit = AsyncMock()

@@ -39,7 +39,9 @@ pseudonyms of the requests to re-key (their ``user_id``) in every column an
 erasure writes one to (``SUB_COLUMNS``: ``erasure_requests.user_id`` /
 ``initiated_by``, ``memories.user_id``, ``memory_revisions.actor_user_id``,
 ``vector_erasure_jobs.subject_pseudonym``, ``secret_access_log``, the
-authorship columns of surviving rows, ...) and on ``audit_logs`` (``user_id``,
+authorship columns of surviving rows, the actor / affected-member / context
+owner of ``workspace_operation_history`` and its member target ids, ...) and on
+``audit_logs`` (``user_id``,
 ``user_email`` — the raw-sub fallback —, ``resource = 'user:'||p``, the
 ``user_pseudonym:<first 16>`` resource of the erasure's own rows, the
 subject-identifier keys of ``user_metadata``); and the subjects' email
@@ -183,6 +185,7 @@ from models.memory import (  # noqa: E402
 )
 from models.memory_access_event import MemoryAccessEvent  # noqa: E402
 from models.observation_credential import ObservationCredential  # noqa: E402
+from models.operation_history import OperationHistory  # noqa: E402
 from models.public_mcp import PublicMcpEndpoint  # noqa: E402
 from models.resource import (  # noqa: E402
     Resource,
@@ -216,6 +219,7 @@ from services.erasure_details import (  # noqa: E402
     stores_pseudonym,
     unrepaired_erasure,
 )
+from services.operation_history_erasure import MEMBER_TARGET_TYPE  # noqa: E402
 from utils.hashing import sha256_hex  # noqa: E402
 from utils.logger import get_logger  # noqa: E402
 
@@ -228,9 +232,10 @@ logger = get_logger(__name__)
 # (``AccountErasureService._delete_postgres``: ``_pseudonymize_field`` and its
 # authorship sweep, ``_scrub_surviving_memories``,
 # ``pseudonymize_revision_actor``, ``_erase_session_provenance``,
-# ``_erase_memory_access_events``, ``_erase_secret_access_log``,
-# ``capture_vector_erasure``). ``tests/cli/test_rekey_erasure_pseudonyms.py``
-# checks it against the erasure's source.
+# ``_erase_memory_access_events``, ``erase_operation_history``,
+# ``_erase_secret_access_log``, ``capture_vector_erasure``).
+# ``tests/cli/test_rekey_erasure_pseudonyms.py`` checks it against the
+# erasure's source.
 SUB_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     Context.created_by,
     Memory.user_id,
@@ -238,6 +243,10 @@ SUB_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     MemorySessionRollback.principal_user_id,
     MemorySessionRollback.requested_by,
     MemoryAccessEvent.user_id,
+    # services/operation_history_erasure.py ERASED_COLUMNS (#2739)
+    OperationHistory.actor_user_id,
+    OperationHistory.subject_user_id,
+    OperationHistory.context_owner_id,
     NeuralMemoryEdge.user_id,
     MemoryAnalysis.triggered_by,
     RetrievalFeedback.user_id,
@@ -270,6 +279,18 @@ SUB_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     SecretAccessLog.recipient_identity,
     VectorErasureJob.subject_pseudonym,
 )
+# Columns that carry the pseudonym only on some rows: (column, discriminator
+# column, value), rewritten right after the SUB_COLUMNS entry they follow.
+# ``workspace_operation_history.target_id`` is an account id only on
+# membership events (``erase_operation_history``, #2739).
+CONDITIONAL_SUB_COLUMNS: dict[
+    InstrumentedAttribute[Any],
+    tuple[tuple[InstrumentedAttribute[Any], InstrumentedAttribute[Any], str], ...],
+] = {
+    OperationHistory.context_owner_id: (
+        (OperationHistory.target_id, OperationHistory.target_type, MEMBER_TARGET_TYPE),
+    ),
+}
 REQUEST_COLUMNS: tuple[InstrumentedAttribute[Any], ...] = (
     ErasureRequest.user_id,
     ErasureRequest.initiated_by,
@@ -546,16 +567,27 @@ async def _rewrite_column(
     mapping: Mapping[str, str],
     *,
     dry_run: bool,
+    only_where: tuple[InstrumentedAttribute[Any], str] | None = None,
 ) -> int:
     """Rewrite ``column`` by exact value (``mapping``), its rows locked in id
-    order first. Returns the rowcount (the dry run's: how many match)."""
+    order first. Returns the rowcount (the dry run's: how many match).
+    ``only_where`` (a column of the same model and a value) limits it to the
+    rows where that column has that value."""
     if not mapping:
         return 0
     model: Any = column.class_
     olds = _texts(mapping)
+
+    def scoped(entity: Any) -> list[ColumnElement[bool]]:
+        if only_where is None:
+            return []
+        return [getattr(entity, only_where[0].key) == only_where[1]]
+
     if dry_run:
         return (
-            await db.execute(select(func.count()).select_from(model).where(column == any_(olds)))
+            await db.execute(
+                select(func.count()).select_from(model).where(column == any_(olds), *scoped(model))
+            )
         ).scalar_one()
     keys = sorted(mapping)
     pairs = select(
@@ -567,13 +599,13 @@ async def _rewrite_column(
     row = aliased(model)
     locked = (
         select(row.id)
-        .where(getattr(row, column.key) == any_(olds))
+        .where(getattr(row, column.key) == any_(olds), *scoped(row))
         .order_by(row.id)
         .with_for_update()
     )
     result = await db.execute(
         update(model)
-        .where(model.id.in_(locked), column == pairs.c.old)
+        .where(model.id.in_(locked), column == pairs.c.old, *scoped(model))
         .values({column: pairs.c.new})
         .execution_options(synchronize_session=False)
     )
@@ -834,6 +866,11 @@ async def _rekey(db: AsyncSession, *, dry_run: bool, stamp_current: bool) -> Rek
             await _lock_memories(db, sub_map)
         if count := await _rewrite_column(db, column, sub_map, dry_run=dry_run):
             result.columns[_label(column)] = count
+        for conditional, discriminator, value in CONDITIONAL_SUB_COLUMNS.get(column, ()):
+            if count := await _rewrite_column(
+                db, conditional, sub_map, dry_run=dry_run, only_where=(discriminator, value)
+            ):
+                result.columns[_label(conditional)] = count
     audit = await _rewrite_audit_logs(db, sub_map, email_map, dry_run=dry_run)
     result.columns.update({f"audit_logs.{k}": v for k, v in audit.items() if v})
     ids = [r.id for r in to_rekey]

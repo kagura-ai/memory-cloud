@@ -744,6 +744,16 @@ class WorkspaceService:
         )
 
         self.db.add(member)
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="member.added",
+            actor_user_id=invited_by,
+            workspace_id=workspace_id,
+            subject_user_id=user_id,
+            changed_fields=["role"],
+        )
         await self.db.commit()
         await self.db.refresh(member)
 
@@ -822,6 +832,8 @@ class WorkspaceService:
         workspace_id: UUID,
         user_id: str,
         new_role: str,
+        *,
+        actor_user_id: str | None = None,
     ) -> WorkspaceMember:
         """Update member's role.
 
@@ -902,6 +914,8 @@ class WorkspaceService:
                 )
 
         old_role = member.role
+        if old_role == new_role:
+            return member
         # new_role is validated by the caller's request schema; column is
         # Mapped[WorkspaceRole] (StrEnum). See the note in api/routes/contexts.py
         # — cast only, no behaviour change (#1442).
@@ -927,6 +941,16 @@ class WorkspaceService:
                 new_role=new_role,
             )
 
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="member.role_changed",
+            actor_user_id=actor_user_id,
+            workspace_id=workspace_id,
+            subject_user_id=user_id,
+            changed_fields=["role"],
+        )
         await self.db.commit()
         await self.db.refresh(member)
 
@@ -938,6 +962,8 @@ class WorkspaceService:
         workspace_id: UUID,
         user_id: str,
         allowed_context_ids: list[UUID] | None,
+        *,
+        actor_user_id: str | None = None,
     ) -> WorkspaceMember:
         """Update member's allowed context access.
 
@@ -965,9 +991,22 @@ class WorkspaceService:
 
         _warn_list_on_privileged_role(workspace_id, user_id, member.role, allowed_context_ids)
 
+        if member.allowed_context_ids == allowed_context_ids:
+            return member
+
         member.allowed_context_ids = allowed_context_ids
         member.updated_at = func.now()
 
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="member.access_changed",
+            actor_user_id=actor_user_id,
+            workspace_id=workspace_id,
+            subject_user_id=user_id,
+            changed_fields=["allowed_context_ids"],
+        )
         await self.db.commit()
         await self.db.refresh(member)
 
@@ -981,7 +1020,9 @@ class WorkspaceService:
         )
         return member
 
-    async def remove_member(self, workspace_id: UUID, user_id: str) -> None:
+    async def remove_member(
+        self, workspace_id: UUID, user_id: str, *, actor_user_id: str | None = None
+    ) -> None:
         """Remove member from workspace.
 
         Issue #275 Critical: Comprehensive cleanup including ownership transfers.
@@ -1101,6 +1142,15 @@ class WorkspaceService:
 
             # Delete member record
             await self.db.delete(member)
+            from services.operation_history_writer import record_operation
+
+            record_operation(
+                self.db,
+                operation="member.removed",
+                actor_user_id=actor_user_id,
+                workspace_id=workspace_id,
+                subject_user_id=user_id,
+            )
             await self.db.commit()
 
             # Log after successful commit

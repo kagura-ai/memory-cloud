@@ -42,6 +42,27 @@ class TestAddonFeatureWarnings:
         assert _addon_feature_warnings("enterprise", request) == ["connectors_feature_missing"]
 
 
+class TestHistoryRetentionAddonRequest:
+    """#2739: the days add-on is bounded and inert without operation history."""
+
+    def test_days_are_bounded(self):
+        from pydantic import ValidationError
+
+        assert UpdateAddonRequest(addon_history_retention_days_bonus=3650)
+        with pytest.raises(ValidationError):
+            UpdateAddonRequest(addon_history_retention_days_bonus=3651)
+
+    @pytest.mark.parametrize("plan_name", ["free", "basic"])
+    def test_grant_warns_when_tier_lacks_operation_history(self, plan_name: str):
+        request = UpdateAddonRequest(addon_history_retention_days_bonus=30)
+        assert _addon_feature_warnings(plan_name, request) == ["operation_history_feature_missing"]
+
+    @pytest.mark.parametrize("plan_name", ["pro", "promax"])
+    def test_grant_is_silent_on_entitled_tiers(self, plan_name: str):
+        request = UpdateAddonRequest(addon_history_retention_days_bonus=30)
+        assert _addon_feature_warnings(plan_name, request) == []
+
+
 class TestAddonReductionValidation:
     """Test addon reduction validation logic (no DB required).
 

@@ -167,6 +167,13 @@ def _llm_selector_cap() -> MemoryCloudException:
 
 
 REFUSALS: list[Refusal] = [
+    Refusal(
+        id="plan/operation_history",
+        site="api.routes.operation_history:get_operation_history",
+        exc=FeatureNotAvailableError.for_feature(_FREE, "operation_history"),
+        site_literal="operation_history",
+        carries_counts=False,
+    ),
     # ---- FEAT-001, gate "plan" ------------------------------------------
     # #2103: turning content chunks on, where CONTENT_CHUNKS_REQUIRE_PLAN is on.
     Refusal(
@@ -758,7 +765,7 @@ def _discover_refusal_sites() -> dict[str, set[str]]:
     """Map ``module:qualname`` -> the string constants of its refusal raises."""
     found: dict[str, set[str]] = {}
     for path in sorted(SRC_ROOT.rglob("*.py")):
-        module = str(path.relative_to(SRC_ROOT))[: -len(".py")].replace("/", ".")
+        module = path.relative_to(SRC_ROOT).with_suffix("").as_posix().replace("/", ".")
         for qualname, call in _refusal_raises(path):
             found.setdefault(f"{module}:{qualname}", set()).update(_string_constants(call))
     return found
@@ -1694,6 +1701,7 @@ NOT_ON_MCP = {
     "quota/api_public_daily-suspended": "anonymous public REST routes only",
     "plan/shared_contexts-rest": "the REST route's own pre-check",
     "plan/public_contexts-api-key": "REST route only",
+    "plan/operation_history": "session-only REST history; no MCP history reader",
     "plan/any-feature-via-quota-service": "no caller uses the raising form",
     "plan/memory_analysis": "REST dependency; MCP goes through the _mcp variant",
     "allowlist/memory_analysis-start": "REST dependency; MCP goes through the _mcp variant",

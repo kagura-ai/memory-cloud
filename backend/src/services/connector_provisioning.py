@@ -416,6 +416,7 @@ class ConnectorProvisioningService:
                 resource_pk=resource_pk,
                 workspace_id=workspace_id,
                 description=f"Connector token for {connector_type}:{connector.id}",
+                actor_user_id=user_id,
                 quota_events_per_hour=quota_events_per_hour,
                 created_by=user_id,
             )
@@ -460,6 +461,17 @@ class ConnectorProvisioningService:
             runtime_fields=runtime_fields,
         )
 
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="integration.created",
+            actor_user_id=user_id,
+            workspace_id=workspace_id,
+            context_id=connector.context_id,
+            target_id=connector.id,
+            event_key=f"connector-created:{connector.id}",
+        )
         return ConnectorProvisioningResult(
             connector=connector,
             token=token_record,
@@ -514,6 +526,7 @@ class ConnectorProvisioningService:
                 workspace_id=workspace.id,
                 name=auto_create_context_name,
                 created_by=workspace.owner_user_id,
+                actor_user_id=user_id,
             )
             return context.id
         return None
@@ -979,7 +992,12 @@ class ConnectorProvisioningService:
         return result.scalar_one_or_none()
 
     async def refresh_slack_bot_token(
-        self, workspace_id: UUID, connector_id: UUID, bot_token: str
+        self,
+        workspace_id: UUID,
+        connector_id: UUID,
+        bot_token: str,
+        *,
+        actor_user_id: str | None = None,
     ) -> bool:
         """Store a fresh Slack install's bot token on an existing connector (#1880).
 
@@ -1020,6 +1038,18 @@ class ConnectorProvisioningService:
         tokens["bot_token"] = bot_token
         connector.set_oauth_tokens(tokens)
         connector.config_version += 1
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="integration.updated",
+            actor_user_id=actor_user_id,
+            workspace_id=workspace_id,
+            context_id=connector.context_id,
+            target_id=connector.id,
+            changed_fields=["credential"],
+            event_key=f"connector-update:{connector.id}:{connector.config_version}",
+        )
         await self.db.flush()
         logger.info(
             "workspace_connector_slack_bot_token_refreshed",
@@ -1044,7 +1074,9 @@ class ConnectorProvisioningService:
         )
         return result.scalar_one_or_none()
 
-    async def delete_connector(self, workspace_id: UUID, connector_id: UUID) -> bool:
+    async def delete_connector(
+        self, workspace_id: UUID, connector_id: UUID, *, actor_user_id: str | None = None
+    ) -> bool:
         """Delete a connector: drop its resource, and with it its KMC write key.
 
         Deletes the owning ``resources`` row; CASCADE removes the connector,
@@ -1071,6 +1103,17 @@ class ConnectorProvisioningService:
         if connector is None:
             return False
 
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            self.db,
+            operation="integration.deleted",
+            actor_user_id=actor_user_id,
+            workspace_id=workspace_id,
+            context_id=connector.context_id,
+            target_id=connector.id,
+            event_key=f"connector-deleted:{connector.id}",
+        )
         # #1952: only unlinked rows — linked ones go with the cascade below.
         await self.db.execute(
             update(APIKey)
@@ -1138,6 +1181,19 @@ class ConnectorProvisioningService:
             if _runtime_field(previous, key) != _runtime_field(effective_new, key)
         )
         connector.runtime_config = normalized_runtime_config
+        from services.operation_history_writer import record_operation
+
+        if changed_fields:
+            record_operation(
+                self.db,
+                operation="integration.updated",
+                actor_user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=connector.context_id,
+                target_id=connector.id,
+                changed_fields=["runtime"],
+                event_key=f"connector-update:{connector.id}:{connector.config_version + 1}",
+            )
         connector.config_version += 1
         await self.db.flush()
 
@@ -1359,6 +1415,24 @@ class ConnectorProvisioningService:
                 field="context_id",
             )
 
+        llm_changed = False
+        if llm_config is not _UNSET:
+            try:
+                llm_changed = connector.get_llm_config() != llm_config
+            except ValueError:
+                # Replacing an unreadable old bundle must still repair the
+                # connector. Only the field name is recorded, never values.
+                llm_changed = True
+        settings_changed = llm_changed or any(
+            value is not _UNSET and getattr(connector, name) != value
+            for name, value in (
+                ("channel_ids", channel_ids),
+                ("litellm_virtual_key_id", litellm_virtual_key_id),
+                ("locale", locale),
+                ("context_id", context_id),
+            )
+        )
+
         if channel_ids is not _UNSET:
             connector.channel_ids = channel_ids
         if litellm_virtual_key_id is not _UNSET:
@@ -1367,8 +1441,38 @@ class ConnectorProvisioningService:
             connector.set_llm_config(llm_config)
         if locale is not _UNSET:
             connector.locale = locale
+        from services.operation_history_writer import record_operation
+
+        # Keep the old boundary on a rebind/unbind; otherwise a private
+        # connector's actor and identifier would become workspace-wide.
+        history_context_id = connector.context_id
         if context_id is not _UNSET:
             connector.context_id = context_id
+            if context_id is not None and context_id != history_context_id:
+                from models.auth import Context
+
+                history_context_id = await self.db.scalar(
+                    select(Context.id)
+                    .where(
+                        Context.workspace_id == workspace_id,
+                        Context.id.in_([history_context_id, context_id]),
+                    )
+                    .order_by(Context.is_private.desc())
+                    .limit(1)
+                )
+        if history_context_id is None:
+            history_context_id = connector.context_id
+        if settings_changed:
+            record_operation(
+                self.db,
+                operation="integration.updated",
+                actor_user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=history_context_id,
+                target_id=connector.id,
+                changed_fields=["settings"],
+                event_key=f"connector-update:{connector.id}:{connector.config_version + 1}",
+            )
         connector.config_version += 1
         await self.db.flush()
 
@@ -1592,6 +1696,39 @@ class ConnectorProvisioningService:
         connector.set_kmc_api_key(plaintext_new_key)
         connector.kmc_api_key_expires_at = new_key_row.expires_at
         connector.config_version = connector.config_version + 1
+        from services.operation_history_writer import record_operation
+
+        if old_key is not None:
+            record_operation(
+                self.db,
+                operation="credential.revoked",
+                actor_user_id=user_id,
+                subject_user_id=old_key.user_id,
+                workspace_id=workspace_id,
+                context_id=connector.context_id,
+                target_id=old_key.public_id,
+                event_key=f"api-key:{old_key.public_id}:credential.revoked",
+            )
+        record_operation(
+            self.db,
+            operation="credential.issued",
+            actor_user_id=user_id,
+            subject_user_id=owner_user_id,
+            workspace_id=workspace_id,
+            context_id=connector.context_id,
+            target_id=new_key_row.public_id,
+            event_key=f"api-key:{new_key_row.public_id}:credential.issued",
+        )
+        record_operation(
+            self.db,
+            operation="integration.updated",
+            actor_user_id=user_id,
+            workspace_id=workspace_id,
+            context_id=connector.context_id,
+            target_id=connector.id,
+            changed_fields=["credential"],
+            event_key=f"connector-update:{connector.id}:{connector.config_version}",
+        )
         await self.db.flush()
 
         logger.info(

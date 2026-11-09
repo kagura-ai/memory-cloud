@@ -115,14 +115,17 @@ async def get_current_user(request: Request) -> dict:
     # and get_user_from_api_key_or_session). Session auth never carries an agent
     # scope; make that explicit and stale-proof.
     from auth.agent_scope import set_agent_scope
+    from auth.history_principal import set_history_principal
 
     set_agent_scope(None)
+    set_history_principal()
 
     # SessionMiddleware sets request.state.user if logged in
     if not hasattr(request.state, "user") or request.state.user is None:
         logger.warning("unauthorized_access_attempt", path=request.url.path)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    set_history_principal("session")
     return request.state.user
 
 
@@ -285,6 +288,9 @@ async def verify_api_key(api_key: str) -> VerifiedKey | None:
             from auth.agent_scope import set_agent_scope_from_verified
 
             set_agent_scope_from_verified(verified)
+            from auth.history_principal import set_history_principal
+
+            set_history_principal("api_key", credential_id=verified.public_id)
             return verified
     return None
 
@@ -425,6 +431,9 @@ async def verify_api_key_user(
     from auth.agent_scope import set_agent_scope_from_verified
 
     set_agent_scope_from_verified(result)
+    from auth.history_principal import set_history_principal
+
+    set_history_principal("api_key", credential_id=result.public_id)
 
     return await _build_api_key_user_dict(
         result.user_id, result.workspace_id, db, api_key_prefix=result.key_prefix
@@ -539,8 +548,10 @@ async def get_user_from_api_key_or_session(
     # observes a stale scope even if that isolation assumption breaks. The
     # agent-key branch below re-sets it via set_agent_scope_from_verified.
     from auth.agent_scope import set_agent_scope
+    from auth.history_principal import set_history_principal
 
     set_agent_scope(None)
+    set_history_principal()
 
     # Priority 0: OAuth Bearer. The prefix check skips the OAuth DB
     # lookup for ``kagura_*`` API keys (and vice versa), so each Bearer
@@ -603,6 +614,7 @@ async def get_user_from_api_key_or_session(
             from auth.agent_scope import set_agent_scope_from_verified
 
             set_agent_scope_from_verified(result)
+            set_history_principal("api_key", credential_id=result.public_id)
 
             return await _build_api_key_user_dict(
                 result.user_id, result.workspace_id, db, api_key_prefix=result.key_prefix

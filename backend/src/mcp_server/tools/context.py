@@ -600,7 +600,7 @@ async def _apply_resource_id(
         # #1877: scoped to this context's workspace and ``resources`` row — the
         # slug alone also matches a same-slug resource of another workspace.
         await ResourceTokenManager(db).revoke_tokens_for_resource(
-            context.workspace_id, old_rid, created_by=user_id
+            context.workspace_id, old_rid, created_by=user_id, actor_user_id=user_id
         )
 
     context.resource_id = rid
@@ -717,9 +717,28 @@ async def handle_update_context(
                     help="You need owner access for summary/usage_guide/resource_id/is_public/is_locked, or editor access for display_name/description.",
                 )
 
+            previous = {name: getattr(context, name) for name in requested_fields}
+            private_before = context.is_private
             error = await _apply_context_updates(db, context, args, user_id)
             if error:
                 return error
+
+            changed_fields = [
+                name for name, value in previous.items() if getattr(context, name) != value
+            ]
+            if changed_fields:
+                from services.operation_history_writer import record_operation
+
+                record_operation(
+                    db,
+                    operation="context.updated",
+                    actor_user_id=user_id,
+                    context=context,
+                    target_id=context.id,
+                    changed_fields=changed_fields,
+                    private_before=private_before,
+                    surface="mcp",
+                )
 
             try:
                 await db.commit()

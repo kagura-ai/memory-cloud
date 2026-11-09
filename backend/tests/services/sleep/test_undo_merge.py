@@ -12,6 +12,8 @@ from uuid import uuid4
 
 import pytest
 
+from models.operation_history import OperationHistory
+from models.sleep import SleepAction
 from services.sleep.undo import UndoMergeError, undo_merge_action
 
 
@@ -46,6 +48,7 @@ def _db(first_row, memory=None) -> AsyncMock:
     """AsyncMock db: 1st execute -> (action, report) join, 2nd -> memory,
     3rd -> the restore UPDATE."""
     db = AsyncMock()
+    db.add = MagicMock()
     join_result = MagicMock()
     join_result.first.return_value = first_row
     mem_result = MagicMock()
@@ -158,11 +161,17 @@ async def test_happy_path_restores_reembeds_and_audits() -> None:
     assert re_embed.await_args.kwargs["db"] is db
 
     # The undo is audited as an undo_merge action on the SAME report.
-    added = db.add.call_args.args[0]
+    (added,) = [c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], SleepAction)]
     assert added.action_type == "undo_merge"
     assert added.report_id == action.report_id
     assert added.details["undone_action_id"] == 42
     assert added.details["undone_by"] == "admin-user"
+    (history,) = [
+        c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], OperationHistory)
+    ]
+    assert history.operation == "sleep.undo"
+    assert history.actor_user_id == "admin-user"
+    assert history.workspace_id == report.workspace_id
     db.commit.assert_awaited_once()
 
 
@@ -211,9 +220,14 @@ async def test_shadow_undo_deletes_created_edge_and_audits() -> None:
 
     assert summary["restored_memory_id"] == str(action.target_id)
     assert summary["undone_action_id"] == 42
-    added = db.add.call_args.args[0]
+    (added,) = [c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], SleepAction)]
     assert added.action_type == "undo_merge"
     assert added.details["mode"] == "shadow"
+    (history,) = [
+        c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], OperationHistory)
+    ]
+    assert history.operation == "sleep.undo"
+    assert history.actor_user_id == "admin-user"
     db.commit.assert_awaited_once()
 
 

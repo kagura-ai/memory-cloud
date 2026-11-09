@@ -7938,6 +7938,18 @@ class MemoryService:
         ).all()
         deleted = [row.id for row in rows]
         if rows:
+            from services.operation_history_writer import record_operation
+
+            record_operation(
+                self.db,
+                operation="memory.deleted",
+                actor_user_id=user_id,
+                workspace_id=UUID(str(workspace_id)),
+                context_id=UUID(context_id),
+                count=len(rows),
+                at=deleted_at,
+                event_key=f"memory-bulk-delete:{context_id}:{deleted_at!s}",
+            )
             # #2043: the rows' forgotten events, at the versions the UPDATE
             # returned (it holds the row locks, so they are the committed ones).
             await self.db.execute(

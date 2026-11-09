@@ -73,6 +73,7 @@ def _key_record(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=1,
+        public_id="akey_" + "b" * 22,
         user_id="owner-1",
         name=name,
         workspace_id=workspace_id,
@@ -132,6 +133,7 @@ class TestVerifyKeyConnectorGate:
         verified = await _verify(db)
 
         assert verified is not None
+        assert verified.public_id == record.public_id
         assert verified.workspace_id == WORKSPACE_ID
         assert db.execute.await_count == 2
 
@@ -423,6 +425,7 @@ class TestVerifiedKeyConnectorFlag:
         verified = await _verify(db)
 
         assert verified is not None and verified.is_connector_key is True
+        assert verified.public_id == record.public_id
 
     @pytest.mark.asyncio
     async def test_ordinary_key_is_not_flagged(self) -> None:
@@ -432,3 +435,4 @@ class TestVerifiedKeyConnectorFlag:
         verified = await _verify(db)
 
         assert verified is not None and verified.is_connector_key is False
+        assert verified.public_id == record.public_id

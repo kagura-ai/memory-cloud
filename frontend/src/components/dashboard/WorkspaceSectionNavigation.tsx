@@ -4,12 +4,16 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { useWorkspace } from "@/contexts/WorkspaceContext";
 
 export function WorkspaceSectionNavigation() {
   const path = usePathname();
   const params = useSearchParams();
   const t = useTranslations("sectionNavigation");
   const features = useSystemFeatures();
+  const { currentWorkspace } = useWorkspace();
+  const canViewHistory = currentWorkspace?.current_user_role === "owner"
+    || currentWorkspace?.current_user_role === "admin";
   const integrations = [
     "/workspace/integrations",
     "/workspace/resources",
@@ -73,6 +77,11 @@ export function WorkspaceSectionNavigation() {
       href: "/workspace/settings/general",
       active: path.endsWith("/general"),
     },
+    ...(canViewHistory ? [{
+      label: "operationHistory",
+      href: "/workspace/settings/history",
+      active: path.endsWith("/history"),
+    }] : []),
   ];
 
   return (

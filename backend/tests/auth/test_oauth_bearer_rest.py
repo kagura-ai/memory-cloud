@@ -289,13 +289,15 @@ class TestMCPOAuth2TokenShim:
     async def test_shim_returns_user_scope_and_resource(self):
         from mcp_server.auth import OAuthGrant, _verify_oauth2_token
 
-        row = MagicMock(user_id="user-mcp-xyz", scope="memory:read", resource=None)
+        row = MagicMock(
+            user_id="user-mcp-xyz", scope="memory:read", resource=None, client_id="client-1"
+        )
         with patch(
             "auth.oauth2_bearer.find_active_oauth_token",
             new=AsyncMock(return_value=row),
         ):
             result = await _verify_oauth2_token("randomtok")
-            assert result == OAuthGrant("user-mcp-xyz", "memory:read", None)
+            assert result == OAuthGrant("user-mcp-xyz", "memory:read", None, client_id="client-1")
 
     @pytest.mark.asyncio
     async def test_shim_returns_none_on_invalid(self):

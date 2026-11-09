@@ -14,6 +14,12 @@ import type { PlanTierFeature } from "@/lib/api/workspaces";
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
+  // Pure matrix lookups need neither the application provider graph nor a
+  // live API. Hook cases replace these defaults in setup below.
+  vi.doMock("@/lib/api/workspaces", () => ({ getPlanTierMatrix: vi.fn() }));
+  vi.doMock("@/contexts/WorkspaceContext", () => ({
+    useWorkspace: () => ({ currentWorkspace: null }),
+  }));
 });
 
 // Only the fields the hook reads matter; the rest is filler for the type.
@@ -45,6 +51,7 @@ function tier(name: string, gates: Partial<PlanTierFeature>): PlanTierFeature {
     public_contexts: false,
     content_chunks: false,
     llm_selector: false,
+    operation_history: false,
     ...gates,
   };
 }
@@ -101,6 +108,7 @@ describe("planFeaturesFor (#1560)", () => {
       secret_store: false,
       content_chunks: false,
       llm_selector: false,
+      operation_history: false,
     });
     expect(planFeaturesFor(MATRIX, "promax")).toEqual({
       resources: false,
@@ -114,6 +122,7 @@ describe("planFeaturesFor (#1560)", () => {
       secret_store: false,
       content_chunks: false,
       llm_selector: false,
+      operation_history: false,
     });
     expect(planFeaturesFor(MATRIX, "free").secret_store).toBe(true);
   });
@@ -132,6 +141,7 @@ describe("planFeaturesFor (#1560)", () => {
       secret_store: false,
       content_chunks: false,
       llm_selector: false,
+      operation_history: false,
     };
     expect(planFeaturesFor(MATRIX, "enterprise")).toEqual(closed);
     expect(planFeaturesFor(MATRIX, undefined)).toEqual(closed);

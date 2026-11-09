@@ -13,6 +13,7 @@ Implements scheduled tasks for:
 - Capacity-over purge sweep (daily 04:00 UTC) — Issue #1969
 - Pending referral grant sweep (every 5 minutes) — Issue #2563
 - Public MCP usage event retention (daily 04:50 UTC) — Issue #2678
+- Expired operation history purge (daily 05:10 UTC) — Issue #2739
 
 Every job above is leader-only: one process of the deployment runs the
 scheduler (``scheduler_leader``, Issue #1980) and adds them with
@@ -37,6 +38,7 @@ from .erasure_tasks import schedule_erasure_tasks
 from .file_tasks import schedule_file_tasks
 from .known_device_tasks import schedule_known_device_tasks
 from .neural_tasks import schedule_neural_tasks
+from .operation_history_tasks import schedule_operation_history_tasks
 from .public_mcp_usage_tasks import schedule_public_mcp_usage_tasks
 from .referral_tasks import schedule_referral_tasks
 from .resource_indexer_job import schedule_resource_indexer_jobs
@@ -71,6 +73,7 @@ def register_scheduled_jobs(scheduler: AsyncIOScheduler) -> None:
     schedule_semantic_edge_reverify_tasks(scheduler)
     schedule_referral_tasks(scheduler)
     schedule_public_mcp_usage_tasks(scheduler)
+    schedule_operation_history_tasks(scheduler)
 
 
 __all__ = [
@@ -94,4 +97,5 @@ __all__ = [
     "schedule_capacity_purge_tasks",
     "schedule_referral_tasks",
     "schedule_public_mcp_usage_tasks",
+    "schedule_operation_history_tasks",
 ]

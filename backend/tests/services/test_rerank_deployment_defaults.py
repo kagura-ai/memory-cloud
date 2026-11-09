@@ -243,6 +243,7 @@ class TestCreateContext:
         result.scalar_one_or_none.return_value = workspace
         db = MagicMock()
         db.execute = AsyncMock(return_value=result)
+        db.flush = AsyncMock()
         db.commit = AsyncMock()
         db.refresh = AsyncMock()
         service = ContextService(db=db)

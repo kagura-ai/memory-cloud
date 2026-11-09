@@ -934,6 +934,7 @@ async def update_member_role(
         workspace_id=workspace_id,
         user_id=user_id,
         new_role=body.role,
+        actor_user_id=current_user["user_id"],
     )
 
     return WorkspaceMemberResponse(
@@ -998,6 +999,7 @@ async def update_member_context_access(
         workspace_id=workspace_id,
         user_id=user_id,
         allowed_context_ids=allowed_context_ids,
+        actor_user_id=current_user["user_id"],
     )
 
     return {
@@ -1116,7 +1118,9 @@ async def remove_member(
         target=user_id,
     )
 
-    await workspace_service.remove_member(workspace_id, user_id)
+    await workspace_service.remove_member(
+        workspace_id, user_id, actor_user_id=current_user["user_id"]
+    )
 
 
 # ============================================================================

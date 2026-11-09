@@ -96,6 +96,47 @@ async def _over_cap(db_session: AsyncSession, ws, ctx, owner) -> None:
 
 
 @pytest.mark.asyncio
+async def test_chunked_history_preserves_each_context_privacy(db_session, free_ws) -> None:
+    """A leftover sweep cannot combine private counts into a workspace row."""
+    from models.operation_history import OperationHistory
+
+    ws, public, owner = free_ws
+    # The sweep itself only reaches Free workspaces, which record no history
+    # (#2739); an entitled plan exercises the chunked writer's per-context rows.
+    ws.plan_name = "pro"
+    private = make_context(workspace_id=ws.id, created_by=owner.user_id)
+    public.is_private = False
+    private.is_private = True
+    db_session.add(private)
+    await db_session.flush()
+    for context in (public, public, private):
+        db_session.add(_memory(ws, context, owner.user_id))
+    await db_session.flush()
+
+    total, aborted = await ContextService(db_session)._tombstone_chunked(
+        [Memory.workspace_id == ws.id],
+        workspace_id=ws.id,
+        actor=CAPACITY_PURGE_ACTOR,
+        deleted_at=utcnow(),
+    )
+    assert (total, aborted) == (3, False)
+    rows = list(
+        (
+            await db_session.scalars(
+                select(OperationHistory).where(OperationHistory.workspace_id == ws.id)
+            )
+        ).all()
+    )
+    assert {row.context_id: row.count for row in rows} == {public.id: 2, private.id: 1}
+    assert {row.context_id: row.context_private for row in rows} == {
+        public.id: False,
+        private.id: True,
+    }
+    assert all(row.actor_user_id is None and row.surface == "system" for row in rows)
+    assert all(row.context_owner_id == owner.user_id for row in rows)
+
+
+@pytest.mark.asyncio
 async def test_stamp_sets_once_and_keeps_the_first_date(db_session, free_ws) -> None:
     ws, ctx, owner = free_ws
     await _over_cap(db_session, ws, ctx, owner)

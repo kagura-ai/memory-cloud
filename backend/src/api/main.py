@@ -864,6 +864,7 @@ from api.routes import (  # noqa: E402
     oauth,
     observability,  # Issue #2679: internal read-only observability API
     observation_credentials,  # Issue #2679: read-only observability credentials
+    operation_history,
     passkeys,
     password,  # Issue #1678: self-service password endpoints
     public_mcp_endpoints,  # Issue #2675: publish a resource as a public MCP endpoint
@@ -1059,6 +1060,7 @@ app.include_router(observability.router, prefix="/api/v1")
 
 # Workspace connector setup route (Issue #851 - ai-worker connector provisioning)
 app.include_router(workspace_connectors.router, prefix="/api/v1")
+app.include_router(operation_history.router, prefix="/api/v1")
 app.include_router(workers.router, prefix="/api/v1")
 app.include_router(worker_apps.router, prefix="/api/v1")
 # Issue #954: internal billing entitlement push. Mounted WITHOUT /api/v1 — it

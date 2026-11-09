@@ -90,6 +90,57 @@ async def test_resource_scope_and_ttl(world: World) -> None:
     assert row.expires_at == now + timedelta(days=7)
 
 
+async def test_resource_credential_history_preserves_private_scope_and_revoking_actor(
+    world: World,
+) -> None:
+    from sqlalchemy import update
+
+    from models.auth import Context
+    from models.operation_history import OperationHistory
+    from services.operation_history import read_history
+
+    async with world.factory() as s:
+        await s.execute(
+            update(Context)
+            .where(Context.id == world.ctx["a1"])
+            .values(is_private=True, is_public=False, created_by=world.member)
+        )
+        manager = ObservationCredentialManager(s)
+        row, secret = await manager.create(
+            world.ws,
+            name="private credential label",
+            resource_pk=world.resource_pk["a1"],
+            ttl_days=7,
+            created_by=world.owner,
+        )
+        await s.commit()
+        await manager.revoke(row.public_id, world.ws, actor_user_id=world.member)
+        await s.commit()
+        events = (
+            await s.scalars(
+                select(OperationHistory)
+                .where(OperationHistory.target_id == row.public_id)
+                .order_by(OperationHistory.occurred_at)
+            )
+        ).all()
+        assert len(events) == 2
+        assert events[1].actor_user_id == world.member
+        assert events[1].subject_user_id == world.owner
+        assert all(event.context_private for event in events)
+        assert all(event.context_owner_id == world.member for event in events)
+        assert all(event.context_id == world.ctx["a1"] for event in events)
+        assert secret not in str([event.__dict__ for event in events])
+        assert "private credential label" not in str([event.__dict__ for event in events])
+        owner_view = await read_history(
+            s, workspace_id=world.ws, user_id=world.owner, limit=30, retention_days=90
+        )
+        assert owner_view["items"] == []
+        member_view = await read_history(
+            s, workspace_id=world.ws, user_id=world.member, limit=30, retention_days=90
+        )
+        assert len(member_view["items"]) == 2
+
+
 async def test_verify_accepts_a_live_credential(world: World) -> None:
     public_id, secret = await issue_credential(world, resource="a1")
     async with world.factory() as s:

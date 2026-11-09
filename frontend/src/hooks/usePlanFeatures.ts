@@ -76,6 +76,7 @@ export const PLAN_FEATURE_KEYS = [
   "secret_store",
   "content_chunks",
   "llm_selector",
+  "operation_history",
 ] as const satisfies readonly PlanFeature[];
 
 type AssertNever<T extends never> = T;

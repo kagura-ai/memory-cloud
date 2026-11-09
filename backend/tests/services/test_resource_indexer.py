@@ -138,6 +138,7 @@ class TestResourceIndexerNamedVectorUpsert:
         )
         assert KAGURA_MEMORIES_VECTOR_NAME in point.vector
         assert point.vector[KAGURA_MEMORIES_VECTOR_NAME] == [0.1] * 512
+        assert indexer._history_changes == {"memory.created": 1, "memory.deleted": 0}
 
     @pytest.mark.asyncio
     async def test_apply_upsert_existing_row_lookup_excludes_tombstones(self, indexer, mock_db):
@@ -765,6 +766,52 @@ class TestProcessIncrementalMemoriesPerDay:
         quota = AsyncMock(return_value=(allowed, None if allowed else "over quota"))
         routing = AsyncMock(return_value=("kagura_memories", MagicMock()))
         return quota, routing
+
+    @pytest.mark.asyncio
+    async def test_history_summary_excludes_a_failed_event_and_precedes_commit(self):
+        """SAVEPOINT failure must not inflate the batch's committed summary."""
+        from models.operation_history import OperationHistory
+
+        events = [_upsert("failed"), _upsert("created"), _upsert("created-again")]
+        for event_id, event in enumerate(events, start=1):
+            event.id = event_id
+            event.created_at = utcnow()
+        indexer = self._indexer(events)
+        indexer.db.add = MagicMock()
+        self.context.is_private = False
+        self.context.created_by = "connector-owner"
+
+        async def apply(event, *_args):
+            indexer._history_changes["memory.created"] += 1
+            if event.doc_id == "failed":
+                raise ValueError("failed event savepoint")
+
+        indexer._apply_upsert = AsyncMock(side_effect=apply)
+        committed = []
+
+        async def commit():
+            committed.extend(
+                c.args[0]
+                for c in indexer.db.add.call_args_list
+                if isinstance(c.args[0], OperationHistory)
+            )
+
+        indexer.db.commit = AsyncMock(side_effect=commit)
+        quota, routing = self._run(indexer, allowed=True)
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.check_memories_per_day = quota
+            metrics = await indexer.process_incremental("res_test", self.context.id)
+
+        assert metrics.batch_committed
+        assert metrics.errors == 1
+        (history,) = committed
+        assert (history.operation, history.count) == ("memory.created", 2)
+        assert history.context_id == self.context.id
+        assert history.surface == "system"
+        assert history.actor_user_id is None
 
     @pytest.mark.asyncio
     async def test_batch_charged_once_with_new_doc_count(self):

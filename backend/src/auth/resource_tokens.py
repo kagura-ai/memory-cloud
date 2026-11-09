@@ -15,6 +15,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, Select, and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.auth import Context
 from models.resource import Resource, ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk
 from utils.logger import get_logger
@@ -207,6 +208,7 @@ class ResourceTokenManager:
         description: str | None = None,
         quota_events_per_hour: int = 1000,
         created_by: str | None = None,
+        actor_user_id: str | None = None,
     ) -> tuple[str, ResourceToken]:
         """Create a new resource token.
 
@@ -253,6 +255,21 @@ class ResourceTokenManager:
 
         self.db.add(new_token)
         await self.db.flush()
+        from services.operation_history_writer import record_operation
+
+        history_workspace, history_context = await self._history_scope(
+            resource_pk, workspace_id, resource_id
+        )
+        record_operation(
+            self.db,
+            operation="credential.issued",
+            actor_user_id=actor_user_id,
+            workspace_id=history_workspace,
+            context=history_context,
+            target_id=new_token.public_id,
+            subject_user_id=created_by,
+            event_key=f"resource-token-created:{new_token.id}",
+        )
 
         logger.info(
             "resource_token_created",
@@ -328,7 +345,41 @@ class ResourceTokenManager:
 
         return token_record
 
-    async def revoke_token(self, token_id: int) -> None:
+    async def _history_scope(
+        self, resource_pk: UUID | None, workspace_id: UUID | None, resource_id: str
+    ) -> tuple[UUID | None, Context | None]:
+        """Use canonical resource ownership, never a token's drifted shadow.
+
+        Retained contexts participate too. If a reused resource slug has a
+        private boundary, prefer it rather than disclosing historical metadata.
+        """
+        if resource_pk is not None:
+            resource = await self.db.get(Resource, resource_pk)
+            if resource is None:
+                return None, None
+            workspace_id, resource_id = resource.workspace_id, resource.resource_id
+        if workspace_id is None:
+            return None, None
+        connector_context = (
+            select(WorkspaceConnector.context_id)
+            .where(
+                WorkspaceConnector.resource_pk == resource_pk,
+                WorkspaceConnector.workspace_id == workspace_id,
+            )
+            .scalar_subquery()
+        )
+        context = await self.db.scalar(
+            select(Context)
+            .where(
+                Context.workspace_id == workspace_id,
+                or_(Context.resource_id == resource_id, Context.id == connector_context),
+            )
+            .order_by(Context.is_private.desc(), Context.created_at.desc())
+            .limit(1)
+        )
+        return workspace_id, context
+
+    async def revoke_token(self, token_id: int, *, actor_user_id: str | None = None) -> None:
         """Revoke a resource token.
 
         Args:
@@ -342,6 +393,23 @@ class ResourceTokenManager:
         if not token:
             raise ValueError(f"Resource token {token_id} not found")
 
+        if not token.is_active:
+            return
+        from services.operation_history_writer import record_operation
+
+        history_workspace, history_context = await self._history_scope(
+            token.resource_pk, token.workspace_id, token.resource_id
+        )
+        record_operation(
+            self.db,
+            operation="credential.revoked",
+            actor_user_id=actor_user_id,
+            workspace_id=history_workspace,
+            context=history_context,
+            target_id=token.public_id,
+            subject_user_id=token.created_by,
+            event_key=f"resource-token-revoked:{token.id}",
+        )
         token.is_active = False
         await self.db.flush()
 
@@ -358,6 +426,7 @@ class ResourceTokenManager:
         resource_id: str,
         *,
         created_by: str | None = None,
+        actor_user_id: str | None = None,
     ) -> int:
         """Revoke the active tokens of one workspace's resource (#1877).
 
@@ -384,7 +453,7 @@ class ResourceTokenManager:
 
         tokens = list((await self.db.execute(query)).scalars().all())
         for token in tokens:
-            await self.revoke_token(token.id)
+            await self.revoke_token(token.id, actor_user_id=actor_user_id)
         return len(tokens)
 
     async def list_tokens(

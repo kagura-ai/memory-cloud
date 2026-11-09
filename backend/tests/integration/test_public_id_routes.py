@@ -461,7 +461,8 @@ async def test_resource_token_revoke_race_hides_integer_id(
     a = owners["a"]
     pk = a["token"].id
 
-    async def _vanished(self, token_id: int) -> None:
+    async def _vanished(self, token_id: int, *, actor_user_id: str | None = None) -> None:
+        assert actor_user_id == a["user_id"]
         raise ValueError(f"Resource token {token_id} not found")
 
     monkeypatch.setattr(ResourceTokenManager, "revoke_token", _vanished)

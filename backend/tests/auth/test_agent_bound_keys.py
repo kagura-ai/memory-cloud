@@ -29,6 +29,7 @@ AGENT_ID = uuid.uuid4()
 def _key_record(**overrides):
     defaults = {
         "id": 7,
+        "public_id": "akey_" + "a" * 22,
         "key_hash": "0" * 64,
         "key_prefix": "kagura_test_pref",
         "name": "agent-key",
@@ -109,6 +110,7 @@ class TestVerifyKeyKillSwitch:
         ):
             verified = await manager.verify_key("kagura_x")
         assert verified is not None
+        assert verified.public_id == key.public_id
         assert verified.agent_id == AGENT_ID
         assert verified.agent_enforcement_mode == "shadow"
         touch.assert_awaited_once_with(AGENT_ID)
@@ -122,6 +124,7 @@ class TestVerifyKeyKillSwitch:
         with _patch_hash(key):
             verified = await manager.verify_key("kagura_x")
         assert verified is not None
+        assert verified.public_id == key.public_id
         assert verified.agent_id is None
         assert verified.agent_enforcement_mode is None
         assert manager.db.execute.await_count == 1

@@ -219,6 +219,7 @@ function lookup(messages: Messages, key: string): unknown {
  * below fails until it is), so it is scanned too.
  */
 const USAGE_GUIDE_KEYS = [
+  "operationHistory.fields.usage_guide",
   "contexts.usageGuide",
   "contexts.usageGuidePlaceholder",
   "contexts.usageGuideForAI",

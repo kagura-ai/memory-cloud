@@ -278,6 +278,10 @@
             "default": 0,
             "type": "integer"
           },
+          "history_retention_days_bonus": {
+            "default": 0,
+            "type": "integer"
+          },
           "mcp_quota_bonus": {
             "default": 0,
             "type": "integer"
@@ -7406,6 +7410,63 @@
         ],
         "type": "object"
       },
+      "OperationHistoryItem": {
+        "properties": {
+          "actor_name": {},
+          "actor_user_id": {},
+          "agent_id": {},
+          "changed_fields": {},
+          "client_id": {},
+          "context_id": {},
+          "count": {},
+          "credential_id": {},
+          "id": {},
+          "occurred_at": {},
+          "operation": {},
+          "outcome": {},
+          "principal_kind": {},
+          "subject_user_id": {},
+          "surface": {},
+          "target_id": {},
+          "target_type": {}
+        },
+        "required": [
+          "actor_name",
+          "actor_user_id",
+          "agent_id",
+          "changed_fields",
+          "client_id",
+          "context_id",
+          "count",
+          "credential_id",
+          "id",
+          "occurred_at",
+          "operation",
+          "outcome",
+          "principal_kind",
+          "subject_user_id",
+          "surface",
+          "target_id",
+          "target_type"
+        ],
+        "type": "object"
+      },
+      "OperationHistoryPage": {
+        "properties": {
+          "items": {},
+          "next_cursor": {},
+          "retention_days": {},
+          "total": {},
+          "total_capped": {}
+        },
+        "required": [
+          "items",
+          "next_cursor",
+          "retention_days",
+          "total"
+        ],
+        "type": "object"
+      },
       "PaginatedResourceTokensResponse": {
         "properties": {
           "limit": {
@@ -7973,6 +8034,10 @@
           },
           "name": {
             "type": "string"
+          },
+          "operation_history": {
+            "default": false,
+            "type": "boolean"
           },
           "owned_workspaces": {
             "type": "integer"
@@ -8855,6 +8920,10 @@
       "QuotaBreakdown": {
         "properties": {
           "analysis_runs_per_day": {
+            "type": "integer"
+          },
+          "history_retention_days": {
+            "default": 0,
             "type": "integer"
           },
           "max_connectors": {
@@ -11599,6 +11668,18 @@
             "anyOf": [
               {
                 "maximum": 2000000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "addon_history_retention_days_bonus": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
                 "minimum": 0.0,
                 "type": "integer"
               },
@@ -31944,6 +32025,225 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OpenAIKeyStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "workspaces"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/operation-history": {
+      "get": {
+        "operationId": "get_operation_history_api_v1_workspaces__workspace_id__operation_history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 120,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "context_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "operation",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(memory|context|member|credential|integration|sleep)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "outcome",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(success|failure|denied)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationHistoryPage"
                 }
               }
             }

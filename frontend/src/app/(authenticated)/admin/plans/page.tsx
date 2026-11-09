@@ -994,7 +994,11 @@ export default function AdminPlansPage() {
                         ? t(
                             "addonDialog.featureWarning.connectorsFeatureMissing",
                           )
-                        : t("addonDialog.featureWarning.generic", { code })}
+                        : code === "operation_history_feature_missing"
+                          ? t(
+                              "addonDialog.featureWarning.operationHistoryFeatureMissing",
+                            )
+                          : t("addonDialog.featureWarning.generic", { code })}
                     </p>
                   ))}
                 </AlertDescription>

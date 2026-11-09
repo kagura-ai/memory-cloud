@@ -46,6 +46,8 @@ import {
   gateFromFacts,
   isBlocked,
   quotaGate,
+  requiredTierFor,
+  resolvedPlanLabel,
   type FeatureGate,
 } from "@/lib/gates/featureGates";
 import {
@@ -179,6 +181,13 @@ export default function WorkspaceMembersPage() {
   // #1645: the same shared matrix (module cache — no extra fetch), so a
   // refusal that names no tier gets the pre-check's tier and labels.
   const tiers = usePlanTierMatrix();
+  // #2739: the lowest served tier that includes operation history, as labelled here.
+  const historyTier = tiers
+    ? requiredTierFor(tiers, (tier) => tier.operation_history === true)
+    : null;
+  const historyPlanLabel = historyTier
+    ? resolvedPlanLabel(historyTier.name, tiers, undefined, locale)
+    : null;
 
   // #1643: may we point this member at /workspace/settings/plan at all? The
   // seat-limit copy stays either way; only the upgrade links are withheld.
@@ -1110,6 +1119,17 @@ export default function WorkspaceMembersPage() {
                     viewer={false}
                   />
                   <PermissionRow
+                    permission={
+                      historyPlanLabel
+                        ? t("permissionViewOperationHistory", { plan: historyPlanLabel })
+                        : t("permissionViewOperationHistoryPlain")
+                    }
+                    owner={true}
+                    admin={true}
+                    member={false}
+                    viewer={false}
+                  />
+                  <PermissionRow
                     permission={t("permissionManageContexts")}
                     owner={true}
                     admin={true}
@@ -1161,6 +1181,7 @@ export default function WorkspaceMembersPage() {
                 </tbody>
               </table>
             </div>
+            <p className="mt-3 text-sm text-muted-foreground">{t("operationHistoryPermissionNote")}</p>
           </div>
         )}
       </div>

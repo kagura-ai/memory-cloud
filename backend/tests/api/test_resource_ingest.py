@@ -85,19 +85,32 @@ class TestResourceTokenManager:
         # Issue #390 Phase 2: create_token now requires keyword-only
         # resource_pk + workspace_id so the before_insert event listener
         # invariant on ResourceToken passes.
+        resource_pk, workspace_id = uuid.uuid4(), uuid.uuid4()
+        mock_db.get.return_value = SimpleNamespace(
+            id=resource_pk, workspace_id=workspace_id, resource_id="ec_products"
+        )
+        mock_db.scalar = AsyncMock(return_value=None)
         token, token_obj = await manager.create_token(
             resource_id="ec_products",
-            resource_pk=uuid.uuid4(),
-            workspace_id=uuid.uuid4(),
+            resource_pk=resource_pk,
+            workspace_id=workspace_id,
             description="Test EC integration",
             quota_events_per_hour=500,
             created_by="admin_user",
+            actor_user_id="admin_user",
         )
 
         # Assert
         assert token.startswith("kagura_resource_")
         assert len(token) > 50  # Has random suffix
-        mock_db.add.assert_called_once()
+        from models.operation_history import OperationHistory
+
+        added = [call.args[0] for call in mock_db.add.call_args_list]
+        assert sum(isinstance(row, ResourceToken) for row in added) == 1
+        evidence = [row for row in added if isinstance(row, OperationHistory)]
+        assert len(evidence) == 1
+        assert evidence[0].actor_user_id == "admin_user"
+        assert evidence[0].workspace_id == workspace_id
         mock_db.flush.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -711,6 +724,7 @@ class TestConnectorOwnedIngest:
         workspace_id = uuid4()
         token = SimpleNamespace(
             id=1,
+            public_id="rtok_" + "a" * 22,
             resource_pk=uuid4(),
             workspace_id=workspace_id,
             quota_events_per_hour=1000,
@@ -843,6 +857,7 @@ class TestIngestSuspendedOnFree:
         workspace_id = uuid4()
         token = SimpleNamespace(
             id=1,
+            public_id="rtok_" + "a" * 22,
             resource_pk=uuid4(),
             workspace_id=workspace_id,
             quota_events_per_hour=1000,

@@ -245,7 +245,9 @@ async def revoke_observation_credential(
     Raises:
         404: No credential with this id in the current workspace.
     """
-    _, workspace_id = owner
-    if not await ObservationCredentialManager(db).revoke(credential_id, workspace_id):
+    user_id, workspace_id = owner
+    if not await ObservationCredentialManager(db).revoke(
+        credential_id, workspace_id, actor_user_id=user_id
+    ):
         raise NotFoundException("Observation credential")
     await db.commit()

@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import DBAPIError
 
+from models.resource import WorkspaceConnector
 from services.connector_provisioning import (
     ConnectorProvisioningService,
     validate_connector_idempotency_key,
@@ -263,7 +264,10 @@ class TestConnectorProvisioningService:
         assert result.plaintext_token == "kagura_resource_plain"
         assert result.token is token
         create_token.assert_awaited_once()
-        assert mock_db.add.call_args.args[0].resource_pk == resource_pk
+        assert any(
+            isinstance(call.args[0], WorkspaceConnector) and call.args[0].resource_pk == resource_pk
+            for call in mock_db.add.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_seat_lock_timeout_fails_closed_503(self, mock_db):
@@ -612,6 +616,7 @@ async def test_update_runtime_config_is_workspace_scoped_and_bumps_revision():
         id=connector_id,
         workspace_id=workspace_id,
         runtime_config={"vision_enabled": True},
+        context_id=None,
         config_version=7,
     )
     db = MagicMock()
@@ -658,6 +663,7 @@ async def test_update_runtime_config_null_clears_back_to_worker_defaults():
         id=connector_id,
         workspace_id=workspace_id,
         runtime_config={"vision_enabled": False},
+        context_id=None,
         config_version=3,
     )
     db = MagicMock()
@@ -717,6 +723,7 @@ async def test_update_runtime_config_survives_drifted_stored_document():
         id=uuid4(),
         workspace_id=uuid4(),
         runtime_config={"future_field": True, "buffer": {"max_len": 10**15}},
+        context_id=None,
         config_version=1,
     )
     db = MagicMock()
@@ -904,7 +911,15 @@ class _SettingsConn(SimpleNamespace):
     """Connector stub with a real-ish write-only llm_config setter (#1376)."""
 
     def set_llm_config(self, config):
+        self._llm_config = config
         self.llm_config_encrypted = "ENC:test" if config else None
+
+    def get_llm_config(self):
+        return getattr(
+            self,
+            "_llm_config",
+            {"provider": "stored", "model": "stored"} if self.llm_config_encrypted else None,
+        )
 
 
 def _settings_conn(**over):
@@ -1126,6 +1141,7 @@ async def test_update_settings_repoint_context_binds_and_bumps():
     db = MagicMock()
     # First execute: context validation SELECT (found). Second: connector lock.
     db.execute = AsyncMock(side_effect=[_result(one=new_ctx), _result(one=conn)])
+    db.scalar = AsyncMock(return_value=new_ctx)
     db.flush = AsyncMock()
 
     with patch("services.connector_provisioning.logger.info") as log_info:
@@ -1277,3 +1293,23 @@ async def test_provision_connector_rejects_unvendable_llm_config():
         )
 
     db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_context_creation_passes_actor_independently_of_owner():
+    workspace = SimpleNamespace(id=uuid4(), owner_user_id="workspace-owner")
+    created = SimpleNamespace(id=uuid4())
+    with patch(
+        "services.context_service.ContextService.create_context",
+        new_callable=AsyncMock,
+        return_value=created,
+    ) as create:
+        result = await ConnectorProvisioningService(MagicMock())._resolve_context(
+            workspace=workspace,
+            user_id="acting-admin",
+            context_id=None,
+            auto_create_context_name="chat",
+        )
+    assert result == created.id
+    assert create.await_args.kwargs["created_by"] == "workspace-owner"
+    assert create.await_args.kwargs["actor_user_id"] == "acting-admin"

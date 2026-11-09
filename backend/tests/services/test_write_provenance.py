@@ -125,7 +125,7 @@ def test_record_revision_stamps_the_row_and_the_memory():
         id=uuid.uuid4(), context_id=uuid.uuid4(), version=2, agent_id=None, session_id="old"
     )
     record_revision(db, memory, kind="updated", actor_user_id="u1", at=_AT, prior={"summary": "a"})
-    (row,) = [c.args[0] for c in db.add.call_args_list]
+    (row,) = [c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], MemoryRevision)]
     assert isinstance(row, MemoryRevision)
     assert (row.agent_id, row.session_id, row.actor_user_id) == (AGENT, "sess-1", "u1")
     assert (memory.agent_id, memory.session_id) == (AGENT, "sess-1")
@@ -144,7 +144,7 @@ def test_explicit_provenance_wins():
         at=_AT,
         provenance=WriteProvenance(None, "explicit"),
     )
-    (row,) = [c.args[0] for c in db.add.call_args_list]
+    (row,) = [c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], MemoryRevision)]
     assert (row.agent_id, row.session_id) == (None, "explicit")
     assert memory.session_id == "explicit" and memory.agent_id is None
 

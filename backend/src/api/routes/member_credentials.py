@@ -575,6 +575,28 @@ async def regenerate_api_key(
     # Rotation changes the secret, not the binding or its exact expiration.
     new_key.expires_at = old_key.expires_at
 
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation="credential.revoked",
+        actor_user_id=user["user_id"],
+        workspace_id=workspace_id,
+        subject_user_id=user_id,
+        target_id=old_key.public_id,
+        context_id=old_key.bound_context_id,
+        event_key=f"api-key:{old_key.public_id}:credential.revoked",
+    )
+    record_operation(
+        db,
+        operation="credential.issued",
+        actor_user_id=user["user_id"],
+        workspace_id=workspace_id,
+        subject_user_id=user_id,
+        target_id=new_key.public_id,
+        context_id=new_key.bound_context_id,
+        event_key=f"api-key:{new_key.public_id}:credential.issued",
+    )
     await db.commit()
     schedule_security_notification(
         background_tasks,
@@ -851,6 +873,19 @@ async def create_api_key(
                 )
             )
 
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            db,
+            operation="credential.issued",
+            actor_user_id=user["user_id"],
+            workspace_id=workspace_id,
+            subject_user_id=user_id,
+            target_id=new_key.public_id,
+            context_id=new_key.bound_context_id,
+            changed_fields=["credential"],
+            event_key=f"api-key:{new_key.public_id}:credential.issued",
+        )
         await db.commit()
         schedule_security_notification(
             background_tasks,
@@ -942,6 +977,19 @@ async def delete_api_key(
         raise HTTPException(status_code=404, detail="API key not found")
 
     await db.delete(api_key)
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation="credential.revoked",
+        actor_user_id=user["user_id"],
+        workspace_id=workspace_id,
+        subject_user_id=user_id,
+        target_id=api_key.public_id,
+        context_id=api_key.bound_context_id,
+        changed_fields=["credential"],
+        event_key=f"api-key:{api_key.public_id}:credential.revoked",
+    )
     await db.commit()
 
     logger.info("api_key_deleted", key_id=api_key.id, public_id=api_key.public_id, user_id=user_id)
@@ -1099,6 +1147,19 @@ async def delete_api_key_by_id(
         # so a key revoked inside its visibility window would otherwise retain a
         # Fernet-decryptable plaintext copy indefinitely (v0.42 max review).
         apply_zero_knowledge_hide(api_key)
+        from services.operation_history_writer import record_operation
+
+        record_operation(
+            db,
+            operation="credential.revoked",
+            actor_user_id=user["user_id"],
+            workspace_id=workspace_id,
+            subject_user_id=user_id,
+            target_id=api_key.public_id,
+            context_id=api_key.bound_context_id,
+            changed_fields=["credential"],
+            event_key=f"api-key:{api_key.public_id}:credential.revoked",
+        )
         await db.commit()
         logger.info(
             "member_api_key_revoked",
@@ -1129,6 +1190,19 @@ async def delete_api_key_by_id(
             )
         )
 
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation="credential.revoked",
+        actor_user_id=user["user_id"],
+        workspace_id=workspace_id,
+        subject_user_id=user_id,
+        target_id=api_key.public_id,
+        context_id=api_key.bound_context_id,
+        changed_fields=["credential"],
+        event_key=f"api-key:{api_key.public_id}:credential.revoked",
+    )
     await db.commit()
 
     logger.info(
@@ -1290,6 +1364,17 @@ async def regenerate_oauth_secret(
     oauth_app.visibility_expires_at = utcnow() + timedelta(minutes=10)  # 10 minutes
     oauth_app.plaintext_secret_encrypted = plaintext_secret_encrypted  # Migration 035
 
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation="credential.issued",
+        actor_user_id=user["user_id"],
+        workspace_id=workspace_id,
+        subject_user_id=user_id,
+        target_id=oauth_app.client_id,
+        changed_fields=["credential"],
+    )
     await db.commit()
     schedule_security_notification(
         background_tasks,
@@ -1370,6 +1455,17 @@ async def delete_oauth_app(
         raise HTTPException(status_code=404, detail="OAuth app not found")
 
     await db.delete(oauth_app)
+    from services.operation_history_writer import record_operation
+
+    record_operation(
+        db,
+        operation="credential.revoked",
+        actor_user_id=user["user_id"],
+        workspace_id=workspace_id,
+        subject_user_id=user_id,
+        target_id=oauth_app.client_id,
+        changed_fields=["credential"],
+    )
     await db.commit()
 
     logger.info("oauth_app_deleted", client_id=oauth_app.client_id, user_id=user_id)

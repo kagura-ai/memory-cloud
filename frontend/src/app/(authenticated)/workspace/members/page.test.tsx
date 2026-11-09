@@ -66,6 +66,7 @@ const ECHO_PARAMS = new Set([
   "plan.description",
   "quota.description",
   "quota.upsell",
+  "permissionViewOperationHistory",
 ]);
 const stableT = (k: string, params?: Record<string, unknown>) =>
   params && ECHO_PARAMS.has(k) ? `${k} ${JSON.stringify(params)}` : k;
@@ -166,6 +167,35 @@ afterEach(() => {
 });
 
 // ---------- Tests ------------------------------------------------------------
+
+describe("WorkspaceMembersPage operation history permission (#2739)", () => {
+  async function openPermissions() {
+    render(<WorkspaceMembersPage />);
+    fireEvent.click(await screen.findByText("rolePermissions"));
+  }
+
+  it("names the lowest served tier that includes operation history", async () => {
+    setupWithRole("owner");
+    vi.stubEnv("NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME", "Team");
+    mockTiers = OSS_TIERS.map((tier) => ({
+      ...tier,
+      operation_history: tier.name === "pro" || tier.name === "promax",
+    }));
+    await openPermissions();
+    expect(
+      screen.getByText('permissionViewOperationHistory {"plan":"Team"}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("permissionViewOperationHistoryPlain")).not.toBeInTheDocument();
+    vi.unstubAllEnvs();
+  });
+
+  it("drops the plan suffix while no served tier is known to include it", async () => {
+    setupWithRole("owner");
+    mockTiers = null;
+    await openPermissions();
+    expect(screen.getByText("permissionViewOperationHistoryPlain")).toBeInTheDocument();
+  });
+});
 
 describe("WorkspaceMembersPage redirect guard (#398)", () => {
   it.each(["member", "viewer"] as const)(

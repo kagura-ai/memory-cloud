@@ -350,7 +350,9 @@ class TestVerifyOauth2Token:
         db = AsyncMock()
         # #2129: the grant's default-context lookup finds no settings row.
         db.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
-        row = MagicMock(user_id="oauth-uid", scope="memory:read", resource="https://x/mcp")
+        row = MagicMock(
+            user_id="oauth-uid", scope="memory:read", resource="https://x/mcp", client_id="client-1"
+        )
         with (
             patch("db.base.get_db", new=_mock_get_db(db)),
             patch(
@@ -359,7 +361,7 @@ class TestVerifyOauth2Token:
             ),
         ):
             assert await _verify_oauth2_token("tok") == OAuthGrant(
-                "oauth-uid", "memory:read", "https://x/mcp"
+                "oauth-uid", "memory:read", "https://x/mcp", client_id="client-1"
             )
 
     async def test_invalid_token_returns_none(self):
