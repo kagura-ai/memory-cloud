@@ -1453,6 +1453,11 @@ async def test_a_second_erasure_reverts_only_its_own_keys(
                 None,
             ),
         ]
+        # #2389: version 3 lost keys to both erasures (S's location and t,
+        # B's a), each counted once
+        assert [
+            (await load_version(session, live, v)).partially_unavailable for v in (5, 4, 3, 2, 1)
+        ] == [(("details", 1),), (("details", 2),), (("details", 3),), (("details", 2),), ()]
         everything = [uuid.uuid4()]
         after = await _outside(session, everything)
         sync = AsyncMock()
