@@ -65,7 +65,8 @@ PRIOR_DETAILS_RESTORED_FROM_KEY = "details_restored_from"
 # keys the edit found absent. Read by a later erasure's replay, so the result
 # does not depend on which of two erasures runs first. Not a versioned field
 # and not an ``unavailable`` marker: ``prior_values`` and the marker readers
-# ignore it.
+# ignore it; ``reconstruct_version`` reads only how many there are (#2389,
+# ``HistoricalVersion.partially_unavailable``).
 #
 # Two spellings of a digest, here and as the keys of
 # ``PRIOR_DETAILS_RESTORED_FROM_KEY``: since #2389 every writer stores
@@ -360,6 +361,18 @@ def prior_scrubbed(prior: Mapping[str, Any] | None) -> tuple[str, ...]:
     return _marked(prior, PRIOR_SCRUBBED_KEY)
 
 
+def erased_details_key_count(prior: Mapping[str, Any] | None) -> int:
+    """How many top-level keys account erasure removed from ``prior.details``
+    (#2389): the distinct digests ``PRIOR_ERASED_DETAILS_KEYS_KEY`` lists, on
+    a prior that holds ``details``; 0 otherwise. Only the count: the digests
+    name no key."""
+    prior = prior or {}
+    listed = prior.get(PRIOR_ERASED_DETAILS_KEYS_KEY)
+    if "details" not in prior or not isinstance(listed, list):
+        return 0
+    return len({digest for digest in listed if isinstance(digest, str)})
+
+
 def changed_fields(prior: Mapping[str, Any] | None) -> list[str]:
     """The fields an ``updated`` event changed, in ``VERSIONED_FIELDS`` order
     (an erased value still names its field: the change happened)."""
@@ -398,12 +411,19 @@ class HistoricalVersion:
             removed from the log.
         at: When ``version`` was written (the ``updated`` event that made
             it); None for version 1 (the memory's ``created_at``).
+        partially_unavailable: ``(field, n)`` per field whose value at
+            ``version`` lacks ``n`` top-level keys account erasure removed
+            from the log (#2389, per key since #2275): the value shows the
+            other keys — ``{}`` when it took them all — and is not
+            ``unavailable``. The names are unknown (digests only). In
+            ``VERSIONED_FIELDS`` order; only ``details`` today.
     """
 
     version: int
     values: dict[str, Any]
     unavailable: tuple[str, ...]
     at: datetime | None
+    partially_unavailable: tuple[tuple[str, int], ...] = ()
 
 
 def reconstruct_version(
@@ -422,7 +442,11 @@ def reconstruct_version(
     the resource indexer, a connector re-index), made after ``target``. A
     value erasure removed makes its field unavailable until an older event
     names it again; a field erasure scrubbed on the live row is unavailable
-    below the event carrying the ``scrubbed`` marker.
+    below the event carrying the ``scrubbed`` marker. A ``details`` erasure
+    removed some keys from (``erased_details_keys``, #2275) is partially
+    unavailable (#2389) at every version below that event, until an older
+    event sets ``details`` again without such keys (complete) or the field
+    becomes unavailable (then it is that instead).
 
     Pure: ``updates`` is any iterable of rows with ``version``, ``kind``,
     ``prior`` and ``at``; rows of another kind, at or below ``target`` (bar
@@ -458,18 +482,24 @@ def reconstruct_version(
         raise UnknownVersionError(target, current_version)
     state = {f: copy.deepcopy(live.get(f)) for f in VERSIONED_FIELDS}
     unavailable: set[str] = set()
+    partial: dict[str, int] = {}
     for row in undo:
         for field in (*prior_scrubbed(row.prior), *prior_erased(row.prior)):
             state[field] = None
             unavailable.add(field)
+            partial.pop(field, None)
         for field, value in prior_values(row.prior).items():
             state[field] = copy.deepcopy(value)
             unavailable.discard(field)
+            partial.pop(field, None)
+        if lost := erased_details_key_count(row.prior):
+            partial["details"] = lost
     return HistoricalVersion(
         version=target,
         values=state,
         unavailable=tuple(f for f in VERSIONED_FIELDS if f in unavailable),
         at=made_target.at if made_target is not None else None,
+        partially_unavailable=tuple((f, partial[f]) for f in VERSIONED_FIELDS if f in partial),
     )
 
 

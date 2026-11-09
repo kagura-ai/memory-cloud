@@ -73,9 +73,10 @@ Rules, per memory (``replay``):
   key name): a later walk passes a stripped key like the erased member's
   value it was, and does not take it for a removal. A row written before
   #2389 holds the unsalted digest; the walk and the restore-map lookup
-  match a key by either spelling (``details_key_digests``). Readers of the version history ignore the list (a rebuilt
-  version shows the other members' keys, nothing unavailable). With it the
-  result does not depend on which of two erasures runs first.
+  match a key by either spelling (``details_key_digests``). A rebuilt
+  version shows the other members' keys, nothing unavailable, and reads
+  only how many keys the list names (``partially_unavailable``, #2389).
+  With it the result does not depend on which of two erasures runs first.
 
 A re-run over the result plans nothing: no state, and no live key, is
 attributed to the subject any more.

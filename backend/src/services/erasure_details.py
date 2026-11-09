@@ -1891,9 +1891,10 @@ async def strip_subject_details(
        by a session rollback). The rest of each dict stays — a rebuilt
        version shows the other members' keys — and the removed keys'
        digests join ``PRIOR_ERASED_DETAILS_KEYS_KEY`` (no key name; read
-       only by a later erasure's replay). One lock phase over all those
+       by a later erasure's replay, and counted by a version rebuild's
+       ``partially_unavailable``, #2389). One lock phase over all those
        rows, in id order, then one ``jsonb - text[]`` UPDATE per distinct
-       key set (``_strip_editor_keys``).
+       key set and memory (``_strip_editor_keys``).
     2. On memories the subject authored: ``prior.details`` is removed from
        every revision and replaced by ``{"erased": ["details"]}``
        (``PRIOR_ERASED_KEY``) so a rebuilt earlier version reports its

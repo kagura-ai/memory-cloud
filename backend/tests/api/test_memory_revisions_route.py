@@ -229,3 +229,42 @@ def test_revisions_a_historical_type_the_filter_denies_names_no_field() -> None:
     assert [r["version"] for r in filtered["revisions"]] == [3, 2, 1]
     for key in ("current_version", "has_more", "next_cursor"):
         assert filtered[key] == unfiltered[key]
+
+
+@pytest.mark.parametrize("partial", [{"details": 2}, None])
+def test_reference_names_a_partially_unavailable_field(partial: dict[str, int] | None) -> None:
+    """#2389: an earlier version whose details lost keys to account erasure
+    carries ``partially_unavailable_fields`` (field -> how many); null when
+    nothing was lost, as ``unavailable_fields``."""
+    from models.schemas import ReferenceResponse
+
+    memory_id = uuid4()
+    rebuilt = ReferenceResponse(
+        memory_id=memory_id,
+        summary="old",
+        context_summary=None,
+        content="body",
+        details={"a": 1},
+        type="note",
+        scope="working",
+        importance=0.5,
+        tags=[],
+        context=None,
+        created_at=datetime(2026, 10, 1),
+        updated_at=datetime(2026, 10, 2),
+        version=2,
+        historical=True,
+        current_version=3,
+        partially_unavailable_fields=partial,
+        client="api",
+    )
+    service = MagicMock(reference=AsyncMock(return_value=rebuilt))
+    with _client(service) as client:
+        response = client.post(
+            "/api/v1/memory/reference", json={"memory_id": str(memory_id), "version": 2}
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["partially_unavailable_fields"] == partial
+    assert body["unavailable_fields"] is None
+    assert body["details"] == {"a": 1}

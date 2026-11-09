@@ -2516,6 +2516,11 @@ async def handle_reference(
                 reference_data["current_version"] = result.current_version
                 if result.unavailable_fields:
                     reference_data["unavailable_fields"] = result.unavailable_fields
+                # #2389: keys account erasure removed, counted per field
+                if result.partially_unavailable_fields:
+                    reference_data["partially_unavailable_fields"] = (
+                        result.partially_unavailable_fields
+                    )
                 view = _ReferenceView(
                     view.fields - {"links"}, view.page_field, view.offset, view.max_chars
                 )

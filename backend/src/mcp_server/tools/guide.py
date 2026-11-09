@@ -576,7 +576,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "when N was written; scope, context and provenance are today's, and the links "
         "and supersede_candidate are left out (they describe the memory now). "
         "unavailable_fields lists fields whose old value account erasure removed (they "
-        "read null). version = current_version reads the memory as it is. A version "
+        "read null); partially_unavailable_fields maps a field to how many of its keys "
+        "account erasure removed (the rest show; {} when it removed all). "
+        "version = current_version reads the memory as it is. A version "
         "outside 1..current_version is validation_error with current_version. To see "
         "which versions exist and what each edit changed, call list_revisions — outside "
         'the core profile, describe_tools(["list_revisions"]) has its schema. To '

@@ -9374,6 +9374,7 @@
           "observed_at": {},
           "outgoing_has_more": {},
           "outgoing_links": {},
+          "partially_unavailable_fields": {},
           "scope": {},
           "source_type": {},
           "source_uri": {},

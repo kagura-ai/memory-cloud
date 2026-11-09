@@ -1356,6 +1356,11 @@ async def test_a_carried_key_is_reverted_and_stripped_per_key(
         assert (await load_version(session, live, 4)).values["details"] == live.details
         assert (await load_version(session, live, 3)).values["details"] == {"a": 2}
         assert (await load_version(session, live, 2)).values["details"] == {"a": 1}
+        # #2389: how many of each version's keys the erasure took (S's
+        # location, and t where B carried it); version 1 lost nothing
+        assert [
+            (await load_version(session, live, v)).partially_unavailable for v in (4, 3, 2, 1)
+        ] == [(("details", 1),), (("details", 2),), (("details", 2),), ()]
         # nothing outside the memory moved
         assert await _outside(session, [memory.id]) == before
     sync.assert_awaited_once()
