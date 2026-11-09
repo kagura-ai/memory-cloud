@@ -3,7 +3,7 @@
 import base64
 import binascii
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import String, and_, cast, exists, func, or_, select, tuple_
@@ -74,6 +74,7 @@ async def read_history(
     workspace_id: UUID,
     user_id: str,
     limit: int,
+    retention_days: int,
     query: str = "",
     context_id: UUID | None = None,
     actor: str | None = None,
@@ -85,8 +86,16 @@ async def read_history(
     until: datetime | None = None,
     cursor: str | None = None,
 ) -> dict:
+    """One page of authorized history inside the workspace's retention window.
+
+    ``retention_days`` is the workspace's effective retention
+    (``Workspace.effective_history_retention_days``). Older rows are excluded
+    from rows, the capped count, search and every cursor page, so an expired
+    row disappears at once, before the daily purge deletes it.
+    """
     owners = await linked_user_ids(db, user_id)
     conditions = visibility_conditions(workspace_id, owners)
+    conditions.append(Event.occurred_at >= datetime.now(UTC) - timedelta(days=retention_days))
     for column, value in (
         (Event.context_id, context_id),
         (Event.actor_user_id, actor.strip() or None if actor is not None else None),

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
 from config.plan_tiers import has_feature
+from config.retention import operation_history_retention_days
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Workspace
@@ -45,6 +46,8 @@ class OperationHistoryPage(TZAwareBaseModel):
     total: int
     total_capped: bool = False
     next_cursor: str | None
+    # Effective retention of this workspace: older events are not returned.
+    retention_days: int
 
 
 @router.get("/workspaces/{workspace_id}/operation-history", response_model=OperationHistoryPage)
@@ -70,18 +73,24 @@ async def get_operation_history(
     """Search safe identifiers/actor names/field names, never memory or credential contents.
 
     Authorization and the selected workspace's effective entitlement are checked
-    on every request, including pagination and requests after a downgrade.
+    on every request, including pagination and requests after a downgrade. Only
+    events inside the workspace's retention (90 days plus its add-on) are
+    returned; ``retention_days`` reports that window.
     """
     response.headers["Cache-Control"] = "no-store"
     await PermissionService(db).check_workspace_admin(user["user_id"], workspace_id)
-    plan = await db.scalar(
-        select(Workspace.plan_name).where(
-            Workspace.id == workspace_id,
-            Workspace.deleted_at.is_(None),
+    row = (
+        await db.execute(
+            select(Workspace.plan_name, Workspace.addon_history_retention_days_bonus).where(
+                Workspace.id == workspace_id,
+                Workspace.deleted_at.is_(None),
+            )
         )
-    )
-    if not plan or not has_feature(plan, "operation_history"):
+    ).one_or_none()
+    if row is None or not has_feature(row.plan_name, "operation_history"):
+        plan = row.plan_name if row is not None else None
         raise FeatureNotAvailableError.for_feature(plan or "free", "operation_history")
+    retention_days = operation_history_retention_days(row.addon_history_retention_days_bonus)
     if operation is not None and operation not in OPERATIONS:
         raise ValidationError("Invalid operation", field="operation")
     for field, value in (("since", since), ("until", until)):
@@ -90,11 +99,13 @@ async def get_operation_history(
     if since and until and since > until:
         raise ValidationError("Start must not be after end", field="since")
     return OperationHistoryPage(
+        retention_days=retention_days,
         **await read_history(
             db,
             workspace_id=workspace_id,
             user_id=user["user_id"],
             limit=limit,
+            retention_days=retention_days,
             query=query,
             cursor=cursor,
             context_id=context_id,
@@ -105,5 +116,5 @@ async def get_operation_history(
             outcome=outcome,
             since=since,
             until=until,
-        )
+        ),
     )

@@ -143,7 +143,9 @@ async def seed(db):
 
 
 async def page(db, s, **filters):
-    return await read_history(db, workspace_id=s.workspace, user_id=s.owner, limit=30, **filters)
+    return await read_history(
+        db, workspace_id=s.workspace, user_id=s.owner, limit=30, retention_days=90, **filters
+    )
 
 
 async def route(db, s):
@@ -190,7 +192,9 @@ async def test_private_and_cross_workspace_rows_counts_search_are_scoped(history
         assert (await page(db, s, query=query))["total"] == 0
     assert (await page(db, s, context_id=s.private))["items"] == []
     assert (await page(db, s, context_id=s.foreign))["items"] == []
-    own = await read_history(db, workspace_id=s.workspace, user_id=s.other, limit=30)
+    own = await read_history(
+        db, workspace_id=s.workspace, user_id=s.other, limit=30, retention_days=90
+    )
     assert own["total"] == 2
 
 
@@ -226,9 +230,11 @@ async def test_snapshot_and_current_privacy_both_apply_and_deleted_target_surviv
     await db.commit()
     # Purging never reopens a boundary that is no longer verifiable.
     assert (await page(db, s))["total"] == 0
-    assert (await read_history(db, workspace_id=s.workspace, user_id=s.other, limit=30))[
-        "total"
-    ] == 2
+    assert (
+        await read_history(
+            db, workspace_id=s.workspace, user_id=s.other, limit=30, retention_days=90
+        )
+    )["total"] == 2
 
 
 async def test_rollback_retry_and_changed_field_allowlist(history_db):
@@ -264,7 +270,7 @@ async def test_rollback_retry_and_changed_field_allowlist(history_db):
 async def test_combined_filters_stable_pagination_literal_search_and_actor_names(history_db):
     db = history_db
     s = await seed(db)
-    at = datetime(2026, 11, 9, tzinfo=UTC)
+    at = datetime.now(UTC).replace(microsecond=0) - timedelta(days=1)
     agent = uuid4()
     for index in range(5):
         record_operation(
@@ -300,6 +306,7 @@ async def test_combined_filters_stable_pagination_literal_search_and_actor_names
         "since": at - timedelta(seconds=1),
         "until": at + timedelta(seconds=1),
         "limit": 2,
+        "retention_days": 90,
     }
     ids = []
     cursor = None
@@ -476,9 +483,11 @@ async def test_resource_credentials_follow_canonical_workspace_and_private_bound
     assert {event.actor_user_id for event in events} == {s.other}
     assert {event.operation for event in events} == {"credential.issued", "credential.revoked"}
     assert (await page(db, s))["total"] == 0
-    assert (await read_history(db, workspace_id=s.workspace, user_id=s.other, limit=30))[
-        "total"
-    ] == 2
+    assert (
+        await read_history(
+            db, workspace_id=s.workspace, user_id=s.other, limit=30, retention_days=90
+        )
+    )["total"] == 2
     await manager.revoke_token(token.id, actor_user_id=s.other)
     await db.commit()
     assert len((await db.scalars(select(Event))).all()) == 2
@@ -607,15 +616,16 @@ async def test_timestamp_is_utc_under_non_utc_database_timezone(history_db):
     db = history_db
     s = await seed(db)
     await db.execute(text("SET TIME ZONE 'Asia/Tokyo'"))
+    naive_utc = datetime.now(UTC).replace(tzinfo=None, microsecond=0) - timedelta(hours=1)
     record_operation(
         db,
         operation="context.updated",
         actor_user_id=s.owner,
         workspace_id=s.workspace,
-        at=datetime(2026, 11, 9, 12),
+        at=naive_utc,
     )
     await db.commit()
-    assert (await page(db, s))["items"][0]["occurred_at"] == datetime(2026, 11, 9, 12, tzinfo=UTC)
+    assert (await page(db, s))["items"][0]["occurred_at"] == naive_utc.replace(tzinfo=UTC)
 
 
 async def test_linked_private_owner_reads_only_current_link_set(history_db):
@@ -643,7 +653,9 @@ async def test_count_cap_has_same_privacy_filters_and_keeps_pagination(history_d
             db, operation="memory.created", actor_user_id=s.other, context_id=s.private
         )
     await db.commit()
-    first = await read_history(db, workspace_id=s.workspace, user_id=s.owner, limit=2)
+    first = await read_history(
+        db, workspace_id=s.workspace, user_id=s.owner, limit=2, retention_days=90
+    )
     assert first["total"] == 2 and first["total_capped"] is True
     assert len(first["items"]) == 2 and first["next_cursor"]
     second = await read_history(
@@ -651,6 +663,7 @@ async def test_count_cap_has_same_privacy_filters_and_keeps_pagination(history_d
         workspace_id=s.workspace,
         user_id=s.owner,
         limit=2,
+        retention_days=90,
         cursor=first["next_cursor"],
     )
     assert len(second["items"]) == 2 and second["next_cursor"] is None
@@ -842,3 +855,127 @@ async def test_savepoint_rollback_discards_the_queued_event_and_a_retry_records(
     assert retried is not first
     await db.commit()
     assert len(await _stored(db, s.workspace)) == 1
+
+
+def _days_ago(days, minutes=0):
+    return datetime.now(UTC) - timedelta(days=days, minutes=minutes)
+
+
+async def test_reads_only_show_rows_inside_the_effective_retention(history_db):
+    db = history_db
+    s = await seed(db)
+    for days, target in ((89, "kept"), (91, "expired"), (200, "ancient")):
+        record_operation(
+            db,
+            operation="memory.updated",
+            actor_user_id=s.owner,
+            context_id=s.shared,
+            target_id=target,
+            at=_days_ago(days),
+        )
+    await db.commit()
+    result = await route(db, s)
+    assert result.retention_days == 90
+    assert [item.target_id for item in result.items] == ["kept"]
+    assert result.total == 1
+    # Search, filters and pagination share the window: expired rows are gone
+    # immediately, before the daily purge deletes them.
+    assert (await page(db, s, query="expired"))["total"] == 0
+    first = await read_history(
+        db, workspace_id=s.workspace, user_id=s.owner, limit=1, retention_days=90
+    )
+    assert first["next_cursor"] is None
+    # The add-on extends the window for this workspace only.
+    await db.execute(
+        update(Workspace)
+        .where(Workspace.id == s.workspace)
+        .values(addon_history_retention_days_bonus=110)
+    )
+    await db.commit()
+    result = await route(db, s)
+    assert result.retention_days == 200
+    assert [item.target_id for item in result.items] == ["kept", "expired"]
+
+
+async def test_purge_deletes_expired_rows_in_batches(history_db):
+    from tasks.operation_history_tasks import purge_operation_history
+
+    db = history_db
+    s = await seed(db)
+    now = datetime.now(UTC)
+    gone = uuid4()  # a workspace whose row no longer exists keeps the base
+    await db.execute(
+        update(Workspace)
+        .where(Workspace.id == s.elsewhere)
+        .values(addon_history_retention_days_bonus=30)
+    )
+    rows = [
+        (s.workspace, 91, "expired-1"),
+        (s.workspace, 95, "expired-2"),
+        (s.workspace, 120, "expired-3"),
+        (s.workspace, 89, "kept"),
+        (s.elsewhere, 100, "bonus-kept"),
+        (s.elsewhere, 121, "bonus-expired"),
+    ]
+    for workspace, days, target in rows:
+        record_operation(
+            db,
+            operation="member.added",
+            actor_user_id=s.owner,
+            workspace_id=workspace,
+            target_id=target,
+            at=now - timedelta(days=days),
+        )
+    await db.commit()
+    # Orphans were recorded while their workspace existed; insert them directly
+    # (the writer would refuse a workspace that does not exist).
+    from sqlalchemy import insert
+
+    await db.execute(
+        insert(Event.__table__),
+        [
+            {
+                "id": uuid4(),
+                "workspace_id": gone,
+                "context_private": False,
+                "occurred_at": now - timedelta(days=days),
+                "principal_kind": "system",
+                "surface": "system",
+                "operation": "member.added",
+                "target_type": "member",
+                "target_id": target,
+                "outcome": "success",
+                "count": 1,
+                "changed_fields": [],
+            }
+            for days, target in ((91, "orphan-expired"), (60, "orphan-kept"))
+        ],
+    )
+    await db.commit()
+    counts = await purge_operation_history(db, now=now, batch_size=2)
+    assert counts == {"deleted": 5, "batches": 3, "budget_exhausted": 0}
+    remaining = {e.target_id for e in (await db.scalars(select(Event))).all()}
+    assert remaining == {"kept", "bonus-kept", "orphan-kept"}
+    # A rerun finds nothing left to delete.
+    again = await purge_operation_history(db, now=now, batch_size=2)
+    assert again == {"deleted": 0, "batches": 0, "budget_exhausted": 0}
+
+
+async def test_purge_stops_at_its_time_budget(history_db):
+    from tasks.operation_history_tasks import purge_operation_history
+
+    db = history_db
+    s = await seed(db)
+    for index in range(3):
+        record_operation(
+            db,
+            operation="member.added",
+            actor_user_id=s.owner,
+            workspace_id=s.workspace,
+            target_id=f"old-{index}",
+            at=_days_ago(100 + index),
+        )
+    await db.commit()
+    counts = await purge_operation_history(db, batch_size=1, time_budget_seconds=0)
+    assert counts == {"deleted": 1, "batches": 1, "budget_exhausted": 1}
+    assert len(await _stored(db, s.workspace)) == 2

@@ -7455,12 +7455,14 @@
         "properties": {
           "items": {},
           "next_cursor": {},
+          "retention_days": {},
           "total": {},
           "total_capped": {}
         },
         "required": [
           "items",
           "next_cursor",
+          "retention_days",
           "total"
         ],
         "type": "object"
