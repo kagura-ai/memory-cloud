@@ -44,6 +44,7 @@ import { MemoryDetailDialog } from "@/components/memories/MemoryDetailDialog";
 import { DeleteMemoryDialog } from "@/components/memories/DeleteMemoryDialog";
 import { BulkDeleteMemoriesDialog } from "@/components/memories/BulkDeleteMemoriesDialog";
 import { Button } from "@/components/ui/button";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { requestCapacityRefresh } from "@/lib/capacityRefresh";
 import { EditMemoryDialog } from "@/components/memories/EditMemoryDialog";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
@@ -67,6 +68,7 @@ import type {
 
 interface MemoriesTabPanelProps {
   contextId: string;
+  recallOnly?: boolean;
 }
 
 const PAGE_SIZE = 50;
@@ -75,12 +77,13 @@ const SEARCH_PARAM = "q";
 // Supersedes #618's single `?tag=`.
 const TAGS_PARAM = "tags";
 const DEBOUNCE_MS = 300;
-// #2132: recall has no pagination; one page of the best matches.
+// The API returns top-k, not offset pages. Increasing k replaces the ranking.
 const RECALL_K = 20;
+const MAX_RECALL_K = 100;
 
 type SearchMode = "text" | "recall";
 
-export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
+export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabPanelProps) {
   const t = useTranslations("contextDetail.memoriesPanel");
   const tRecall = useTranslations("contextDetail.memoriesPanel.recall");
   const { toast } = useToast();
@@ -99,8 +102,8 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const [items, setItems] = useState<MemoryListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [settledListRequest, setSettledListRequest] = useState<object | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
 
   // Monotonic request id — guards against a slow earlier fetch resolving
   // after a faster later one and overwriting `items` with stale results.
@@ -113,9 +116,9 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // null until the first submit. The switch and the tag filter re-run the
   // submitted query through the effect below. `recallOutcome` records which
   // effective request its rows answer, so loading is derived, not stored.
-  const [searchMode, setSearchMode] = useState<SearchMode>("text");
+  const [searchMode, setSearchMode] = useState<SearchMode>(recallOnly ? "recall" : "text");
   const [includeSuperseded, setIncludeSuperseded] = useState(false);
-  const [recallRequest, setRecallRequest] = useState<{ query: string } | null>(
+  const [recallRequest, setRecallRequest] = useState<{ query: string; k: number; scopeKey: string } | null>(
     null,
   );
   const [recallOutcome, setRecallOutcome] = useState<{
@@ -261,37 +264,37 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedQuery]);
 
-  const fetchMemories = useCallback(async () => {
+  const listParams = useMemo(() => ({
+    enabled: searchMode === "text",
+    query: {
+      context_id: contextId,
+      limit: PAGE_SIZE,
+      offset: (page - 1) * PAGE_SIZE,
+      q: debouncedQuery.trim() || undefined,
+      tags: selectedTags.length ? selectedTags : undefined,
+      tagsMatch: selectedTags.length ? "all" as const : undefined,
+    },
+  }), [contextId, page, debouncedQuery, selectedTags, searchMode]);
+
+  const fetchMemories = useCallback(() => {
     // #2132: recall mode never renders the list; switching back to text
     // mode changes this callback's identity, so the effect below refetches.
-    if (searchMode !== "text") return;
+    if (!listParams.enabled) return;
     const requestId = ++requestIdRef.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const offset = (page - 1) * PAGE_SIZE;
-      // Trim before sending — whitespace-only is equivalent to no filter
-      // on the backend, but the client should not waste a request on it.
-      const trimmed = debouncedQuery.trim();
-      const response = await getMemories({
-        context_id: contextId,
-        limit: PAGE_SIZE,
-        offset,
-        q: trimmed || undefined,
-        // #830: ALL-match so the list mirrors the cloud's AND drill-down.
-        tags: selectedTags.length ? selectedTags : undefined,
-        tagsMatch: selectedTags.length ? "all" : undefined,
-      });
+    return getMemories(listParams.query).then((response) => {
       if (requestId !== requestIdRef.current) return;
       setItems(response.memories);
       setTotal(response.total);
-    } catch (err) {
+      setListError(null);
+      setSettledListRequest(listParams);
+    }, (err: unknown) => {
       if (requestId !== requestIdRef.current) return;
-      setError(err instanceof Error ? err.message : t("loadFailed"));
-    } finally {
-      if (requestId === requestIdRef.current) setLoading(false);
-    }
-  }, [contextId, page, debouncedQuery, selectedTags, t, searchMode]);
+      setListError(err instanceof Error ? err.message : t("loadFailed"));
+      setSettledListRequest(listParams);
+    });
+  }, [listParams, t]);
+  const loading = settledListRequest !== listParams;
+  const error = loading ? null : listError;
 
   useEffect(() => {
     fetchMemories();
@@ -301,12 +304,18 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // query is (re)submitted or refreshed, or the switch, context or tags
   // change — never on a mode switch, so flipping Text → Recall shows the
   // last rows without spending another recall.
+  const scopeKey = JSON.stringify([contextId, selectedTags, includeSuperseded]);
+  if (recallRequest && recallRequest.scopeKey !== scopeKey) {
+    // Reset when filters change, including when returning to an earlier filter set.
+    setRecallRequest({ ...recallRequest, k: RECALL_K, scopeKey });
+  }
+  const recallK = recallRequest?.scopeKey === scopeKey ? recallRequest.k : RECALL_K;
   const recallParams = useMemo(
     () =>
       recallRequest
         ? {
             query: recallRequest.query,
-            k: RECALL_K,
+            k: recallK,
             include_superseded: includeSuperseded,
             filters: {
               context_id: contextId,
@@ -317,7 +326,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
             },
           }
         : null,
-    [recallRequest, includeSuperseded, contextId, selectedTags],
+    [recallRequest, recallK, includeSuperseded, contextId, selectedTags],
   );
   const outcomeRequest = recallOutcome?.request;
 
@@ -391,8 +400,8 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   const submitRecall = useCallback(() => {
     const trimmed = searchInput.trim();
     if (!trimmed) return;
-    setRecallRequest({ query: trimmed });
-  }, [searchInput]);
+    setRecallRequest({ query: trimmed, k: RECALL_K, scopeKey });
+  }, [searchInput, scopeKey]);
 
   const handleView = useCallback(
     (memory: MemoryListItem) => dialog.openDetail(memory.id),
@@ -463,28 +472,25 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         {/* #2132: text match (list) vs recall (semantic). */}
-        <div
-          role="group"
+        {!recallOnly && <ToggleGroup
+          type="single"
+          value={searchMode}
+          onValueChange={(mode) => { if (mode === "text" || mode === "recall") setSearchMode(mode); }}
           aria-label={tRecall("modeLabel")}
-          className="inline-flex gap-1"
         >
           {(["text", "recall"] as const).map((mode) => (
-            <Button
+            <ToggleGroupItem
               key={mode}
-              type="button"
-              size="sm"
-              variant={searchMode === mode ? "default" : "outline"}
-              aria-pressed={searchMode === mode}
-              onClick={() => setSearchMode(mode)}
+              value={mode}
             >
               {mode === "text" ? tRecall("modeText") : tRecall("modeRecall")}
-            </Button>
+            </ToggleGroupItem>
           ))}
-        </div>
+        </ToggleGroup>}
         <ContextualHelp topic="search" />
-        <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}>
+        {!recallOnly && <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}>
           {tBulk("open")}
-        </Button>
+        </Button>}
       </div>
       <form
         role="search"
@@ -660,6 +666,18 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
               onOpen={dialog.openDetail}
             />
           ) : null}
+          {recallRequest && !recallLoading && !recallError && recallResults.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs text-muted-foreground">{tRecall("limitHint", { limit: recallK })}</p>
+              {recallK < MAX_RECALL_K && (
+                <Button type="button" variant="outline" onClick={() => {
+                  setRecallRequest({ ...recallRequest, k: Math.min(recallK + RECALL_K, MAX_RECALL_K), scopeKey });
+                }}>
+                  {tRecall("loadMore")}
+                </Button>
+              )}
+            </div>
+          )}
         </div>
         {dialogs}
       </>

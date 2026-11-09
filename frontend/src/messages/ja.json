@@ -1,4 +1,9 @@
 {
+  "pluginGuide": {
+    "label": "プラグインとスキルの導入手順",
+    "description": "任意：MCP接続後に、CodexやClaude Codeでセッション開始や記憶の保存に使うスキルを追加できます。",
+    "newTab": "（新しいタブで開く）"
+  },
   "passkeys": {
     "confirmGoogle": "Google で本人確認",
     "onlyKeyAddAnother": "このパスキーを削除するには、別のパスキーを追加し、そのパスキーで削除を確認してください。",
@@ -3849,6 +3854,13 @@
         "announceCleared": "すべてのタグフィルターを解除しました。"
       },
       "recall": {
+        "graphModeLabel": "グラフの表示モード",
+        "modeGraph": "グラフ",
+        "loadMore": "検索結果をさらに表示",
+        "limitHint": "最大{limit}件を表示しています。さらに表示すると上限を増やして再検索するため、結果の順序が変わる場合があります（最大100件）。",
+        "olderVersion": "過去のバージョン {number}",
+        "summariesFailed": "一部の要約を読み込めませんでした。過去のバージョンを開いて詳細を確認できます。",
+        "moreVersions": "過去のバージョンをさらに表示",
         "modeLabel": "検索モード",
         "modeText": "テキスト一致",
         "modeRecall": "リコール",
@@ -3864,7 +3876,6 @@
         "noResultsDesc": "「{query}」に該当するメモリは見つかりませんでした。",
         "score": "スコア {score}",
         "folded": "{count, plural, other {古いバージョン # 件を折りたたみ:}}",
-        "openFolded": "古いバージョン {id} を開く",
         "superseded": "置き換え済み",
         "openNewer": "新しいバージョンを開く",
         "view": "表示"

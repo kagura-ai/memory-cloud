@@ -124,7 +124,7 @@ afterEach(() => {
 async function enterRecallMode() {
   render(<MemoriesTabPanel contextId="ctx-1" />);
   await screen.findByText("Listed row");
-  fireEvent.click(screen.getByRole("button", { name: "modeRecall" }));
+  fireEvent.click(screen.getByRole("radio", { name: "modeRecall" }));
 }
 
 function submitQuery(text: string) {
@@ -138,14 +138,14 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
   it("keeps text match as the default and does not recall on mode switch", async () => {
     render(<MemoriesTabPanel contextId="ctx-1" />);
     await screen.findByText("Listed row");
-    expect(screen.getByRole("button", { name: "modeText" })).toHaveAttribute(
-      "aria-pressed",
+    expect(screen.getByRole("radio", { name: "modeText" })).toHaveAttribute(
+      "aria-checked",
       "true",
     );
     expect(screen.queryByRole("switch")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "modeRecall" }));
-    expect(screen.getByRole("button", { name: "modeRecall" })).toHaveAttribute(
-      "aria-pressed",
+    fireEvent.click(screen.getByRole("radio", { name: "modeRecall" }));
+    expect(screen.getByRole("radio", { name: "modeRecall" })).toHaveAttribute(
+      "aria-checked",
       "true",
     );
     expect(mockRecallMemories).not.toHaveBeenCalled();
@@ -203,12 +203,13 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
   it("opens a folded version in the detail dialog via ?memoryId=", async () => {
     await enterRecallMode();
     submitQuery("deploy");
-    const link = await screen.findByRole("button", {
-      name: `openFolded:${OLDER}`,
-    });
+    mockReferenceMemory.mockResolvedValueOnce({ summary: "Earlier deployment" });
+    fireEvent.click(await screen.findByRole("button", { name: "folded:1" }));
+    const link = await screen.findByRole("button", { name: "Earlier deployment" });
     fireEvent.click(link);
     await waitFor(() => expect(mockReferenceMemory).toHaveBeenCalled());
-    expect(mockReferenceMemory.mock.calls[0][0]).toBe(OLDER);
+    expect(mockReferenceMemory).toHaveBeenCalledWith(OLDER, expect.objectContaining({ recordAccess: false }));
+    expect(mockReferenceMemory).toHaveBeenCalledWith(OLDER);
     expect(mockReplace).toHaveBeenCalledWith(
       expect.stringContaining(`memoryId=${OLDER}`),
     );
@@ -218,7 +219,7 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     await enterRecallMode();
     submitQuery("deploy");
     await screen.findByText("Deploy target is region B");
-    fireEvent.click(screen.getByRole("button", { name: "modeText" }));
+    fireEvent.click(screen.getByRole("radio", { name: "modeText" }));
     expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.queryByRole("button", { name: "submit" })).toBeNull();
     expect(await screen.findByText("Listed row")).toBeInTheDocument();
@@ -229,9 +230,9 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     await enterRecallMode();
     submitQuery("deploy");
     await screen.findByText("Deploy target is region B");
-    fireEvent.click(screen.getByRole("button", { name: "modeText" }));
+    fireEvent.click(screen.getByRole("radio", { name: "modeText" }));
     await screen.findByText("Listed row");
-    fireEvent.click(screen.getByRole("button", { name: "modeRecall" }));
+    fireEvent.click(screen.getByRole("radio", { name: "modeRecall" }));
     expect(screen.getByText("Deploy target is region B")).toBeInTheDocument();
     expect(mockRecallMemories).toHaveBeenCalledTimes(1);
   });
@@ -246,9 +247,9 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     await enterRecallMode();
     submitQuery("deploy");
     await waitFor(() => expect(mockRecallMemories).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("button", { name: "modeText" }));
+    fireEvent.click(screen.getByRole("radio", { name: "modeText" }));
     await screen.findByText("Listed row");
-    fireEvent.click(screen.getByRole("button", { name: "modeRecall" }));
+    fireEvent.click(screen.getByRole("radio", { name: "modeRecall" }));
     expect(mockRecallMemories).toHaveBeenCalledTimes(1);
     await act(async () => {
       resolve({ results: [recallRow()] });
@@ -357,6 +358,36 @@ describe("MemoriesTabPanel — recall mode (#2132)", () => {
     });
     // List mode stays as it was: the accept adds no list fetch.
     expect(mockGetMemories.mock.calls.length).toBe(listCalls);
+  });
+
+  it("grows top-k to 100, replaces rankings, and resets for a new query", async () => {
+    await enterRecallMode();
+    submitQuery("deploy");
+    await screen.findByText("Deploy target is region B");
+    for (const k of [40, 60, 80, 100]) {
+      mockRecallMemories.mockResolvedValueOnce({ results: [recallRow({ summary: `Ranking ${k}` })], total: 1 });
+      fireEvent.click(screen.getByRole("button", { name: "loadMore" }));
+      await screen.findByText(`Ranking ${k}`);
+      expect(mockRecallMemories).toHaveBeenLastCalledWith(expect.objectContaining({ query: "deploy", k }));
+      expect(screen.queryByText("Deploy target is region B")).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole("button", { name: "loadMore" })).not.toBeInTheDocument();
+    submitQuery("other query");
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenLastCalledWith(expect.objectContaining({ query: "other query", k: 20 })));
+  });
+
+  it("resets the limit when filters change and drops a stale load-more response", async () => {
+    await enterRecallMode();
+    submitQuery("deploy");
+    await screen.findByText("Deploy target is region B");
+    let resolve!: (value: unknown) => void;
+    mockRecallMemories.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    fireEvent.click(screen.getByRole("button", { name: "loadMore" }));
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenLastCalledWith(expect.objectContaining({ k: 40 })));
+    fireEvent.click(screen.getByRole("switch", { name: "includeSuperseded" }));
+    await waitFor(() => expect(mockRecallMemories).toHaveBeenLastCalledWith(expect.objectContaining({ k: 20, include_superseded: true })));
+    await act(async () => resolve({ results: [recallRow({ summary: "Obsolete larger ranking" })], total: 1 }));
+    expect(screen.queryByText("Obsolete larger ranking")).not.toBeInTheDocument();
   });
 
   it("shows an error banner when recall fails", async () => {
