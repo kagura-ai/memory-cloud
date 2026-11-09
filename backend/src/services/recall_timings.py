@@ -23,6 +23,7 @@ STAGES: tuple[str, ...] = (
     "fulltext",
     "rerank",
     "hydrate",
+    "related_index",
     "select",
     "finalize",
     "commit",

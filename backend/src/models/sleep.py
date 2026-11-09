@@ -236,6 +236,41 @@ class SleepReport(Base):
         )
 
 
+class SleepRelatedIndex(Base):
+    """Disposable source references prepared by Sleep; no copied source text."""
+
+    __tablename__ = "sleep_related_indexes"
+
+    edge_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("neural_memory_edges.id", ondelete="CASCADE"), primary_key=True
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memories.id", ondelete="CASCADE"), nullable=False
+    )
+    target_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memories.id", ondelete="CASCADE"), nullable=False
+    )
+    context_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("contexts.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    report_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sleep_reports.id", ondelete="SET NULL"), nullable=True
+    )
+    evidence: Mapped[dict[str, Any]] = mapped_column(NullableJSON, nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=func.now())
+
+    __table_args__ = (
+        Index("ix_sleep_related_source", "source_id", "context_id"),
+        Index("ix_sleep_related_target", "target_id", "context_id"),
+        Index("ix_sleep_related_context", "context_id"),
+        Index("ix_sleep_related_workspace", "workspace_id"),
+        Index("ix_sleep_related_report", "report_id"),
+    )
+
+
 class SleepAction(Base):
     """Sleep Maintenance audit log entry.
 

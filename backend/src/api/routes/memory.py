@@ -329,6 +329,7 @@ async def recall(
             current_context_id=context_uuid,
             current_workspace_id=current_workspace_id,  # Issue #146
             context_workspace_id=context_workspace_id,
+            related_index=True,  # #2728: opt-in Sleep related index
         )
     except ValueError as e:
         # Mirror /remember: MemoryService.recall raises ValueError for bad

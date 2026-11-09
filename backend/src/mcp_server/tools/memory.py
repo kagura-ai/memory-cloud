@@ -1481,6 +1481,9 @@ async def handle_recall(
                     # LLM selector; it runs where the context's flag is
                     # effective.
                     llm_selector=True,
+                    # #2728: may add Sleep-indexed one-hop candidates when
+                    # RECALL_RELATED_INDEX_ENABLED is set.
+                    related_index=True,
                 ),
                 operation_name="recall",
             )

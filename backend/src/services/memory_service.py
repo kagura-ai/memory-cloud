@@ -6571,6 +6571,7 @@ class MemoryService:
         timings: RecallTimings | None = None,
         context_count: int = 1,
         selector: SelectorReport | None = None,
+        baseline_pool: list[dict] | None = None,
     ) -> RecallResponse:
         """Assemble the final response: hints, tags, confidence, audit row.
 
@@ -6617,6 +6618,7 @@ class MemoryService:
                 cross_context=cross_context,
                 degradation=degradation,
                 selector=selector,
+                baseline_pool=baseline_pool,
             )
         # #1989: one line per recall, after everything the caller waits for.
         if timings is not None:
@@ -6647,6 +6649,7 @@ class MemoryService:
         cross_context: bool,
         degradation: dict[str, Any] | None,
         selector: SelectorReport | None = None,
+        baseline_pool: list[dict] | None = None,
     ) -> RecallResponse:
         """The body of :meth:`_recall_finalize`, timed as one stage there.
 
@@ -6690,7 +6693,11 @@ class MemoryService:
         # folded rows have left the pool, so they do not count either; with
         # include_superseded=True nothing folds and shadowed rows stay in the
         # pool, annotated, so there they count.
-        confidence_pool = [r for r in search_results if r["id"] in memories]
+        confidence_pool = [
+            r
+            for r in (baseline_pool if baseline_pool is not None else search_results)
+            if r["id"] in memories
+        ]
         if dropped := len(search_results) - len(confidence_pool):
             logger.debug(
                 "recall_confidence_hits_dropped",
@@ -6869,6 +6876,7 @@ class MemoryService:
         content_trusted_only: bool = False,
         llm_selector: bool = False,
         supersede_acceptance: bool = True,
+        related_index: bool = False,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -6915,6 +6923,11 @@ class MemoryService:
                 act on it: a share-key read (the principal is the key's
                 creator, not the reader, and the key never writes), and
                 callers that drop the suggestion (bootstrap, forget(query=)).
+            related_index: #2728 the caller lets the opt-in Sleep related
+                index add one-hop candidates (still gated by
+                RECALL_RELATED_INDEX_ENABLED). Only the MCP and REST recall
+                handlers pass True: forget(query=) deletes what recall
+                returns, so it must never widen.
 
         Returns:
             RecallResponse with search results
@@ -7173,6 +7186,59 @@ class MemoryService:
             filters=effective_filters,
         )
 
+        baseline_pool: list[dict] | None = None
+        # #2728: offline evidence candidates share the existing response budget.
+        # Opt-in per caller: only the MCP and REST recall handlers widen a
+        # page. forget(query=...) deletes what recall returns, and bootstrap
+        # and share-key reads keep their exact candidate sets.
+        if related_index and current_context_id and not context_ids and not degradation:
+            from services.recall_related_index import expand_recall
+            from services.sleep.related_index import index_enabled
+
+            if index_enabled(reading=True):
+                with timings.stage("related_index"):
+                    extra_hits, extra_memories = await expand_recall(
+                        self,
+                        request=request,
+                        hits=search_results,
+                        memories=memories,
+                        user_id=user_id,
+                        context_id=current_context_id,
+                        workspace_id=effective_workspace_id,
+                        filters=effective_filters,
+                        cluster_memory_ids=cluster_memory_ids,
+                    )
+                if extra_hits:
+                    baseline_pool = [dict(hit) for hit in search_results]
+                    search_results.extend(extra_hits)
+                    memories.update(extra_memories)
+                    search_results.sort(
+                        key=lambda hit: hit.get("hybrid_score", hit["score"]), reverse=True
+                    )
+
+        if baseline_pool is not None:
+            # Preserve the ordinary pool for confidence and learning. Folding
+            # can move a derived score onto a different head in either direction.
+            combined_shadow, combined_contradictions = await self._apply_supersede_shadowing(
+                search_results, memories, include_superseded=request.include_superseded
+            )
+            shadow_map.update(combined_shadow)
+            contradiction_map.update(combined_contradictions)
+            combined_fold = await self._apply_supersede_fold(
+                search_results,
+                memories,
+                include_superseded=request.include_superseded,
+                user_id=user_id,
+                shadow_map=shadow_map,
+                resolved=resolved_candidates,
+                filters=effective_filters,
+            )
+            for head, members in combined_fold.items():
+                inherited = [child for member in members for child in fold_map.get(member, [])]
+                fold_map[head] = list(
+                    dict.fromkeys([*fold_map.get(head, []), *members, *inherited])
+                )
+
         # Issue #1048: bounded reinforce re-rank (adoption + retrieval feedback),
         # config-gated per-context (default ON since #1207), single-context only. Reorders the
         # candidate pool BEFORE the top-k slice below; uses only reference_count +
@@ -7250,7 +7316,7 @@ class MemoryService:
         # and selector.dropped reports what the model removed.
         hebbian_pool = search_results
         if selector_report is not None and selector_report.applied and selector_report.dropped:
-            hebbian_pool = _without_dropped_rows(search_results, memories, built_page, responses)
+            hebbian_pool = _without_dropped_rows(hebbian_pool, memories, built_page, responses)
 
         # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
         # #1515: the `!= "keyword"` clause already says keyword-only results must
@@ -7274,7 +7340,15 @@ class MemoryService:
         with timings.stage("post_commit"):
             await self._recall_record_access(responses, memories, client=client)
 
-        if neural_enabled and request.search_mode != "keyword" and not degradation.get("degraded"):
+        # Related candidates can transfer scores and ordering through folding.
+        # Do not train the graph on its own derived evidence. Empty/failed
+        # expansion keeps the ordinary learning path exactly as before.
+        if (
+            neural_enabled
+            and request.search_mode != "keyword"
+            and not degradation.get("degraded")
+            and baseline_pool is None
+        ):
             with timings.stage("post_commit"):
                 await self._recall_run_hebbian_learning(
                     request,
@@ -7301,6 +7375,7 @@ class MemoryService:
             timings=timings,
             context_count=context_count,
             selector=selector_report,
+            baseline_pool=baseline_pool,
         )
 
     async def load_pinned(

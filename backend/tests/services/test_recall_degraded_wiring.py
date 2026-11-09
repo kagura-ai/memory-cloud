@@ -152,7 +152,9 @@ class TestDegradedRecallDoesNotWriteToTheGraph:
 
         from services.memory_service import MemoryService
 
-        src = inspect.getsource(MemoryService.recall)
+        # Whitespace-normalised: the formatter splits the guard over lines
+        # once it gains a clause (#2728 added ``baseline_pool is None``).
+        src = " ".join(inspect.getsource(MemoryService.recall).split())
         assert 'request.search_mode != "keyword" and not degradation.get("degraded")' in src, (
             "Hebbian learning must be skipped for a degraded recall — otherwise "
             "ungated, full-strength edges are written into the persistent graph "

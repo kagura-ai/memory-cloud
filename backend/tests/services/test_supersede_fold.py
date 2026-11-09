@@ -525,7 +525,9 @@ class TestResolveOnce:
         assert captured["fold"] == {v3.id: candidates[v3.id]}
 
 
-async def _run_recall(service, search_results, memories, candidates):
+async def _run_recall(
+    service, search_results, memories, candidates, *, neural_enabled=False, **recall_kwargs
+):
     """Drive recall() with every lane but the fold stubbed; returns the
     page-builder mock."""
     ctx, ws = uuid4(), uuid4()
@@ -534,7 +536,7 @@ async def _run_recall(service, search_results, memories, candidates):
         request=request,
         effective_workspace_id=ws,
         is_shared_context_read=False,
-        neural_enabled=False,
+        neural_enabled=neural_enabled,
         search_config=None,
         search_context_id=str(ctx),
     )
@@ -552,6 +554,7 @@ async def _run_recall(service, search_results, memories, candidates):
     build = AsyncMock(return_value=[])
     service._recall_build_responses = build
     service._recall_record_access = AsyncMock()
+    service._recall_run_hebbian_learning = AsyncMock()
     service._recall_finalize = AsyncMock(return_value="response")
     await service.recall(
         request,
@@ -559,6 +562,7 @@ async def _run_recall(service, search_results, memories, candidates):
         current_context_id=ctx,
         current_workspace_id=ws,
         capacity_gate=False,
+        **recall_kwargs,
     )
     return build
 

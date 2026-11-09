@@ -34,6 +34,7 @@ from services.sleep.importance_reeval import ImportanceReevalPhase
 from services.sleep.measurement_retention import MeasurementRetentionPhase
 from services.sleep.merge_retention import MergeRetentionPhase
 from services.sleep.reindex import ReindexPhase
+from services.sleep.related_index import RelatedIndexPhase, index_enabled
 from services.sleep.reporter import LLMSpendTracker, PhaseResult, SleepBudget, SleepReporter
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -51,6 +52,7 @@ FULL_PHASES = {
     "measurement_retention",
     "importance_reeval",
     "consolidation",
+    "related_index",
 }
 EDGES_ONLY_PHASES = {"edge_discovery"}
 # #1939: the non-LLM housekeeping (retention / privacy purges) of full mode.
@@ -157,6 +159,10 @@ class SleepOrchestrator:
             ("importance_reeval", lambda: ImportanceReevalPhase(self.db, self.llm_service, cn)),
             ("consolidation", lambda: ConsolidationPhase(self.db, self.llm_service, cn)),
         ]
+        if index_enabled():
+            # Capture discovery's evidence before metadata-only maintenance
+            # updates updated_at. Later source edits still fail the fingerprint.
+            phases.insert(1, ("related_index", lambda: RelatedIndexPhase(self.db)))
 
         try:
             # Run phases 1-4 based on sleep_mode
