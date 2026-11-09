@@ -19,15 +19,16 @@ a cursor ``<ISO-8601>,<memory id>`` (the ``resume`` line of a run, in the
 rows' order); a bare instant includes rows created at that instant.
 
 Judge spend: with ``SUPERSEDE_VERIFY_MODE=llm`` each row may cost one judge
-call, counted on the same per-workspace daily cap as live ingest
-(``SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY``). The run stops once that counter
-advanced by ``--max-judge-calls`` (50); run it early in the UTC day. Past the
-daily cap a pair at 0.85 or above is stored unverified and a pair below is
-skipped, as on ingest. ``judge_calls`` in the report is how far the counter
-advanced during the run (live ingest in the same workspace included), or
-``unknown`` when Redis could not be read. With the judge on, a run that cannot
-read the counter stops (``stopped counter_unreadable``); with the judge off it
-goes on.
+call, counted on the workspace's bulk-lane daily cap
+(``SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY``, default 500), a counter apart
+from live ingest's ``SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY`` (#2510). The run
+stops once that counter advanced by ``--max-judge-calls`` (50); run it early
+in the UTC day. Past the bulk cap a pair at 0.85 or above is stored unverified
+and a pair below is skipped, as on ingest. ``judge_calls`` in the report is
+how far the bulk counter advanced during the run (another catch-up run in the
+same workspace included, live ingest not), or ``unknown`` when Redis could
+not be read. With the judge on, a run that cannot read the counter stops
+(``stopped counter_unreadable``); with the judge off it goes on.
 
 A row whose nearest neighbour is not near enough stays without a candidate
 and is planned again by a run over the same range: the report ends with a
@@ -171,7 +172,7 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-judge-calls",
         type=_positive,
         default=50,
-        help="stop once the workspace's judge counter advanced this much (default 50)",
+        help="stop once the workspace's bulk judge counter advanced this much (default 50)",
     )
     add_log_level_argument(parser)
     return parser.parse_args(argv)

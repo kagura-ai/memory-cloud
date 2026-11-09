@@ -674,15 +674,43 @@ class TestSupersedeVerifyConfig:
         assert config.supersede_verify_mode == "off"
         assert config.supersede_verify_min_confidence == 0.7
         assert config.supersede_verify_max_calls_per_day == 200
+        # #2510: bulk work (the catch-up pass) has its own daily cap.
+        assert config.supersede_verify_max_bulk_calls_per_day == 500
+
+    def test_env_defaults(self, monkeypatch):
+        monkeypatch.delenv("SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY", raising=False)
+        monkeypatch.delenv("SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY", raising=False)
+        config = NeuralMemoryConfig.from_env()
+        assert config.supersede_verify_max_calls_per_day == 200
+        assert config.supersede_verify_max_bulk_calls_per_day == 500
 
     def test_env(self, monkeypatch):
         monkeypatch.setenv("SUPERSEDE_VERIFY_MODE", "LLM")
         monkeypatch.setenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE", "0.85")
         monkeypatch.setenv("SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY", "50")
+        monkeypatch.setenv("SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY", "900")
         config = NeuralMemoryConfig.from_env()
         assert config.supersede_verify_mode == "llm"
         assert config.supersede_verify_min_confidence == 0.85
         assert config.supersede_verify_max_calls_per_day == 50
+        assert config.supersede_verify_max_bulk_calls_per_day == 900
+
+    @pytest.mark.asyncio
+    async def test_from_db_keeps_the_env_caps(self, monkeypatch):
+        """Both caps are env-only: the per-workspace config carries them."""
+        monkeypatch.setenv("SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY", "50")
+        monkeypatch.setenv("SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY", "900")
+        NeuralMemoryConfig.invalidate_cache()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+        try:
+            config = await NeuralMemoryConfig.from_db(db)
+        finally:
+            NeuralMemoryConfig.invalidate_cache()
+        assert config.supersede_verify_max_calls_per_day == 50
+        assert config.supersede_verify_max_bulk_calls_per_day == 900
 
     @pytest.mark.parametrize(
         "field, value, match",
@@ -690,6 +718,16 @@ class TestSupersedeVerifyConfig:
             ("supersede_verify_mode", "auto", "supersede_verify_mode"),
             ("supersede_verify_min_confidence", 1.5, "supersede_verify_min_confidence"),
             ("supersede_verify_max_calls_per_day", 0, "supersede_verify_max_calls_per_day"),
+            (
+                "supersede_verify_max_bulk_calls_per_day",
+                0,
+                "supersede_verify_max_bulk_calls_per_day",
+            ),
+            (
+                "supersede_verify_max_bulk_calls_per_day",
+                -1,
+                "supersede_verify_max_bulk_calls_per_day",
+            ),
             ("supersede_suggest_threshold_llm", 0.9, "supersede_suggest_threshold_llm"),
             ("supersede_suggest_threshold_llm", 0.4, "supersede_suggest_threshold_llm"),
         ],

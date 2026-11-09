@@ -1455,11 +1455,42 @@ class TestSupersedeVerification:
         judge.assert_awaited_once()
         assert judge.await_args.kwargs["new"] is memory
         assert str(judge.await_args.kwargs["old"].id) == dup_id
+        # #2510: ingest judges on the live lane.
+        assert judge.await_args.kwargs["lane"] == "live"
         stored = memory.supersede_candidate
         assert stored["memory_id"] == dup_id
         assert stored["verification"] == verdict
         events = {c.args[0]: c.kwargs for c in mock_logger.info.call_args_list if c.args}
         assert events["supersede_candidate_detected"]["verdict"] == "supersedes"
+
+    @pytest.mark.asyncio
+    async def test_bulk_lane_reaches_the_judge(self):
+        """#2510: the catch-up pass passes ``lane="bulk"``; the judge call
+        counts on the bulk cap."""
+        memory = _make_memory()
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode="llm")
+        judge = AsyncMock(return_value={"verdict": "parallel", "confidence": 0.8})
+        _dup_id, candidates, _ = self._run(memory, db, config, judge)
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+            patch("services.supersede_verify.judge_pair", new=judge),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+                seed=False,
+                lane="bulk",
+            )
+
+        judge.assert_awaited_once()
+        assert judge.await_args.kwargs["lane"] == "bulk"
 
     @pytest.mark.asyncio
     async def test_parallel_verdict_is_stored_too(self):

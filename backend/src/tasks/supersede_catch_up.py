@@ -13,11 +13,14 @@ no seed edge, no point write.
 Bounded by ``limit`` rows and by ``max_judge_calls``: the workspace's judge
 counter (the Redis key the daily cap counts on) is read before each row and
 the run stops once it has advanced that much — or, with the judge on, as
-soon as the counter cannot be read. The pass shares the daily cap
-with live ingest; past the cap a pair at 0.85 or above is stored unverified
-and a pair below is skipped, as on ingest. A row whose nearest neighbour is
-not near enough stays without a candidate and is planned again by a run over
-the same range (nothing records "checked"); a run reports the
+soon as the counter cannot be read. The pass judges on the bulk lane
+(#2510): a daily cap and counter of its own
+(``supersede_verify_max_bulk_calls_per_day``), apart from the cap live ingest
+counts on, so a run cannot spend the budget ingest needs. Past the bulk cap a
+pair at 0.85 or above is stored unverified and a pair below is skipped, as on
+ingest. A row whose nearest neighbour is not near enough stays without a
+candidate and is planned again by a run over the same range (nothing records
+"checked"); a run reports the
 ``(created_at, id)`` of the last row it reached, and ``after`` / ``after_id``
 resume past it.
 
@@ -53,10 +56,11 @@ STOPPED_COUNTER_UNREADABLE = "counter_unreadable"
 class SupersedeCatchUp:
     """What a run would check (plan) or did (apply).
 
-    ``judge_calls`` is how far the workspace's judge counter advanced during
-    the run (``None`` when the counter could not be read). It counts every
-    judge attempt in the workspace in that time — live ingest included, and
-    attempts past the daily cap, which are counted but not billed.
+    ``judge_calls`` is how far the workspace's bulk-lane judge counter
+    advanced during the run (``None`` when the counter could not be read). It
+    counts every bulk judge attempt in the workspace in that time — another
+    catch-up run included, live ingest not (#2510), and attempts past the
+    bulk cap, which are counted but not billed.
     """
 
     dry_run: bool
@@ -213,10 +217,11 @@ async def _read_counter(key: str) -> int | None:
 
 
 class _JudgeCounter:
-    """How far a workspace's judge counter advanced since :meth:`start`.
+    """How far a workspace's bulk-lane judge counter advanced since :meth:`start`.
 
-    The counter is one Redis key per workspace per UTC day; a run that spans
-    midnight carries the old day's advance over to the new key.
+    The counter is one Redis key per workspace per lane per UTC day; the pass
+    reads the bulk lane's, the one its judge calls count on (#2510). A run
+    that spans midnight carries the old day's advance over to the new key.
     """
 
     def __init__(self, workspace_id: str) -> None:
@@ -226,9 +231,9 @@ class _JudgeCounter:
         self._carried = 0
 
     async def start(self) -> bool:
-        from services.supersede_verify import counter_key
+        from services.supersede_verify import LANE_BULK, counter_key
 
-        key = counter_key(self._workspace_id)
+        key = counter_key(self._workspace_id, lane=LANE_BULK)
         value = await _read_counter(key)
         if value is None:
             return False
@@ -236,9 +241,9 @@ class _JudgeCounter:
         return True
 
     async def used(self) -> int | None:
-        from services.supersede_verify import counter_key
+        from services.supersede_verify import LANE_BULK, counter_key
 
-        key = counter_key(self._workspace_id)
+        key = counter_key(self._workspace_id, lane=LANE_BULK)
         if key != self._key:
             previous = await _read_counter(self._key)
             if previous is None:
@@ -274,8 +279,8 @@ async def run_supersede_catch_up(
         include_unverified: Also re-check rows whose live candidate has no
             verdict (stored before the judge was on, or past its cap).
         limit: At most this many rows.
-        max_judge_calls: Stop once the workspace's judge counter advanced
-            this much during the run.
+        max_judge_calls: Stop once the workspace's bulk-lane judge counter
+            advanced this much during the run.
         after: Resume past ``(after, after_id)``: the ``last_created_at``
             / ``last_id`` of an earlier run, to move past rows that stay
             without a candidate. Without ``after_id`` rows created at
@@ -342,7 +347,7 @@ async def run_supersede_catch_up(
     # With the judge on, the budget and the judge_calls report both rest on
     # the counter: a run that cannot read it stops rather than store pairs
     # unverified and lose the count. With the judge off nothing is spent.
-    from services.supersede_verify import VERIFY_MODE_LLM
+    from services.supersede_verify import LANE_BULK, VERIFY_MODE_LLM
 
     judge_on = getattr(config, "supersede_verify_mode", None) == VERIFY_MODE_LLM
     counter = _JudgeCounter(str(workspace_id))
@@ -413,6 +418,7 @@ async def run_supersede_catch_up(
                 model,
                 mechanical_reembed=False,
                 seed=False,
+                lane=LANE_BULK,
             )
             result.processed += 1
             if not ok:

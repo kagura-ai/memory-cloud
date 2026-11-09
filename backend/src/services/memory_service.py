@@ -162,6 +162,7 @@ if TYPE_CHECKING:
     from auth.agent_scope import AgentScope
     from models.memory import Memory
     from services.resource_indexer import ResourceIndexer
+    from services.supersede_verify import JudgeLane
 
 # Issue #886: upper bound for the always-load cap, matching the REST schema's
 # ``LoadPinnedRequest.cap`` le=1000. The MCP path sends the raw arg with no
@@ -9543,12 +9544,16 @@ async def _detect_supersede_candidate(
     workspace_id_str: str,
     context_id_str: str,
     clear_allowed: bool = False,
+    lane: JudgeLane = "live",
 ) -> None:
     """Store ``raw_top`` as ``memory``'s supersede suggestion (#1403, #2016).
 
     ``clear_allowed`` (#2123): the search returned this memory's own point,
     so a missing near-duplicate is evidence (#2059) — only then may the
     judge-mode skip below 0.85 clear a suggestion stored at 0.85 or above.
+
+    ``lane`` (#2510): the judge's daily cap the call counts on — ``"live"``
+    for ingest, ``"bulk"`` for the catch-up pass.
 
     ``raw_top`` is the RAW top-1 neighbour (excluding self) at or above
     ``_SUPERSEDE_SUGGEST_THRESHOLD`` (#2123: or the lower
@@ -9720,6 +9725,7 @@ async def _detect_supersede_candidate(
                         context_id=context_id_str,
                         new=memory,
                         old=old,
+                        lane=lane,
                     )
             if verification is not None:
                 candidate["verification"] = verification
@@ -9837,6 +9843,7 @@ async def _create_knn_seed_edges(
     *,
     mechanical_reembed: bool = False,
     seed: bool = True,
+    lane: JudgeLane = "live",
 ) -> bool:
     """Create k-NN cold-start seed edges for a newly embedded memory.
 
@@ -9893,6 +9900,8 @@ async def _create_knn_seed_edges(
             clear of a live candidate runs (#2256).
         seed: False to write no seed edges whatever ``knn_seed_enabled`` says
             (#2256: the catch-up pass).
+        lane: The judge's daily cap a judge call of the detection counts on
+            (#2510): ``"live"`` for ingest, ``"bulk"`` for the catch-up pass.
 
     Returns:
         False when a failure was swallowed (logged as ``knn_seeding_failed``),
@@ -10094,6 +10103,7 @@ async def _create_knn_seed_edges(
                     workspace_id_str=workspace_id_str,
                     context_id_str=context_id_str,
                     clear_allowed=len(non_self) < len(candidates),
+                    lane=lane,
                 )
             elif len(non_self) < len(candidates) and (
                 raw_top is None

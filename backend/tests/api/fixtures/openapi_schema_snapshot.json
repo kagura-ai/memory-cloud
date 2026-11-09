@@ -13836,6 +13836,10 @@
       },
       "WorkspaceTotals": {
         "properties": {
+          "active_users_week": {
+            "default": 0,
+            "type": "integer"
+          },
           "memory_count": {
             "type": "integer"
           }

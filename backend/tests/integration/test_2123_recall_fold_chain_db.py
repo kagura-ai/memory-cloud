@@ -128,7 +128,9 @@ async def _write_chain(db, owner, ws, ctx) -> list[UUID]:
     return ids
 
 
-async def _judge_supersedes(db, *, config, user_id, workspace_id, context_id, new, old):
+async def _judge_supersedes(
+    db, *, config, user_id, workspace_id, context_id, new, old, lane="live"
+):
     """The judge's answer, recorded exactly as ``judge_pair`` records one."""
     return verification_record(
         "supersedes",

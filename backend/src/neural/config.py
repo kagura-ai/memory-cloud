@@ -327,6 +327,11 @@ class NeuralMemoryConfig:
     supersede_verify_mode: str = "off"
     supersede_verify_min_confidence: float = 0.7
     supersede_verify_max_calls_per_day: int = 200
+    # #2510: bulk work (the supersede catch-up pass) counts on a cap of its
+    # own, so a bulk run cannot spend the live cap above. A bulk ingest of N
+    # facts needs about N + 50 judge calls that day; 500 judges ~450 facts.
+    # Env-only, like the live cap.
+    supersede_verify_max_bulk_calls_per_day: int = 500
     # #2123: the detection threshold while supersede_verify_mode == "llm"
     # (top-1 neighbour only). A pair below the unverified 0.85 is stored only
     # when the judge answered (supersedes or parallel). Env-only, clamped to
@@ -633,6 +638,11 @@ class NeuralMemoryConfig:
                 "supersede_verify_max_calls_per_day must be positive, "
                 f"got {self.supersede_verify_max_calls_per_day}"
             )
+        if not self.supersede_verify_max_bulk_calls_per_day > 0:
+            raise ValueError(
+                "supersede_verify_max_bulk_calls_per_day must be positive, "
+                f"got {self.supersede_verify_max_bulk_calls_per_day}"
+            )
         if not (
             SUPERSEDE_SUGGEST_THRESHOLD_LLM_MIN
             <= self.supersede_suggest_threshold_llm
@@ -790,6 +800,9 @@ class NeuralMemoryConfig:
             supersede_verify_mode=os.getenv("SUPERSEDE_VERIFY_MODE", "off").strip().lower(),
             supersede_verify_min_confidence=get_float("SUPERSEDE_VERIFY_MIN_CONFIDENCE", 0.7),
             supersede_verify_max_calls_per_day=get_int("SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY", 200),
+            supersede_verify_max_bulk_calls_per_day=get_int(
+                "SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY", 500
+            ),
             supersede_suggest_threshold_llm=supersede_suggest_threshold_llm_from_env(),
             knn_seed_k=get_int("KNN_SEED_K", 5),
             knn_seed_min_similarity=get_float_or_none("KNN_SEED_MIN_SIMILARITY"),
@@ -1035,6 +1048,9 @@ class NeuralMemoryConfig:
             supersede_verify_mode=base_config.supersede_verify_mode,  # env-only (#2016)
             supersede_verify_min_confidence=base_config.supersede_verify_min_confidence,
             supersede_verify_max_calls_per_day=base_config.supersede_verify_max_calls_per_day,
+            supersede_verify_max_bulk_calls_per_day=(
+                base_config.supersede_verify_max_bulk_calls_per_day
+            ),
             # env-only (#2123)
             supersede_suggest_threshold_llm=base_config.supersede_suggest_threshold_llm,
             knn_seed_k=configs.get("knn_seed_k", base_config.knn_seed_k),

@@ -32,14 +32,14 @@ export function KpiCards({
   const { apiCallsWeek, activeUsersWeek } = useMemo(() => {
     if (!contextStats) return { apiCallsWeek: 0, activeUsersWeek: 0 };
     return {
+      // Calls add up across contexts.
       apiCallsWeek: contextStats.contexts.reduce(
         (sum, ctx) => sum + ctx.api_calls_week,
         0,
       ),
-      activeUsersWeek: contextStats.contexts.reduce(
-        (sum, ctx) => sum + ctx.active_users_week,
-        0,
-      ),
+      // A distinct-user count does not: a user active in several contexts is
+      // one active user, so the backend counts the workspace total (#2744).
+      activeUsersWeek: contextStats.workspace_totals.active_users_week,
     };
   }, [contextStats]);
 

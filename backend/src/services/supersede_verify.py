@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from db.base import isolated_session
 from services.llm_ledger import record_completion_call
@@ -101,6 +101,15 @@ REASON_MAX_CHARS = 200
 # Redis daily counter per workspace (UTC day); the key outlives the day by a
 # margin so a late write never recreates it without a TTL.
 _COUNTER_TTL_SECONDS = 2 * 24 * 3600
+
+# #2510: which daily cap a judge call counts on. "live" is the post-embed
+# detection of ingest (SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY); "bulk" is work the
+# server runs over many rows at once, today the supersede catch-up pass
+# (SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY), so a bulk run cannot spend the
+# budget live ingest needs.
+JudgeLane = Literal["live", "bulk"]
+LANE_LIVE: JudgeLane = "live"
+LANE_BULK: JudgeLane = "bulk"
 
 # Prompt revision: bump on every wording change so stored verifications can
 # be told apart by the model + revision that produced them.
@@ -396,9 +405,15 @@ def reuse_verification(
     return verification
 
 
-def counter_key(workspace_id: str) -> str:
-    """Redis key of the workspace's judge-call counter for the current UTC day."""
-    return f"supersede_verify:{workspace_id}:{utcnow().strftime('%Y-%m-%d')}"
+def counter_key(workspace_id: str, lane: JudgeLane = LANE_LIVE) -> str:
+    """Redis key of the workspace's judge-call counter for the current UTC day.
+
+    #2510: one counter per lane. The live key is the one every judge call
+    counted on before lanes existed (a deploy resets nothing); the bulk key
+    appends ``:bulk``.
+    """
+    key = f"supersede_verify:{workspace_id}:{utcnow().strftime('%Y-%m-%d')}"
+    return key if lane == LANE_LIVE else f"{key}:{lane}"
 
 
 # ``llm_call_log.caller`` for the judge's ledger rows (#2019).
@@ -446,15 +461,15 @@ async def _record_judge_call(
     )
 
 
-# Workspaces whose cap was already reported today (reset when the UTC day
-# changes, so the set never grows past the day's capped workspaces).
+# (workspace, lane) pairs whose cap was already reported today (reset when
+# the UTC day changes, so the set never grows past the day's capped lanes).
 _CAP_REPORTED_DAY = ""
-_CAP_REPORTED: set[str] = set()
+_CAP_REPORTED: set[tuple[str, JudgeLane]] = set()
 _NO_PROVIDER_REPORTED = False
 
 
-async def _under_daily_cap(workspace_id: str, max_calls: int) -> bool:
-    """Count this call against the workspace's daily cap.
+async def _under_daily_cap(workspace_id: str, max_calls: int, lane: JudgeLane = LANE_LIVE) -> bool:
+    """Count this call against the workspace's daily cap of ``lane``.
 
     Fail-closed: when the counter cannot be read the paid call is skipped and
     the candidate surfaces unverified (the pre-#2016 shape) — an outage must
@@ -463,11 +478,12 @@ async def _under_daily_cap(workspace_id: str, max_calls: int) -> bool:
     from db.redis import incrby_counter
 
     try:
-        count = await incrby_counter(counter_key(workspace_id), 1, ttl=_COUNTER_TTL_SECONDS)
+        count = await incrby_counter(counter_key(workspace_id, lane), 1, ttl=_COUNTER_TTL_SECONDS)
     except Exception as exc:  # noqa: BLE001 — never raises into the embedding task
         logger.warning(
             "supersede_verify_counter_failed",
             workspace_id=workspace_id,
+            lane=lane,
             error_type=type(exc).__name__,
             hint="judge skipped; the candidate surfaces unverified",
         )
@@ -479,11 +495,12 @@ async def _under_daily_cap(workspace_id: str, max_calls: int) -> bool:
     if today != _CAP_REPORTED_DAY:
         _CAP_REPORTED_DAY = today
         _CAP_REPORTED.clear()
-    if workspace_id not in _CAP_REPORTED:
-        _CAP_REPORTED.add(workspace_id)
+    if (workspace_id, lane) not in _CAP_REPORTED:
+        _CAP_REPORTED.add((workspace_id, lane))
         logger.warning(
             "supersede_verify_cap_reached",
             workspace_id=workspace_id,
+            lane=lane,
             max_calls_per_day=max_calls,
             hint="suggestions surface unverified until the next UTC day",
         )
@@ -499,6 +516,7 @@ async def judge_pair(
     context_id: str,
     new: Any,
     old: Any,
+    lane: JudgeLane = LANE_LIVE,
 ) -> dict[str, Any] | None:
     """Ask the Sleep judge whether ``new`` supersedes ``old``.
 
@@ -519,6 +537,9 @@ async def judge_pair(
         context_id: Context of both memories (credential scope).
         new: The freshly embedded memory.
         old: The candidate it may supersede.
+        lane: The daily cap the call counts on (#2510): ``"live"`` for
+            ingest (``supersede_verify_max_calls_per_day``), ``"bulk"`` for
+            the catch-up pass (``supersede_verify_max_bulk_calls_per_day``).
     """
     global _NO_PROVIDER_REPORTED
 
@@ -535,7 +556,12 @@ async def judge_pair(
             )
         return None
 
-    if not await _under_daily_cap(workspace_id, config.supersede_verify_max_calls_per_day):
+    max_calls = (
+        config.supersede_verify_max_bulk_calls_per_day
+        if lane == LANE_BULK
+        else config.supersede_verify_max_calls_per_day
+    )
+    if not await _under_daily_cap(workspace_id, max_calls, lane):
         return None
 
     # Stamp the verdict with the moment the texts were read, not the moment
@@ -583,7 +609,11 @@ async def judge_pair(
             await _record_judge_call(
                 db,
                 spent,
-                call_metadata={"outcome": "failed", "prompt_revision": PROMPT_REVISION},
+                call_metadata={
+                    "outcome": "failed",
+                    "prompt_revision": PROMPT_REVISION,
+                    "lane": lane,
+                },
                 paid_by=llm.resolve_paid_by(),
                 user_id=user_id,
                 workspace_id=workspace_id,
@@ -610,7 +640,11 @@ async def judge_pair(
         await _record_judge_call(
             db,
             response,
-            call_metadata={"outcome": "unparseable", "prompt_revision": PROMPT_REVISION},
+            call_metadata={
+                "outcome": "unparseable",
+                "prompt_revision": PROMPT_REVISION,
+                "lane": lane,
+            },
             **ledger,
         )
         logger.warning(
@@ -640,6 +674,7 @@ async def judge_pair(
             "confidence": record["confidence"],
             "verified": record["verified"],
             "prompt_revision": PROMPT_REVISION,
+            "lane": lane,
         },
         **ledger,
     )
@@ -647,6 +682,7 @@ async def judge_pair(
         "supersede_verify_judged",
         memory_id=str(new.id),
         candidate_memory_id=str(old.id),
+        lane=lane,
         verdict=verdict,
         confidence=record["confidence"],
         verified=record["verified"],

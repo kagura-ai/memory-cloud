@@ -1455,24 +1455,35 @@ longer scores as near-duplicates; it never re-judges or stores a pair.
 | `supersede_verify_failed` | WARNING | the provider call failed. The candidate is stored unverified |
 | `supersede_verify_unparseable` | WARNING | the answer could not be parsed. The candidate is stored unverified |
 | `supersede_verify_no_provider` | WARNING | `SLEEP_LLM_PROVIDER` is unset. Logged once per process |
-| `supersede_verify_cap_reached` | WARNING | a workspace hit `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY`. Logged once per workspace per UTC day |
-| `supersede_verify_counter_failed` | WARNING | the daily counter could not be read. The judge is skipped (fail-closed) |
+| `supersede_verify_cap_reached` | WARNING | a workspace hit the daily cap of a lane: `lane=live` is `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` (ingest), `lane=bulk` is `SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY` (the catch-up pass, #2510). Logged once per workspace and lane per UTC day |
+| `supersede_verify_counter_failed` | WARNING | the daily counter of the `lane` could not be read. The judge is skipped (fail-closed) |
 | `supersede_verify_ledger_failed` | WARNING | the `llm_call_log` row for a judge call could not be written. The verdict is still used |
 | `supersede_suggest_threshold_llm_invalid` / `supersede_suggest_threshold_llm_clamped` | WARNING | `SUPERSEDE_SUGGEST_THRESHOLD_LLM` was unparseable (the default 0.75 is used) or outside 0.5-0.85 (the nearest bound is used) |
 
 **Detection threshold with the judge on** (#2123). With `SUPERSEDE_VERIFY_MODE=llm` the
 detection considers the nearest neighbour down to `SUPERSEDE_SUGGEST_THRESHOLD_LLM`
 (default 0.75, clamped to 0.5-0.85, env-only) instead of 0.85, and stores a pair below
-0.85 only with a `supersedes` or `parallel` verdict. The default is provisional until it is
-measured on reworded updates. Each such pair is a judge call against
-`SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` (default 200 per workspace), so raise the cap before a
-bulk ingest: once it is reached, later reworded updates are neither stored nor folded in
-recall, and pairs at 0.85 or above are stored unverified (they do not fold either). The
-lower threshold spends the cap faster than 0.85 did. `remember(dedupe="check")` and the judge-off mode keep 0.85.
+0.85 only with a `supersedes` or `parallel` verdict. Each such pair is a judge call against
+the daily cap of its lane (below), so size the cap before a bulk ingest: a bulk ingest of
+N facts needs about N + 50 judge calls in its lane that day. Once the cap is reached, later
+reworded updates are neither stored nor folded in recall, and pairs at 0.85 or above are
+stored unverified (they do not fold either). The lower threshold spends the cap faster than
+0.85 did. `remember(dedupe="check")` and the judge-off mode keep 0.85.
+
+**Daily judge caps** (#2510). The judge counts its calls per workspace per UTC day on two
+lanes, each with its own Redis counter, so bulk work cannot spend the budget live ingest
+needs. Both are env-only.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` | `200` | Live lane: the post-embed detection of every write, `remember` and `remember_batch` imports included. Raise it before a client imports many facts at once. |
+| `SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY` | `500` | Bulk lane: the [supersede catch-up pass](#supersede-catch-up-pass--issue-2256). 500 judges about 450 facts a day (N + 50). |
+
+The worst case per workspace per day is the sum of the two caps.
 
 The judge's results do not depend on the log. Since #2019, each judge call that
 spent tokens is a `caller='supersede_verify'` row in `llm_call_log`, with the
-verdict or outcome in `call_metadata`, so the tally survives log rotation. See
+verdict or outcome and the `lane` (#2510) in `call_metadata`, so the tally survives log rotation. See
 [Where cost is recorded](#where-cost-is-recorded-sleep_reports-vs-llm_call_log)
 for the query. A `supersede_verify_ledger_failed` line marks a call that is
 missing from that table.
@@ -1912,18 +1923,22 @@ python -m src.cli.supersede_catch_up --context <uuid> --apply --yes  # run the d
   offset) takes only rows created before that instant, and `--after
   <ISO-8601>,<memory id>` resumes past the `resume` line of an earlier run.
 - Judge spend: with the judge on, each row may cost one call, counted on the
-  same per-workspace `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` as live ingest. The
-  run stops once that counter advanced by `--max-judge-calls` (default 50,
-  `stopped judge_budget` in the report), so run it early in the UTC day with
-  headroom under the cap. Past the cap a pair at 0.85 or above is stored
+  workspace's bulk lane, `SUPERSEDE_VERIFY_MAX_BULK_CALLS_PER_DAY` (default
+  500, see [Daily judge caps](#supersede-suggestions-and-k-nn-seeding-log-events-issue-2023)),
+  a counter apart from live ingest's `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY`
+  (#2510), so a run does not spend the cap ingest needs. The run stops once
+  that counter advanced by `--max-judge-calls` (default 50, `stopped
+  judge_budget` in the report), so run it early in the UTC day with headroom
+  under the bulk cap. Past the bulk cap a pair at 0.85 or above is stored
   unverified and a pair below is skipped, as on ingest.
 - Report: `processed`, `detected` (a candidate appeared), `updated` (stored
   again with a new target or verdict), `cleared`, `unchanged`, `failed` (the
   detection failed on the row; see `knn_seeding_failed` in the log),
   `no_vector` (no stored vector for the row), `skipped` (the row changed after
   the plan, or its text or embedding moved after its vector was read),
-  `judge_calls` (how far the workspace's judge counter advanced during the
-  run, live ingest included; `unknown` when Redis could not be read) and
+  `judge_calls` (how far the workspace's bulk judge counter advanced during
+  the run, another catch-up run in the workspace included, live ingest not;
+  `unknown` when Redis could not be read) and
   `stopped`. With the judge on, a run that cannot read the counter stops
   (`stopped counter_unreadable`) instead of going on without a budget; with
   the judge off it goes on. The report ends with a
