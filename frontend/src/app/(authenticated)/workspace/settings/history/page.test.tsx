@@ -3,11 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Page from "./page";
 import { HistoryView } from "./HistoryView";
 import type { HistoryPage } from "@/lib/api/operation-history";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
 import { ApiError } from "@/lib/api/base";
 
+const tier = (name: string, operation_history: boolean) => ({ name, display_name: name, operation_history }) as unknown as PlanTierFeature;
+const SERVED_TIERS = [tier("free", false), tier("basic", false), tier("pro", true), tier("promax", true)];
 const state = vi.hoisted(() => ({
   get: vi.fn(), gate: "allowed", errorGate: false, timezone: "UTC",
   workspace: { id: "workspace-one", current_user_role: "owner", plan_name: "promax" },
+  tiers: null as PlanTierFeature[] | null,
 }));
 vi.mock("next-intl", () => ({
   useLocale: () => "en",
@@ -16,6 +20,10 @@ vi.mock("next-intl", () => ({
 vi.mock("@/contexts/WorkspaceContext", () => ({ useWorkspace: () => ({ currentWorkspace: state.workspace }) }));
 vi.mock("@/contexts/AuthContext", () => ({ useAuth: () => ({ user: { timezone: state.timezone } }) }));
 vi.mock("@/hooks/useFeatureGate", () => ({ useFeatureGate: () => ({ state: state.gate }) }));
+vi.mock("@/hooks/usePlanFeatures", async importOriginal => ({
+  ...await importOriginal<typeof import("@/hooks/usePlanFeatures")>(),
+  usePlanTierMatrix: () => state.tiers,
+}));
 vi.mock("@/hooks/useErrorGate", () => ({ useErrorGate: (error: unknown) => error && state.errorGate ? { state: "plan" } : null }));
 vi.mock("@/components/common/FeatureGateNotice", () => ({ FeatureGateNotice: ({ gate }: { gate: { state: string } }) => <p>gate:{gate.state}</p> }));
 vi.mock("@/components/dashboard/WorkspacePageHeader", () => ({ WorkspacePageHeader: ({ title }: { title: string }) => <h1>{title}</h1> }));
@@ -25,7 +33,7 @@ vi.mock("@/lib/api/operation-history", async importOriginal => ({
 }));
 
 function response(target = "visible-target", next: string | null = null): HistoryPage {
-  return { total: 1, total_capped: false, next_cursor: next, items: [{
+  return { total: 1, total_capped: false, next_cursor: next, retention_days: 90, items: [{
     id: target, occurred_at: "2026-11-09T00:00:00Z", context_id: "context-id",
     actor_user_id: "actor-id", actor_name: "Alice", subject_user_id: null,
     principal_kind: "session", credential_id: null, client_id: null,
@@ -43,6 +51,7 @@ describe("workspace operation history", () => {
   beforeEach(() => {
     vi.clearAllMocks(); state.gate = "allowed"; state.errorGate = false; state.timezone = "UTC";
     state.workspace = { id: "workspace-one", current_user_role: "owner", plan_name: "promax" };
+    state.tiers = SERVED_TIERS;
     state.get.mockResolvedValue(response());
   });
   afterEach(() => {
@@ -74,7 +83,7 @@ describe("workspace operation history", () => {
     fireEvent.click(screen.getByRole("button", { name: "next" }));
     await waitFor(() => expect(state.get.mock.lastCall?.[1].get("cursor")).toBe("next-cursor"));
     fireEvent.change(screen.getByLabelText("query"), { target: { value: "Alice %" } });
-    fireEvent.change(screen.getByLabelText("actor"), { target: { value: "actor-id" } });
+    fireEvent.change(screen.getByLabelText("actorFilter"), { target: { value: "actor-id" } });
     fireEvent.change(screen.getByLabelText("context_id"), { target: { value: "11111111-1111-4111-8111-111111111111" } });
     fireEvent.submit(screen.getByRole("form", { name: "filters" }));
     await waitFor(() => {
@@ -94,7 +103,7 @@ describe("workspace operation history", () => {
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     fireEvent.change(screen.getByLabelText("query"), { target: { value: "Alice" } });
-    fireEvent.change(screen.getByLabelText("actor"), { target: { value: "actor-id" } });
+    fireEvent.change(screen.getByLabelText("actorFilter"), { target: { value: "actor-id" } });
     fireEvent.submit(screen.getByRole("form", { name: "filters" }));
     await waitFor(() => expect(state.get.mock.lastCall?.[1].get("query")).toBe("Alice"));
     expect(toggle).toHaveTextContent("(2)");
@@ -138,7 +147,7 @@ describe("workspace operation history", () => {
   });
 
   it("shows empty results separately from load errors", async () => {
-    state.get.mockResolvedValueOnce({ items: [], total: 0, total_capped: false, next_cursor: null });
+    state.get.mockResolvedValueOnce({ items: [], total: 0, total_capped: false, next_cursor: null, retention_days: 90 });
     render(<HistoryView workspaceId="workspace-one" />);
     expect(await screen.findByText("empty")).toBeInTheDocument();
     state.get.mockRejectedValueOnce(new Error("network"));
@@ -224,6 +233,29 @@ describe("workspace operation history", () => {
     render(<HistoryView workspaceId="workspace-one" />);
     expect(await screen.findByText("unknown")).toBeInTheDocument();
     expect(screen.queryByText("Alice", { exact: true })).not.toBeInTheDocument();
+    // No credential is known, so there is no credential account to qualify.
+    expect(screen.queryByText(/^principalAccount:/)).not.toBeInTheDocument();
+    expect(screen.queryByText("accountAttribution")).not.toBeInTheDocument();
+  });
+
+  it("names a membership target once as the affected member", async () => {
+    const data = response("member-id");
+    Object.assign(data.items[0], {
+      operation: "member.role_changed", target_type: "member", subject_user_id: "member-id",
+      changed_fields: ["role"], context_id: null,
+    });
+    state.get.mockResolvedValueOnce(data);
+    render(<HistoryView workspaceId="workspace-one" />);
+    expect(await screen.findAllByText("subject:member-id")).toHaveLength(1);
+    expect(screen.queryByText("member-id", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("labels the actor filter as an exact user ID", async () => {
+    render(<HistoryView workspaceId="workspace-one" />);
+    await screen.findByText("visible-target");
+    expect(screen.getByLabelText("actorFilter")).toHaveAttribute("placeholder", "actorPlaceholder");
+    // The column header keeps the plain label.
+    expect(screen.getByRole("columnheader", { name: "actor" })).toBeInTheDocument();
   });
 
   it("uses the saved timezone for display and includes the whole ending minute", async () => {
@@ -241,11 +273,28 @@ describe("workspace operation history", () => {
     });
   });
 
-  it("labels capped counts and uses the configured plan name", async () => {
-    vi.stubEnv("NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME", "Team Plus");
+  it("labels capped counts and names the lowest entitled tier as configured", async () => {
+    vi.stubEnv("NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME", "Team Plus");
     state.get.mockResolvedValueOnce({ ...response(), total: 1000, total_capped: true });
     render(<HistoryView workspaceId="workspace-one" />);
     expect(await screen.findByText("totalCapped:1000")).toBeInTheDocument();
     expect(screen.getByText("coverage:Team Plus")).toBeInTheDocument();
+  });
+
+  it("follows the served matrix, not a hard-coded tier, and shows the retention window", async () => {
+    // An operator withheld the feature from pro: the served matrix says so.
+    vi.stubEnv("NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME", "Team Max");
+    state.tiers = [tier("free", false), tier("basic", false), tier("pro", false), tier("promax", true)];
+    state.get.mockResolvedValueOnce({ ...response(), retention_days: 120 });
+    render(<HistoryView workspaceId="workspace-one" />);
+    expect(await screen.findByText("retention:120")).toBeInTheDocument();
+    expect(screen.getByText("coverage:Team Max")).toBeInTheDocument();
+  });
+
+  it("omits the plan sentence until the matrix is known", async () => {
+    state.tiers = null;
+    render(<HistoryView workspaceId="workspace-one" />);
+    expect(await screen.findByText("retention:90")).toBeInTheDocument();
+    expect(screen.queryByText(/^coverage:/)).not.toBeInTheDocument();
   });
 });

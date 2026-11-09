@@ -1377,6 +1377,7 @@
     "permissionInviteMembers": "Invite members",
     "permissionManageRoles": "Manage member roles",
     "permissionViewOperationHistory": "View operation history ({plan}+)",
+    "permissionViewOperationHistoryPlain": "View operation history",
     "operationHistoryPermissionNote": "Operation history is available under Workspace settings → Operation history. Private-context history remains restricted to its creator, including for owners and admins.",
     "permissionManageContexts": "Create/edit/delete contexts",
     "permissionManagePublicSettings": "Manage Public settings (Resource ID, Public API)",
@@ -5406,12 +5407,15 @@
   "operationHistory": {
     "title": "Operation history",
     "description": "See who changed this workspace and what happened.",
-    "coverage": "Important changes recorded after this feature was enabled. Memory contents and secrets are not stored here. Read and search activity is excluded. Records remain after a downgrade; viewing requires {plan} or an eligible higher plan. Deleted targets may no longer open.",
+    "coverage": "Records important changes while this workspace is on {plan} or another plan that includes operation history; nothing is recorded on other plans, and earlier activity is not backfilled. Memory contents and secrets are not stored here, and read and search activity is excluded. After a downgrade the records are kept until they expire, and viewing them needs an eligible plan again. Deleted targets may no longer open.",
+    "retention": "Records are kept for {days, plural, one {# day} other {# days}} and then deleted automatically. A retention add-on extends this period. There is no export.",
     "filters": "Filter operation history",
     "filterToggle": "Filters",
     "query": "Search actor names, IDs or field names",
     "context_id": "Context ID",
     "actor": "Actor",
+    "actorFilter": "Actor ID",
+    "actorPlaceholder": "Exact user ID",
     "agent_id": "Agent ID",
     "since": "From ({timezone})",
     "until": "Through minute ({timezone})",
@@ -5487,6 +5491,7 @@
       },
       "credential": {
         "issued": "Credential issued or rotated",
+        "updated": "Credential settings changed",
         "revoked": "Credential revoked"
       },
       "integration": {
@@ -5526,7 +5531,9 @@
       "expires_at": "Expiration",
       "event_start": "Event start",
       "event_end": "Event end",
-      "delivery_mode": "Delivery mode"
+      "delivery_mode": "Delivery mode",
+      "redirect_uris": "Redirect URIs",
+      "token_endpoint_auth_method": "Token authentication method"
     },
     "accountAttribution": "Authenticated account; a shared credential does not identify the individual caller."
   }

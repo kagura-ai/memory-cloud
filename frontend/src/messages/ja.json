@@ -1377,6 +1377,7 @@
     "permissionInviteMembers": "メンバーの招待",
     "permissionManageRoles": "メンバーのロール管理",
     "permissionViewOperationHistory": "操作履歴の閲覧（{plan} 以上）",
+    "permissionViewOperationHistoryPlain": "操作履歴の閲覧",
     "operationHistoryPermissionNote": "「ワークスペース設定 → 操作履歴」から確認できます。プライベートコンテキストの履歴は、オーナー・管理者でもその作成者のみ閲覧できます。",
     "permissionManageContexts": "コンテキストの作成/編集/削除",
     "permissionManagePublicSettings": "Public設定の管理（Resource ID、Public API）",
@@ -5406,12 +5407,15 @@
   "operationHistory": {
     "title": "操作履歴",
     "description": "このワークスペースで誰が何を変更したかを確認します。",
-    "coverage": "この機能の導入後に記録された重要な変更を表示します。メモリ本文や秘密情報、閲覧・検索操作は記録しません。ダウングレード後も記録は保持され、閲覧には {plan} 以上の対象プランが必要です。削除済みの対象は詳細を開けない場合があります。",
+    "coverage": "このワークスペースが {plan} など操作履歴を含むプランの間に行われた重要な変更を記録します。その他のプランでは記録されず、導入前の操作も補完されません。メモリ本文や秘密情報は保存せず、閲覧・検索操作は記録しません。ダウングレード後も記録は保持期間が終わるまで残り、閲覧には再び対象プランが必要です。削除済みの対象は詳細を開けない場合があります。",
+    "retention": "記録は {days} 日間保持され、その後自動的に削除されます。保持期間はアドオンで延長できます。エクスポート機能はありません。",
     "filters": "操作履歴の絞り込み",
     "filterToggle": "絞り込み",
     "query": "実行者名・ID・項目名を検索",
     "context_id": "コンテキスト ID",
     "actor": "実行者",
+    "actorFilter": "実行者 ID",
+    "actorPlaceholder": "ユーザー ID（完全一致）",
     "agent_id": "エージェント ID",
     "since": "開始日時（{timezone}）",
     "until": "終了日時・指定した分まで（{timezone}）",
@@ -5487,6 +5491,7 @@
       },
       "credential": {
         "issued": "認証情報を発行・更新",
+        "updated": "認証情報の設定を変更",
         "revoked": "認証情報を失効"
       },
       "integration": {
@@ -5526,7 +5531,9 @@
       "expires_at": "有効期限",
       "event_start": "イベント開始",
       "event_end": "イベント終了",
-      "delivery_mode": "配信モード"
+      "delivery_mode": "配信モード",
+      "redirect_uris": "リダイレクト URI",
+      "token_endpoint_auth_method": "トークン認証方式"
     },
     "accountAttribution": "認証に使われたアカウントです。共有認証情報では、実際に操作した個人は特定できません。"
   }

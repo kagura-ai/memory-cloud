@@ -10,7 +10,8 @@ import { useErrorGate } from "@/hooks/useErrorGate";
 import { ApiError } from "@/lib/api/base";
 import { getOperationHistory, HISTORY_OPERATIONS, type HistoryPage } from "@/lib/api/operation-history";
 import { formatDateTime } from "@/lib/utils/datetime";
-import { planLabelFromEnv } from "@/lib/utils/planLabel";
+import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
+import { requiredTierFor, resolvedPlanLabel } from "@/lib/gates/featureGates";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { TableLoadingState } from "@/components/common/LoadingState";
@@ -46,6 +47,12 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
   const page = result?.key === requestKey ? result.page : null;
   const error = failure?.key === requestKey ? failure.error : null;
   const errorGate = useErrorGate(error, "operation_history");
+  // The lowest served tier with the entitlement, named as this deployment labels it.
+  const tiers = usePlanTierMatrix();
+  const minimumTier = tiers ? requiredTierFor(tiers, tier => tier.operation_history === true) : null;
+  const planLabel = minimumTier ? resolvedPlanLabel(minimumTier.name, tiers, undefined, locale) : null;
+  // The last served window stays shown while the same view revalidates.
+  const retentionDays = result?.page.retention_days;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -106,7 +113,8 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
   );
   return (
     <div className="space-y-6">
-      <p className="text-sm text-muted-foreground">{t("coverage", { plan: planLabelFromEnv("promax", locale) })}</p>
+      {planLabel && <p className="text-sm text-muted-foreground">{t("coverage", { plan: planLabel })}</p>}
+      {retentionDays !== undefined && <p className="text-sm text-muted-foreground">{t("retention", { days: retentionDays })}</p>}
       <div className="flex flex-wrap items-center gap-2">
         <Button type="button" variant="outline" className="md:hidden" aria-expanded={filtersOpen} aria-controls="history-filters" onClick={() => setFiltersOpen(open => !open)}>
           {t("filterToggle")}{activeFilterCount > 0 && <span> ({activeFilterCount})</span>}
@@ -115,12 +123,16 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
         <Button type="button" variant="outline" onClick={() => setRevision(v => v + 1)}>{t("refresh")}</Button>
       </div>
       <form id="history-filters" onSubmit={apply} className={`${filtersOpen ? "block" : "hidden"} space-y-4 rounded-lg border p-4 md:block`} aria-label={t("filters")}>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {/* Two columns only where a datetime input keeps its calendar control:
+            the sidebar takes 16rem from md, so md and below lg stay single. */}
+        <div className="grid items-end gap-4 sm:grid-cols-2 md:grid-cols-1 lg:grid-cols-2 xl:grid-cols-3">
           {(["query", "context_id", "actor", "agent_id", "since", "until"] as const).map(key => (
-            <div className="space-y-2" key={key}>
-              <Label htmlFor={`history-${key}`}>{key === "since" || key === "until" ? t(key, { timezone }) : t(key)}</Label>
+            <div className="min-w-0 space-y-2" key={key}>
+              <Label htmlFor={`history-${key}`}>{key === "since" || key === "until" ? t(key, { timezone }) : key === "actor" ? t("actorFilter") : t(key)}</Label>
               <Input id={`history-${key}`} value={draft[key]} onChange={e => setField(key, e.target.value)}
+                className="min-w-0"
                 type={key === "since" || key === "until" ? "datetime-local" : "text"}
+                placeholder={key === "actor" ? t("actorPlaceholder") : undefined}
                 maxLength={key === "query" ? 120 : 255}
                 pattern={key === "context_id" || key === "agent_id" ? "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" : undefined}
               />
@@ -142,9 +154,13 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
               : <>
                 <p className="text-sm text-muted-foreground" role="status">{t(page.total_capped ? "totalCapped" : "total", { count: page.total })}</p>
                 <Table role="table" aria-label={t("title")} className="block xl:table">
-                  <TableHeader role="rowgroup" className="sr-only xl:not-sr-only xl:table-header-group"><TableRow role="row">{["time", "actor", "operation", "target", "outcome"].map(key => <TableHead role="columnheader" scope="col" key={key}>{t(key)}</TableHead>)}</TableRow></TableHeader>
-                  <TableBody role="rowgroup" className="grid gap-4 xl:table-row-group [&_tr:last-child]:border xl:[&_tr:last-child]:border-0">{page.items.map(item => (
-                    <TableRow role="row" key={item.id} className="grid min-w-0 gap-3 rounded-lg border bg-background p-4 xl:table-row xl:rounded-none xl:border-0 xl:border-b xl:bg-transparent xl:p-0">
+                  <TableHeader role="rowgroup" className="sr-only xl:not-sr-only xl:table-header-group"><TableRow role="row">{["time", "actor", "operation", "target", "outcome"].map(key => <TableHead role="columnheader" scope="col" key={key} className="xl:whitespace-nowrap">{t(key)}</TableHead>)}</TableRow></TableHeader>
+                  <TableBody role="rowgroup" className="grid gap-4 xl:table-row-group [&_tr:last-child]:border xl:[&_tr:last-child]:border-0">{page.items.map(item => {
+                    // A shared credential's account is not the physical caller:
+                    // say so only where a credential or client is known.
+                    const viaCredential = Boolean(item.credential_id || item.client_id) && item.principal_kind !== "session" && item.principal_kind !== "system";
+                    return (
+                    <TableRow role="row" key={item.id} className="grid min-w-0 gap-3 rounded-lg border bg-background p-4 even:bg-background dark:even:bg-background xl:table-row xl:rounded-none xl:border-0 xl:border-b xl:bg-transparent xl:p-0 xl:even:bg-slate-50/50 xl:dark:even:bg-slate-900/50">
                       <TableCell role="cell" className="block p-0 align-top xl:table-cell xl:whitespace-nowrap xl:p-2">{mobileLabel("time")}<time dateTime={item.occurred_at}>{formatDateTime(item.occurred_at, timezone, locale)}</time></TableCell>
                       <TableCell role="cell" className="block min-w-0 whitespace-normal p-0 align-top [overflow-wrap:anywhere] xl:table-cell xl:max-w-64 xl:p-2">
                         {mobileLabel("actor")}
@@ -153,11 +169,11 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
                             : item.credential_id ? t("credential", { id: item.credential_id })
                               : item.client_id ? t("client", { id: item.client_id }) : t("unknown")}</div>
                         {item.principal_kind === "session" && item.actor_name && <div className="text-xs text-muted-foreground">{item.actor_user_id}</div>}
-                        {item.principal_kind !== "session" && item.principal_kind !== "system" && item.actor_user_id && <div className="text-xs text-muted-foreground">{t("principalAccount", { id: item.actor_name ? `${item.actor_name} (${item.actor_user_id})` : item.actor_user_id })}</div>}
+                        {viaCredential && item.actor_user_id && <div className="text-xs text-muted-foreground">{t("principalAccount", { id: item.actor_name ? `${item.actor_name} (${item.actor_user_id})` : item.actor_user_id })}</div>}
                         {item.credential_id && item.client_id && <div className="text-xs">{t("client", { id: item.client_id })}</div>}
                         {item.agent_id && <div className="text-xs">{t("agent", { id: item.agent_id })}</div>}
                         <div className="text-xs text-muted-foreground">{t(`surfaces.${item.surface}`)}</div>
-                        {item.principal_kind !== "session" && item.principal_kind !== "system" && <div className="text-xs text-muted-foreground">{t("accountAttribution")}</div>}
+                        {viaCredential && <div className="text-xs text-muted-foreground">{t("accountAttribution")}</div>}
                       </TableCell>
                       <TableCell role="cell" className="block min-w-0 p-0 align-top xl:table-cell xl:p-2">
                         {mobileLabel("operation")}
@@ -167,15 +183,17 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
                       </TableCell>
                       <TableCell role="cell" className="block min-w-0 whitespace-normal p-0 align-top [overflow-wrap:anywhere] xl:table-cell xl:max-w-64 xl:p-2">
                         {mobileLabel("target")}
-                        <div>{item.target_id || t("multiple")}</div>
-                        {item.subject_user_id && <div className="text-xs">{t("subject", { id: item.subject_user_id })}</div>}
+                        {/* A membership event's target IS the affected member: name it once. */}
+                        <div>{item.subject_user_id && item.subject_user_id === item.target_id ? t("subject", { id: item.target_id }) : item.target_id || t("multiple")}</div>
+                        {item.subject_user_id && item.subject_user_id !== item.target_id && <div className="text-xs">{t("subject", { id: item.subject_user_id })}</div>}
                         {item.context_id && <div className="text-xs text-muted-foreground">{t("context", { id: item.context_id })}</div>}
                         {item.target_type === "memory" && item.context_id && item.target_id && item.count === 1 && <Link className="text-sm underline" href={`/workspace/contexts/${encodeURIComponent(item.context_id)}?tab=memories&memoryId=${encodeURIComponent(item.target_id)}`}>{t("details")}</Link>}
                         {item.target_type === "sleep" && item.target_id && <Link className="text-sm underline" href={`/workspace/sleep-reports/${encodeURIComponent(item.target_id)}`}>{t("details")}</Link>}
                       </TableCell>
-                      <TableCell role="cell" className="block p-0 align-top xl:table-cell xl:p-2">{mobileLabel("outcome")}{t(`outcomes.${item.outcome}`)}</TableCell>
+                      <TableCell role="cell" className="block p-0 align-top xl:table-cell xl:whitespace-nowrap xl:p-2">{mobileLabel("outcome")}{t(`outcomes.${item.outcome}`)}</TableCell>
                     </TableRow>
-                  ))}</TableBody>
+                    );
+                  })}</TableBody>
                 </Table>
               </>}
       <div className="flex items-center gap-3">

@@ -4,7 +4,7 @@ export const HISTORY_OPERATIONS = [
   "memory.created", "memory.updated", "memory.deleted", "memory.restored",
   "context.created", "context.updated", "context.deleted", "context.restored",
   "member.invited", "member.added", "member.removed", "member.role_changed", "member.access_changed",
-  "credential.issued", "credential.revoked", "integration.created", "integration.updated",
+  "credential.issued", "credential.updated", "credential.revoked", "integration.created", "integration.updated",
   "integration.deleted", "sleep.completed", "sleep.failed", "sleep.undo",
 ] as const;
 
@@ -33,6 +33,8 @@ export interface HistoryPage {
   total: number;
   total_capped: boolean;
   next_cursor: string | null;
+  /** Effective retention of this workspace in days; older events are not returned. */
+  retention_days: number;
 }
 
 export function getOperationHistory(workspaceId: string, params: URLSearchParams, signal: AbortSignal) {
