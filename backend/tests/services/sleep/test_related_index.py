@@ -129,13 +129,10 @@ async def test_builder_is_bounded_incremental_and_audited(monkeypatch):
     assert result.details["indexed"] == 0
     assert result.memories_processed == 0
     reporter.add_action.assert_not_awaited()
-    original_evidence = index.evidence
+    # An edit after indexing invalidates the row at read time; the builder
+    # never re-certifies it (SQL rule, checked on PostgreSQL in
+    # tests/integration/test_2728_related_index.py).
     target.content = "An unrelated replacement after discovery."
-    result = await phase.execute(
-        *args, SleepBudget(max_memories=8), reporter=reporter, report_id=uuid4()
-    )
-    assert result.details["indexed"] == 0
-    assert index.evidence == original_evidence
     assert not current(index, source, target)
     db.execute.reset_mock()
     result = await phase.execute(*args, SleepBudget(max_memories=1), report_id=uuid4())

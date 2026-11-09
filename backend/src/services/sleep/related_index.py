@@ -114,6 +114,8 @@ class RelatedIndexPhase:
                 # at read time and never re-certified here, so re-reading it
                 # would only spend budget.
                 SleepRelatedIndex.edge_id.is_(None),
+                # A self-loop is never written, so it would come back every run.
+                NeuralMemoryEdge.src_id != NeuralMemoryEdge.dst_id,
                 source_row.deleted_at.is_(None),
                 target_row.deleted_at.is_(None),
                 # Erasure survivors are intentionally unindexed (#2738 review).

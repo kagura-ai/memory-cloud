@@ -1,5 +1,6 @@
 """Real PostgreSQL checks; skipped explicitly when TEST_DATABASE_URL is absent."""
 
+from datetime import timedelta
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -123,13 +124,16 @@ async def test_builder_charges_only_new_pairs_and_skips_suppressed_rows(db_sessi
             type="fact",
             client="pytest",
         )
-        for n in range(5)
+        for n in range(7)
     ]
     # An erasure survivor: intentionally unindexed, never linked.
     memories[4].embedding_suppressed_at = utcnow()
+    # Edited after its edge was discovered: the edge cannot certify the new text.
+    memories[6].updated_at = utcnow() + timedelta(hours=1)
     db.add_all(memories)
     await db.flush()
-    for src, dst in ((0, 1), (2, 3), (3, 4)):
+    # (3, 4) suppressed endpoint, (5, 6) edited endpoint, (0, 0) self-loop.
+    for src, dst in ((0, 1), (2, 3), (3, 4), (5, 6), (0, 0)):
         db.add(
             NeuralMemoryEdge(
                 user_id="test",
@@ -152,8 +156,13 @@ async def test_builder_charges_only_new_pairs_and_skips_suppressed_rows(db_sessi
     await db.flush()
     assert first.details == {"candidates": 2, "indexed": 2}
     assert first.memories_processed == 4
-    rows = (await db.execute(text("SELECT target_id FROM sleep_related_indexes"))).scalars().all()
-    assert memories[4].id not in set(rows)
+    rows = (
+        await db.execute(
+            text("SELECT target_id FROM sleep_related_indexes WHERE context_id = :ctx"),
+            {"ctx": ctx.id},
+        )
+    ).scalars()
+    assert set(rows) == {memories[1].id, memories[3].id}
 
     second = await RelatedIndexPhase(db).execute(
         *args, SleepBudget(max_memories=200), report_id=report.id
