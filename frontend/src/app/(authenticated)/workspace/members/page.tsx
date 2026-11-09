@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { copyText } from "@/lib/utils/clipboard";
+import { planLabelFromEnv } from "@/lib/utils/planLabel";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
@@ -1110,6 +1111,13 @@ export default function WorkspaceMembersPage() {
                     viewer={false}
                   />
                   <PermissionRow
+                    permission={t("permissionViewOperationHistory", { plan: planLabelFromEnv("promax", locale) })}
+                    owner={true}
+                    admin={true}
+                    member={false}
+                    viewer={false}
+                  />
+                  <PermissionRow
                     permission={t("permissionManageContexts")}
                     owner={true}
                     admin={true}
@@ -1161,6 +1169,7 @@ export default function WorkspaceMembersPage() {
                 </tbody>
               </table>
             </div>
+            <p className="mt-3 text-sm text-muted-foreground">{t("operationHistoryPermissionNote")}</p>
           </div>
         )}
       </div>

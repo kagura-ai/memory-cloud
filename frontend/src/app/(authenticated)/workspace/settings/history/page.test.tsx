@@ -86,6 +86,27 @@ describe("workspace operation history", () => {
     });
   });
 
+  it("keeps applied filters indicated while the mobile controls are collapsed", async () => {
+    render(<HistoryView workspaceId="workspace-one" />);
+    await screen.findByText("visible-target");
+    const toggle = screen.getByRole("button", { name: "filterToggle" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.change(screen.getByLabelText("query"), { target: { value: "Alice" } });
+    fireEvent.change(screen.getByLabelText("actor"), { target: { value: "actor-id" } });
+    fireEvent.submit(screen.getByRole("form", { name: "filters" }));
+    await waitFor(() => expect(state.get.mock.lastCall?.[1].get("query")).toBe("Alice"));
+    expect(toggle).toHaveTextContent("(2)");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveTextContent("(2)");
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: "reset" }));
+    await waitFor(() => expect(state.get.mock.lastCall?.[1].has("query")).toBe(false));
+    expect(toggle).not.toHaveTextContent("(2)");
+  });
+
   it("discards a late response after workspace switching and aborts its request", async () => {
     const old = deferred<HistoryPage>();
     state.get.mockReturnValueOnce(old.promise).mockResolvedValueOnce(response("new-workspace"));

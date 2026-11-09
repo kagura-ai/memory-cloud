@@ -3,7 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useLocale, useTranslations } from "next-intl";
-import { History } from "lucide-react";
+import { ChevronDown, History } from "lucide-react";
 import { fromZonedTime } from "date-fns-tz";
 import { useAuth } from "@/contexts/AuthContext";
 import { useErrorGate } from "@/hooks/useErrorGate";
@@ -36,6 +36,7 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [revision, setRevision] = useState(0);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [result, setResult] = useState<{ key: string; page: HistoryPage } | null>(null);
   const [failure, setFailure] = useState<{ key: string; error: unknown } | null>(null);
   const cursor = cursors[cursors.length - 1];
@@ -89,6 +90,8 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
     event.preventDefault(); setFilters({ ...draft }); setCursors([null]); setRevision(v => v + 1);
   };
   const setField = (key: keyof Filters, value: string) => setDraft(previous => ({ ...previous, [key]: value }));
+  const activeFilterCount = Object.values(filters).filter(value => value.trim() && value !== "all").length;
+  const mobileLabel = (key: string) => <span aria-hidden="true" className="mb-1 block text-xs font-medium text-muted-foreground xl:hidden">{t(key)}</span>;
   const select = (key: "operation" | "target_type" | "outcome", options: readonly string[], label: (value: string) => string) => (
     <div className="space-y-2" key={key}>
       <Label htmlFor={`history-${key}`}>{t(key)}</Label>
@@ -104,7 +107,14 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="space-y-6">
       <p className="text-sm text-muted-foreground">{t("coverage", { plan: planLabelFromEnv("promax", locale) })}</p>
-      <form onSubmit={apply} className="space-y-4 rounded-lg border p-4" aria-label={t("filters")}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" className="md:hidden" aria-expanded={filtersOpen} aria-controls="history-filters" onClick={() => setFiltersOpen(open => !open)}>
+          {t("filterToggle")}{activeFilterCount > 0 && <span> ({activeFilterCount})</span>}
+          <ChevronDown aria-hidden="true" className={`ml-2 h-4 w-4 ${filtersOpen ? "rotate-180" : ""}`} />
+        </Button>
+        <Button type="button" variant="outline" onClick={() => setRevision(v => v + 1)}>{t("refresh")}</Button>
+      </div>
+      <form id="history-filters" onSubmit={apply} className={`${filtersOpen ? "block" : "hidden"} space-y-4 rounded-lg border p-4 md:block`} aria-label={t("filters")}>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {(["query", "context_id", "actor", "agent_id", "since", "until"] as const).map(key => (
             <div className="space-y-2" key={key}>
@@ -123,7 +133,6 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
         <div className="flex flex-wrap gap-2">
           <Button type="submit">{t("apply")}</Button>
           <Button type="button" variant="outline" onClick={reset}>{t("reset")}</Button>
-          <Button type="button" variant="outline" onClick={() => setRevision(v => v + 1)}>{t("refresh")}</Button>
         </div>
       </form>
       {errorGate ? <FeatureGateNotice gate={errorGate} variant="page" />
@@ -132,12 +141,13 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
             : page.items.length === 0 ? <EmptyState icon={History} title={t("empty")} description={t("emptyDescription")} actionLabel={t("reset")} onAction={reset} compact />
               : <>
                 <p className="text-sm text-muted-foreground" role="status">{t(page.total_capped ? "totalCapped" : "total", { count: page.total })}</p>
-                <Table>
-                  <TableHeader><TableRow>{["time", "actor", "operation", "target", "outcome"].map(key => <TableHead key={key}>{t(key)}</TableHead>)}</TableRow></TableHeader>
-                  <TableBody>{page.items.map(item => (
-                    <TableRow key={item.id}>
-                      <TableCell className="whitespace-nowrap align-top"><time dateTime={item.occurred_at}>{formatDateTime(item.occurred_at, timezone, locale)}</time></TableCell>
-                      <TableCell className="max-w-64 whitespace-normal break-all align-top">
+                <Table role="table" aria-label={t("title")} className="block xl:table">
+                  <TableHeader role="rowgroup" className="sr-only xl:not-sr-only xl:table-header-group"><TableRow role="row">{["time", "actor", "operation", "target", "outcome"].map(key => <TableHead role="columnheader" scope="col" key={key}>{t(key)}</TableHead>)}</TableRow></TableHeader>
+                  <TableBody role="rowgroup" className="grid gap-4 xl:table-row-group [&_tr:last-child]:border xl:[&_tr:last-child]:border-0">{page.items.map(item => (
+                    <TableRow role="row" key={item.id} className="grid min-w-0 gap-3 rounded-lg border bg-background p-4 xl:table-row xl:rounded-none xl:border-0 xl:border-b xl:bg-transparent xl:p-0">
+                      <TableCell role="cell" className="block p-0 align-top xl:table-cell xl:whitespace-nowrap xl:p-2">{mobileLabel("time")}<time dateTime={item.occurred_at}>{formatDateTime(item.occurred_at, timezone, locale)}</time></TableCell>
+                      <TableCell role="cell" className="block min-w-0 whitespace-normal p-0 align-top [overflow-wrap:anywhere] xl:table-cell xl:max-w-64 xl:p-2">
+                        {mobileLabel("actor")}
                         <div>{item.principal_kind === "system" ? t("system")
                           : item.principal_kind === "session" ? item.actor_name || item.actor_user_id || t("unknown")
                             : item.credential_id ? t("credential", { id: item.credential_id })
@@ -149,19 +159,21 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
                         <div className="text-xs text-muted-foreground">{t(`surfaces.${item.surface}`)}</div>
                         {item.principal_kind !== "session" && item.principal_kind !== "system" && <div className="text-xs text-muted-foreground">{t("accountAttribution")}</div>}
                       </TableCell>
-                      <TableCell className="align-top">
+                      <TableCell role="cell" className="block min-w-0 p-0 align-top xl:table-cell xl:p-2">
+                        {mobileLabel("operation")}
                         {t(`operations.${item.operation}`)}
                         {item.count > 1 && <div className="text-xs">{t("count", { count: item.count })}</div>}
                         {item.changed_fields.length > 0 && <div className="max-w-52 break-words text-xs text-muted-foreground">{item.changed_fields.map(field => t(`fields.${field}`)).join(", ")}</div>}
                       </TableCell>
-                      <TableCell className="max-w-64 whitespace-normal break-all align-top">
+                      <TableCell role="cell" className="block min-w-0 whitespace-normal p-0 align-top [overflow-wrap:anywhere] xl:table-cell xl:max-w-64 xl:p-2">
+                        {mobileLabel("target")}
                         <div>{item.target_id || t("multiple")}</div>
                         {item.subject_user_id && <div className="text-xs">{t("subject", { id: item.subject_user_id })}</div>}
                         {item.context_id && <div className="text-xs text-muted-foreground">{t("context", { id: item.context_id })}</div>}
                         {item.target_type === "memory" && item.context_id && item.target_id && item.count === 1 && <Link className="text-sm underline" href={`/workspace/contexts/${encodeURIComponent(item.context_id)}?tab=memories&memoryId=${encodeURIComponent(item.target_id)}`}>{t("details")}</Link>}
                         {item.target_type === "sleep" && item.target_id && <Link className="text-sm underline" href={`/workspace/sleep-reports/${encodeURIComponent(item.target_id)}`}>{t("details")}</Link>}
                       </TableCell>
-                      <TableCell className="align-top">{t(`outcomes.${item.outcome}`)}</TableCell>
+                      <TableCell role="cell" className="block p-0 align-top xl:table-cell xl:p-2">{mobileLabel("outcome")}{t(`outcomes.${item.outcome}`)}</TableCell>
                     </TableRow>
                   ))}</TableBody>
                 </Table>
