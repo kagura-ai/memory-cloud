@@ -17,7 +17,7 @@ from services.operation_history_writer import OPERATIONS
 from services.permission_service import PermissionService
 from utils.exceptions import FeatureNotAvailableError, ValidationError
 
-router = APIRouter(tags=["workspace-operation-history"])
+router = APIRouter(tags=["workspaces"])
 
 
 class OperationHistoryItem(TZAwareBaseModel):

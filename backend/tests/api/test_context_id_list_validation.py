@@ -179,7 +179,8 @@ def access_route(monkeypatch):
 
     svc = MagicMock()
 
-    async def _update(*, workspace_id, user_id, allowed_context_ids):
+    async def _update(*, workspace_id, user_id, allowed_context_ids, actor_user_id):
+        assert actor_user_id == _session_user()["user_id"]
         return MagicMock(user_id=user_id, allowed_context_ids=allowed_context_ids)
 
     async def _add(*, workspace_id, user_id, role, invited_by, allowed_context_ids=None):

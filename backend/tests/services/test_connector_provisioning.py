@@ -1285,3 +1285,23 @@ async def test_provision_connector_rejects_unvendable_llm_config():
         )
 
     db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_context_creation_passes_actor_independently_of_owner():
+    workspace = SimpleNamespace(id=uuid4(), owner_user_id="workspace-owner")
+    created = SimpleNamespace(id=uuid4())
+    with patch(
+        "services.context_service.ContextService.create_context",
+        new_callable=AsyncMock,
+        return_value=created,
+    ) as create:
+        result = await ConnectorProvisioningService(MagicMock())._resolve_context(
+            workspace=workspace,
+            user_id="acting-admin",
+            context_id=None,
+            auto_create_context_name="chat",
+        )
+    assert result == created.id
+    assert create.await_args.kwargs["created_by"] == "workspace-owner"
+    assert create.await_args.kwargs["actor_user_id"] == "acting-admin"

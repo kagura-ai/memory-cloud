@@ -57,6 +57,8 @@ def _old_key(**over) -> SimpleNamespace:
 def _new_key() -> SimpleNamespace:
     return SimpleNamespace(
         id=8,
+        workspace_id=WORKSPACE_ID,
+        bound_context_id=None,
         public_id=NEW_PID,
         key_prefix="kmc_live_abcdefgh",
         name="ci",

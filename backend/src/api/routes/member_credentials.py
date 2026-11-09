@@ -585,6 +585,7 @@ async def regenerate_api_key(
         subject_user_id=user_id,
         target_id=old_key.public_id,
         context_id=old_key.bound_context_id,
+        event_key=f"api-key:{old_key.public_id}:credential.revoked",
     )
     record_operation(
         db,
@@ -594,6 +595,7 @@ async def regenerate_api_key(
         subject_user_id=user_id,
         target_id=new_key.public_id,
         context_id=new_key.bound_context_id,
+        event_key=f"api-key:{new_key.public_id}:credential.issued",
     )
     await db.commit()
     schedule_security_notification(
@@ -882,6 +884,7 @@ async def create_api_key(
             target_id=new_key.public_id,
             context_id=new_key.bound_context_id,
             changed_fields=["credential"],
+            event_key=f"api-key:{new_key.public_id}:credential.issued",
         )
         await db.commit()
         schedule_security_notification(
@@ -985,6 +988,7 @@ async def delete_api_key(
         target_id=api_key.public_id,
         context_id=api_key.bound_context_id,
         changed_fields=["credential"],
+        event_key=f"api-key:{api_key.public_id}:credential.revoked",
     )
     await db.commit()
 
@@ -1154,6 +1158,7 @@ async def delete_api_key_by_id(
             target_id=api_key.public_id,
             context_id=api_key.bound_context_id,
             changed_fields=["credential"],
+            event_key=f"api-key:{api_key.public_id}:credential.revoked",
         )
         await db.commit()
         logger.info(
@@ -1196,6 +1201,7 @@ async def delete_api_key_by_id(
         target_id=api_key.public_id,
         context_id=api_key.bound_context_id,
         changed_fields=["credential"],
+        event_key=f"api-key:{api_key.public_id}:credential.revoked",
     )
     await db.commit()
 

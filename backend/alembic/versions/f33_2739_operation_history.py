@@ -1,7 +1,7 @@
 """Workspace operation history (#2739), without historical backfill.
 
 Revision ID: f33_2739_operation_history
-Revises: f31_2724_event_dates
+Revises: f32_2728_sleep_related_index
 """
 
 import sqlalchemy as sa
@@ -10,7 +10,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "f33_2739_operation_history"
-down_revision = "f31_2724_event_dates"
+down_revision = "f32_2728_sleep_related_index"
 branch_labels = None
 depends_on = None
 

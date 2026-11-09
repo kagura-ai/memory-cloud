@@ -269,6 +269,7 @@ async def get_available_plans(
         "shared_contexts": "Shared Contexts",
         "content_chunks": "Content Chunk Vectors",  # Issue #2103
         "llm_selector": "Recall LLM Selector",  # Issue #2144
+        "operation_history": "Operation History",  # Issue #2739
     }
 
     return [

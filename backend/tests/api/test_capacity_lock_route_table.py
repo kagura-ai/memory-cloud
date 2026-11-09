@@ -78,6 +78,8 @@ ROUTER_DEFAULTS: dict[str, str] = {
 
 # Layer 2 — content routers: every route named, no default.
 ROUTES: dict[tuple[str, str], str] = {
+    # Authorized mutation metadata remains available while capacity is locked.
+    ("GET", "/api/v1/workspaces/{workspace_id}/operation-history"): ALLOWED,
     # memory — the MCP recall/remember family
     ("POST", "/api/v1/memory/recall"): BLOCKED,
     ("POST", "/api/v1/memory/reference"): BLOCKED,
@@ -253,6 +255,7 @@ ROUTES: dict[tuple[str, str], str] = {
 }
 
 CONTENT_ROUTERS = {
+    "operation_history",
     "memory",
     "contexts",
     "graph",

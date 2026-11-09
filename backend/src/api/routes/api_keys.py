@@ -71,7 +71,7 @@ def _record_workspace_key(db: AsyncSession, key: APIKey, actor: str, operation: 
         context_id=key.bound_context_id,
         target_id=key.public_id,
         surface="web",
-        event_key=f"api-key:{key.id}:{operation}",
+        event_key=f"api-key:{key.public_id}:{operation}",
     )
 
 

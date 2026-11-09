@@ -387,10 +387,13 @@ async def test_member_regenerate_keeps_the_default_context():
         revoked_at=None,
         default_context_id=CONTEXT_ID,
         agent_id=None,
+        bound_context_id=None,
         expires_at=None,
         connector_id=None,  # #1952
     )
-    new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")
+    new_key = SimpleNamespace(
+        id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new", bound_context_id=None
+    )
     db = MagicMock()
     db.execute = AsyncMock(
         return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old_key))

@@ -19,7 +19,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 import models.llm_pricing  # noqa: F401
 from api.routes.operation_history import get_operation_history
 from db.base import Base
-from models.auth import Context, IdentityLink, User, Workspace, WorkspaceMember
+from models.auth import APIKey, Context, IdentityLink, User, Workspace, WorkspaceMember
 from models.operation_history import OperationHistory as Event
 from models.resource import Resource, ResourceToken, WorkspaceConnector
 from services.operation_history import read_history
@@ -56,8 +56,11 @@ async def history_db():
             Resource,
             ResourceToken,
             WorkspaceConnector,
+            APIKey,
         )
     }
+    tables.add(APIKey.__table__)
+    tables.add(Base.metadata.tables["context_search_configs"])
     while True:
         dependencies = {fk.column.table for table in tables for fk in table.foreign_keys}
         if dependencies <= tables:
@@ -476,3 +479,92 @@ async def test_resource_credentials_follow_canonical_workspace_and_private_bound
     await manager.revoke_token(token.id, actor_user_id=s.other)
     await db.commit()
     assert len((await db.scalars(select(Event))).all()) == 2
+
+
+async def test_member_changes_distinguish_actor_and_subject_and_ignore_replays(history_db):
+    from services.workspace_service import WorkspaceService
+
+    db = history_db
+    s = await seed(db)
+    service = WorkspaceService(db)
+    for _ in range(2):
+        await service.update_member_role(s.workspace, s.other, "member", actor_user_id=s.owner)
+        await service.update_member_context_access(s.workspace, s.other, [], actor_user_id=s.owner)
+    events = (await db.scalars(select(Event))).all()
+    assert {e.operation for e in events} == {"member.role_changed", "member.access_changed"}
+    assert len(events) == 2
+    assert all(e.actor_user_id == s.owner and e.subject_user_id == s.other for e in events)
+
+
+async def test_connector_rebinding_keeps_private_history_boundary(history_db):
+    from services.connector_provisioning import ConnectorProvisioningService
+
+    db = history_db
+    s = await seed(db)
+    resource = Resource(id=uuid4(), workspace_id=s.workspace, resource_id="connector-history")
+    db.add(resource)
+    await db.flush()
+    connector = WorkspaceConnector(
+        workspace_id=s.workspace,
+        resource_pk=resource.id,
+        connector_type="slack",
+        context_id=s.private,
+        kmc_api_key_encrypted="placeholder",
+        created_by=s.owner,
+    )
+    db.add(connector)
+    await db.commit()
+    service = ConnectorProvisioningService(db)
+    # Private -> shared -> private -> unbound: each transition touches private data.
+    for target in (s.shared, s.private, None):
+        await service.update_connector_settings(
+            workspace_id=s.workspace, connector_id=connector.id, user_id=s.owner, context_id=target
+        )
+        await db.commit()
+    events = (await db.scalars(select(Event))).all()
+    assert len(events) == 3
+    assert all(e.context_id == s.private and e.context_private for e in events)
+    assert (await page(db, s))["total"] == 0
+
+
+async def test_personal_api_key_routes_record_workspace_revocation_once(history_db):
+    from api.routes.api_keys import delete_api_key, revoke_api_key
+
+    db = history_db
+    s = await seed(db)
+    key = APIKey(
+        user_id=s.owner,
+        workspace_id=s.workspace,
+        key_hash=uuid4().hex,
+        key_prefix="test",
+        name="test",
+    )
+    db.add(key)
+    await db.commit()
+    for _ in range(2):
+        await revoke_api_key(key.public_id, {"user_id": s.owner}, manager=None, db=db)
+    await delete_api_key(key.public_id, {"user_id": s.owner}, manager=None, db=db)
+    events = (await db.scalars(select(Event))).all()
+    assert len(events) == 1
+    assert events[0].operation == "credential.revoked"
+    assert events[0].actor_user_id == s.owner
+    assert events[0].workspace_id == s.workspace
+    assert events[0].surface == "web"
+
+
+async def test_context_creation_keeps_authenticated_actor_separate_from_owner(history_db):
+    from services.context_service import ContextService
+
+    db = history_db
+    s = await seed(db)
+    context = await ContextService(db).create_context(
+        workspace_id=s.workspace,
+        name="connector-auto",
+        created_by=s.owner,
+        actor_user_id=s.other,
+        create_collection=False,
+    )
+    event = (await db.scalars(select(Event).where(Event.target_id == str(context.id)))).one()
+    assert event.actor_user_id == s.other
+    assert event.context_owner_id == s.owner
+    assert event.context_private
