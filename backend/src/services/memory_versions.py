@@ -251,7 +251,7 @@ def record_revision(
         at=at,
         agent_id=prov.agent_id,
         changed_fields=list(prior or {}),
-        surface="system" if writer in {"erasure", "sleep"} else None,
+        surface="system" if writer == "erasure" else None,
         event_key=f"memory:{memory.id}:{memory.version}:{kind}:{at!s}",
     )
     db.add(

@@ -23,8 +23,9 @@ audit trail. Existing security logs remain independent and active on every tier.
 | Integrations | Connector provisioning, runtime/settings changes and deletion |
 | Sleep | Completion/failure with processed-memory count; undo/rollback summaries linked to the existing report |
 
-Individual versioned Sleep changes may also appear as system events. The Sleep
-report remains the authoritative breakdown of merges and other maintenance work.
+Sleep records a summary rather than one history row per maintenance revision.
+The existing SleepAction log powers undo; the Sleep report provides the
+breakdown of merges and other maintenance work.
 Global credentials without a workspace, legacy unscoped data, dynamic OAuth client
 registration, raw SQL/admin scripts and ordinary reads/searches are outside this
 initial feed. Failure rows currently come from persisted Sleep outcomes; rejected
