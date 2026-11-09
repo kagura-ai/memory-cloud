@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import Page, { HistoryView } from "./page";
+import Page from "./page";
+import { HistoryView } from "./HistoryView";
 import type { HistoryPage } from "@/lib/api/operation-history";
 
 const state = vi.hoisted(() => ({
