@@ -81,6 +81,9 @@ async def verify_oauth_bearer_token(
     token = await find_active_oauth_token(access_token, db)
     if token is None:
         return None
+    from auth.history_principal import set_history_principal
+
+    set_history_principal("oauth", client_id=token.client_id)
     return (token.user_id, token.scope)
 
 

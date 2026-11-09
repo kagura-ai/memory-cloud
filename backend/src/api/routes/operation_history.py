@@ -28,6 +28,9 @@ class OperationHistoryItem(TZAwareBaseModel):
     actor_name: str | None
     subject_user_id: str | None
     agent_id: UUID | None
+    principal_kind: str
+    credential_id: str | None
+    client_id: str | None
     surface: str
     operation: str
     target_type: str
@@ -40,6 +43,7 @@ class OperationHistoryItem(TZAwareBaseModel):
 class OperationHistoryPage(TZAwareBaseModel):
     items: list[OperationHistoryItem]
     total: int
+    total_capped: bool = False
     next_cursor: str | None
 
 
@@ -80,9 +84,9 @@ async def get_operation_history(
         raise FeatureNotAvailableError.for_feature(plan or "free", "operation_history")
     if operation is not None and operation not in OPERATIONS:
         raise ValidationError("Invalid operation", field="operation")
-    for value in (since, until):
+    for field, value in (("since", since), ("until", until)):
         if value is not None and value.tzinfo is None:
-            raise ValidationError("Time filters require a timezone", field="since")
+            raise ValidationError("Time filters require a timezone", field=field)
     if since and until and since > until:
         raise ValidationError("Start must not be after end", field="since")
     return OperationHistoryPage(

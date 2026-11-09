@@ -529,6 +529,7 @@ async def test_connector_rebinding_keeps_private_history_boundary(history_db):
 
 async def test_personal_api_key_routes_record_workspace_revocation_once(history_db):
     from api.routes.api_keys import delete_api_key, revoke_api_key
+    from auth.history_principal import set_history_principal
 
     db = history_db
     s = await seed(db)
@@ -541,6 +542,7 @@ async def test_personal_api_key_routes_record_workspace_revocation_once(history_
     )
     db.add(key)
     await db.commit()
+    set_history_principal("session")
     for _ in range(2):
         await revoke_api_key(key.public_id, {"user_id": s.owner}, manager=None, db=db)
     await delete_api_key(key.public_id, {"user_id": s.owner}, manager=None, db=db)
@@ -550,6 +552,7 @@ async def test_personal_api_key_routes_record_workspace_revocation_once(history_
     assert events[0].actor_user_id == s.owner
     assert events[0].workspace_id == s.workspace
     assert events[0].surface == "web"
+    set_history_principal()
 
 
 async def test_context_creation_keeps_authenticated_actor_separate_from_owner(history_db):
@@ -568,3 +571,184 @@ async def test_context_creation_keeps_authenticated_actor_separate_from_owner(hi
     assert event.actor_user_id == s.other
     assert event.context_owner_id == s.owner
     assert event.context_private
+
+
+async def test_history_write_failure_rolls_back_business_change(history_db):
+    from sqlalchemy.exc import IntegrityError
+
+    db = history_db
+    s = await seed(db)
+    original_name = await db.scalar(select(Workspace.name).where(Workspace.id == s.workspace))
+    await db.execute(
+        update(Workspace).where(Workspace.id == s.workspace).values(name="uncommitted")
+    )
+    row = record_operation(
+        db,
+        operation="context.updated",
+        actor_user_id=s.owner,
+        workspace_id=s.workspace,
+    )
+    row.count = 0  # Inject a real database failure in the evidence INSERT.
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
+    assert (
+        await db.scalar(select(Workspace.name).where(Workspace.id == s.workspace)) == original_name
+    )
+    assert (await page(db, s))["items"] == []
+
+
+async def test_timestamp_is_utc_under_non_utc_database_timezone(history_db):
+    from sqlalchemy import text
+
+    db = history_db
+    s = await seed(db)
+    await db.execute(text("SET TIME ZONE 'Asia/Tokyo'"))
+    record_operation(
+        db,
+        operation="context.updated",
+        actor_user_id=s.owner,
+        workspace_id=s.workspace,
+        at=datetime(2026, 11, 9, 12),
+    )
+    await db.commit()
+    assert (await page(db, s))["items"][0]["occurred_at"] == datetime(2026, 11, 9, 12, tzinfo=UTC)
+
+
+async def test_linked_private_owner_reads_only_current_link_set(history_db):
+    db = history_db
+    s = await seed(db)
+    record_operation(db, operation="memory.created", actor_user_id=s.other, context_id=s.private)
+    await db.commit()
+    assert (await page(db, s))["total"] == 0
+    group = uuid4()
+    db.add_all([IdentityLink(group_id=group, user_id=user) for user in (s.owner, s.other)])
+    await db.commit()
+    assert (await page(db, s))["total"] == 1
+    await db.execute(delete(IdentityLink).where(IdentityLink.user_id == s.owner))
+    await db.commit()
+    assert (await page(db, s))["total"] == 0
+
+
+async def test_count_cap_has_same_privacy_filters_and_keeps_pagination(history_db, monkeypatch):
+    monkeypatch.setattr("services.operation_history.COUNT_LIMIT", 2)
+    db = history_db
+    s = await seed(db)
+    for _ in range(4):
+        record_operation(db, operation="memory.created", actor_user_id=s.other, context_id=s.shared)
+        record_operation(
+            db, operation="memory.created", actor_user_id=s.other, context_id=s.private
+        )
+    await db.commit()
+    first = await read_history(db, workspace_id=s.workspace, user_id=s.owner, limit=2)
+    assert first["total"] == 2 and first["total_capped"] is True
+    assert len(first["items"]) == 2 and first["next_cursor"]
+    second = await read_history(
+        db,
+        workspace_id=s.workspace,
+        user_id=s.owner,
+        limit=2,
+        cursor=first["next_cursor"],
+    )
+    assert len(second["items"]) == 2 and second["next_cursor"] is None
+    hidden = await page(db, s, context_id=s.private)
+    assert hidden["total"] == 0 and hidden["total_capped"] is False
+
+
+@pytest_asyncio.fixture
+async def history_http(history_db):
+    """Exercise FastAPI parsing and the actual SessionUser dependency over HTTP."""
+    from fastapi import FastAPI, Request
+    from httpx import ASGITransport, AsyncClient
+
+    from api.main import memory_cloud_exception_handler
+    from api.routes.operation_history import router
+    from db.base import get_db
+    from utils.exceptions import MemoryCloudException
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.add_exception_handler(MemoryCloudException, memory_cloud_exception_handler)
+    s = await seed(history_db)
+    app.state.user_id = s.owner
+
+    @app.middleware("http")
+    async def browser_session(request: Request, call_next):
+        request.state.user = {"user_id": app.state.user_id} if app.state.user_id else None
+        return await call_next(request)
+
+    async def database():
+        yield history_db
+
+    app.dependency_overrides[get_db] = database
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        yield client, app, s, f"/api/v1/workspaces/{s.workspace}/operation-history"
+
+
+async def test_http_rejects_all_bearer_credentials_and_expired_session(history_http):
+    client, app, _, url = history_http
+    assert (await client.get(url)).status_code == 200
+    for token in ("kagura_test", "oauth-test", "kagura_resource_test"):
+        result = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        assert result.status_code == 403
+        assert "items" not in result.json()
+    app.state.user_id = None
+    assert (await client.get(url)).status_code == 401
+
+
+async def test_http_rechecks_removed_role_and_selected_workspace_entitlement(
+    history_http, history_db
+):
+    client, _, s, url = history_http
+    record_operation(
+        history_db, operation="member.added", actor_user_id=s.owner, workspace_id=s.workspace
+    )
+    await history_db.commit()
+    response = await client.get(url)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert len(response.json()["items"]) == 1
+    await history_db.execute(
+        update(Workspace).where(Workspace.id == s.workspace).values(plan_name="free")
+    )
+    await history_db.commit()
+    denied = await client.get(url)
+    assert denied.status_code == 403 and denied.json()["error"] == "FEAT-001"
+    await history_db.execute(
+        update(Workspace).where(Workspace.id == s.workspace).values(plan_name="promax")
+    )
+    await history_db.commit()
+    assert (await client.get(url)).status_code == 200
+    await history_db.execute(
+        delete(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == s.workspace,
+            WorkspaceMember.user_id == s.owner,
+        )
+    )
+    await history_db.commit()
+    assert (await client.get(url)).status_code == 403
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"query": "x" * 121},
+        {"limit": 0},
+        {"limit": 101},
+        {"cursor": "x" * 513},
+        {"context_id": "invalid"},
+        {"agent_id": "invalid"},
+        {"outcome": "invalid"},
+    ],
+)
+async def test_http_validates_query_boundaries(history_http, params):
+    client, _, _, url = history_http
+    assert (await client.get(url, params=params)).status_code == 422
+
+
+async def test_http_validates_timezone_and_treats_blank_actor_as_unset(history_http):
+    client, _, _, url = history_http
+    naive = await client.get(url, params={"until": "2026-11-09T12:00:00"})
+    assert naive.status_code == 422
+    assert naive.json()["details"]["field"] == "until"
+    assert (await client.get(url, params={"actor": "  "})).status_code == 200

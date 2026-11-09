@@ -15,6 +15,8 @@ from services.identity_link_service import linked_user_ids
 from utils.datetime import to_utc_iso
 from utils.exceptions import ValidationError
 
+COUNT_LIMIT = 1000
+
 
 def encode_cursor(at: datetime, event_id: UUID) -> str:
     return base64.urlsafe_b64encode(json.dumps([to_utc_iso(at), str(event_id)]).encode()).decode()
@@ -87,7 +89,7 @@ async def read_history(
     conditions = visibility_conditions(workspace_id, owners)
     for column, value in (
         (Event.context_id, context_id),
-        (Event.actor_user_id, actor),
+        (Event.actor_user_id, actor.strip() or None if actor is not None else None),
         (Event.agent_id, agent_id),
         (Event.operation, operation),
         (Event.target_type, target_type),
@@ -109,6 +111,8 @@ async def read_history(
                         Event.actor_user_id,
                         Event.subject_user_id,
                         Event.agent_id,
+                        Event.credential_id,
+                        Event.client_id,
                         Event.target_id,
                         Event.context_id,
                         Event.operation,
@@ -121,7 +125,10 @@ async def read_history(
         )
     # The actor's current display name is resolved live, never copied into history.
     joined = Event.__table__.outerjoin(User, User.user_id == Event.actor_user_id)
-    total = await db.scalar(select(func.count()).select_from(joined).where(*conditions))
+    # A capped, permission-scoped count avoids scanning every retained matching
+    # row on each refresh. It is a lower bound when more than COUNT_LIMIT match.
+    counted = select(Event.id).select_from(joined).where(*conditions).limit(COUNT_LIMIT + 1)
+    total = int(await db.scalar(select(func.count()).select_from(counted.subquery())) or 0)
     if cursor:
         at, identifier = decode_cursor(cursor)
         conditions.append(tuple_(Event.occurred_at, Event.id) < tuple_(at, identifier))
@@ -144,6 +151,9 @@ async def read_history(
             "actor_name": name,
             "subject_user_id": event.subject_user_id,
             "agent_id": event.agent_id,
+            "principal_kind": event.principal_kind,
+            "credential_id": event.credential_id,
+            "client_id": event.client_id,
             "surface": event.surface,
             "operation": event.operation,
             "target_type": event.target_type,
@@ -156,7 +166,8 @@ async def read_history(
     ]
     return {
         "items": items,
-        "total": total or 0,
+        "total": min(total, COUNT_LIMIT),
+        "total_capped": total > COUNT_LIMIT,
         "next_cursor": encode_cursor(page[-1][0].occurred_at, page[-1][0].id)
         if len(rows) > limit
         else None,

@@ -179,6 +179,9 @@ async def management_principal(
     actor = request.headers.get("x-management-actor", "")
     if request.method != "GET" and not re.fullmatch(r"[a-f0-9]{64}", actor):
         raise BadRequestError("Service-attributed actor required")
+    from auth.history_principal import set_history_principal
+
+    set_history_principal("management_grant", credential_id=str(grant.id))
     return ManagementPrincipal(grant, resource, workspace, fields, actor)
 
 

@@ -119,3 +119,27 @@ class TestRestoreContextCommand:
             assert _run([str(CONTEXT_ID)], restore) == 0
 
         assert restore.await_args.kwargs["actor_id"] == "cli:deploy"
+
+    def test_cli_actor_is_not_an_authenticated_history_account(self):
+        from auth.history_principal import get_history_principal, set_history_principal
+
+        seen = []
+
+        async def restore(*args, **kwargs):
+            seen.append(get_history_principal())
+            return _result(dry_run=kwargs["dry_run"])
+
+        set_history_principal("session")
+        try:
+            assert (
+                _run(
+                    [str(CONTEXT_ID), "--actor", "owner-account", "--apply", "--yes"],
+                    AsyncMock(side_effect=restore),
+                )
+                == 0
+            )
+            assert [item.kind for item in seen] == ["system", "system"]
+            assert all(item.credential_id is None for item in seen)
+            assert get_history_principal().kind == "session"
+        finally:
+            set_history_principal()

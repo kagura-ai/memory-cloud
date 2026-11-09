@@ -70,9 +70,14 @@ async def _main(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
 
     async def run(db: AsyncSession, dry_run: bool) -> ContextRestoreResult:
-        return await restore_deleted_context(
-            db, args.context_id, dry_run=dry_run, new_name=args.name, actor_id=args.actor
-        )
+        from auth.history_principal import history_principal_scope
+
+        # The optional CLI actor is operator-supplied audit context, not a
+        # browser-authenticated account. Workspace history attributes maintenance.
+        with history_principal_scope("system"):
+            return await restore_deleted_context(
+                db, args.context_id, dry_run=dry_run, new_name=args.name, actor_id=args.actor
+            )
 
     return await run_plan_apply(
         run=run,

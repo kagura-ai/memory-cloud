@@ -166,6 +166,9 @@ async def verify_resource_token(
         # and cleanup URL) with no further membership read.
         await ensure_not_capacity_locked(db, workspace)
 
+    from auth.history_principal import set_history_principal
+
+    set_history_principal("resource_token", credential_id=token_record.public_id)
     return token_record, token_record.quota_events_per_hour, context
 
 

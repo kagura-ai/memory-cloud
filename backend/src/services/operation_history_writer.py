@@ -4,7 +4,7 @@ Never commits independently or checks a subscription: recording runs on all
 tiers. The paid feature is reading. A rollback discards both change and event.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -13,10 +13,12 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from auth.history_principal import HistoryPrincipal, get_history_principal
 from models.auth import Context
 from models.operation_history import OperationHistory
 from services.write_provenance import current_provenance
-from utils.datetime import utcnow
+
+_UNSET_AGENT = object()
 
 
 @event.listens_for(Session, "before_flush")
@@ -117,7 +119,7 @@ def record_operation(
     surface: str | None = None,
     at: datetime | None = None,
     event_key: str | None = None,
-    agent_id: UUID | None = None,
+    agent_id: UUID | None | object = _UNSET_AGENT,
     private_before: bool = False,
 ) -> OperationHistory | None:
     """Queue one event; only field NAMES from the closed vocabulary survive.
@@ -139,9 +141,31 @@ def record_operation(
     from api.correlation import get_correlation
 
     corr = get_correlation()
-    source = surface or ("mcp" if corr and corr.surface == "mcp" else "api" if corr else "unknown")
+    principal = get_history_principal()
+    source = surface or (
+        "system"
+        if principal.kind == "system"
+        else "mcp"
+        if corr and corr.surface == "mcp"
+        else "web"
+        if principal.kind == "session"
+        else "api"
+        if principal.kind not in {"unknown", "system"}
+        else "unknown"
+    )
     if source not in {"web", "api", "mcp", "system", "unknown"}:
         raise ValueError("Unsupported operation history surface")
+    if source == "system":
+        principal = HistoryPrincipal("system")
+        actor_user_id = None
+    occurred_at = at or datetime.now(UTC)
+    # Existing source records use naive UTC. Never let the process timezone
+    # reinterpret those values while binding to this TIMESTAMPTZ column.
+    occurred_at = (
+        occurred_at.replace(tzinfo=UTC)
+        if occurred_at.tzinfo is None
+        else occurred_at.astimezone(UTC)
+    )
     identifier = uuid5(NAMESPACE_URL, "kmc-operation:" + event_key) if event_key else uuid4()
     # A caller may queue the same source twice before flushing. The PK also
     # prevents a source from acquiring two persisted representations.
@@ -154,10 +178,15 @@ def record_operation(
         "context_id": context_id,
         "context_private": False,
         "context_owner_id": None,
-        "occurred_at": at or utcnow(),
+        "occurred_at": occurred_at,
         "actor_user_id": actor_user_id,
         "subject_user_id": subject_user_id,
-        "agent_id": agent_id or (current_provenance().agent_id if source != "system" else None),
+        "agent_id": None
+        if source == "system"
+        else (current_provenance().agent_id if agent_id is _UNSET_AGENT else agent_id),
+        "principal_kind": principal.kind,
+        "credential_id": principal.credential_id,
+        "client_id": principal.client_id,
         "surface": source,
         "operation": operation,
         "target_type": operation.split(".")[0],

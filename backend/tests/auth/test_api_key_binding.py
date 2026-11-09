@@ -300,6 +300,7 @@ class TestVerifyKeyTimingSafeComparison:
     def _record(key_hash: str) -> SimpleNamespace:
         return SimpleNamespace(
             id=1,
+            public_id="akey_" + "a" * 22,
             name="laptop",
             user_id="user-1",
             workspace_id=None,
@@ -336,6 +337,7 @@ class TestVerifyKeyTimingSafeComparison:
         result = await self._verify(self._record(sha256_hex(self.API_KEY)))
         assert result is not None
         assert result.user_id == "user-1"
+        assert result.public_id == "akey_" + "a" * 22
 
 
 class TestVerifyKeyLastUsedThrottle:
@@ -349,6 +351,7 @@ class TestVerifyKeyLastUsedThrottle:
     def _key_record(last_used_at: datetime | None) -> SimpleNamespace:
         return SimpleNamespace(
             id=1,
+            public_id="akey_" + "a" * 22,
             name="laptop",
             user_id="user-1",
             workspace_id=None,

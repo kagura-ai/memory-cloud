@@ -724,6 +724,7 @@ class TestConnectorOwnedIngest:
         workspace_id = uuid4()
         token = SimpleNamespace(
             id=1,
+            public_id="rtok_" + "a" * 22,
             resource_pk=uuid4(),
             workspace_id=workspace_id,
             quota_events_per_hour=1000,
@@ -856,6 +857,7 @@ class TestIngestSuspendedOnFree:
         workspace_id = uuid4()
         token = SimpleNamespace(
             id=1,
+            public_id="rtok_" + "a" * 22,
             resource_pk=uuid4(),
             workspace_id=workspace_id,
             quota_events_per_hour=1000,

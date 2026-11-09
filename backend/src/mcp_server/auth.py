@@ -58,6 +58,7 @@ class OAuthGrant:
     client_scope_unavailable: bool = False
     # #2129: the grant's MCP default context (``oauth_grant_settings``).
     default_context_id: "UUID | None" = None
+    client_id: str | None = None
 
 
 # The OAuth scopes of the current request's access token; ``None`` when the
@@ -196,10 +197,12 @@ async def authenticate_mcp_request(
     # agent-bound. Defense in depth against a stale scope in reused contexts.
     # #1686: the OAuth scopes likewise; only the OAuth2 branch sets them.
     from auth.agent_scope import set_agent_scope
+    from auth.history_principal import set_history_principal
     from auth.oauth2_bearer import is_oauth_bearer_token
     from mcp_server.tools._helpers import set_mcp_credential_default_context
 
     set_agent_scope(None)
+    set_history_principal()
     _mcp_oauth_scopes.set(None)
     _mcp_connector_credential.set(False)
     # #2129: only a user API key or an OAuth grant carries one (set below).
@@ -213,6 +216,7 @@ async def authenticate_mcp_request(
             # #2025: auth success fires once per MCP request — DEBUG, not INFO,
             # so it does not dominate the log volume. Failures stay at WARNING.
             logger.debug("MCP auth success: method=session_cookie, user=%s", user_id)
+            set_history_principal("session")
             return (user_id, None, None)  # Session auth doesn't have context/workspace scope
 
     # No auth header and no session → authentication required
@@ -264,6 +268,7 @@ async def authenticate_mcp_request(
                 )
             )
             set_mcp_credential_default_context(grant.default_context_id)
+            set_history_principal("oauth", client_id=grant.client_id)
             logger.debug("MCP auth success: method=oauth2, user=%s", grant.user_id)
             # Issue #245: context_id is now required in tool args, not from auth
             return (grant.user_id, None, None)
@@ -382,6 +387,7 @@ async def _verify_oauth2_token(access_token: str) -> OAuthGrant | None:
                 client_scope=client_scope,
                 client_scope_unavailable=client_scope_unavailable,
                 default_context_id=await _grant_default_context(token.user_id, token.client_id, db),
+                client_id=token.client_id,
             )
     return None
 
