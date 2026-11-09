@@ -48,6 +48,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { requestCapacityRefresh } from "@/lib/capacityRefresh";
 import { EditMemoryDialog } from "@/components/memories/EditMemoryDialog";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { InlineSpinner } from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
@@ -80,6 +81,11 @@ const DEBOUNCE_MS = 300;
 // The API returns top-k, not offset pages. Increasing k replaces the ranking.
 const RECALL_K = 20;
 const MAX_RECALL_K = 100;
+
+/** Everything about a recall request except k: "show more" keeps it. */
+function recallScope(request: { query: string; include_superseded: boolean; filters: object }) {
+  return JSON.stringify([request.query, request.include_superseded, request.filters]);
+}
 
 type SearchMode = "text" | "recall";
 
@@ -118,11 +124,17 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
   // effective request its rows answer, so loading is derived, not stored.
   const [searchMode, setSearchMode] = useState<SearchMode>(recallOnly ? "recall" : "text");
   const [includeSuperseded, setIncludeSuperseded] = useState(false);
-  const [recallRequest, setRecallRequest] = useState<{ query: string; k: number; scopeKey: string } | null>(
-    null,
-  );
+  // `grow`: set only by "show more"; a refresh or filter reset clears it.
+  const [recallRequest, setRecallRequest] = useState<{
+    query: string;
+    k: number;
+    scopeKey: string;
+    grow?: boolean;
+  } | null>(null);
   const [recallOutcome, setRecallOutcome] = useState<{
     request: object;
+    scope: string;
+    k: number;
     results: RecallResultItem[];
     error: string | null;
   } | null>(null);
@@ -130,7 +142,8 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
   // Re-run the submitted recall after an edit / delete / accepted supersede
   // (no-op before one).
   const refreshRecall = useCallback(() => {
-    setRecallRequest((r) => (r ? { ...r } : r));
+    // Not a "show more": the refreshed page must not show pre-refresh rows.
+    setRecallRequest((r) => (r ? { ...r, grow: false } : r));
   }, []);
 
   const dialog = useMemoryDetailDialog({
@@ -307,7 +320,7 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
   const scopeKey = JSON.stringify([contextId, selectedTags, includeSuperseded]);
   if (recallRequest && recallRequest.scopeKey !== scopeKey) {
     // Reset when filters change, including when returning to an earlier filter set.
-    setRecallRequest({ ...recallRequest, k: RECALL_K, scopeKey });
+    setRecallRequest({ ...recallRequest, k: RECALL_K, scopeKey, grow: false });
   }
   const recallK = recallRequest?.scopeKey === scopeKey ? recallRequest.k : RECALL_K;
   const recallParams = useMemo(
@@ -370,7 +383,13 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
     recallMemories(request).then(
       (response) => {
         if (!current()) return;
-        setRecallOutcome({ request, results: response.results, error: null });
+        setRecallOutcome({
+          request,
+          scope: recallScope(request),
+          k: request.k,
+          results: response.results,
+          error: null,
+        });
         if (searchModeRef.current === "recall") {
           setAnnouncement(
             tRecall("resultsCount", { count: response.results.length }),
@@ -381,6 +400,8 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
         if (!current()) return;
         setRecallOutcome({
           request,
+          scope: recallScope(request),
+          k: request.k,
           results: [],
           error: err instanceof Error ? err.message : tRecall("loadFailed"),
         });
@@ -390,10 +411,42 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
 
   const recallLoading =
     recallParams !== null && outcomeRequest !== recallParams;
+  // "Show more": the same query and scope re-run with a larger k. The shown
+  // page stays (busy) and so does its button, so focus and scroll stay put.
+  const recallGrowing =
+    recallLoading &&
+    recallRequest?.grow === true &&
+    recallParams !== null &&
+    recallOutcome !== null &&
+    recallOutcome.error === null &&
+    recallOutcome.scope === recallScope(recallParams) &&
+    recallParams.k > recallOutcome.k;
   const recallError = recallLoading ? null : (recallOutcome?.error ?? null);
-  // Rows of an earlier request are never shown under a new one: while a
-  // re-run is in flight the list shows its loading state instead.
-  const recallResults = recallLoading ? [] : (recallOutcome?.results ?? []);
+  // Rows of any other earlier request are never shown under a new one: while
+  // such a re-run is in flight the list shows its loading state instead.
+  const recallResults = recallLoading
+    ? recallGrowing && recallOutcome
+      ? recallOutcome.results
+      : []
+    : (recallOutcome?.results ?? []);
+  // A page shorter than k: the ranking ran out (the fold and shadowing run
+  // on the pool before the top-k cut). With a k-sized pool (neural off) a
+  // fold can still shorten it, so the hint only says how many are shown.
+  // While a larger page loads the button stays (aria-disabled), including
+  // the last step to MAX_RECALL_K.
+  const canLoadMore =
+    recallGrowing || (recallK < MAX_RECALL_K && recallResults.length >= recallK);
+  const loadMoreClickedRef = useRef(false);
+  const limitHintRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    // The button the user just pressed is gone (the ranking ran out or hit
+    // the maximum) and focus fell to <body>: keep it next to the button.
+    // Focus the user moved elsewhere meanwhile stays where it is.
+    const focusLost = !document.activeElement || document.activeElement === document.body;
+    if (!canLoadMore && loadMoreClickedRef.current && focusLost) limitHintRef.current?.focus();
+    loadMoreClickedRef.current = false;
+    // Runs when a page lands (a new outcome) or the button's availability changes.
+  }, [canLoadMore, recallOutcome]);
   const includeSupersededId = useId();
   const includeSupersededHelpId = useId();
 
@@ -666,13 +719,34 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
               onOpen={dialog.openDetail}
             />
           ) : null}
-          {recallRequest && !recallLoading && !recallError && recallResults.length > 0 && (
+          {recallRequest && (!recallLoading || recallGrowing) && !recallError && recallResults.length > 0 && (
             <div className="space-y-2">
-              <p className="text-xs text-muted-foreground">{tRecall("limitHint", { limit: recallK })}</p>
-              {recallK < MAX_RECALL_K && (
-                <Button type="button" variant="outline" onClick={() => {
-                  setRecallRequest({ ...recallRequest, k: Math.min(recallK + RECALL_K, MAX_RECALL_K), scopeKey });
-                }}>
+              <p ref={limitHintRef} tabIndex={-1} className="text-xs text-muted-foreground focus:outline-none">
+                {canLoadMore
+                  ? // While a larger page loads, describe the page on screen.
+                    tRecall("limitHint", { limit: recallGrowing && recallOutcome ? recallOutcome.k : recallK })
+                  : recallK >= MAX_RECALL_K && recallResults.length >= MAX_RECALL_K
+                    ? tRecall("limitHintMax", { limit: MAX_RECALL_K })
+                    : tRecall("limitHintAll", { count: recallResults.length })}
+              </p>
+              {canLoadMore && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  // aria-disabled, not disabled: a disabled button drops focus.
+                  aria-disabled={recallGrowing || undefined}
+                  onClick={() => {
+                    if (recallGrowing) return;
+                    loadMoreClickedRef.current = true;
+                    setRecallRequest({
+                      ...recallRequest,
+                      k: Math.min(recallK + RECALL_K, MAX_RECALL_K),
+                      scopeKey,
+                      grow: true,
+                    });
+                  }}
+                >
+                  {recallGrowing && <InlineSpinner className="mr-2" />}
                   {tRecall("loadMore")}
                 </Button>
               )}

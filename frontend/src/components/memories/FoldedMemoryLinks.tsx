@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { referenceMemory } from "@/lib/api/memory";
 import { Button } from "@/components/ui/button";
@@ -18,8 +18,14 @@ export function FoldedMemoryLinks({ ids, count, onOpen }: {
   const [loaded, setLoaded] = useState(0);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Unmounting (a re-run replacing the rows, a closed dialog) aborts the
+  // summary reads still in flight instead of letting the batches run on.
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   async function load(start: number) {
+    abortRef.current ??= new AbortController();
+    const unmounted = abortRef.current.signal;
     setLoading(true);
     setFailed(false);
     const end = Math.min(start + 20, ids.length);
@@ -27,17 +33,29 @@ export function FoldedMemoryLinks({ ids, count, onOpen }: {
     let hasFailure = false;
     // Bound both each expansion and parallel requests. Errors keep detail links usable.
     for (let i = start; i < end; i += 4) {
+      if (unmounted.aborted) return;
       const batch = ids.slice(i, Math.min(i + 4, end));
       const results = await Promise.allSettled(
         batch.map(async (id) => {
-          const memory = await referenceMemory(id, { recordAccess: false, signal: AbortSignal.timeout(10_000) });
-          setSummaries((previous) => ({ ...previous, [id]: memory.summary }));
+          // Each read ends on unmount or after 10 s, whichever comes first.
+          const request = new AbortController();
+          const abort = () => request.abort();
+          unmounted.addEventListener("abort", abort, { once: true });
+          const timer = setTimeout(abort, 10_000);
+          try {
+            const memory = await referenceMemory(id, { recordAccess: false, signal: request.signal });
+            if (!unmounted.aborted) setSummaries((previous) => ({ ...previous, [id]: memory.summary }));
+          } finally {
+            clearTimeout(timer);
+            unmounted.removeEventListener("abort", abort);
+          }
         }),
       );
       results.forEach((result) => {
         if (result.status === "rejected") hasFailure = true;
       });
     }
+    if (unmounted.aborted) return;
     setFailed(hasFailure);
     setLoading(false);
   }

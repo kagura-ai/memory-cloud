@@ -7,7 +7,7 @@
  * opening the newer memory), the per-row View button and the empty state.
  */
 
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RecallResultsList } from "./RecallResultsList";
@@ -137,6 +137,17 @@ describe("RecallResultsList", () => {
     fireEvent.click(screen.getByRole("button", { name: "olderVersion:1" }));
     expect(onOpen).toHaveBeenCalledWith(OLDER_1);
     expect(await screen.findByRole("button", { name: "Loaded summary" })).toBeInTheDocument();
+  });
+
+  it("aborts pending summary loads when the list unmounts", async () => {
+    vi.mocked(referenceMemory).mockReturnValue(new Promise(() => {}));
+    const view = render(<RecallResultsList results={[row({ folded: { count: 2, memory_ids: [OLDER_1, OLDER_2] } })]} loading={false} query="deploy" onOpen={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "folded:2" }));
+    await waitFor(() => expect(referenceMemory).toHaveBeenCalledTimes(2));
+    const signals = vi.mocked(referenceMemory).mock.calls.map(([, options]) => options?.signal);
+    expect(signals.every((signal) => signal && !signal.aborted)).toBe(true);
+    view.unmount();
+    expect(signals.every((signal) => signal?.aborted)).toBe(true);
   });
 
   it("keeps the folded count when the id list is capped", () => {

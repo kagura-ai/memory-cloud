@@ -3858,6 +3858,8 @@
         "modeGraph": "Graph",
         "loadMore": "Show more matches",
         "limitHint": "Showing up to {limit} matches. Show more reruns the search with a larger limit and may reorder results (maximum 100).",
+        "limitHintAll": "Showing {count, plural, one {# match} other {# matches}}.",
+        "limitHintMax": "Showing up to {limit} matches, the maximum.",
         "olderVersion": "Older version {number}",
         "summariesFailed": "Some summaries could not be loaded. Open an older version to view its details.",
         "moreVersions": "Show more older versions",
