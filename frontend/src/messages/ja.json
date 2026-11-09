@@ -3858,6 +3858,8 @@
         "modeGraph": "グラフ",
         "loadMore": "検索結果をさらに表示",
         "limitHint": "最大{limit}件を表示しています。さらに表示すると上限を増やして再検索するため、結果の順序が変わる場合があります（最大100件）。",
+        "limitHintAll": "{count}件の検索結果を表示しています。",
+        "limitHintMax": "上限の{limit}件まで表示しています。",
         "olderVersion": "過去のバージョン {number}",
         "summariesFailed": "一部の要約を読み込めませんでした。過去のバージョンを開いて詳細を確認できます。",
         "moreVersions": "過去のバージョンをさらに表示",
