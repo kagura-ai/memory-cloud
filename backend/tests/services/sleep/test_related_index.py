@@ -12,6 +12,7 @@ from models.sleep import SleepRelatedIndex
 from services.recall_related_index import expand_recall
 from services.sleep.related_index import (
     MAX_ADDITIONS,
+    MAX_INDEX_PAIRS_PER_RUN,
     RelatedIndexPhase,
     candidate_links,
     current,
@@ -106,30 +107,32 @@ async def test_builder_is_bounded_incremental_and_audited(monkeypatch):
     source, target, _ = pair()
     edge = SimpleNamespace(id=1, src_id=source.id, dst_id=target.id)
     db = MagicMock()
-    db.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: [(edge, None)]))
+    db.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: [(edge,)]))
     db.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [source, target]))
     reporter = SimpleNamespace(add_action=AsyncMock())
     phase = RelatedIndexPhase(db)
     args = (None, source.user_id, str(source.workspace_id), str(source.context_id))
     report_id = uuid4()
     result = await phase.execute(
-        *args, SleepBudget(max_memories=2), reporter=reporter, report_id=report_id
+        *args, SleepBudget(max_memories=8), reporter=reporter, report_id=report_id
     )
     assert result.memories_processed == 2
     index = db.add.call_args.args[0]
     assert current(index, source, target)
     assert reporter.add_action.await_args.kwargs["action_type"] == "index_related"
-    db.execute.return_value = SimpleNamespace(all=lambda: [(edge, index)])
+    # An indexed edge is never selected again: a repeat run charges no budget.
+    db.execute.return_value = SimpleNamespace(all=lambda: [])
     reporter.add_action.reset_mock()
     result = await phase.execute(
-        *args, SleepBudget(max_memories=2), reporter=reporter, report_id=uuid4()
+        *args, SleepBudget(max_memories=8), reporter=reporter, report_id=uuid4()
     )
     assert result.details["indexed"] == 0
+    assert result.memories_processed == 0
     reporter.add_action.assert_not_awaited()
     original_evidence = index.evidence
     target.content = "An unrelated replacement after discovery."
     result = await phase.execute(
-        *args, SleepBudget(max_memories=2), reporter=reporter, report_id=uuid4()
+        *args, SleepBudget(max_memories=8), reporter=reporter, report_id=uuid4()
     )
     assert result.details["indexed"] == 0
     assert index.evidence == original_evidence
@@ -380,7 +383,12 @@ async def test_cross_pool_fold_preserves_baseline_scores(monkeypatch, derived_ne
         AsyncMock(return_value=(extra_hits, extra_memories)),
     ):
         build = await _run_recall(
-            service, hits, memories, {newer.id: _cand(older)}, neural_enabled=True
+            service,
+            hits,
+            memories,
+            {newer.id: _cand(older)},
+            neural_enabled=True,
+            related_index=True,
         )
     assert [r["id"] for r in build.await_args.args[1]] == [str(newer.id)]
     assert service._recall_finalize.await_args.kwargs["baseline_pool"] == [
@@ -398,6 +406,92 @@ async def test_empty_expansion_keeps_normal_learning(monkeypatch):
     hits, memories = _pool((_mem(0), 0.8), (_mem(1), 0.7))
     service = MemoryService(db=AsyncMock())
     with patch("services.recall_related_index.expand_recall", AsyncMock(return_value=([], {}))):
-        await _run_recall(service, hits, memories, {}, neural_enabled=True)
+        await _run_recall(service, hits, memories, {}, neural_enabled=True, related_index=True)
     service._recall_run_hebbian_learning.assert_awaited_once()
     assert service._recall_run_hebbian_learning.await_args.args[1] == hits
+
+
+def _compiled(statement) -> str:
+    from sqlalchemy.dialects import postgresql
+
+    return str(
+        statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+
+
+@pytest.mark.asyncio
+async def test_recall_expands_only_when_the_caller_opts_in(monkeypatch):
+    """forget(query=...) deletes whatever recall returns: it must never widen (#2738)."""
+    from services.memory_service import MemoryService
+    from tests.services.test_supersede_fold import _mem, _pool, _run_recall
+
+    monkeypatch.setenv("RECALL_RELATED_INDEX_ENABLED", "true")
+    hits, memories = _pool((_mem(0), 0.8))
+    service = MemoryService(db=AsyncMock())
+    with patch(
+        "services.recall_related_index.expand_recall", AsyncMock(return_value=([], {}))
+    ) as expand:
+        await _run_recall(service, hits, memories, {})
+        expand.assert_not_awaited()
+        await _run_recall(service, hits, memories, {}, related_index=True)
+        expand.assert_awaited_once()
+
+
+def test_only_the_recall_tools_opt_into_the_related_index():
+    import inspect
+    from pathlib import Path
+
+    from services.memory_service import MemoryService
+
+    assert inspect.signature(MemoryService.recall).parameters["related_index"].default is False
+    src = Path(__file__).resolve().parents[3] / "src"
+    callers = {
+        path.relative_to(src).as_posix()
+        for path in src.rglob("*.py")
+        if "related_index=True" in path.read_text(encoding="utf-8")
+    }
+    # The MCP recall tool and REST /memory/recall. Never forget-by-query,
+    # bootstrap or share-key reads.
+    assert callers == {"mcp_server/tools/memory.py", "api/routes/memory.py"}
+
+
+@pytest.mark.asyncio
+async def test_builder_skips_indexed_edges_and_takes_a_bounded_share(monkeypatch):
+    monkeypatch.setenv("SLEEP_RELATED_INDEX_ENABLED", "true")
+    source, _, _ = pair()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+    db.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+    args = (None, source.user_id, str(source.workspace_id), str(source.context_id))
+    result = await RelatedIndexPhase(db).execute(
+        *args, SleepBudget(max_memories=200, memories_used=30), report_id=uuid4()
+    )
+    sql = _compiled(db.execute.call_args.args[0])
+    assert "sleep_related_indexes.edge_id IS NULL" in sql
+    # A quarter of the 170 remaining memories at two per pair -> 21 pairs.
+    assert "LIMIT 21" in sql
+    assert sql.count("embedding_suppressed_at IS NULL") == 2
+    assert result.memories_processed == 0
+    db.execute.reset_mock()
+    await RelatedIndexPhase(db).execute(*args, SleepBudget(max_memories=10_000), report_id=uuid4())
+    assert f"LIMIT {MAX_INDEX_PAIRS_PER_RUN}" in _compiled(db.execute.call_args.args[0])
+
+
+@pytest.mark.asyncio
+async def test_reader_excludes_suppressed_endpoints(monkeypatch):
+    monkeypatch.setenv("RECALL_RELATED_INDEX_ENABLED", "true")
+    source, target, index = pair()
+    service, args = reader(source, [target])
+    with (
+        patch("services.recall_related_index.candidate_links", AsyncMock(return_value=[index])),
+        patch(
+            "services.agent_binding_service.filter_memory_rows_by_binding",
+            AsyncMock(return_value=([target], 0)),
+        ),
+        patch(
+            "services.permission_service.PermissionService.can_access_memory",
+            AsyncMock(return_value=True),
+        ),
+    ):
+        await expand_recall(service, **args)
+    assert "embedding_suppressed_at IS NULL" in _compiled(service.db.scalars.call_args.args[0])

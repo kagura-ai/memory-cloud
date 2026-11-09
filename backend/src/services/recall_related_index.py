@@ -86,6 +86,8 @@ async def expand_recall(
                             Memory.workspace_id == workspace_id,
                             Memory.context_id == context_id,
                             Memory.deleted_at.is_(None),
+                            # Erasure survivors are intentionally unindexed.
+                            Memory.embedding_suppressed_at.is_(None),
                             *predicates,
                             *(
                                 [Memory.id.in_(cluster_memory_ids)]

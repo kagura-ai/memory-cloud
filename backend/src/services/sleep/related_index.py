@@ -24,6 +24,10 @@ from utils.datetime import utcnow
 MAX_SEEDS = 2
 MAX_ADDITIONS = 2
 MAX_EDGE_READS = 16
+# The phase is DB-only, but it shares the run's memory budget with the LLM
+# phases after it: it takes at most a quarter of what remains, two memories
+# per pair, and never more than this many new pairs per run.
+MAX_INDEX_PAIRS_PER_RUN = 25
 
 
 def index_enabled(*, reading: bool = False) -> bool:
@@ -90,12 +94,13 @@ class RelatedIndexPhase:
             result.skipped, result.skip_reason = True, "disabled_or_unscoped"
             return result
         remaining = max(0, budget.max_memories - budget.memories_used)
-        if remaining < 2:
+        pair_limit = min(remaining // 4 // 2, MAX_INDEX_PAIRS_PER_RUN)
+        if pair_limit < 1:
             result.skipped, result.skip_reason = True, "budget_exhausted"
             return result
         source_row, target_row = aliased(Memory), aliased(Memory)
         rows = await self.db.execute(
-            select(NeuralMemoryEdge, SleepRelatedIndex)
+            select(NeuralMemoryEdge)
             .join(source_row, source_row.id == NeuralMemoryEdge.src_id)
             .join(target_row, target_row.id == NeuralMemoryEdge.dst_id)
             .outerjoin(SleepRelatedIndex, SleepRelatedIndex.edge_id == NeuralMemoryEdge.id)
@@ -105,8 +110,15 @@ class RelatedIndexPhase:
                 NeuralMemoryEdge.context_id == UUID(context_id),
                 NeuralMemoryEdge.origin == "semantic",
                 NeuralMemoryEdge.edge_type.in_(["related_to", "semantic_similarity"]),
+                # Only edges with no index row yet: an existing row is checked
+                # at read time and never re-certified here, so re-reading it
+                # would only spend budget.
+                SleepRelatedIndex.edge_id.is_(None),
                 source_row.deleted_at.is_(None),
                 target_row.deleted_at.is_(None),
+                # Erasure survivors are intentionally unindexed (#2738 review).
+                source_row.embedding_suppressed_at.is_(None),
+                target_row.embedding_suppressed_at.is_(None),
                 source_row.context_id == UUID(context_id),
                 target_row.context_id == UUID(context_id),
                 source_row.workspace_id == UUID(workspace_id),
@@ -121,11 +133,11 @@ class RelatedIndexPhase:
                     target_row.updated_at <= NeuralMemoryEdge.created_at,
                 ),
             )
-            .order_by(SleepRelatedIndex.checked_at.asc().nullsfirst(), NeuralMemoryEdge.id)
-            .limit(min(remaining // 2, 100))
+            .order_by(NeuralMemoryEdge.id)
+            .limit(pair_limit)
         )
-        pairs = rows.all()
-        ids = {node for edge, _ in pairs for node in (edge.src_id, edge.dst_id)}
+        edges = [row[0] for row in rows.all()]
+        ids = {node for edge in edges for node in (edge.src_id, edge.dst_id)}
         memories = {
             m.id: m
             for m in (
@@ -140,16 +152,11 @@ class RelatedIndexPhase:
             ).all()
         }
         written = 0
-        for edge, existing in pairs:
+        indexed_ids: set[UUID] = set()
+        for edge in edges:
             source, target = memories.get(edge.src_id), memories.get(edge.dst_id)
             if source is None or target is None or source.id == target.id:
                 continue
-            if existing is not None:
-                # Never bless a stale relation with a new fingerprint. A changed
-                # source needs a genuinely rediscovered (new) edge first.
-                existing.checked_at = utcnow()
-                continue
-            previous = None
             existing = SleepRelatedIndex(
                 edge_id=edge.id,
                 source_id=source.id,
@@ -168,11 +175,13 @@ class RelatedIndexPhase:
                     action_type="index_related",
                     memory_id=source.id,
                     target_id=target.id,
-                    details={"edge_id": edge.id, "previous": previous},
+                    details={"edge_id": edge.id, "previous": None},
                 )
             written += 1
-        result.memories_processed = len(ids)
-        result.details = {"candidates": len(pairs), "indexed": written}
+            indexed_ids.update((source.id, target.id))
+        # Charged to the run's budget: only the memories this run indexed.
+        result.memories_processed = len(indexed_ids)
+        result.details = {"candidates": len(edges), "indexed": written}
         return result
 
 

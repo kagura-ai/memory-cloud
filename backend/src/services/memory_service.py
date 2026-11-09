@@ -6876,6 +6876,7 @@ class MemoryService:
         content_trusted_only: bool = False,
         llm_selector: bool = False,
         supersede_acceptance: bool = True,
+        related_index: bool = False,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -6922,6 +6923,11 @@ class MemoryService:
                 act on it: a share-key read (the principal is the key's
                 creator, not the reader, and the key never writes), and
                 callers that drop the suggestion (bootstrap, forget(query=)).
+            related_index: #2728 the caller lets the opt-in Sleep related
+                index add one-hop candidates (still gated by
+                RECALL_RELATED_INDEX_ENABLED). Only the MCP and REST recall
+                handlers pass True: forget(query=) deletes what recall
+                returns, so it must never widen.
 
         Returns:
             RecallResponse with search results
@@ -7182,7 +7188,10 @@ class MemoryService:
 
         baseline_pool: list[dict] | None = None
         # #2728: offline evidence candidates share the existing response budget.
-        if current_context_id and not context_ids and not degradation:
+        # Opt-in per caller: only the MCP and REST recall handlers widen a
+        # page. forget(query=...) deletes what recall returns, and bootstrap
+        # and share-key reads keep their exact candidate sets.
+        if related_index and current_context_id and not context_ids and not degradation:
             from services.recall_related_index import expand_recall
             from services.sleep.related_index import index_enabled
 

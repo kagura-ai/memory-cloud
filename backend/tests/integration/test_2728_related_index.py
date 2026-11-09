@@ -11,8 +11,10 @@ from models.memory import Memory, NeuralMemoryEdge
 from models.sleep import SleepRelatedIndex
 from services.memory_service import MemoryService
 from services.recall_related_index import expand_recall
-from services.sleep.related_index import candidate_links, evidence
+from services.sleep.related_index import RelatedIndexPhase, candidate_links, evidence
+from services.sleep.reporter import SleepBudget, SleepReporter
 from tests.services.sleep.test_related_index import reader
+from utils.datetime import utcnow
 
 
 @pytest.mark.asyncio
@@ -97,3 +99,64 @@ async def test_index_query_scope_and_live_supersession(db_session):
     )
     await db.flush()
     assert await candidate_links(db, [source], context_id=ctx.id, workspace_id=ws.id) == []
+
+
+@pytest.mark.asyncio
+async def test_builder_charges_only_new_pairs_and_skips_suppressed_rows(db_session, monkeypatch):
+    """A repeat run must not drain the Sleep budget (#2738 review)."""
+    monkeypatch.setenv("SLEEP_RELATED_INDEX_ENABLED", "true")
+    db = db_session
+    ws = Workspace(id=uuid4(), name="related-index-budget", owner_user_id="test")
+    db.add(ws)
+    await db.flush()
+    ctx = Context(id=uuid4(), workspace_id=ws.id, name="related-index-budget", created_by="test")
+    db.add(ctx)
+    await db.flush()
+    memories = [
+        Memory(
+            id=uuid4(),
+            user_id="test",
+            workspace_id=ws.id,
+            context_id=ctx.id,
+            summary=f"Fictional budget source {n}",
+            content=f"Fictional budget content {n}",
+            type="fact",
+            client="pytest",
+        )
+        for n in range(5)
+    ]
+    # An erasure survivor: intentionally unindexed, never linked.
+    memories[4].embedding_suppressed_at = utcnow()
+    db.add_all(memories)
+    await db.flush()
+    for src, dst in ((0, 1), (2, 3), (3, 4)):
+        db.add(
+            NeuralMemoryEdge(
+                user_id="test",
+                workspace_id=ws.id,
+                context_id=ctx.id,
+                src_id=memories[src].id,
+                dst_id=memories[dst].id,
+                origin="semantic",
+                edge_type="related_to",
+                weight=0.8,
+            )
+        )
+    await db.flush()
+    report = await SleepReporter(db).create_report("test", str(ws.id), str(ctx.id))
+    args = (None, "test", str(ws.id), str(ctx.id))
+
+    first = await RelatedIndexPhase(db).execute(
+        *args, SleepBudget(max_memories=200), report_id=report.id
+    )
+    await db.flush()
+    assert first.details == {"candidates": 2, "indexed": 2}
+    assert first.memories_processed == 4
+    rows = (await db.execute(text("SELECT target_id FROM sleep_related_indexes"))).scalars().all()
+    assert memories[4].id not in set(rows)
+
+    second = await RelatedIndexPhase(db).execute(
+        *args, SleepBudget(max_memories=200), report_id=report.id
+    )
+    assert second.details == {"candidates": 0, "indexed": 0}
+    assert second.memories_processed == 0
