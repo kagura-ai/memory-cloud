@@ -40,8 +40,10 @@ class TestSleepOrchestrator:
     """Test orchestrator phase coordination."""
 
     @pytest.mark.asyncio
-    async def test_runs_all_phases_in_order(self, mock_db):
+    @pytest.mark.parametrize("related_enabled", [False, True])
+    async def test_runs_all_phases_in_order(self, mock_db, monkeypatch, related_enabled):
         """All 6 phases should execute in order."""
+        monkeypatch.setenv("SLEEP_RELATED_INDEX_ENABLED", str(related_enabled).lower())
         config = _make_config()
         phase_names_executed = []
 
@@ -49,6 +51,7 @@ class TestSleepOrchestrator:
             patch("services.sleep.orchestrator.LLMService"),
             patch("services.sleep.orchestrator.SleepReporter") as MockReporter,
             patch("services.sleep.orchestrator.EdgeDiscoveryPhase") as MockED,
+            patch("services.sleep.orchestrator.RelatedIndexPhase") as MockRelated,
             patch("services.sleep.orchestrator.DedupMergePhase") as MockDM,
             patch("services.sleep.orchestrator.ImportanceReevalPhase") as MockIR,
             patch("services.sleep.orchestrator.ConsolidationPhase") as MockCP,
@@ -74,6 +77,12 @@ class TestSleepOrchestrator:
                 instance.execute = make_result
                 MockPhase.return_value = instance
 
+            async def related_exec(*args, **kwargs):
+                phase_names_executed.append("related_index")
+                return PhaseResult(phase_name="related_index")
+
+            MockRelated.return_value.execute = related_exec
+
             # Reindex
             reindex_instance = AsyncMock()
 
@@ -94,6 +103,7 @@ class TestSleepOrchestrator:
         # Verify order
         assert phase_names_executed == [
             "edge_discovery",
+            *(["related_index"] if related_enabled else []),
             "dedup_merge",
             "importance_reeval",
             "consolidation",

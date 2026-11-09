@@ -26,6 +26,7 @@ from mcp_server.tools._helpers import (
 )
 from models.memory import DELETED_BY_SLEEP_ARCHIVE, DELETED_BY_SLEEP_MERGE
 from services.sleep.merge_retention import restore_sleep_tombstone_stmt
+from services.sleep.related_index import undo_related_index
 from utils.logger import get_logger
 from utils.response_budget import (
     BudgetArgumentError,
@@ -796,6 +797,7 @@ async def _undo_archive(db: Any, action: Any, ctx: _RollbackCtx, summary: dict[s
 # replaces — ``undo_merge`` rows (written by the per-merge undo onto the same
 # report) rely on it.
 _UNDO_HANDLERS = {
+    "index_related": undo_related_index,
     "create_edge": _undo_create_edge,
     "merge": _undo_merge,
     "update_importance": _undo_update_importance,

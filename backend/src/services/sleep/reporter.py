@@ -511,6 +511,11 @@ class SleepReporter:
                 report.consolidation_result = phase_data
             elif result.phase_name == "reindex":
                 report.reindex_result = phase_data
+            elif result.phase_name == "related_index":
+                report.edge_discovery_result = {
+                    **(report.edge_discovery_result or {}),
+                    "related_index": phase_data,
+                }
 
         report.embedding_tokens = embedding_tokens_total
         report.llm_calls_made = total_llm_calls
