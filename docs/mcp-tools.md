@@ -677,7 +677,7 @@ The descriptions an agent receives from `tools/list` are paid for on every sessi
 The tool description includes these answering rules (kept in sync with both recall skills):
 
 - **Every item of a kind** ("what instruments…", "which places…") — read every result, not only the top ones; recall once more per kind found, or `list` with a tag or type filter naming the set; answer with all of them.
-- **When did / in a period** — `filters={"event_after": ..., "event_before": ...}` (the event's own days, event_start/event_end); rows without one: `observed_after`/`observed_before` around it with a margin (`observed_at` = the date a fact was stated); nothing matches: recall again without the filter.
+- **When did / in a period** — `filters={"event_after": ..., "event_before": ...}` (the event's own days, event_start/event_end); rows without one: `observed_after`/`observed_before` around it with a margin (`observed_at` = the date a fact was stated); nothing matches: recall again without the filter. Inside one row: the event happened on `event_start`..`event_end`; `observed_at` is the day it was said; a date written in the summary loses to the row's event fields.
 - **Likely / would / might** — recall again on concrete entities and category words (brand, sponsor, shop, friend), `search_mode="keyword"` for surfaced names; answer with the best-supported inference, name the memory, mark it as an inference; decline only at `confidence.level` `none`/`low`.
 - **Not recorded** — first recall again with the subject's name and the fact's key noun (`search_mode="keyword"`), or `list` with a tag naming the subject; a row that states it answers — name it. A general statement beats single instances for "how often".
 
