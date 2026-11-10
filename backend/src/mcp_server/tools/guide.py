@@ -368,7 +368,8 @@ GUIDE_TOPICS: dict[str, str] = {
         'list(filters={"tags": [tag]}) when this search\'s candidates (before the k '
         "cut) carry a returned row's tag more often than the page shows; its count is "
         "'at least N matching this search', not the context's total — follow it for "
-        "every-item questions. Over max_chars (full), context_summary is dropped "
+        "every-item questions; absent when max_chars cut results (truncated). Over "
+        "max_chars (full), context_summary is dropped "
         "first (context_summary_omitted), then the lowest-ranked results (truncated: "
         "true). Cross-context recall (context_ids, 2-20 contexts) requires one "
         "workspace, one privacy setting and one embedding model across the list "

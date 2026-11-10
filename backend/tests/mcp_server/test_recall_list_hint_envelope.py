@@ -137,3 +137,50 @@ class TestDocs:
         for relative in ("docs/deployment.md", ".env.example"):
             text = (REPO_ROOT / relative).read_text(encoding="utf-8")
             assert "RECALL_LIST_HINT_ENABLED" in text, relative
+
+
+class TestTheBound:
+    """A reply whose rows the ``max_chars`` bound cut carries no hint (its "N shown"
+    counted the uncut page); content fitted away without a row cut keeps it."""
+
+    @staticmethod
+    def _rows(n: int, content: str | None) -> list[MemoryResponse]:
+        return [
+            MemoryResponse(
+                memory_id=UUID(f"00000000-0000-4000-8000-{i:012d}"),
+                summary=f"went hiking, trip number {i}",
+                context_summary=None,
+                type="event",
+                importance=0.5,
+                scope="persistent",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                updated_at=None,
+                client="test",
+                tags=["trip"],
+                context=None,
+                score=0.9,
+                content=content,
+            )
+            for i in range(n)
+        ]
+
+    def _reply(self, rows: list[MemoryResponse], max_chars: int) -> dict:
+        return mcp_memory._recall_reply(
+            _result(results=rows, hint=HINT), _context(), "compact", max_chars
+        )
+
+    def test_rows_cut_drops_the_hint(self):
+        rows = self._rows(40, None)
+        uncut = self._reply(rows, 100_000)
+        assert "truncated" not in uncut and uncut["hint"] == HINT
+        reply = self._reply(rows, len(_dumps(uncut)) // 2)
+        assert reply["truncated"] is True
+        assert "hint" not in reply
+
+    def test_content_fitted_without_a_row_cut_keeps_the_hint(self):
+        rows = self._rows(3, "x" * 1400)
+        bare = self._reply(self._rows(3, None), 100_000)
+        reply = self._reply(rows, len(_dumps(bare)) + 1_000)
+        assert "full_applied" in reply
+        assert "truncated" not in reply
+        assert reply["hint"] == HINT

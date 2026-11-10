@@ -1296,6 +1296,9 @@ def _bound_recall_envelope(envelope: dict[str, Any], max_chars: int) -> dict[str
     if cut["results"]:
         bounded["count"] = len(bounded["results"])
         bounded["truncated"] = True
+        # #2754: the hint's "N shown" counted the page before the cut; a reply
+        # never states a count that is not true, so a cut reply carries none.
+        bounded.pop("hint", None)
     return bounded
 
 
