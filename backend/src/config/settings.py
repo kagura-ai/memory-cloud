@@ -998,6 +998,15 @@ class Settings(BaseSettings):
         description="recall top results carrying content when the caller omits full",
     )
 
+    # #2754: an optional ``hint`` on a single-context, non-degraded recall that
+    # names ``list(filters={"tags": [...]})`` when the candidate pool recall
+    # already holds has more memories with a page row's tag than the page shows.
+    # Counted over that pool only (no extra query). Off: the reply is unchanged.
+    recall_list_hint_enabled: bool = Field(
+        default=False,
+        description="recall may add a hint naming list() for a tag the page under-shows",
+    )
+
     # #1740: MCP Streamable HTTP spec alignment. ``/mcp`` answers a request
     # whose ``Origin`` header is present and not allow-listed with 403 (the
     # spec's DNS-rebinding defence). The allow-list is ``CORS_ORIGINS``, the

@@ -1216,6 +1216,12 @@ def _recall_envelope(
         response_data["related_tags"] = [
             {"tag": tag.tag, "count": tag.count} for tag in result.related_tags
         ]
+    # #2754: the opt-in pointer at list(), right after related_tags; absent
+    # (never null) when there is none. The type check keeps a loose stand-in
+    # result (a bare mock) from inventing one.
+    hint = getattr(result, "hint", None)
+    if isinstance(hint, str):
+        response_data["hint"] = hint
 
     if result.explore_hints is not None:
         response_data["explore_hints"] = [

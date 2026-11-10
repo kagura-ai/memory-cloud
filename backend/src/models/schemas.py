@@ -905,6 +905,17 @@ class RecallResponse(BaseModel):
     # #2144: the recall LLM selector's report — None (absent) unless the MCP
     # recall ran, or was refused, the stage on a context with the flag on.
     selector: SelectorReport | None = None
+    # #2754: one line pointing at ``list`` for a tag the candidate pool holds
+    # more of than the page shows. None (absent) unless
+    # RECALL_LIST_HINT_ENABLED is on and a tag qualifies.
+    hint: str | None = Field(
+        default=None,
+        description=(
+            'Points at list(filters={"tags": [...]}) when this search\'s candidates '
+            "carry a returned row's tag more often than the page shows. Absent "
+            "unless the deployment enables it and a tag qualifies."
+        ),
+    )
 
 
 class ReferenceRequest(BaseModel):

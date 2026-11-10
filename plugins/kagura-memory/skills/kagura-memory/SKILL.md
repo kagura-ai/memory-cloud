@@ -140,7 +140,7 @@ Query technique:
 - A result carrying `supersede_candidate` likely replaces that older memory: accept with `update_memory(memory_id=<result>, accept_supersede_candidate=true, context_id=...)`, or reject a deliberate pair with `update_memory(memory_id=<result>, dismiss_supersede_candidate=true, context_id=...)`.
 - `get_context_info(context_id).guardrails` lists the context's tool guardrails (`tool_triggered_version` changes when the set changes); `load_guardrails` is the full read for hooks and the smoke test.
 
-Show result summaries with `memory_id`, type, importance, and tags when the user needs to choose what to inspect.
+Show result summaries with `memory_id`, type, importance, and tags when the user needs to choose what to inspect. When a recall reply carries `hint`, follow it for every-item questions: it names the `list` call that returns every memory with a tag the page under-shows.
 
 ## Remember
 

@@ -6680,6 +6680,16 @@ class MemoryService:
 
         # Issue #104: Aggregate related tags from results
         related_tags = self._aggregate_related_tags(responses, limit=10)
+        # #2754: opt-in hint towards list(), from the pool held in memory.
+        from config.settings import get_settings
+
+        hint = (
+            self._recall_list_hint(responses, search_results, memories)
+            if get_settings().recall_list_hint_enabled
+            and not cross_context
+            and not (degradation or {}).get("degraded")
+            else None
+        )
 
         # Issue #1047/#1052: relevance confidence from the full candidate pool's
         # score distribution (search_results, which holds up to candidates_k >> k
@@ -6740,6 +6750,7 @@ class MemoryService:
             results=responses,
             selector=selector,
             related_tags=related_tags,
+            hint=hint,
             explore_hints=explore_hints,
             # #1515: None (and therefore omitted) unless the search degraded.
             degraded=(degradation or {}).get("degraded"),
@@ -9021,6 +9032,32 @@ class MemoryService:
             by_importance=by_importance,
             recent_activity=recent_activity,
         )
+
+    @staticmethod
+    def _recall_list_hint(
+        responses: list[MemoryResponse],
+        search_results: list[dict],
+        memories: Mapping[str, Memory],
+    ) -> str | None:
+        """The #2754 ``hint`` for this page, from the candidate pool in memory.
+
+        The pool is ``search_results`` before the top-k cut: the hits that passed
+        the filters, the binding and the supersede shadowing and fold, the same
+        as the page. Only hits still in ``memories`` count (one that hydrated to
+        nothing cannot be in a reply). Reads no row and runs no query.
+
+        Args:
+            responses: The page that ships (after the LLM selector, if any).
+            search_results: The candidate pool the page was cut from.
+            memories: The hydrated, binding-filtered hit id -> Memory map.
+
+        Returns:
+            The hint line, or None when no page tag is under-shown.
+        """
+        from services.recall_list_hint import list_hint
+
+        pool_tags = [memories[hit["id"]].tags for hit in search_results if hit["id"] in memories]
+        return list_hint([r.tags for r in responses], pool_tags)
 
     def _aggregate_related_tags(
         self, responses: list[MemoryResponse], limit: int = 10

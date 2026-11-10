@@ -123,7 +123,7 @@ One `recall(k=5)` ranks by similarity and its rows carry no `details`. Choose th
 
 ### 4. Display results
 
-Show results in a table: memory_id, summary, type, importance (plus a tags column when you called with `verbosity="full"`). List the reply's `related_tags` below it.
+Show results in a table: memory_id, summary, type, importance (plus a tags column when you called with `verbosity="full"`). List the reply's `related_tags` below it. When a recall reply carries `hint`, follow it for every-item questions: it names the `list` call that returns every memory with a tag the page under-shows.
 
 ### 5. Follow up
 
