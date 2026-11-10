@@ -3086,6 +3086,14 @@ Two settings change what an MCP `recall` returns when the caller leaves an argum
 
 `MCP_RECALL_DEFAULT_FULL` is still a default: as with the built-in 3, only trusted rows (trusted context, not connector-ingested) get content, and an explicit `full=N` from the caller makes every row eligible. Like a bad verbosity, a value outside `0`-`100`, or one that is not a number (`abc`, `3.5`), stops the backend at startup instead of being clamped; note that Pydantic reads `3.0` as 3 and `1_0` as 10. A high value makes every argument-less recall build content that the `max_chars` budget (default 20,000 characters) then drops again from the lowest-ranked rows, so keep it small. The REST default stays `0`.
 
+### Recall list hint — Issue #2754
+
+| Variable | Default | Effect |
+|---|---|---|
+| `RECALL_LIST_HINT_ENABLED` | `false` | A single-context, non-degraded `recall` adds the optional key `hint` (after `related_tags`) when the candidates it already holds (those that passed the same filters and shadowing as the page, before the `k` cut) carry a returned row's tag more often than the page shows. The line names `list(filters={"tags": [tag]})`. |
+
+The count is "at least N matching this search": it is taken over the recall's candidate pool, which is wider than `k` only when the search over-fetches, so it is never the context's total and costs no query. The tag with the most candidates wins (ties: more rows on the page, then alphabetical). Off, the reply is unchanged. MCP recall tool only: the line names the MCP `list` tool, so the REST `POST /api/v1/memory/recall`, the share-key recall, the agent bootstrap's recall component and `forget(query=...)` never compute or return it.
+
 ## Public MCP endpoints — Issue #2675
 
 A workspace owner can publish one resource context as an **anonymous, read-only MCP endpoint** at `/mcp/public/<public_id>` (how: [Resource Tokens Guide › Publishing a resource as a public MCP endpoint](resource-tokens-guide.md#publishing-a-resource-as-a-public-mcp-endpoint); client setup: [MCP Client Setup › Public read-only endpoint](mcp-clients.md#public-read-only-endpoint-no-sign-in)). The operator decides whether this deployment serves such endpoints at all.

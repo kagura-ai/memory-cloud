@@ -6575,6 +6575,7 @@ class MemoryService:
         context_count: int = 1,
         selector: SelectorReport | None = None,
         baseline_pool: list[dict] | None = None,
+        list_hint_pool: list[dict] | None = None,
     ) -> RecallResponse:
         """Assemble the final response: hints, tags, confidence, audit row.
 
@@ -6602,6 +6603,8 @@ class MemoryService:
                 line, like :meth:`_empty_recall_response`.
             context_count: Contexts the recall spanned, for the log line.
             selector: #2144 the LLM selector's report, or None.
+            list_hint_pool: #2754 the candidates the opt-in ``hint`` counts,
+                or None (the caller did not opt in: no hint).
 
         Returns:
             The completed RecallResponse.
@@ -6622,6 +6625,7 @@ class MemoryService:
                 degradation=degradation,
                 selector=selector,
                 baseline_pool=baseline_pool,
+                list_hint_pool=list_hint_pool,
             )
         # #1989: one line per recall, after everything the caller waits for.
         if timings is not None:
@@ -6653,6 +6657,7 @@ class MemoryService:
         degradation: dict[str, Any] | None,
         selector: SelectorReport | None = None,
         baseline_pool: list[dict] | None = None,
+        list_hint_pool: list[dict] | None = None,
     ) -> RecallResponse:
         """The body of :meth:`_recall_finalize`, timed as one stage there.
 
@@ -6680,6 +6685,17 @@ class MemoryService:
 
         # Issue #104: Aggregate related tags from results
         related_tags = self._aggregate_related_tags(responses, limit=10)
+        # #2754: opt-in hint towards list(), from the pool held in memory.
+        from config.settings import get_settings
+
+        hint = (
+            self._recall_list_hint(responses, list_hint_pool, memories)
+            if list_hint_pool is not None
+            and get_settings().recall_list_hint_enabled
+            and not cross_context
+            and not (degradation or {}).get("degraded")
+            else None
+        )
 
         # Issue #1047/#1052: relevance confidence from the full candidate pool's
         # score distribution (search_results, which holds up to candidates_k >> k
@@ -6740,6 +6756,7 @@ class MemoryService:
             results=responses,
             selector=selector,
             related_tags=related_tags,
+            hint=hint,
             explore_hints=explore_hints,
             # #1515: None (and therefore omitted) unless the search degraded.
             degraded=(degradation or {}).get("degraded"),
@@ -6880,6 +6897,7 @@ class MemoryService:
         llm_selector: bool = False,
         supersede_acceptance: bool = True,
         related_index: bool = False,
+        list_hint: bool = False,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -6931,6 +6949,10 @@ class MemoryService:
                 RECALL_RELATED_INDEX_ENABLED). Only the MCP and REST recall
                 handlers pass True: forget(query=) deletes what recall
                 returns, so it must never widen.
+            list_hint: #2754 the caller lets recall add the ``hint`` towards
+                ``list`` (still gated by RECALL_LIST_HINT_ENABLED). Only the
+                MCP recall tool passes True: the line names an MCP tool that
+                REST, share-key, bootstrap and forget(query=) callers lack.
 
         Returns:
             RecallResponse with search results
@@ -7320,6 +7342,16 @@ class MemoryService:
         hebbian_pool = search_results
         if selector_report is not None and selector_report.applied and selector_report.dropped:
             hebbian_pool = _without_dropped_rows(hebbian_pool, memories, built_page, responses)
+        # #2754: the pool the opt-in hint counts — the query's own candidates
+        # after every subtractive gate, without the rows the selector judged
+        # irrelevant and without the related-index extras (not hits for the
+        # query, like confidence's baseline_pool). None: no hint.
+        list_hint_pool: list[dict] | None = None
+        if list_hint and not context_ids and not degradation.get("degraded"):
+            list_hint_pool = hebbian_pool
+            if baseline_pool is not None:
+                baseline_ids = {hit["id"] for hit in baseline_pool}
+                list_hint_pool = [hit for hit in hebbian_pool if hit["id"] in baseline_ids]
 
         # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
         # #1515: the `!= "keyword"` clause already says keyword-only results must
@@ -7379,6 +7411,7 @@ class MemoryService:
             context_count=context_count,
             selector=selector_report,
             baseline_pool=baseline_pool,
+            list_hint_pool=list_hint_pool,
         )
 
     async def load_pinned(
@@ -9021,6 +9054,33 @@ class MemoryService:
             by_importance=by_importance,
             recent_activity=recent_activity,
         )
+
+    @staticmethod
+    def _recall_list_hint(
+        responses: list[MemoryResponse],
+        search_results: list[dict],
+        memories: Mapping[str, Memory],
+    ) -> str | None:
+        """The #2754 ``hint`` for this page, from the candidate pool in memory.
+
+        The pool is ``search_results`` before the top-k cut: the hits that passed
+        the filters, the binding and the supersede shadowing and fold, the same
+        as the page, minus the rows the LLM selector dropped and the
+        related-index extras. Only hits still in ``memories`` count (one that
+        hydrated to nothing cannot be in a reply). Reads no row and runs no query.
+
+        Args:
+            responses: The page that ships (after the LLM selector, if any).
+            search_results: The candidate pool the page was cut from.
+            memories: The hydrated, binding-filtered hit id -> Memory map.
+
+        Returns:
+            The hint line, or None when no page tag is under-shown.
+        """
+        from services.recall_list_hint import list_hint
+
+        pool_tags = [memories[hit["id"]].tags for hit in search_results if hit["id"] in memories]
+        return list_hint([r.tags for r in responses], pool_tags)
 
     def _aggregate_related_tags(
         self, responses: list[MemoryResponse], limit: int = 10
