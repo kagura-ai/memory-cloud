@@ -778,6 +778,24 @@ class TestBatchLevelArgumentsOnAnItem:
         assert "lint" not in payload
 
     @pytest.mark.asyncio
+    async def test_a_refused_item_does_not_set_the_batch_value(self):
+        """Only items that are otherwise accepted count towards adoption."""
+        service = _stubbed_service()
+        items = [{**ITEM, "importnace": 0.9, "dedupe": "check"}, ITEM]
+        payload = await _run_stubbed({"items": items}, service)
+        assert [r["status"] for r in payload["results"]] == ["error", "success"]
+        assert _write_kwargs(service, False)["dedupe"] == "suggest"
+        assert "lint" not in payload
+        # A refused item that disagrees does not block the accepted items' value.
+        items = [
+            {**ITEM, "summary": "x", "tags_normalize": False},
+            {**ITEM, "tags_normalize": True},
+        ]
+        payload = await _run_stubbed({"items": items}, service)
+        assert [r["status"] for r in payload["results"]] == ["error", "success"]
+        assert [entry["subject"] for entry in payload["lint"]] == ["tags_normalize"]
+
+    @pytest.mark.asyncio
     async def test_a_json_string_boolean_agrees_with_a_boolean(self):
         """Items get remember's JSON-string coercion, the batch-level values too."""
         service = _stubbed_service()

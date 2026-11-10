@@ -103,7 +103,8 @@ def batch_level_values(
     """The batch-level values an item may repeat, and the lint for adopted ones (#2753).
 
     A key passed on ``remember_batch`` is the batch's. A key the batch does not
-    set, carried by items that all agree on one valid value, becomes the batch's,
+    set, carried by otherwise accepted items that all agree on one valid value
+    (a refused item counts for nothing), becomes the batch's,
     and one ``batch_level_argument`` lint entry says to set it once on the
     batch. Items that disagree with each other (or agree on an invalid value)
     leave the key out, so every item carrying it is refused, as before.
@@ -114,11 +115,23 @@ def batch_level_values(
     """
     values: dict[str, Any] = {}
     lint: list[dict[str, Any]] = []
+    # Only items that are otherwise accepted count: a refused item sets nothing.
+    accepted = [
+        item
+        for item in items
+        if isinstance(item, dict)
+        and not isinstance(
+            _request_from_item(
+                {k: v for k, v in item.items() if k not in _BATCH_LEVEL}, str(args["context_id"])
+            ),
+            dict,
+        )
+    ]
     for key in _BATCH_LEVEL:
         if key in args:
             values[key] = args[key]
             continue
-        carried = [_item_batch_value(i, key) for i in items if isinstance(i, dict) and key in i]
+        carried = [_item_batch_value(i, key) for i in accepted if key in i]
         if not carried:
             continue
         first = carried[0]
