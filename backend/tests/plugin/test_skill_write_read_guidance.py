@@ -350,6 +350,12 @@ RELATIVE_DATE_RULES = (
     "Relative dates.",
     "pass the phrase as stated in `details.event_phrase`",
     "do not compute the dates yourself",
+    # #2751: the rules added to the set.
+    "tonight, this morning, this afternoon and this evening (the material date)",
+    "last night (the day before), the day after tomorrow and the day before yesterday",
+    "N days, weeks, months or years ago",
+    "this <weekday> (that day in the material date's Monday–Sunday week)",
+    "next <weekday> (that day in the week after it)",
     '"last weekend" is the Saturday–Sunday just before the material date',
     "on a Saturday or Sunday, the weekend before the current one",
     "returns `event_start`, `event_end` and `event_weekday`",

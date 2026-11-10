@@ -88,6 +88,23 @@ class TestDefinitions:
                 "event_start?, event_end?, event_weekday?, event_unresolved?" in GUIDE_TOPICS[name]
             )
 
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            "tonight",
+            "this morning / afternoon / evening",
+            "last night",
+            "the day after tomorrow / before yesterday",
+            "N days / weeks / months / years ago",
+            "this <weekday> (in observed_at's week)",
+            "next <weekday> (in the week after)",
+        ],
+    )
+    def test_the_guide_names_the_rules_of_2751(self, rule):
+        from mcp_server.tools.guide import GUIDE_TOPICS
+
+        assert rule in GUIDE_TOPICS["remember.observed_at"]
+
 
 class TestRemember:
     @pytest.mark.asyncio

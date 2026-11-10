@@ -21,10 +21,16 @@ a year boundary), so the server resolves it, deterministically, at write time:
 
 Rule set (:func:`resolve_event_phrase`; ``anchor`` is the ``observed_at`` day):
 
-- ``today``, ``yesterday``, ``tomorrow``.
+- ``today``, ``yesterday``, ``tomorrow``; ``tonight``, ``this morning``,
+  ``this afternoon``, ``this evening`` (the anchor); ``last night`` (the day
+  before); ``the day after tomorrow`` / ``the day before yesterday`` (two days
+  after / before).
 - ``N days ago`` (the day), ``N weeks ago`` (the day ``7 N`` days back),
-  ``N months ago`` (the day ``N`` months back, clamped to the month's end);
-  ``N`` as digits or the words one … twelve, ``a`` / ``an`` meaning one.
+  ``N months ago`` (the day ``N`` months back, clamped to the month's end),
+  ``N years ago`` (the same calendar day ``N`` years back, clamped the same
+  way: 29 February is 28 February in a year without one; before year 1 it is
+  unresolved); ``N`` as digits or the words one … twelve, ``a`` / ``an``
+  meaning one.
 - ``last`` / ``this`` / ``next`` ``week`` (Mon–Sun), ``weekend`` (Sat–Sun),
   ``month``, ``year``. Weeks are counted from the anchor's weekday: "this
   week" is the Mon–Sun week holding the anchor, "last weekend" the Sat–Sun
@@ -40,6 +46,10 @@ Rule set (:func:`resolve_event_phrase`; ``anchor`` is the ``observed_at`` day):
   the anchor ("December" from 2026-01-09 is December 2025).
 - ``<weekday>`` (optionally ``last <weekday>``): the most recent one strictly
   before the anchor.
+- ``this <weekday>``: that weekday in the Mon–Sun week holding the anchor (on,
+  before or after it). ``next <weekday>``: that weekday in the Mon–Sun week
+  after the anchor's week (from Saturday 2024-03-09, "this Sunday" is
+  2024-03-10, "next Sunday" 2024-03-17 and "next Monday" 2024-03-11).
 
 Matching is case-insensitive, tolerant of surrounding whitespace, a trailing
 period and a leading ``on`` / ``in`` / ``the``. Anything else is unresolved.
@@ -94,10 +104,24 @@ _WEEKDAYS.update({name.lower(): number for number, name in enumerate(calendar.da
 _LEADING = ("on", "in", "the")
 _MAX_UNITS = 1_000  # "1000 days ago" is as far as a sentence goes; beyond is a typo
 
-_N_AGO = re.compile(r"(?P<n>\d{1,4}|[a-z]+) (?P<unit>day|week|month|weekend)s? ago")
+_N_AGO = re.compile(r"(?P<n>\d{1,4}|[a-z]+) (?P<unit>day|week|month|weekend|year)s? ago")
 _RELATIVE_PERIOD = re.compile(r"(?P<which>last|this|next) (?P<unit>weekend|week|month|year)")
 _WEEK_OF_MONTH = re.compile(r"(?P<which>first|last) week of (?P<month>[a-z]+)")
+_THIS_NEXT_WEEKDAY = re.compile(r"(?P<which>this|next) (?P<day>[a-z]+)")
 _LAST_WEEKDAY = re.compile(r"(?:last )?(?P<day>[a-z]+)")
+# Fixed phrases: days counted from the anchor.
+_DAY_OFFSETS = {
+    "today": 0,
+    "tonight": 0,
+    "this morning": 0,
+    "this afternoon": 0,
+    "this evening": 0,
+    "yesterday": -1,
+    "last night": -1,
+    "tomorrow": 1,
+    "day after tomorrow": 2,
+    "day before yesterday": -2,
+}
 
 _FORMAT_HINT = "event_start / event_end must be ISO 8601 dates (2024-03-07)"
 
@@ -190,13 +214,8 @@ def resolve_event_phrase(phrase: str, anchor: date) -> tuple[date, date] | None:
     text = _normalize(phrase)
     if not text:
         return None
-    if text == "today":
-        return anchor, anchor
-    if text == "yesterday":
-        day = anchor - timedelta(days=1)
-        return day, day
-    if text == "tomorrow":
-        day = anchor + timedelta(days=1)
+    if (offset := _DAY_OFFSETS.get(text)) is not None:
+        day = anchor + timedelta(days=offset)
         return day, day
 
     if (m := _N_AGO.fullmatch(text)) is not None:
@@ -210,10 +229,10 @@ def resolve_event_phrase(phrase: str, anchor: date) -> tuple[date, date] | None:
         if unit == "week":
             day = anchor - timedelta(days=7 * n)
             return day, day
-        if unit == "month":
+        if unit in ("month", "year"):
             try:
-                day = _shift_months(anchor, n)
-            except ValueError:
+                day = _shift_months(anchor, n * 12 if unit == "year" else n)
+            except ValueError:  # before year 1
                 return None
             return day, day
         saturday, sunday = _last_weekend(anchor)
@@ -252,6 +271,14 @@ def resolve_event_phrase(phrase: str, anchor: date) -> tuple[date, date] | None:
 
     if (month := _MONTHS.get(text)) is not None:
         return _recent_month(anchor, month)
+
+    if (m := _THIS_NEXT_WEEKDAY.fullmatch(text)) is not None:
+        weekday = _WEEKDAYS.get(m.group("day"))
+        if weekday is None:
+            return None
+        week = 7 if m.group("which") == "next" else 0
+        day = _monday(anchor) + timedelta(days=week + weekday)
+        return day, day
 
     if (m := _LAST_WEEKDAY.fullmatch(text)) is not None:
         weekday = _WEEKDAYS.get(m.group("day"))
