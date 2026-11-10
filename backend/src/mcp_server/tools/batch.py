@@ -1,7 +1,8 @@
 """``remember_batch`` — several memories in one call (#1853).
 
 Each item carries ``remember``'s arguments (no ``context_id``: the batch's
-applies; ``dedupe`` / ``tags_normalize`` / ``verbose`` are set on the batch)
+applies; ``dedupe`` / ``tags_normalize`` / ``verbose`` are set on the batch,
+and an item that repeats one with the batch's value is accepted, #2753)
 and is validated and limited like a single ``remember`` — an undeclared key is
 refused per item (#1873). Without ``atomic`` the items are written
 independently and reported per item; with ``atomic=true`` the service writes
@@ -51,6 +52,7 @@ from mcp_server.tools.memory import (
     remember_request_from_args,
 )
 from services.memory_service import (
+    DEDUPE_MODES,
     MAX_BATCH_ITEMS,
     BatchCommittedError,
     BatchItemError,
@@ -79,15 +81,85 @@ _BATCH_LEVEL = ("dedupe", "tags_normalize", "verbose")
 _ITEM_KEYS = frozenset(_TOOL_SCHEMAS["remember"]) - frozenset(_BATCH_LEVEL)
 
 
-def _undeclared_keys(item: dict[str, Any]) -> dict[str, Any] | None:
+def _valid_batch_value(key: str, value: Any) -> bool:
+    if key == "dedupe":
+        return isinstance(value, str) and value in DEDUPE_MODES
+    return isinstance(value, bool)
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    """JSON equality: ``true`` is not ``1``."""
+    return type(a) is type(b) and a == b
+
+
+def _item_batch_value(item: dict[str, Any], key: str) -> Any:
+    """An item's ``key`` with remember's JSON-string coercion (``"true"`` → true)."""
+    return coerce_mcp_arguments("remember", {key: item[key]})[key]
+
+
+def batch_level_values(
+    args: dict[str, Any], items: list[Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The batch-level values an item may repeat, and the lint for adopted ones (#2753).
+
+    A key passed on ``remember_batch`` is the batch's. A key the batch does not
+    set, carried by items that all agree on one valid value, becomes the batch's,
+    and one ``batch_level_argument`` lint entry says to set it once on the
+    batch. Items that disagree with each other (or agree on an invalid value)
+    leave the key out, so every item carrying it is refused, as before.
+
+    Returns:
+        ``(values, lint)``: ``values`` maps each key an item may carry to the
+        value it must equal; ``lint`` holds the adopted keys' entries.
+    """
+    values: dict[str, Any] = {}
+    lint: list[dict[str, Any]] = []
+    for key in _BATCH_LEVEL:
+        if key in args:
+            values[key] = args[key]
+            continue
+        carried = [_item_batch_value(i, key) for i in items if isinstance(i, dict) and key in i]
+        if not carried:
+            continue
+        first = carried[0]
+        if not _valid_batch_value(key, first) or not all(_same_value(first, v) for v in carried):
+            continue
+        values[key] = first
+        shown = _dumps(first)
+        lint.append(
+            {
+                "code": "batch_level_argument",
+                "hint": (
+                    f"{key} is a batch-level argument: the items' {key}={shown} was applied "
+                    f"to the whole batch. Set it once on remember_batch ({key}={shown}), "
+                    "not on each item."
+                ),
+                "subject": key,
+            }
+        )
+    return values, lint
+
+
+def _undeclared_keys(
+    item: dict[str, Any], batch_level: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
     """The per-item ``invalid_argument`` for keys an item may not carry (#1873).
 
     A single ``remember`` refuses unknown arguments (#1742); an item that
     dropped ``importnace`` silently and reported ``success`` did not. The
     echoed names are client-controlled, hence bounded as in
-    ``find_unknown_arguments``.
+    ``find_unknown_arguments``. #2753: a batch-level key whose value equals
+    ``batch_level[key]`` (see :func:`batch_level_values`) is accepted.
     """
-    unknown = sorted(str(key) for key in item if key not in _ITEM_KEYS)
+    batch_level = batch_level or {}
+    accepted = {
+        key
+        for key in _BATCH_LEVEL
+        if key in item
+        and key in batch_level
+        and _same_value(_item_batch_value(item, key), batch_level[key])
+    }
+    unknown = sorted(str(key) for key in item if key not in _ITEM_KEYS and key not in accepted)
     if not unknown:
         return None
     allowed = sorted(_ITEM_KEYS - {"context_id"})
@@ -101,11 +173,17 @@ def _undeclared_keys(item: dict[str, Any]) -> dict[str, Any] | None:
         parts.append(f"{shown} (did you mean '{close[0]}'?)" if close else shown)
     more = len(unknown) - _MAX_UNKNOWN_SHOWN
     listed = ", ".join(parts) + (f" and {more} more" if more > 0 else "")
+    # The batch's own (validated) values, for an item that tried to change one.
+    conflicts = "".join(
+        f"The batch's {key} is {_dumps(batch_level[key])}; an item may repeat it, not change it. "
+        for key in _BATCH_LEVEL
+        if key in unknown and key in batch_level
+    )
     return {
         "error": "invalid_argument",
         "message": (
-            f"item does not accept {listed}. {', '.join(_BATCH_LEVEL)} are batch-level "
-            "arguments: set them on remember_batch itself, not on an item. "
+            f"item does not accept {listed}. {conflicts}{', '.join(_BATCH_LEVEL)} are "
+            "batch-level arguments: set them on remember_batch itself, not on an item. "
             f"An item accepts: {', '.join(allowed)}."
         ),
     }
@@ -119,13 +197,21 @@ class ParsedItem(NamedTuple):
     fitted: dict[str, Any]
 
 
-def _request_from_item(item: Any, batch_context_id: str) -> ParsedItem | dict[str, Any]:
-    """A ``ParsedItem`` for one item, or a per-item error dict."""
+def _request_from_item(
+    item: Any, batch_context_id: str, batch_level: dict[str, Any] | None = None
+) -> ParsedItem | dict[str, Any]:
+    """A ``ParsedItem`` for one item, or a per-item error dict.
+
+    ``batch_level``: the values an item's batch-level keys must repeat
+    (:func:`batch_level_values`); without it every batch-level key is refused.
+    """
     if not isinstance(item, dict):
         return {"error": "validation_error", "message": "item must be an object"}
-    undeclared = _undeclared_keys(item)
+    undeclared = _undeclared_keys(item, batch_level)
     if undeclared:
         return undeclared
+    # Accepted repeats of the batch's values: the batch's apply.
+    item = {key: value for key, value in item.items() if key not in _BATCH_LEVEL}
     # #1873: the JSON-string coercion a single remember gets at dispatch
     # (tags sent as '["a"]', details as '{"k": 1}').
     item = coerce_mcp_arguments("remember", item)
@@ -280,15 +366,20 @@ async def handle_remember_batch(
             "validation_error", f"items holds {len(items)} items; the limit is {MAX_BATCH_ITEMS}."
         )
     atomic = args.get("atomic", False)
-    verbose = args.get("verbose", False)
-    if not isinstance(atomic, bool) or not isinstance(verbose, bool):
+    if not isinstance(atomic, bool) or not isinstance(args.get("verbose", False), bool):
         return _error_response("validation_error", "atomic and verbose must be booleans.")
     try:
-        tags_normalize, dedupe = parse_write_options(args)
+        parse_write_options(args)
     except ValueError as e:
         return _error_response("validation_error", str(e))
+    # #2753: items that all repeat one batch-level value set it for the batch.
+    batch_level, batch_lint = batch_level_values(args, items)
+    effective = {**args, **batch_level}
+    verbose = effective.get("verbose", False)
+    tags_normalize, dedupe = parse_write_options(effective)
+    lint_field = {"lint": batch_lint} if batch_lint else {}
 
-    parsed = [_request_from_item(item, str(args["context_id"])) for item in items]
+    parsed = [_request_from_item(item, str(args["context_id"]), batch_level) for item in items]
     invalid = {i: p for i, p in enumerate(parsed) if isinstance(p, dict)}
     if atomic and invalid:
         # Nothing touches the database: the batch is refused whole.
@@ -311,6 +402,7 @@ async def handle_remember_batch(
             candidates=0,
             failed=len(invalid),
             skipped=len(results) - len(invalid),
+            **lint_field,
         )
 
     start = time.time()
@@ -466,7 +558,7 @@ async def handle_remember_batch(
                 await db.commit()
                 # #2615: one notice set per call, from the last item's counts.
                 headroom = await _plan_headroom_field(db, context, workspace_id)
-            return _envelope(results, context_fields, **note, **headroom)
+            return _envelope(results, context_fields, **note, **headroom, **lint_field)
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()

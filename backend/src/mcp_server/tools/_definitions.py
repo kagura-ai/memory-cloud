@@ -155,8 +155,8 @@ Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?
         },
         {
             "name": "remember_batch",
-            "description": """Store up to 50 memories in one call (the end-of-session save). Each item takes remember's arguments and limits; an unknown item key fails only that item (invalid_argument). atomic=true: all or nothing (a failing item or a dedupe='check' candidate rolls the batch back); default false: each item on its own. Relative dates as in remember: details.event_phrase as stated plus observed_at; do not compute dates.
-Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}.
+            "description": """Store up to 50 memories in one call (the end-of-session save); dedupe, tags_normalize and verbose are batch-level, and an item that repeats one with the batch's value is accepted. Items take remember's other arguments and limits; an unknown item key fails only that item (invalid_argument). atomic=true: all or nothing (a failing item or a dedupe='check' candidate rolls the batch back); default false: each item on its own. Relative dates as in remember: details.event_phrase as stated plus observed_at; do not compute dates.
+Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, lint?, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["remember_batch"]).""",
             "inputSchema": {
                 "type": "object",
@@ -171,7 +171,7 @@ Manual: guide(["remember_batch"]).""",
                         "minItems": 1,
                         "maxItems": 50,
                         "items": {"type": "object"},
-                        "description": "One object per memory with remember's arguments (summary, content, type required). No context_id, dedupe, tags_normalize or verbose per item; undeclared keys are refused.",
+                        "description": "One object per memory with remember's arguments (summary, content, type required). A batch-level key may only repeat the batch's value; undeclared keys are refused.",
                     },
                     "atomic": {
                         "type": "boolean",

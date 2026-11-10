@@ -243,11 +243,17 @@ async def test_an_atomic_batch_with_an_invalid_item_is_refused_whole_before_any_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extra", [{"dedupe": "check"}, {"importnace": 0.9}])
-async def test_an_undeclared_item_key_refuses_an_atomic_batch_whole(extra):
+@pytest.mark.parametrize(
+    ("extra", "batch"),
+    # #2753: an item's batch-level value refuses it only when it conflicts with the batch's.
+    [({"dedupe": "check"}, {"dedupe": "suggest"}), ({"importnace": 0.9}, {})],
+)
+async def test_an_undeclared_item_key_refuses_an_atomic_batch_whole(extra, batch):
     payload = _parse(
         await handle_remember_batch(
-            {"context_id": CTX, "items": [ITEM, {**ITEM, **extra}], "atomic": True}, "user-1", None
+            {"context_id": CTX, "items": [ITEM, {**ITEM, **extra}], "atomic": True, **batch},
+            "user-1",
+            None,
         )
     )
     assert payload["error"] == "batch_refused"
@@ -406,7 +412,11 @@ async def test_an_undeclared_item_key_is_a_per_item_error_without_atomic(live):
     ctx_id = ctx.id
     payload = _parse(
         await handle_remember_batch(
-            {"context_id": str(ctx_id), "items": [OK_ITEM, {**OK_ITEM, "dedupe": "off"}]},
+            {
+                "context_id": str(ctx_id),
+                "items": [OK_ITEM, {**OK_ITEM, "dedupe": "off"}],
+                "dedupe": "suggest",  # #2753: a value that agrees with the batch's is accepted
+            },
             owner,
             ws.id,
         )
@@ -626,3 +636,223 @@ async def test_a_skill_style_write_normalizes_tags_and_reports_the_mapping(atomi
         assert request.tags == ["Dev_Environment"]
         assert kwargs["tags_normalize"] is True
         assert kwargs["tag_canonical"] == {"devenvironment": "dev-environment"}
+
+
+# ------------------------------------- batch-level arguments on an item (#2753)
+
+
+def _stubbed_service(*, fail_remember=False):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from uuid import uuid4 as _uuid4
+
+    def _response(*_args, **_kwargs):
+        return SimpleNamespace(memory_id=_uuid4(), scope="working", persistence=None, lint=[])
+
+    async def _many(requests, **_kwargs):
+        return [_response() for _ in requests]
+
+    return MagicMock(
+        tag_canonical_map=AsyncMock(return_value={}),
+        remember=AsyncMock(side_effect=_response),
+        remember_many=AsyncMock(side_effect=_many),
+    )
+
+
+async def _run_stubbed(args, service):
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4 as _uuid4
+
+    db = MagicMock(commit=AsyncMock(), rollback=AsyncMock(), refresh=AsyncMock())
+
+    async def _db():
+        yield db
+
+    context = MagicMock(workspace_id=_uuid4())
+    with (
+        patch("db.base.get_db", new=_db),
+        patch("services.memory_service.MemoryService", return_value=service),
+        patch("mcp_server.tools.batch._resolve_context", new=AsyncMock(return_value=context)),
+        patch("mcp_server.tools.batch._context_response_fields", return_value={"context_id": CTX}),
+        patch("mcp_server.tools.batch._log_tool_usage", new=AsyncMock()),
+        patch("mcp_server.tools.batch._touch_context_last_used", new=AsyncMock()),
+        patch("mcp_server.tools.batch._plan_headroom_field", new=AsyncMock(return_value={})),
+    ):
+        return _parse(await handle_remember_batch({"context_id": CTX, **args}, "user-1", None))
+
+
+def _write_kwargs(service, atomic):
+    call = service.remember_many if atomic else service.remember
+    return call.await_args.kwargs
+
+
+class TestBatchLevelArgumentsOnAnItem:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("atomic", [False, True])
+    async def test_agreeing_items_set_the_batch_value_and_say_so_once(self, atomic):
+        service = _stubbed_service()
+        items = [{**ITEM, "tags": ["Dev_Env"], "tags_normalize": True} for _ in range(3)]
+        payload = await _run_stubbed({"items": items, "atomic": atomic}, service)
+        assert payload["status"] == "success" and payload["succeeded"] == 3
+        assert _write_kwargs(service, atomic)["tags_normalize"] is True
+        (lint,) = payload["lint"]
+        assert lint["code"] == "batch_level_argument" and lint["subject"] == "tags_normalize"
+        assert "remember_batch" in lint["hint"] and "tags_normalize=true" in lint["hint"]
+        if not atomic:
+            service.tag_canonical_map.assert_awaited_once()  # normalized: the fold map is read
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("atomic", [False, True])
+    async def test_items_that_repeat_the_batch_value_are_accepted_quietly(self, atomic):
+        service = _stubbed_service()
+        items = [{**ITEM, "tags_normalize": True, "verbose": False} for _ in range(2)]
+        payload = await _run_stubbed(
+            {"items": items, "atomic": atomic, "tags_normalize": True, "verbose": False}, service
+        )
+        assert payload["status"] == "success" and payload["succeeded"] == 2
+        assert _write_kwargs(service, atomic)["tags_normalize"] is True
+        assert "lint" not in payload
+
+    @pytest.mark.asyncio
+    async def test_an_item_that_repeats_the_default_is_adopted_too(self):
+        service = _stubbed_service()
+        payload = await _run_stubbed({"items": [ITEM, {**ITEM, "dedupe": "suggest"}]}, service)
+        assert payload["status"] == "success"
+        assert _write_kwargs(service, False)["dedupe"] == "suggest"
+        assert [entry["subject"] for entry in payload["lint"]] == ["dedupe"]
+
+    @pytest.mark.asyncio
+    async def test_a_conflict_with_the_batch_value_refuses_only_that_item(self):
+        service = _stubbed_service()
+        items = [ITEM, {**ITEM, "tags_normalize": True}, {**ITEM, "tags_normalize": False}]
+        payload = await _run_stubbed({"items": items, "tags_normalize": False}, service)
+        assert [r["status"] for r in payload["results"]] == ["success", "error", "success"]
+        refused = payload["results"][1]
+        assert refused["error"] == "invalid_argument"
+        assert "'tags_normalize' (batch-level)" in refused["message"]
+        assert "The batch's tags_normalize is false" in refused["message"]
+        assert _write_kwargs(service, False)["tags_normalize"] is False
+        assert "lint" not in payload
+
+    @pytest.mark.asyncio
+    async def test_a_conflict_refuses_an_atomic_batch_whole(self):
+        payload = _parse(
+            await handle_remember_batch(
+                {
+                    "context_id": CTX,
+                    "items": [ITEM, {**ITEM, "verbose": True}],
+                    "atomic": True,
+                    "verbose": False,
+                },
+                "user-1",
+                None,
+            )
+        )
+        assert payload["error"] == "batch_refused"
+        assert [r["status"] for r in payload["results"]] == ["skipped", "error"]
+        assert payload["results"][1]["error"] == "invalid_argument"
+
+    @pytest.mark.asyncio
+    async def test_items_that_disagree_without_a_batch_value_are_all_refused(self):
+        service = _stubbed_service()
+        items = [
+            {**ITEM, "tags_normalize": True},
+            ITEM,
+            {**ITEM, "tags_normalize": False},
+        ]
+        payload = await _run_stubbed({"items": items}, service)
+        assert [r["status"] for r in payload["results"]] == ["error", "success", "error"]
+        for index in (0, 2):
+            assert payload["results"][index]["error"] == "invalid_argument"
+            assert "'tags_normalize' (batch-level)" in payload["results"][index]["message"]
+        assert _write_kwargs(service, False)["tags_normalize"] is False
+        assert "lint" not in payload
+
+    @pytest.mark.asyncio
+    async def test_an_invalid_agreeing_value_is_not_adopted(self):
+        service = _stubbed_service()
+        items = [{**ITEM, "dedupe": "always"}, {**ITEM, "dedupe": "always"}]
+        payload = await _run_stubbed({"items": items}, service)
+        assert payload["error"] == "batch_failed"
+        assert {r["error"] for r in payload["results"]} == {"invalid_argument"}
+        assert "lint" not in payload
+
+    @pytest.mark.asyncio
+    async def test_a_json_string_boolean_agrees_with_a_boolean(self):
+        """Items get remember's JSON-string coercion, the batch-level values too."""
+        service = _stubbed_service()
+        items = [{**ITEM, "tags_normalize": "true"}, {**ITEM, "tags_normalize": True}]
+        payload = await _run_stubbed({"items": items, "tags_normalize": True}, service)
+        assert payload["status"] == "success" and payload["succeeded"] == 2
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_key_is_still_refused_with_the_did_you_mean(self):
+        service = _stubbed_service()
+        items = [ITEM, {**ITEM, "tags_normalize": True, "importnace": 0.9}]
+        payload = await _run_stubbed({"items": items, "tags_normalize": True}, service)
+        refused = payload["results"][1]
+        assert refused["error"] == "invalid_argument"
+        assert "'importnace' (did you mean 'importance'?)" in refused["message"]
+        assert "'tags_normalize'" not in refused["message"].split(". ")[0]
+
+    @pytest.mark.asyncio
+    async def test_an_adopted_verbose_reaches_every_item(self):
+        from unittest.mock import patch
+
+        service = _stubbed_service()
+        items = [{**ITEM, "verbose": True}, ITEM]
+        with patch(
+            "mcp_server.tools.batch._persistence_response_field", return_value={}
+        ) as persistence:
+            payload = await _run_stubbed({"items": items}, service)
+        assert payload["status"] == "success"
+        assert [c.kwargs["verbose"] for c in persistence.call_args_list] == [True, True]
+        assert [entry["subject"] for entry in payload["lint"]] == ["verbose"]
+
+
+def test_the_description_and_the_guide_say_an_agreeing_value_is_accepted():
+    tool = next(t for t in get_tool_definitions() if t["name"] == "remember_batch")
+    assert "dedupe, tags_normalize and verbose are batch-level" in tool["description"]
+    assert "an item that repeats one with the batch's value is accepted" in tool["description"]
+    from mcp_server.tools.guide import GUIDE_TOPICS
+
+    usage = GUIDE_TOPICS["remember_batch.usage"]
+    assert "batch_level_argument" in usage
+    assert "every item that carries one agrees" in usage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [{}, {"tags_normalize": True}])
+async def test_items_with_tags_normalize_are_written_in_one_call_and_normalized(live, batch):
+    """#2753 on Postgres: the item-level tags_normalize no longer fails the batch."""
+    from uuid import UUID
+    from uuid import uuid4 as _uuid4
+
+    from sqlalchemy import select
+
+    from models.memory import Memory
+    from services.tag_resolution import clear_vocabulary_cache
+
+    owner = f"o-{_uuid4().hex[:6]}"
+    ws, ctx = await _scope(live, owner)
+    ctx_id = ctx.id
+    seeded = _parse(
+        await handle_remember_batch(
+            {"context_id": str(ctx_id), "items": [{**OK_ITEM, "tags": ["dev-environment"]}]},
+            owner,
+            ws.id,
+        )
+    )
+    assert seeded["status"] == "success"
+    clear_vocabulary_cache()
+    item = {**OK_ITEM, "tags": ["Dev_Environment"], "tags_normalize": True}
+    payload = _parse(
+        await handle_remember_batch(
+            {"context_id": str(ctx_id), "items": [item, item], **batch}, owner, ws.id
+        )
+    )
+    assert payload["status"] == "success" and payload["succeeded"] == 2
+    assert ("lint" in payload) is (not batch)
+    ids = [UUID(r["memory_id"]) for r in payload["results"]]
+    rows = (await live.execute(select(Memory.tags).where(Memory.id.in_(ids)))).scalars().all()
+    assert [list(tags) for tags in rows] == [["dev-environment"], ["dev-environment"]]
