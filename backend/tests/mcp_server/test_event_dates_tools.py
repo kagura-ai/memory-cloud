@@ -69,8 +69,8 @@ class TestDefinitions:
 
     def test_the_details_parameter_lists_the_event_keys(self):
         details = _definition("remember")["inputSchema"]["properties"]["details"]["description"]
-        for key in ("event_phrase", "event_start", "event_end", "observed_at"):
-            assert key in details
+        for key in ("event_phrase", "event_start", "event_end", "observed_at", "event_direction"):
+            assert key in details  # #2752: a writer that never calls guide still sees it
         observed_at = _definition("remember")["inputSchema"]["properties"]["observed_at"]
         assert "never the write time" in observed_at["description"]
         assert "event_phrase" in observed_at["description"]

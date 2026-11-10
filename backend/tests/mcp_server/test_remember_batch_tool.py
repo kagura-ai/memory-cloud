@@ -814,6 +814,7 @@ def test_the_description_and_the_guide_say_an_agreeing_value_is_accepted():
     tool = next(t for t in get_tool_definitions() if t["name"] == "remember_batch")
     assert "dedupe, tags_normalize and verbose are batch-level" in tool["description"]
     assert "an item that repeats one with the batch's value is accepted" in tool["description"]
+    assert "applies to the whole batch" in tool["description"]
     from mcp_server.tools.guide import GUIDE_TOPICS
 
     usage = GUIDE_TOPICS["remember_batch.usage"]

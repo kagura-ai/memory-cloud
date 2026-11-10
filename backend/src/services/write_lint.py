@@ -66,18 +66,31 @@ _NARRATIVE_OPENERS = re.compile(
 
 # #2752: a parenthesised group right after the event phrase that holds nothing
 # but one ISO date or a range of two ("last week (2024-03-04..2024-03-10)").
+# The second date may keep only what differs from the first, as the skills
+# write it: "(2024-03-09–10)" (DD) or "(2024-02-26–03-03)" (MM-DD).
 _ISO_DAY = r"\d{4}-\d{2}-\d{2}"
 _BARE_DATES = re.compile(
     rf"\s*\(\s*(?P<start>{_ISO_DAY})"
-    rf"(?:(?:\s*(?:\.\.|–|—|-|/)\s*|\s+to\s+)(?P<end>{_ISO_DAY}))?\s*\)",
+    r"(?:(?:\s*(?:\.\.|–|—|-|/)\s*|\s+to\s+)"
+    rf"(?P<end>{_ISO_DAY}|\d{{2}}-\d{{2}}|\d{{2}}))?\s*\)",
     re.IGNORECASE,
 )
+# The leading words the resolver ignores ("on Sunday" is written "Sunday" too).
+_PHRASE_LEADING = ("on", "in", "the")
 
 
 def _written_days(match: re.Match[str]) -> tuple[date, date] | None:
     try:
         start = date.fromisoformat(match.group("start"))
-        end = date.fromisoformat(match.group("end")) if match.group("end") else start
+        end_text = match.group("end")
+        if not end_text:
+            end = start
+        elif len(end_text) == 2:
+            end = start.replace(day=int(end_text))
+        elif len(end_text) == 5:
+            end = start.replace(month=int(end_text[:2]), day=int(end_text[3:]))
+        else:
+            end = date.fromisoformat(end_text)
     except ValueError:
         return None  # not a calendar date: not a bare date either
     return start, end
@@ -88,8 +101,10 @@ def _event_date_hints(summary: str, content: str | None, details: Any) -> list[W
 
     Fires only when the memory's ``event_phrase`` resolved (``event_start`` ..
     ``event_end``) and the summary or the content has the phrase
-    (case-insensitive) followed by a parenthesised ISO date or range that is
-    not those days; one date agrees with a single-day event. Silent for a
+    (case-insensitive, a leading on / in / the optional) followed by a
+    parenthesised ISO date or range that is not those days; one date agrees
+    with a single-day event, and a range's second date may be shortened to
+    ``MM-DD`` or ``DD`` (the missing parts are the first date's). Silent for a
     parenthesis that is not a bare date ("(stated on 2024-03-09)"). Nothing is
     rewritten.
     """
@@ -97,11 +112,12 @@ def _event_date_hints(summary: str, content: str | None, details: Any) -> list[W
     if resolved is None:
         return []
     phrase = details["event_phrase"].strip().rstrip(".,!").strip()
-    if not phrase:
+    words = phrase.split()
+    while len(words) > 1 and words[0].lower() in _PHRASE_LEADING:
+        words = words[1:]
+    if not words:
         return []
-    pattern = re.compile(
-        r"(?<!\w)" + r"\s+".join(re.escape(word) for word in phrase.split()), re.IGNORECASE
-    )
+    pattern = re.compile(r"(?<!\w)" + r"\s+".join(re.escape(word) for word in words), re.IGNORECASE)
     start, end = resolved
     shown = start.isoformat() if start == end else f"{start.isoformat()}..{end.isoformat()}"
     for text in (summary, content):

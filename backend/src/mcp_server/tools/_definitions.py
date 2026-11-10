@@ -59,8 +59,8 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
             "name": "remember",
             "description": """Store a new memory; edit a known id with update_memory, replace an outdated fact with supersedes=<old_memory_id>.
 Named speakers: start summaries with the subject's name; record both people and direction; attribute facts to their speaker; check subjects against speaker labels.
-Dates: observed_at is always the material's date (ISO YYYY-MM-DD, when the fact was stated), never the write time. A relative date ('last weekend') goes as stated in details.event_phrase; do not compute dates yourself — the server resolves it from observed_at into event_start/event_end (else event_unresolved).
-SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
+Dates: observed_at is always the material's date (ISO YYYY-MM-DD, when the fact was stated), never the write time. A relative date ('last weekend') goes as stated in details.event_phrase; do not compute dates yourself; the server resolves it from observed_at into event_start/event_end (else event_unresolved).
+SECURITY: never store secrets, credentials or PII: refuse and ask the user to redact; coordinates go only in details.location, never in context.
 Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}; dedupe='check': {status: 'duplicate_candidate', candidate}. Committed before return. Errors: quota_exceeded, payload_too_large (>1,000,000 chars: split), validation_error. Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
@@ -85,11 +85,11 @@ Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?
                     },
                     "content": {
                         "type": "string",
-                        "description": "Main content: code, notes, explanation — any text to preserve.",
+                        "description": "Main content: any text to preserve.",
                     },
                     "type": {
                         "type": "string",
-                        "description": "Free-form type (max 50 chars), e.g. 'decision', 'pattern', 'bug-fix', 'note', 'fact', 'event'; 'time' makes a Time Memory (needs details.trigger).",
+                        "description": "Free-form type (max 50 chars), e.g. 'decision', 'pattern', 'fact', 'event'; 'time' makes a Time Memory (needs details.trigger).",
                     },
                     "context_summary": {
                         "type": "string",
@@ -97,7 +97,7 @@ Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?
                     },
                     "details": {
                         "type": "object",
-                        "description": "Structured details (JSON object). Reserved keys: location (lat/lon, see SECURITY), trigger (type='time'), tool_trigger (guardrail), observed_at (ISO 8601 date, when the fact held), event_phrase (a relative date as stated, resolved from observed_at into event_start/event_end; pass those two for absolute dates).",
+                        "description": "JSON object. Reserved keys: location (lat/lon, see SECURITY), trigger (type='time'), tool_trigger (guardrail), observed_at (the material's date), event_phrase (a relative date as stated, resolved from observed_at into event_start/event_end; pass those two for absolute dates), event_direction ('future' when a bare weekday is upcoming).",
                     },
                     "observed_at": {
                         "type": "string",
@@ -119,7 +119,7 @@ Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?
                     "delivery_mode": {
                         "type": "string",
                         "enum": ["always", "on_recall", "on_trigger"],
-                        "description": "'on_recall' (default): only via recall(). 'always': pinned (load_pinned, persistent) — ONLY for standing notes like a goal. 'on_trigger': set by type='time'.",
+                        "description": "'on_recall' (default): only via recall(). 'always': pinned (load_pinned, persistent); ONLY for standing notes like a goal. 'on_trigger': set by type='time'.",
                     },
                     "context_id": {
                         "type": "string",
@@ -155,7 +155,7 @@ Returns: {status, memory_id, scope, version, persistence?, lint?, plan_headroom?
         },
         {
             "name": "remember_batch",
-            "description": """Store up to 50 memories in one call (the end-of-session save); dedupe, tags_normalize and verbose are batch-level, and an item that repeats one with the batch's value is accepted. Items take remember's other arguments and limits; an unknown item key fails only that item (invalid_argument). atomic=true: all or nothing (a failing item or a dedupe='check' candidate rolls the batch back); default false: each item on its own. Relative dates as in remember: details.event_phrase as stated plus observed_at; do not compute dates.
+            "description": """Store up to 50 memories in one call (the end-of-session save); dedupe, tags_normalize and verbose are batch-level, and an item that repeats one with the batch's value is accepted (one only items set, all alike, applies to the whole batch). Items take remember's other arguments and limits; an unknown item key fails only that item (invalid_argument). atomic=true: all or nothing; default false: each item on its own. Relative dates as in remember: details.event_phrase as stated plus observed_at; do not compute dates.
 Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, lint?, plan_headroom?, session_id?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["remember_batch"]).""",
             "inputSchema": {
@@ -171,7 +171,7 @@ Manual: guide(["remember_batch"]).""",
                         "minItems": 1,
                         "maxItems": 50,
                         "items": {"type": "object"},
-                        "description": "One object per memory with remember's arguments (summary, content, type required). A batch-level key may only repeat the batch's value; undeclared keys are refused.",
+                        "description": "One object per memory with remember's arguments (summary, content, type required).",
                     },
                     "atomic": {
                         "type": "boolean",
