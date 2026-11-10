@@ -120,13 +120,22 @@ class TestRemember:
         "details",
         [
             {"observed_at": "2024-03-11", "event_phrase": ""},
-            {"observed_at": "2024-03-11", "event_phrase": "Sunday", "event_direction": "soon"},
             {"event_start": "2024-3-9"},
             {"event_end": "2024-03-10"},
         ],
     )
     async def test_a_bad_value_is_the_established_value_error(self, service, details):
         with pytest.raises(ValueError, match="invalid details.event_phrase"):
+            await _remember(service, details=details)
+        service.memory_repo.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_bad_direction_names_its_own_key(self, service):
+        details = {"observed_at": "2024-03-11", "event_phrase": "Sunday", "event_direction": "soon"}
+        with pytest.raises(
+            ValueError,
+            match='^invalid details.event_direction: event_direction must be "past" or "future"$',
+        ):
             await _remember(service, details=details)
         service.memory_repo.create.assert_not_awaited()
 

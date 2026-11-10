@@ -308,29 +308,6 @@ def resolve_event_phrase(
     return None
 
 
-def resolved_event_days(details: Any) -> tuple[date, date] | None:
-    """The days the stored ``event_phrase`` resolves to from the stored ``observed_at``
-    (and ``event_direction``), or None: no phrase, no anchor or outside the rules.
-
-    For readers that need to know the dates came from the phrase (the
-    ``event_date_mismatch`` write lint), not from a pair the client passed.
-    Never raises.
-    """
-    if not isinstance(details, dict):
-        return None
-    phrase = details.get("event_phrase")
-    anchor = _anchor(details)
-    if not isinstance(phrase, str) or anchor is None:
-        return None
-    direction = details.get("event_direction")
-    try:
-        return resolve_event_phrase(
-            phrase, anchor, direction if isinstance(direction, str) else None
-        )
-    except (OverflowError, ValueError):
-        return None
-
-
 # --------------------------------------------------------------- write path
 
 
@@ -347,12 +324,16 @@ def _calendar_date(value: Any, key: str) -> str:
     return day.isoformat()
 
 
+class EventDirectionValidationError(EventDateValidationError):
+    """A ``details.event_direction`` other than ``"past"`` / ``"future"``."""
+
+
 def _direction(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, str):
-        raise EventDateValidationError(_DIRECTION_HINT)
+        raise EventDirectionValidationError(_DIRECTION_HINT)
     text = value.strip().lower()
     if text not in EVENT_DIRECTIONS:
-        raise EventDateValidationError(_DIRECTION_HINT)
+        raise EventDirectionValidationError(_DIRECTION_HINT)
     return text
 
 

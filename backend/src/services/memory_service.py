@@ -125,6 +125,7 @@ from services.write_provenance import current_provenance
 from utils.datetime import to_naive_utc, to_utc_iso, utcnow
 from utils.event_dates import (
     EventDateValidationError,
+    EventDirectionValidationError,
     event_payload_value,
     event_payload_values,
     event_response_kwargs,
@@ -944,7 +945,12 @@ class MemoryService:
         try:
             return normalize_event_dates(details)
         except EventDateValidationError as exc:
-            raise ValueError(f"invalid details.event_phrase: {exc}") from exc
+            key = (
+                "event_direction"
+                if isinstance(exc, EventDirectionValidationError)
+                else "event_phrase"
+            )
+            raise ValueError(f"invalid details.{key}: {exc}") from exc
 
     @staticmethod
     def _fold_observed_at(

@@ -759,7 +759,9 @@ class TestEventDateMismatch:
         summary = f"Shipped the new parser last week ({written}) after the review round."
         (hint,) = _mismatch(await _event_lint(summary, dict(LAST_WEEK)))
         assert hint.subject == "last week"
-        assert written in hint.hint
+        # The written days as parsed, not the client's text.
+        shown = written if written == "2024-03-04" else "2024-03-05..2024-03-11"
+        assert f"'last week' is written as ({shown})" in hint.hint
         assert "2024-03-04..2024-03-10" in hint.hint
 
     @pytest.mark.asyncio
@@ -864,11 +866,16 @@ class TestEventDateMismatch:
         hints = _mismatch(await _event_lint(summary, dict(LAST_WEEK)))
         assert len(hints) == (1 if fires else 0)
         if fires:
-            assert written in hints[0].hint
+            assert "but the memory holds 2024-03-04..2024-03-10" in hints[0].hint
 
     @pytest.mark.asyncio
     async def test_a_month_day_second_date_crosses_the_month(self):
-        details = {"observed_at": "2024-03-06", "event_phrase": "last week"}  # Feb 26 - Mar 3
+        details = {
+            "observed_at": "2024-03-06",
+            "event_phrase": "last week",
+            "event_start": "2024-02-26",
+            "event_end": "2024-03-03",
+        }
         ok = "Shipped the new parser last week (2024-02-26–03-03) after the review round."
         assert _mismatch(await _event_lint(ok, details)) == []
         bad = "Shipped the new parser last week (2024-02-26–03-02) after the review round."
@@ -876,11 +883,97 @@ class TestEventDateMismatch:
 
     @pytest.mark.asyncio
     async def test_a_leading_on_in_or_the_of_the_phrase_is_optional_in_the_text(self):
-        details = {"observed_at": "2024-03-09", "event_phrase": "on Sunday"}  # 2024-03-03
+        details = {
+            "observed_at": "2024-03-09",
+            "event_phrase": "on Sunday",
+            "event_start": "2024-03-03",
+            "event_end": "2024-03-03",
+        }
         bad = "The team went hiking Sunday (2024-03-10) near the lake."
         assert len(_mismatch(await _event_lint(bad, details))) == 1
         ok = "The team went hiking on Sunday (2024-03-03) near the lake."
         assert _mismatch(await _event_lint(ok, details)) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("phrase", "start", "end", "summary"),
+        [
+            (
+                "tomorrow",
+                "2024-03-10",
+                "2024-03-10",
+                "We fly out the day after tomorrow (2024-03-11).",
+            ),
+            (
+                "yesterday",
+                "2024-03-08",
+                "2024-03-08",
+                "It broke the day before yesterday (2024-03-07).",
+            ),
+            ("Sunday", "2024-03-03", "2024-03-03", "The review moved to next Sunday (2024-03-17)."),
+            ("March", "2024-03-01", "2024-03-31", "The launch slips to next March (2025-03-01)."),
+            ("may", "2023-05-01", "2023-05-31", "We may (2024-01-01) go to the coast after all."),
+        ],
+    )
+    async def test_the_phrase_inside_a_longer_expression_is_not_it(
+        self, phrase, start, end, summary
+    ):
+        """The stored phrase as the tail of another expression ("the day after
+        tomorrow" for "tomorrow") or a common word ("We may") is not the phrase."""
+        details = {
+            "observed_at": "2024-03-09",
+            "event_phrase": phrase,
+            "event_start": start,
+            "event_end": end,
+        }
+        assert _mismatch(await _event_lint(summary, details)) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("phrase", "start", "end", "summary"),
+        [
+            (
+                "last weekend",
+                "2024-03-02",
+                "2024-03-03",
+                "We met last weekend (2024-03-01) at the lake.",
+            ),
+            ("Sunday", "2024-03-03", "2024-03-03", "The team went hiking on Sunday (2024-03-05)."),
+            ("Sunday", "2024-03-03", "2024-03-03", "Hiking. Sunday (2024-03-05) was cold."),
+        ],
+    )
+    async def test_a_real_mismatch_still_fires(self, phrase, start, end, summary):
+        details = {
+            "observed_at": "2024-03-09",
+            "event_phrase": phrase,
+            "event_start": start,
+            "event_end": end,
+        }
+        assert len(_mismatch(await _event_lint(summary, details))) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_hint_stays_short_whatever_the_text(self):
+        gap = " " * 100_000
+        content = f"It shipped last{gap}week ({gap}2024-03-05{gap}..{gap}2024-03-11{gap})."
+        (hint,) = _mismatch(await _event_lint(GOOD_SUMMARY, dict(LAST_WEEK), content=content))
+        assert len(hint.hint) < 300
+        assert "'last week'" in hint.hint and "2024-03-05..2024-03-11" in hint.hint
+
+    @pytest.mark.asyncio
+    async def test_it_compares_with_the_stored_days_not_a_new_resolution(self):
+        stored = {
+            "event_phrase": "three years ago",
+            "observed_at": "2024-03-09",
+            "event_start": "2021-01-01",
+            "event_end": "2021-12-31",
+        }
+        agrees = "Moved to Osaka three years ago (2021-01-01..2021-12-31) for the job."
+        assert _mismatch(await _event_lint(agrees, stored)) == []
+        differs = "Moved to Osaka three years ago (2021-03-09) for the job."
+        (hint,) = _mismatch(await _event_lint(differs, stored))
+        assert "2021-01-01..2021-12-31" in hint.hint
+        no_days = {"event_phrase": "three years ago", "observed_at": "2024-03-09"}
+        assert _mismatch(await _event_lint(differs, no_days)) == []
 
     @pytest.mark.asyncio
     async def test_a_well_formed_write_stays_silent(self):
