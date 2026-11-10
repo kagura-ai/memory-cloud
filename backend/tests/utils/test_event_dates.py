@@ -261,8 +261,6 @@ class TestUnresolved:
             "soon",
             "a few days ago",
             "a couple of weeks ago",
-            "the day before yesterday",
-            "next Tuesday",
             "last December",
             "in two days",
             "0 days ago",
@@ -286,6 +284,261 @@ class TestUnresolved:
     def test_non_string_or_non_date_inputs_are_none(self):
         assert resolve_event_phrase(None, MONDAY) is None  # type: ignore[arg-type]
         assert resolve_event_phrase("today", "2024-03-11") is None  # type: ignore[arg-type]
+
+
+class TestPartsOfTheDay:
+    """#2751: a part of the material's day is that day; "last night" the day before."""
+
+    @pytest.mark.parametrize(
+        "phrase", ["tonight", "Tonight.", "this morning", "this afternoon", "this evening"]
+    )
+    def test_a_part_of_the_day_is_the_anchor(self, phrase):
+        assert resolve_event_phrase(phrase, SATURDAY) == _span("2024-03-09")
+
+    def test_last_night_is_the_day_before(self):
+        assert resolve_event_phrase("last night", SATURDAY) == _span("2024-03-08")
+        # Across a month end in a leap year.
+        assert resolve_event_phrase("last night", date(2024, 3, 1)) == _span("2024-02-29")
+        assert resolve_event_phrase("Last Night", NEW_YEAR) == _span("2026-01-08")
+
+
+class TestTwoDaysAway:
+    @pytest.mark.parametrize(
+        ("phrase", "anchor", "expected"),
+        [
+            ("day after tomorrow", SATURDAY, "2024-03-11"),
+            ("the day after tomorrow", SATURDAY, "2024-03-11"),
+            ("day before yesterday", SATURDAY, "2024-03-07"),
+            ("the day before yesterday", SATURDAY, "2024-03-07"),
+            # Across a month end (2024 is a leap year) and a year end.
+            ("the day after tomorrow", date(2024, 2, 28), "2024-03-01"),
+            ("the day before yesterday", date(2024, 3, 1), "2024-02-28"),
+            ("the day after tomorrow", date(2025, 12, 31), "2026-01-02"),
+            ("the day before yesterday", NEW_YEAR, "2026-01-07"),
+        ],
+    )
+    def test_plus_or_minus_two_days(self, phrase, anchor, expected):
+        assert resolve_event_phrase(phrase, anchor) == _span(expected)
+
+
+class TestThisAndNextWeekday:
+    """#2751: ``this <weekday>`` is in the anchor's Mon–Sun week, ``next <weekday>``
+    in the Mon–Sun week after it (reading B)."""
+
+    @pytest.mark.parametrize(
+        ("phrase", "expected"),
+        [
+            ("this Sunday", "2024-03-10"),
+            ("next Sunday", "2024-03-17"),
+            ("next Monday", "2024-03-11"),
+            ("this Monday", "2024-03-04"),  # before the anchor, same week
+            ("this Saturday", "2024-03-09"),  # the anchor itself
+            ("next Saturday", "2024-03-16"),
+            ("this Friday", "2024-03-08"),
+            ("next fri", "2024-03-15"),
+            ("on this sun", "2024-03-10"),
+        ],
+    )
+    def test_from_a_saturday(self, phrase, expected):
+        assert resolve_event_phrase(phrase, SATURDAY) == _span(expected)
+
+    @pytest.mark.parametrize(
+        ("phrase", "expected"),
+        [
+            ("this Monday", "2024-03-11"),  # the anchor itself
+            ("next Monday", "2024-03-18"),
+            ("this Tuesday", "2024-03-12"),
+            ("next Tuesday", "2024-03-19"),
+            ("this Sunday", "2024-03-17"),
+            ("next Sunday", "2024-03-24"),
+        ],
+    )
+    def test_from_a_monday(self, phrase, expected):
+        assert resolve_event_phrase(phrase, MONDAY) == _span(expected)
+
+    @pytest.mark.parametrize(
+        ("phrase", "anchor", "expected"),
+        [
+            # Fri 2024-05-31: the week runs Mon 27 May - Sun 2 June.
+            ("this Monday", date(2024, 5, 31), "2024-05-27"),
+            ("this Sunday", date(2024, 5, 31), "2024-06-02"),
+            ("next Monday", date(2024, 5, 31), "2024-06-03"),
+            ("next Wednesday", date(2024, 5, 31), "2024-06-05"),
+            # Wed 2025-12-31: the week runs Mon 29 Dec - Sun 4 January.
+            ("this Monday", date(2025, 12, 31), "2025-12-29"),
+            ("this Sunday", date(2025, 12, 31), "2026-01-04"),
+            ("next Tuesday", date(2025, 12, 31), "2026-01-06"),
+        ],
+    )
+    def test_across_a_month_and_a_year_end(self, phrase, anchor, expected):
+        assert resolve_event_phrase(phrase, anchor) == _span(expected)
+
+    @pytest.mark.parametrize(
+        ("phrase", "start", "end"),
+        [
+            ("this week", "2024-03-04", "2024-03-10"),
+            ("next week", "2024-03-11", "2024-03-17"),
+            ("this weekend", "2024-03-09", "2024-03-10"),
+            ("next weekend", "2024-03-16", "2024-03-17"),
+            ("this month", "2024-03-01", "2024-03-31"),
+            ("next month", "2024-04-01", "2024-04-30"),
+            ("this year", "2024-01-01", "2024-12-31"),
+            ("next year", "2025-01-01", "2025-12-31"),
+        ],
+    )
+    def test_the_periods_are_not_shadowed(self, phrase, start, end):
+        assert resolve_event_phrase(phrase, SATURDAY) == _span(start, end)
+
+    @pytest.mark.parametrize("phrase", ["this March", "next June", "this day", "next time"])
+    def test_a_word_that_is_no_weekday_is_unresolved(self, phrase):
+        assert resolve_event_phrase(phrase, SATURDAY) is None
+
+
+class TestYearsAgo:
+    """#2751: the same calendar day N years back, clamped as ``N months ago``."""
+
+    @pytest.mark.parametrize(
+        ("phrase", "anchor", "expected"),
+        [
+            ("three years ago", NEW_YEAR, "2023-01-09"),
+            ("a year ago", NEW_YEAR, "2025-01-09"),
+            ("one year ago", SATURDAY, "2023-03-09"),
+            ("2 years ago", SATURDAY, "2022-03-09"),
+            ("twelve years ago", SATURDAY, "2012-03-09"),
+            ("100 years ago", SATURDAY, "1924-03-09"),
+            # 29 February: clamped in a non-leap year, kept in a leap year.
+            ("a year ago", date(2024, 2, 29), "2023-02-28"),
+            ("four years ago", date(2024, 2, 29), "2020-02-29"),
+            ("3 years ago", date(2024, 2, 29), "2021-02-28"),
+        ],
+    )
+    def test_the_same_calendar_day(self, phrase, anchor, expected):
+        assert resolve_event_phrase(phrase, anchor) == _span(expected)
+
+    @pytest.mark.parametrize(
+        ("phrase", "anchor"),
+        [
+            ("5 years ago", date(5, 6, 1)),
+            ("a year ago", date(1, 1, 1)),
+            ("1000 years ago", date(500, 1, 1)),
+        ],
+    )
+    def test_a_year_below_one_is_unresolved_not_an_error(self, phrase, anchor):
+        assert resolve_event_phrase(phrase, anchor) is None
+
+    def test_a_year_below_one_leaves_the_write_unresolved(self):
+        details = normalize_event_dates({"observed_at": "0001-06-01", "event_phrase": "a year ago"})
+        assert details == {"observed_at": "0001-06-01", "event_phrase": "a year ago"}
+
+    @pytest.mark.parametrize("phrase", ["thirteen years ago", "0 years ago", "1001 years ago"])
+    def test_counts_outside_the_words_or_the_cap_are_unresolved(self, phrase):
+        assert resolve_event_phrase(phrase, SATURDAY) is None
+
+
+class TestUnresolvedOnPurpose:
+    """#2751: phrases that name no single day or range, a season, a phrase counted
+    from another event, and the open items the issue leaves for later."""
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "a few years back",
+            "the other day",
+            "lately",
+            "a while back",
+            "a few weeks ago",
+            "last summer",
+            "two weekends later",
+            # Open, lower priority in #2751: ranges ending on the anchor, "around".
+            "the past week",
+            "the last 3 days",
+            "around yesterday",
+            "about two weeks ago",
+        ],
+    )
+    def test_they_stay_unknown(self, phrase):
+        assert resolve_event_phrase(phrase, SATURDAY) is None
+        result = SimpleNamespace(
+            event_start=None, event_end=None, event_phrase=phrase, observed_at="2024-03-09"
+        )
+        assert event_write_fields(result) == {"event_unresolved": "unknown_phrase"}
+
+
+FRIDAY = date(2024, 3, 8)
+
+
+class TestEventDirection:
+    """#2752: ``event_direction="future"`` turns a BARE weekday into the first such
+    day on or after the anchor; ``"past"`` or no direction keeps the present rule;
+    every other phrase ignores it."""
+
+    @pytest.mark.parametrize(
+        ("anchor", "future", "past"),
+        [
+            (FRIDAY, "2024-03-10", "2024-03-03"),  # before the named weekday
+            (SUNDAY, "2024-03-10", "2024-03-03"),  # on it: the anchor itself
+            (MONDAY, "2024-03-17", "2024-03-10"),  # after it
+        ],
+    )
+    @pytest.mark.parametrize("phrase", ["Sunday", "on Sunday", "sun"])
+    def test_a_bare_weekday(self, phrase, anchor, future, past):
+        assert resolve_event_phrase(phrase, anchor, "future") == _span(future)
+        assert resolve_event_phrase(phrase, anchor, "past") == _span(past)
+        assert resolve_event_phrase(phrase, anchor) == _span(past)
+        assert resolve_event_phrase(phrase, anchor, None) == _span(past)
+
+    def test_the_issue_examples(self):
+        assert resolve_event_phrase("on Sunday", SATURDAY, "future") == _span("2024-03-10")
+        assert resolve_event_phrase("Saturday", SATURDAY, "future") == _span("2024-03-09")
+        assert resolve_event_phrase("Saturday", SATURDAY) == _span("2024-03-02")
+
+    @pytest.mark.parametrize(
+        ("phrase", "expected"),
+        [
+            ("last Sunday", ("2024-03-03",)),
+            ("this Sunday", ("2024-03-10",)),
+            ("next Sunday", ("2024-03-17",)),
+            ("yesterday", ("2024-03-08",)),
+            ("last week", ("2024-02-26", "2024-03-03")),
+            ("two weeks ago", ("2024-02-24",)),
+            ("June", ("2023-06-01", "2023-06-30")),
+        ],
+    )
+    @pytest.mark.parametrize("direction", ["past", "future", None])
+    def test_every_other_phrase_ignores_it(self, phrase, expected, direction):
+        assert resolve_event_phrase(phrase, SATURDAY, direction) == _span(*expected)
+
+    def test_the_write_resolves_with_it_and_stores_it(self):
+        details = normalize_event_dates(
+            {"observed_at": "2024-03-09", "event_phrase": "on Sunday", "event_direction": "future"}
+        )
+        assert details == {
+            "observed_at": "2024-03-09",
+            "event_phrase": "on Sunday",
+            "event_direction": "future",
+            "event_start": "2024-03-10",
+            "event_end": "2024-03-10",
+        }
+
+    @pytest.mark.parametrize(("given", "stored"), [(" Future ", "future"), ("PAST", "past")])
+    def test_it_is_lower_cased_and_stripped(self, given, stored):
+        details = normalize_event_dates(
+            {"observed_at": "2024-03-09", "event_phrase": "Sunday", "event_direction": given}
+        )
+        assert details["event_direction"] == stored
+
+    def test_it_alone_is_kept_and_null_removes_it(self):
+        assert normalize_event_dates({"event_direction": "past"}) == {"event_direction": "past"}
+        assert normalize_event_dates({"event_direction": None, "k": 1}) == {"k": 1}
+
+    @pytest.mark.parametrize("value", ["soon", "", "  ", "forward", 1, True, ["future"]])
+    def test_any_other_value_is_refused(self, value):
+        with pytest.raises(
+            EventDateValidationError, match='event_direction must be "past" or "future"'
+        ):
+            normalize_event_dates(
+                {"observed_at": "2024-03-09", "event_phrase": "Sunday", "event_direction": value}
+            )
 
 
 # --------------------------------------------------------------- write path

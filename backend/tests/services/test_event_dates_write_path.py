@@ -14,7 +14,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -129,6 +129,16 @@ class TestRemember:
             await _remember(service, details=details)
         service.memory_repo.create.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_a_bad_direction_names_its_own_key(self, service):
+        details = {"observed_at": "2024-03-11", "event_phrase": "Sunday", "event_direction": "soon"}
+        with pytest.raises(
+            ValueError,
+            match='^invalid details.event_direction: event_direction must be "past" or "future"$',
+        ):
+            await _remember(service, details=details)
+        service.memory_repo.create.assert_not_awaited()
+
 
 _STORED = {
     "observed_at": "2024-03-11",
@@ -172,6 +182,60 @@ class TestUpdateInPlace:
         memory = _stored_memory(dict(_STORED))
         result = await _update_in_place(service, memory, details={"observed_at": "2024-03-11"})
         assert (result.event_start, result.event_end, result.event_phrase) == (None, None, None)
+
+
+class TestEventDateMismatchLint:
+    """#2752: the write lint compares a parenthesised date after the phrase with the
+    resolved days, on remember (each remember_batch item goes the same way) and on
+    update_memory (which lints the memory's current state)."""
+
+    @pytest.mark.asyncio
+    async def test_remember_reports_a_differing_date(self, service):
+        from models.schemas import RememberRequest
+
+        request = RememberRequest(
+            summary="Shipped the new parser last week (2024-03-05..2024-03-11) after review",
+            content="c",
+            type="event",
+            tags=["parser"],
+            details={"observed_at": "2024-03-11", "event_phrase": "last week"},
+        )
+        with (
+            patch("services.memory_service.process_pending_embedding", new=AsyncMock()),
+            patch(
+                "services.quota_service.QuotaService",
+                **{
+                    "return_value.check_memory_quota": AsyncMock(return_value=(True, None)),
+                    "return_value.check_memories_per_day": AsyncMock(return_value=(True, None)),
+                },
+            ),
+            patch(
+                "services.tag_resolution.vocabulary_before_write", new=AsyncMock(return_value={})
+            ),
+        ):
+            result = await service.remember(
+                request,
+                user_id="test_user",
+                client="test",
+                current_context_id=service._mock_context.id,
+                current_workspace_id=None,
+            )
+        assert (result.event_start, result.event_end) == ("2024-03-04", "2024-03-10")
+        (hint,) = [h for h in result.lint if h.code == "event_date_mismatch"]
+        assert "2024-03-05..2024-03-11" in hint.hint and "2024-03-04..2024-03-10" in hint.hint
+        assert _written(service).summary == request.summary  # nothing is rewritten
+
+    @pytest.mark.asyncio
+    async def test_update_memory_reports_it_on_the_current_state(self, service):
+        memory = _stored_memory(dict(_STORED))
+        with patch(
+            "services.tag_resolution.vocabulary_before_write", new=AsyncMock(return_value={})
+        ):
+            result = await _update_in_place(
+                service, memory, summary="We went hiking last weekend (2024-03-02..2024-03-03)"
+            )
+        (hint,) = [h for h in result.lint if h.code == "event_date_mismatch"]
+        assert "2024-03-09..2024-03-10" in hint.hint
 
 
 def _payload_request(details):

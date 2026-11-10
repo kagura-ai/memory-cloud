@@ -350,6 +350,18 @@ RELATIVE_DATE_RULES = (
     "Relative dates.",
     "pass the phrase as stated in `details.event_phrase`",
     "do not compute the dates yourself",
+    # #2751: the rules added to the set.
+    "tonight, this morning, this afternoon and this evening (the material date)",
+    "last night (the day before), the day after tomorrow and the day before yesterday",
+    "N days, weeks, months or years ago",
+    "this <weekday> (that day in the material date's Monday–Sunday week)",
+    "next <weekday> (that day in the week after it)",
+    # #2752: the direction of a bare weekday, the batch rule and the lint.
+    '`details.event_direction: "future"`',
+    "the first such day on or after the material date",
+    "In a `remember_batch` the summaries are written before any response exists: "
+    "keep the phrase as stated and add no date; the row carries the resolved days.",
+    "`event_date_mismatch` lint",
     '"last weekend" is the Saturday–Sunday just before the material date',
     "on a Saturday or Sunday, the weekend before the current one",
     "returns `event_start`, `event_end` and `event_weekday`",
@@ -399,6 +411,10 @@ def test_session_summary_passes_relative_dates_as_event_phrase(relative):
     assert "do not compute it" in text
     assert "returns `event_start` / `event_end`" in text
     assert "resolve relative dates" not in text
+    # #2752: a batch writer cannot copy dates from a response that does not exist yet.
+    assert "keep the phrase as stated and add no date; the row carries the resolved days" in text
+    assert "`event_end` for the summary" not in text
+    assert '`details.event_direction: "future"`' in text
 
 
 @pytest.mark.parametrize("name", ["remember", "remember_batch", "update_memory"])

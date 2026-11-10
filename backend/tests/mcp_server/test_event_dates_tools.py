@@ -69,8 +69,8 @@ class TestDefinitions:
 
     def test_the_details_parameter_lists_the_event_keys(self):
         details = _definition("remember")["inputSchema"]["properties"]["details"]["description"]
-        for key in ("event_phrase", "event_start", "event_end", "observed_at"):
-            assert key in details
+        for key in ("event_phrase", "event_start", "event_end", "observed_at", "event_direction"):
+            assert key in details  # #2752: a writer that never calls guide still sees it
         observed_at = _definition("remember")["inputSchema"]["properties"]["observed_at"]
         assert "never the write time" in observed_at["description"]
         assert "event_phrase" in observed_at["description"]
@@ -87,6 +87,38 @@ class TestDefinitions:
             assert (
                 "event_start?, event_end?, event_weekday?, event_unresolved?" in GUIDE_TOPICS[name]
             )
+
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            "tonight",
+            "this morning / afternoon / evening",
+            "last night",
+            "the day after tomorrow / before yesterday",
+            "N days / weeks / months / years ago",
+            "this <weekday> (in observed_at's week)",
+            "next <weekday> (in the week after)",
+        ],
+    )
+    def test_the_guide_names_the_rules_of_2751(self, rule):
+        from mcp_server.tools.guide import GUIDE_TOPICS
+
+        assert rule in GUIDE_TOPICS["remember.observed_at"]
+
+    def test_the_guide_documents_the_direction_the_lint_and_the_batch_rule(self):
+        """#2752."""
+        from mcp_server.tools.guide import GUIDE_TOPICS
+
+        topic = GUIDE_TOPICS["remember.observed_at"]
+        assert "details.event_direction='future'" in topic
+        assert "event_date_mismatch" in topic
+        assert "event_date_mismatch" in GUIDE_TOPICS["remember.returns"]
+        batch = GUIDE_TOPICS["remember_batch.usage"]
+        assert "keep the phrase as stated and add no date; the row carries the resolved days" in (
+            batch
+        )
+        resend = _definition("update_memory")["inputSchema"]["properties"]["details"]
+        assert "event_direction" in resend["description"]
 
 
 class TestRemember:

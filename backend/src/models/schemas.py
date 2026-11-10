@@ -307,7 +307,8 @@ class WriteLintHint(BaseModel):
     code: str = Field(
         description=(
             "Stable machine-readable hint id: summary_short, summary_long, "
-            "summary_narrative, no_tags, tag_near_duplicate, tag_normalized."
+            "summary_narrative, no_tags, tag_near_duplicate, tag_normalized, "
+            "event_date_mismatch."
         )
     )
     hint: str = Field(description="What to do differently, in one sentence.")
