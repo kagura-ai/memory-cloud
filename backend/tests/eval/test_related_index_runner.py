@@ -1,14 +1,21 @@
 """Protocol checks only: these tests do not make live quality claims."""
 
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
+from tests.eval import related_index_runner as runner
 from tests.eval.related_index_cases import PROBES, SOURCES
 from tests.eval.related_index_runner import (
+    SkipLog,
     aggregate,
+    answer_problem,
+    expansion_skips,
+    git_state,
     local_only,
     offline_usage,
+    online_usage,
     opaque_documents,
     pair_summary,
     percentile,
@@ -17,6 +24,12 @@ from tests.eval.related_index_runner import (
     validate_config,
     verdict,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_git(monkeypatch):
+    """validate_config reads the checkout; the protocol tests do not need git."""
+    monkeypatch.setattr(runner, "git_state", lambda: {"git_commit": "c" * 40, "git_dirty": False})
 
 
 def test_answer_scoring_requires_exact_facts_and_actual_retrieved_sources():
@@ -54,6 +67,7 @@ def test_source_split_and_metrics_are_deterministic():
         "answer_calls": 1,
         "extra_candidates": 1,
         "extras_in_evidence": 1,
+        "expansion_skips": 0,
         "answer_errors": 0,
         "retrieval_ms": 5,
         "end_to_end_ms": 10,
@@ -109,10 +123,10 @@ def test_offline_accounting_includes_cached_and_failed_call_spend():
     assert usage["declared_usd"] == pytest.approx(0.00075)
 
 
-def test_protocol_records_hashes_and_rejects_unbalanced_or_git_output(tmp_path):
+def _config(tmp_path) -> dict:
     tokenizer = tmp_path / "tokenizer.json"
     tokenizer.write_text("{}", encoding="utf-8")
-    config = {
+    return {
         "embedding_model": "local-embedding",
         "answer_model": "local-answer",
         "sleep_model": "local-judge",
@@ -120,7 +134,7 @@ def test_protocol_records_hashes_and_rejects_unbalanced_or_git_output(tmp_path):
         "tokenizer": str(tokenizer),
         "repetitions": 2,
         "k": 3,
-        "max_chars": 6000,
+        "max_chars": 10_000,
         "tolerances": {
             "coverage_drop": 0,
             "correctness_drop": 0,
@@ -131,11 +145,18 @@ def test_protocol_records_hashes_and_rejects_unbalanced_or_git_output(tmp_path):
         },
         "usd_per_million": {"embedding": 0, "input": 0, "output": 0},
     }
+
+
+def test_protocol_records_hashes_and_rejects_unbalanced_or_git_output(tmp_path):
+    config = _config(tmp_path)
     manifest = validate_config(config, tmp_path / "output")
     assert len(manifest["tokenizer_sha256"]) == 64
     assert manifest["rollout"] is False
     with pytest.raises(ValueError, match="even"):
         validate_config({**config, "repetitions": 3}, tmp_path / "output")
+    # Below the recall tool's own floor no MCP client can ask for the reply.
+    with pytest.raises(ValueError, match="retrieval budget"):
+        validate_config({**config, "max_chars": 6000}, tmp_path / "output")
     with pytest.raises(ValueError, match="tolerance"):
         validate_config(
             {**config, "tolerances": {**config["tolerances"], "coverage_drop": float("nan")}},
@@ -235,3 +256,141 @@ def test_non_object_answers_score_as_wrong_instead_of_crashing():
     probe = PROBES[1]
     for parsed in (None, [], "text"):
         assert score(probe, set(probe["sources"]), parsed, {})["grounded_correct"] == 0
+        # ... and count as a failed answer, so the error-rate gate sees them.
+        assert answer_problem(SimpleNamespace(parsed=parsed)) == "MalformedAnswer"
+    assert answer_problem(SimpleNamespace(parsed={})) is None
+
+
+def _loopback(monkeypatch):
+    for key, value in {
+        "DATABASE_URL": "postgresql+asyncpg://localhost/kmc_related_eval_test",
+        "QDRANT_URL": "http://127.0.0.1:6333",
+        "REDIS_URL": "redis://localhost:6379/0",
+        "SELF_HOSTED_BASE_URL": "http://127.0.0.1:8000",
+        "EMBEDDING_PROVIDER": "self_hosted",
+        "ENABLE_NEURAL_MEMORY": "false",
+    }.items():
+        monkeypatch.setenv(key, value)
+    for key in ("SUPERSEDE_VERIFY_MODE", "SLEEP_LLM_PROVIDER", "SLEEP_LLM_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_live_runner_refuses_a_write_path_judge_that_is_not_local(monkeypatch):
+    _loopback(monkeypatch)
+    local_only()  # verify mode off: nothing judges on the write path
+    monkeypatch.setenv("SUPERSEDE_VERIFY_MODE", "llm")
+    # No provider named is not "no judge": the pair falls to a hosted default.
+    monkeypatch.setenv("SLEEP_LLM_MODEL", "some-judge")
+    with pytest.raises(ValueError, match="resolves to openai"):
+        local_only()
+    monkeypatch.setenv("SLEEP_LLM_PROVIDER", "anthropic")
+    with pytest.raises(ValueError, match="resolves to anthropic"):
+        local_only()
+    monkeypatch.setenv("SLEEP_LLM_PROVIDER", "self_hosted")
+    local_only()
+    monkeypatch.setenv("SUPERSEDE_VERIFY_MODE", "off")
+    monkeypatch.setenv("SLEEP_LLM_PROVIDER", "anthropic")
+    local_only()
+
+
+def test_manifest_records_the_checkout_and_the_settings_as_resolved(tmp_path, monkeypatch):
+    from config.settings import get_settings
+
+    monkeypatch.setenv("RECALL_RELATED_INDEX_TIMEOUT_MS", "1000")  # held to the ceiling
+    monkeypatch.setenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE", "0.8")
+    monkeypatch.setenv("SLEEP_LLM_PROVIDER", "self_hosted")
+    monkeypatch.setenv("SLEEP_LLM_MODEL", "local-judge")
+    for key in ("SUPERSEDE_VERIFY_MODE", "SUPERSEDE_SUGGEST_ENABLED"):
+        monkeypatch.delenv(key, raising=False)
+    manifest = validate_config(_config(tmp_path), tmp_path / "output")
+    assert manifest["git_commit"] == "c" * 40
+    assert manifest["git_dirty"] is False
+    assert manifest["recall"] == {
+        "full": 3,
+        "verbosity": get_settings().mcp_recall_default_verbosity,
+        "use_rerank": False,
+    }
+    assert manifest["settings"] == {
+        "recall_related_index_timeout_ms": 500,
+        "supersede_suggest_enabled": True,
+        "supersede_verify_mode": "off",
+        "supersede_verify_min_confidence": 0.8,
+        "write_path_judge": {"provider": "self_hosted", "model": "local-judge"},
+    }
+    # A value the expansion could not use fails the protocol check, not every trial.
+    monkeypatch.setenv("RECALL_RELATED_INDEX_TIMEOUT_MS", "abc")
+    with pytest.raises(ValueError):
+        validate_config(_config(tmp_path), tmp_path / "output")
+
+
+def test_git_state_reads_commit_and_status_on_their_own(monkeypatch):
+    replies = {"rev-parse": "a" * 40 + "\n", "status": " M backend/x.py\n"}
+
+    def fake_run(command, **kwargs):
+        assert command[:2] == ["git", "--no-optional-locks"]
+        reply = replies["rev-parse" if "rev-parse" in command else "status"]
+        if isinstance(reply, Exception):
+            raise reply
+        return SimpleNamespace(stdout=reply)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert git_state() == {"git_commit": "a" * 40, "git_dirty": True}
+    replies["status"] = ""
+    assert git_state()["git_dirty"] is False
+    # A status that times out (a lock on a shared checkout) keeps the commit.
+    replies["status"] = subprocess.TimeoutExpired("git", 10)
+    assert git_state() == {"git_commit": "a" * 40, "git_dirty": None}
+    replies["rev-parse"] = FileNotFoundError("git")
+    assert git_state() == {"git_commit": "unknown", "git_dirty": None}
+
+
+def test_expansion_fallbacks_are_counted_and_still_logged():
+    from services.recall_related_index import SKIP_EVENT
+
+    seen = []
+    inner = SimpleNamespace(info=lambda event, **fields: seen.append(event), name="kept")
+    usage = {"skips": [], "attempted": True}
+    log = SkipLog(inner, usage, SKIP_EVENT)
+    log.info(SKIP_EVENT, error_type="TimeoutError")
+    log.info("something_else", error_type="ignored")
+    assert usage["skips"] == ["TimeoutError"]
+    assert seen == [SKIP_EVENT, "something_else"]
+    assert log.name == "kept"
+    # The trial reset rebinds the list; the counter must follow it.
+    usage.update(skips=[])
+    log.info(SKIP_EVENT)
+    assert usage["skips"] == ["unknown"]
+
+
+def test_an_on_arm_recall_that_never_expanded_is_a_skip_not_an_empty_index():
+    quiet = {"skips": [], "attempted": True}
+    assert expansion_skips(True, quiet) == []  # ran and linked nothing
+    assert expansion_skips(True, {"skips": ["TimeoutError"], "attempted": True}) == ["TimeoutError"]
+    # A degraded recall skips the stage: the expansion was never called.
+    assert expansion_skips(True, {"skips": [], "attempted": False}) == ["not_attempted"]
+    # The off arm never calls it by design.
+    assert expansion_skips(False, {"skips": [], "attempted": False}) == []
+
+
+def test_a_failed_answer_still_counts_the_tokens_it_spent():
+    from services.llm_service import LLMServiceError, billed_usage
+
+    rates = {"embedding": 1, "input": 2, "output": 3}
+    spent = SimpleNamespace(
+        total_tokens=130,
+        input_tokens=100,
+        cached_input_tokens=10,
+        cache_write_tokens=0,
+        output_tokens=20,
+    )
+    answered = online_usage(spent, 7, rates)
+    assert answered["online_reported_tokens"] == 137
+    assert answered["online_usd"] == pytest.approx((7 * 1 + 110 * 2 + 20 * 3) / 1_000_000)
+    # An unparseable reply raises with its usage attached: same accounting.
+    unparseable = LLMServiceError("not JSON", usage=spent)
+    assert online_usage(billed_usage(unparseable), 7, rates) == answered
+    # No attempt answered: embedding tokens only.
+    assert online_usage(billed_usage(TimeoutError()), 7, rates) == {
+        "online_reported_tokens": 7,
+        "online_usd": pytest.approx(7 / 1_000_000),
+    }
