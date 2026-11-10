@@ -23,6 +23,18 @@ from utils.tag_normalize import TAG_GROUPS_FILTER_KEY
 
 logger = get_logger(__name__)
 
+# What a fallback to the baseline logs; the local runner (#2728) counts it.
+SKIP_EVENT = "recall_related_index_skipped"
+
+
+def expansion_timeout_ms() -> int:
+    """``RECALL_RELATED_INDEX_TIMEOUT_MS`` held to 25..500 (default 150).
+
+    Raises:
+        ValueError: the variable is not an integer.
+    """
+    return min(500, max(25, int(os.environ.get("RECALL_RELATED_INDEX_TIMEOUT_MS", "150"))))
+
 
 async def expand_recall(
     service: Any,
@@ -48,9 +60,7 @@ async def expand_recall(
     from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
     try:
-        timeout_ms = min(
-            500, max(25, int(os.environ.get("RECALL_RELATED_INDEX_TIMEOUT_MS", "150")))
-        )
+        timeout_ms = expansion_timeout_ms()
         # Scope and cluster membership are already resolved by recall; apply
         # them explicitly below rather than sending them to the row compiler.
         handled_keys = {
@@ -145,5 +155,5 @@ async def expand_recall(
             # pool so cross-pool relations and annotations stay intact.
             return extras, extra_memories
     except Exception as exc:
-        logger.info("recall_related_index_skipped", error_type=type(exc).__name__)
+        logger.info(SKIP_EVENT, error_type=type(exc).__name__)
         return [], {}

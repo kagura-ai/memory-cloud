@@ -81,15 +81,17 @@ class TestMcpEnvelope:
     def test_the_handler_uses_the_shared_projection(self):
         # Pins the wiring itself: the handler must call the helper these tests
         # exercise, or they would be testing an unused function. #1599 moved
-        # the envelope assembly out of the handler into _recall_envelope, so
-        # the chain is handler -> _recall_envelope -> _degraded_response_fields.
+        # the envelope assembly out of the handler into _recall_envelope and
+        # #2728 put the reply's three steps into _recall_reply, so the chain is
+        # handler -> _recall_reply -> _recall_envelope -> _degraded_response_fields.
         import inspect
 
         from mcp_server.tools import memory as mcp_memory
 
+        assert "_recall_reply(" in inspect.getsource(mcp_memory.handle_recall)
         assert (
-            "_recall_envelope(result, current_context, verbosity, explore_hints_omitted)"
-            in inspect.getsource(mcp_memory.handle_recall)
+            "_recall_envelope(result, context, verbosity, explore_hints_omitted)"
+            in inspect.getsource(mcp_memory._recall_reply)
         )
         src = inspect.getsource(mcp_memory._recall_envelope)
         assert "_degraded_response_fields(result)" in src, (

@@ -258,9 +258,13 @@ class TestEnvelope:
 
     def test_the_handler_serializes_this_envelope(self):
         # Pins the wiring: these tests would otherwise exercise an unused function.
+        # The handler assembles its reply in _recall_reply (#2728), which starts
+        # from this envelope.
         src = inspect.getsource(mcp_memory.handle_recall)
-        assert "_recall_envelope(result, current_context, verbosity, explore_hints_omitted)" in src
+        assert "_recall_reply(" in src
         assert "_dumps(" in src
+        reply = inspect.getsource(mcp_memory._recall_reply)
+        assert "_recall_envelope(result, context, verbosity, explore_hints_omitted)" in reply
 
 
 # ============================================================================
@@ -1003,3 +1007,35 @@ class TestSelectorAndSpans:
         payload = await _handler_payload({}, self._result())
         assert payload["selector"]["applied"] is True
         assert payload["results"][0]["spans"][0] == {"start": 0, "end": 13}
+
+
+class TestRecallReply:
+    """``_recall_reply``: the one place a recall reply is assembled (#2728)."""
+
+    def test_fits_content_then_cuts_to_the_budget(self):
+        result = RecallResponse(results=[_memory(content="x" * 1_400) for _ in range(12)])
+        reply = mcp_memory._recall_reply(result, _context(), "compact", 10_000)
+        assert reply == mcp_memory._bound_recall_envelope(
+            mcp_memory._fit_recall_content(
+                mcp_memory._recall_envelope(result, _context(), "compact"), 10_000
+            ),
+            10_000,
+        )
+        # Over budget the lowest-ranked rows lose their content first.
+        assert 0 < reply["full_applied"] < 12
+        assert "content" in reply["results"][0]
+        assert "content" not in reply["results"][-1]
+        assert len(_dumps(reply)) <= 10_000
+
+    def test_passes_the_omitted_hints_reason_through(self):
+        reply = mcp_memory._recall_reply(
+            RecallResponse(results=[_memory()]), _context(), "full", 20_000, "not_listed"
+        )
+        assert reply["explore_hints_omitted"] == "not_listed"
+
+    def test_the_handler_builds_its_reply_with_it(self):
+        # The local related-index runner measures this function's output; a
+        # handler that assembled its reply inline again would drift from it.
+        source = inspect.getsource(mcp_memory.handle_recall)
+        assert "_recall_reply(" in source
+        assert "_fit_recall_content(" not in source
