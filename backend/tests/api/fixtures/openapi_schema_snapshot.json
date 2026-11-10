@@ -9258,16 +9258,6 @@
               }
             ]
           },
-          "hint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "related_tags": {
             "default": [],
             "items": {

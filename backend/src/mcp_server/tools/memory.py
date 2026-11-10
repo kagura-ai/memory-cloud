@@ -1510,6 +1510,9 @@ async def handle_recall(
                     # #2728: may add Sleep-indexed one-hop candidates when
                     # RECALL_RELATED_INDEX_ENABLED is set.
                     related_index=True,
+                    # #2754: may add the hint towards list() when
+                    # RECALL_LIST_HINT_ENABLED is set; only this tool has list.
+                    list_hint=True,
                 ),
                 operation_name="recall",
             )

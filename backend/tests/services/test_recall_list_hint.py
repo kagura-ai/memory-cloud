@@ -141,6 +141,8 @@ async def _finalize(svc: MemoryService, hits, memories, page, **overrides):
         "selection_evidence": None,
         "cross_context": False,
         "degradation": None,
+        # The opt-in caller's pool (MemoryService.recall(list_hint=True)).
+        "list_hint_pool": hits,
     }
     kwargs.update(overrides)
     with patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()):
@@ -177,10 +179,16 @@ class TestFinalizeUsesThePoolItHolds:
         svc.db.execute.assert_not_called()
         svc._tag_suggestions_for_empty_result.assert_awaited_once()
 
-    async def test_off_by_default_no_hint(self):
-        assert get_settings().recall_list_hint_enabled is False
+    async def test_setting_off_no_hint(self, monkeypatch):
+        monkeypatch.setattr(get_settings(), "recall_list_hint_enabled", False)
         hits, memories, page = _pool()
         response = await _finalize(_service(), hits, memories, page)
+        assert response.hint is None
+
+    async def test_a_caller_that_did_not_opt_in_gets_none(self, hint_on):
+        """Share-key, REST, bootstrap and forget(query=) pass no pool."""
+        hits, memories, page = _pool()
+        response = await _finalize(_service(), hits, memories, page, list_hint_pool=None)
         assert response.hint is None
 
     async def test_not_on_a_cross_context_recall(self, hint_on):

@@ -3092,7 +3092,7 @@ Two settings change what an MCP `recall` returns when the caller leaves an argum
 |---|---|---|
 | `RECALL_LIST_HINT_ENABLED` | `false` | A single-context, non-degraded `recall` adds the optional key `hint` (after `related_tags`) when the candidates it already holds (those that passed the same filters and shadowing as the page, before the `k` cut) carry a returned row's tag more often than the page shows. The line names `list(filters={"tags": [tag]})`. |
 
-The count is "at least N matching this search": it is taken over the recall's candidate pool, which is wider than `k` only when the search over-fetches, so it is never the context's total and costs no query. The tag with the most candidates wins (ties: more rows on the page, then alphabetical). Off, the reply is unchanged. The MCP tool, the REST `POST /api/v1/memory/recall` and the share-key recall return it when set; the agent bootstrap's recall component and `forget(query=...)` do not use it.
+The count is "at least N matching this search": it is taken over the recall's candidate pool, which is wider than `k` only when the search over-fetches, so it is never the context's total and costs no query. The tag with the most candidates wins (ties: more rows on the page, then alphabetical). Off, the reply is unchanged. MCP recall tool only: the line names the MCP `list` tool, so the REST `POST /api/v1/memory/recall`, the share-key recall, the agent bootstrap's recall component and `forget(query=...)` never compute or return it.
 
 ## Public MCP endpoints — Issue #2675
 

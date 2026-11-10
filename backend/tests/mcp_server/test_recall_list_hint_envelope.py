@@ -101,10 +101,10 @@ class TestEnvelope:
         envelope = mcp_memory._recall_envelope(loose, _context(), "compact")
         assert "hint" not in envelope
 
-    def test_rest_drops_it_when_none(self):
-        """The REST routes serialise with exclude_none: absent unless set."""
-        assert "hint" not in _result().model_dump(mode="json", exclude_none=True)
-        assert _result(hint=HINT).model_dump(mode="json")["hint"] == HINT
+    def test_rest_never_serialises_it(self):
+        """MCP recall tool only: a REST or share-key body never carries it, even set."""
+        assert "hint" not in _result(hint=HINT).model_dump(mode="json")
+        assert "hint" not in _result(hint=HINT).model_dump(mode="json", exclude_none=True)
 
 
 class TestDocs:

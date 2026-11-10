@@ -905,16 +905,15 @@ class RecallResponse(BaseModel):
     # #2144: the recall LLM selector's report — None (absent) unless the MCP
     # recall ran, or was refused, the stage on a context with the flag on.
     selector: SelectorReport | None = None
-    # #2754: one line pointing at ``list`` for a tag the candidate pool holds
-    # more of than the page shows. None (absent) unless
-    # RECALL_LIST_HINT_ENABLED is on and a tag qualifies.
+    # #2754: one line pointing at the MCP ``list`` tool for a tag the candidate
+    # pool holds more of than the page shows. Set only for the MCP recall tool
+    # (the one caller passing ``list_hint`` to ``MemoryService.recall``), which
+    # copies it into its hand-built envelope; ``exclude=True`` keeps it out of
+    # every REST body and of the OpenAPI schema, since REST has no ``list``.
     hint: str | None = Field(
         default=None,
-        description=(
-            'Points at list(filters={"tags": [...]}) when this search\'s candidates '
-            "carry a returned row's tag more often than the page shows. Absent "
-            "unless the deployment enables it and a tag qualifies."
-        ),
+        exclude=True,
+        description="MCP recall tool only: the optional pointer at list().",
     )
 
 
