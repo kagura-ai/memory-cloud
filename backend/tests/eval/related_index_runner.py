@@ -14,6 +14,7 @@ import json
 import math
 import os
 import statistics
+import subprocess
 import time
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -32,6 +33,17 @@ SYSTEM = (
     "Do not infer causation or reverse who did what to whom."
 )
 RUBRIC = "v1: exact normalized facts object, no extra fields; all required sources cited and retrieved; no other citations; abstention has empty facts/citations"
+# The MCP recall tool's default projection: the evidence is the reply it sends.
+VERBOSITY = "compact"
+SKIP_EVENT = "recall_related_index_skipped"
+LIMITATIONS = (
+    "Local read-only experiment, not deployment latency. Provider-reported online tokens "
+    "may omit embedding usage; zero is not proof of zero work, and a provider call that "
+    "fails reports none. ENABLE_NEURAL_MEMORY=false leaves a candidate pool of k, so an "
+    "index extra reaches the reply only by displacing a ranked result. An expansion that "
+    "timed out or failed is the baseline reply for that trial (expansion_skipped). "
+    "Exact-fact scoring is intentionally conservative. Never enables rollout."
+)
 
 
 def digest(value) -> str:
@@ -111,6 +123,76 @@ def score(probe: dict, retrieved: set[str], answer: dict, id_map: dict[str, str]
     }
 
 
+def git_state() -> dict:
+    """Commit and dirty flag of the checkout this runner runs from."""
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+
+    try:
+        return {
+            "git_commit": git("rev-parse", "HEAD"),
+            "git_dirty": bool(git("status", "--porcelain")),
+        }
+    except (OSError, subprocess.SubprocessError):
+        return {"git_commit": "unknown", "git_dirty": None}
+
+
+def recorded_settings() -> dict:
+    """Process settings that change what is measured; recorded, not chosen here."""
+    return {
+        "RECALL_RELATED_INDEX_TIMEOUT_MS": os.environ.get("RECALL_RELATED_INDEX_TIMEOUT_MS", "150"),
+        "SUPERSEDE_VERIFY_MODE": os.environ.get("SUPERSEDE_VERIFY_MODE", "off"),
+        "SLEEP_LLM_PROVIDER": os.environ.get("SLEEP_LLM_PROVIDER", ""),
+        **{key: value for key, value in sorted(os.environ.items()) if key.startswith("SUPERSEDE_")},
+    }
+
+
+def mcp_evidence(response, context, max_chars: int) -> dict:
+    """The reply the MCP recall tool builds for ``response``, cut the same way."""
+    from mcp_server.tools.memory import (
+        _bound_recall_envelope,
+        _fit_recall_content,
+        _recall_envelope,
+    )
+
+    return _bound_recall_envelope(
+        _fit_recall_content(_recall_envelope(response, context, VERBOSITY), max_chars),
+        max_chars,
+    )
+
+
+def answer_problem(answer) -> str | None:
+    """A reply that did not parse to an object is a failed answer, not a wrong one."""
+    return None if isinstance(getattr(answer, "parsed", None), dict) else "MalformedAnswer"
+
+
+class SkipLog:
+    """Stands in for the expansion module's logger and counts its fallbacks.
+
+    ``expand_recall`` contains its own failures, a timeout included, and
+    returns no extras; without this a trial cannot tell that from "nothing
+    was linked".
+    """
+
+    def __init__(self, inner, usage: dict):
+        self._inner, self._usage = inner, usage
+
+    def info(self, event, **fields):
+        if event == SKIP_EVENT:
+            self._usage["skips"].append(str(fields.get("error_type", "unknown")))
+        return self._inner.info(event, **fields)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def validate_config(config: dict, output: Path) -> dict:
     from importlib.metadata import version
 
@@ -154,6 +236,9 @@ def validate_config(config: dict, output: Path) -> dict:
         "tokenizer_sha256": hashlib.sha256(tokenizer.read_bytes()).hexdigest(),
         "tokenizers_version": version("tokenizers"),
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        **git_state(),
+        "recall": {"full": config["k"], "verbosity": VERBOSITY, "use_rerank": False},
+        "settings": recorded_settings(),
         "sources_sha256": digest(SOURCES),
         "probes_sha256": digest(PROBES),
         "answer_system": SYSTEM,
@@ -178,6 +263,11 @@ def local_only() -> None:
         raise ValueError("this runner requires local self_hosted inference")
     if os.environ.get("ENABLE_NEURAL_MEMORY", "").lower() != "false":
         raise ValueError("set ENABLE_NEURAL_MEMORY=false for this small frozen fixture")
+    # The write-path judge follows SLEEP_LLM_PROVIDER, not the frozen config.
+    if os.environ.get("SUPERSEDE_VERIFY_MODE", "off").strip().lower() == "llm" and os.environ.get(
+        "SLEEP_LLM_PROVIDER", ""
+    ).strip().lower() not in {"", "self_hosted"}:
+        raise ValueError("SUPERSEDE_VERIFY_MODE=llm needs SLEEP_LLM_PROVIDER=self_hosted here")
 
 
 @contextmanager
@@ -233,6 +323,7 @@ def aggregate(rows: list[dict]) -> dict:
                 "answer_errors",
                 "extra_candidates",
                 "extras_in_evidence",
+                "expansion_skips",
             )
         }
         for key in ("retrieval_ms", "end_to_end_ms"):
@@ -303,17 +394,17 @@ async def run(config: dict, output: Path) -> dict:
     local_only()
     from tokenizers import Tokenizer
 
+    import services.recall_related_index as expansion
     from config.settings import get_settings
     from db.base import get_db
     from db.qdrant import ensure_kagura_memories_collection, get_collection_name
-    from mcp_server.tools.memory import _bound_recall_envelope
+    from mcp_server.tools._helpers import _dumps
     from models.memory import EDGE_ORIGIN_DECLARED, NeuralMemoryEdge
     from models.schemas import RecallRequest
     from neural.config import NeuralMemoryConfig
     from services.embedding_service import EmbeddingService
     from services.llm_service import LLMService
     from services.memory_service import MemoryService
-    from services.recall_related_index import expand_recall
     from services.sleep.edge_discovery import EdgeDiscoveryPhase
     from services.sleep.related_index import RelatedIndexPhase
     from services.sleep.reporter import SleepBudget, SleepReporter
@@ -403,7 +494,13 @@ async def run(config: dict, output: Path) -> dict:
             }
             snapshot = await ranking_snapshot(db, ctx.id)
             rows = []
-            usage = {"tokens": 0, "calls": 0, "extra_candidates": 0, "extra_ids": set()}
+            usage = {
+                "tokens": 0,
+                "calls": 0,
+                "extra_candidates": 0,
+                "extra_ids": set(),
+                "skips": [],
+            }
             original_embed = EmbeddingService.embed_with_usage
 
             async def embed(service, *args, _original=original_embed, _usage=usage, **kwargs):
@@ -416,8 +513,10 @@ async def run(config: dict, output: Path) -> dict:
             async def no_learning(*args, **kwargs):
                 return None
 
-            async def measured_expand(*args, _usage=usage, **kwargs):
-                result = await expand_recall(*args, **kwargs)
+            async def measured_expand(
+                *args, _usage=usage, _original=expansion.expand_recall, **kwargs
+            ):
+                result = await _original(*args, **kwargs)
                 _usage["extra_candidates"] += len(result[0])
                 _usage["extra_ids"].update(str(hit["id"]) for hit in result[0])
                 return result
@@ -426,7 +525,8 @@ async def run(config: dict, output: Path) -> dict:
                 patch.object(MemoryService, "_recall_record_access", no_learning),
                 patch.object(MemoryService, "_recall_run_hebbian_learning", no_learning),
                 patch.object(EmbeddingService, "embed_with_usage", embed),
-                patch("services.recall_related_index.expand_recall", measured_expand),
+                patch.object(expansion, "expand_recall", measured_expand),
+                patch.object(expansion, "logger", SkipLog(expansion.logger, usage)),
             ):
                 for repetition in range(-1, config["repetitions"]):
                     order = trial_order(repetition)
@@ -436,7 +536,9 @@ async def run(config: dict, output: Path) -> dict:
                                 raise RuntimeError(
                                     "ranking state drifted; stop instead of comparing unequal snapshots"
                                 )
-                            usage.update(tokens=0, calls=0, extra_candidates=0, extra_ids=set())
+                            usage.update(
+                                tokens=0, calls=0, extra_candidates=0, extra_ids=set(), skips=[]
+                            )
                             start = time.perf_counter()
                             with flag("RECALL_RELATED_INDEX_ENABLED", enabled):
                                 response = await svc.recall(
@@ -451,17 +553,8 @@ async def run(config: dict, output: Path) -> dict:
                                     ws.id,
                                     related_index=True,
                                 )
-                            envelope = _bound_recall_envelope(
-                                {
-                                    "results": [
-                                        r.model_dump(mode="json", exclude_none=True)
-                                        for r in response.results
-                                    ],
-                                    "count": len(response.results),
-                                },
-                                config["max_chars"],
-                            )
-                            serialized = json.dumps(envelope, ensure_ascii=False)
+                            envelope = mcp_evidence(response, ctx, config["max_chars"])
+                            serialized = _dumps(envelope)
                             retrieval_ms = (time.perf_counter() - start) * 1000
                             answer, answer_error = None, None
                             try:
@@ -486,6 +579,8 @@ async def run(config: dict, output: Path) -> dict:
                                 )
                             except Exception as exc:  # noqa: BLE001 - recorded per trial
                                 answer_error = type(exc).__name__
+                            else:
+                                answer_error = answer_problem(answer)
                             elapsed = (time.perf_counter() - start) * 1000
                             retrieved = {
                                 ids.get(str(row["memory_id"]), "unknown")
@@ -509,6 +604,9 @@ async def run(config: dict, output: Path) -> dict:
                                     & {str(r["memory_id"]) for r in envelope["results"]}
                                 ),
                                 "evidence_sha256": digest(envelope),
+                                # Why the expansion fell back to the baseline, if it did.
+                                "expansion_skips": len(usage["skips"]),
+                                "expansion_skipped": usage["skips"][0] if usage["skips"] else None,
                                 "answer_errors": int(answer_error is not None),
                                 "answer_error": answer_error,
                                 "online_usd": declared_cost(
@@ -540,7 +638,7 @@ async def run(config: dict, output: Path) -> dict:
                 "metrics": metrics,
                 "trials": rows,
                 **verdict(metrics, config["tolerances"], pair_summary(rows)),
-                "limitations": "Local read-only experiment, not deployment latency. Provider-reported online tokens may omit embedding usage; zero is not proof of zero work. Exact-fact scoring is intentionally conservative. Never enables rollout.",
+                "limitations": LIMITATIONS,
             }
             (output / "results.json").write_text(
                 json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8"

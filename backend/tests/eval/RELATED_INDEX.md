@@ -30,7 +30,10 @@ explicitly. The small fixture freezes neural over-fetch off so it does not
 exhaust all sources before related expansion; this is recorded in the manifest. The runner
 refuses non-loopback endpoints or an unmarked database. Apply migrations to
 that disposable database first (`uv run alembic upgrade head`). Never point
-the test fixtures at a database whose data you want to keep.
+the test fixtures at a database whose data you want to keep. Leave
+`SUPERSEDE_VERIFY_MODE` unset or `off`: with `llm` the write path asks the
+`SLEEP_LLM_PROVIDER` judge while the fixture is ingested, and the runner
+refuses any provider there other than `self_hosted`.
 
 Install the locked development dependencies with `uv sync --locked --extra dev`
 in `backend/`. Supply a local Hugging Face `tokenizer.json` matching the answer
@@ -75,8 +78,20 @@ uv run python -m tests.eval.related_index_runner --config C:/local-eval/config.j
 uv run python -m tests.eval.related_index_runner --config C:/local-eval/config.json --output C:/local-eval/run-001
 ```
 
+The same in bash:
+
+```bash
+export PYTHONPATH=src
+uv run python -m tests.eval.related_index_runner --config ~/local-eval/config.json --output ~/local-eval/run-001 --check
+uv run python -m tests.eval.related_index_runner --config ~/local-eval/config.json --output ~/local-eval/run-001
+```
+
 The output directory must not exist and must be outside **every git checkout**.
-The manifest is written before measurements. Do not attach outputs to issues,
+The manifest is written before measurements. Besides the configuration it
+records the runner's git commit and whether the checkout was dirty, the recall
+parameters (`full`, `verbosity`, `use_rerank`) and the process settings that
+shape a run (`RECALL_RELATED_INDEX_TIMEOUT_MS`, every `SUPERSEDE_*` variable,
+`SLEEP_LLM_PROVIDER`). Do not attach outputs to issues,
 PRs or public benchmarks. The runner creates an isolated workspace/context and
 deletes only those fixture memories and that workspace in its cleanup path.
 The shared eval cleanup is best effort; use disposable local infrastructure
@@ -116,9 +131,15 @@ serialized response tokens, provider-reported online tokens, tool/provider
 calls, declared online cost, and retrieval/end-to-end p50/p95 latency. Sleep
 phase usage and cost are separate from online totals. Negative or inconclusive
 results are valid. No verdict enables the feature automatically.
+The evidence is the reply the MCP `recall` tool sends for that request:
+the compact projection with content on the top `k` results, fitted and cut
+to `max_chars` by the tool's own functions, and its serialized form is what
+the tokenizer counts.
 Each trial records the related candidates the expansion added, how many of
 them reached the bounded evidence the model saw, and a digest of that
-evidence. Off/on trials of the same probe and repetition are paired: only a
+evidence. An expansion that timed out or failed returns the baseline reply;
+the trial records why (`expansion_skipped`) and the report carries the rate
+per arm (`expansion_skips`), so a fallback is not read as "nothing was linked". Off/on trials of the same probe and repetition are paired: only a
 pair whose on-arm evidence holds an index extra and differs from the off arm
 credits the index, and a pair with identical evidence but a different score
 counts as answer-model noise. "promising-local-only" needs at least one
@@ -126,9 +147,10 @@ changed pair and a coverage or correctness gain above `min_improvement` plus
 that noise rate; otherwise the result is inconclusive. Regression gates use
 serialized response tokens and retrieval and end-to-end p95 latency, and
 provider-reported tokens only when both arms report them
-(`provider_tokens_measured`). A failed or malformed answer is recorded on its
-trial (`answer_error`) and scores as wrong; a higher error rate on the on arm
-is a regression.
+(`provider_tokens_measured`). A failed answer call, or a reply that is not a JSON
+object (`MalformedAnswer`), is recorded on its trial (`answer_error`) and
+scores as wrong; a higher error rate on the on arm is a regression. A failed
+call reports no tokens, so online totals leave it out.
 Declared Sleep cost excludes ingestion and hardware and uses the same local
 input rate for standard, cached and cache-write tokens.
 
