@@ -1293,6 +1293,26 @@ def _bound_recall_envelope(envelope: dict[str, Any], max_chars: int) -> dict[str
     return bounded
 
 
+def _recall_reply(
+    result: Any,
+    context: Any,
+    verbosity: str,
+    max_chars: int,
+    explore_hints_omitted: str | None = None,
+) -> dict[str, Any]:
+    """The reply ``handle_recall`` serializes: the envelope, fitted then cut.
+
+    One function, so that whatever measures a recall reply (the local
+    related-index runner, #2728) builds the text the tool sends.
+    """
+    return _bound_recall_envelope(
+        _fit_recall_content(
+            _recall_envelope(result, context, verbosity, explore_hints_omitted), max_chars
+        ),
+        max_chars,
+    )
+
+
 async def handle_recall(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -1490,12 +1510,8 @@ async def handle_recall(
 
             # Built before the usage row / commit, as the item projection always
             # was: a result that cannot be rendered fails the call as a whole.
-            response_data = _bound_recall_envelope(
-                _fit_recall_content(
-                    _recall_envelope(result, current_context, verbosity, explore_hints_omitted),
-                    max_chars,
-                ),
-                max_chars,
+            response_data = _recall_reply(
+                result, current_context, verbosity, max_chars, explore_hints_omitted
             )
 
             await _log_tool_usage(
