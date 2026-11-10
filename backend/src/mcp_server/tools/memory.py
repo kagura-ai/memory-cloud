@@ -1216,6 +1216,12 @@ def _recall_envelope(
         response_data["related_tags"] = [
             {"tag": tag.tag, "count": tag.count} for tag in result.related_tags
         ]
+    # #2754: the opt-in pointer at list(), right after related_tags; absent
+    # (never null) when there is none. The type check keeps a loose stand-in
+    # result (a bare mock) from inventing one.
+    hint = getattr(result, "hint", None)
+    if isinstance(hint, str):
+        response_data["hint"] = hint
 
     if result.explore_hints is not None:
         response_data["explore_hints"] = [
@@ -1290,6 +1296,9 @@ def _bound_recall_envelope(envelope: dict[str, Any], max_chars: int) -> dict[str
     if cut["results"]:
         bounded["count"] = len(bounded["results"])
         bounded["truncated"] = True
+        # #2754: the hint's "N shown" counted the page before the cut; a reply
+        # never states a count that is not true, so a cut reply carries none.
+        bounded.pop("hint", None)
     return bounded
 
 
@@ -1504,6 +1513,9 @@ async def handle_recall(
                     # #2728: may add Sleep-indexed one-hop candidates when
                     # RECALL_RELATED_INDEX_ENABLED is set.
                     related_index=True,
+                    # #2754: may add the hint towards list() when
+                    # RECALL_LIST_HINT_ENABLED is set; only this tool has list.
+                    list_hint=True,
                 ),
                 operation_name="recall",
             )

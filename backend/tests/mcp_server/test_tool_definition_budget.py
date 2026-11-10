@@ -95,7 +95,11 @@ FULL_LIST_BUDGET = 111_000  # (#2043, #2044) list_revisions + rollback_session j
 # them by trimming update_memory's own text (the semantics live in the guide topic
 # update_memory.modes): core list 39,840 under an unchanged ceiling.
 CORE_LIST_BUDGET = 40_000  # (#2470) 21 core tools
-RECALL_BUDGET = 4_000  # (#1850) was 6,900
+# #2755 named the event fields in recall's Returns line (+49) and added the
+# within-row date rule (+141, already tightened); the rest of the text is pinned
+# or carries meaning, so recall is 4,174 and the core list stays under its
+# unchanged ceiling.
+RECALL_BUDGET = 4_200  # (#2755) was 4,000 (#1850), 6,900 before
 REMEMBER_BUDGET = 4_800  # (#1853) tags_normalize + dedupe
 PER_TOOL_BUDGET = 4_800  # (#1853) the largest definition
 
