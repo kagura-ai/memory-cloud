@@ -702,3 +702,147 @@ class TestCheckedTags:
             checked_tags=[],
         )
         assert _codes(hints) == {"no_tags"}
+
+
+# ------------------------------------------------- event_date_mismatch (#2752)
+
+LAST_WEEK = {
+    "observed_at": "2024-03-11",
+    "event_phrase": "last week",
+    "event_start": "2024-03-04",
+    "event_end": "2024-03-10",
+}
+YESTERDAY = {
+    "observed_at": "2024-03-11",
+    "event_phrase": "yesterday",
+    "event_start": "2024-03-10",
+    "event_end": "2024-03-10",
+}
+
+
+async def _event_lint(summary, details, content=None):
+    return await lint_write(
+        _db_with_vocabulary({"auth": 12}),
+        workspace_id=WS,
+        context_id=CTX,
+        user_id=USER,
+        summary=summary,
+        tags=["auth"],
+        content=content,
+        details=details,
+    )
+
+
+def _mismatch(hints):
+    return [h for h in hints if h.code == "event_date_mismatch"]
+
+
+class TestEventDateMismatch:
+    """A date written in parentheses right after the phrase that differs from the
+    resolved days is reported; nothing is rewritten and the write stands."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "written",
+        [
+            "2024-03-05..2024-03-11",
+            "2024-03-05 to 2024-03-11",
+            "2024-03-05–2024-03-11",
+            "2024-03-05—2024-03-11",
+            "2024-03-05-2024-03-11",
+            "2024-03-05/2024-03-11",
+            "2024-03-05 – 2024-03-11",
+            "2024-03-04",  # one date for a seven-day range
+        ],
+    )
+    async def test_a_differing_date_or_range_after_the_phrase_fires(self, written):
+        summary = f"Shipped the new parser last week ({written}) after the review round."
+        (hint,) = _mismatch(await _event_lint(summary, dict(LAST_WEEK)))
+        assert hint.subject == "last week"
+        assert written in hint.hint
+        assert "2024-03-04..2024-03-10" in hint.hint
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "written",
+        [
+            "2024-03-04..2024-03-10",
+            "2024-03-04 to 2024-03-10",
+            "2024-03-04–2024-03-10",
+            "2024-03-04—2024-03-10",
+            "2024-03-04-2024-03-10",
+            "2024-03-04/2024-03-10",
+        ],
+    )
+    async def test_an_agreeing_range_is_silent(self, written):
+        summary = f"Shipped the new parser last week ({written}) after the review round."
+        assert _mismatch(await _event_lint(summary, dict(LAST_WEEK))) == []
+
+    @pytest.mark.asyncio
+    async def test_one_date_agrees_with_a_single_day(self):
+        ok = "Rolled the deploy back yesterday (2024-03-10) after the alert."
+        assert _mismatch(await _event_lint(ok, dict(YESTERDAY))) == []
+        bad = "Rolled the deploy back yesterday (2024-03-09) after the alert."
+        (hint,) = _mismatch(await _event_lint(bad, dict(YESTERDAY)))
+        assert "2024-03-09" in hint.hint and "2024-03-10" in hint.hint
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive_and_the_space_is_optional(self):
+        for summary in (
+            "Last Week (2024-03-05..2024-03-11) the parser shipped after review.",
+            "The parser shipped LAST WEEK(2024-03-05..2024-03-11) after review.",
+        ):
+            assert len(_mismatch(await _event_lint(summary, dict(LAST_WEEK)))) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_content_is_read_too(self):
+        hints = await _event_lint(
+            GOOD_SUMMARY, dict(LAST_WEEK), content="It shipped last week (2024-03-11)."
+        )
+        assert len(_mismatch(hints)) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "summary",
+        [
+            "Shipped the new parser last week after the review round, on schedule.",
+            "Shipped the new parser last week (stated on 2024-03-11) after review.",
+            "Shipped the new parser last week (2024-03-04–10) after the review round.",
+            "Shipped the new parser last week (2024-02-30) after the review round.",
+            "Shipped the new parser last week (around 2024-03-05) after the review.",
+            "Shipped the new parser on 2024-03-05 (2024-03-05) after the review.",
+        ],
+    )
+    async def test_silent_without_a_bare_date_after_the_phrase(self, summary):
+        assert _mismatch(await _event_lint(summary, dict(LAST_WEEK))) == []
+
+    @pytest.mark.asyncio
+    async def test_silent_when_the_phrase_did_not_resolve(self):
+        summary = "Shipped the new parser a while back (2024-03-05) after the review round."
+        unresolved = {"observed_at": "2024-03-11", "event_phrase": "a while back"}
+        assert _mismatch(await _event_lint(summary, unresolved)) == []
+        no_anchor = {"event_phrase": "last week"}
+        summary = "Shipped the new parser last week (2024-03-05) after the review round."
+        assert _mismatch(await _event_lint(summary, no_anchor)) == []
+        assert _mismatch(await _event_lint(summary, None)) == []
+        pair_only = {"event_start": "2024-03-04", "event_end": "2024-03-10"}
+        assert _mismatch(await _event_lint(summary, pair_only)) == []
+
+    @pytest.mark.asyncio
+    async def test_the_direction_is_counted(self):
+        details = {
+            "observed_at": "2024-03-09",
+            "event_phrase": "on Sunday",
+            "event_direction": "future",
+            "event_start": "2024-03-10",
+            "event_end": "2024-03-10",
+        }
+        ok = "The team goes hiking on Sunday (2024-03-10) near the lake."
+        assert _mismatch(await _event_lint(ok, details)) == []
+        bad = "The team goes hiking on Sunday (2024-03-03) near the lake."
+        assert len(_mismatch(await _event_lint(bad, details))) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_well_formed_write_stays_silent(self):
+        summary = "Shipped the new parser last week (2024-03-04..2024-03-10) after review."
+        assert await _event_lint(summary, dict(LAST_WEEK)) == []

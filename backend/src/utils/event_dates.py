@@ -18,6 +18,9 @@ a year boundary), so the server resolves it, deterministically, at write time:
 - A client that passes ``event_start`` / ``event_end`` itself, without a
   phrase, keeps them as given (validated as calendar dates; ``event_end``
   defaults to ``event_start``).
+- ``details.event_direction`` (optional, ``"past"`` or ``"future"``, stored
+  lower-cased and stripped next to the phrase) says whether a bare weekday
+  names a past or an upcoming day; the server cannot tell from the phrase.
 
 Rule set (:func:`resolve_event_phrase`; ``anchor`` is the ``observed_at`` day):
 
@@ -45,7 +48,11 @@ Rule set (:func:`resolve_event_phrase`; ``anchor`` is the ``observed_at`` day):
 - ``<month>``: the whole month, the most recent one that started on or before
   the anchor ("December" from 2026-01-09 is December 2025).
 - ``<weekday>`` (optionally ``last <weekday>``): the most recent one strictly
-  before the anchor.
+  before the anchor. With ``details.event_direction = "future"`` a BARE
+  weekday ("Sunday", "on Sunday") is instead the first such day on or after
+  the anchor (the anchor itself when it is that weekday); ``"past"`` or no
+  direction keeps the rule above. ``last <weekday>``, ``this / next
+  <weekday>`` and every other phrase ignore the direction.
 - ``this <weekday>``: that weekday in the Mon–Sun week holding the anchor (on,
   before or after it). ``next <weekday>``: that weekday in the Mon–Sun week
   after the anchor's week (from Saturday 2024-03-09, "this Sunday" is
@@ -124,6 +131,8 @@ _DAY_OFFSETS = {
 }
 
 _FORMAT_HINT = "event_start / event_end must be ISO 8601 dates (2024-03-07)"
+EVENT_DIRECTIONS = ("past", "future")
+_DIRECTION_HINT = 'event_direction must be "past" or "future"'
 
 
 class EventDateValidationError(ValueError):
@@ -199,7 +208,9 @@ def _normalize(phrase: str) -> str:
     return text.rstrip(".,!").strip()
 
 
-def resolve_event_phrase(phrase: str, anchor: date) -> tuple[date, date] | None:
+def resolve_event_phrase(
+    phrase: str, anchor: date, direction: str | None = None
+) -> tuple[date, date] | None:
     """The ``(start, end)`` days ``phrase`` names, counted from ``anchor``, or None.
 
     Deterministic: the rule set in the module docstring and nothing else; no
@@ -208,6 +219,10 @@ def resolve_event_phrase(phrase: str, anchor: date) -> tuple[date, date] | None:
     Args:
         phrase: The relative date as stated ("last weekend", "two weeks ago").
         anchor: The material's date (the ``observed_at`` day).
+        direction: ``details.event_direction``. ``"future"`` makes a bare
+            weekday the first such day on or after ``anchor``; anything else
+            (``"past"``, None) keeps the most recent one before it. Every
+            other phrase ignores it.
     """
     if not isinstance(phrase, str) or not isinstance(anchor, date):
         return None
@@ -284,10 +299,36 @@ def resolve_event_phrase(phrase: str, anchor: date) -> tuple[date, date] | None:
         weekday = _WEEKDAYS.get(m.group("day"))
         if weekday is None:
             return None
+        if direction == "future" and not text.startswith("last "):
+            day = anchor + timedelta(days=(weekday - anchor.weekday()) % 7)
+            return day, day
         back = (anchor.weekday() - weekday) % 7 or 7
         day = anchor - timedelta(days=back)
         return day, day
     return None
+
+
+def resolved_event_days(details: Any) -> tuple[date, date] | None:
+    """The days the stored ``event_phrase`` resolves to from the stored ``observed_at``
+    (and ``event_direction``), or None: no phrase, no anchor or outside the rules.
+
+    For readers that need to know the dates came from the phrase (the
+    ``event_date_mismatch`` write lint), not from a pair the client passed.
+    Never raises.
+    """
+    if not isinstance(details, dict):
+        return None
+    phrase = details.get("event_phrase")
+    anchor = _anchor(details)
+    if not isinstance(phrase, str) or anchor is None:
+        return None
+    direction = details.get("event_direction")
+    try:
+        return resolve_event_phrase(
+            phrase, anchor, direction if isinstance(direction, str) else None
+        )
+    except (OverflowError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------- write path
@@ -306,6 +347,15 @@ def _calendar_date(value: Any, key: str) -> str:
     return day.isoformat()
 
 
+def _direction(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, str):
+        raise EventDateValidationError(_DIRECTION_HINT)
+    text = value.strip().lower()
+    if text not in EVENT_DIRECTIONS:
+        raise EventDateValidationError(_DIRECTION_HINT)
+    return text
+
+
 def _anchor(details: dict[str, Any]) -> date | None:
     """The ``observed_at`` day of normalised details (a date or a UTC datetime), or None."""
     value = details.get("observed_at")
@@ -322,8 +372,10 @@ def normalize_event_dates(details: dict[str, Any] | None) -> dict[str, Any] | No
 
     Runs after ``normalize_observed_at`` (the anchor is the stored
     ``observed_at``). Gate: fires only when one of ``event_phrase``,
-    ``event_start``, ``event_end`` is present; absent keys or ``None`` details
-    pass through untouched. A ``None`` value removes its key.
+    ``event_start``, ``event_end``, ``event_direction`` is present; absent keys
+    or ``None`` details pass through untouched. A ``None`` value removes its
+    key. ``event_direction`` is stored lower-cased and stripped and only
+    changes a bare weekday phrase (see :func:`resolve_event_phrase`).
 
     With a phrase that resolves against the ``observed_at`` day the server
     owns both dates (a re-sent pair never outlives a changed phrase). A phrase
@@ -336,16 +388,19 @@ def normalize_event_dates(details: dict[str, Any] | None) -> dict[str, Any] | No
     Raises:
         EventDateValidationError: a phrase that is not a non-empty string of at
             most ``MAX_PHRASE_CHARS``, a date that is not ``YYYY-MM-DD``, an
-            ``event_end`` without ``event_start``, or an end before its start.
+            ``event_end`` without ``event_start``, an end before its start, or
+            an ``event_direction`` other than ``"past"`` / ``"future"``.
     """
     if details is None:
         return details
-    keys = {"event_phrase", "event_start", "event_end"} & details.keys()
+    keys = {"event_phrase", "event_start", "event_end", "event_direction"} & details.keys()
     if not keys:
         return details
     for key in keys:
         if details[key] is None:
             details.pop(key)
+    if "event_direction" in details:
+        details["event_direction"] = _direction(details["event_direction"])
     phrase = details.get("event_phrase")
     if "event_phrase" in details:
         if isinstance(phrase, bool) or not isinstance(phrase, str) or not phrase.strip():
@@ -354,7 +409,11 @@ def normalize_event_dates(details: dict[str, Any] | None) -> dict[str, Any] | No
             raise EventDateValidationError(f"event_phrase is longer than {MAX_PHRASE_CHARS} chars")
         anchor = _anchor(details)
         try:
-            resolved = resolve_event_phrase(phrase, anchor) if anchor is not None else None
+            resolved = (
+                resolve_event_phrase(phrase, anchor, details.get("event_direction"))
+                if anchor is not None
+                else None
+            )
         except OverflowError:
             # The arithmetic left the calendar (an anchor at year 1 or 9999):
             # unresolved, like any phrase the server cannot count.

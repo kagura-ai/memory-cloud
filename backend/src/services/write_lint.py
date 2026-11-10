@@ -27,11 +27,14 @@ logs server-side.
 from __future__ import annotations
 
 import re
+from datetime import date
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.schemas import WriteLintHint
+from utils.event_dates import resolved_event_days
 from utils.logger import get_logger
 from utils.tag_normalize import is_near_duplicate, is_specialisation, normalize_tag
 
@@ -59,6 +62,71 @@ _NARRATIVE_OPENERS = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+# #2752: a parenthesised group right after the event phrase that holds nothing
+# but one ISO date or a range of two ("last week (2024-03-04..2024-03-10)").
+_ISO_DAY = r"\d{4}-\d{2}-\d{2}"
+_BARE_DATES = re.compile(
+    rf"\s*\(\s*(?P<start>{_ISO_DAY})"
+    rf"(?:(?:\s*(?:\.\.|–|—|-|/)\s*|\s+to\s+)(?P<end>{_ISO_DAY}))?\s*\)",
+    re.IGNORECASE,
+)
+
+
+def _written_days(match: re.Match[str]) -> tuple[date, date] | None:
+    try:
+        start = date.fromisoformat(match.group("start"))
+        end = date.fromisoformat(match.group("end")) if match.group("end") else start
+    except ValueError:
+        return None  # not a calendar date: not a bare date either
+    return start, end
+
+
+def _event_date_hints(summary: str, content: str | None, details: Any) -> list[WriteLintHint]:
+    """``event_date_mismatch``: the text dates the phrase differently from the server.
+
+    Fires only when the memory's ``event_phrase`` resolved (``event_start`` ..
+    ``event_end``) and the summary or the content has the phrase
+    (case-insensitive) followed by a parenthesised ISO date or range that is
+    not those days; one date agrees with a single-day event. Silent for a
+    parenthesis that is not a bare date ("(stated on 2024-03-09)"). Nothing is
+    rewritten.
+    """
+    resolved = resolved_event_days(details)
+    if resolved is None:
+        return []
+    phrase = details["event_phrase"].strip().rstrip(".,!").strip()
+    if not phrase:
+        return []
+    pattern = re.compile(
+        r"(?<!\w)" + r"\s+".join(re.escape(word) for word in phrase.split()), re.IGNORECASE
+    )
+    start, end = resolved
+    shown = start.isoformat() if start == end else f"{start.isoformat()}..{end.isoformat()}"
+    for text in (summary, content):
+        if not isinstance(text, str):
+            continue
+        for found in pattern.finditer(text):
+            dates = _BARE_DATES.match(text, found.end())
+            if dates is None:
+                continue
+            written = _written_days(dates)
+            if written is None or written == resolved:
+                continue
+            value = dates.group(0).strip()[1:-1].strip()
+            return [
+                WriteLintHint(
+                    code="event_date_mismatch",
+                    hint=(
+                        f"'{found.group(0)}' is written as ({value}), but the server resolved "
+                        f"it to {shown} (event_start..event_end); remove the written date "
+                        "or correct it with update_memory()."
+                    ),
+                    subject=phrase,
+                )
+            ]
+    return []
 
 
 def _summary_hints(summary: str) -> list[WriteLintHint]:
@@ -173,6 +241,8 @@ async def lint_write(
     tags: list[str] | None,
     memory_id: UUID | None = None,
     checked_tags: list[str] | None = None,
+    content: str | None = None,
+    details: Any = None,
 ) -> list[WriteLintHint]:
     """Advisory recall-ability hints for a just-written memory.
 
@@ -189,6 +259,9 @@ async def lint_write(
             ``tags`` (#2585: the ones an ``add_tags`` call added; the stored
             ones were judged when they were written). ``tags`` still decides
             ``no_tags``.
+        content: The content as stored, for ``event_date_mismatch`` (#2752).
+        details: The details as stored (``event_phrase``, ``observed_at``,
+            ``event_direction``), for ``event_date_mismatch``.
 
     Returns:
         Up to ``MAX_HINTS`` hints, or an empty list when the write looks fine —
@@ -197,6 +270,7 @@ async def lint_write(
     """
     try:
         hints = _summary_hints(summary)
+        hints.extend(_event_date_hints(summary, content, details))
 
         tag_list = [t for t in (tags or []) if isinstance(t, str) and t]
         checked = (

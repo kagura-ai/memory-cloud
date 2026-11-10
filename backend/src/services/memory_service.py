@@ -1689,6 +1689,8 @@ class MemoryService:
                 summary=request.summary,
                 tags=request.tags,
                 memory_id=memory_id,
+                content=request.content,
+                details=memory.details,  # #2752: event_date_mismatch
             ),
         )
 
@@ -2374,6 +2376,8 @@ class MemoryService:
                 tags=memory.tags,
                 memory_id=memory.id,
                 checked_tags=lint_checked_tags,
+                content=memory.content,
+                details=memory.details,  # #2752: event_date_mismatch
             ),
         )
 
@@ -6775,6 +6779,8 @@ class MemoryService:
         tags: list[str] | None,
         memory_id: UUID | None = None,
         checked_tags: list[str] | None = None,
+        content: str | None = None,
+        details: Any = None,
     ) -> list[WriteLintHint]:
         """#1502: advisory recall-ability hints for a completed write.
 
@@ -6803,6 +6809,8 @@ class MemoryService:
                 tags=tags,
                 memory_id=memory_id,
                 checked_tags=checked_tags,
+                content=content,
+                details=details,
             )
         except Exception as e:  # noqa: BLE001 — advisory; never fail a committed write
             logger.warning("write_lint_unavailable", error=str(e))

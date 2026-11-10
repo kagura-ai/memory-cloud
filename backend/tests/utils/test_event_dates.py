@@ -464,6 +464,83 @@ class TestUnresolvedOnPurpose:
         assert event_write_fields(result) == {"event_unresolved": "unknown_phrase"}
 
 
+FRIDAY = date(2024, 3, 8)
+
+
+class TestEventDirection:
+    """#2752: ``event_direction="future"`` turns a BARE weekday into the first such
+    day on or after the anchor; ``"past"`` or no direction keeps the present rule;
+    every other phrase ignores it."""
+
+    @pytest.mark.parametrize(
+        ("anchor", "future", "past"),
+        [
+            (FRIDAY, "2024-03-10", "2024-03-03"),  # before the named weekday
+            (SUNDAY, "2024-03-10", "2024-03-03"),  # on it: the anchor itself
+            (MONDAY, "2024-03-17", "2024-03-10"),  # after it
+        ],
+    )
+    @pytest.mark.parametrize("phrase", ["Sunday", "on Sunday", "sun"])
+    def test_a_bare_weekday(self, phrase, anchor, future, past):
+        assert resolve_event_phrase(phrase, anchor, "future") == _span(future)
+        assert resolve_event_phrase(phrase, anchor, "past") == _span(past)
+        assert resolve_event_phrase(phrase, anchor) == _span(past)
+        assert resolve_event_phrase(phrase, anchor, None) == _span(past)
+
+    def test_the_issue_examples(self):
+        assert resolve_event_phrase("on Sunday", SATURDAY, "future") == _span("2024-03-10")
+        assert resolve_event_phrase("Saturday", SATURDAY, "future") == _span("2024-03-09")
+        assert resolve_event_phrase("Saturday", SATURDAY) == _span("2024-03-02")
+
+    @pytest.mark.parametrize(
+        ("phrase", "expected"),
+        [
+            ("last Sunday", ("2024-03-03",)),
+            ("this Sunday", ("2024-03-10",)),
+            ("next Sunday", ("2024-03-17",)),
+            ("yesterday", ("2024-03-08",)),
+            ("last week", ("2024-02-26", "2024-03-03")),
+            ("two weeks ago", ("2024-02-24",)),
+            ("June", ("2023-06-01", "2023-06-30")),
+        ],
+    )
+    @pytest.mark.parametrize("direction", ["past", "future", None])
+    def test_every_other_phrase_ignores_it(self, phrase, expected, direction):
+        assert resolve_event_phrase(phrase, SATURDAY, direction) == _span(*expected)
+
+    def test_the_write_resolves_with_it_and_stores_it(self):
+        details = normalize_event_dates(
+            {"observed_at": "2024-03-09", "event_phrase": "on Sunday", "event_direction": "future"}
+        )
+        assert details == {
+            "observed_at": "2024-03-09",
+            "event_phrase": "on Sunday",
+            "event_direction": "future",
+            "event_start": "2024-03-10",
+            "event_end": "2024-03-10",
+        }
+
+    @pytest.mark.parametrize(("given", "stored"), [(" Future ", "future"), ("PAST", "past")])
+    def test_it_is_lower_cased_and_stripped(self, given, stored):
+        details = normalize_event_dates(
+            {"observed_at": "2024-03-09", "event_phrase": "Sunday", "event_direction": given}
+        )
+        assert details["event_direction"] == stored
+
+    def test_it_alone_is_kept_and_null_removes_it(self):
+        assert normalize_event_dates({"event_direction": "past"}) == {"event_direction": "past"}
+        assert normalize_event_dates({"event_direction": None, "k": 1}) == {"k": 1}
+
+    @pytest.mark.parametrize("value", ["soon", "", "  ", "forward", 1, True, ["future"]])
+    def test_any_other_value_is_refused(self, value):
+        with pytest.raises(
+            EventDateValidationError, match='event_direction must be "past" or "future"'
+        ):
+            normalize_event_dates(
+                {"observed_at": "2024-03-09", "event_phrase": "Sunday", "event_direction": value}
+            )
+
+
 # --------------------------------------------------------------- write path
 
 

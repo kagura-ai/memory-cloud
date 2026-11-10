@@ -248,7 +248,7 @@ Manual: guide(["update_memory"]).""",
                     },
                     "details": {
                         "type": "object",
-                        "description": "Replaces the stored details (resend location, observed_at and event_phrase or they are dropped).",
+                        "description": "Replaces the stored details (resend location, observed_at, event_phrase and event_direction or they are dropped).",
                     },
                     "details_patch": {
                         "type": "object",

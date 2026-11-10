@@ -105,6 +105,21 @@ class TestDefinitions:
 
         assert rule in GUIDE_TOPICS["remember.observed_at"]
 
+    def test_the_guide_documents_the_direction_the_lint_and_the_batch_rule(self):
+        """#2752."""
+        from mcp_server.tools.guide import GUIDE_TOPICS
+
+        topic = GUIDE_TOPICS["remember.observed_at"]
+        assert "details.event_direction='future'" in topic
+        assert "event_date_mismatch" in topic
+        assert "event_date_mismatch" in GUIDE_TOPICS["remember.returns"]
+        batch = GUIDE_TOPICS["remember_batch.usage"]
+        assert "keep the phrase as stated and add no date; the row carries the resolved days" in (
+            batch
+        )
+        resend = _definition("update_memory")["inputSchema"]["properties"]["details"]
+        assert "event_direction" in resend["description"]
+
 
 class TestRemember:
     @pytest.mark.asyncio
