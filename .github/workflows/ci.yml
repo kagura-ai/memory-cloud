@@ -372,6 +372,8 @@ jobs:
               - 'backend/pyproject.toml'
               - 'backend/uv.lock'
               - 'frontend/Dockerfile'
+              # `output: "standalone"` decides whether the runner gets server.js.
+              - 'frontend/next.config.ts'
               - 'frontend/package.json'
               - 'frontend/package-lock.json'
               - '.github/workflows/ci.yml'
