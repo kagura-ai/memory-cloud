@@ -33,16 +33,14 @@ SYSTEM = (
     "Do not infer causation or reverse who did what to whom."
 )
 RUBRIC = "v1: exact normalized facts object, no extra fields; all required sources cited and retrieved; no other citations; abstention has empty facts/citations"
-# The MCP recall tool's default projection: the evidence is the reply it sends.
-VERBOSITY = "compact"
-SKIP_EVENT = "recall_related_index_skipped"
 LIMITATIONS = (
     "Local read-only experiment, not deployment latency. Provider-reported online tokens "
-    "may omit embedding usage; zero is not proof of zero work, and a provider call that "
-    "fails reports none. ENABLE_NEURAL_MEMORY=false leaves a candidate pool of k, so an "
-    "index extra reaches the reply only by displacing a ranked result. An expansion that "
-    "timed out or failed is the baseline reply for that trial (expansion_skipped). "
-    "Exact-fact scoring is intentionally conservative. Never enables rollout."
+    "may omit embedding usage; zero is not proof of zero work, and an answer call that "
+    "got no reply reports none. ENABLE_NEURAL_MEMORY=false leaves a candidate pool of k, "
+    "so an index extra reaches the reply only by displacing a ranked result. An expansion "
+    "that timed out, failed or was never attempted is the baseline reply for that trial "
+    "(expansion_skipped). Exact-fact scoring is intentionally conservative. Never enables "
+    "rollout."
 )
 
 
@@ -124,53 +122,101 @@ def score(probe: dict, retrieved: set[str], answer: dict, id_map: dict[str, str]
 
 
 def git_state() -> dict:
-    """Commit and dirty flag of the checkout this runner runs from."""
+    """Commit and dirty flag of the checkout this runner runs from.
 
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parent), *args],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        ).stdout.strip()
+    Each is read on its own: a status that fails or times out (a lock held by
+    another process on a shared checkout) leaves the commit as read.
+    """
 
-    try:
-        return {
-            "git_commit": git("rev-parse", "HEAD"),
-            "git_dirty": bool(git("status", "--porcelain")),
-        }
-    except (OSError, subprocess.SubprocessError):
-        return {"git_commit": "unknown", "git_dirty": None}
+    def git(*args: str) -> str | None:
+        try:
+            return subprocess.run(
+                # No optional locks: a status must not refresh the index.
+                ["git", "--no-optional-locks", "-C", str(Path(__file__).resolve().parent), *args],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
 
-
-def recorded_settings() -> dict:
-    """Process settings that change what is measured; recorded, not chosen here."""
+    commit, status = git("rev-parse", "HEAD"), git("status", "--porcelain")
     return {
-        "RECALL_RELATED_INDEX_TIMEOUT_MS": os.environ.get("RECALL_RELATED_INDEX_TIMEOUT_MS", "150"),
-        "SUPERSEDE_VERIFY_MODE": os.environ.get("SUPERSEDE_VERIFY_MODE", "off"),
-        "SLEEP_LLM_PROVIDER": os.environ.get("SLEEP_LLM_PROVIDER", ""),
-        **{key: value for key, value in sorted(os.environ.items()) if key.startswith("SUPERSEDE_")},
+        "git_commit": commit or "unknown",
+        "git_dirty": None if status is None else bool(status),
     }
 
 
-def mcp_evidence(response, context, max_chars: int) -> dict:
-    """The reply the MCP recall tool builds for ``response``, cut the same way."""
-    from mcp_server.tools.memory import (
-        _bound_recall_envelope,
-        _fit_recall_content,
-        _recall_envelope,
-    )
+def effective_settings() -> dict:
+    """Process settings that change what is measured, as the code resolves them.
 
-    return _bound_recall_envelope(
-        _fit_recall_content(_recall_envelope(response, context, VERBOSITY), max_chars),
-        max_chars,
-    )
+    Recorded, not chosen here. The write-path judge is the env resolution; a
+    ``neural_config`` row would win over it, and a disposable database has none.
+    """
+    from neural.config import NeuralMemoryConfig
+    from services.recall_related_index import expansion_timeout_ms
+
+    neural = NeuralMemoryConfig.from_env()
+    return {
+        "recall_related_index_timeout_ms": expansion_timeout_ms(),
+        "supersede_suggest_enabled": neural.supersede_suggest_enabled,
+        "supersede_verify_mode": neural.supersede_verify_mode,
+        "supersede_verify_min_confidence": neural.supersede_verify_min_confidence,
+        "write_path_judge": {
+            "provider": neural.sleep_llm_provider,
+            "model": neural.sleep_llm_model,
+        },
+    }
+
+
+def recall_parameters(k: int) -> dict:
+    """How the measured recall is asked and rendered; the manifest holds it and run() reads it.
+
+    ``verbosity`` is the deployment default an MCP client gets when it passes none.
+    """
+    from config.settings import get_settings
+
+    return {
+        "full": k,
+        "verbosity": get_settings().mcp_recall_default_verbosity,
+        "use_rerank": False,
+    }
 
 
 def answer_problem(answer) -> str | None:
     """A reply that did not parse to an object is a failed answer, not a wrong one."""
     return None if isinstance(getattr(answer, "parsed", None), dict) else "MalformedAnswer"
+
+
+def online_usage(spent, embedding_tokens: int, rates: dict) -> dict:
+    """Online tokens and declared cost of one trial.
+
+    ``spent`` is the answer call's usage: the reply, or what a failed call
+    still spent (``billed_usage``), or ``None`` when no attempt answered.
+    """
+    return {
+        "online_reported_tokens": embedding_tokens + getattr(spent, "total_tokens", 0),
+        "online_usd": declared_cost(
+            embedding_tokens,
+            getattr(spent, "input_tokens", 0)
+            + getattr(spent, "cached_input_tokens", 0)
+            + getattr(spent, "cache_write_tokens", 0),
+            getattr(spent, "output_tokens", 0),
+            rates,
+        ),
+    }
+
+
+def expansion_skips(enabled: bool, usage: dict) -> list[str]:
+    """Why the on arm got the baseline reply, if it did.
+
+    A fallback the expansion logged, or ``not_attempted`` when recall never
+    called it (a degraded recall skips the stage). Empty on the off arm.
+    """
+    if enabled and not usage["attempted"]:
+        return [*usage["skips"], "not_attempted"]
+    return list(usage["skips"])
 
 
 class SkipLog:
@@ -181,11 +227,11 @@ class SkipLog:
     was linked".
     """
 
-    def __init__(self, inner, usage: dict):
-        self._inner, self._usage = inner, usage
+    def __init__(self, inner, usage: dict, event: str):
+        self._inner, self._usage, self._event = inner, usage, event
 
     def info(self, event, **fields):
-        if event == SKIP_EVENT:
+        if event == self._event:
             self._usage["skips"].append(str(fields.get("error_type", "unknown")))
         return self._inner.info(event, **fields)
 
@@ -195,6 +241,8 @@ class SkipLog:
 
 def validate_config(config: dict, output: Path) -> dict:
     from importlib.metadata import version
+
+    from utils.response_budget import MAX_CHARS_LIMIT, MIN_MAX_CHARS
 
     if any((parent / ".git").exists() for parent in [output, *output.parents]):
         raise ValueError("measurements must be outside every git checkout")
@@ -206,8 +254,12 @@ def validate_config(config: dict, output: Path) -> dict:
             raise ValueError(f"record immutable local model revision: {key}")
     if not 2 <= config["repetitions"] <= 100 or config["repetitions"] % 2:
         raise ValueError("repetitions must be even, 2..100, for balanced order")
-    if not 1 <= config["k"] <= 100 or not 1000 <= config["max_chars"] <= 100000:
-        raise ValueError("invalid retrieval budget")
+    # max_chars within the recall tool's own range: a budget the tool refuses
+    # would cut the evidence where no MCP client can ask for it.
+    if not 1 <= config["k"] <= 100 or not MIN_MAX_CHARS <= config["max_chars"] <= MAX_CHARS_LIMIT:
+        raise ValueError(
+            f"invalid retrieval budget: k 1..100, max_chars {MIN_MAX_CHARS}..{MAX_CHARS_LIMIT}"
+        )
     for key in (
         "coverage_drop",
         "correctness_drop",
@@ -237,8 +289,8 @@ def validate_config(config: dict, output: Path) -> dict:
         "tokenizers_version": version("tokenizers"),
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         **git_state(),
-        "recall": {"full": config["k"], "verbosity": VERBOSITY, "use_rerank": False},
-        "settings": recorded_settings(),
+        "recall": recall_parameters(config["k"]),
+        "settings": effective_settings(),
         "sources_sha256": digest(SOURCES),
         "probes_sha256": digest(PROBES),
         "answer_system": SYSTEM,
@@ -263,11 +315,17 @@ def local_only() -> None:
         raise ValueError("this runner requires local self_hosted inference")
     if os.environ.get("ENABLE_NEURAL_MEMORY", "").lower() != "false":
         raise ValueError("set ENABLE_NEURAL_MEMORY=false for this small frozen fixture")
-    # The write-path judge follows SLEEP_LLM_PROVIDER, not the frozen config.
-    if os.environ.get("SUPERSEDE_VERIFY_MODE", "off").strip().lower() == "llm" and os.environ.get(
-        "SLEEP_LLM_PROVIDER", ""
-    ).strip().lower() not in {"", "self_hosted"}:
-        raise ValueError("SUPERSEDE_VERIFY_MODE=llm needs SLEEP_LLM_PROVIDER=self_hosted here")
+    # The write-path judge is not the frozen config's: it resolves from
+    # SLEEP_LLM_*, else the managed lane, else a hosted default.
+    judge = effective_settings()
+    if (
+        judge["supersede_verify_mode"] == "llm"
+        and judge["write_path_judge"]["provider"] != "self_hosted"
+    ):
+        raise ValueError(
+            "SUPERSEDE_VERIFY_MODE=llm needs SLEEP_LLM_PROVIDER=self_hosted here; the judge "
+            f"resolves to {judge['write_path_judge']['provider']}"
+        )
 
 
 @contextmanager
@@ -399,11 +457,12 @@ async def run(config: dict, output: Path) -> dict:
     from db.base import get_db
     from db.qdrant import ensure_kagura_memories_collection, get_collection_name
     from mcp_server.tools._helpers import _dumps
+    from mcp_server.tools.memory import _recall_reply
     from models.memory import EDGE_ORIGIN_DECLARED, NeuralMemoryEdge
     from models.schemas import RecallRequest
     from neural.config import NeuralMemoryConfig
     from services.embedding_service import EmbeddingService
-    from services.llm_service import LLMService
+    from services.llm_service import LLMService, billed_usage
     from services.memory_service import MemoryService
     from services.sleep.edge_discovery import EdgeDiscoveryPhase
     from services.sleep.related_index import RelatedIndexPhase
@@ -500,6 +559,7 @@ async def run(config: dict, output: Path) -> dict:
                 "extra_candidates": 0,
                 "extra_ids": set(),
                 "skips": [],
+                "attempted": False,
             }
             original_embed = EmbeddingService.embed_with_usage
 
@@ -516,6 +576,7 @@ async def run(config: dict, output: Path) -> dict:
             async def measured_expand(
                 *args, _usage=usage, _original=expansion.expand_recall, **kwargs
             ):
+                _usage["attempted"] = True
                 result = await _original(*args, **kwargs)
                 _usage["extra_candidates"] += len(result[0])
                 _usage["extra_ids"].update(str(hit["id"]) for hit in result[0])
@@ -526,7 +587,9 @@ async def run(config: dict, output: Path) -> dict:
                 patch.object(MemoryService, "_recall_run_hebbian_learning", no_learning),
                 patch.object(EmbeddingService, "embed_with_usage", embed),
                 patch.object(expansion, "expand_recall", measured_expand),
-                patch.object(expansion, "logger", SkipLog(expansion.logger, usage)),
+                patch.object(
+                    expansion, "logger", SkipLog(expansion.logger, usage, expansion.SKIP_EVENT)
+                ),
             ):
                 for repetition in range(-1, config["repetitions"]):
                     order = trial_order(repetition)
@@ -537,7 +600,12 @@ async def run(config: dict, output: Path) -> dict:
                                     "ranking state drifted; stop instead of comparing unequal snapshots"
                                 )
                             usage.update(
-                                tokens=0, calls=0, extra_candidates=0, extra_ids=set(), skips=[]
+                                tokens=0,
+                                calls=0,
+                                extra_candidates=0,
+                                extra_ids=set(),
+                                skips=[],
+                                attempted=False,
                             )
                             start = time.perf_counter()
                             with flag("RECALL_RELATED_INDEX_ENABLED", enabled):
@@ -545,20 +613,22 @@ async def run(config: dict, output: Path) -> dict:
                                     RecallRequest(
                                         query=probe["query"],
                                         k=config["k"],
-                                        full=config["k"],
-                                        use_rerank=False,
+                                        full=config["recall"]["full"],
+                                        use_rerank=config["recall"]["use_rerank"],
                                     ),
                                     owner,
                                     ctx.id,
                                     ws.id,
                                     related_index=True,
                                 )
-                            envelope = mcp_evidence(response, ctx, config["max_chars"])
+                            envelope = _recall_reply(
+                                response, ctx, config["recall"]["verbosity"], config["max_chars"]
+                            )
                             serialized = _dumps(envelope)
                             retrieval_ms = (time.perf_counter() - start) * 1000
-                            answer, answer_error = None, None
+                            answer, spent, answer_error = None, None, None
                             try:
-                                answer = await llm.complete_json(
+                                answer = spent = await llm.complete_json(
                                     owner,
                                     json.dumps(
                                         {
@@ -579,6 +649,8 @@ async def run(config: dict, output: Path) -> dict:
                                 )
                             except Exception as exc:  # noqa: BLE001 - recorded per trial
                                 answer_error = type(exc).__name__
+                                # An unparseable reply still spent its tokens.
+                                spent = billed_usage(exc)
                             else:
                                 answer_error = answer_problem(answer)
                             elapsed = (time.perf_counter() - start) * 1000
@@ -586,14 +658,14 @@ async def run(config: dict, output: Path) -> dict:
                                 ids.get(str(row["memory_id"]), "unknown")
                                 for row in envelope["results"]
                             }
+                            skips = expansion_skips(enabled, usage)
                             row = {
                                 "arm": "on" if enabled else "off",
                                 "probe": probe["id"],
                                 "repetition": repetition,
                                 **score(probe, retrieved, getattr(answer, "parsed", None), ids),
                                 "response_tokens": len(tokenizer.encode(serialized).ids),
-                                "online_reported_tokens": usage["tokens"]
-                                + getattr(answer, "total_tokens", 0),
+                                **online_usage(spent, usage["tokens"], config["usd_per_million"]),
                                 "embedding_calls": usage["calls"],
                                 "answer_calls": 1,
                                 "tool_calls": 1,
@@ -605,18 +677,10 @@ async def run(config: dict, output: Path) -> dict:
                                 ),
                                 "evidence_sha256": digest(envelope),
                                 # Why the expansion fell back to the baseline, if it did.
-                                "expansion_skips": len(usage["skips"]),
-                                "expansion_skipped": usage["skips"][0] if usage["skips"] else None,
+                                "expansion_skips": len(skips),
+                                "expansion_skipped": skips[0] if skips else None,
                                 "answer_errors": int(answer_error is not None),
                                 "answer_error": answer_error,
-                                "online_usd": declared_cost(
-                                    usage["tokens"],
-                                    getattr(answer, "input_tokens", 0)
-                                    + getattr(answer, "cached_input_tokens", 0)
-                                    + getattr(answer, "cache_write_tokens", 0),
-                                    getattr(answer, "output_tokens", 0),
-                                    config["usd_per_million"],
-                                ),
                                 "retrieval_ms": retrieval_ms,
                                 "end_to_end_ms": elapsed,
                                 "retrieved": sorted(retrieved),
