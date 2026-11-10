@@ -26,9 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # The within-row rule, word for word, wherever the answering rules are kept.
 WITHIN_ROW_RULE = (
-    "Inside one row: the event happened on `event_start`..`event_end`; "
-    "`observed_at` is the day it was said; a date written in the summary loses to "
-    "the row's event fields."
+    "In one row: `event_start`..`event_end` = when it happened, `observed_at` = "
+    "when it was said; a date in the summary loses to the event fields."
 )
 EVENT_KEYS = ("event_start", "event_end", "event_weekday")
 SUMMARY_WITH_ANOTHER_DATE = "Went hiking on 2024-03-02 (the summary's own date)"
