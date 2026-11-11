@@ -774,8 +774,8 @@ _EXACT_REDIRECT_BASES: tuple[tuple[str, str], ...] = tuple(
 # Grok and Grok Bot (#2779) register with Cursor's published client metadata
 # (``client_name`` "Cursor") plus one grok.com callback, trailing slash
 # included; that one URI, not grok.com, is allowed. grok.com is xAI's: its
-# pages link xAI's terms and privacy policy on x.ai and load media from x.ai
-# hosts; whois shows a privacy-redacted US (CA) registrant, Cloudflare as
+# page signs in through accounts.x.ai and loads media from data.x.ai and
+# media.x.ai; whois shows a privacy-redacted US (CA) registrant, Cloudflare as
 # registrar and name servers (x.ai's name servers are Cloudflare's too), and
 # the certificate is issued to grok.com and *.grok.com.
 _PROVIDER_EXACT_URIS: dict[str, tuple[str, ...]] = {

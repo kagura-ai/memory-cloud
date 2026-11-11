@@ -1870,6 +1870,7 @@ class TestDcrEndpointGoogleConnectedApps:
             _GCA_GEMINI_URI,
             "https://claude.ai/api/mcp/auth_callback",
             _MUSE_URI,
+            _GROK_URI,  # #2779
         ],
     )
     @pytest.mark.parametrize("listed_first", [True, False])
@@ -1912,6 +1913,31 @@ class TestDcrEndpointGoogleConnectedApps:
         stored = fake_session.add.call_args.args[0]
         assert stored.provider == "claude"
         assert stored.redirect_uris == ["http://127.0.0.1:8080/callback"]
+
+    @pytest.mark.usefixtures("gca_listed")
+    @pytest.mark.parametrize("listed_first", [True, False])
+    def test_grok_registration_with_a_listed_uri_never_becomes_the_provider(
+        self, client, listed_first
+    ):
+        # #2779: Grok's five callbacks next to a configured connected-app URI;
+        # the configured URI is dropped and Grok's five are kept as cursor.
+        uris = [_GCA_URI, *_GROK_CURSOR_URIS] if listed_first else [*_GROK_CURSOR_URIS, _GCA_URI]
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={"client_name": "Cursor", "redirect_uris": uris},
+            )
+
+        assert response.status_code == 201, response.text
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "cursor"
+        assert stored.redirect_uris == _GROK_CURSOR_URIS
+        assert not stored.check_redirect_uri(_GCA_URI)
 
     def test_manual_creation_with_the_provider_is_422(self):
         # Gate1 (#2773): only DCR, through the exact list, stores this provider.
