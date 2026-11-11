@@ -11,6 +11,7 @@ SCRIPT="$BATS_TEST_DIRNAME/../check-image-contents.sh"
 #   FAKE_PRESENT  names a probe finds: commands, `module` (the venv's Python)
 #                 and `sys:module` (the system Python)
 #   FAKE_BROKEN   a command whose probe fails the docker way (125)
+#   FAKE_IMPORT_FAILS a present module whose import raises (exit 1)
 #   FAKE_RUNNABLE=0 the image does not start; FAKE_APP_IMPORTS=0, FAKE_SERVER_JS=0
 #   FAKE_UID, FAKE_USER, FAKE_NODE  what id -u, id -un and node print
 mock_docker() {
@@ -30,10 +31,17 @@ mock_docker() {
     return 1
   fi
   if [ "$entrypoint" = python ] || [ "$entrypoint" = /usr/local/bin/python3 ]; then
-    name="${2#import }"
-    if [ "$name" = src.api.main ]; then
+    if [ "$2" = "import src.api.main" ]; then
       [ "${FAKE_APP_IMPORTS:-1}" = 1 ]
       return
+    fi
+    # A module probe must look the module up, not import it: an import of a
+    # module in FAKE_IMPORT_FAILS exits 1 although the module is there.
+    if [[ "$2" == *find_spec* ]]; then
+      name="$3"
+    else
+      name="${2#import }"
+      [[ " ${FAKE_IMPORT_FAILS:-} " == *" $name "* ]] && return 1
     fi
     [ "$entrypoint" = /usr/local/bin/python3 ] && name="sys:$name"
     [[ " ${FAKE_PRESENT:-} " == *" $name "* ]] && return 0
@@ -80,6 +88,19 @@ teardown() {
   FAKE_PRESENT="gcc" run "$SCRIPT" api img
   [ "$status" -eq 1 ]
   [[ "$output" == *"gcc is in the image"* ]]
+}
+
+@test "a present module whose import raises still fails the check" {
+  FAKE_PRESENT="pytest" FAKE_IMPORT_FAILS="pytest" run "$SCRIPT" api img
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"pytest (dev extra) is in the image"* ]]
+}
+
+@test "a C++ compiler or clang in the api image fails" {
+  FAKE_PRESENT="g++ clang" run "$SCRIPT" api img
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"g++ is in the image"* ]]
+  [[ "$output" == *"clang is in the image"* ]]
 }
 
 @test "uv left in the api image fails" {

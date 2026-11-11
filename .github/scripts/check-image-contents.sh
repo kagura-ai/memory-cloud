@@ -10,7 +10,7 @@
 # api (the default target, which is what the production compose files build):
 #   - none of the dev extra: pytest, fakeredis, playwright do not import;
 #     ruff and pyright are not on PATH
-#   - no compiler or build tool: gcc, cc, make
+#   - no compiler or build tool: gcc, cc, g++, c++, clang, make
 #   - the base image's pip, setuptools and wheel are gone (system Python)
 #   - uv and uvx are gone
 #   - runs as uid 1000; the application imports; alembic and curl (the
@@ -84,10 +84,16 @@ expect_no_command() {
   expect_absent "$1" sh -c 'command -v "$1" > /dev/null || exit 1' sh "$1"
 }
 
-# A module that fails to import exits 1 (ModuleNotFoundError).
+# The module is looked up, not imported: a module that is there but raises on
+# import must not read as absent. 1 = not found; an error in the lookup is 3.
 expect_no_module() {
   local python="$1" module="$2" label="$3"
-  expect_absent "$label" "$python" -c "import $module"
+  expect_absent "$label" "$python" -c 'import importlib.util, sys
+try:
+    found = importlib.util.find_spec(sys.argv[1]) is not None
+except Exception:
+    sys.exit(3)
+sys.exit(0 if found else 1)' "$module"
 }
 
 # <what> <probe...>: the probe must exit 0.
@@ -119,7 +125,7 @@ check_api() {
   for name in pytest fakeredis playwright; do
     expect_no_module python "$name" "$name (dev extra)"
   done
-  for name in ruff pyright gcc cc make uv uvx; do
+  for name in ruff pyright gcc cc g++ c++ clang make uv uvx; do
     expect_no_command "$name"
   done
   # The base image's packaging tools sit outside .venv, in the system Python.
