@@ -1,6 +1,6 @@
 import type { ElementType } from "react";
 import { Role, WorkspaceRole } from "@/lib/auth/rbac";
-import { Compass, Brain, Key, Settings, Puzzle, Database, Sliders, KeyRound, Users, BarChart, CreditCard, Lock, Gauge, Moon, ShieldCheck, DollarSign, Plug, HardDrive } from "lucide-react";
+import { Compass, Brain, Key, Settings, Puzzle, Database, Sliders, KeyRound, Users, BarChart, CreditCard, Lock, Moon, ShieldCheck, DollarSign, Plug, HardDrive } from "lucide-react";
 
 export interface NavItem {
   nameKey: string; // Translation key
@@ -168,12 +168,6 @@ export const navigationGroups: NavGroup[] = [
         nameKey: "users",
         href: "/admin/users",
         icon: Users,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        nameKey: "quotas",
-        href: "/admin/plans",
-        icon: Gauge,
         requiredRole: Role.ADMIN,
       },
       {

@@ -316,7 +316,6 @@
     "workspaceSettings": "Workspace",
     "admin": "Admin",
     "users": "Users",
-    "quotas": "Quotas & Limits",
     "neuralConfig": "Neural Config",
     "sleepReports": "Sleep Reports",
     "cost": "Cost",
@@ -2761,32 +2760,16 @@
       "cancel": "Cancel",
       "loading": "Loading...",
       "noResults": "No results found",
-      "noWorkspaces": "No workspaces found",
       "noChanges": "No changes recorded",
       "error": "Error",
       "success": "Success"
     },
     "plans": {
-      "title": "Quotas & Limits",
-      "description": "Manage workspace tiers and quotas. Note: All users can own max 10 workspaces. Join other workspaces as member via invite.",
-      "tabs": {
-        "workspaces": "Workspaces",
-        "tiers": "Tiers",
-        "audit": "Audit Log"
-      },
-      "workspacesTable": {
-        "title": "Workspaces",
-        "description": "All workspaces with plan tiers and usage",
-        "workspace": "Workspace",
-        "plan": "Plan",
-        "memories": "Memories",
-        "storage": "Storage (MB)",
-        "usage": "Usage %",
-        "actions": "Actions",
+      "actions": {
         "changePlan": "Change Tier",
         "editAddons": "Edit Addons",
         "editSpendCap": "Edit Spend Cap",
-        "owner": "Owner: {name}"
+        "quotaDetail": "Quotas"
       },
       "tiersTable": {
         "title": "Tier Comparison",
@@ -2797,7 +2780,7 @@
         "emptyDescription": "The backend returned no tiers — check the deployment's PLAN_* configuration.",
         "infoCard": {
           "title": "About these values",
-          "addonBody": "Each quota can be augmented per workspace with extra_* addons (memory=+10k, storage=+100MB, etc.) from the addon dialog in the Workspaces tab.",
+          "addonBody": "Each quota can be augmented per workspace with extra_* addons (memory=+10k, storage=+100MB, etc.) from Edit Addons on the workspace owner's user page.",
           "zeroFloorBody": "Rows whose base value is 0 cannot be unlocked by addons (zero-floor policy, #569). Upgrade the workspace tier first to use addons for that quota.",
           "envOverrideBody": "Numbers below are read from the running backend at request time, so PLAN_*_* environment overrides are reflected without rebuilding the UI."
         },
@@ -2862,7 +2845,8 @@
         "usageEffective": "Usage / Effective",
         "connector": "Connectors",
         "memoriesPerDay": "Memories Created/day",
-        "historyRetention": "Operation History Retention (days)"
+        "historyRetention": "Operation History Retention (days)",
+        "loadError": "Failed to load quota details"
       },
       "addonDialog": {
         "title": "Edit Addons",
@@ -2924,7 +2908,8 @@
         "workspace": "Workspace",
         "change": "Change",
         "changedBy": "Changed By",
-        "reason": "Reason"
+        "reason": "Reason",
+        "emptyDescription": "Tier changes made from a user's page are listed here."
       },
       "changePlanDialog": {
         "title": "Change Tier",
@@ -2936,18 +2921,29 @@
         "confirm": "Confirm Change"
       },
       "messages": {
-        "loadError": "Failed to load workspaces",
+        "loadError": "Failed to load the tier change history",
         "changeSuccess": "Tier changed from {oldPlan} to {newPlan}",
         "changeError": "Failed to change tier",
         "addonUpdateSuccess": "Quota addons updated",
         "spendCapUpdateSuccess": "Spend cap updated",
         "spendCapUpdateError": "Failed to update spend cap",
-        "quotaRefreshError": "Failed to refresh quota details"
+        "quotaRefreshError": "Failed to refresh quota details",
+        "addonUpdateError": "Failed to update addons"
       }
     },
     "users": {
       "title": "Users Management",
       "description": "Manage all users, view statistics, and control permissions",
+      "tabs": {
+        "users": "Users",
+        "planTiers": "Plan tiers",
+        "planChanges": "Plan changes"
+      },
+      "tabHelp": {
+        "users": "Every user, their workspaces and their workspace cap. Open a user to manage the plan, add-ons and spend cap of the workspaces they own.",
+        "planTiers": "What each plan tier allows, as the running server applies it. Use it to pick a tier before changing a workspace's plan.",
+        "planChanges": "The last tier changes across all workspaces, with who made them. Use it to check when and by whom a plan changed."
+      },
       "search": {
         "placeholder": "Search by name, email, or user ID...",
         "showing": "Showing {filtered} of {total} users"
@@ -3044,8 +3040,8 @@
           },
           "primaryBadge": "Primary",
           "notAvailable": "N/A",
-          "changePlanButton": "Change Plan",
-          "empty": "No workspaces"
+          "empty": "No workspaces",
+          "ownerManagesPlan": "Managed on the owner's page"
         },
         "workspaceCapacity": {
           "title": "Workspace Capacity",
@@ -3076,14 +3072,6 @@
           "memoryBreakdown": "Working: {working} | Persistent: {persistent}",
           "activeApiKeys": "Active API Keys"
         },
-        "changePlanDialog": {
-          "title": "Change Workspace Plan",
-          "description": "Change plan tier for {workspaceName}",
-          "currentPlanLabel": "Current Plan",
-          "newPlanLabel": "New Plan",
-          "warningText": "⚠️ Plan changes take effect immediately and will update quota limits.",
-          "confirm": "Change Plan"
-        },
         "reasonModal": {
           "title": "Reason required",
           "description": "This change reduces the cap below the user's current owned count.",
@@ -3095,8 +3083,6 @@
         },
         "messages": {
           "loadError": "Failed to load user details",
-          "planChangeSuccessDesc": "Plan changed to {plan} for {workspace}",
-          "planChangeErrorDesc": "Failed to change plan",
           "bonusUpdateSuccessTitle": "Updated",
           "bonusUpdateSuccessDesc": "Slot bonus: {before} → {after}.",
           "bonusUpdateErrorDesc": "Failed to update slot bonus",

@@ -3,7 +3,7 @@
  * Shared by file/storage listings and resource payload displays.
  *
  * Note: workspace plan quotas use a separate GiB-based formatter
- * (`admin/plans/_addon-types.ts`); unifying the GB-vs-GiB convention across the
+ * (`components/admin/plans/_addon-types.ts`); unifying the GB-vs-GiB convention across the
  * product is a follow-up design decision, intentionally out of scope here.
  */
 export function formatBytes(bytes: number): string {

@@ -118,8 +118,8 @@ Every entitled workspace keeps its history for **90 days**
 it: the effective retention is 90 days plus
 `workspaces.addon_history_retention_days_bonus`, at most 3650 extra days. Billing
 sets the bonus with the `history_retention_days` add-on dimension of the internal
-plan push; admins grant it under **Admin → Plans → Workspaces** (`extra_history_retention_days`,
-one day per unit). The API returns the effective window as `retention_days`, and
+plan push; admins grant it under **Admin → Users → the workspace owner → Quotas →
+Edit Addons** (`extra_history_retention_days`, one day per unit). The API returns the effective window as `retention_days`, and
 the page shows it.
 
 Retention works like a TTL. Reads (rows, counts, search and every cursor page)
