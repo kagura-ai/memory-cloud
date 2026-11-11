@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -299,7 +300,7 @@ def test_cli_outputs_metadata_without_a_secret_or_hash(
     engine, _ = client_database
     secret = "client-secret-" + "x" * 32
     path = _secret_file(tmp_path / "client.secret", secret)
-    monkeypatch.setattr(cli._env_guard, "require_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(cli._env_guard, "require_settings", SimpleNamespace)
     monkeypatch.setattr(cli.db, "get_sync_database_url", lambda: "sqlite://")
     monkeypatch.setattr(command, "create_engine", lambda *args, **kwargs: engine)
     result = main(
@@ -320,6 +321,36 @@ def test_cli_outputs_metadata_without_a_secret_or_hash(
     assert json.loads(captured.out)["status"] == "registered"
     assert secret not in captured.out + captured.err
     assert "$2" not in captured.out + captured.err
+
+
+def test_cli_redacts_unicode_input_failures_before_database_access(monkeypatch, capsys):
+    import cli._env_guard
+    import cli.oidc_client as command
+
+    engine_factory = Mock()
+    monkeypatch.setattr(cli._env_guard, "require_settings", SimpleNamespace)
+    monkeypatch.setattr(command.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(
+        command.getpass, "getpass", Mock(side_effect=["x" * 32, "x" * 31 + "\ud800"])
+    )
+    monkeypatch.setattr(command, "create_engine", engine_factory)
+
+    result = main(
+        [
+            "register",
+            "--client-id",
+            "web-client",
+            "--name",
+            "External web client",
+            "--redirect-uri",
+            "https://client.example.test/auth/callback",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "OIDC provisioning could not read its protected inputs\n"
+    engine_factory.assert_not_called()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unprivileged symlink creation is POSIX-specific")

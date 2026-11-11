@@ -33477,6 +33477,9 @@
       "name": "observation-credentials"
     },
     {
+      "name": "oidc"
+    },
+    {
       "name": "public-search"
     },
     {

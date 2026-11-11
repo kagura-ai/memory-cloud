@@ -306,6 +306,10 @@ openapi_tags = [
     {"name": "authentication", "description": "OAuth2 login and session management"},
     {"name": "google-oauth2", "description": "Google OAuth2 login and callback flow"},
     {"name": "github-oauth2", "description": "GitHub OAuth2 login and callback flow"},
+    {
+        "name": "oidc",
+        "description": "Isolated OpenID Connect provider for pre-registered confidential web clients",
+    },
     {"name": "users", "description": "User profile and settings"},
     {
         "name": "account-erasure",

@@ -205,14 +205,16 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(outcome))
         finally:
             engine.dispose()
+    except (OSError, UnicodeError):
+        # UnicodeError is a ValueError; protect input failures before the
+        # general validation-error handler can interpolate their details.
+        print("OIDC provisioning could not read its protected inputs", file=sys.stderr)
+        return 1
     except ValueError as exc:
         print(f"OIDC provisioning refused: {exc}", file=sys.stderr)
         return 1
     except SQLAlchemyError:
         print("OIDC provisioning failed; no successful commit was confirmed", file=sys.stderr)
-        return 1
-    except (OSError, UnicodeError):
-        print("OIDC provisioning could not read its protected inputs", file=sys.stderr)
         return 1
     return 0
 

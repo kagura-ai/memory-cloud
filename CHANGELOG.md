@@ -4,14 +4,6 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
-## Unreleased
-
-### Added
-- **Optional identity provider for confidential web clients** ([#2781](https://github.com/kagura-ai/memory-cloud/issues/2781)): a separate `/oidc` issuer provides Discovery, Authorization Code with mandatory S256 PKCE and nonce, RS256 ID tokens and public JWKS, UserInfo, rotating refresh tokens and revocation. Explicit client registrations, credential hashes, fixed grant lifetimes and current account revocation keep these credentials separate from MCP OAuth. See [operator setup](docs/ops/oidc-provider.md).
-
-### Migration
-- Migration `f36_2781_oidc_provider` adds independent client, grant, code and token tables. The provider stays disabled until `OIDC_ENABLED` and its issuer/signing settings are configured; existing `/oauth` clients and MCP scopes are unchanged.
-
 ## [v0.158.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.158.0) — 2026-11-11
 
 Connector requirements for Google connected apps (Gemini app, Google Search), Microsoft 365 Copilot and Grok, and a lock so two `deploy.sh` runs cannot overlap. Everything new for connectors is inert until an operator sets it or a client asks for the new tool profiles.
