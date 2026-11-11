@@ -21,8 +21,13 @@ Use an RSA key of at least 2048 bits. RS256 is the only ID-token algorithm.
 The API never creates a replacement signing key automatically. Do not reuse
 another service's signing or encryption key. Restrict the file to the API
 service account (`0400` or `0600` on POSIX; equivalent ACLs on Windows), keep it
-outside source control, and mount it read-only. A symlink, non-regular file,
+outside source control, and mount its containing directory read-only. A symlink, non-regular file,
 oversized file or group/world-readable POSIX file is refused.
+
+For Docker, bind-mount the directory so an atomic file replacement becomes
+visible inside the container. A single-file bind mount stays attached to the
+old inode after a host-side replacement; recreate every API container using
+that mount to load the replacement file.
 
 A JWK set has a `keys` array. Each key needs a distinct `kid`; the active key
 needs RSA private material. Previous public RSA keys may remain in the set for
@@ -130,8 +135,10 @@ does not silently alter another application's registration.
 1. Generate a new private RSA key and distinct `kid` through the operator's
    secure tooling. Stage a JWK set containing both old and new keys, while
    retaining the old active private key.
-2. Atomically replace the mounted file. Confirm that JWKS publishes both
-   public keys before switching any instance's active key ID.
+2. Atomically replace the file inside the mounted directory. If using a
+   single-file bind mount, recreate the API containers after replacing the
+   host file. Confirm that JWKS publishes both public keys before switching
+   any instance's active key ID.
 3. Change `OIDC_ACTIVE_SIGNING_KID` to the new ID and roll the API instances.
    Verify that newly issued ID tokens carry the new `kid` and that old tokens
    remain verifiable.
