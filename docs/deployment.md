@@ -3935,6 +3935,8 @@ flag. Whatever the flag says, a connector that has a route (or the switch on
 worker would write every channel into the default context. The worker contract
 is in [`docs/connector-ingest-contract.md`](connector-ingest-contract.md#worker-config-vend-per-channel-destinations-1759).
 
+**Private destinations:** A route destination is a connector write target like the default context: a private context chosen as a destination serves the workspace from then on, so if its creator leaves the workspace or deletes their account it passes to the workspace owner with everything already in it instead of being deleted. The settings dialog says so on the row.
+
 **Rolling back** below this release: an older image vends no routes, so its
 worker config would send routed and skipped channels, private ones included,
 into each connector's default context. Before rolling the image back, clear

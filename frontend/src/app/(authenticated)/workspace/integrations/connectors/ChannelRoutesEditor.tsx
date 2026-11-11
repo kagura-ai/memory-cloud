@@ -357,6 +357,16 @@ export function ChannelRoutesEditor({
               ? unrouted === "default" && isSharedContext(defaultContextId)
               : dest.kind === "context" && isSharedContext(dest.contextId);
           const privateToShared = channel?.is_private === true && effectiveShared;
+          // A route into a private context makes it a connector write target:
+          // it serves the workspace from now on (informational, never blocks).
+          const privateDestination =
+            dest?.kind === "context" &&
+            dest.contextId !== null &&
+            !missing &&
+            (contextById.get(dest.contextId)?.is_private ??
+              (stored?.status === "ok" &&
+                stored.context_id === dest.contextId &&
+                stored.context_is_private === true));
           const privacyUnknown =
             channel === undefined && listing.state !== "loading";
           const label = channel
@@ -421,6 +431,11 @@ export function ChannelRoutesEditor({
               {privateToShared && (
                 <p role="status" className="text-xs text-amber-700 dark:text-amber-500">
                   {t("routePrivateToShared")}
+                </p>
+              )}
+              {privateDestination && (
+                <p className="text-xs text-muted-foreground">
+                  {t("routePrivateDestinationServesWorkspace")}
                 </p>
               )}
               {privacyUnknown && !listingUnavailable && (

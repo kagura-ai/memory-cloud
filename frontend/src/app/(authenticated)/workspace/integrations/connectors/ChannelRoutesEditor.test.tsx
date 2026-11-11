@@ -353,6 +353,76 @@ describe("ChannelRoutesEditor", () => {
     );
   });
 
+  it("says a newly chosen private destination passes to the workspace", async () => {
+    const notice = en.connectors.routePrivateDestinationServesWorkspace;
+    renderIn("en", <Harness selected={["C0PUB", "C0PRIV"]} />);
+    await settled();
+    // Default and Do not ingest: no notice.
+    expect(screen.queryByText(notice)).toBeNull();
+    fireEvent.change(row("C0PUB").getByRole("combobox"), { target: { value: "skip" } });
+    expect(screen.queryByText(notice)).toBeNull();
+    // A shared context: no notice.
+    fireEvent.change(row("C0PUB").getByRole("combobox"), {
+      target: { value: "ctx:ctx-shared" },
+    });
+    expect(screen.queryByText(notice)).toBeNull();
+    // A private context: the notice, on that row only, while the other row
+    // keeps its private-to-shared warning.
+    fireEvent.change(row("C0PUB").getByRole("combobox"), {
+      target: { value: "ctx:ctx-private" },
+    });
+    expect(row("C0PUB").getByText(notice)).toBeInTheDocument();
+    expect(row("C0PRIV").queryByText(notice)).toBeNull();
+    expect(row("C0PRIV").getByText(en.connectors.routePrivateToShared)).toBeInTheDocument();
+  });
+
+  it("says a stored private destination passes to the workspace, next to the other notes", async () => {
+    const notice = en.connectors.routePrivateDestinationServesWorkspace;
+    renderIn(
+      "en",
+      <Harness
+        selected={["C0ELSEWHERE", "C0PUB"]}
+        stored={[
+          // Another admin's route to a private context this admin cannot list.
+          route({
+            channel_id: "C0ELSEWHERE",
+            context_id: "ctx-theirs",
+            context_name: "Their notes",
+            context_is_private: true,
+          }),
+          route({
+            channel_id: "C0PUB",
+            context_id: "ctx-gone",
+            context_name: null,
+            context_is_private: null,
+            status: "destination_missing",
+          }),
+        ]}
+        rowErrors={{ C0ELSEWHERE: "keyOwner" }}
+      />,
+    );
+    await settled();
+    const theirs = row("C0ELSEWHERE");
+    expect(theirs.getByText(notice)).toBeInTheDocument();
+    expect(theirs.getByText(en.connectors.routeUnlistedContext)).toBeInTheDocument();
+    expect(theirs.getByText(en.connectors.routeChannelPrivacyUnknown)).toBeInTheDocument();
+    expect(theirs.getByRole("alert")).toHaveTextContent(en.connectors.routeKeyOwnerCannotWrite);
+    // A missing destination keeps its error and gets no notice.
+    expect(row("C0PUB").getByText(en.connectors.routeDestinationMissing)).toBeInTheDocument();
+    expect(row("C0PUB").queryByText(notice)).toBeNull();
+  });
+
+  it("says a private destination passes to the workspace in Japanese", async () => {
+    renderIn("ja", <Harness selected={["C0PUB"]} />);
+    await settled();
+    fireEvent.change(row("C0PUB").getByRole("combobox"), {
+      target: { value: "ctx:ctx-private" },
+    });
+    expect(
+      row("C0PUB").getByText(ja.connectors.routePrivateDestinationServesWorkspace),
+    ).toBeInTheDocument();
+  });
+
   it("renders in Japanese", async () => {
     renderIn("ja", <Harness selected={["C0PRIV"]} />);
     await settled();

@@ -4685,6 +4685,7 @@
     "routeDestinationMissing": "Its destination was deleted: this channel is not ingested until you choose a destination.",
     "routeChooseDestination": "Choose a destination for this channel, or Do not ingest.",
     "routePrivateToShared": "Private channel written to a shared context: everyone who can read that context will read this channel.",
+    "routePrivateDestinationServesWorkspace": "This context now serves the workspace: if its creator leaves the workspace or deletes their account, it passes to the workspace owner with everything already in it, instead of being deleted.",
     "routeChannelPrivacyUnknown": "Privacy unknown: this channel is not in the Slack channel list.",
     "routesPrivacyUnknown": "Channel privacy is unknown because the Slack channel list is unavailable, so private channels written to a shared context cannot be flagged. Check each destination yourself.",
     "routeDestinationNotFound": "That context no longer exists or you cannot see it. Choose another destination.",

@@ -4685,6 +4685,7 @@
     "routeDestinationMissing": "保存先が削除されました。保存先を選び直すまで、このチャンネルは取り込まれません。",
     "routeChooseDestination": "このチャンネルの保存先を選ぶか、「取り込まない」を選んでください。",
     "routePrivateToShared": "private チャンネルを共有コンテキストに保存します。そのコンテキストを読める全員がこのチャンネルの内容を読めます。",
+    "routePrivateDestinationServesWorkspace": "このコンテキストは今後ワークスペースのものとして扱われます。作成者がワークスペースを離れたりアカウントを削除したりしても削除されず、すでに保存されている内容ごとワークスペースのオーナーに引き継がれます。",
     "routeChannelPrivacyUnknown": "公開範囲が不明です（Slack のチャンネル一覧にありません）。",
     "routesPrivacyUnknown": "Slack のチャンネル一覧を取得できないため、チャンネルの公開範囲が分かりません。private チャンネルを共有コンテキストに保存していても警告できないので、保存先をご自身で確認してください。",
     "routeDestinationNotFound": "そのコンテキストは存在しないか、表示できません。別の保存先を選んでください。",
