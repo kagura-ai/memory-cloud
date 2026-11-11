@@ -6,10 +6,11 @@ and OpenAI Apps SDK requirements.
 
 import os
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request, status
 
 from auth.mcp_resource import mcp_resource_identifier
 from auth.mcp_scopes import ALL_ADVERTISED_SCOPES
+from config.settings import get_settings
 
 router = APIRouter(tags=["well-known"])
 
@@ -198,3 +199,27 @@ async def oauth_authorization_server(request: Request):
             "client_secret_basic",
         ],
     }
+
+
+@router.get(
+    "/google-connected-apps",
+    responses={404: {"description": "GOOGLE_CONNECTED_APPS_VERIFICATION_TOKENS is not set"}},
+)
+async def google_connected_apps_verification() -> dict[str, list[str]]:
+    """Domain verification file for Google connected apps (#2773).
+
+    Google's Connected Console checks that this path answers ``200`` with
+    the JSON it issued, with no redirect: ``{"verification_tokens": [...]}``.
+    The tokens come from ``GOOGLE_CONNECTED_APPS_VERIFICATION_TOKENS``; they
+    are not secret, but they are not logged either. Unset answers ``404``.
+
+    Returns:
+        The verification tokens, in the order configured.
+
+    Raises:
+        HTTPException: 404 when no token is configured.
+    """
+    tokens = get_settings().google_connected_apps_verification_token_list
+    if not tokens:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    return {"verification_tokens": list(tokens)}

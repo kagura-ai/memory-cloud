@@ -14113,6 +14113,32 @@
         ]
       }
     },
+    "/.well-known/google-connected-apps": {
+      "get": {
+        "operationId": "google_connected_apps_verification__well_known_google_connected_apps_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {}
+        },
+        "tags": [
+          "well-known"
+        ]
+      }
+    },
     "/.well-known/oauth-authorization-server": {
       "get": {
         "operationId": "oauth_authorization_server__well_known_oauth_authorization_server_get",
