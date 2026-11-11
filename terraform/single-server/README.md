@@ -613,6 +613,12 @@ that color, or `./scripts/deploy.sh --rollback` to switch back.
 > contents just describe the last holder. `--status`, `--verify-bridge` and
 > `--help` take no lock and work during a deploy. The host needs `flock`
 > (util-linux).
+>
+> The lock covers what the script does, not your shell: in
+> `./scripts/deploy.sh | tee deploy.log` the shell truncates `deploy.log`
+> before `deploy.sh` starts, so a refused second run would still empty the
+> first run's log. Give each run its own log file (for example
+> `tee "deploy-$(date -u +%Y%m%dT%H%M%SZ).log"`) or append with `tee -a`.
 
 > **The co-resident consumer worker.** Both the deploy and the rollback path
 > restart it right after the Caddy switch (Step 6b), because a flip would
