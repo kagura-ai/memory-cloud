@@ -54,6 +54,17 @@ provider requires it for selection UX, is a picker-time concern (cf. the
 [Slack channel picker design](slack-channel-picker.md)) — not a storage-shape
 change.
 
+Next to the flat `channel_ids` sits a second flat list, the per-channel
+destinations (#1759): `workspace_connector_channel_routes` rows of
+`{channel_id, action: route | skip, context_id}` plus the connector's
+`unrouted_private_channels` switch. They are keyed by the same opaque channel
+id, are independent of `channel_ids` (that list is a reference, ingestion
+follows the bot's channel membership), and are vended only to a worker that
+declares the `channel_routes` capability
+([contract](../connector-ingest-contract.md#worker-config-vend-per-channel-destinations-1759)).
+A provider with a guild/team hierarchy keys its routes by the same id it puts
+in `channel_ids`.
+
 ## 3. Generalization policy — deliberately deferred until the 2nd provider lands
 
 Renaming working Slack-specific surfaces now is churn with no user value.

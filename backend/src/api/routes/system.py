@@ -186,6 +186,10 @@ async def system_info():
             # Issue #2144: default-off. When true, the recall LLM selector is a
             # plan feature with a per-plan context cap (LLM_SELECTOR_REQUIRE_PLAN).
             "llm_selector_require_plan": settings.llm_selector_require_plan,
+            # Issue #1759: default-off. When true the connector settings dialog
+            # offers per-channel destination contexts; when false a PATCH that
+            # creates or changes a route is refused (stored routes still apply).
+            "connector_channel_routing": settings.connector_channel_routing_enabled,
         },
     }
 

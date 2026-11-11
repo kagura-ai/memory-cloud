@@ -21,6 +21,15 @@ from utils.exceptions import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_channel_routes():
+    """#1759: these mocked-DB tests script every ``execute`` result; the route
+    reads (one per list / settings result) are DB-tested in
+    ``tests/integration/test_1759_channel_routes_db.py``."""
+    with patch("services.connector_provisioning.route_views", new=AsyncMock(return_value={})):
+        yield
+
+
 def _result(*, one=None, scalar=None):
     result = MagicMock()
     result.scalar_one_or_none.return_value = one
@@ -416,6 +425,7 @@ async def test_existing_connector_paths_bypass_the_create_gate(create_gate_must_
         context_id=uuid4(),
         runtime_config=None,
         config_version=1,
+        unrouted_private_channels="default",
     )
 
     list_db = MagicMock()
@@ -452,9 +462,9 @@ async def test_list_connectors_returns_workspace_scoped_rows_newest_first():
 
     ws_id = uuid4()
     ctx_a = uuid4()
-    conn_a = SimpleNamespace(id=uuid4(), context_id=ctx_a)
+    conn_a = SimpleNamespace(id=uuid4(), unrouted_private_channels="default", context_id=ctx_a)
     # #1449: a context-less connector must not break the activity join.
-    conn_b = SimpleNamespace(id=uuid4(), context_id=None)
+    conn_b = SimpleNamespace(id=uuid4(), unrouted_private_channels="default", context_id=None)
     # The JOIN yields (WorkspaceConnector, resource_id-slug, resource name,
     # coalesced context name) tuples (#991, #1389) — the display_name-or-name
     # fallback happens in SQL via func.coalesce, NULL-only semantics.
@@ -505,7 +515,7 @@ async def test_list_connectors_reports_never_written_context_as_zero():
     from services.connector_provisioning import ConnectorListItem
 
     ws_id = uuid4()
-    conn = SimpleNamespace(id=uuid4(), context_id=uuid4())
+    conn = SimpleNamespace(id=uuid4(), unrouted_private_channels="default", context_id=uuid4())
 
     db = MagicMock()
     list_result = MagicMock()
@@ -538,7 +548,7 @@ async def test_ingest_activity_query_is_scoped_and_grouped():
     and check the parts that carry those guarantees.
     """
     ws_id = uuid4()
-    conn = SimpleNamespace(id=uuid4(), context_id=uuid4())
+    conn = SimpleNamespace(id=uuid4(), unrouted_private_channels="default", context_id=uuid4())
 
     db = MagicMock()
     list_result = MagicMock()
@@ -567,9 +577,9 @@ async def test_list_connectors_flags_a_context_two_connectors_share():
     way these numbers mislead. Mark it rather than let it pass as own traffic."""
     ws_id = uuid4()
     shared_ctx = uuid4()
-    conn_a = SimpleNamespace(id=uuid4(), context_id=shared_ctx)
-    conn_b = SimpleNamespace(id=uuid4(), context_id=shared_ctx)
-    conn_solo = SimpleNamespace(id=uuid4(), context_id=uuid4())
+    conn_a = SimpleNamespace(id=uuid4(), unrouted_private_channels="default", context_id=shared_ctx)
+    conn_b = SimpleNamespace(id=uuid4(), unrouted_private_channels="default", context_id=shared_ctx)
+    conn_solo = SimpleNamespace(id=uuid4(), unrouted_private_channels="default", context_id=uuid4())
 
     db = MagicMock()
     list_result = MagicMock()
@@ -593,7 +603,7 @@ async def test_list_connectors_skips_the_activity_query_without_contexts():
     grouped query for the whole page, never per row, and an empty ``IN ()`` is
     not worth issuing at all."""
     ws_id = uuid4()
-    conn = SimpleNamespace(id=uuid4(), context_id=None)
+    conn = SimpleNamespace(id=uuid4(), unrouted_private_channels="default", context_id=None)
 
     db = MagicMock()
     list_result = MagicMock()
@@ -936,6 +946,8 @@ def _settings_conn(**over):
         # re-point is allowed. Tests that exercise the no-credentials guard
         # override this to a falsy value.
         "kmc_api_key_encrypted": "ENC:kmc",
+        "unrouted_private_channels": "default",
+        "connector_type": "slack",
     }
     base.update(over)
     return _SettingsConn(**base)
@@ -1313,3 +1325,191 @@ async def test_auto_context_creation_passes_actor_independently_of_owner():
     assert result == created.id
     assert create.await_args.kwargs["created_by"] == "workspace-owner"
     assert create.await_args.kwargs["actor_user_id"] == "acting-admin"
+
+
+# ---------------------------------------------------------------------------
+# #1759: per-channel destinations — the deployment flag and the shapes
+# (the destination checks and the stored rows: tests/integration/
+# test_1759_channel_routes_db.py)
+# ---------------------------------------------------------------------------
+
+
+def _routing_flag(enabled: bool):
+    return patch(
+        "config.settings.get_settings",
+        return_value=SimpleNamespace(connector_channel_routing_enabled=enabled),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"channel_routes": [{"channel_id": "C01", "action": "skip"}]}, "channel_routes"),
+        (
+            {"channel_routes": [{"channel_id": "C01", "context_id": str(uuid4())}]},
+            "channel_routes",
+        ),
+        ({"unrouted_private_channels": "skip"}, "unrouted_private_channels"),
+    ],
+)
+async def test_update_settings_refuses_routing_while_the_flag_is_off(kwargs, field):
+    db = MagicMock()
+    db.execute = AsyncMock()
+    with _routing_flag(False), pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(), connector_id=uuid4(), user_id="admin-1", **kwargs
+        )
+    assert "channel routing is not enabled on this deployment" in str(exc.value)
+    assert exc.value.details["field"] == field
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routes", [[], None])
+async def test_update_settings_clearing_routes_is_allowed_with_the_flag_off(routes):
+    conn = _settings_conn(unrouted_private_channels="skip")
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+    with (
+        _routing_flag(False),
+        patch(
+            "services.connector_provisioning.stored_routes",
+            new=AsyncMock(return_value={("C01", "skip", None)}),
+        ),
+        patch("services.operation_history_writer.record_operation") as record,
+    ):
+        result = await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            channel_routes=routes,
+            unrouted_private_channels="default",
+        )
+    assert conn.unrouted_private_channels == "default"
+    assert result.unrouted_private_channels == "default"
+    assert result.config_version == 4
+    assert record.call_args.kwargs["changed_fields"] == ["channel_routes"]
+
+
+@pytest.mark.asyncio
+async def test_update_settings_switch_null_is_invalid():
+    db = MagicMock()
+    db.execute = AsyncMock()
+    with _routing_flag(True), pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(),
+            connector_id=uuid4(),
+            user_id="admin-1",
+            unrouted_private_channels=None,
+        )
+    assert exc.value.details["field"] == "unrouted_private_channels"
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_malformed_routes_fail_before_any_db_work():
+    db = MagicMock()
+    db.execute = AsyncMock()
+    with _routing_flag(True), pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(),
+            connector_id=uuid4(),
+            user_id="admin-1",
+            channel_routes=[{"channel_id": "C01", "action": "skip", "context_id": str(uuid4())}],
+        )
+    assert exc.value.details["field"] == "channel_routes"
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_at_least_one_field_names_the_routing_fields():
+    db = MagicMock()
+    db.execute = AsyncMock()
+    with pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(), connector_id=uuid4(), user_id="admin-1"
+        )
+    assert "channel_routes" in str(exc.value)
+    assert "unrouted_private_channels" in str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_id", ["#secret", "c01abc"])
+async def test_update_settings_refuses_a_slack_route_no_channel_can_match(channel_id):
+    """#1759 review: a Slack route names a conversation id. A channel name or
+    a lowercased id would never match, and the channel would silently keep
+    landing in the default context."""
+    conn = _settings_conn()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+    with (
+        _routing_flag(True),
+        patch("services.connector_provisioning.stored_routes", new=AsyncMock(return_value=set())),
+        pytest.raises(ValidationError) as exc,
+    ):
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            channel_routes=[{"channel_id": channel_id, "action": "skip"}],
+        )
+    assert exc.value.details["field"] == "channel_routes"
+    assert channel_id in str(exc.value)
+    db.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_routes_need_a_write_key_and_a_default_context():
+    """Same reasoning as the #1428 re-point guard: a connector the worker
+    cannot be served does not take routes. Checked under the row lock, after
+    the destination checks, so it is reached here with a skip-only list."""
+    conn = _settings_conn(kmc_api_key_encrypted=None)
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+    with _routing_flag(True), pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            channel_routes=[{"channel_id": "C01", "action": "skip"}],
+        )
+    assert exc.value.details["field"] == "channel_routes"
+    db.flush.assert_not_awaited()
+
+    conn = _settings_conn(context_id=None)
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    with _routing_flag(True), pytest.raises(ValidationError):
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            channel_routes=[{"channel_id": "C01", "action": "skip"}],
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_refuses_a_soft_deleted_context_like_an_unknown_one():
+    """The create path binds only a live context of the workspace: a
+    soft-deleted one is the same NotFound as an unknown one (the write path
+    refuses it anyway, and the settings re-point already does)."""
+    from utils.exceptions import NotFoundException
+
+    workspace = SimpleNamespace(id=uuid4(), owner_user_id="owner-1")
+    ctx = uuid4()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=None))
+    with pytest.raises(NotFoundException) as exc:
+        await ConnectorProvisioningService(db)._resolve_context(
+            workspace=workspace,
+            user_id="admin-1",
+            context_id=ctx,
+            auto_create_context_name=None,
+        )
+    assert str(ctx) in str(exc.value)
+    statement = str(db.execute.await_args.args[0])
+    assert "contexts.workspace_id" in statement
+    assert "contexts.deleted_at IS NULL" in statement

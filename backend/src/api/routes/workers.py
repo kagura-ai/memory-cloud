@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
-from pydantic import BaseModel, SerializerFunctionWrapHandler, model_serializer
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.constants import DeployColor
@@ -29,6 +29,15 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.worker_runtime import WorkerLocale, WorkerRuntimeConfig, normalize_worker_locale
 from services.active_color import read_active_color_settled
+from services.connector_channel_routes import (
+    CHANNEL_ROUTES_CAPABILITY,
+    parse_capabilities,
+)
+
+# The name is kept: tests patch ``api.routes.workers._channel_routing_for``.
+from services.connector_channel_routes import (
+    effective_channel_routing as _channel_routing_for,
+)
 from services.connector_provisioning import ConnectorProvisioningService
 
 # The name is kept: tests patch ``api.routes.workers._connectors_suspended_for``.
@@ -77,8 +86,33 @@ async def verify_worker_token(authorization: str | None = Header(None)) -> None:
         )
 
 
+class WorkerChannelRouteToContext(BaseModel):
+    """Write channel ``channel_id`` into ``context_id`` (#1759)."""
+
+    channel_id: str
+    action: Literal["route"]
+    context_id: UUID
+
+
+class WorkerChannelRouteSkip(BaseModel):
+    """Do not ingest channel ``channel_id``, nor answer from memory there (#1759)."""
+
+    channel_id: str
+    action: Literal["skip"]
+
+
+WorkerChannelRoute = Annotated[
+    WorkerChannelRouteToContext | WorkerChannelRouteSkip, Field(discriminator="action")
+]
+
+
 class WorkerConnectorConfig(TZAwareBaseModel):
-    """Per-connector config handed to the ai-worker. Contains secrets."""
+    """Per-connector config handed to the ai-worker. Contains secrets.
+
+    ``channel_routes`` / ``unrouted_private_channels`` (#1759) are present only
+    for a worker that declared the ``channel_routes`` capability; for any
+    other worker the body is exactly what it was before them.
+    """
 
     connector_id: UUID
     workspace_id: UUID
@@ -99,16 +133,25 @@ class WorkerConnectorConfig(TZAwareBaseModel):
     llm: dict[str, Any] | None = None
     pii_guardrail_config: dict[str, Any] | None = None
     runtime: WorkerRuntimeConfig | None = None
+    # #1759, capability ``channel_routes`` only: the EFFECTIVE destinations (a
+    # missing destination is vended as ``skip``) and the unrouted-private
+    # switch. See docs/connector-ingest-contract.md.
+    channel_routes: list[WorkerChannelRoute] | None = None
+    unrouted_private_channels: Literal["default", "skip"] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_runtime(
         self,
         handler: SerializerFunctionWrapHandler,
     ) -> dict[str, Any]:
-        """Keep legacy nullable fields while omitting only the additive block."""
+        """Keep legacy nullable fields while omitting only the additive blocks."""
         payload: dict[str, Any] = handler(self)
         if self.runtime is None:
             payload.pop("runtime", None)
+        if self.channel_routes is None:
+            payload.pop("channel_routes", None)
+        if self.unrouted_private_channels is None:
+            payload.pop("unrouted_private_channels", None)
         return payload
 
 
@@ -265,6 +308,23 @@ async def get_worker_apps(
     return WorkerAppBootstrapResponse(revision=revision, apps=apps)
 
 
+async def _default_context_live(db: AsyncSession, connector: Any) -> bool:
+    """The connector's default context exists, is not soft-deleted and is in
+    the connector's workspace (one primary-key lookup)."""
+    from sqlalchemy import select
+
+    from models.auth import Context
+
+    row = (
+        await db.execute(
+            select(Context.workspace_id, Context.deleted_at).where(
+                Context.id == connector.context_id
+            )
+        )
+    ).first()
+    return row is not None and row.workspace_id == connector.workspace_id and row.deleted_at is None
+
+
 @router.get(
     "/config",
     response_model=WorkerConnectorConfig,
@@ -278,6 +338,19 @@ async def get_worker_config(
     app_key: str | None = Query(
         None, min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$"
     ),
+    capabilities: Annotated[
+        str | None,
+        Query(
+            max_length=512,
+            description=(
+                "Comma-separated contract features the worker implements; unknown "
+                "tokens are ignored. `channel_routes` (#1759): the worker honours "
+                "per-channel destinations, and the body carries `channel_routes` and "
+                "`unrouted_private_channels`. Without it, a connector that uses "
+                "routing is not ready (404)."
+            ),
+        ),
+    ] = None,
     if_none_match: str | None = Header(None, alias="If-None-Match"),
     _: None = Depends(verify_worker_token),
     db: AsyncSession = Depends(get_db),
@@ -285,10 +358,13 @@ async def get_worker_config(
     """Return the connector config for a platform team (worker dispatch).
 
     404 when no connector serves the team, the connector has no write-target
-    context yet (registration incomplete), its workspace's plan has connectors
-    suspended (#1939), it has no KMC write key, or its
-    ``llm_config`` cannot vend (#1447) — the worker treats all of them as
-    not-ready and skips the team rather than failing the dispatch.
+    context yet (registration incomplete) or that context was soft-deleted or
+    is no longer in the connector's workspace, its workspace's plan has connectors
+    suspended (#1939), it has no KMC write key, its
+    ``llm_config`` cannot vend (#1447), or it uses channel routing and the
+    worker did not declare the ``channel_routes`` capability (#1759) — the
+    worker treats all of them as not-ready and skips the team rather than
+    failing the dispatch.
     """
     selected_app_key = app_key or "default"
     app_config_version = 0
@@ -317,6 +393,18 @@ async def get_worker_config(
         app_key=selected_app_key,
     )
     if connector is None or connector.context_id is None:
+        raise WorkerConnectorNotReadyError()
+
+    # A soft-deleted default context (or one no longer in the connector's
+    # workspace) keeps its id, so the check above passes, yet the write path
+    # refuses every write into it: not ready, before the conditional GET (a
+    # soft delete bumps no config_version).
+    if not await _default_context_live(db, connector):
+        logger.warning(
+            "worker_config_not_ready",
+            connector_id=str(connector.id),
+            reason="default_context_unavailable",
+        )
         raise WorkerConnectorNotReadyError()
 
     # #1939: a suspended connector (its workspace fell back to Free) is a
@@ -405,12 +493,33 @@ async def get_worker_config(
         )
         raise WorkerConnectorNotReadyError()
 
-    config_revision = opaque_revision(
+    # #1759: a connector that uses channel routing is not ready for a worker
+    # that does not declare it can honour it — that worker would write every
+    # channel, private ones included, into the default context. Decided here,
+    # with the other not-ready reasons and before the conditional GET, and
+    # whatever the deployment flag says: stored routes are always honoured.
+    routes_supported = CHANNEL_ROUTES_CAPABILITY in parse_capabilities(capabilities)
+    routing = await _channel_routing_for(db, connector)
+    if routing.uses_routing and not routes_supported:
+        logger.warning(
+            "worker_config_not_ready",
+            connector_id=str(connector.id),
+            reason="channel_routing_unsupported",
+        )
+        raise WorkerConnectorNotReadyError()
+
+    revision_parts: list[object] = [
         connector.id,
         connector.config_version,
         selected_app_key,
         app_config_version,
-    )
+    ]
+    if routes_supported:
+        # The effective routes move without a config_version bump when a
+        # destination is deleted later, so their digest is in the revision.
+        # Without the capability the input is unchanged (same ETag as before).
+        revision_parts += [CHANNEL_ROUTES_CAPABILITY, routing.digest()]
+    config_revision = opaque_revision(*revision_parts)
     etag = _etag(config_revision)
     headers = {"ETag": etag, "Cache-Control": "no-store"}
     if if_none_match == etag:
@@ -476,6 +585,17 @@ async def get_worker_config(
         # strict-validation 500 here is a full connector outage (the worker
         # cannot fetch its token/KMC key either).
         runtime=WorkerRuntimeConfig.from_stored(connector.runtime_config),
+        channel_routes=(
+            [
+                WorkerChannelRouteToContext(**route)
+                if route["action"] == "route"
+                else WorkerChannelRouteSkip(**route)
+                for route in routing.vend_routes()
+            ]
+            if routes_supported
+            else None
+        ),
+        unrouted_private_channels=(routing.unrouted_private_channels if routes_supported else None),
     )
 
 

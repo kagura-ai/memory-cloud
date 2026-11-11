@@ -2186,6 +2186,95 @@
         ],
         "type": "object"
       },
+      "ConnectorChannelRoute": {
+        "properties": {
+          "action": {
+            "enum": [
+              "route",
+              "skip"
+            ],
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string"
+          },
+          "context_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "context_is_private": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "context_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "destination_missing"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "channel_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ConnectorChannelRouteInput": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "route",
+            "enum": [
+              "route",
+              "skip"
+            ],
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string"
+          },
+          "context_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "channel_id"
+        ],
+        "type": "object"
+      },
       "ConnectorChannelsResponse": {
         "properties": {
           "channels": {
@@ -12606,6 +12695,43 @@
         },
         "type": "object"
       },
+      "WorkerChannelRouteSkip": {
+        "properties": {
+          "action": {
+            "const": "skip",
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "channel_id"
+        ],
+        "type": "object"
+      },
+      "WorkerChannelRouteToContext": {
+        "properties": {
+          "action": {
+            "const": "route",
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string"
+          },
+          "context_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "channel_id",
+          "context_id"
+        ],
+        "type": "object"
+      },
       "WorkerConnectorConfig": {
         "additionalProperties": true,
         "type": "object"
@@ -13114,6 +13240,19 @@
               }
             ]
           },
+          "channel_routes": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ConnectorChannelRouteInput"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context_id": {
             "anyOf": [
               {
@@ -13168,6 +13307,13 @@
                 "type": "null"
               }
             ]
+          },
+          "unrouted_private_channels": {
+            "enum": [
+              "default",
+              "skip"
+            ],
+            "type": "string"
           }
         },
         "type": "object"
@@ -13184,6 +13330,12 @@
                 "type": "null"
               }
             ]
+          },
+          "channel_routes": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorChannelRoute"
+            },
+            "type": "array"
           },
           "config_version": {
             "type": "integer"
@@ -13225,6 +13377,14 @@
                 "type": "null"
               }
             ]
+          },
+          "unrouted_private_channels": {
+            "default": "default",
+            "enum": [
+              "default",
+              "skip"
+            ],
+            "type": "string"
           }
         },
         "required": [
@@ -13242,6 +13402,7 @@
         "properties": {
           "app_key": {},
           "channel_ids": {},
+          "channel_routes": {},
           "config_version": {},
           "connector_id": {},
           "connector_type": {},
@@ -13258,7 +13419,8 @@
           "locale": {},
           "memories_last_7d": {},
           "resource_id": {},
-          "runtime": {}
+          "runtime": {},
+          "unrouted_private_channels": {}
         },
         "required": [
           "app_key",
@@ -29374,6 +29536,22 @@
                   "maxLength": 64,
                   "minLength": 1,
                   "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "capabilities",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
                   "type": "string"
                 },
                 {

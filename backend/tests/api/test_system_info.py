@@ -173,6 +173,17 @@ def test_system_info_exposes_the_llm_selector_plan_gate_default_off(info_with) -
     assert gated["features"]["llm_selector_require_plan"] is True
 
 
+def test_system_info_exposes_the_connector_channel_routing_flag_default_off(
+    info_with, monkeypatch
+) -> None:
+    """#1759: the connector settings dialog offers per-channel destinations only
+    when the deployment says the worker can honour them. Default OFF."""
+    monkeypatch.delenv("CONNECTOR_CHANNEL_ROUTING_ENABLED", raising=False)
+    assert info_with().json()["features"]["connector_channel_routing"] is False
+    enabled = info_with(connector_channel_routing_enabled=True).json()
+    assert enabled["features"]["connector_channel_routing"] is True
+
+
 # ---------------------------------------------------------------------------
 # #2760: chatgpt_app_url (CHATGPT_APP_URL), the deployment's ChatGPT app listing
 # ---------------------------------------------------------------------------

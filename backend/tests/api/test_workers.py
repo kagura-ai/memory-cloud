@@ -30,6 +30,25 @@ def _connectors_not_suspended():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _default_context_live():
+    """The default context is live unless a test says otherwise (the real
+    lookup is covered below and DB-tested in test_1759_channel_routes_db.py)."""
+    with patch("api.routes.workers._default_context_live", new=AsyncMock(return_value=True)):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _no_channel_routing():
+    """#1759: no routes and the switch at ``default`` unless a test says
+    otherwise (the real read is DB-tested in
+    ``tests/integration/test_1759_channel_routes_db.py``)."""
+    from services.connector_channel_routes import NO_ROUTING
+
+    with patch("api.routes.workers._channel_routing_for", new=AsyncMock(return_value=NO_ROUTING)):
+        yield
+
+
 # #1447: the minimum bundle the bridge's ``LLMConfig`` accepts. A connector
 # missing any of these cannot vend, so the readiness gate rejects it.
 _VENDABLE_LLM = {"provider": "anthropic", "model": "m", "api_key": "sk"}
@@ -940,3 +959,328 @@ async def test_get_worker_config_basic_keeps_serving_existing_connector():
     """#1551: Basic's serve-only connector seats keep dispatch running."""
     result = await _vend_on_plan("basic")
     assert result.connector_id is not None
+
+
+# ---------------------------------------------------------------------------
+# #1759: per-channel destinations, the capability handshake
+# ---------------------------------------------------------------------------
+
+_PIN_CONNECTOR_ID = "00000000-0000-4000-8000-000000000001"
+_PIN_WORKSPACE_ID = "00000000-0000-4000-8000-000000000002"
+_PIN_CONTEXT_ID = "00000000-0000-4000-8000-000000000003"
+
+# The body and revision v0.156.0 vended for ``_pinned_conn`` (captured before
+# #1759). An old worker must see no difference after the deploy: neither in
+# the body, byte for byte, nor in the revision (a changed ETag would make
+# every worker refetch, a changed body could fail its validation).
+_PINNED_BODY = (
+    '{"connector_id":"00000000-0000-4000-8000-000000000001",'
+    '"workspace_id":"00000000-0000-4000-8000-000000000002",'
+    '"context_id":"00000000-0000-4000-8000-000000000003","platform":"slack",'
+    '"app_key":"default","config_revision":"36c94118e8367148f42c4e521ecbec07",'
+    '"locale":"ja","slack":{"bot_token":"xoxb-x","team_id":"T01",'
+    '"installing_admin_user_id":"U01","channel_ids":["C01","C02"]},'
+    '"kmc":{"mcp_url":"https://example.com/mcp","api_key":"kagura_writekey"},'
+    '"resource":null,"llm":{"provider":"p","model":"m","api_key":"sk"},'
+    '"pii_guardrail_config":{"enabled":true}}'
+)
+_PINNED_REVISION = "36c94118e8367148f42c4e521ecbec07"
+
+
+def _pinned_conn():
+    from uuid import UUID
+
+    conn = MagicMock()
+    conn.id = UUID(_PIN_CONNECTOR_ID)
+    conn.workspace_id = UUID(_PIN_WORKSPACE_ID)
+    conn.context_id = UUID(_PIN_CONTEXT_ID)
+    conn.connector_type = "slack"
+    conn.locale = "ja"
+    conn.external_team_id = "T01"
+    conn.config_version = 7
+    conn.channel_ids = ["C01", "C02"]
+    conn.pii_guardrail_config = {"enabled": True}
+    conn.runtime_config = None
+    conn.get_oauth_tokens.return_value = {"bot_token": "xoxb-x", "installing_admin_user_id": "U01"}
+    conn.get_kmc_api_key.return_value = "kagura_writekey"
+    conn.kmc_api_key_expires_at = None
+    conn.get_resource_token.return_value = None
+    conn.get_llm_config.return_value = {"provider": "p", "model": "m", "api_key": "sk"}
+    return conn
+
+
+async def _vend_routed(
+    routing,
+    *,
+    capabilities: str | None = None,
+    if_none_match: str | None = None,
+    conn=None,
+    response: Response | None = None,
+):
+    with (
+        patch("api.routes.workers._channel_routing_for", new=AsyncMock(return_value=routing)),
+        patch(
+            "api.routes.workers.get_settings",
+            return_value=_settings(mcp_url="https://example.com/mcp"),
+        ),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+        patch("api.routes.workers.WorkerAppIdentityService") as app_svc,
+    ):
+        app_svc.return_value.get_identity = AsyncMock(return_value=None)
+        svc.return_value.get_connector_for_dispatch = AsyncMock(
+            return_value=conn if conn is not None else _pinned_conn()
+        )
+        return await get_worker_config(
+            response=response if response is not None else Response(),
+            platform="slack",
+            team_id="T01",
+            app_key=None,
+            capabilities=capabilities,
+            if_none_match=if_none_match,
+            _=None,
+            db=MagicMock(),
+        )
+
+
+def _routing(rows=(), unrouted="default"):
+    from services.connector_channel_routes import effective_routing_from_rows
+
+    return effective_routing_from_rows(
+        [
+            SimpleNamespace(
+                channel_id=channel_id,
+                action=action,
+                context_id=context_id,
+                context_workspace_id=workspace_id,
+                context_deleted_at=deleted_at,
+                context_name=None,
+                context_is_private=None,
+            )
+            for channel_id, action, context_id, workspace_id, deleted_at in rows
+        ],
+        __import__("uuid").UUID(_PIN_WORKSPACE_ID),
+        unrouted,
+    )
+
+
+def _dump(result) -> str:
+    import json
+
+    return json.dumps(result.model_dump(mode="json"), separators=(",", ":"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capabilities", [None, "", "something_else"])
+async def test_vend_without_the_capability_is_byte_identical_for_an_unrouted_connector(
+    capabilities,
+):
+    from services.connector_channel_routes import NO_ROUTING
+
+    response = Response()
+    result = await _vend_routed(NO_ROUTING, capabilities=capabilities, response=response)
+    assert _dump(result) == _PINNED_BODY
+    assert result.config_revision == _PINNED_REVISION
+    assert response.headers["etag"] == f'"{_PINNED_REVISION}"'
+    assert "channel_routes" not in result.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "routing",
+    [
+        pytest.param(("C09", "skip", None, None, None), id="a-skip-route"),
+        pytest.param(("C09", "route", "ctx", "ws", None), id="a-live-route"),
+        pytest.param(("C09", "route", None, None, None), id="a-missing-destination"),
+    ],
+)
+async def test_vend_without_the_capability_refuses_a_connector_that_uses_routing(routing):
+    """A worker that would write every channel into the default context is
+    never served the config of a connector with a route row."""
+    from uuid import UUID, uuid4
+
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    channel_id, action, ctx, ws, deleted = routing
+    row = (
+        channel_id,
+        action,
+        uuid4() if ctx else None,
+        UUID(_PIN_WORKSPACE_ID) if ws else None,
+        deleted,
+    )
+    with patch("api.routes.workers.logger") as log:
+        with pytest.raises(WorkerConnectorNotReadyError) as exc:
+            await _vend_routed(_routing([row]))
+    assert exc.value.status_code == 404
+    assert any(
+        call.kwargs.get("reason") == "channel_routing_unsupported"
+        for call in log.warning.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_vend_without_the_capability_refuses_the_switch_alone():
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    with pytest.raises(WorkerConnectorNotReadyError):
+        await _vend_routed(_routing([], unrouted="skip"))
+
+
+@pytest.mark.asyncio
+async def test_the_routing_404_beats_a_matching_etag():
+    """Decided before the conditional GET: a worker holding the pre-routing
+    ETag must get the 404, not a 304 that keeps its unrouted config."""
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    with pytest.raises(WorkerConnectorNotReadyError):
+        await _vend_routed(
+            _routing([("C01", "skip", None, None, None)]),
+            if_none_match=f'"{_PINNED_REVISION}"',
+        )
+
+
+@pytest.mark.asyncio
+async def test_vend_with_the_capability_carries_the_effective_routes():
+    from uuid import UUID, uuid4
+
+    live, foreign = uuid4(), uuid4()
+    ws = UUID(_PIN_WORKSPACE_ID)
+    from datetime import datetime
+
+    routing = _routing(
+        [
+            ("C05", "route", live, ws, None),
+            ("C04", "route", uuid4(), ws, datetime(2026, 1, 1)),  # soft-deleted
+            ("C03", "route", None, None, None),  # hard-deleted (SET NULL)
+            ("C02", "route", foreign, uuid4(), None),  # another workspace
+            ("C01", "skip", None, None, None),
+        ],
+        unrouted="skip",
+    )
+    result = await _vend_routed(routing, capabilities="other,channel_routes")
+    body = result.model_dump(mode="json")
+    assert body["channel_routes"] == [
+        {"channel_id": "C01", "action": "skip"},
+        {"channel_id": "C02", "action": "skip"},
+        {"channel_id": "C03", "action": "skip"},
+        {"channel_id": "C04", "action": "skip"},
+        {"channel_id": "C05", "action": "route", "context_id": str(live)},
+    ]
+    assert body["unrouted_private_channels"] == "skip"
+    assert str(foreign) not in _dump(result)
+    # Everything an old worker reads is still there, unchanged.
+    pinned = __import__("json").loads(_PINNED_BODY)
+    for key in pinned:
+        if key != "config_revision":
+            assert body[key] == pinned[key]
+
+
+@pytest.mark.asyncio
+async def test_vend_with_the_capability_carries_empty_routing_when_unused():
+    from services.connector_channel_routes import NO_ROUTING
+
+    result = await _vend_routed(NO_ROUTING, capabilities="channel_routes")
+    body = result.model_dump(mode="json")
+    assert body["channel_routes"] == []
+    assert body["unrouted_private_channels"] == "default"
+    # The capability is part of the revision input.
+    assert result.config_revision != _PINNED_REVISION
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_destination_changes_the_revision_without_a_version_bump():
+    from datetime import datetime
+    from uuid import UUID, uuid4
+
+    ctx = uuid4()
+    ws = UUID(_PIN_WORKSPACE_ID)
+    live = await _vend_routed(
+        _routing([("C01", "route", ctx, ws, None)]), capabilities="channel_routes"
+    )
+    again = await _vend_routed(
+        _routing([("C01", "route", ctx, ws, None)]), capabilities="channel_routes"
+    )
+    soft = await _vend_routed(
+        _routing([("C01", "route", ctx, ws, datetime(2026, 1, 1))]), capabilities="channel_routes"
+    )
+    hard = await _vend_routed(
+        _routing([("C01", "route", None, None, None)]), capabilities="channel_routes"
+    )
+    assert live.config_revision == again.config_revision
+    assert soft.config_revision != live.config_revision
+    assert hard.config_revision != live.config_revision
+    # A matching ETag after the deletion is no longer a 304.
+    response = await _vend_routed(
+        _routing([("C01", "route", ctx, ws, datetime(2026, 1, 1))]),
+        capabilities="channel_routes",
+        if_none_match=f'"{live.config_revision}"',
+    )
+    assert not isinstance(response, Response)
+    # ...and an unchanged one is.
+    cached = await _vend_routed(
+        _routing([("C01", "route", ctx, ws, None)]),
+        capabilities="channel_routes",
+        if_none_match=f'"{live.config_revision}"',
+    )
+    assert isinstance(cached, Response)
+    assert cached.status_code == 304
+
+
+# ---------------------------------------------------------------------------
+# A soft-deleted default context is not ready
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_default_context_that_is_not_live_is_not_ready_even_on_a_matching_etag():
+    """A soft delete keeps the id and bumps no config_version: decided before
+    the conditional GET, with its own log reason."""
+    from services.connector_channel_routes import NO_ROUTING
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    for if_none_match in (None, f'"{_PINNED_REVISION}"'):
+        with (
+            patch("api.routes.workers._default_context_live", new=AsyncMock(return_value=False)),
+            patch("api.routes.workers.logger") as log,
+            pytest.raises(WorkerConnectorNotReadyError) as exc,
+        ):
+            await _vend_routed(NO_ROUTING, if_none_match=if_none_match)
+        assert exc.value.status_code == 404
+        assert any(
+            call.kwargs.get("reason") == "default_context_unavailable"
+            for call in log.warning.call_args_list
+        )
+
+
+# The real lookup, taken at import (the autouse fixture patches the name).
+_REAL_DEFAULT_CONTEXT_LIVE = workers_module._default_context_live
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row", "live"),
+    [
+        pytest.param("live", True, id="live"),
+        pytest.param("soft-deleted", False, id="soft-deleted"),
+        pytest.param("other-workspace", False, id="other-workspace"),
+        pytest.param(None, False, id="no-row"),
+    ],
+)
+async def test_default_context_live_reads_existence_deletion_and_workspace(row, live):
+    from datetime import datetime
+    from uuid import uuid4
+
+    conn = _pinned_conn()
+    values = {
+        "live": SimpleNamespace(workspace_id=conn.workspace_id, deleted_at=None),
+        "soft-deleted": SimpleNamespace(
+            workspace_id=conn.workspace_id, deleted_at=datetime(2026, 1, 1)
+        ),
+        "other-workspace": SimpleNamespace(workspace_id=uuid4(), deleted_at=None),
+        None: None,
+    }
+    result = MagicMock()
+    result.first.return_value = values[row]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    assert await _REAL_DEFAULT_CONTEXT_LIVE(db, conn) is live

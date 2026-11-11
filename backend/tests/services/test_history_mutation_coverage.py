@@ -196,6 +196,7 @@ async def test_connector_no_op_does_not_add_history(kind):
         litellm_virtual_key_id=None,
         locale=None,
         llm_config_encrypted=None,
+        unrouted_private_channels="default",
     )
     result = MagicMock()
     result.scalar_one_or_none.return_value = conn
@@ -224,6 +225,7 @@ async def test_connector_llm_no_op_or_unreadable_bundle_repair(unreadable):
         litellm_virtual_key_id=None,
         locale=None,
         llm_config_encrypted="fixture-ciphertext",
+        unrouted_private_channels="default",
         get_llm_config=MagicMock(
             side_effect=ValueError("unreadable") if unreadable else None, return_value=bundle
         ),

@@ -161,6 +161,77 @@ validation of the **whole** config body and the tenant fails closed
 Widening the enum (e.g. adding `ko`) requires a coordinated change to **both**
 repos: bridge `Locale` first (workers tolerate `null`), then `WORKER_LOCALES`.
 
+## Worker config vend: per-channel destinations (#1759)
+
+A connector writes every channel into its default context (`context_id`)
+unless an admin gives a channel a destination of its own. This section is the
+contract the connector worker implements for that.
+
+**Capability handshake.** The worker declares that it implements this section
+with `GET /api/v1/workers/config?...&capabilities=channel_routes`
+(comma-separated tokens; unknown tokens are ignored). Then, and only then, the
+body additionally carries, always (an empty list when the connector uses no
+routing):
+
+```json
+{
+  "context_id": "<default context>",
+  "channel_routes": [
+    {"channel_id": "C0SALES", "action": "route", "context_id": "<context>"},
+    {"channel_id": "C0HR", "action": "skip"}
+  ],
+  "unrouted_private_channels": "skip"
+}
+```
+
+A connector **uses routing** when it has at least one route or its
+`unrouted_private_channels` is `skip`. Such a connector is **not ready** (the
+usual `404 WORKER-CONNECTOR-001`, decided before the conditional GET) for a
+request without the capability: a worker that does not know this contract
+would write every channel, private ones included, into the default context.
+For a request without the capability and a connector that uses no routing, the
+body and `config_revision` are exactly what they were before this feature.
+
+The same not-ready `404` answers, with or without the capability, when the
+connector's default `context_id` was soft-deleted or is no longer in the
+connector's workspace (API log `worker_config_not_ready`,
+`reason=default_context_unavailable`): the worker skips the team instead of
+having every write refused.
+
+**What the worker does for a message in channel C:**
+
+| `channel_routes` entry for C | Ingest | Answer from memory in C |
+|---|---|---|
+| `action: "route"` | write to that entry's `context_id` | channel-scoped recall reads from that `context_id` |
+| `action: "skip"` | do not ingest | do not answer from memory |
+| any other `action` | treat as `skip` | treat as `skip` |
+| no entry, C is private, `unrouted_private_channels: "skip"` | do not ingest | do not answer from memory |
+| no entry otherwise | write to the default `context_id` | as before |
+
+- A worker that cannot tell whether a channel is private treats it as private.
+- A channel with an entry never falls back to the default `context_id`. The
+  server vends a route whose destination was deleted (or soft-deleted, or is
+  no longer in the connector's workspace) as `skip`, so the channel stops being
+  ingested until an admin picks a new destination; it never reappears in the
+  default context.
+- The writes go through the `kmc` block's key, which acts as one user (the
+  key's owner). The server accepted each route only after checking that this
+  user may write the destination; it does not change the key's scope.
+- The resource-token ingest path (`resource` block) has no per-channel
+  destination: a channel with an entry, and a private channel under
+  `unrouted_private_channels: "skip"`, never goes through it.
+- `config_revision` (and the ETag) covers the declared capability and a
+  digest of the effective routes and the switch, so a destination deleted
+  later changes the revision although `config_version` did not move: the
+  worker refetches and sees the `skip`.
+
+**Rollout order for operators** (also in `docs/deployment.md`): upgrade the
+worker to one that declares `capabilities=channel_routes`, then set
+`CONNECTOR_CHANNEL_ROUTING_ENABLED=true`. With the flag off, the settings PATCH
+refuses to create or change a route or to set the switch to `skip` (clearing is
+always allowed). Stored routes are honoured, and kept from a worker without the
+capability, whatever the flag says.
+
 ## Related
 
 - Epic #755 (F6) — chat ingest reuses Resource Foundation

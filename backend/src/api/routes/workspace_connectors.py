@@ -47,6 +47,7 @@ from utils.exceptions import (
     ConflictError,
     ConnectorScopeError,
     ConnectorTeamConnectedHereError,
+    FeatureNotAvailableError,
     InternalError,
     MemoryCloudException,
     NotFoundException,
@@ -233,6 +234,62 @@ class WorkspaceConnectorCreateResponse(BaseModel):
     idempotency_key_prefix: str
 
 
+class ConnectorChannelRoute(BaseModel):
+    """One stored channel destination as the admin reads it (#1759).
+
+    ``status`` is ``destination_missing`` for a ``route`` whose context was
+    deleted (or soft-deleted): that channel is not ingested until an admin
+    picks a new destination; it never falls back to the default context.
+    ``context_name`` / ``context_is_private`` are set only while the
+    destination is live; ``context_id`` is null for a context outside this
+    workspace.
+    """
+
+    channel_id: str
+    action: Literal["route", "skip"]
+    context_id: UUID | None = None
+    context_name: str | None = None
+    context_is_private: bool | None = None
+    status: Literal["ok", "destination_missing"]
+
+
+class ConnectorChannelRouteInput(BaseModel):
+    """One channel destination in a settings PATCH (#1759)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel_id: str = Field(
+        ...,
+        description=(
+            "Platform channel id, exactly as the platform names it (non-blank, <= 64 "
+            "chars, no surrounding whitespace or control characters; on a Slack "
+            "connector a conversation id such as C01ABCDEF, never a #name)"
+        ),
+    )
+    action: Literal["route", "skip"] = Field(
+        "route",
+        description="'route' writes the channel into context_id; 'skip' does not ingest it",
+    )
+    context_id: UUID | None = Field(
+        None,
+        description="Destination of a 'route' (required there); a 'skip' takes none",
+    )
+
+
+def _route_models(views: Any) -> list[ConnectorChannelRoute]:
+    return [
+        ConnectorChannelRoute(
+            channel_id=view.channel_id,
+            action=view.action,
+            context_id=view.context_id,
+            context_name=view.context_name,
+            context_is_private=view.context_is_private,
+            status=view.status,
+        )
+        for view in views
+    ]
+
+
 class WorkspaceConnectorSummary(TZAwareBaseModel):
     """One connector row for the workspace list view."""
 
@@ -275,6 +332,10 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
     # Surfaced rather than silently averaged away: a shared context is the one
     # case where a dead connector could read as healthy off its sibling.
     ingest_context_shared: bool = False
+    # #1759: per-channel destinations and what happens to a private channel
+    # without one.
+    channel_routes: list[ConnectorChannelRoute] = Field(default_factory=list)
+    unrouted_private_channels: Literal["default", "skip"] = "default"
 
 
 class WorkspaceConnectorSettingsUpdateRequest(BaseModel):
@@ -311,6 +372,28 @@ class WorkspaceConnectorSettingsUpdateRequest(BaseModel):
         description="Re-point the write-target context (#1428). Must be a live "
         "context in this workspace; null clears the binding (no write target).",
     )
+    channel_routes: list[ConnectorChannelRouteInput] | None = Field(
+        None,
+        description=(
+            "Per-channel destinations (#1759): the FULL list (replaces every stored "
+            "route; [] or null removes them all). At most 500 items, no channel twice. "
+            "A 'route' destination must be a live context of this workspace that you can "
+            "read (404 'Context' otherwise) and that the connector key's owner may write "
+            "(422 otherwise). A channel with a route never falls back to the default "
+            "context. Refused, except clearing, where the deployment has "
+            "CONNECTOR_CHANNEL_ROUTING_ENABLED off."
+        ),
+    )
+    # Not Optional on purpose: absent = untouched (the None default is only
+    # the "absent" marker, dropped by exclude_unset), an explicit null is a 422.
+    unrouted_private_channels: Literal["default", "skip"] = Field(  # pyright: ignore[reportAssignmentType]
+        default=None,
+        description=(
+            "What happens to a private channel without a route (#1759): 'default' "
+            "(written to context_id) or 'skip' (not ingested). Null is invalid. "
+            "'skip' is refused where CONNECTOR_CHANNEL_ROUTING_ENABLED is off."
+        ),
+    )
     expected_config_version: int | None = Field(default=None, ge=0)
 
 
@@ -324,6 +407,9 @@ class WorkspaceConnectorSettingsUpdateResponse(BaseModel):
     locale: str | None
     config_version: int
     context_id: UUID | None
+    # #1759: the stored destinations after the update, and the switch.
+    channel_routes: list[ConnectorChannelRoute] = Field(default_factory=list)
+    unrouted_private_channels: Literal["default", "skip"] = "default"
 
 
 class WorkspaceConnectorRuntimeUpdateRequest(BaseModel):
@@ -640,6 +726,8 @@ async def list_workspace_connectors(
             last_memory_at=item.last_memory_at,
             memories_last_7d=item.memories_last_7d,
             ingest_context_shared=item.ingest_context_shared,
+            channel_routes=_route_models(item.channel_routes),
+            unrouted_private_channels=item.unrouted_private_channels,
         )
         for item in items
     ]
@@ -714,7 +802,8 @@ async def update_workspace_connector_settings(
     admin: WorkspaceAdmin,
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceConnectorSettingsUpdateResponse:
-    """PATCH connector vend settings (#1376): channel_ids / LLM binding / locale.
+    """PATCH connector vend settings (#1376): channel_ids / LLM binding / locale,
+    the write-target context (#1428) and per-channel destinations (#1759).
 
     Repairs connectors born un-vendable (the create endpoint was previously
     the only writer of these columns). True PATCH semantics — absent fields
@@ -748,7 +837,10 @@ async def update_workspace_connector_settings(
         # ids are caller-supplied (URL / body), so this leaks nothing.
         await db.rollback()
         raise
-    except (ConflictError, ValidationError):
+    except (ConflictError, ValidationError, FeatureNotAvailableError):
+        # FeatureNotAvailableError (#1759): the route destination check reads
+        # the caller's seat; an admin whose seat is suspended gets that
+        # refusal, not a 500.
         await db.rollback()
         raise
     except Exception as exc:
@@ -770,6 +862,8 @@ async def update_workspace_connector_settings(
         locale=settings_result.locale,
         config_version=settings_result.config_version,
         context_id=settings_result.context_id,
+        channel_routes=_route_models(settings_result.channel_routes),
+        unrouted_private_channels=settings_result.unrouted_private_channels,
     )
 
 

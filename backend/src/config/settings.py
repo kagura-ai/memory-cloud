@@ -1699,6 +1699,19 @@ class Settings(BaseSettings):
             "via GET /api/v1/system/info features.managed_connectors."
         ),
     )
+    connector_channel_routing_enabled: bool = Field(
+        default=False,
+        description=(
+            "Per-channel destination contexts for chat connectors (#1759). OFF by "
+            "default: a settings PATCH that creates or changes a channel route, or sets "
+            "unrouted_private_channels to 'skip', is refused; clearing them is always "
+            "allowed. Turn it on only after the connector worker declares the "
+            "'channel_routes' capability on GET /api/v1/workers/config (upgrade the "
+            "worker first, then set this). Routes already stored are honoured, and "
+            "kept from a worker without the capability, whatever this flag says. "
+            "Surfaced via GET /api/v1/system/info features.connector_channel_routing."
+        ),
+    )
     enable_owner_key_member_management: bool = Field(
         default=True,
         description=(

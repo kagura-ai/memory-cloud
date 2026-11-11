@@ -1207,6 +1207,32 @@ Workspace owner only (session or owner API key) for the credential routes; the o
 | `409` | `RES-002` | — | `resource_id` already exists (not connector-owned, or already bound to a connector) |
 | `403` | `FEAT-001` / `CONNECTOR-001` | — | Plan without the `connectors` feature / connector seat cap reached |
 
+### Connector channel destinations
+
+`PATCH /api/v1/workspace-connectors/{connector_id}` (workspace admin, [#1759](https://github.com/kagura-ai/memory-cloud/issues/1759)) takes two more optional fields next to `channel_ids`, `context_id` and the others, with the same PATCH semantics, `expected_config_version` lock (`409`) and `config_version` bump:
+
+```json
+{
+  "channel_routes": [
+    {"channel_id": "C0SALES", "action": "route", "context_id": "<context uuid>"},
+    {"channel_id": "C0HR", "action": "skip"}
+  ],
+  "unrouted_private_channels": "skip",
+  "expected_config_version": 7
+}
+```
+
+- `channel_routes` is the full list: it replaces every stored route; `[]` or `null` removes them all; absent leaves them. `action` is `route` (default; needs `context_id`) or `skip` (do not ingest the channel; takes no `context_id`). At most 500 items, each `channel_id` once, by the `channel_ids` rule, and exactly as the platform names the channel: no surrounding whitespace or control characters, and on a Slack connector a conversation id (uppercase letters and digits, e.g. `C01ABCDEF`, never a `#name`), since the worker matches ids exactly. Routes do not depend on `channel_ids`. A route destination is a connector write target like the default context: a private context chosen as a destination serves the workspace from then on, so if its creator leaves the workspace or deletes their account it passes to the workspace owner with everything already in it instead of being deleted. The settings dialog says so on the row.
+- `unrouted_private_channels`: `default` (a private channel without a route goes to the connector's context) or `skip` (it is not ingested). `null` is invalid.
+- A channel with a route never falls back to the connector's context: when its destination is deleted, it is not ingested until an admin picks a new one (`status: "destination_missing"` in the read model).
+
+| Status | `error` | When |
+|---|---|---|
+| `422` | `VAL-001` (`field: channel_routes` / `unrouted_private_channels`) | Malformed item; `CONNECTOR_CHANNEL_ROUTING_ENABLED` is off and the request creates or changes a route or sets the switch to `skip` (`channel routing is not enabled on this deployment`; clearing is always allowed); the connector has no write key or no default context; or the connector's key owner cannot write a destination (the message names the channel: the connector writes as its key's owner — pick a shared context or one that user created) |
+| `404` | `RES-001` (`Context not found`) | A destination that is not a live context of this workspace you can read — the same answer whether it does not exist, is in another workspace, is in the trash, or is another member's private context |
+
+The response, and each row of `GET /api/v1/workspace-connectors`, carries `unrouted_private_channels` and `channel_routes`: `{channel_id, action, context_id, context_name, context_is_private, status}` with `status` `ok` or `destination_missing`. A change is recorded in the operation history as `integration.updated` with `changed_fields: ["channel_routes"]` (field names only). The worker side is in [`docs/connector-ingest-contract.md`](connector-ingest-contract.md#worker-config-vend-per-channel-destinations-1759).
+
 ---
 
 ## Public Read API
