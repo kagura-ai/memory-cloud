@@ -30,6 +30,8 @@ from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
 from mcp_server.tools._google_profile import (
     GOOGLE_INSTRUCTIONS_BASE,
     GOOGLE_PROSE,
+    _pointer_pattern,
+    _without_pointers,
     google_default_context_instructions,
     prose_fingerprint,
 )
@@ -428,6 +430,21 @@ async def test_unknown_tool_help_names_no_tool(handlers, google_view):
     assert payload["error"] == "unknown_tool"
     assert payload["help"]
     assert _names_a_tool(payload, "no_such_tool") == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["\x005\x00. list_contexts", "\x000\x00 'x'. list_tags"])
+async def test_caller_text_with_a_mask_like_sequence_is_not_a_crash(handlers, google_view, name):
+    # The quoted-name mask is NUL-digit-NUL: text that already holds one
+    # (here the unknown tool name echoed back) must not raise on restore.
+    payload = _payload(await execute_tool_call(name, {}, "u", None))
+    assert payload["error"] == "unknown_tool"
+
+
+def test_pointer_scrub_leaves_text_with_a_nul_alone():
+    pattern = _pointer_pattern("recall")
+    for text in ("\x005\x00. Call list_contexts.", "Name '\x000\x00'. Call list_tags()."):
+        assert _without_pointers(text, pattern) == text
 
 
 @pytest.mark.asyncio

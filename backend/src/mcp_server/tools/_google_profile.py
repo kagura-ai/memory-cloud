@@ -557,8 +557,12 @@ def _without_pointers(text: str, pattern: re.Pattern[str]) -> str:
     """``text`` without the sentences that name another tool.
 
     Single-quoted names are the user's data and never count as a pointer.
+    They are masked as NUL-index-NUL while the sentences are matched, so a
+    text that already holds a NUL (only caller input echoed back) is left
+    as it is: its own NUL-digit-NUL would otherwise be restored as a quoted
+    name that does not exist.
     """
-    if not pattern.search(text):
+    if not pattern.search(text) or "\x00" in text:
         return text
     for clause, replacement in _POINTER_CLAUSES:
         text = text.replace(clause, replacement)
