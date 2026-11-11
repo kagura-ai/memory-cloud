@@ -181,7 +181,11 @@ jobs:
       - name: ShellCheck wait-for-api.sh
         run: shellcheck .github/scripts/wait-for-api.sh
 
-      - name: Bats — wait-for-api phase verdicts
+      # #2763: the image contents check that the images job runs.
+      - name: ShellCheck check-image-contents.sh
+        run: shellcheck .github/scripts/check-image-contents.sh
+
+      - name: Bats — wait-for-api phase verdicts, image contents verdicts
         run: bats .github/scripts/tests/
 
   backend-unit:
@@ -326,6 +330,7 @@ jobs:
     outputs:
       backend-integration: ${{ steps.filter.outputs.backend-integration }}
       frontend-a11y-authed: ${{ steps.filter.outputs.frontend-a11y-authed }}
+      images: ${{ steps.filter.outputs.images }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -358,6 +363,21 @@ jobs:
               - 'backend/uv.lock'
               - '.github/workflows/ci.yml'
               - '.github/scripts/**'
+            images:
+              # What goes into the api and web images (#2763). The application
+              # code is left out on purpose: the images job checks the tools
+              # and packages around it, and the web build takes minutes.
+              - 'backend/Dockerfile'
+              - 'backend/.dockerignore'
+              - 'backend/pyproject.toml'
+              - 'backend/uv.lock'
+              - 'frontend/Dockerfile'
+              # `output: "standalone"` decides whether the runner gets server.js.
+              - 'frontend/next.config.ts'
+              - 'frontend/package.json'
+              - 'frontend/package-lock.json'
+              - '.github/workflows/ci.yml'
+              - '.github/scripts/check-image-contents.sh'
 
   # Integration tests + the all-routes smoke test — both require a live
   # DB and Redis. Gated by detect-changes path filter, `force-integration`
@@ -862,3 +882,48 @@ jobs:
           path: frontend/playwright-report/
           if-no-files-found: ignore
           retention-days: 7
+
+  # Builds the api and web images and checks what they carry (#2763).
+  # backend/tests/ci/test_image_contents.py reads the Dockerfiles; this job runs
+  # the built images, so a base image or a dependency that brings in a compiler,
+  # the dev extra or a package manager fails here as well. Gated like
+  # backend-integration: a change to what goes into the images, tag pushes and
+  # workflow_dispatch. Nothing is pushed: publishing happens outside this
+  # repository.
+  images:
+    runs-on: ubuntu-latest
+    needs: [detect-changes]
+    if: |
+      needs.detect-changes.outputs.images == 'true' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No --target: the production compose files build the api's last stage,
+      # which test_image_contents.py keeps as `runtime`. No layer cache: the job
+      # runs when the image inputs change, so a cache would rarely hit, and the
+      # repository's cache budget is the other jobs'.
+      - name: Build the api image
+        id: build_api
+        run: docker build --pull -t kagura-api:ci backend
+
+      # Throwaway NEXT_PUBLIC_* values: they are compiled into the bundle and do
+      # not change which tools and packages the image carries.
+      - name: Build the web image
+        id: build_web
+        if: ${{ !cancelled() }}
+        run: >-
+          docker build --pull -t kagura-web:ci
+          --build-arg NEXT_PUBLIC_API_URL=http://localhost:8080
+          --build-arg NEXT_PUBLIC_APP_URL=http://localhost:3000
+          frontend
+
+      - name: Check what the api image carries
+        if: ${{ !cancelled() && steps.build_api.outcome == 'success' }}
+        run: .github/scripts/check-image-contents.sh api kagura-api:ci
+
+      - name: Check what the web image carries
+        if: ${{ !cancelled() && steps.build_web.outcome == 'success' }}
+        run: .github/scripts/check-image-contents.sh web kagura-web:ci

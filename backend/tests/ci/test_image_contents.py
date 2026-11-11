@@ -13,9 +13,11 @@ well as its dependencies, so the images leave out what they do not run:
 Node itself is pinned in the image, the dev compose file and CI. They name one
 LTS major: CI on another Node than the image proves little.
 
-No CI job builds the images, so these tests are the only thing that notices a
-step going missing. They read Dockerfile instructions, not text: a step that is
-commented out must fail here.
+These tests read Dockerfile instructions, not text: a step that is commented
+out must fail here. They run on every pull request. The CI ``images`` job
+(#2763) builds both images when what goes into them changes, and
+``.github/scripts/check-image-contents.sh`` checks the built result: what a base
+image or a dependency brings in that no Dockerfile line names.
 """
 
 import re
