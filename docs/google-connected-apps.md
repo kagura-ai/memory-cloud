@@ -27,13 +27,11 @@ Everything below applies only to a request whose URL selects `profile=google` wi
 | `recall` | `destructiveHint: true`: learns associations (Hebbian reweighting, pruning) and promotes working memories | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`: no learning writes and no promotion; only access counters move |
 | Other annotations | `TOOL_ANNOTATIONS` | The same |
 | Server instructions | Base text naming the entry calls, plus a guardrail digest when selected | A short base text that names no tool, and never a guardrail digest (the digest lists rules for when to call tools) |
-| Replies | Caller errors carry `Manual: guide([...])`; `unknown_tool` names `describe_tools`; `get_context_info` / `bootstrap` carry the quick reference `instructions` | No manual pointer, a neutral `unknown_tool` help, no quick reference; sentences of a reply's `help`, `hint` and `message` that point at another tool are dropped |
+| Replies | Caller errors carry `Manual: guide([...])`; `unknown_tool` names `describe_tools`; `get_context_info` / `bootstrap` carry the quick reference `instructions` | No manual pointer, a neutral `unknown_tool` help, no quick reference; sentences of a reply's `help`, `hint` and `message`, of write lint hints and of `persistence.detail` that point at another tool are dropped, and `plan_headroom[].help` names no tool |
 
-Stored data is never rewritten: memory text, context summaries and usage guides, and the guardrail memories `bootstrap` and `get_context_info` return pass through unchanged.
+Stored data is never rewritten: memory text, context summaries and usage guides, and the guardrail memories `bootstrap` and `get_context_info` return pass through unchanged, and a context name quoted in a reply (`Context 'list_tags' created successfully.`) is kept even when it spells a tool name. A success reply is never turned into a failure message.
 
 The OAuth scope a call needs still follows the global annotation table, so a read-scope token cannot call `recall` on one URL and not on another.
-
-Known gaps (server text that can still name a tool on this view): the `lint` hints of `remember` / `remember_batch` / `update_memory` (`no_tags`, `event_date_mismatch`), `persistence.detail` with `verbose=true`, and the note `remember_batch` returns when a batch committed after its time limit.
 
 ## 3. Console: user confirmation
 

@@ -102,6 +102,17 @@ _AT_LIMIT = {
         "At 100 % the metered MCP tools (remember, recall, …) will be refused until the reset."
     ),
 }
+# The same help without a tool name or a call recipe: the ``google`` tool
+# profile (#2773) serves a surface that never points at another tool.
+_NEUTRAL_REMEDY_TEXT = {
+    **_REMEDY_TEXT,
+    _CLEANUP: "free capacity by removing memories or contexts the user no longer needs",
+}
+_NEUTRAL_AT_LIMIT = {
+    MEMORIES: "At 100 % new memories will be refused.",
+    MEMORIES_PER_DAY: "At 100 % new memories will be refused until the reset.",
+    MCP_CALLS_PER_DAY: "At 100 % metered calls will be refused until the reset.",
+}
 
 
 @dataclass(frozen=True)
@@ -261,10 +272,33 @@ def billing_configured() -> bool:
     return BillingHandoffSigner().is_configured
 
 
-def _help(dimension: str, remedies: list[str], resets_at: str | None) -> str:
-    phrases = [_REMEDY_TEXT[r].format(resets_at=resets_at or "UTC midnight") for r in remedies]
+def _help(
+    dimension: str, remedies: list[str], resets_at: str | None, *, neutral: bool = False
+) -> str:
+    remedy_text = _NEUTRAL_REMEDY_TEXT if neutral else _REMEDY_TEXT
+    at_limit = _NEUTRAL_AT_LIMIT if neutral else _AT_LIMIT
+    phrases = [remedy_text[r].format(resets_at=resets_at or "UTC midnight") for r in remedies]
     text = ", or ".join(phrases)
-    return f"{text[0].upper()}{text[1:]}. {_AT_LIMIT[dimension]}"
+    return f"{text[0].upper()}{text[1:]}. {at_limit[dimension]}"
+
+
+def tool_neutral_help(notice: Mapping[str, Any]) -> str | None:
+    """A notice's ``help`` without a tool name or a call recipe (the ``google`` profile).
+
+    Built from the notice's own ``dimension``, ``remedies`` and ``resets_at``;
+    ``None`` when the notice is not one :func:`headroom_notices` makes.
+    """
+    dimension, remedies = notice.get("dimension"), notice.get("remedies")
+    resets_at = notice.get("resets_at")
+    if (
+        dimension not in _NEUTRAL_AT_LIMIT
+        or not isinstance(remedies, list)
+        or not remedies
+        or not all(r in _NEUTRAL_REMEDY_TEXT for r in remedies)
+        or not (resets_at is None or isinstance(resets_at, str))
+    ):
+        return None
+    return _help(dimension, remedies, resets_at, neutral=True)
 
 
 def _notice(dimension: str, reading: QuotaReading, *, billing: bool) -> dict[str, Any] | None:

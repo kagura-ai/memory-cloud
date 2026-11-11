@@ -235,6 +235,23 @@ def test_no_text_asks_for_the_conversation():
     assert hits == []
 
 
+# Paraphrased pointers: no tool name, but still a rule for using another tool.
+# (A tool describing its own argument, as update_memory's delivery_mode, is fine.)
+PARAPHRASE_BLOCKLIST = (
+    "store the new one",
+    "pins a memory",
+    "from search results",
+    "unlocked first",
+    "of a single stored memory",
+)
+
+
+def test_no_text_paraphrases_a_rule_for_another_tool():
+    texts = [text for tool in _google().values() for _path, text in _descriptions(tool)]
+    found = {phrase for phrase in PARAPHRASE_BLOCKLIST for text in texts if phrase in text}
+    assert found == set()
+
+
 def test_no_text_tells_the_model_to_follow_stored_content():
     texts = [text for tool in _google().values() for _p, text in _descriptions(tool)]
     texts += [GOOGLE_INSTRUCTIONS_BASE, google_default_context_instructions("proj")]
@@ -333,10 +350,15 @@ async def test_core_instructions_still_carry_the_digest(digest):
 
 
 @pytest.mark.asyncio
-async def test_the_rest_preview_of_a_google_url_is_the_google_base(monkeypatch):
+@pytest.mark.parametrize("digest_enabled", [True, False])
+async def test_the_rest_preview_of_a_google_url_is_the_google_base(monkeypatch, digest_enabled):
     import services.guardrail_digest as digest_mod
     from api.routes.memory import guardrail_digest
+    from config.settings import get_settings
     from services.guardrail_digest import DigestEntries, DigestEntry
+
+    # The MCP handshake decides the google view before lane (a)'s switch.
+    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_enabled", digest_enabled)
 
     ctx = uuid4()
     entries = DigestEntries(
@@ -499,6 +521,184 @@ async def test_core_replies_are_unchanged(handlers, core_view):
     }
     handlers["get_context_info"] = (False, payload)
     result = await execute_tool_call("get_context_info", {"context_id": str(uuid4())}, "u", None)
+    assert _payload(result) == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "message"),
+    [
+        ("create_context", "Context 'list_tags' created successfully."),
+        ("update_context", "Context 'changes_since-log' updated successfully."),
+        ("delete_context", "Context 'recall_upcoming-plans' has been soft-deleted."),
+    ],
+)
+async def test_a_success_message_keeps_a_context_name_that_is_a_tool_name(
+    handlers, google_view, tool, message
+):
+    # The name is the user's data, not a pointer: the reply stays a success.
+    handlers[tool] = (False, {"status": "success", "message": message})
+    args = {"name": "x"} if tool == "create_context" else {"context_id": str(uuid4())}
+    payload = _payload(await execute_tool_call(tool, args, "u", None))
+    assert payload == {"status": "success", "message": message}
+
+
+@pytest.mark.asyncio
+async def test_a_success_message_is_never_replaced_by_the_failure_text(handlers, google_view):
+    handlers["list_contexts"] = (
+        False,
+        {"status": "success", "contexts": [], "message": "Call create_context() first."},
+    )
+    payload = _payload(await execute_tool_call("list_contexts", {}, "u", None))
+    assert payload == {"status": "success", "contexts": []}
+
+
+def _lint_hints() -> list[dict]:
+    from services.write_lint import _tag_hints
+
+    no_tags = [h.model_dump(exclude_none=True) for h in _tag_hints([], {})]
+    assert no_tags and "list_tags()" in no_tags[0]["hint"]
+    return [
+        *no_tags,
+        {
+            "code": "event_date_mismatch",
+            # The template of write_lint's event-date hint.
+            "hint": "'next friday' is written as (2026-01-01), but the memory holds 2026-01-02 "
+            "(event_start..event_end); remove the written date or correct it with "
+            "update_memory().",
+            "subject": "next friday",
+        },
+    ]
+
+
+def _persistence_details() -> list[dict]:
+    from services import persistence as persistence_mod
+
+    blocks = [
+        persistence_mod._persistence_info("persistent"),
+        persistence_mod._persistence_info("persistent", pinned=True),
+    ]
+    with (
+        patch.object(
+            persistence_mod,
+            "active_consolidation_pass",
+            return_value=persistence_mod.SLEEP_CONSOLIDATION,
+        ),
+        patch.object(persistence_mod, "consolidation_archive_min_age_days", return_value=7),
+    ):
+        blocks.append(persistence_mod._persistence_info("working"))
+    details = [block.model_dump() for block in blocks if block is not None]
+    assert all("forget()" in d["detail"] for d in details)
+    assert any("reference()" in d["detail"] for d in details)
+    return details
+
+
+def _headroom() -> list[dict]:
+    from services.plan_headroom import (
+        MCP_CALLS_PER_DAY,
+        MEMORIES,
+        MEMORIES_PER_DAY,
+        QuotaReading,
+        headroom_notices,
+    )
+
+    def reading(used: int) -> QuotaReading:
+        return QuotaReading(
+            workspace_id=uuid4(), used=used, limit=100, plan="free", resets_at="2026-11-12T00:00Z"
+        )
+
+    notices = headroom_notices(
+        {MEMORIES: reading(90), MEMORIES_PER_DAY: reading(96), MCP_CALLS_PER_DAY: reading(85)},
+        billing=False,
+    )
+    assert len(notices) == 3
+    return notices
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["remember", "update_memory", "bootstrap"])
+async def test_nested_server_text_names_no_tool(handlers, google_view, tool):
+    lint, details, headroom = _lint_hints(), _persistence_details(), _headroom()
+    handlers[tool] = (
+        False,
+        {
+            "status": "success",
+            "memory_id": "m",
+            "lint": copy.deepcopy(lint),
+            "persistence": copy.deepcopy(details[-1]),
+            "plan_headroom": copy.deepcopy(headroom),
+        },
+    )
+    payload = _payload(await execute_tool_call(tool, {"context_id": str(uuid4())}, "u", None))
+    assert _names_a_tool(payload, tool) == set()
+    # What is left still says what happened; the machine-readable fields stay.
+    assert payload["lint"][0]["hint"].startswith("no tags: this memory cannot be reached")
+    # A tool may name itself (update_memory's own hint keeps its call).
+    assert payload["lint"][1]["hint"].endswith(
+        "or correct it with update_memory()."
+        if tool == "update_memory"
+        else "remove the written date or correct it."
+    )
+    assert payload["lint"][1]["subject"] == "next friday"
+    assert payload["persistence"]["detail"].startswith("Committed and durable now")
+    assert "adoption," in payload["persistence"]["detail"]
+    assert {k: v for k, v in payload["persistence"].items() if k != "detail"} == {
+        k: v for k, v in details[-1].items() if k != "detail"
+    }
+    for got, sent in zip(payload["plan_headroom"], headroom, strict=True):
+        assert {k: v for k, v in got.items() if k != "help"} == {
+            k: v for k, v in sent.items() if k != "help"
+        }
+        assert got["help"].startswith(("Free capacity", "Wait for the daily reset"))
+        assert "100 %" in got["help"]
+
+
+@pytest.mark.asyncio
+async def test_a_batch_reply_names_no_tool(handlers, google_view):
+    lint, details, headroom = _lint_hints(), _persistence_details(), _headroom()
+    item = {"index": 0, "status": "success", "memory_id": "m", "lint": lint}
+    handlers["remember_batch"] = (
+        False,
+        {
+            "results": [{**copy.deepcopy(item), "persistence": copy.deepcopy(d)} for d in details],
+            "count": len(details),
+            "succeeded": len(details),
+            "committed_after_timeout": True,
+            # batch.py's note when the time limit passed after the commit.
+            "message": (
+                "The call passed its time limit after the batch was committed: "
+                "every item is stored (memory_id per item). Do NOT send the batch "
+                "again. Post-commit steps were cut short, so declared links "
+                "(supersedes, linked_memory_ids) of some items may be missing — "
+                "check with reference()."
+            ),
+            "plan_headroom": headroom,
+            "lint": [{"code": "batch_level_argument", "hint": "Set it once on remember_batch."}],
+        },
+    )
+    payload = _payload(
+        await execute_tool_call(
+            "remember_batch", {"context_id": str(uuid4()), "items": []}, "u", None
+        )
+    )
+    assert _names_a_tool(payload, "remember_batch") == set()
+    assert payload["message"].endswith("of some items may be missing.")
+    assert payload["lint"] == [
+        {"code": "batch_level_argument", "hint": "Set it once on remember_batch."}
+    ]
+    assert all(r["persistence"]["detail"] for r in payload["results"])
+
+
+@pytest.mark.asyncio
+async def test_core_nested_server_text_is_unchanged(handlers, core_view):
+    payload = {
+        "status": "success",
+        "lint": _lint_hints(),
+        "persistence": _persistence_details()[-1],
+        "plan_headroom": _headroom(),
+    }
+    handlers["remember"] = (False, copy.deepcopy(payload))
+    result = await execute_tool_call("remember", {"context_id": str(uuid4())}, "u", None)
     assert _payload(result) == payload
 
 

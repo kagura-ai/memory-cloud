@@ -464,7 +464,8 @@ async def guardrail_digest(
         ),
     ),
     profile: str | None = Query(
-        None, description="target=instructions only: the MCP URL's profile value (full | core)"
+        None,
+        description="target=instructions only: the MCP URL's profile value (full | core | google)",
     ),
     tools: str | None = Query(
         None, description="target=instructions only: the MCP URL's tools allowlist"
@@ -542,12 +543,6 @@ async def guardrail_digest(
     if target == "export":
         body = render_export_block(entries)
         media_type = "text/markdown"
-    elif not get_settings().mcp_guardrail_digest_enabled:
-        # Lane (a) is switched off: ``build_instructions`` serves the base
-        # text to every caller, so the preview is that text — the read above
-        # still decides the uniform 404 and the version header.
-        body = SERVER_INSTRUCTIONS_BASE
-        media_type = "text/plain"
     else:
         # Rebuild the MCP URL's query the way a URL carries it (percent-
         # encoded) so a ``&`` or ``=`` inside a value stays inside that value
@@ -560,8 +555,15 @@ async def guardrail_digest(
             }
         )
         if is_google_view(query):
-            # #2773: the google view serves its base text and never a digest.
+            # #2773: the google view serves its base text and never a digest,
+            # whether lane (a) is on or off (``build_instructions`` decides the
+            # view first, too).
             body = GOOGLE_INSTRUCTIONS_BASE
+        elif not get_settings().mcp_guardrail_digest_enabled:
+            # Lane (a) is switched off: ``build_instructions`` serves the base
+            # text to every caller, so the preview is that text — the read
+            # above still decides the uniform 404 and the version header.
+            body = SERVER_INSTRUCTIONS_BASE
         else:
             body = render_instructions(
                 SERVER_INSTRUCTIONS_BASE, entries, tool_names=tool_view_names(query)

@@ -26,11 +26,16 @@ guide(...)``), so ``?profile=google`` serves its own prose for the same tools:
   carry no guardrail digest (the digest is a list of rules for when to call
   tools).
 * ``scrub_google_reply``: the dispatcher's last step on this view. Sentences
-  of the server's own ``help`` / ``hint`` / ``message`` / ``example`` fields
-  that point at another tool are dropped, and the static quick reference
-  (``KAGURA_MEMORY_INSTRUCTIONS``) leaves ``get_context_info`` and
-  ``bootstrap`` replies. Stored data (memories, context notes, guardrail
-  memories) is never touched.
+  of the server's own ``help`` / ``hint`` / ``message`` / ``example`` fields,
+  and of the server text nested in write replies (``lint[].hint``,
+  ``persistence.detail``, a batch item's ``lint`` and ``persistence``), that
+  point at another tool are dropped (a few known clauses are cut instead, so
+  the sentence survives), ``plan_headroom[].help`` gets its tool-free
+  wording, and the static quick reference (``KAGURA_MEMORY_INSTRUCTIONS``)
+  leaves ``get_context_info`` and ``bootstrap`` replies. Stored data
+  (memories, context notes, guardrail memories) is never touched, and a
+  single-quoted name inside server text (``Context 'list_tags' created``) is
+  the user's data, not a pointer.
 
 "Google view" = the request URL selects ``profile=google`` and has no
 ``tools=`` allowlist (which wins over ``profile``). A tool added with
@@ -129,9 +134,9 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
             "752bd37f3feb1bf5",
             "Store up to 50 memories the user asks to keep in one call; dedupe, tags_normalize "
             "and verbose are batch-level, and an item that repeats one with the batch's value is "
-            "accepted (one only items set, all alike, applies to the whole batch). Items take "
-            "the arguments and limits of a single stored memory; an unknown item key fails only "
-            "that item (invalid_argument). atomic=true: all or nothing; default false: each item "
+            "accepted (one only items set, all alike, applies to the whole batch). Each item is "
+            "one memory (fields under items); an unknown item key fails only that item "
+            "(invalid_argument). atomic=true: all or nothing; default false: each item "
             "on its own. Relative dates: details.event_phrase as stated plus observed_at; do not "
             "compute dates.\n"
             "Returns: {status: success|partial|duplicate_candidate, results: [{index, status: "
@@ -145,8 +150,9 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
         ),
         _p("items"): (
             "a9783b6f6fa804ff",
-            "One object per memory: summary, content, type (required) and the optional fields "
-            "of a single stored memory.",
+            "One object per memory: summary, content, type (required); optional context_summary, "
+            "details, observed_at, importance, tags, context, delivery_mode, source_uri, "
+            "source_type, linked_memory_ids, linked_source_uris, supersedes.",
         ),
         _p("tags_normalize"): (
             "cf901b26174e3f16",
@@ -178,8 +184,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
         ),
         _p("memory_id"): (
             "aa0ac664166bcc3c",
-            "UUID of the memory to edit in place (from search results). Do NOT guess or "
-            "fabricate IDs.",
+            "UUID of the memory to edit in place. Do NOT guess or fabricate IDs.",
         ),
         _p("expected_version"): (
             "f36fcb7f63f5ee67",
@@ -250,7 +255,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
         ),
         _p("memory_id"): (
             "98cc5a180b969203",
-            "UUID of the memory to read (from search results). Do NOT guess or fabricate IDs.",
+            "UUID of the memory to read. Do NOT guess or fabricate IDs.",
         ),
         _p("context_id"): ("a28d808187709c36", _CONTEXT_ID),
     },
@@ -269,9 +274,8 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     "load_pinned": {
         _D: (
             "2b160a4897be7ba3",
-            "Load a context's pinned memories (delivery_mode='always'): the complete, unranked "
-            "set on every call, not a search. delivery_mode='always' pins a memory, "
-            "'on_recall' unpins it.\n"
+            "Load a context's pinned memories (those whose delivery_mode is 'always'): the "
+            "complete, unranked set on every call, not a search.\n"
             "Returns: {status, memories: [{memory_id, summary, context_summary, type, "
             f"importance, delivery_mode}}], total_available, truncated, cap, {_RETURNS_CONTEXT}}}; "
             "truncated=true when more exist than cap or max_chars allow.",
@@ -282,8 +286,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
         _D: (
             "0daae51438dca617",
             "Soft-delete memories. DESTRUCTIVE: show the user the summary of what will be "
-            "deleted and get their explicit approval first (warn when importance > 0.8). To "
-            "replace a fact instead, store the new one with supersedes=<old_memory_id>.\n"
+            "deleted and get their explicit approval first (warn when importance > 0.8).\n"
             "Supply exactly ONE of memory_id (deletes that memory), memory_ids (up to 50, one "
             "result per id) or query (deletes its top-k matches; bulk cleanup only). Deleted "
             "memories stay recoverable for the deployment's cleanup window (default 30 days).\n"
@@ -295,7 +298,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
         ),
         _p("memory_id"): (
             "d374c5b055bb2f31",
-            "UUID of the memory to delete (from search results). Do NOT guess or fabricate IDs.",
+            "UUID of the memory to delete. Do NOT guess or fabricate IDs.",
         ),
         _p("context_id"): ("a28d808187709c36", _CONTEXT_ID),
     },
@@ -365,8 +368,8 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
             "Soft-delete a context and ALL its memories and files: it leaves the context "
             "directory and search, the files' bytes leave the storage quota at once; the data "
             "is retained for recovery (files restorable by an admin for 6 days). DESTRUCTIVE — "
-            "confirm with the user. Owner-only; the default context cannot be deleted, and a "
-            "locked context must be unlocked first (is_locked=false in its settings).\n\n"
+            "confirm with the user. Owner-only; neither the default context nor a locked "
+            "context (is_locked=true) can be deleted.\n\n"
             "Returns: {status, message, context_id, context_name}.",
         ),
         _p("context_id"): ("a28d808187709c36", _CONTEXT_ID),
@@ -516,8 +519,24 @@ CONTEXT_ID_REQUIRED_HELP = (
 
 # The server-owned top-level fields a reply's pointer sentences are dropped from.
 _SCRUBBED_FIELDS = ("help", "hint", "message")
+# Only an error reply whose message is all pointers gets this text; a success
+# reply loses the field instead (it must never read as a failure).
 _FALLBACK_MESSAGE = "The call could not be completed."
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+# A single-quoted word in server text is an interpolated name the user chose
+# (``Context '{name}' created successfully.``): masked before the match. An
+# apostrophe inside a word (``tool's``) does not open one.
+_QUOTED_NAME = re.compile(r"(?<!\w)'[^'\s]+'(?!\w)")
+_MASK = re.compile("\x00(\\d+)\x00")
+# Clauses of known server texts that point at a tool, cut so the rest of the
+# sentence stays (persistence.detail, write lint, the batch time-limit note).
+# Whatever these miss, the sentence drop below still removes.
+_POINTER_CLAUSES = (
+    ("adoption via reference(), ", "adoption, "),
+    ("an explicit forget()", "an explicit deletion"),
+    (" — check with reference().", "."),
+    (" or correct it with update_memory().", " or correct it."),
+)
 
 
 @lru_cache(maxsize=256)
@@ -535,11 +554,76 @@ def _pointer_pattern(tool_name: str) -> re.Pattern[str]:
 
 
 def _without_pointers(text: str, pattern: re.Pattern[str]) -> str:
-    """``text`` without the sentences that name another tool."""
+    """``text`` without the sentences that name another tool.
+
+    Single-quoted names are the user's data and never count as a pointer.
+    """
     if not pattern.search(text):
         return text
-    kept = [s for s in _SENTENCE_END.split(text) if not pattern.search(s)]
-    return " ".join(kept).strip()
+    for clause, replacement in _POINTER_CLAUSES:
+        text = text.replace(clause, replacement)
+    quoted: list[str] = []
+
+    def mask(found: re.Match[str]) -> str:
+        quoted.append(found.group(0))
+        return f"\x00{len(quoted) - 1}\x00"
+
+    masked = _QUOTED_NAME.sub(mask, text)
+    if not pattern.search(masked):
+        return text
+    kept = " ".join(s for s in _SENTENCE_END.split(masked) if not pattern.search(s)).strip()
+    return _MASK.sub(lambda found: quoted[int(found.group(1))], kept)
+
+
+def _scrub_key(node: Any, key: str, pattern: re.Pattern[str]) -> bool:
+    """Drop ``node[key]``'s pointer sentences (the key goes when nothing is left)."""
+    if not isinstance(node, dict):
+        return False
+    value = node.get(key)
+    if not isinstance(value, str):
+        return False
+    cleaned = _without_pointers(value, pattern)
+    if cleaned == value:
+        return False
+    if cleaned:
+        node[key] = cleaned
+    else:
+        del node[key]
+    return True
+
+
+def _scrub_write_blocks(node: Any, pattern: re.Pattern[str]) -> bool:
+    """The server text of a write reply (or batch item): lint hints and persistence.detail."""
+    if not isinstance(node, dict):
+        return False
+    changed = False
+    lint = node.get("lint")
+    if isinstance(lint, list):
+        for entry in lint:
+            changed = _scrub_key(entry, "hint", pattern) or changed
+    return _scrub_key(node.get("persistence"), "detail", pattern) or changed
+
+
+def _neutral_headroom(payload: dict[str, Any]) -> bool:
+    """``plan_headroom[].help`` in its tool-free wording (dropped when it cannot be built)."""
+    from services.plan_headroom import tool_neutral_help
+
+    notices = payload.get("plan_headroom")
+    if not isinstance(notices, list):
+        return False
+    changed = False
+    for notice in notices:
+        if not isinstance(notice, dict) or "help" not in notice:
+            continue
+        neutral = tool_neutral_help(notice)
+        if neutral == notice["help"]:
+            continue
+        changed = True
+        if neutral is None:
+            del notice["help"]
+        else:
+            notice["help"] = neutral
+    return changed
 
 
 def _error_content_class() -> type:
@@ -552,9 +636,12 @@ def scrub_google_reply(tool_name: str, result: list[TextContent]) -> list[TextCo
     """Drop static pointers to other tools from a reply on the google view.
 
     Only the reply's own top-level ``help`` / ``hint`` / ``message`` /
-    ``example`` fields and the static quick reference are touched; nested
-    values (memories, context notes, guardrail memories) pass through as they
-    are. The reply keeps its class (``ToolErrorContent`` stays an error).
+    ``example`` fields, the server text of write replies (``lint``,
+    ``persistence``, ``plan_headroom``; a ``remember_batch`` item's ``lint``
+    and ``persistence``) and the static quick reference are touched; other
+    nested values (memories, context notes, guardrail memories) pass through
+    as they are. The reply keeps its class (``ToolErrorContent`` stays an
+    error); a success reply never gets the failure fallback message.
     """
     if (
         type(result) not in (list, _error_content_class())
@@ -572,7 +659,12 @@ def scrub_google_reply(tool_name: str, result: list[TextContent]) -> list[TextCo
     from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
 
     pattern = _pointer_pattern(tool_name)
-    changed = False
+    is_error = type(result) is not list
+    changed = _scrub_write_blocks(payload, pattern)
+    changed = _neutral_headroom(payload) or changed
+    if tool_name == "remember_batch" and isinstance(payload.get("results"), list):
+        for item in payload["results"]:
+            changed = _scrub_write_blocks(item, pattern) or changed
     if payload.get("instructions") == KAGURA_MEMORY_INSTRUCTIONS:
         del payload["instructions"]
         changed = True
@@ -590,7 +682,7 @@ def scrub_google_reply(tool_name: str, result: list[TextContent]) -> list[TextCo
         changed = True
         if cleaned:
             payload[field] = cleaned
-        elif field == "message":
+        elif field == "message" and is_error:
             payload[field] = _FALLBACK_MESSAGE
         else:
             del payload[field]
