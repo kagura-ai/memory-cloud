@@ -103,14 +103,16 @@ _AT_LIMIT = {
     ),
 }
 # The same help without a tool name or a call recipe: the ``google`` tool
-# profile (#2773) serves a surface that never points at another tool.
+# profile (#2773) serves a surface that never points at another tool. Each
+# text is at most as long as the one it replaces, so swapping it in after
+# bootstrap budgeted the standard help never grows a reply.
 _NEUTRAL_REMEDY_TEXT = {
     **_REMEDY_TEXT,
     _CLEANUP: "free capacity by removing memories or contexts the user no longer needs",
 }
 _NEUTRAL_AT_LIMIT = {
-    MEMORIES: "At 100 % new memories will be refused.",
-    MEMORIES_PER_DAY: "At 100 % new memories will be refused until the reset.",
+    MEMORIES: "At 100 % new memories are refused.",
+    MEMORIES_PER_DAY: "At 100 % new memories are refused until the reset.",
     MCP_CALLS_PER_DAY: "At 100 % metered calls will be refused until the reset.",
 }
 

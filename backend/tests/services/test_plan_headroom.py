@@ -10,6 +10,7 @@ Redis is needed; the quota checks are driven with the mocked sessions
 from __future__ import annotations
 
 import dataclasses
+import itertools
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,6 +35,7 @@ from services.plan_headroom import (
     open_plan_headroom_counts,
     plan_headroom,
     record_quota_reading,
+    tool_neutral_help,
 )
 from utils.exceptions import RedisError
 
@@ -197,6 +199,25 @@ def test_help_is_short_names_the_failing_call_and_has_no_url(plan):
     assert "remember will be refused" in per_day["help"]
     assert "MCP tools" in calls["help"]
     assert "forget" in memories["help"]
+
+
+@pytest.mark.parametrize("resets_at", [RESETS_AT, None])
+@pytest.mark.parametrize("dimension", [MEMORIES, MEMORIES_PER_DAY, MCP_CALLS_PER_DAY])
+def test_the_tool_neutral_help_is_never_longer_than_the_standard_help(dimension, resets_at):
+    # The google profile swaps the help in after bootstrap budgeted the
+    # standard one (#2773): the swap must never grow the reply.
+    names = ["cleanup", "wait", "upgrade", "admin"]
+    combinations = [
+        list(combo)
+        for size in range(1, len(names) + 1)
+        for combo in itertools.permutations(names, size)
+    ]
+    for remedies in combinations:
+        standard = ph._help(dimension, remedies, resets_at)
+        notice = {"dimension": dimension, "remedies": remedies, "resets_at": resets_at}
+        neutral = tool_neutral_help(notice)
+        assert neutral is not None
+        assert len(neutral) <= len(standard), (dimension, remedies, neutral, standard)
 
 
 @pytest.mark.parametrize("plan", [*PLAN_ORDER])
