@@ -518,8 +518,11 @@ def query_client(session: Session, client_id: str) -> OAuth2Client | None:
         client_id: Client identifier
 
     Returns:
-        OAuth2Client or None
+        OAuth2Client or None (also for a ``client_id`` holding a NUL, which no
+        client has and which the Postgres driver would refuse with an error)
     """
+    if "\x00" in client_id:
+        return None
     client = session.query(OAuth2Client).filter_by(client_id=client_id).first()
     logger.info(f"query_client: client_id={client_id}, found={client is not None}")
 

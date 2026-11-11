@@ -165,6 +165,34 @@ def test_malformed_basic_credentials_at_token_are_invalid_client(credentials):
     db.query.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"grant_type=refresh_token&refresh_token=x&client_id=oauth%00client",  # public client
+        b"grant_type=refresh_token&refresh_token=x&client_id=oauth%00client&client_secret=s",
+    ],
+)
+def test_a_nul_in_a_form_client_id_at_token_is_invalid_client(body):
+    """A NUL in a form-posted ``client_id`` never reaches the client lookup (a 500 before)."""
+    db = MagicMock()
+    db.query.side_effect = ValueError("A string literal cannot contain NUL (0x00) characters.")
+    with (
+        patch("api.routes.oauth.get_sync_session", return_value=db),
+        patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)),
+    ):
+        response = TestClient(
+            app, base_url="https://testserver", raise_server_exceptions=False
+        ).post(
+            "/api/v1/oauth/token",
+            content=body,
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+
+    assert response.status_code in (400, 401), response.text
+    assert response.json()["error"] == "invalid_client"
+    db.query.assert_not_called()
+
+
 def _basic_request(header: str | None):
     headers = {} if header is None else {"Authorization": header}
     return SimpleNamespace(headers=headers)
