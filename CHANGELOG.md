@@ -4,6 +4,38 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.157.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.157.0) — 2026-11-11
+
+The memory health report and plan management move next to what they describe, a Slack connector can give each channel its own destination context (off by default), and each release tag now publishes the server listing to the Official MCP Registry.
+
+### Added
+- **Per-channel destinations for a Slack connector** ([#1759](https://github.com/kagura-ai/memory-cloud/issues/1759)): a channel can be routed to a context of its own or set to "do not ingest", and one switch per connector keeps private channels without a route out of ingestion (`PATCH /api/v1/workspace-connectors/{connector_id}` with `channel_routes` and `unrouted_private_channels`; the connector settings dialog has a destination per channel). A channel with a route never falls back to the default context: when its destination is deleted the channel is not ingested until an admin picks a new one, and the dialog says so. The dialog warns when a private channel's destination is a context shared with the workspace, and says that a private context chosen as a destination passes to the workspace owner when its creator leaves. A destination is accepted only if the caller can read it and the user the connector writes as can write to it. Operation history records `integration.updated` with `channel_routes`.
+- **Worker config capability `channel_routes`** ([#1759](https://github.com/kagura-ai/memory-cloud/issues/1759)): a worker that sends `capabilities=channel_routes` on `GET /api/v1/workers/config` receives `channel_routes` and `unrouted_private_channels`, and the revision covers them. A connector that uses routing answers `404` to a worker without the capability; for a connector without routing the body and the revision are unchanged. The contract is in `docs/connector-ingest-contract.md`.
+- **Link to a deployment's ChatGPT app** ([#2760](https://github.com/kagura-ai/memory-cloud/issues/2760)): the optional setting `CHATGPT_APP_URL` (default empty) shows a link next to the plugin guide link on the onboarding chat connection screen and on the MCP connection card. `/api/v1/system/info` returns it as `chatgpt_app_url`, or `null` when unset.
+- **Memory health for every user** ([#2764](https://github.com/kagura-ai/memory-cloud/issues/2764)): `GET /api/v1/memory-health` serves the report to any signed-in user (browser session only) for the contexts they created in a workspace they can still open. Each of those contexts has a Health tab (`?tab=health`), the context list shows a status badge on them, and a card covers signals outside them.
+- **MCP Registry publish on release tags** ([#2771](https://github.com/kagura-ai/memory-cloud/issues/2771)): `.github/workflows/publish-mcp-registry.yml` publishes `server.json` when a `v*` tag is pushed, through GitHub OIDC with no secret, with a pinned and verified `mcp-publisher` and a guard that the tag equals `server.json`'s version. A dispatch on a branch is a dry run that validates and logs in but publishes nothing.
+- **Built images checked in CI** ([#2763](https://github.com/kagura-ai/memory-cloud/issues/2763)): an `images` job builds the api and web images when a Dockerfile, a dependency manifest or lock, or the job itself changes, and on release tags, and fails when the api image carries the dev extra, a compiler, the packaging tools or `uv`, or the web image a package manager.
+
+### Changed
+- **Plan management moved to the admin user page** ([#2765](https://github.com/kagura-ai/memory-cloud/issues/2765)): a workspace's plan, add-ons and spend cap are managed from its owner's page under Users, which also shows the quota detail; a workspace the user does not own shows its plan read-only. The Users page gains the tabs Plan tiers and Plan changes. The `/api/v1/admin/plans` routes are unchanged.
+- **Memory health left the system-admin menu** ([#2764](https://github.com/kagura-ai/memory-cloud/issues/2764)): the report is read on the context it describes, and its notes are written for the context's owner.
+
+### Fixed
+- **Connector with a deleted default context** ([#1759](https://github.com/kagura-ai/memory-cloud/issues/1759)): `GET /api/v1/workers/config` answers not ready (`404`) for a connector whose default context is soft-deleted or no longer in its workspace. It used to serve the config, and every write then failed at the write path. A connector can no longer be created on a soft-deleted context.
+
+### Deprecated
+- **`GET /api/v1/admin/memory-health`** ([#2764](https://github.com/kagura-ai/memory-cloud/issues/2764)): still answers a system admin with the same document, and will be removed in a later release. Use `GET /api/v1/memory-health` with a session.
+
+### Removed
+- The pages `/admin/memory-health`, `/admin/plans` and `/admin/quotas` and their sidebar entries ([#2764](https://github.com/kagura-ai/memory-cloud/issues/2764), [#2765](https://github.com/kagura-ai/memory-cloud/issues/2765)). There are no redirects.
+
+### Migration
+- Migration `f35_1759_channel_routes`: a new empty table and one column with a default on `workspace_connectors`. The previous image reads neither.
+- New optional environment variables: `CONNECTOR_CHANNEL_ROUTING_ENABLED` (default `false`) and `CHATGPT_APP_URL` (default empty; an absolute `https://` URL, any other value fails startup).
+- Operators: channel routing needs a connector worker that sends `capabilities=channel_routes`. Upgrade the worker first, then set `CONNECTOR_CHANNEL_ROUTING_ENABLED=true`. Before rolling the image back below this release, clear the routes and set the switch back to `default` on every connector, or stop the worker; the `f35` downgrade refuses to run while a connector uses routing.
+- Operators: set `CHATGPT_APP_URL` only on the deployment the listing points at.
+- Scripts that read `GET /api/v1/admin/memory-health` should move to `GET /api/v1/memory-health`.
+
 ## [v0.156.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.156.0) — 2026-11-10
 
 More event phrases resolve to dates when a memory is written, a recall row says which of its dates answers "when", and `remember_batch` no longer refuses a whole batch over an argument put on its items.
