@@ -1,4 +1,9 @@
 {
+  "chatgptApp": {
+    "label": "ChatGPTにアプリを追加",
+    "description": "ChatGPTのアプリディレクトリでこのサービスのアプリを開きます。追加してサインインするだけで、URLをコピーする必要はありません。",
+    "newTab": "（新しいタブで開く）"
+  },
   "pluginGuide": {
     "label": "プラグインとスキルの導入手順",
     "description": "任意：MCP接続後に、CodexやClaude Codeでセッション開始や記憶の保存に使うスキルを追加できます。",

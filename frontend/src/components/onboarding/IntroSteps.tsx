@@ -7,6 +7,7 @@
  */
 
 import Link from "next/link";
+import { ChatGptAppLink } from "@/components/common/ChatGptAppLink";
 import { PluginGuideLink } from "@/components/common/PluginGuideLink";
 import { useId, useState } from "react";
 import { useTranslations } from "next-intl";
@@ -270,6 +271,7 @@ export function ChatStep({
       >
         {t("chat.guide")}
       </Link>
+      <ChatGptAppLink />
       <PluginGuideLink />
       <div>
         <Button onClick={onNext} className={PRIMARY_BUTTON}>

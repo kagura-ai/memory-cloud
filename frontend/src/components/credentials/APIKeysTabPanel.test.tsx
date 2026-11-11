@@ -103,6 +103,7 @@ vi.mock("next/navigation", () => {
 });
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => ({ plan_page: true }),
+  useSystemInfo: () => null,
 }));
 vi.mock("@/hooks/usePlanFeatures", () => ({
   usePlanTierMatrix: () => null,

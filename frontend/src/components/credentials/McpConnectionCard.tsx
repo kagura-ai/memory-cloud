@@ -29,6 +29,7 @@ import { useId, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { ArrowRight, Check, ChevronDown, Copy } from "lucide-react";
 import { CopyIconButton } from "@/components/common/CopyIconButton";
+import { ChatGptAppLink } from "@/components/common/ChatGptAppLink";
 import { PluginGuideLink } from "@/components/common/PluginGuideLink";
 import { Section } from "@/components/common/Section";
 import { Button } from "@/components/ui/button";
@@ -202,6 +203,7 @@ export function McpConnectionCard({ variant = "full", title, description, settin
             {t("links.mcpClients")}
             <ArrowRight aria-hidden="true" className="h-4 w-4" />
           </a>
+          <ChatGptAppLink />
           <PluginGuideLink />
         </div>
       </section>
@@ -210,6 +212,7 @@ export function McpConnectionCard({ variant = "full", title, description, settin
 
   return (
     <Section title={`🔗 ${t("title")}`} description={t("description")}>
+      <ChatGptAppLink />
       <PluginGuideLink />
       <div className="space-y-4">
         {/* The endpoint every client uses */}
