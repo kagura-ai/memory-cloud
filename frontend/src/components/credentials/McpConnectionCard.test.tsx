@@ -45,12 +45,48 @@ vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
 }));
 
+// #2760: the ChatGPT app link reads the deployment's listing from /system/info.
+let mockSystemInfo: { chatgpt_app_url?: string | null } | null = null;
+vi.mock("@/hooks/useSystemFeatures", () => ({ useSystemInfo: () => mockSystemInfo }));
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockCopyToTarget.mockResolvedValue(undefined);
   mockWorkspace.currentWorkspaceId = "ws-1";
   mockWorkspace.workspaces = [{ id: "ws-1" }, { id: "ws-2" }];
   vi.stubEnv("NEXT_PUBLIC_API_URL", "https://memory.example.test/api/v1");
+  mockSystemInfo = null;
+});
+
+describe("McpConnectionCard — ChatGPT app link (#2760)", () => {
+  const LISTING = "https://example.com/chatgpt-app";
+  // useId values move with every render; the markup around them must not.
+  const markup = (el: HTMLElement) => el.innerHTML.replace(/_r_[0-9a-z]+_/g, "_id_");
+  const chatGptLink = () => screen.queryAllByRole("link").filter((a) => a.getAttribute("href") === LISTING);
+
+  it.each(["summary", "full"] as const)("adds no link and no extra DOM to the %s card when the deployment sets none", (variant) => {
+    const unset = render(<McpConnectionCard variant={variant} />);
+    const html = markup(unset.container);
+    unset.unmount();
+    for (const info of [{ chatgpt_app_url: null }, { chatgpt_app_url: "http://example.com/chatgpt-app" }, { chatgpt_app_url: "javascript:alert(1)" }]) {
+      mockSystemInfo = info;
+      const { container, unmount } = render(<McpConnectionCard variant={variant} />);
+      expect(chatGptLink()).toHaveLength(0);
+      expect(markup(container)).toBe(html);
+      unmount();
+    }
+  });
+
+  it.each(["summary", "full"] as const)("links the listing in a new tab on the %s card, next to the plugin guide", (variant) => {
+    mockSystemInfo = { chatgpt_app_url: LISTING };
+    render(<McpConnectionCard variant={variant} />);
+    const [link] = chatGptLink();
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(link).toHaveAccessibleName("label newTab");
+    const pluginGuide = screen.getAllByRole("link").find((a) => a.getAttribute("href")?.includes("/help/guide/#plugins"));
+    expect(link.parentElement?.nextElementSibling).toContainElement(pluginGuide ?? null);
+  });
 });
 
 describe("McpConnectionCard — overview tool settings", () => {

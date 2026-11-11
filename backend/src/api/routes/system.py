@@ -140,6 +140,10 @@ async def system_info():
         # TERMS_VERSION is empty (server-side acceptance disabled). The sign-in
         # pages send it back as ``accepted_terms`` once the box is ticked.
         "terms_version": settings.terms_version or None,
+        # Issue #2760: the deployment's ChatGPT app listing, or null when
+        # CHATGPT_APP_URL is empty. A public listing URL (https only, checked at
+        # startup); the web UI links to it next to the plugin guide.
+        "chatgpt_app_url": settings.chatgpt_app_url or None,
         "features": {
             "neural_memory": settings.enable_neural_memory,
             "research_tools": settings.enable_research_tools,

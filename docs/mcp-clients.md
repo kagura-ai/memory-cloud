@@ -233,6 +233,8 @@ ChatGPT desktop app supports MCP servers. Add via Settings > MCP Servers:
 
 > Like Claude Chat, ChatGPT requires a public URL. For local development, use a tunnel or the REST API directly.
 
+> If the deployment has an app listed in ChatGPT's app directory, its operator can set `CHATGPT_APP_URL` ([Deployment › ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760)): the web UI then shows a link to the listing on the onboarding chat screen and the MCP connection card, where the user adds the app and signs in instead of pasting the URL. Without it, connect by the Server URL above.
+
 ### ChatGPT web (developer mode)
 
 ChatGPT web (and ChatGPT Work on the web) runs no client-side hooks, so [tool guardrails](mcp-tools.md#tool-guardrails) reach the model through the server instead:

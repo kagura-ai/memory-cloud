@@ -1,4 +1,9 @@
 {
+  "chatgptApp": {
+    "label": "Add the app in ChatGPT",
+    "description": "Opens this service's app in ChatGPT's app directory: add it there and sign in, with no URL to copy.",
+    "newTab": " (opens in a new tab)"
+  },
   "pluginGuide": {
     "label": "Install the plugin and skills",
     "description": "Optional: after connecting over MCP, add the session and memory skills for Codex or Claude Code.",
