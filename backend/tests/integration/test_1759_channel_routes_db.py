@@ -326,6 +326,116 @@ async def test_history_names_channel_routes_only_when_they_changed(setup: _Setup
         assert "C01" not in repr(row.changed_fields)
 
 
+# ------------------------------- carried-over routes are not re-validated
+
+
+@pytest.mark.asyncio
+async def test_another_admins_route_carried_over_does_not_block_a_save(setup: _Setup):
+    """The key's owner (the admin) routed a channel to their own private
+    context; the workspace owner cannot see it, yet can save a change to
+    another channel with that route carried over unchanged."""
+    s = setup
+    await s.patch(channel_routes=[{"channel_id": "C01", "context_id": s.admins_private}])
+
+    await s.patch(
+        caller=s.owner,
+        channel_routes=[
+            {"channel_id": "C01", "context_id": s.admins_private},
+            {"channel_id": "C02", "context_id": s.shared},
+        ],
+    )
+    assert await s.stored() == {("C01", "route", s.admins_private), ("C02", "route", s.shared)}
+
+
+@pytest.mark.asyncio
+async def test_pointing_another_channel_at_that_context_is_still_not_found(setup: _Setup):
+    s = setup
+    await s.patch(channel_routes=[{"channel_id": "C01", "context_id": s.admins_private}])
+    with pytest.raises(NotFoundException) as exc:
+        await s.patch(
+            caller=s.owner,
+            channel_routes=[
+                {"channel_id": "C01", "context_id": s.admins_private},
+                {"channel_id": "C03", "context_id": s.admins_private},
+            ],
+        )
+    await s.db.rollback()
+    assert str(exc.value) == str(NotFoundException("Context", str(s.admins_private)))
+    assert await s.stored() == {("C01", "route", s.admins_private)}
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_route_the_key_owner_can_no_longer_write_does_not_block(
+    setup: _Setup,
+):
+    s = setup
+    await s.patch(channel_routes=[{"channel_id": "C01", "context_id": s.shared}])
+    # The owner makes that context their own private one: the key's owner
+    # (the admin) can no longer write it.
+    await s.db.execute(update(Context).where(Context.id == s.shared).values(is_private=True))
+    await s.db.commit()
+
+    await s.patch(
+        caller=s.owner,
+        channel_routes=[
+            {"channel_id": "C01", "context_id": s.shared},
+            {"channel_id": "C02", "action": "skip"},
+        ],
+    )
+    assert await s.stored() == {("C01", "route", s.shared), ("C02", "skip", None)}
+    # ...but routing a new channel there is refused (checked: a changed item).
+    with pytest.raises(ValidationError):
+        await s.patch(
+            caller=s.owner,
+            channel_routes=[
+                {"channel_id": "C01", "context_id": s.shared},
+                {"channel_id": "C03", "context_id": s.shared},
+            ],
+        )
+    await s.db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_a_soft_deleted_destination_carried_over_saves_and_vends_as_skip(setup: _Setup):
+    s = setup
+    await s.patch(channel_routes=[{"channel_id": "C01", "context_id": s.shared}])
+    await s.db.execute(update(Context).where(Context.id == s.shared).values(deleted_at=utcnow()))
+    await s.db.commit()
+
+    result = await s.patch(
+        channel_routes=[
+            {"channel_id": "C01", "context_id": s.shared},
+            {"channel_id": "C02", "action": "skip"},
+        ]
+    )
+    assert ("C01", "route", s.shared) in await s.stored()
+    assert {v.channel_id: v.status for v in result.channel_routes}["C01"] == ("destination_missing")
+    connector = await s.db.get(WorkspaceConnector, s.connector_id)
+    vended = (await effective_channel_routing(s.db, connector)).vend_routes()
+    assert {"channel_id": "C01", "action": "skip"} in vended
+
+
+@pytest.mark.asyncio
+async def test_another_workspaces_routes_are_not_an_oracle(setup: _Setup, connector_world):
+    """The pre-lock read of the stored routes is workspace-scoped: naming
+    another workspace's connector with one of its routes carried over still
+    answers the read check (Context 404), not the connector's 404."""
+    s = setup
+    await s.patch(channel_routes=[{"channel_id": "C01", "context_id": s.shared}])
+    other_owner = await connector_world.user("other")
+    other_ws = await connector_world.workspace(other_owner)
+    await s.db.commit()
+    with pytest.raises(NotFoundException) as exc:
+        await ConnectorProvisioningService(s.db).update_connector_settings(
+            workspace_id=other_ws.id,
+            connector_id=s.connector_id,
+            user_id=other_owner,
+            channel_routes=[{"channel_id": "C01", "context_id": s.shared}],
+        )
+    await s.db.rollback()
+    assert "Context" in str(exc.value)
+
+
 # --------------------------------------------------------------- read model
 
 

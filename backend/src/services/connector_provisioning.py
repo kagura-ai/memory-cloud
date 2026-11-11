@@ -192,6 +192,18 @@ _MAX_CHANNEL_IDS = 500
 _MAX_CHANNEL_ID_CHARS = 64
 
 
+def _route_key(route: ChannelRouteInput) -> tuple[str, str, UUID | None]:
+    return (route.channel_id, route.action, route.context_id)
+
+
+def _changed_routes(
+    routes: list[ChannelRouteInput], stored: set[tuple[str, str, UUID | None]]
+) -> list[ChannelRouteInput]:
+    """The items of a ``channel_routes`` PATCH that are not identical to a
+    stored row (#1759): only these are checked; the rest are carried over."""
+    return [r for r in routes if _route_key(r) not in stored]
+
+
 class ConnectorProvisioningService:
     """Provision ai-worker chat-ingest connectors atomically.
 
@@ -1445,10 +1457,19 @@ class ConnectorProvisioningService:
             if target is None:
                 raise NotFoundException("Context", str(context_id))
 
-        # #1759 check 1, before the lock too: each destination is a live
-        # context of this workspace the caller can read.
+        # #1759 check 1, before the lock too: each destination the PATCH adds
+        # or changes is a live context of this workspace the caller can read.
+        # An item identical to a stored row is carried over unchecked: the
+        # list is a full replacement, so another admin's route to a context
+        # this caller cannot see must not block every later save (it grants
+        # nothing — pointing a channel there is a changed item). The stored
+        # set is re-read under the lock below.
+        stored_unlocked: set[tuple[str, str, UUID | None]] = set()
         if new_routes:
-            await self._check_route_destinations_readable(new_routes, workspace_id, user_id)
+            stored_unlocked = await stored_routes(self.db, connector_id, workspace_id)
+            await self._check_route_destinations_readable(
+                _changed_routes(new_routes, stored_unlocked), workspace_id, user_id
+            )
 
         connector = await self._get_connector_for_update(
             workspace_id, connector_id, expected_config_version
@@ -1485,7 +1506,22 @@ class ConnectorProvisioningService:
                     "channel routes need both. Re-create it bound to a context first.",
                     field="channel_routes",
                 )
-            await self._check_route_destinations_writable(new_routes, connector)
+            stored_locked = await stored_routes(self.db, connector.id, workspace_id)
+            # An item that matched before the lock but no longer does (a
+            # concurrent save changed the stored row) is a changed item: it
+            # gets the read check it skipped.
+            await self._check_route_destinations_readable(
+                [
+                    r
+                    for r in _changed_routes(new_routes, stored_locked)
+                    if _route_key(r) in stored_unlocked
+                ],
+                workspace_id,
+                user_id,
+            )
+            await self._check_route_destinations_writable(
+                _changed_routes(new_routes, stored_locked), connector
+            )
 
         llm_changed = False
         if llm_config is not _UNSET:
@@ -1506,7 +1542,9 @@ class ConnectorProvisioningService:
         )
         routes_changed = False
         if new_routes is not None:
-            routes_changed = await self._replace_channel_routes(connector.id, new_routes)
+            routes_changed = await self._replace_channel_routes(
+                connector.id, workspace_id, new_routes
+            )
         if unrouted_private_channels is not _UNSET:
             if connector.unrouted_private_channels != unrouted_private_channels:
                 routes_changed = True
@@ -1636,6 +1674,9 @@ class ConnectorProvisioningService:
         from services.permission_service import PermissionService
         from utils.exceptions import AuthorizationError
 
+        targets = [r for r in routes if r.action == ROUTE and r.context_id is not None]
+        if not targets:
+            return
         owner = await self._connector_key_owner(connector)
         if owner is None:
             raise ValidationError(
@@ -1644,8 +1685,8 @@ class ConnectorProvisioningService:
                 field="channel_routes",
             )
         permissions = PermissionService(self.db)
-        for route in routes:
-            if route.action != ROUTE or route.context_id is None:
+        for route in targets:
+            if route.context_id is None:  # narrowed above; for the type checker
                 continue
             try:
                 await permissions.check_context_write(
@@ -1688,14 +1729,14 @@ class ConnectorProvisioningService:
         ).scalar_one_or_none()
 
     async def _replace_channel_routes(
-        self, connector_id: UUID, routes: list[ChannelRouteInput]
+        self, connector_id: UUID, workspace_id: UUID, routes: list[ChannelRouteInput]
     ) -> bool:
         """Replace the connector's route rows with ``routes`` (the caller holds
         the connector row lock); returns whether the stored set changed."""
         from models.resource import WorkspaceConnectorChannelRoute as Route
 
-        before = await stored_routes(self.db, connector_id)
-        after = {(r.channel_id, r.action, r.context_id) for r in routes}
+        before = await stored_routes(self.db, connector_id, workspace_id)
+        after = {_route_key(r) for r in routes}
         if before == after:
             return False
         await self.db.execute(delete(Route).where(Route.connector_id == connector_id))

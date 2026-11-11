@@ -343,14 +343,23 @@ async def effective_channel_routing(db: AsyncSession, connector: Any) -> Effecti
     )
 
 
-async def stored_routes(db: AsyncSession, connector_id: UUID) -> set[tuple[str, str, UUID | None]]:
-    """The stored ``(channel_id, action, context_id)`` set of one connector, as
-    written (no effective reading), to tell whether a PATCH changed it."""
+async def stored_routes(
+    db: AsyncSession, connector_id: UUID, workspace_id: UUID
+) -> set[tuple[str, str, UUID | None]]:
+    """The stored ``(channel_id, action, context_id)`` set of one connector of
+    ``workspace_id``, as written (no effective reading), to tell which items of
+    a PATCH are new or changed. Scoped to the workspace: it is read before the
+    connector row lock, whose workspace predicate has not run yet, so another
+    workspace's connector reads as having no routes (no oracle)."""
+    from models.resource import WorkspaceConnector
     from models.resource import WorkspaceConnectorChannelRoute as Route
 
     result = await db.execute(
-        select(Route.channel_id, Route.action, Route.context_id).where(
-            Route.connector_id == connector_id
+        select(Route.channel_id, Route.action, Route.context_id)
+        .join(WorkspaceConnector, WorkspaceConnector.id == Route.connector_id)
+        .where(
+            Route.connector_id == connector_id,
+            WorkspaceConnector.workspace_id == workspace_id,
         )
     )
     return {(row.channel_id, row.action, row.context_id) for row in result.all()}
