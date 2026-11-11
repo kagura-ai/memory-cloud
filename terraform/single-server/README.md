@@ -594,6 +594,35 @@ the bridge-worker restart, and draining automatically. Use
 `./scripts/deploy.sh --verify-bridge` to check the chat-bridge worker is on
 that color, or `./scripts/deploy.sh --rollback` to switch back.
 
+> **One mutating run at a time
+> ([#2776](https://github.com/kagura-ai/memory-cloud/issues/2776)).** A deploy,
+> `--rollback`, `--web` and `--generate-caddyfile` first take a non-blocking
+> `flock` on `/opt/kagura-memory/deploy.lock` (next to the marker, outside the
+> source tree; override with `DEPLOY_LOCK_FILE`). The holder writes its pid,
+> start time and mode into that file. A second run started meanwhile changes
+> nothing and exits at once with:
+>
+> ```text
+> [deploy] ERROR: another deploy.sh run holds /opt/kagura-memory/deploy.lock (pid=… started=… mode=…).
+>        Refusing to start '…': nothing was changed. Let that run finish …
+> ```
+>
+> Wait for the first run (a deploy whose output looks stuck usually is not)
+> and start again. The kernel drops the lock when the holding process exits,
+> also on failure or a signal, so there is no stale lock to delete; the file's
+> contents just describe the last holder. `--status`, `--verify-bridge` and
+> `--help` take no lock and work during a deploy. The host needs `flock`
+> (util-linux).
+>
+> The lock covers what the script does, not your shell: in
+> `./scripts/deploy.sh | tee deploy.log` the shell truncates `deploy.log`
+> before `deploy.sh` starts, so a refused second run would still empty the
+> first run's log. Give each run its own log file (for example
+> `tee "deploy-$(date -u +%Y%m%dT%H%M%SZ).log"`) or append with `tee -a`.
+> The same holds for the steps above it: check that no deploy runs
+> (`flock -n /opt/kagura-memory/deploy.lock true` succeeds) before you move the
+> checkout with `git fetch` / `git reset --hard`.
+
 > **The co-resident consumer worker.** Both the deploy and the rollback path
 > restart it right after the Caddy switch (Step 6b), because a flip would
 > otherwise leave it talking to the color being drained — surviving only on a

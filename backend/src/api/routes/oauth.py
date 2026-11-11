@@ -20,8 +20,6 @@ Security:
 """
 
 import asyncio
-import base64
-import binascii
 import contextlib
 import contextvars
 import hashlib
@@ -42,7 +40,6 @@ from typing import Any, TypeVar
 from urllib.parse import (
     parse_qsl,
     unquote,
-    unquote_plus,
     urlencode,
     urlparse,
     urlsplit,
@@ -65,6 +62,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from python_multipart.exceptions import MultipartParseError
+from sqlalchemy import func, literal
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
@@ -72,6 +70,11 @@ from starlette.requests import ClientDisconnect
 
 from auth.consent_csrf import consent_csrf_token, consent_csrf_valid
 from auth.dependencies import SessionUser, require_admin
+from auth.google_connected_apps import (
+    GOOGLE_CONNECTED_APPS_PROVIDER,
+    is_google_connected_apps_redirect_uri,
+    keeps_refresh_token,
+)
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
     AUTHORIZATION_REQUEST_SINGLE_VALUED,
@@ -80,6 +83,7 @@ from auth.oauth2_server import (
     _OAuthUser,
     browser_session_is_live,
     create_authorization_server,
+    decode_basic_client_credentials,
     repeated_parameter,
     share_lock_owner,
     validate_authorization_parameters,
@@ -88,6 +92,10 @@ from auth.oauth_scope import client_registered_scope, granted_scope, registratio
 from auth.oauth_token_storage import token_lookup_values, token_matches
 from auth.session import SESSION_COOKIE_NAME
 from auth.starlette_oauth2_request import StarletteOAuth2Payload, StarletteOAuth2Request
+from config.google_connected_apps import (
+    GEMINI_CUSTOM_MCP_PATH_PREFIX,
+    GOOGLE_OAUTH_REDIRECTOR_HOSTS,
+)
 from config.settings import get_settings
 from db.base import get_sync_session
 from db.redis import increment_counter
@@ -746,14 +754,7 @@ _PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
 # binding on the redirector.
 # Hosts are an ordered tuple (not a frozenset) so the match order is fixed.
 _PROVIDER_EXACT_REDIRECTS: dict[str, tuple[tuple[str, ...], str]] = {
-    "gemini": (
-        (
-            "oauth-redirect.googleusercontent.com",
-            "oauth-redirect-sandbox.googleusercontent.com",
-            "oauth-redirect-test.googleusercontent.com",
-        ),
-        "/r/user_bound_custom-mcp-",
-    ),
+    "gemini": (GOOGLE_OAUTH_REDIRECTOR_HOSTS, GEMINI_CUSTOM_MCP_PATH_PREFIX),
 }
 
 # ``(base, provider)`` pairs, ``base`` = ``https://<host><prefix>``, built once.
@@ -769,12 +770,20 @@ _EXACT_REDIRECT_BASES: tuple[tuple[str, str], ...] = tuple(
 # through RFC 7591 as a public PKCE client. agent.meta.ai is the callback first
 # reported for it; the submission portal's sign-in test registers the other two
 # together and needs both. muse.ai is Meta's (whois, name servers, certificate).
+# Grok and Grok Bot (#2779) register with Cursor's published client metadata
+# (``client_name`` "Cursor") plus one grok.com callback, trailing slash
+# included; that one URI, not grok.com, is allowed. grok.com is xAI's: its
+# page signs in through accounts.x.ai and loads media from data.x.ai and
+# media.x.ai; whois shows a privacy-redacted US (CA) registrant, Cloudflare as
+# registrar and name servers (x.ai's name servers are Cloudflare's too), and
+# the certificate is issued to grok.com and *.grok.com.
 _PROVIDER_EXACT_URIS: dict[str, tuple[str, ...]] = {
     "muse": (
         "https://agent.meta.ai/api/hatch/oauth/callback",
         "https://muse.ai/api/hatch/oauth/callback",
         "https://platform.muse.ai/oauth/credential-test/callback",
     ),
+    "grok": ("https://grok.com/connectors-oauth-exchange-code/",),
 }
 
 # The Muse callbacks as the registration rejection message names them.
@@ -839,11 +848,14 @@ _LOOPBACK_CLIENT_LABELS: tuple[str, ...] = (
 # is a superset of ``_PROVIDER_HOSTNAMES``), then the exact-redirect ones. The
 # exact-redirect providers are NOT loopback keywords: a loopback registration
 # whose ``client_name`` says "Gemini" stays refused (#2222). The exact-URI
-# providers (#2410) follow the same rule.
+# providers (#2410) follow the same rule, and so does Google connected apps
+# (#2773), whose exact URIs come from ``GOOGLE_CONNECTED_APPS_REDIRECT_URIS``
+# and are read at registration time.
 _DCR_ALLOWED_PROVIDERS: tuple[str, ...] = (
     *_LOOPBACK_PROVIDER_KEYWORDS,
     *_PROVIDER_EXACT_REDIRECTS,
     *_PROVIDER_EXACT_URIS,
+    GOOGLE_CONNECTED_APPS_PROVIDER,
 )
 
 
@@ -865,7 +877,9 @@ def _match_exact_redirect_provider(redirect_uri: str) -> str | None:
     """Return the exact-URI or exact-redirect provider ``redirect_uri`` names, or None.
 
     An ``_PROVIDER_EXACT_URIS`` provider (#2410) matches only its listed URIs,
-    whole and as written.
+    whole and as written; so does ``google_connected_apps`` (#2773), whose
+    URIs are ``GOOGLE_CONNECTED_APPS_REDIRECT_URIS`` as configured now (the
+    setting refuses any entry under the gemini prefix, so the two never meet).
 
     The raw string must be ``https://<host><prefix><segment>`` for one of the
     provider's hosts, character for character: the scheme and host are
@@ -883,6 +897,8 @@ def _match_exact_redirect_provider(redirect_uri: str) -> str | None:
     for provider, uris in _PROVIDER_EXACT_URIS.items():
         if redirect_uri in uris:
             return provider
+    if is_google_connected_apps_redirect_uri(redirect_uri):
+        return GOOGLE_CONNECTED_APPS_PROVIDER
     for base, provider in _EXACT_REDIRECT_BASES:
         if not redirect_uri.startswith(base):
             continue
@@ -899,7 +915,8 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
     """Detect the DCR provider from ``redirect_uri`` (+ ``client_name`` for loopback).
 
     Returns one of ``"chatgpt"``, ``"claude"``, ``"cursor"``, ``"codex"``,
-    ``"hermes"``, ``"openclaw"``, ``"gemini"``, ``"muse"``, or ``"custom"``. The caller rejects
+    ``"hermes"``, ``"openclaw"``, ``"gemini"``, ``"muse"``, ``"grok"``,
+    ``"google_connected_apps"``, or ``"custom"``. The caller rejects
     ``"custom"`` with an RFC 6749 §5.2 error response.
 
     Strategy:
@@ -912,8 +929,9 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
         2. Otherwise → an exact-redirect provider (``_PROVIDER_EXACT_REDIRECTS``,
            ``gemini``): exact https host + pinned path prefix + one segment,
            compared as written (issue #2222); an exact-URI provider
-           (``_PROVIDER_EXACT_URIS``, ``muse``): the whole URI as written
-           (issue #2410).
+           (``_PROVIDER_EXACT_URIS``, ``muse``, ``grok``): the whole URI as
+           written (issues #2410, #2779); ``google_connected_apps``: the whole
+           URI as written, listed in ``GOOGLE_CONNECTED_APPS_REDIRECT_URIS`` (issue #2773).
         3. Otherwise → match the parsed hostname (case-insensitive) against
            ``_PROVIDER_HOSTNAMES`` (``chatgpt`` / ``claude`` / ``cursor``)
            as exact host or single-suffix subdomain.
@@ -1017,8 +1035,9 @@ async def dynamic_client_registration(
       URIs ``https://agent.meta.ai/api/hatch/oauth/callback``,
       ``https://muse.ai/api/hatch/oauth/callback`` and
       ``https://platform.muse.ai/oauth/credential-test/callback``
-      (issues #2410, #2487). Every entry of
-      ``redirect_uris`` is checked on its own (#1686); entries that fail are
+      (issues #2410, #2487); grok by its exact callback URI
+      ``https://grok.com/connectors-oauth-exchange-code/`` (issue #2779).
+      Every entry of ``redirect_uris`` is checked on its own (#1686); entries that fail are
       left out of the registration and only the rest are stored and echoed
       (RFC 7591 §3.2.1). Refused with ``invalid_client_metadata`` only when
       no entry passes (#2232)
@@ -1082,7 +1101,9 @@ async def dynamic_client_registration(
     # list: a refused entry is never stored, so /authorize and /token never
     # accept it, and the client is the one the caller could get by sending the
     # passing entries alone. The registration is refused only when none
-    # passes. The client's provider is the first *passing* entry's.
+    # passes. The client's provider is the first *passing* entry's, except
+    # that google_connected_apps (#2773) is only ever the provider of a list
+    # made of its configured URIs alone (see below).
     accepted: list[tuple[str, str]] = []
     refused: list[str] = []
     for uri in data.redirect_uris:
@@ -1100,6 +1121,22 @@ async def dynamic_client_registration(
             accepted.append((uri, provider))
         else:
             refused.append(uri)
+
+    # A google_connected_apps client keeps its refresh token on refresh
+    # (#2773), so it must have no callback but the configured ones: next to
+    # any other accepted entry (a loopback, a gemini binding, another
+    # provider's callback) the configured entries are dropped, and the rest
+    # are registered as they would be without them.
+    connected_app_uris = [
+        uri for uri, provider in accepted if provider == GOOGLE_CONNECTED_APPS_PROVIDER
+    ]
+    if connected_app_uris and len(connected_app_uris) != len(accepted):
+        refused.extend(connected_app_uris)
+        accepted = [
+            (uri, provider)
+            for uri, provider in accepted
+            if provider != GOOGLE_CONNECTED_APPS_PROVIDER
+        ]
 
     if not accepted:
         logger.warning(
@@ -1121,7 +1158,10 @@ async def dynamic_client_registration(
                 f"Gemini must use {_GEMINI_REDIRECT_HOSTS_TEXT} with the path "
                 f"{_PROVIDER_EXACT_REDIRECTS['gemini'][1]}<one segment> and no "
                 "query or fragment. "
-                f"Muse must use exactly {_MUSE_CALLBACKS_TEXT}."
+                f"Muse must use exactly {_MUSE_CALLBACKS_TEXT}. "
+                f"Grok must use exactly {_PROVIDER_EXACT_URIS['grok'][0]}. "
+                "Google connected apps must use only the redirect URIs this "
+                "server is configured with."
             ),
         )
 
@@ -3606,27 +3646,6 @@ def _invalid_client_response(description: str) -> JSONResponse:
     return response
 
 
-def _basic_client_credentials(header: str) -> tuple[str, str] | None:
-    """Decode an ``Authorization: Basic`` header into (client_id, secret).
-
-    RFC 6749 §2.3.1: both parts are form-urlencoded before base64 encoding.
-
-    Raises:
-        ValueError: The header is not valid Basic credentials.
-    """
-    scheme, _, value = header.partition(" ")
-    if scheme.lower() != "basic":
-        return None
-    try:
-        decoded = base64.b64decode(value.strip(), validate=True).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError) as e:
-        raise ValueError("malformed Basic credentials") from e
-    client_id, sep, secret = decoded.partition(":")
-    if not sep or not client_id:
-        raise ValueError("malformed Basic credentials")
-    return unquote_plus(client_id), unquote_plus(secret)
-
-
 def _authenticate_endpoint_client(
     request: Request,
     db_session: Session,
@@ -3659,7 +3678,7 @@ def _authenticate_endpoint_client(
     secret = form_client_secret
     if header:
         try:
-            basic = _basic_client_credentials(header)
+            basic = decode_basic_client_credentials(header)
         except ValueError:
             return _invalid_client_response("Malformed client credentials.")
         if basic is not None:
@@ -3902,6 +3921,29 @@ async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSO
     return await _run_sync(_sync)
 
 
+def _revoked_columns(*, by_access: bool, by_refresh: bool, keeps_refresh: bool) -> list[Any]:
+    """The ``oauth_tokens`` revocation columns a ``/revoke`` stamps.
+
+    A refresh token revokes the access token issued with it too. For a client
+    that keeps its refresh token (Google connected apps, #2773) any token of
+    the row ends the link, since its refresh would otherwise mint a new
+    access token; for every other client an access token revokes only itself.
+
+    Args:
+        by_access: The presented token is the row's access token.
+        by_refresh: The presented token is the row's refresh token.
+        keeps_refresh: ``keeps_refresh_token`` holds for the caller.
+
+    Returns:
+        The columns to stamp (empty when the token matched neither).
+    """
+    if by_refresh or (keeps_refresh and by_access):
+        return [OAuth2Token.access_token_revoked_at, OAuth2Token.refresh_token_revoked_at]
+    if by_access:
+        return [OAuth2Token.access_token_revoked_at]
+    return []
+
+
 @router.post(
     "/revoke",
     response_model=None,
@@ -3935,7 +3977,11 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
     ``client_id``, a confidential client with its secret by HTTP Basic or
     the form. A token issued to another client is left alone and answered
     like an unknown token, ``200`` (§2.2). Revoking a refresh token also
-    revokes the access token issued with it.
+    revokes the access token issued with it. For a Google connected-apps
+    client that keeps its refresh token (#2773), revoking the current access
+    token revokes the refresh token too, so the link ends either way; an
+    access token already replaced by a refresh matches no row and is
+    answered ``200`` with nothing changed, like an unknown token.
 
     The form body is read bounded before it is parsed and before the client
     is authenticated (#2207): over ``_OAUTH_FORM_MAX_BODY_BYTES`` is
@@ -3960,11 +4006,21 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
             if isinstance(caller, JSONResponse):
                 return caller
 
+            # Read without a row lock, then revoke with one UPDATE by id
+            # (#2773). A refresh of a Google connected-apps client rewrites
+            # this row's access token in place and holds the row while it
+            # does: a locked read by the presented token would wait for it,
+            # then match nothing and leave the link alive. The UPDATE waits
+            # for that refresh instead and stamps each column with
+            # COALESCE(existing, now) on whatever the refresh committed, so
+            # the revocation wins either way. No lock is taken beyond the
+            # UPDATE's own row lock on oauth_tokens.
+            candidates = token_lookup_values(token)
             oauth_token = (
                 db_session.query(OAuth2Token)
                 .filter(
-                    OAuth2Token.access_token.in_(token_lookup_values(token))
-                    | OAuth2Token.refresh_token.in_(token_lookup_values(token))
+                    OAuth2Token.access_token.in_(candidates)
+                    | OAuth2Token.refresh_token.in_(candidates)
                 )
                 .first()
             )
@@ -3975,17 +4031,20 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
                     caller_client_id=caller.client_id,
                 )
             elif oauth_token is not None:
-                now = utcnow()
-                if (
-                    token_matches(token, oauth_token.access_token)
-                    and oauth_token.access_token_revoked_at is None
-                ):
-                    oauth_token.access_token_revoked_at = now
-                if token_matches(token, oauth_token.refresh_token):
-                    if oauth_token.refresh_token_revoked_at is None:
-                        oauth_token.refresh_token_revoked_at = now
-                    if oauth_token.access_token_revoked_at is None:
-                        oauth_token.access_token_revoked_at = now
+                columns = _revoked_columns(
+                    by_access=token_matches(token, oauth_token.access_token),
+                    by_refresh=token_matches(token, oauth_token.refresh_token),
+                    keeps_refresh=keeps_refresh_token(caller),
+                )
+                if columns:
+                    now = utcnow()
+                    db_session.query(OAuth2Token).filter(OAuth2Token.id == oauth_token.id).update(
+                        {
+                            column: func.coalesce(column, literal(now, type_=column.type))
+                            for column in columns
+                        },
+                        synchronize_session=False,
+                    )
                 db_session.commit()
                 logger.info(
                     "oauth_token_revoked",

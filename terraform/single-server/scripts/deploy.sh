@@ -16,6 +16,10 @@
 #   ./scripts/deploy.sh --status     # show current active API color
 #   ./scripts/deploy.sh --web        # rebuild + restart kagura-web in place
 #
+# One mutating run at a time (#2776): deploy, --rollback, --web and
+# --generate-caddyfile take a non-blocking lock (DEPLOY_LOCK_FILE); a second
+# run exits at once naming the holder. --status takes no lock.
+#
 # Requires (on host): docker compose, envsubst (gettext-base)
 #   Inside images: curl (api container), node (kagura-web container)
 #   Additionally for --web (host): timeout (coreutils) — checked at invocation, not at startup
@@ -35,6 +39,10 @@ CADDYFILE_TPL="${CADDYFILE_TPL:-$PROJECT_DIR/Caddyfile.tpl}"
 CADDYFILE="$PROJECT_DIR/Caddyfile"
 MARKER_FILE="/opt/kagura-memory/active-color"
 ENV_FILE="$PROJECT_DIR/.env.prod"
+# One mutating run at a time (#2776): see acquire_deploy_lock. Next to the
+# marker, i.e. outside the source tree a deploy replaces, in a directory the
+# deploy user already writes. Overridable for tests.
+DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-$(dirname "$MARKER_FILE")/deploy.lock}"
 
 READINESS_TIMEOUT="${READINESS_TIMEOUT:-60}"   # seconds to wait for /readiness
 READINESS_INTERVAL=2                            # seconds between checks
@@ -846,6 +854,51 @@ report_bridge_state() {
 }
 
 # ---------------------------------------------------------------------------
+# Deploy lock (#2776)
+# ---------------------------------------------------------------------------
+# Two deploys started 23 s apart both ran `alembic upgrade head` in the same
+# second; the second lost a CREATE TABLE race and stopped at Step 2 by luck.
+# Nothing here is written for overlapping runs (two migrations, two writers of
+# the marker and the Caddyfile, two Caddy restarts), so every mutating mode
+# takes an exclusive, NON-blocking flock before it does anything at all.
+
+# Does this mode change anything (marker, Caddyfile, containers, migrations)?
+# Read-only modes and an unknown argument take no lock, so --status keeps
+# working while a deploy runs.
+mode_takes_lock() {
+    case "$1" in
+        ""|--rollback|--web|--generate-caddyfile) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Takes the lock on fd 9 for the rest of the process: the kernel drops it when
+# the process exits, on success, on error() and on a signal alike. Children
+# inherit fd 9; none of them outlives the script (docker CLI calls return).
+acquire_deploy_lock() {
+    local mode="$1"
+    command -v flock > /dev/null 2>&1 \
+        || error "flock not found (util-linux). It keeps two deploy.sh runs from overlapping (#2776)."
+    mkdir -p "$(dirname "$DEPLOY_LOCK_FILE")" 2> /dev/null || true
+    # `<>` opens read-write WITHOUT truncating: a refused run must leave the
+    # holder's line in the file intact.
+    if ! exec 9<> "$DEPLOY_LOCK_FILE"; then
+        error "Cannot open the deploy lock $DEPLOY_LOCK_FILE. Make it writable by the deploy user (for example: sudo chown \"$(id -un)\" \"$DEPLOY_LOCK_FILE\"); pointing DEPLOY_LOCK_FILE elsewhere would let two runs overlap. Nothing was changed."
+    fi
+    if ! flock -n 9; then
+        local holder
+        holder="$(cat "$DEPLOY_LOCK_FILE" 2> /dev/null || true)"
+        error "another deploy.sh run holds $DEPLOY_LOCK_FILE (${holder:-holder not recorded yet}).
+       Refusing to start '${mode}': nothing was changed. Let that run finish
+       (\`$0 --status\` works meanwhile), then run this again."
+    fi
+    # Same inode, so the flock on fd 9 is unaffected by this second open.
+    printf 'pid=%s started=%s mode=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" \
+        > "$DEPLOY_LOCK_FILE" \
+        || log "WARNING: could not record this run in $DEPLOY_LOCK_FILE (the lock is held regardless)"
+}
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 cmd_status() {
@@ -1285,6 +1338,13 @@ main() {
     # validation so even an early set -e death reports where it aborted.
     trap 'on_exit $?' EXIT
 
+    # #2776: before ANY other step, so a refused second run changes nothing.
+    if mode_takes_lock "${1:-}"; then
+        DEPLOY_STAGE="acquire deploy lock"
+        acquire_deploy_lock "${1:-deploy}"
+        DEPLOY_STAGE="startup"
+    fi
+
     # Validate prerequisites
     command -v envsubst > /dev/null 2>&1 || error "envsubst not found. Install: apt-get install gettext-base"
     [ -f "$COMPOSE_FILE" ] || error "docker-compose.prod.yml not found at $COMPOSE_FILE"
@@ -1348,6 +1408,7 @@ main() {
             echo "  KAGURA_IMAGE_TAG         API image tag, registry mode only (e.g. v0.65.0)"
             echo "  KAGURA_WEB_IMAGE_REPO    Web image repository, registry mode + --web only"
             echo "  KAGURA_WEB_IMAGE_TAG     Web image tag, registry mode + --web only"
+            echo "  DEPLOY_LOCK_FILE         Lock that keeps two mutating runs from overlapping; --status/--verify-bridge skip it (default: /opt/kagura-memory/deploy.lock)"
             ;;
         "")
             cmd_deploy

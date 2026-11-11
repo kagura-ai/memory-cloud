@@ -759,6 +759,15 @@ class TestRefreshTokenGrant:
         result = grant.authenticate_refresh_token("rt-revoked")
         assert result is None
 
+    def test_authenticate_refresh_token_with_the_revoked_flag_returns_none(self) -> None:
+        # A row whose ``revoked`` flag is set is dead even when the refresh
+        # column was never stamped.
+        grant = _make_refresh_grant()
+        token = _make_token(refresh_token="rt-flagged", refresh_token_revoked_at=None, revoked=True)
+        grant.server.db_session.query().filter().with_for_update().first.return_value = token
+
+        assert grant.authenticate_refresh_token("rt-flagged") is None
+
     def test_authenticate_refresh_token_locks_the_owner_first(self) -> None:
         # #1738: the owner's users row is share-locked before the token row,
         # in the same order as a password reset, so a reset cannot miss a

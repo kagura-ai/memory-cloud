@@ -150,11 +150,14 @@ class StarletteOAuth2Request(OAuth2Request):
         if request.headers.get("x-forwarded-proto") == "https":
             uri = uri.replace("http://", "https://", 1)
 
-        # Initialize base OAuth2Request
+        # Initialize base OAuth2Request. Starlette's ``Headers`` is matched
+        # case-insensitively; Authlib reads ``headers.get("Authorization")``
+        # for ``client_secret_basic``, which a dict of the lower-cased ASGI
+        # names never answered (#2778).
         super().__init__(
             method=request.method,
             uri=uri,
-            headers=dict(request.headers),
+            headers=request.headers,
         )
 
         # Set payload explicitly (required for Authlib 1.6.5).

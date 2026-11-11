@@ -1413,6 +1413,28 @@ it by its MCP URL as before ([MCP clients › ChatGPT](mcp-clients.md#chatgpt-de
 The web UI also renders the link only for an `https:` URL, whatever the API
 returns.
 
+## Google connected apps (Issue #2773)
+
+Google's connected apps program links an MCP server into Google's apps. Its
+client registers through Dynamic Client Registration and asks for two things
+this deployment answers from configuration: its own redirect URIs, and a
+refresh token that is not rotated ("persistent linking"). Both values come from
+Google's Connected Console for this deployment's app; leave both empty
+otherwise.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `GOOGLE_CONNECTED_APPS_REDIRECT_URIS` | *(empty)* | The app's redirect URIs, comma-separated, **exactly** as the console shows them, e.g. `https://oauth-redirect.googleusercontent.com/r/<app-id>`. Matched character for character. A DCR registration whose every redirect URI is listed is stored with the provider `google_connected_apps`; listed URIs sent next to any other URI are dropped from that registration. Such a client gets back the same refresh token on every refresh (its access token is replaced in place), unless it also registered a grant beyond `authorization_code` and `refresh_token` (the device-code grant, for one, hands tokens to the poller without Google's redirector), in which case it rotates; every other client keeps rotating its refresh token. Removing a URI from the list, or emptying it, restores rotation for that client at its next refresh. Each entry must be `https://` on `oauth-redirect`, `oauth-redirect-sandbox` or `oauth-redirect-test` `.googleusercontent.com` written exactly (no user info, port or case variant), with a path of one or more segments, no query, fragment, `*` or trailing `/`, not the bare `/r` or `/a`, and not under `/r/user_bound_custom-mcp-` (the Gemini custom connector's namespace); an entry listed twice or anything else fails startup. |
+| `GOOGLE_CONNECTED_APPS_VERIFICATION_TOKENS` | *(empty)* | The domain verification token(s) from the console, comma-separated. `GET /.well-known/google-connected-apps` answers `200` `{"verification_tokens": [...]}` directly (no redirect); empty answers `404`. Not secret, but never logged. A token with whitespace or a control character fails startup. |
+
+The reverse proxy already forwards `/.well-known/*` to the API, so the file
+needs no proxy change. A kept refresh token has no expiry, like every refresh
+token here; it ends when the client revokes it (`/revoke` with the refresh
+token or with the current access token), when the user's password is reset, or
+when the account is erased. A revocation that arrives while a refresh of the
+same token is running still ends the link: it waits for that refresh and then
+revokes the refresh token and the access token the refresh just issued.
+
 ## Supersede suggestions and k-NN seeding: log events (Issue #2023)
 
 After a memory is embedded, one step reads its nearest neighbours. Two features

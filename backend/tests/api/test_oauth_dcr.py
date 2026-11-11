@@ -1512,6 +1512,190 @@ class TestDcrEndpointMuse:
         assert all(uri in description for uri in _MUSE_URIS)
 
 
+# --- #2779: Grok ---------------------------------------------------------------
+
+_GROK_URI = "https://grok.com/connectors-oauth-exchange-code/"
+# What Grok and Grok Bot send: Cursor's published client metadata plus the
+# grok.com callback.
+_GROK_CURSOR_URIS = [
+    "https://www.cursor.com/agents/mcp/oauth/callback",
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "http://localhost:8787/callback",
+    "http://127.0.0.1:8787/callback",
+    _GROK_URI,
+]
+
+
+class TestDetectDcrProviderGrok:
+    """Grok's connector callback, matched as the whole URI, character for character."""
+
+    @pytest.mark.parametrize("client_name", ["Cursor", "Grok", "Any Client"])
+    def test_accepted(self, client_name: str):
+        assert detect_dcr_provider(_GROK_URI, client_name) == "grok"
+
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            # No trailing slash, another path, a path under it.
+            "https://grok.com/connectors-oauth-exchange-code",
+            "https://grok.com/connectors-oauth-exchange-code/x",
+            "https://grok.com/connectors-oauth-exchange-code//",
+            "https://grok.com/connectors-oauth-exchange-codex/",
+            "https://grok.com/oauth/callback",
+            "https://grok.com/",
+            "https://grok.com/connectors-oauth-exchange-code/%2E%2E/",
+            "https://grok.com/%63onnectors-oauth-exchange-code/",
+            # Query, params, fragment.
+            "https://grok.com/connectors-oauth-exchange-code/?next=https://evil.example",
+            "https://grok.com/connectors-oauth-exchange-code/#x",
+            "https://grok.com/connectors-oauth-exchange-code/;x",
+            # Scheme, case, trailing dot, port, userinfo.
+            "http://grok.com/connectors-oauth-exchange-code/",
+            "HTTPS://grok.com/connectors-oauth-exchange-code/",
+            "https://GROK.COM/connectors-oauth-exchange-code/",
+            "https://grok.com/Connectors-OAuth-Exchange-Code/",
+            "https://grok.com./connectors-oauth-exchange-code/",
+            "https://grok.com:443/connectors-oauth-exchange-code/",
+            "https://user@grok.com/connectors-oauth-exchange-code/",
+            # Other grok.com hosts and look-alikes: no hostname suffix match.
+            "https://www.grok.com/connectors-oauth-exchange-code/",
+            "https://evil.grok.com/connectors-oauth-exchange-code/",
+            "https://grok.com.evil.example/connectors-oauth-exchange-code/",
+            "https://evilgrok.com/connectors-oauth-exchange-code/",
+        ],
+    )
+    def test_refused(self, redirect_uri: str):
+        assert detect_dcr_provider(redirect_uri, "Cursor") != "grok"
+        assert detect_dcr_provider(redirect_uri, "Grok") == "custom"
+
+    def test_grok_is_not_a_loopback_keyword(self):
+        # A loopback registration that merely says "Grok" stays refused.
+        assert detect_dcr_provider("http://localhost:8787/callback", "Grok") == "custom"
+
+
+class TestDcrEndpointGrok:
+    """``POST /api/v1/oauth/register`` with Grok's callbacks (#2779)."""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app) as c:
+            yield c
+
+    def _register(self, client, body: dict):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+            patch("api.routes.oauth.logger") as fake_logger,
+        ):
+            response = client.post("/api/v1/oauth/register", json=body)
+        return response, fake_session, fake_logger
+
+    def test_cursor_metadata_with_the_grok_callback_stores_all_five(self, client):
+        response, fake_session, _ = self._register(
+            client,
+            {
+                "client_name": "Cursor",
+                "redirect_uris": _GROK_CURSOR_URIS,
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        body = response.json()
+        # The provider is the first accepted entry's (#2232): cursor.
+        assert body["provider"] == "cursor"
+        assert body["redirect_uris"] == _GROK_CURSOR_URIS
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "cursor"
+        assert stored.redirect_uris == _GROK_CURSOR_URIS
+        assert stored.check_redirect_uri(_GROK_URI)
+        assert not stored.check_redirect_uri("https://grok.com/connectors-oauth-exchange-code")
+
+    def test_grok_callback_alone_registers_as_grok(self, client):
+        response, fake_session, _ = self._register(
+            client, {"client_name": "Grok", "redirect_uris": [_GROK_URI]}
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == "grok"
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "grok"
+        assert stored.redirect_uris == [_GROK_URI]
+
+    @pytest.mark.parametrize(
+        "variant",
+        [
+            "https://grok.com/connectors-oauth-exchange-code",
+            "https://grok.com/connectors-oauth-exchange-code/?x=1",
+            "https://grok.com/connectors-oauth-exchange-code/#x",
+            "https://grok.com/other/",
+            "http://grok.com/connectors-oauth-exchange-code/",
+            "https://Grok.com/connectors-oauth-exchange-code/",
+        ],
+    )
+    def test_variant_next_to_cursor_callbacks_is_dropped(self, client, variant):
+        uris = [*_GROK_CURSOR_URIS[:4], variant]
+        response, fake_session, _ = self._register(
+            client, {"client_name": "Cursor", "redirect_uris": uris}
+        )
+
+        assert response.status_code == 201, response.text
+        stored = fake_session.add.call_args.args[0]
+        assert stored.redirect_uris == _GROK_CURSOR_URIS[:4]
+        assert not stored.check_redirect_uri(variant)
+
+    def test_rejection_description_names_the_grok_callback(self, client):
+        response, _, _ = self._register(
+            client, {"client_name": "Grok", "redirect_uris": ["https://attacker.example/cb"]}
+        )
+
+        assert response.status_code == 400, response.text
+        description = response.json()["error_description"]
+        assert "grok" in description
+        assert _GROK_URI in description
+
+    def test_authorize_accepts_the_grok_callback_of_the_registered_client(self, client):
+        response, fake_session, _ = self._register(
+            client, {"client_name": "Cursor", "redirect_uris": _GROK_CURSOR_URIS}
+        )
+        assert response.status_code == 201, response.text
+        stored = fake_session.add.call_args.args[0]
+
+        def _authorize(redirect_uri: str):
+            fake_user = MagicMock(email="test@example.com", session_id="sid-x")
+            db = MagicMock()
+            db.query.return_value.filter_by.return_value.first.return_value = stored
+            with (
+                patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
+                patch("api.routes.oauth.get_sync_session", return_value=db),
+            ):
+                return client.get(
+                    "/api/v1/oauth/authorize",
+                    params={
+                        "response_type": "code",
+                        "client_id": stored.client_id,
+                        "redirect_uri": redirect_uri,
+                        "state": "s",
+                        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+                        "code_challenge_method": "S256",
+                        "locale": "en",
+                    },
+                    follow_redirects=False,
+                )
+
+        accepted = _authorize(_GROK_URI)
+        assert accepted.status_code == 200, accepted.text[:500]
+        assert "Authorize</button>" in accepted.text
+
+        refused = _authorize("https://grok.com/connectors-oauth-exchange-code")
+        assert refused.status_code == 400, refused.text[:500]
+        assert "Authorize</button>" not in refused.text
+
+
 class TestDcrPatternFollowups:
     @pytest.mark.parametrize(
         "invalid",
@@ -1564,3 +1748,220 @@ class TestDcrPatternFollowups:
 
         with pytest.raises(ValidationError):
             getattr(oauth, schema)(client_name="manual", redirect_uris=["ftp://claude.ai/callback"])
+
+
+# ---------------------------------------------------------------------------
+# Google connected apps (#2773): exact redirect URIs from a setting
+# ---------------------------------------------------------------------------
+
+_GCA_URI = "https://oauth-redirect.googleusercontent.com/r/example-connected-app"
+_GCA_SANDBOX_URI = "https://oauth-redirect-sandbox.googleusercontent.com/r/example-connected-app"
+_GCA_GEMINI_URI = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-abc"
+
+
+@pytest.fixture
+def gca_listed(monkeypatch):
+    """List the two connected-app URIs in the setting, as an operator would."""
+    from config.settings import get_settings
+
+    monkeypatch.setattr(
+        get_settings(),
+        "google_connected_apps_redirect_uris",
+        f"{_GCA_URI},{_GCA_SANDBOX_URI}",
+    )
+
+
+class TestDetectDcrProviderGoogleConnectedApps:
+    @pytest.mark.usefixtures("gca_listed")
+    @pytest.mark.parametrize("redirect_uri", [_GCA_URI, _GCA_SANDBOX_URI])
+    def test_listed_uri_is_the_provider(self, redirect_uri):
+        assert detect_dcr_provider(redirect_uri, "Any Client") == "google_connected_apps"
+
+    @pytest.mark.usefixtures("gca_listed")
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            # Same host, another app or a variant of the listed one.
+            "https://oauth-redirect.googleusercontent.com/r/another-app",
+            f"{_GCA_URI}/",
+            f"{_GCA_URI}x",
+            f"{_GCA_URI}?x=1",
+            f"{_GCA_URI}#x",
+            "https://oauth-redirect-test.googleusercontent.com/r/example-connected-app",
+            "https://OAUTH-REDIRECT.googleusercontent.com/r/example-connected-app",
+            "https://oauth-redirect.googleusercontent.com:443/r/example-connected-app",
+            "https://oauth-redirect.googleusercontent.com/a/example-connected-app",
+        ],
+    )
+    def test_unlisted_uri_on_the_same_host_is_not_the_provider(self, redirect_uri):
+        assert detect_dcr_provider(redirect_uri, "Any Client") != "google_connected_apps"
+
+    def test_nothing_is_the_provider_while_the_setting_is_empty(self):
+        assert detect_dcr_provider(_GCA_URI, "Any Client") == "custom"
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_gemini_prefix_stays_gemini(self):
+        assert detect_dcr_provider(_GCA_GEMINI_URI, "Any Client") == "gemini"
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_loopback_naming_google_stays_refused(self):
+        assert detect_dcr_provider("http://localhost:8080/cb", "google_connected_apps") == "custom"
+
+    def test_allowed_explicitly(self):
+        from api.routes.oauth import _DCR_ALLOWED_PROVIDERS, _LOOPBACK_PROVIDER_KEYWORDS
+
+        assert "google_connected_apps" in _DCR_ALLOWED_PROVIDERS
+        assert "google_connected_apps" not in _LOOPBACK_PROVIDER_KEYWORDS
+
+
+class TestDcrEndpointGoogleConnectedApps:
+    """``POST /api/v1/oauth/register`` for Google connected apps (#2773)."""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app) as c:
+            yield c
+
+    def _register(self, client, redirect_uris: list[str]):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={"client_name": "Google", "redirect_uris": redirect_uris},
+            )
+        return response, fake_session
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_listed_uris_register_as_the_provider(self, client):
+        response, fake_session = self._register(client, [_GCA_URI, _GCA_SANDBOX_URI])
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == "google_connected_apps"
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "google_connected_apps"
+        assert stored.redirect_uris == [_GCA_URI, _GCA_SANDBOX_URI]
+        assert stored.token_endpoint_auth_method == "none"
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_unlisted_uri_on_the_same_host_is_refused(self, client):
+        response, fake_session = self._register(
+            client, ["https://oauth-redirect.googleusercontent.com/r/another-app"]
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_client_metadata"
+        fake_session.add.assert_not_called()
+
+    def test_listed_uri_is_refused_while_the_setting_is_empty(self, client):
+        response, fake_session = self._register(client, [_GCA_URI])
+
+        assert response.status_code == 400, response.text
+        fake_session.add.assert_not_called()
+
+    @pytest.mark.usefixtures("gca_listed")
+    @pytest.mark.parametrize(
+        "other",
+        [
+            "http://127.0.0.1:8080/callback",  # loopback without a client_name keyword
+            _GCA_GEMINI_URI,
+            "https://claude.ai/api/mcp/auth_callback",
+            _MUSE_URI,
+            _GROK_URI,  # #2779
+        ],
+    )
+    @pytest.mark.parametrize("listed_first", [True, False])
+    def test_mixed_list_never_becomes_the_provider(self, client, other, listed_first):
+        # Gate1 (#2773): a listed URI next to anything else must not carry the
+        # no-rotation provider onto an attacker's callback; the listed entries
+        # are dropped and the rest keep today's handling.
+        uris = [_GCA_URI, other] if listed_first else [other, _GCA_URI]
+        response, fake_session = self._register(client, uris)
+
+        assert response.status_code == 201, response.text
+        stored = fake_session.add.call_args.args[0]
+        if other.startswith("http://127.0.0.1"):
+            # The loopback entry is refused on its own (no client_name keyword),
+            # so what is stored is the configured URI alone, nothing else.
+            assert stored.provider == "google_connected_apps"
+            assert stored.redirect_uris == [_GCA_URI]
+            return
+        assert stored.provider != "google_connected_apps"
+        assert stored.redirect_uris == [other]
+        assert response.json()["redirect_uris"] == [other]
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_mixed_list_with_a_loopback_keyword_client(self, client):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": "Claude Code",
+                    "redirect_uris": [_GCA_URI, "http://127.0.0.1:8080/callback"],
+                },
+            )
+
+        assert response.status_code == 201, response.text
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "claude"
+        assert stored.redirect_uris == ["http://127.0.0.1:8080/callback"]
+
+    @pytest.mark.usefixtures("gca_listed")
+    @pytest.mark.parametrize("listed_first", [True, False])
+    def test_grok_registration_with_a_listed_uri_never_becomes_the_provider(
+        self, client, listed_first
+    ):
+        # #2779: Grok's five callbacks next to a configured connected-app URI;
+        # the configured URI is dropped and Grok's five are kept as cursor.
+        uris = [_GCA_URI, *_GROK_CURSOR_URIS] if listed_first else [*_GROK_CURSOR_URIS, _GCA_URI]
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={"client_name": "Cursor", "redirect_uris": uris},
+            )
+
+        assert response.status_code == 201, response.text
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "cursor"
+        assert stored.redirect_uris == _GROK_CURSOR_URIS
+        assert not stored.check_redirect_uri(_GCA_URI)
+
+    def test_manual_creation_with_the_provider_is_422(self):
+        # Gate1 (#2773): only DCR, through the exact list, stores this provider.
+        from auth.dependencies import require_session_auth
+
+        app.dependency_overrides[require_session_auth] = lambda: {
+            "user_id": "manual-user",
+            "current_workspace_id": None,
+        }
+        try:
+            with (
+                patch("api.routes.oauth.get_sync_session") as get_session,
+                TestClient(app) as c,
+            ):
+                response = c.post(
+                    "/api/v1/oauth/clients",
+                    json={
+                        "client_name": "manual",
+                        "redirect_uris": [_GCA_URI],
+                        "provider": "google_connected_apps",
+                    },
+                )
+        finally:
+            app.dependency_overrides.pop(require_session_auth, None)
+
+        assert response.status_code == 422, response.text
+        get_session.assert_not_called()

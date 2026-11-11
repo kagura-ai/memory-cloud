@@ -17,6 +17,12 @@ from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from config.constants import RerankPromptFormat
+from config.google_connected_apps import (
+    parse_redirect_uris as parse_google_connected_apps_redirect_uris,
+)
+from config.google_connected_apps import (
+    parse_verification_tokens as parse_google_connected_apps_verification_tokens,
+)
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 from utils.recall_projection import RECALL_DEFAULT_FULL, RECALL_MAX_FULL
 
@@ -249,6 +255,59 @@ class Settings(BaseSettings):
     ) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
         """Parsed ``oauth_dcr_rate_limit_exempt_cidrs``."""
         return _parse_cidrs(self.oauth_dcr_rate_limit_exempt_cidrs)
+
+    # #2773: Google connected apps. The redirect URIs the Connected Console
+    # shows for this server's app, matched exactly; a DCR client registered
+    # with only these is Google's and keeps its refresh token on refresh.
+    # Empty (the default) recognises no client. A malformed entry refuses
+    # startup, like the CIDR list above.
+    google_connected_apps_redirect_uris: str = Field(
+        default="",
+        description=(
+            "Comma-separated redirect URIs of this server's Google connected app, "
+            "exactly as the Connected Console shows them (#2773). Each must be "
+            "https on a Google OAuth redirector host, with no query, fragment, "
+            "wildcard or trailing slash, and not under /r/user_bound_custom-mcp-. "
+            "A DCR client whose every redirect URI is listed keeps its refresh "
+            "token on refresh (Google's persistent linking); every other client "
+            "rotates. Empty recognises no client."
+        ),
+    )
+
+    @field_validator("google_connected_apps_redirect_uris")
+    @classmethod
+    def _validate_google_connected_apps_redirect_uris(cls, value: str) -> str:
+        """Refuse a malformed or pattern-like redirect URI at startup."""
+        parse_google_connected_apps_redirect_uris(value)
+        return value
+
+    @property
+    def google_connected_apps_redirect_uri_list(self) -> tuple[str, ...]:
+        """Parsed ``google_connected_apps_redirect_uris``."""
+        return parse_google_connected_apps_redirect_uris(self.google_connected_apps_redirect_uris)
+
+    google_connected_apps_verification_tokens: str = Field(
+        default="",
+        description=(
+            "Comma-separated verification tokens from Google's Connected Console "
+            '(#2773), served as {"verification_tokens": [...]} at '
+            "/.well-known/google-connected-apps. Not secret. Empty answers 404."
+        ),
+    )
+
+    @field_validator("google_connected_apps_verification_tokens")
+    @classmethod
+    def _validate_google_connected_apps_verification_tokens(cls, value: str) -> str:
+        """Refuse a token with whitespace or control characters at startup."""
+        parse_google_connected_apps_verification_tokens(value)
+        return value
+
+    @property
+    def google_connected_apps_verification_token_list(self) -> tuple[str, ...]:
+        """Parsed ``google_connected_apps_verification_tokens``."""
+        return parse_google_connected_apps_verification_tokens(
+            self.google_connected_apps_verification_tokens
+        )
 
     oauth_device_code_retention_seconds: int = Field(
         default=3600,
