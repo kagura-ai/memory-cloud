@@ -465,7 +465,7 @@ async def guardrail_digest(
     ),
     profile: str | None = Query(
         None,
-        description="target=instructions only: the MCP URL's profile value (full | core | google)",
+        description="target=instructions only: the MCP URL's profile value (full | core | google | microsoft)",
     ),
     tools: str | None = Query(
         None, description="target=instructions only: the MCP URL's tools allowlist"

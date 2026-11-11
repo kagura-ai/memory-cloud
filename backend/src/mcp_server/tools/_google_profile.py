@@ -702,7 +702,10 @@ def scrub_google_reply(tool_name: str, result: list[TextContent]) -> list[TextCo
 
 
 def google_mode_active() -> bool:
-    """Whether the current request's URL is the google view (``False`` with no request)."""
+    """Whether the current request's URL is the google view (``False`` with no request).
+
+    ``profile=microsoft`` is an alias of ``profile=google`` (#2778) and selects the same view.
+    """
     from mcp_server.tools._helpers import get_mcp_tool_view_query
     from mcp_server.tools._profiles import is_google_view
 
