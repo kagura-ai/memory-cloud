@@ -771,12 +771,20 @@ _EXACT_REDIRECT_BASES: tuple[tuple[str, str], ...] = tuple(
 # through RFC 7591 as a public PKCE client. agent.meta.ai is the callback first
 # reported for it; the submission portal's sign-in test registers the other two
 # together and needs both. muse.ai is Meta's (whois, name servers, certificate).
+# Grok and Grok Bot (#2779) register with Cursor's published client metadata
+# (``client_name`` "Cursor") plus one grok.com callback, trailing slash
+# included; that one URI, not grok.com, is allowed. grok.com is xAI's: its
+# pages link xAI's terms and privacy policy on x.ai and load media from x.ai
+# hosts; whois shows a privacy-redacted US (CA) registrant, Cloudflare as
+# registrar and name servers (x.ai's name servers are Cloudflare's too), and
+# the certificate is issued to grok.com and *.grok.com.
 _PROVIDER_EXACT_URIS: dict[str, tuple[str, ...]] = {
     "muse": (
         "https://agent.meta.ai/api/hatch/oauth/callback",
         "https://muse.ai/api/hatch/oauth/callback",
         "https://platform.muse.ai/oauth/credential-test/callback",
     ),
+    "grok": ("https://grok.com/connectors-oauth-exchange-code/",),
 }
 
 # The Muse callbacks as the registration rejection message names them.
@@ -908,8 +916,8 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
     """Detect the DCR provider from ``redirect_uri`` (+ ``client_name`` for loopback).
 
     Returns one of ``"chatgpt"``, ``"claude"``, ``"cursor"``, ``"codex"``,
-    ``"hermes"``, ``"openclaw"``, ``"gemini"``, ``"muse"``, ``"google_connected_apps"``,
-    or ``"custom"``. The caller rejects
+    ``"hermes"``, ``"openclaw"``, ``"gemini"``, ``"muse"``, ``"grok"``,
+    ``"google_connected_apps"``, or ``"custom"``. The caller rejects
     ``"custom"`` with an RFC 6749 §5.2 error response.
 
     Strategy:
@@ -922,9 +930,9 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
         2. Otherwise → an exact-redirect provider (``_PROVIDER_EXACT_REDIRECTS``,
            ``gemini``): exact https host + pinned path prefix + one segment,
            compared as written (issue #2222); an exact-URI provider
-           (``_PROVIDER_EXACT_URIS``, ``muse``): the whole URI as written
-           (issue #2410); ``google_connected_apps``: the whole URI as written,
-           listed in ``GOOGLE_CONNECTED_APPS_REDIRECT_URIS`` (issue #2773).
+           (``_PROVIDER_EXACT_URIS``, ``muse``, ``grok``): the whole URI as
+           written (issues #2410, #2779); ``google_connected_apps``: the whole
+           URI as written, listed in ``GOOGLE_CONNECTED_APPS_REDIRECT_URIS`` (issue #2773).
         3. Otherwise → match the parsed hostname (case-insensitive) against
            ``_PROVIDER_HOSTNAMES`` (``chatgpt`` / ``claude`` / ``cursor``)
            as exact host or single-suffix subdomain.
@@ -1028,8 +1036,9 @@ async def dynamic_client_registration(
       URIs ``https://agent.meta.ai/api/hatch/oauth/callback``,
       ``https://muse.ai/api/hatch/oauth/callback`` and
       ``https://platform.muse.ai/oauth/credential-test/callback``
-      (issues #2410, #2487). Every entry of
-      ``redirect_uris`` is checked on its own (#1686); entries that fail are
+      (issues #2410, #2487); grok by its exact callback URI
+      ``https://grok.com/connectors-oauth-exchange-code/`` (issue #2779).
+      Every entry of ``redirect_uris`` is checked on its own (#1686); entries that fail are
       left out of the registration and only the rest are stored and echoed
       (RFC 7591 §3.2.1). Refused with ``invalid_client_metadata`` only when
       no entry passes (#2232)
@@ -1151,6 +1160,7 @@ async def dynamic_client_registration(
                 f"{_PROVIDER_EXACT_REDIRECTS['gemini'][1]}<one segment> and no "
                 "query or fragment. "
                 f"Muse must use exactly {_MUSE_CALLBACKS_TEXT}. "
+                f"Grok must use exactly {_PROVIDER_EXACT_URIS['grok'][0]}. "
                 "Google connected apps must use only the redirect URIs this "
                 "server is configured with."
             ),
