@@ -103,3 +103,45 @@ class TestWellKnownEndpoints:
                 "client_secret_basic",
                 "client_secret_post",
             }, endpoint
+
+
+class TestGoogleConnectedAppsVerification:
+    """``/.well-known/google-connected-apps`` serves the console's tokens (#2773)."""
+
+    PATH = "/.well-known/google-connected-apps"
+
+    def test_tokens_are_served_as_json_without_a_redirect(self, client, monkeypatch):
+        from config.settings import get_settings
+
+        monkeypatch.setattr(
+            get_settings(), "google_connected_apps_verification_tokens", "token-one,token-two"
+        )
+
+        response = client.get(self.PATH, follow_redirects=False)
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/json"
+        assert response.json() == {"verification_tokens": ["token-one", "token-two"]}
+
+    def test_unset_is_404(self, client, monkeypatch):
+        from config.settings import get_settings
+
+        monkeypatch.setattr(get_settings(), "google_connected_apps_verification_tokens", "")
+
+        response = client.get(self.PATH, follow_redirects=False)
+
+        assert response.status_code == 404
+
+    def test_tokens_are_not_logged(self, client, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from config.settings import get_settings
+
+        monkeypatch.setattr(
+            get_settings(), "google_connected_apps_verification_tokens", "token-not-in-logs"
+        )
+
+        with capture_logs() as logs:
+            assert client.get(self.PATH).status_code == 200
+
+        assert "token-not-in-logs" not in repr(logs)

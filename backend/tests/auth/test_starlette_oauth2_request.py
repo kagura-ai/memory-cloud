@@ -79,6 +79,26 @@ def test_default_request_exposes_the_form() -> None:
     assert oauth_request.payload.client_id == "confidential"
 
 
+def test_headers_are_read_case_insensitively_so_basic_client_auth_works() -> None:
+    """#2778: Authlib reads ``headers.get("Authorization")`` for
+    ``client_secret_basic``; ASGI header names arrive lower-cased, so a plain
+    dict of them hid the credentials and every Basic-authenticated token
+    request was ``invalid_client`` although the metadata advertises the method."""
+    import base64
+
+    from authlib.oauth2.rfc6749.util import extract_basic_authorization
+
+    request = _request("", {}, [])
+    credentials = base64.b64encode(b"oauth_client:the-secret")
+    request.scope["headers"] = [(b"authorization", b"Basic " + credentials)]
+
+    oauth_request = StarletteOAuth2Request(request)
+
+    assert oauth_request.headers.get("Authorization") == "Basic " + credentials.decode()
+    assert oauth_request.headers.get("authorization") == "Basic " + credentials.decode()
+    assert extract_basic_authorization(oauth_request.headers) == ("oauth_client", "the-secret")
+
+
 def test_single_empty_values_are_omitted_but_occurrences_remain():
     payload = StarletteOAuth2Payload(
         _request("scope=&state=&client_id=public", {"code": ""}, [("code", "")])

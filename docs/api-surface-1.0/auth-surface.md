@@ -53,6 +53,13 @@ response (7 fields, `models/schemas.py:TokenIntrospectionResponse`):
 Opaque `secrets.token_urlsafe(32)`, issued alongside every access token
 (unconditionally — see `offline_access` flag below). Long-lived, no automatic
 expiration; rotated on use (old access+refresh revoked, RFC 6819 §5.2.2.3).
+Exception (#2773): a `google_connected_apps` client (see `/register` below) keeps
+its refresh token while every one of its redirect URIs is still listed in
+`GOOGLE_CONNECTED_APPS_REDIRECT_URIS` and it holds no grant beyond
+`authorization_code` and `refresh_token`: a refresh answers with the same
+`refresh_token` and a new access token that replaces the previous one in the same
+row. Removing a URI from the setting or emptying it restores rotation at the
+client's next refresh.
 
 ### 4. Device-flow token response extras (RFC 8628)
 
@@ -81,7 +88,7 @@ Code comments mark these as point-in-time and explicitly **not security-bearing*
 ## well-known metadata endpoints
 
 Router: `backend/src/api/routes/well_known.py`, mounted at prefix `/.well-known`
-(`api/main.py:588`). 4 endpoints total. `base_url` = `FRONTEND_URL` env;
+(`api/main.py:588`). 5 endpoints total. `base_url` = `FRONTEND_URL` env;
 `mcp_base` = `FRONTEND_URL` + `MCP_BASE_PATH` (default `/mcp`).
 
 ### 1. `GET /.well-known/oauth-protected-resource/mcp`
@@ -143,6 +150,14 @@ Identical to openid-configuration **minus** `response_modes_supported` and
 `subject_types_supported` (the other fields and values match exactly), including the
 `device_authorization_endpoint` and device_code grant added in #993.
 
+### 5. `GET /.well-known/google-connected-apps` — 1 field
+
+Domain verification file for Google connected apps (#2773). `200`
+`application/json` `{"verification_tokens": [...]}` (the values of
+`GOOGLE_CONNECTED_APPS_VERIFICATION_TOKENS`, in the order configured), answered
+directly at that path with no redirect; `404` when the setting is empty. Not part
+of the OAuth discovery metadata.
+
 ---
 
 ## OAuth scope catalogue
@@ -179,11 +194,11 @@ Semver-locked discovery-referenced endpoints:
 
 | Path | Method | Purpose |
 |---|---|---|
-| `/register` | POST | DCR (RFC 7591). Public, no auth. Provider whitelist: `chatgpt`/`claude`/`cursor` by redirect-URI hostname; for RFC 8252 loopback redirects (`http://localhost`, `http://127.0.0.1`, `http://[::1]`), a `client_name` naming ChatGPT, Claude, Cursor, Codex, Hermes Agent or OpenClaw (stored as `codex`/`hermes`/`openclaw` for the last three, loopback only, #1657); `gemini` by an exact https redirect on `oauth-redirect.googleusercontent.com`, `oauth-redirect-sandbox.googleusercontent.com` or `oauth-redirect-test.googleusercontent.com` (#2232) (exact host, no suffix match) with the path `/r/user_bound_custom-mcp-` + exactly one segment, never via `client_name` or loopback (#2222); `muse` by the exact callback URIs `https://agent.meta.ai/api/hatch/oauth/callback`, `https://muse.ai/api/hatch/oauth/callback` and `https://platform.muse.ai/oauth/credential-test/callback`, compared as written, never via `client_name` or loopback (#2410, #2487). Each `redirect_uris` entry is checked on its own; entries that fail are dropped, not stored or echoed, and the registration is refused (`invalid_client_metadata`) only when none passes (#2232). 5 req/min/IP rate limit (addresses in `OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS` are exempt, default none, #1741). Always forces `token_endpoint_auth_method="none"`; never returns `client_secret` (#689) |
+| `/register` | POST | DCR (RFC 7591). Public, no auth. Provider whitelist: `chatgpt`/`claude`/`cursor` by redirect-URI hostname; for RFC 8252 loopback redirects (`http://localhost`, `http://127.0.0.1`, `http://[::1]`), a `client_name` naming ChatGPT, Claude, Cursor, Codex, Hermes Agent or OpenClaw (stored as `codex`/`hermes`/`openclaw` for the last three, loopback only, #1657); `gemini` by an exact https redirect on `oauth-redirect.googleusercontent.com`, `oauth-redirect-sandbox.googleusercontent.com` or `oauth-redirect-test.googleusercontent.com` (#2232) (exact host, no suffix match) with the path `/r/user_bound_custom-mcp-` + exactly one segment, never via `client_name` or loopback (#2222); `muse` by the exact callback URIs `https://agent.meta.ai/api/hatch/oauth/callback`, `https://muse.ai/api/hatch/oauth/callback` and `https://platform.muse.ai/oauth/credential-test/callback`, compared as written, never via `client_name` or loopback (#2410, #2487); `grok` by the exact callback URI `https://grok.com/connectors-oauth-exchange-code/` (trailing slash included), compared as written, never via `client_name` or loopback (#2779); `google_connected_apps` by the exact URIs listed in `GOOGLE_CONNECTED_APPS_REDIRECT_URIS` (compared as written, never via `client_name` or loopback), assigned only when every redirect URI the registration keeps is listed there; listed entries sent next to any other qualifying entry are dropped (#2773). Each `redirect_uris` entry is checked on its own; entries that fail are dropped, not stored or echoed, and the registration is refused (`invalid_client_metadata`) only when none passes (#2232). 5 req/min/IP rate limit (addresses in `OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS` are exempt, default none, #1741). Always forces `token_endpoint_auth_method="none"`; never returns `client_secret` (#689) |
 | `/authorize` | GET | Authorization endpoint (consent page, HTML). The page carries the session-bound `csrf_token` and is served with `Cache-Control: no-store`, `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'` (#2199). Each of `response_type`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge`, `code_challenge_method` may be sent once in the query; a repeated one → `400` HTML error page (`invalid_request`), no redirect, nothing stored, checked before the client lookup; `resource` may repeat (RFC 8707), every value must name the MCP resource (#2208) |
 | `/authorize` | POST | Consent decision submit. OAuth parameters are read from the query string only; the form carries `confirm`, `default_context` and `csrf_token` (bound to the browser session; any other form field is ignored). Missing or wrong `csrf_token`, on approve and deny alike → `400` HTML error page (`invalid_request`), no redirect, nothing stored; checked after the unregistered-`redirect_uri` page (#218) (#2199). Form body over 16384 bytes → `413` RFC 6749 `{error: "invalid_request", error_description}` + `Cache-Control: no-store`, refused before it is parsed and before the session is read, no redirect (#2200). Each of `response_type`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge`, `code_challenge_method` may be sent once in the query; a repeated one → `400` HTML error page (`invalid_request`), no redirect, nothing stored, checked before the unregistered-`redirect_uri` page and the `csrf_token` check (form fields are not counted); `resource` may repeat (RFC 8707), every value must name the MCP resource (#2208) |
-| `/token` (canonical, schema-visible), `/token/` (hidden alias) | POST | Token endpoint (Authlib). Grants registered: `authorization_code` (PKCE S256, 10-min single-use codes), `refresh_token` (rotation), `urn:ietf:params:oauth:grant-type:device_code` (RFC 8628, #536). Form body over 16384 bytes → `413 invalid_request` (RFC 6749 shape, `Cache-Control: no-store`), refused before it is parsed (#2200) |
-| `/revoke` | POST | RFC 7009 revocation (access or refresh; `token_type_hint` accepted). The caller identifies itself (#1741): a public client by `client_id` (form or HTTP Basic with an empty secret), a confidential client with its secret (`client_secret_basic` or `client_secret_post`); otherwise `401 invalid_client`. A token issued to another client is left alone; it and an unknown token both get `200`. Revoking a refresh token also revokes its access token. Form body over 16384 bytes → `413 invalid_request` (RFC 6749 shape, `Cache-Control: no-store`), refused before it is parsed and before client authentication; missing or empty `token` → `400 invalid_request`, formerly `422` (#2207) |
+| `/token` (canonical, schema-visible), `/token/` (hidden alias) | POST | Token endpoint (Authlib). Grants registered: `authorization_code` (PKCE S256, 10-min single-use codes), `refresh_token` (rotation; a `google_connected_apps` client keeps its refresh token and gets a new access token in place, #2773), `urn:ietf:params:oauth:grant-type:device_code` (RFC 8628, #536). Form body over 16384 bytes → `413 invalid_request` (RFC 6749 shape, `Cache-Control: no-store`), refused before it is parsed (#2200) |
+| `/revoke` | POST | RFC 7009 revocation (access or refresh; `token_type_hint` accepted). The caller identifies itself (#1741): a public client by `client_id` (form or HTTP Basic with an empty secret), a confidential client with its secret (`client_secret_basic` or `client_secret_post`); otherwise `401 invalid_client`. A token issued to another client is left alone; it and an unknown token both get `200`. Revoking a refresh token also revokes its access token. For a `google_connected_apps` client that keeps its refresh token, revoking the current access token revokes the refresh token too, also when a refresh of that row runs concurrently; an access token already replaced by a refresh matches no row and gets `200` with nothing changed (#2773). Form body over 16384 bytes → `413 invalid_request` (RFC 6749 shape, `Cache-Control: no-store`), refused before it is parsed and before client authentication; missing or empty `token` → `400 invalid_request`, formerly `422` (#2207) |
 | `/introspect` | POST | RFC 7662 introspection. Requires a confidential client's credentials (`client_secret_basic` or `client_secret_post`); an anonymous caller or a public client gets `401 invalid_client` (#1741). Describes only tokens issued to the caller; any other token is `{"active": false}`. Form body over 16384 bytes → `413 invalid_request` (RFC 6749 shape, `Cache-Control: no-store`), refused before it is parsed and before client authentication; missing or empty `token` → `400 invalid_request`, formerly `422` (#2207) |
 
 Device flow (RFC 8628):

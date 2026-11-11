@@ -1,6 +1,6 @@
 # MCP Client Setup
 
-How to connect MCP clients (Claude Code, Claude Desktop/Chat, ChatGPT, Gemini, Muse, Gemini CLI, and any Streamable-HTTP client) to a self-hosted Kagura Memory Cloud. Start from the [README Quick Start](../README.md#quick-start) if your server isn't running yet; the full tool list is in the [MCP Tools Reference](mcp-tools.md).
+How to connect MCP clients (Claude Code, Claude Desktop/Chat, ChatGPT, Gemini, Muse, Grok, Gemini CLI, and any Streamable-HTTP client) to a self-hosted Kagura Memory Cloud. Start from the [README Quick Start](../README.md#quick-start) if your server isn't running yet; the full tool list is in the [MCP Tools Reference](mcp-tools.md).
 
 ## Which URL?
 
@@ -264,6 +264,22 @@ Gemini registers redirect URIs on Google's three OAuth redirector hosts (`oauth-
 2. Add that URL as a remote MCP server in Muse.
 3. Sign in to Kagura and approve access when prompted. KMC handles OAuth client registration automatically for Muse’s supported callbacks.
 
+## Grok / Grok Bot
+
+1. Copy the public HTTPS MCP URL from the **Integrations** connection card.
+2. Add that URL as a remote MCP server (connector) in Grok or Grok Bot.
+3. Sign in to Kagura and approve access when prompted.
+
+Grok and Grok Bot register themselves (Dynamic Client Registration) with the OAuth client metadata Cursor publishes (`client_name` "Cursor"), so the registered app is listed as Cursor. Of the callbacks they send, KMC keeps the two `https://www.cursor.com/…/mcp/oauth/callback` URIs, the two loopback `http://localhost:8787/callback` / `http://127.0.0.1:8787/callback` URIs (allowed for the "Cursor" client name), and `https://grok.com/connectors-oauth-exchange-code/` exactly as written, trailing slash included; any other grok.com URI (another path, no trailing slash, a query or fragment, `http`, another host or a case variant) is dropped. Like Claude Chat and ChatGPT, Grok needs a public URL: its servers exchange the code at the token endpoint.
+
+## Google connected apps
+
+A deployment registered in Google's connected apps program lists its app's redirect URIs in `GOOGLE_CONNECTED_APPS_REDIRECT_URIS` ([deployment](deployment.md#google-connected-apps-issue-2773)). Google's client registers itself with exactly those URIs and, as Google's persistent-linking rule requires, keeps its refresh token: a refresh returns the same refresh token and a new access token. Every other client (Claude, ChatGPT, Gemini's custom connector, Muse, Grok, Microsoft 365 Copilot, CLIs) gets a new refresh token on each refresh and the old one stops working. Revoking the refresh token, or the current access token, ends Google's link at once.
+
+## Microsoft 365 Copilot
+
+Microsoft 365 Copilot connects through a static confidential OAuth client (its DCR needs a client secret, which this server's DCR does not issue): an operator account creates the client with the redirect URI `https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect`, registers it in the Teams developer portal, and the plugin uses `https://example.com/mcp?profile=microsoft`. Users of any workspace sign in through that one client; their refresh tokens rotate like every other client's. Step by step, with the tools Copilot asks to confirm and the validation targets: [Microsoft 365 Copilot](microsoft-365-copilot.md).
+
 ## Gemini CLI
 
 Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):
@@ -388,6 +404,8 @@ By default `tools/list` returns the 21 core tools (≈ 40k characters of JSON); 
 |---|---|
 | *(none)* or `?profile=core` | The 21 core memory and context tools (incl. `create_edge`, `create_context`, `update_context`, `delete_context`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap`; `explore` is opt-in) — the default, ≈ 40k characters |
 | `?profile=full` | Everything — 72 tools, ≈ 108k characters |
+| `?profile=google` | For Google's connected apps: the core tools without `describe_tools` and `guide`, descriptions that name no other tool, a read-only `recall` (no learning writes) and server instructions without a guardrail digest — see [Google Connected Apps](google-connected-apps.md) |
+| `?profile=microsoft` | For Microsoft 365 Copilot: an alias of `?profile=google` (the same list, text and read-only `recall`) — see [Microsoft 365 Copilot](microsoft-365-copilot.md) |
 | `?tools=remember,recall,reference` | Exactly the named tools (an allowlist; wins over `profile`) |
 | `?add_tools=list_edges,merge_contexts` | The default core tools plus the named ones (`?profile=core&add_tools=…` is the same; `?add_tools=explore` turns on the graph walk); ignored next to `?tools=` |
 
@@ -400,6 +418,7 @@ Only the URL changes; the `Authorization` header stays as it is. The client sect
 | ChatGPT | Server URL |
 | Gemini | Server URL of the custom MCP connector |
 | Muse | Remote MCP server URL |
+| Grok / Grok Bot | Remote MCP server URL of the connector |
 | Gemini CLI | `"url"` in `.gemini/settings.json` |
 | Cursor | `"url"` of the `mcpServers` entry (same shape as Claude Code) |
 | Codex CLI | `url = "http://localhost:8080/mcp?profile=full"` in `~/.codex/config.toml` |

@@ -14,6 +14,8 @@
 - [Architecture](architecture.md) — System design, data flow, and tech stack (incl. **LLM Knowledge Base 5-layer mapping**)
 - [API Reference](api-reference.md) — REST API endpoints, authentication, request/response examples
 - [Remote MCP Directory Scope](remote-mcp-directory-scope.md) — Submission scope of the Remote MCP endpoint, data flows by source, guardrail/pinned delivery paths and the policy mapping (§1.F: the project's position, to be confirmed in Directory review)
+- [Google Connected Apps](google-connected-apps.md) — The `google` tool profile for Google's connected apps: MCP URL, what the profile changes, and which tools to mark for user confirmation in the console
+- [Microsoft 365 Copilot](microsoft-365-copilot.md) — The `microsoft` tool profile (an alias of `google`), the static OAuth client and who should own it, the Teams developer portal registration, the tools Copilot asks to confirm, and the validation targets
 - [Derived-Layer Boundary](derived-layer-boundary.md) — Design rule: raw memories are exportable, the derived/learned layer is the moat (table classification + feature-review checklist)
 - [Agent Registry & Context Bindings](design/agent-registry-and-bindings.md) — Implemented v0.49.0-preview registry, agent-bound key, and subtractive binding contract
 - [`get_agent_bootstrap` Contract](design/agent-bootstrap-contract.md) — Implemented composed session-start bundle and fail-soft component contract

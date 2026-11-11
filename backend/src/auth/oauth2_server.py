@@ -31,15 +31,19 @@ References:
     - RFC 6749: The OAuth 2.0 Authorization Framework
 """
 
+import base64
+import binascii
 import logging
 import secrets
 from datetime import timedelta
 from typing import Any, cast
+from urllib.parse import unquote_plus
 
 from authlib.oauth2 import OAuth2Request
 from authlib.oauth2.rfc6749 import grants
 from authlib.oauth2.rfc6749.errors import (
     AccessDeniedError,
+    InvalidClientError,
     InvalidGrantError,
     InvalidRequestError,
     InvalidScopeError,
@@ -53,11 +57,12 @@ from authlib.oauth2.rfc7636.challenge import (
     compare_s256_code_challenge,
 )
 from authlib.oauth2.rfc8628 import DeviceCodeGrant as _DeviceCodeGrant
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
+from auth.google_connected_apps import keeps_refresh_token
 from auth.mcp_resource import is_same_mcp_resource, mcp_resource_identifier
 from auth.oauth_scope import client_registered_scope, granted_scope
 from auth.oauth_token_storage import hash_oauth_token, issuance_storage_mode, token_lookup_values
@@ -428,6 +433,81 @@ class _OAuthUser:
 # ============================================================================
 
 
+def decode_basic_client_credentials(header: str) -> tuple[str, str] | None:
+    """Decode an ``Authorization: Basic`` header into (client_id, secret).
+
+    RFC 6749 §2.3.1: both parts are form-urlencoded before base64 encoding.
+    A NUL in either part is refused here: the database driver rejects it in
+    a query parameter, so it would otherwise surface as a server error.
+
+    Args:
+        header: The ``Authorization`` header value.
+
+    Returns:
+        The decoded credentials, or None when the scheme is not Basic.
+
+    Raises:
+        ValueError: The header is not valid Basic credentials.
+    """
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "basic":
+        return None
+    try:
+        decoded = base64.b64decode(value.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as e:
+        raise ValueError("malformed Basic credentials") from e
+    client_id, sep, secret = decoded.partition(":")
+    if not sep or not client_id:
+        raise ValueError("malformed Basic credentials")
+    client_id, secret = unquote_plus(client_id), unquote_plus(secret)
+    if "\x00" in client_id or "\x00" in secret:
+        raise ValueError("malformed Basic credentials")
+    return client_id, secret
+
+
+def authenticate_client_secret_basic(query_client: Any, request: Any) -> Any:
+    """Authlib's ``client_secret_basic`` method with a strict header decoder (#2778).
+
+    Authlib's own decoder lets a non-UTF-8 or non-ASCII header escape as an
+    exception, which the token endpoint answered with a 500. Here a malformed
+    header is ``invalid_client`` (401, RFC 6749 §5.2), decoded the same way as
+    at the revocation and introspection endpoints.
+
+    Args:
+        query_client: Authlib's client lookup.
+        request: The OAuth2 request (its ``headers`` are read).
+
+    Returns:
+        The client whose secret matches, or None when the request carries no
+        usable Basic credentials (another method may still authenticate it).
+
+    Raises:
+        InvalidClientError: The header is malformed or names an unknown client.
+    """
+    header = request.headers.get("Authorization")
+    if not header:
+        return None
+    try:
+        credentials = decode_basic_client_credentials(header)
+    except ValueError:
+        raise InvalidClientError(
+            status_code=401, description="Malformed client credentials."
+        ) from None
+    if credentials is None:
+        return None
+    client_id, secret = credentials
+    if not secret:
+        return None
+    client = query_client(client_id)
+    if not client:
+        raise InvalidClientError(
+            status_code=401, description="The client does not exist on this server."
+        )
+    if client.check_client_secret(secret):
+        return client
+    return None
+
+
 def query_client(session: Session, client_id: str) -> OAuth2Client | None:
     """Query OAuth2 client by client_id.
 
@@ -438,8 +518,11 @@ def query_client(session: Session, client_id: str) -> OAuth2Client | None:
         client_id: Client identifier
 
     Returns:
-        OAuth2Client or None
+        OAuth2Client or None (also for a ``client_id`` holding a NUL, which no
+        client has and which the Postgres driver would refuse with an error)
     """
+    if "\x00" in client_id:
+        return None
     client = session.query(OAuth2Client).filter_by(client_id=client_id).first()
     logger.info(f"query_client: client_id={client_id}, found={client is not None}")
 
@@ -862,11 +945,18 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
         - Rotation is atomic: one refresh per refresh token issues a token
         - The requested scope cannot exceed the original grant
         - The new token keeps the audience of the refreshed one (RFC 8707)
+        - A Google connected-apps client (``keeps_refresh_token``, #2773)
+          is not rotated: its refresh answers with the same refresh token
+          and rewrites the access token of the same row
     """
 
     # Token endpoint auth methods (Issue #157: Public Client + PKCE support)
     TOKEN_ENDPOINT_AUTH_METHODS = _TOKEN_ENDPOINT_AUTH_METHODS
     TOKEN_EXPIRES_IN = 3600
+
+    #: Whether this refresh keeps the refresh token (#2773), decided once per
+    #: request from the authenticated client in ``validate_token_request``.
+    keep_refresh_token: bool = False
 
     def validate_token_request(self) -> None:
         """Validate the refresh request and settle the new token's audience.
@@ -888,6 +978,20 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
         self.token_resource = settle_audience(
             requested_resource(self.request.payload), credential.resource
         )
+        self.keep_refresh_token = keeps_refresh_token(self.request.client)
+
+    def issue_token(self, user: Any, refresh_token: OAuth2Token) -> dict[str, Any]:
+        """Issue the new token; a kept refresh token is echoed back (#2773).
+
+        Google's persistent linking asks for "the exact same Refresh Token in
+        the JSON response". Only digests are stored, so the value is the one
+        the client sent in this request, which found the row through
+        ``token_lookup_values`` in :meth:`authenticate_refresh_token`.
+        """
+        token = cast(dict[str, Any], super().issue_token(user, refresh_token))
+        if self.keep_refresh_token:
+            token["refresh_token"] = self.request.form["refresh_token"]
+        return token
 
     def generate_token(
         self,
@@ -955,7 +1059,7 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
             logger.warning(
                 "oauth_refresh_token_invalid",
                 token_id=token.id,
-                revoked=token.refresh_token_revoked_at is not None,
+                revoked=bool(token.revoked) or token.refresh_token_revoked_at is not None,
             )
 
         return None
@@ -982,9 +1086,15 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
         row, so of two refreshes with one refresh token only one issues a
         token.
 
+        A kept refresh token (#2773) is handled by :meth:`_rewrite_access_token`
+        instead: no rotation, the same row gets the new access token.
+
         Raises:
             InvalidGrantError: The refresh token was rotated by another request.
         """
+        if self.keep_refresh_token:
+            self._rewrite_access_token(token)
+            return
         credential = cast(OAuth2Token, self.request.refresh_token)
         client_id, user_id = credential.client_id, credential.user_id
         session = self.server.db_session
@@ -1009,6 +1119,67 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
             raise InvalidGrantError()
         super().save_token(token)
         logger.info("oauth_refresh_token_rotated", client_id=client_id, user_id=user_id)
+
+    def _rewrite_access_token(self, token: dict[str, Any]) -> None:
+        """Store the new access token in the refreshed row, keeping its refresh token.
+
+        Google connected apps (#2773): the row keeps its refresh token digest
+        and stays unrevoked; the access token digest, ``issued_at`` (the same
+        database clock as the INSERT default), lifetime, scope and audience
+        are rewritten. The previous access token of the row stops working at
+        once, as its digest is replaced; that is accepted (the client was
+        asking for a new one).
+
+        The row is still locked ``FOR UPDATE`` by
+        :meth:`authenticate_refresh_token` (after the owner's ``users`` row),
+        so a second refresh with the same token waits for this commit, then
+        succeeds too and replaces this access token in turn: a client that
+        retries a refresh only loses the access token of the earlier answer.
+        ``/revoke`` reads the row unlocked and revokes it with one UPDATE by
+        id that waits for this commit and stamps both columns with
+        ``COALESCE(existing, now)``, so a revocation racing this refresh
+        also revokes the access token written here. The update matches only the
+        unrevoked row (``refresh_token_revoked_at`` and ``revoked``); a
+        refresh token revoked meanwhile is ``invalid_grant``.
+
+        Raises:
+            InvalidGrantError: The refresh token was revoked by another request.
+        """
+        credential = cast(OAuth2Token, self.request.refresh_token)
+        client_id, user_id = credential.client_id, credential.user_id
+        session = self.server.db_session
+        storage_mode = issuance_storage_mode(session)
+        access_token = (
+            hash_oauth_token(token["access_token"])
+            if storage_mode == "hashed"
+            else token["access_token"]
+        )
+        rewritten = (
+            session.query(OAuth2Token)
+            .filter(
+                OAuth2Token.id == credential.id,
+                OAuth2Token.refresh_token_revoked_at.is_(None),
+                OAuth2Token.revoked.is_(False),
+            )
+            .update(
+                {
+                    OAuth2Token.access_token: access_token,
+                    OAuth2Token.access_token_revoked_at: None,
+                    OAuth2Token.issued_at: func.now(),
+                    OAuth2Token.expires_in: token.get("expires_in", self.TOKEN_EXPIRES_IN),
+                    OAuth2Token.token_type: token.get("token_type", "Bearer"),
+                    OAuth2Token.scope: token.get("scope", ""),
+                    OAuth2Token.resource: self.token_resource,
+                },
+                synchronize_session=False,
+            )
+        )
+        if rewritten != 1:
+            session.rollback()
+            logger.warning("refresh_token_kept_revoked", client_id=client_id)
+            raise InvalidGrantError()
+        session.commit()
+        logger.info("oauth_refresh_token_kept", client_id=client_id, user_id=user_id)
 
     def revoke_old_credential(self, credential: OAuth2Token) -> None:
         """Called by Authlib after issuing the new token pair.
@@ -1307,6 +1478,9 @@ class OAuth2AuthorizationServer:
         # Set query_client and save_token as attributes (Authlib v1.3+ style)
         self.server.query_client = query_client_func
         self.server.save_token = save_token_func
+        self.server.register_client_auth_method(
+            "client_secret_basic", authenticate_client_secret_basic
+        )
 
         # Issue #141: Token generation is now handled by Grant classes
         # (AuthorizationCodeGrant.generate_token() and RefreshTokenGrant.generate_token())

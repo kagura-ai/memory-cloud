@@ -7,6 +7,7 @@ write timeout, or raising. The request path only ever calls ``offer``.
 from __future__ import annotations
 
 import asyncio
+import gc
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -200,10 +201,19 @@ async def test_offer_is_fast_and_never_raises(monkeypatch):
     db = FakeDB(default="slow")
     writer = _writer(db, queue_size=100)
     worst = 0.0
-    for _ in range(500):  # 100 queued, the rest dropped
-        started = time.perf_counter()
-        writer.offer(_event(doc_ids=tuple(f"d{i}" for i in range(25))))
-        worst = max(worst, time.perf_counter() - started)
+    # The threshold measures offer() itself. A full garbage collection late in
+    # the suite, with coverage on, can pause one call for over a second on CI
+    # (seen twice on PR #2777, #2780), so collect first and keep the collector
+    # off while timing.
+    gc.collect()
+    gc.disable()
+    try:
+        for _ in range(500):  # 100 queued, the rest dropped
+            started = time.perf_counter()
+            writer.offer(_event(doc_ids=tuple(f"d{i}" for i in range(25))))
+            worst = max(worst, time.perf_counter() - started)
+    finally:
+        gc.enable()
     assert worst < 0.005
 
     def boom(*args: Any, **kwargs: Any) -> None:

@@ -1400,7 +1400,21 @@ written as is or percent-encoded; no `..`, query, fragment or params), or (Muse)
 `https://muse.ai/api/hatch/oauth/callback` or
 `https://platform.muse.ai/oauth/credential-test/callback` exactly, as written
 ([#2410](https://github.com/kagura-ai/memory-cloud/issues/2410),
-[#2487](https://github.com/kagura-ai/memory-cloud/issues/2487)). Entries
+[#2487](https://github.com/kagura-ai/memory-cloud/issues/2487)), or (Grok)
+it is `https://grok.com/connectors-oauth-exchange-code/` exactly, as written,
+trailing slash included
+([#2779](https://github.com/kagura-ai/memory-cloud/issues/2779)), or (Google
+connected apps) it is listed in `GOOGLE_CONNECTED_APPS_REDIRECT_URIS`, as
+written ([#2773](https://github.com/kagura-ai/memory-cloud/issues/2773)). A
+registration gets the provider `google_connected_apps` only when every entry
+it keeps is listed there; listed entries sent next to any other qualifying
+entry are left out. Such a client keeps its refresh token: a refresh answers
+with the same `refresh_token` and a new access token, which replaces the
+previous one; every other client's refresh rotates the pair. For that client,
+`POST /api/v1/oauth/revoke` with the current access token revokes the refresh
+token too, also when it races a refresh (the access token that refresh
+issued is revoked with it); an access token already replaced before the
+revocation arrives matches nothing and is answered `200`. Entries
 that do not qualify are left out of the registration (RFC 7591 §3.2.1): the
 response's `redirect_uris` lists what was registered, and only those are
 accepted at `/authorize` and `/token`, so compare it with what you sent. A

@@ -6254,6 +6254,7 @@ class MemoryService:
         memories: dict[str, Memory],
         *,
         client: str,
+        promote: bool = True,
     ) -> None:
         """Bump access stats for the shipped page and promote what qualifies.
 
@@ -6270,6 +6271,7 @@ class MemoryService:
             responses: The page being returned (mutated for promoted rows).
             memories: Hydrated point-id → Memory map (read state).
             client: Client name recorded in ``accessed_by_clients``.
+            promote: #2773 False bumps the stats only (a read-only recall).
         """
         if not responses:
             return
@@ -6282,7 +6284,7 @@ class MemoryService:
                 due = [
                     memory_id
                     for memory_id, stats in updated.items()
-                    if memory_id in rows and self._promotion_due(rows[memory_id], stats)
+                    if promote and memory_id in rows and self._promotion_due(rows[memory_id], stats)
                 ]
                 promoted = (
                     set(await repo.bulk_promote_to_persistent(due, skip_locked=True))
@@ -6912,6 +6914,7 @@ class MemoryService:
         supersede_acceptance: bool = True,
         related_index: bool = False,
         list_hint: bool = False,
+        learning: bool = True,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -6967,6 +6970,11 @@ class MemoryService:
                 ``list`` (still gated by RECALL_LIST_HINT_ENABLED). Only the
                 MCP recall tool passes True: the line names an MCP tool that
                 REST, share-key, bootstrap and forget(query=) callers lack.
+            learning: #2773 False makes the call read-only for what later
+                results depend on: no Hebbian pass (no edge reweighting,
+                pruning or eviction, no co-activation) and no working →
+                persistent promotion. The access bookkeeping still runs. Only
+                the MCP recall tool on the google view passes False.
 
         Returns:
             RecallResponse with search results
@@ -7387,13 +7395,17 @@ class MemoryService:
         # so the raw request.filters reading is the effective one (#2257).
         client = request.filters.get("client", "api") if request.filters else "api"
         with timings.stage("post_commit"):
-            await self._recall_record_access(responses, memories, client=client)
+            if learning:
+                await self._recall_record_access(responses, memories, client=client)
+            else:
+                await self._recall_record_access(responses, memories, client=client, promote=False)
 
         # Related candidates can transfer scores and ordering through folding.
         # Do not train the graph on its own derived evidence. Empty/failed
         # expansion keeps the ordinary learning path exactly as before.
         if (
-            neural_enabled
+            learning
+            and neural_enabled
             and request.search_mode != "keyword"
             and not degradation.get("degraded")
             and baseline_pool is None
