@@ -308,6 +308,23 @@ async def get_worker_apps(
     return WorkerAppBootstrapResponse(revision=revision, apps=apps)
 
 
+async def _default_context_live(db: AsyncSession, connector: Any) -> bool:
+    """The connector's default context exists, is not soft-deleted and is in
+    the connector's workspace (one primary-key lookup)."""
+    from sqlalchemy import select
+
+    from models.auth import Context
+
+    row = (
+        await db.execute(
+            select(Context.workspace_id, Context.deleted_at).where(
+                Context.id == connector.context_id
+            )
+        )
+    ).first()
+    return row is not None and row.workspace_id == connector.workspace_id and row.deleted_at is None
+
+
 @router.get(
     "/config",
     response_model=WorkerConnectorConfig,
@@ -341,7 +358,8 @@ async def get_worker_config(
     """Return the connector config for a platform team (worker dispatch).
 
     404 when no connector serves the team, the connector has no write-target
-    context yet (registration incomplete), its workspace's plan has connectors
+    context yet (registration incomplete) or that context was soft-deleted or
+    is no longer in the connector's workspace, its workspace's plan has connectors
     suspended (#1939), it has no KMC write key, its
     ``llm_config`` cannot vend (#1447), or it uses channel routing and the
     worker did not declare the ``channel_routes`` capability (#1759) — the
@@ -375,6 +393,18 @@ async def get_worker_config(
         app_key=selected_app_key,
     )
     if connector is None or connector.context_id is None:
+        raise WorkerConnectorNotReadyError()
+
+    # A soft-deleted default context (or one no longer in the connector's
+    # workspace) keeps its id, so the check above passes, yet the write path
+    # refuses every write into it: not ready, before the conditional GET (a
+    # soft delete bumps no config_version).
+    if not await _default_context_live(db, connector):
+        logger.warning(
+            "worker_config_not_ready",
+            connector_id=str(connector.id),
+            reason="default_context_unavailable",
+        )
         raise WorkerConnectorNotReadyError()
 
     # #1939: a suspended connector (its workspace fell back to Free) is a

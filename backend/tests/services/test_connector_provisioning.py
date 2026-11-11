@@ -1489,3 +1489,27 @@ async def test_update_settings_routes_need_a_write_key_and_a_default_context():
             user_id="admin-1",
             channel_routes=[{"channel_id": "C01", "action": "skip"}],
         )
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_refuses_a_soft_deleted_context_like_an_unknown_one():
+    """The create path binds only a live context of the workspace: a
+    soft-deleted one is the same NotFound as an unknown one (the write path
+    refuses it anyway, and the settings re-point already does)."""
+    from utils.exceptions import NotFoundException
+
+    workspace = SimpleNamespace(id=uuid4(), owner_user_id="owner-1")
+    ctx = uuid4()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=None))
+    with pytest.raises(NotFoundException) as exc:
+        await ConnectorProvisioningService(db)._resolve_context(
+            workspace=workspace,
+            user_id="admin-1",
+            context_id=ctx,
+            auto_create_context_name=None,
+        )
+    assert str(ctx) in str(exc.value)
+    statement = str(db.execute.await_args.args[0])
+    assert "contexts.workspace_id" in statement
+    assert "contexts.deleted_at IS NULL" in statement

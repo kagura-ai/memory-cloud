@@ -544,6 +544,57 @@ async def test_the_vend_end_to_end(setup: _Setup):
     assert await s.version() == version
 
 
+@pytest.mark.asyncio
+async def test_a_soft_deleted_default_context_is_not_ready(setup: _Setup):
+    """The default context keeps its id when soft-deleted (no SET NULL) and no
+    config_version moves: still a 404, also on the ETag the worker holds."""
+    from api.routes.workers import get_worker_config
+
+    s = setup
+    team = f"T{uuid4().hex[:10].upper()}"
+    connector = await s.db.get(WorkspaceConnector, s.connector_id)
+    connector.external_team_id = team
+    connector.set_llm_config({"provider": "p", "model": "m", "api_key": "k"})
+    await s.db.commit()
+
+    async def vend(if_none_match=None):
+        return await get_worker_config(
+            response=Response(),
+            platform="slack",
+            team_id=team,
+            app_key=None,
+            capabilities=None,
+            if_none_match=if_none_match,
+            _=None,
+            db=s.db,
+        )
+
+    served = await vend()
+    assert served.context_id == s.default_context
+    await s.db.execute(
+        update(Context).where(Context.id == s.default_context).values(deleted_at=utcnow())
+    )
+    await s.db.commit()
+    with pytest.raises(WorkerConnectorNotReadyError):
+        await vend()
+    with pytest.raises(WorkerConnectorNotReadyError):
+        await vend(if_none_match=f'"{served.config_revision}"')
+
+    # Restored, then moved to another workspace: not ready either.
+    await s.db.execute(
+        update(Context).where(Context.id == s.default_context).values(deleted_at=None)
+    )
+    await s.db.commit()
+    assert (await vend()).context_id == s.default_context
+    other = await s.world.workspace(s.owner)
+    await s.db.execute(
+        update(Context).where(Context.id == s.default_context).values(workspace_id=other.id)
+    )
+    await s.db.commit()
+    with pytest.raises(WorkerConnectorNotReadyError):
+        await vend()
+
+
 # ------------------------------------------------------------ ON DELETE
 
 

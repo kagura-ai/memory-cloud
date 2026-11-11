@@ -545,6 +545,9 @@ class ConnectorProvisioningService:
                 select(Context).where(
                     Context.id == context_id,
                     Context.workspace_id == workspace.id,
+                    # A soft-deleted context is the same NotFound as an
+                    # unknown one: the write path refuses it anyway.
+                    Context.deleted_at.is_(None),
                 )
             )
             if result.scalar_one_or_none() is None:

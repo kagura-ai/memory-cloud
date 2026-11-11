@@ -192,6 +192,12 @@ would write every channel, private ones included, into the default context.
 For a request without the capability and a connector that uses no routing, the
 body and `config_revision` are exactly what they were before this feature.
 
+The same not-ready `404` answers, with or without the capability, when the
+connector's default `context_id` was soft-deleted or is no longer in the
+connector's workspace (API log `worker_config_not_ready`,
+`reason=default_context_unavailable`): the worker skips the team instead of
+having every write refused.
+
 **What the worker does for a message in channel C:**
 
 | `channel_routes` entry for C | Ingest | Answer from memory in C |

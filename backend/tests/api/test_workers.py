@@ -31,6 +31,14 @@ def _connectors_not_suspended():
 
 
 @pytest.fixture(autouse=True)
+def _default_context_live():
+    """The default context is live unless a test says otherwise (the real
+    lookup is covered below and DB-tested in test_1759_channel_routes_db.py)."""
+    with patch("api.routes.workers._default_context_live", new=AsyncMock(return_value=True)):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _no_channel_routing():
     """#1759: no routes and the switch at ``default`` unless a test says
     otherwise (the real read is DB-tested in
@@ -1216,3 +1224,63 @@ async def test_a_deleted_destination_changes_the_revision_without_a_version_bump
     )
     assert isinstance(cached, Response)
     assert cached.status_code == 304
+
+
+# ---------------------------------------------------------------------------
+# A soft-deleted default context is not ready
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_default_context_that_is_not_live_is_not_ready_even_on_a_matching_etag():
+    """A soft delete keeps the id and bumps no config_version: decided before
+    the conditional GET, with its own log reason."""
+    from services.connector_channel_routes import NO_ROUTING
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    for if_none_match in (None, f'"{_PINNED_REVISION}"'):
+        with (
+            patch("api.routes.workers._default_context_live", new=AsyncMock(return_value=False)),
+            patch("api.routes.workers.logger") as log,
+            pytest.raises(WorkerConnectorNotReadyError) as exc,
+        ):
+            await _vend_routed(NO_ROUTING, if_none_match=if_none_match)
+        assert exc.value.status_code == 404
+        assert any(
+            call.kwargs.get("reason") == "default_context_unavailable"
+            for call in log.warning.call_args_list
+        )
+
+
+# The real lookup, taken at import (the autouse fixture patches the name).
+_REAL_DEFAULT_CONTEXT_LIVE = workers_module._default_context_live
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row", "live"),
+    [
+        pytest.param("live", True, id="live"),
+        pytest.param("soft-deleted", False, id="soft-deleted"),
+        pytest.param("other-workspace", False, id="other-workspace"),
+        pytest.param(None, False, id="no-row"),
+    ],
+)
+async def test_default_context_live_reads_existence_deletion_and_workspace(row, live):
+    from datetime import datetime
+    from uuid import uuid4
+
+    conn = _pinned_conn()
+    values = {
+        "live": SimpleNamespace(workspace_id=conn.workspace_id, deleted_at=None),
+        "soft-deleted": SimpleNamespace(
+            workspace_id=conn.workspace_id, deleted_at=datetime(2026, 1, 1)
+        ),
+        "other-workspace": SimpleNamespace(workspace_id=uuid4(), deleted_at=None),
+        None: None,
+    }
+    result = MagicMock()
+    result.first.return_value = values[row]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    assert await _REAL_DEFAULT_CONTEXT_LIVE(db, conn) is live
