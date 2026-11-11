@@ -10,8 +10,10 @@ counts. What can drift without anyone noticing is pinned here:
 - every action is pinned by a commit SHA, the ``mcp-publisher`` release by its
   version and archive digest, and the archive is verified with cosign before it
   is unpacked;
-- the version guard runs before the download, and ``login`` and ``publish`` run
-  only on a tag ref (a dispatch on a branch is a dry run).
+- the version guard runs before the download and tolerates "not a v-tag" only
+  off a tag; ``login`` runs on every ref (a dispatch on a branch proves the OIDC
+  exchange), ``publish`` only on a tag ref;
+- runs are serialised per ref, so a branch dry run never cancels a pending tag run.
 """
 
 import re
@@ -142,10 +144,36 @@ def test_validate_runs_before_login_and_publish() -> None:
     )
 
 
-@pytest.mark.parametrize("command", ['mcp-publisher" login github-oidc', 'mcp-publisher" publish'])
-def test_login_and_publish_run_on_a_tag_ref_only(command: str) -> None:
-    step = _steps()[_index(command)]
-    assert step["if"] == _ON_TAG
+def test_login_runs_on_every_ref_and_publish_on_a_tag_ref_only() -> None:
+    # Login only exchanges the OIDC token for a registry token kept on the
+    # runner, so a branch dry run proves it; nothing but the ref gates publish.
+    assert "if" not in _steps()[_index('mcp-publisher" login github-oidc')]
+    assert _steps()[_index('mcp-publisher" publish')]["if"] == _ON_TAG
+
+
+def test_concurrency_is_per_ref_and_never_cancels() -> None:
+    # GitHub cancels an older pending run of the same group: one group for every
+    # ref would let a branch dry run cancel a tag run waiting to publish.
+    concurrency = _workflow()["concurrency"]
+    assert "${{ github.ref }}" in concurrency["group"]
+    assert concurrency["cancel-in-progress"] is False
+
+
+def test_the_guard_tolerates_not_a_tag_only_off_a_tag() -> None:
+    guard = _steps()[_index(".github/scripts/check-server-json-version.sh")]
+    assert guard["env"]["REF_TYPE"] == "${{ github.ref_type }}"
+    script = str(guard["run"])
+    assert 'if [ "$REF_TYPE" != tag ] && [ "$rc" -eq 3 ]; then' in script
+    # The exit status is reset in that branch only, and the step ends on it.
+    assert script.count("rc=0") == 2  # the initial value and the tolerated case
+    assert script.rstrip().endswith('exit "$rc"')
+
+
+def test_no_step_hides_a_failure_or_expands_an_expression_in_a_script() -> None:
+    assert "continue-on-error" not in _job()
+    for step in _steps():
+        assert "continue-on-error" not in step, step.get("name")
+        assert "${{" not in str(step.get("run", "")), step.get("name")
 
 
 def test_the_dry_run_is_decided_by_the_ref_not_an_input() -> None:

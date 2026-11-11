@@ -72,7 +72,7 @@ The canonical runtime version is `APP_VERSION` in `backend/src/config/constants.
 - `frontend/package-lock.json` — run `cd frontend && npm install` to sync lock file (both the root `version` and `packages[""].version`)
 - `.claude-plugin/plugin.json` — `"version": "X.Y.Z"` (kagura-memory Claude Code plugin manifest; kept in lockstep so marketplace consumers see the same version as the backend)
 - `plugins/kagura-memory/.codex-plugin/plugin.json` — `"version": "X.Y.Z"` (kagura-memory Codex plugin manifest; kept in lockstep with the Claude plugin manifest)
-- `server.json` — `"version": "X.Y.Z"` (Official MCP Registry metadata, #1679; publishing it to the registry is a separate manual step)
+- `server.json` — `"version": "X.Y.Z"` (Official MCP Registry metadata, #1679; the tag push publishes it to the registry, see step 10)
 - `backend/uv.lock` — run `cd backend && uv lock` after the `pyproject.toml` bump. The tracked lock records the project's own version (#1706), so without this the `lint` job's `uv lock --check` fails the release PR. Only the `kagura-memory-cloud` version line should change; anything more means the lock was stale on `main`.
 
 ### 6. Add the CHANGELOG entry
@@ -184,7 +184,7 @@ git ls-remote --tags origin refs/tags/vX.Y.Z           # confirm the tag landed
 
 The tag push triggers the `push: tags: ["v*"]` CI run in `.github/workflows/ci.yml`.
 
-It also triggers `.github/workflows/publish-mcp-registry.yml`, which publishes `server.json` to the Official MCP Registry (GitHub OIDC, no secret); it fails before publishing when the tag is not `v` + `server.json`'s `version`. A failed publish does not block the release or the deploy: fix the cause, then re-run it on the tag with `gh workflow run publish-mcp-registry.yml --ref vX.Y.Z` (a dispatch on a tag publishes like the push; a dispatch on a branch is a dry run that publishes nothing). Check the listing with `curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=kagura&version=latest'`.
+It also triggers `.github/workflows/publish-mcp-registry.yml`, which publishes `server.json` to the Official MCP Registry (GitHub OIDC, no secret); it fails before publishing when the tag is not `v` + `server.json`'s `version`. A failed publish does not block the release or the deploy. A dispatch on the tag (`gh workflow run publish-mcp-registry.yml --ref vX.Y.Z`) runs the tag's own workflow file and `server.json`, so re-running it only helps when the cause is outside the repository (an outage, the registry side). A cause inside the repository is fixed on `main`, and the listing catches up with the next release tag; publishing never happens from a branch. A dispatch on a branch is a dry run: it verifies the publisher, validates `server.json` and logs in through OIDC, and publishes nothing. Check the listing with `curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=kagura&version=latest'`.
 
 ### 11. Create the GitHub Release
 

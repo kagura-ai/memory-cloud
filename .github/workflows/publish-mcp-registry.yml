@@ -8,10 +8,12 @@ name: Publish to MCP Registry
 # the device-flow login) and publish.
 #
 # A dispatch on a branch is a dry run: download, verification, the version
-# guard's verdict and `validate` (a read-only check against the registry), but
-# no login and no publish. A dispatch on a tag behaves like the tag push: that
-# is how a failed publish is re-run. A failed publish does not block the
-# release or the deploy.
+# guard's verdict, `validate` (a read-only check against the registry) and
+# `login github-oidc` (it only exchanges the OIDC token for a registry token
+# kept on the runner; nothing changes on the registry), but no publish. A
+# dispatch on a tag behaves like the tag push, with the tag's own workflow and
+# server.json: it re-runs a publish that failed for a cause outside the
+# repository. A failed publish does not block the release or the deploy.
 # backend/tests/ci/test_mcp_registry_publish.py pins the shape of this file.
 
 on:
@@ -22,9 +24,11 @@ on:
 permissions:
   contents: read
 
-# One publish at a time; a second one waits instead of cancelling the first.
+# One run per ref at a time; a second one waits instead of cancelling the
+# first. Per ref because GitHub cancels an older pending run of the same group:
+# a branch dry run must never replace a tag run that is waiting to publish.
 concurrency:
-  group: publish-mcp-registry
+  group: publish-mcp-registry-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -103,7 +107,6 @@ jobs:
 
       - name: Authenticate to MCP Registry
         id: login
-        if: github.ref_type == 'tag'
         run: '"$RUNNER_TEMP/mcp-publisher/mcp-publisher" login github-oidc'
 
       - name: Publish server to MCP Registry
@@ -126,8 +129,10 @@ jobs:
             published="yes"
           elif [ "$REF_TYPE" = tag ]; then
             published="no (validate: $VALIDATE, login: $LOGIN, publish: $PUBLISH); fix, then re-run this workflow on the tag"
+          elif [ "$VALIDATE" = success ] && [ "$LOGIN" = success ]; then
+            published="no (dry run: validated and logged in, nothing published)"
           else
-            published="no: dry run on a branch, nothing was published"
+            published="no (dry run, nothing published; validate: $VALIDATE, login: $LOGIN)"
           fi
           {
             echo "## MCP Registry publish"
