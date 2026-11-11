@@ -1983,6 +1983,32 @@ Session cookie only. Records that the signed-in user accepts the current terms v
 
 ---
 
+## Memory Health
+
+The per-context memory health report (#1211, #1225), for the contexts the
+caller created. Session only: an API key or an OAuth bearer token gets `403`.
+Any signed-in user may call it; no system-admin or workspace role is needed,
+because every number in it is the caller's own (#2764).
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/memory-health` | Breakdown: one graded entry per context the caller created (consolidation / graph / retrieval statuses, `ok`/`warn`/`fail`) from Sleep telemetry, graph invariants and usage stats, plus an entry with `context_id: null` when signals were recorded outside those contexts. |
+| `GET /api/v1/memory-health?context_id=<uuid>` | The 3-section detail of one context the caller created. A context created by someone else and an unknown id get the same `404`. |
+| `GET /api/v1/memory-health?context_id=unattributed` | The 3-section detail of the signals recorded outside the caller's contexts. |
+
+| Status | When |
+|--------|------|
+| `401` / `403` | no session / an API key or bearer token instead of a session |
+| `404` | the context does not exist or the caller did not create it |
+| `422` | `context_id` is neither a UUID nor `unattributed` |
+
+The web UI shows the detail on the **Health** tab of a context the viewer
+created and a status badge on each of those contexts in the context list.
+See [Memory Health Report](ops/memory-health-report.md) for every metric and
+threshold.
+
+---
+
 ## Admin APIs
 
 Admin endpoints require `system_admin` or `workspace_admin` role.
@@ -1996,14 +2022,11 @@ Admin endpoints require `system_admin` or `workspace_admin` role.
 
 See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `sleep_mode`, and rollback semantics.
 
-### Memory Health
+### Memory Health (deprecated)
 
-| Endpoint                          | Purpose                                                       |
-|-----------------------------------|---------------------------------------------------------------|
-| `GET /api/v1/admin/memory-health` | Per-context self-diagnosis breakdown — one graded entry per owned context (consolidation / graph / retrieval statuses, `ok`/`warn`/`fail`) from Sleep telemetry, graph invariants, and usage stats. Self-scoped (the calling admin's data partition). |
-| `GET /api/v1/admin/memory-health?context_id=<uuid>` | The 3-section detail document for one owned context (un-owned → 404). `context_id=unattributed` targets signals recorded without a context. |
-
-See [Memory Health Report](ops/memory-health-report.md) for every metric and threshold.
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/memory-health` | **Deprecated** (#2764): an alias of [`GET /api/v1/memory-health`](#memory-health) that answers a system admin with the same document, with the same `context_id` parameter. It is removed in a later release; call the new path. |
 
 ### Environment Console
 

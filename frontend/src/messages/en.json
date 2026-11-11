@@ -319,7 +319,6 @@
     "quotas": "Quotas & Limits",
     "neuralConfig": "Neural Config",
     "sleepReports": "Sleep Reports",
-    "memoryHealth": "Memory Health",
     "cost": "Cost",
     "environment": "Environment",
     "workerApps": "Worker Apps",
@@ -3291,40 +3290,6 @@
         "unknown": "Unknown error while loading cost aggregation."
       }
     },
-    "memoryHealth": {
-      "title": "Memory Health",
-      "description": "Per-context self-diagnosis: consolidation, graph, and retrieval signals with ok/warn/fail grading",
-      "refresh": "Refresh",
-      "overall": "Overall",
-      "back": "Back to contexts",
-      "unattributed": "Unattributed (no context)",
-      "emptyTitle": "Nothing to grade yet",
-      "emptyDescription": "Health entries appear here once you have contexts or recorded signals.",
-      "emptyValue": "—",
-      "status": {
-        "ok": "OK",
-        "warn": "Warn",
-        "fail": "Fail"
-      },
-      "sections": {
-        "consolidation": "Consolidation",
-        "graph": "Graph",
-        "retrieval": "Retrieval"
-      },
-      "notes": {
-        "latest_sleep_failed": "The latest sleep run failed — total judge failure. Check the sleep LLM configuration.",
-        "judge_failures": "Judge failures in the window: {count} (degraded runs: {degraded_runs}) — a partially dead judge grades 'degraded', never silently 'completed'.",
-        "degraded_runs": "{count} degraded run(s) without judge failures — a maintenance phase crashed; check the run's error message.",
-        "failed_runs_recovered": "{count} failed sleep run(s) in the window — the latest run recovered, but recent instability is worth a look.",
-        "deferred_pairs": "{count} candidate pair(s) deferred unjudged (cluster caps) — dedup may be structurally behind.",
-        "merge_backlog_old": "The oldest merge loser is {oldest_days}d old (over {threshold_days}d) — consider a retention window.",
-        "edge_weight_violations": "{count} edge(s) outside the weight bounds [{min}, {max}] — an unclamped-accumulation bug.",
-        "cold_graph": "{active_memories} active memories but zero edges — the graph never warmed. Check edge-formation gates and the sleep mode.",
-        "write_only_store": "No successful recall calls in the last {window_days}d while memories were written ({active_memories} active memories) — the store is write-only right now.",
-        "idle_store": "No successful MCP recall or memory-write calls in the last {window_days}d across {active_memories} active memories — the context looks idle, not write-only. Writes made through the web UI, REST API or connectors are not counted here.",
-        "unknown": "Unrecognized health note (code: {code})."
-      }
-    },
     "sleepReports": {
       "title": "Sleep Reports",
       "description": "View Sleep Maintenance execution history and audit logs",
@@ -4040,6 +4005,53 @@
       "deleted": "{count, plural, one {Deleted # memory} other {Deleted # memories}}",
       "progress": "{count, plural, one {Deleting… # memory deleted} other {Deleting… # memories deleted}}",
       "partial": "{count, plural, one {# memory was deleted before the error. Count again to continue.} other {# memories were deleted before the error. Count again to continue.}}"
+    }
+  },
+  "memoryHealth": {
+    "tabLabel": "Health",
+    "description": "How memory upkeep, the links between memories and retrieval are working in this context, read from your own activity. Warnings say what to look at; a failure means something did not work.",
+    "refresh": "Refresh",
+    "overall": "Overall",
+    "generatedAt": "Checked {time}",
+    "loadError": "The health report could not be loaded. Try again with Refresh.",
+    "emptyValue": "—",
+    "badgeLabel": "Memory health: {status}. Open the Health tab",
+    "status": {
+      "ok": "OK",
+      "warn": "Warn",
+      "fail": "Fail"
+    },
+    "sections": {
+      "consolidation": {
+        "title": "Upkeep (sleep)",
+        "description": "Sleep runs that merge duplicate memories and tidy this context."
+      },
+      "graph": {
+        "title": "Links",
+        "description": "Links between memories that let recall bring up related ones."
+      },
+      "retrieval": {
+        "title": "Use",
+        "description": "How your agents wrote and recalled memories in this context over the last days."
+      }
+    },
+    "notes": {
+      "latest_sleep_failed": "The latest sleep run failed: the model that compares memories did not answer, so nothing was merged. If the next run fails too, check the sleep setting of this context or ask your administrator.",
+      "judge_failures": "{count} memory comparison(s) failed in recent sleep runs ({degraded_runs} run(s) finished only partly). Some duplicates may stay unmerged until a later run; if this keeps happening, ask your administrator.",
+      "degraded_runs": "{count} recent sleep run(s) finished only partly because one upkeep step stopped early. Your memories are not affected; if this keeps happening, ask your administrator.",
+      "failed_runs_recovered": "{count} sleep run(s) failed recently, but the latest run worked. Nothing to do unless failures come back.",
+      "deferred_pairs": "{count} pair(s) of possibly duplicate memories were left for a later run, because one run compares only so many. Later runs catch up; until then some duplicates may show up in recall.",
+      "merge_backlog_old": "Memories that sleep merged into others are kept for a while so they can be restored; the oldest is {oldest_days} days old (more than {threshold_days}). They do not show up in recall; your administrator decides how long they are kept.",
+      "edge_weight_violations": "{count} link(s) between memories have a strength outside the allowed range [{min}, {max}]. This points to a fault in the system, not in your memories: please report it to your administrator.",
+      "cold_graph": "This context holds {active_memories} memories but no links between them yet, so recall cannot bring up related memories. Links form when memories are recalled together and when sleep runs: check the sleep setting of this context.",
+      "write_only_store": "Memories were written in the last {window_days} days but none were recalled ({active_memories} memories in this context). If your agents should use this context, make sure they recall from it.",
+      "idle_store": "Nothing was written or recalled through MCP in the last {window_days} days ({active_memories} memories in this context): the context looks unused. Writes made in this web app, through the REST API or by connectors are not counted here."
+    },
+    "noteUnknown": "A health signal this page does not know yet (code: {code}).",
+    "unattributed": {
+      "title": "Activity outside your contexts",
+      "description": "Some of your activity is recorded outside the contexts you created: sleep runs for your whole account, recalls across several contexts, or work in contexts that were deleted or that someone else created.",
+      "action": "View report"
     }
   },
   "contextSettings": {

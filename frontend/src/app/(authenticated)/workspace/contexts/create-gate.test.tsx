@@ -36,6 +36,12 @@ vi.mock("@/lib/api/contexts", () => ({
   getEmbeddingModels: (...args: unknown[]) => mockGetEmbeddingModels(...args),
 }));
 
+// #2764: the page's memory-health breakdown stays pending here (not under test).
+vi.mock("@/lib/api/memory-health", () => ({
+  UNATTRIBUTED_SCOPE: "unattributed",
+  getMemoryHealthBreakdown: () => new Promise(() => {}),
+}));
+
 vi.mock("@/lib/api/workspaces", () => ({
   checkOpenAIKeyStatus: (...args: unknown[]) =>
     mockCheckOpenAIKeyStatus(...args),

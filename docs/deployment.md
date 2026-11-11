@@ -1101,7 +1101,7 @@ What it does not do:
   (and `explore`), Sleep maintenance (each account's memories are maintained
   on their own, with no de-duplication across the two — merging would delete
   or rewrite one account's rows under the other's name, and an unlink could
-  not give them back), the admin memory-health report, the workspace
+  not give them back), the memory-health report, the workspace
   dashboard's counts and retrieval feedback. A private context's **access
   patterns** do follow the link (#1807), as its memory list and stats do.
 - **Writes that name another memory follow the link only in a private

@@ -1,10 +1,11 @@
-"""Route-level tests for GET /api/v1/admin/memory-health (#1211, #1225).
+"""Route-level tests for the deprecated GET /api/v1/admin/memory-health alias.
 
-Covers the admin gate (403 for non-admin), the two 200 response shapes
-through FastAPI serialization (breakdown vs ?context_id detail — the
-dict-to-model boundary the service unit tests can't see), the uniform 404
-for un-owned contexts, the 'unattributed' sentinel, the 422 for malformed
-scopes, and the HEALTH-001 guard.
+#2764 moved the report to ``GET /api/v1/memory-health`` (see
+``test_memory_health.py``). The admin path stays for one release as a
+deprecated alias of the same handler: still behind the system-admin gate,
+answering a system admin with the same document as the new path, marked
+``deprecated`` in the OpenAPI document with a description naming its
+replacement.
 """
 
 import uuid
@@ -14,45 +15,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from auth.dependencies import get_current_user, require_admin
+from auth.dependencies import get_current_user, require_admin, require_session_auth
 from db.base import get_db
+from tests.api.test_memory_health import CANNED_BREAKDOWN, CANNED_DETAIL
 
-_CTX = str(uuid.uuid4())
+SERVICE = "api.routes.memory_health.MemoryHealthService"
+ALIAS = "/api/v1/admin/memory-health"
+NEW = "/api/v1/memory-health"
 
-_CANNED_BREAKDOWN = {
-    "generated_at": "2026-07-12T00:00:00Z",
-    "overall_status": "warn",
-    "contexts": [
-        {
-            "context_id": _CTX,
-            "name": "Context A",
-            "overall_status": "warn",
-            "sections": {"consolidation": "warn", "graph": "ok", "retrieval": "ok"},
-        },
-        {
-            "context_id": None,
-            "name": None,
-            "overall_status": "ok",
-            "sections": {"consolidation": "ok", "graph": "ok", "retrieval": "ok"},
-        },
-    ],
-}
-
-_CANNED_DETAIL = {
-    "generated_at": "2026-07-12T00:00:00Z",
-    "context_id": _CTX,
-    "context_name": "Context A",
-    "overall_status": "warn",
-    "sections": {
-        "consolidation": {
-            "status": "warn",
-            "metrics": {"reports_in_window": 3, "llm_call_failures": 2},
-            "notes": [{"code": "judge_failures", "params": {"count": 2, "degraded_runs": 1}}],
-        },
-        "graph": {"status": "ok", "metrics": {"total_edges": 5}, "notes": []},
-        "retrieval": {"status": "ok", "metrics": {"recall_calls": 7}, "notes": []},
-    },
-}
+_CTX = CANNED_DETAIL["context_id"]
 
 
 def _admin_user() -> dict:
@@ -74,68 +45,53 @@ def _as_admin():
         return _admin_user()
 
     app.dependency_overrides[require_admin] = admin
+    app.dependency_overrides[require_session_auth] = admin
     app.dependency_overrides[get_db] = _mock_get_db
 
 
-class TestAdminMemoryHealthRoute:
+class TestDeprecatedAdminAlias:
     def test_non_admin_gets_403(self, client) -> None:
         async def member_user():
             return {"user_id": "u1", "email": "member@test.com", "role": "member"}
 
         app.dependency_overrides[get_current_user] = member_user
         app.dependency_overrides[get_db] = _mock_get_db
-
-        resp = client.get("/api/v1/admin/memory-health")
+        called = AsyncMock()
+        with patch(f"{SERVICE}.build_breakdown", new=called):
+            resp = client.get(ALIAS)
         assert resp.status_code == 403
+        called.assert_not_awaited()
 
-    def test_breakdown_shape_without_context_id(self, client) -> None:
+    def test_breakdown_is_the_same_document_as_the_new_path(self, client) -> None:
         _as_admin()
         with patch(
-            "api.routes.admin_memory_health.MemoryHealthService.build_breakdown",
-            new=AsyncMock(return_value=_CANNED_BREAKDOWN),
-        ):
-            resp = client.get("/api/v1/admin/memory-health")
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["overall_status"] == "warn"
-        assert len(body["contexts"]) == 2
-        assert body["contexts"][0]["context_id"] == _CTX
-        assert body["contexts"][0]["sections"] == {
-            "consolidation": "warn",
-            "graph": "ok",
-            "retrieval": "ok",
-        }
-        # The unattributed entry serializes with null identity fields.
-        assert body["contexts"][1]["context_id"] is None
-        assert body["contexts"][1]["name"] is None
-
-    def test_detail_shape_with_context_id(self, client) -> None:
-        _as_admin()
-        with patch(
-            "api.routes.admin_memory_health.MemoryHealthService.build_context_report",
-            new=AsyncMock(return_value=_CANNED_DETAIL),
+            f"{SERVICE}.build_breakdown", new=AsyncMock(return_value=CANNED_BREAKDOWN)
         ) as mocked:
-            resp = client.get(f"/api/v1/admin/memory-health?context_id={_CTX}")
+            alias = client.get(ALIAS)
+            new = client.get(NEW)
 
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["context_id"] == _CTX
-        assert body["context_name"] == "Context A"
-        assert set(body["sections"]) == {"consolidation", "graph", "retrieval"}
-        note = body["sections"]["consolidation"]["notes"][0]
-        assert note == {"code": "judge_failures", "params": {"count": 2, "degraded_runs": 1}}
-        # The route parses the query param into a UUID scope.
+        assert alias.status_code == 200
+        assert alias.json() == new.json()
+        assert alias.json()["contexts"][0]["context_id"] == _CTX
+        assert mocked.await_args.args[0] == "admin_user_1"
+
+    def test_detail_is_the_same_document_as_the_new_path(self, client) -> None:
+        _as_admin()
+        with patch(
+            f"{SERVICE}.build_context_report", new=AsyncMock(return_value=CANNED_DETAIL)
+        ) as mocked:
+            alias = client.get(f"{ALIAS}?context_id={_CTX}")
+            new = client.get(f"{NEW}?context_id={_CTX}")
+
+        assert alias.status_code == 200
+        assert alias.json() == new.json()
         assert mocked.await_args.args[1] == uuid.UUID(_CTX)
 
     def test_unattributed_sentinel_maps_to_null_scope(self, client) -> None:
         _as_admin()
-        canned = {**_CANNED_DETAIL, "context_id": None, "context_name": None}
-        with patch(
-            "api.routes.admin_memory_health.MemoryHealthService.build_context_report",
-            new=AsyncMock(return_value=canned),
-        ) as mocked:
-            resp = client.get("/api/v1/admin/memory-health?context_id=unattributed")
+        canned = {**CANNED_DETAIL, "context_id": None, "context_name": None}
+        with patch(f"{SERVICE}.build_context_report", new=AsyncMock(return_value=canned)) as mocked:
+            resp = client.get(f"{ALIAS}?context_id=unattributed")
 
         assert resp.status_code == 200
         assert resp.json()["context_id"] is None
@@ -143,18 +99,15 @@ class TestAdminMemoryHealthRoute:
 
     def test_unowned_context_gets_uniform_404(self, client) -> None:
         _as_admin()
-        with patch(
-            "api.routes.admin_memory_health.MemoryHealthService.build_context_report",
-            new=AsyncMock(return_value=None),
-        ):
-            resp = client.get(f"/api/v1/admin/memory-health?context_id={uuid.uuid4()}")
+        with patch(f"{SERVICE}.build_context_report", new=AsyncMock(return_value=None)):
+            resp = client.get(f"{ALIAS}?context_id={uuid.uuid4()}")
 
         assert resp.status_code == 404
         assert "Context not found" in resp.text
 
     def test_malformed_context_id_gets_422(self, client) -> None:
         _as_admin()
-        resp = client.get("/api/v1/admin/memory-health?context_id=not-a-uuid")
+        resp = client.get(f"{ALIAS}?context_id=not-a-uuid")
         assert resp.status_code == 422
 
     def test_missing_user_id_yields_health_001(self, client) -> None:
@@ -164,6 +117,11 @@ class TestAdminMemoryHealthRoute:
         app.dependency_overrides[require_admin] = admin_without_id
         app.dependency_overrides[get_db] = _mock_get_db
 
-        resp = client.get("/api/v1/admin/memory-health")
+        resp = client.get(ALIAS)
         assert resp.status_code == 500
         assert "HEALTH-001" in resp.text
+
+    def test_openapi_marks_the_alias_deprecated_and_names_the_new_path(self) -> None:
+        operation = app.openapi()["paths"][ALIAS]["get"]
+        assert operation["deprecated"] is True
+        assert NEW in operation["description"]
