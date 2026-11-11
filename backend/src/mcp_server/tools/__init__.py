@@ -612,9 +612,13 @@ async def _execute_tool_call(
 
     # Validate tool exists before expensive checks (avoids DB query for unknown tools)
     handler = _TOOL_REGISTRY.get(tool_name)
-    if handler is None:
-        from mcp_server.tools._google_profile import UNKNOWN_TOOL_HELP, google_mode_active
+    from mcp_server.tools._google_profile import UNKNOWN_TOOL_HELP, google_mode_active
+    from mcp_server.tools._profiles import GOOGLE_EXCLUDED_TOOLS
 
+    # #2773 / #2778: the google view leaves the discovery and manual tools
+    # out of tools/list, and a tools/call naming one is refused the same way,
+    # so their catalogue and manual text never reach that connection.
+    if handler is None or (tool_name in GOOGLE_EXCLUDED_TOOLS and google_mode_active()):
         return _error_response(
             "unknown_tool",
             f"Unknown tool: {tool_name}",

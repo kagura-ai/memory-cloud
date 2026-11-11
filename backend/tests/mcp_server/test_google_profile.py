@@ -30,6 +30,7 @@ from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
 from mcp_server.tools._google_profile import (
     GOOGLE_INSTRUCTIONS_BASE,
     GOOGLE_PROSE,
+    UNKNOWN_TOOL_HELP,
     _pointer_pattern,
     _without_pointers,
     google_default_context_instructions,
@@ -38,6 +39,7 @@ from mcp_server.tools._google_profile import (
 from mcp_server.tools._helpers import _mcp_tool_view_query
 from mcp_server.tools._profiles import (
     CORE_TOOLS,
+    GOOGLE_EXCLUDED_TOOLS,
     GOOGLE_PROFILE,
     GOOGLE_TOOLS,
     PROFILES,
@@ -439,6 +441,31 @@ async def test_caller_text_with_a_mask_like_sequence_is_not_a_crash(handlers, go
     # (here the unknown tool name echoed back) must not raise on restore.
     payload = _payload(await execute_tool_call(name, {}, "u", None))
     assert payload["error"] == "unknown_tool"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", [GOOGLE, b"profile=microsoft"])
+@pytest.mark.parametrize("tool", sorted(GOOGLE_EXCLUDED_TOOLS))
+async def test_the_left_out_tools_cannot_be_called_by_name(handlers, query, tool):
+    # The view leaves the discovery and manual tools out of tools/list; a
+    # tools/call that names one anyway gets the unknown-tool answer, not the
+    # catalogue or the manual.
+    handlers[tool] = (False, {"status": "success", "tools": ["the whole catalogue"]})
+    token = _mcp_tool_view_query.set(query)
+    try:
+        payload = _payload(await execute_tool_call(tool, {}, "u", None))
+    finally:
+        _mcp_tool_view_query.reset(token)
+    assert payload["error"] == "unknown_tool"
+    assert payload["help"] == UNKNOWN_TOOL_HELP
+    assert "the whole catalogue" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", sorted(GOOGLE_EXCLUDED_TOOLS))
+async def test_the_core_view_still_calls_the_discovery_and_manual_tools(handlers, core_view, tool):
+    payload = _payload(await execute_tool_call(tool, {}, "u", None))
+    assert payload == {"status": "success"}
 
 
 def test_pointer_scrub_leaves_text_with_a_nul_alone():
