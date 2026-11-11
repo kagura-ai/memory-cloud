@@ -1842,9 +1842,28 @@ class Settings(BaseSettings):
         v = v.strip()
         if not v:
             return ""
-        parsed = urlparse(v)
-        if parsed.scheme != "https" or not parsed.hostname or any(c.isspace() for c in v):
-            raise ValueError("CHATGPT_APP_URL must be an absolute https:// URL with a host")
+        error = "CHATGPT_APP_URL must be an absolute https:// URL with a host"
+        # No whitespace or control characters anywhere: the value is rendered
+        # as is, so what passes here must be what the browser parses.
+        if any(c.isspace() or not c.isprintable() for c in v):
+            raise ValueError(error)
+        try:
+            parsed = urlparse(v)
+            _ = parsed.port  # raises on a non-numeric or out-of-range port
+        except ValueError as exc:
+            raise ValueError(error) from exc
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            # A plain DNS name or IPv4 address: the browser refuses other host
+            # characters, so the UI would silently show no link.
+            or not re.fullmatch(r"[a-z0-9.-]+", parsed.hostname)
+            # No userinfo: ``https://a.example@b.example`` reads as one host
+            # and opens another.
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError(error)
         return v
 
     # Workspace Governance (Issue #1113)

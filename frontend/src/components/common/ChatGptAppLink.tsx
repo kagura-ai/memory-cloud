@@ -15,7 +15,9 @@ export function chatGptAppHref(value: string | null | undefined): string | null 
   if (!value) return null;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && url.hostname ? value : null;
+    // No userinfo: `https://a.example@b.example` reads as one host, opens another.
+    const safe = url.protocol === "https:" && url.hostname && !url.username && !url.password;
+    return safe ? value : null;
   } catch {
     return null;
   }

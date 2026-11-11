@@ -201,10 +201,15 @@ def test_system_info_chatgpt_app_url_needs_no_auth(info_with) -> None:
     assert resp.json()["chatgpt_app_url"] == _LISTING
 
 
-def test_chatgpt_app_url_is_trimmed_and_blank_means_unset() -> None:
+def test_chatgpt_app_url_is_trimmed_and_blank_means_unset(monkeypatch) -> None:
+    monkeypatch.delenv("CHATGPT_APP_URL", raising=False)
     assert Settings(_env_file=None, chatgpt_app_url=f"  {_LISTING}\n").chatgpt_app_url == _LISTING
     assert Settings(_env_file=None, chatgpt_app_url="   ").chatgpt_app_url == ""
     assert Settings(_env_file=None).chatgpt_app_url == ""
+    assert (
+        Settings(_env_file=None, chatgpt_app_url="HTTPS://Example.com/x").chatgpt_app_url
+        == "HTTPS://Example.com/x"
+    )
 
 
 @pytest.mark.parametrize(
@@ -216,9 +221,22 @@ def test_chatgpt_app_url_is_trimmed_and_blank_means_unset() -> None:
         "https://",
         "https:///chatgpt-app",
         "//example.com/chatgpt-app",
+        # The browser's URL parser refuses these, so the UI would show no link
+        # while startup passed: refuse them at startup instead.
+        "https://example.com:70000/chatgpt-app",
+        "https://example.com:abc/chatgpt-app",
+        "https://exa<mple.com/chatgpt-app",
+        "https://exa\x07mple.com/chatgpt-app",
+        "https://example.com/chatgpt\x7fapp",
+        # Userinfo: a link that reads like one host but opens another.
+        "https://chatgpt.example@example.com/chatgpt-app",
+        "https://user:pass@example.com/chatgpt-app",
     ],
 )
-def test_chatgpt_app_url_refuses_anything_but_an_https_url_with_a_host(value: str) -> None:
+def test_chatgpt_app_url_refuses_anything_but_an_https_url_with_a_host(
+    value: str, monkeypatch
+) -> None:
     """A value the UI could not safely link to fails startup instead."""
+    monkeypatch.delenv("CHATGPT_APP_URL", raising=False)
     with pytest.raises(ValidationError, match="CHATGPT_APP_URL"):
         Settings(_env_file=None, chatgpt_app_url=value)

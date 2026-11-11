@@ -33,6 +33,8 @@ describe("chatGptAppHref (#2760)", () => {
     ["javascript:alert(1)", null],
     ["chatgpt-app", null],
     ["//example.com/chatgpt-app", null],
+    ["https://chatgpt.example@example.com/chatgpt-app", null],
+    ["https://user:pass@example.com/chatgpt-app", null],
   ])("turns %s into %s", (value, expected) => {
     expect(chatGptAppHref(value)).toBe(expected);
   });

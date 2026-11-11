@@ -705,10 +705,13 @@ describe("OnboardingCard first screens (#2701)", () => {
     expect(screen.getByText("chat.title")).toBeInTheDocument();
   });
 
-  it("shows no ChatGPT app link on the chat screen when the deployment sets none", async () => {
+  it.each([
+    ["sets none", { chatgpt_app_url: null }],
+    ["returns a non-https value", { chatgpt_app_url: "javascript:alert(1)" }],
+  ])("shows no ChatGPT app link on the chat screen when the deployment %s", async (_label, info) => {
     window.localStorage.setItem("onboarding:u1:intro", "chat");
     withPracticeContext();
-    mockSystemInfo = { chatgpt_app_url: "javascript:alert(1)" };
+    mockSystemInfo = info;
     render(<OnboardingCard />);
     expect(await screen.findByText("chat.title")).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "label newTab" })).toHaveLength(1);

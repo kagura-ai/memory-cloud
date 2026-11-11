@@ -1405,7 +1405,7 @@ instead of pasting the MCP URL into ChatGPT's connector settings.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `CHATGPT_APP_URL` | *(empty)* | The listing's public URL, e.g. `https://example.com/chatgpt-app`. **Empty shows no link** — the UI is exactly what it was. When set, `GET /api/v1/system/info` returns it as `chatgpt_app_url` (`null` when empty) and the link opens it in a new tab. Surrounding whitespace is trimmed; anything but an absolute `https://` URL with a host (`http://`, `javascript:`, a bare word, a relative URL) fails startup. |
+| `CHATGPT_APP_URL` | *(empty)* | The listing's public URL, e.g. `https://example.com/chatgpt-app`. **Empty shows no link** — the UI is exactly what it was. When set, `GET /api/v1/system/info` returns it as `chatgpt_app_url` (`null` when empty) and the link opens it in a new tab. Surrounding whitespace is trimmed; anything but an absolute `https://` URL with a host (`http://`, `javascript:`, a bare word, a relative URL, whitespace or control characters inside, an invalid port, user info such as `user@`) fails startup. |
 
 A listing connects to one MCP server, so only the deployment the listing points
 at sets this; a self-hosted deployment leaves it empty, and ChatGPT connects to
