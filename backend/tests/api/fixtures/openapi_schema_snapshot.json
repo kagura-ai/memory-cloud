@@ -14619,6 +14619,7 @@
     },
     "/api/v1/admin/memory-health": {
       "get": {
+        "deprecated": true,
         "operationId": "get_memory_health_api_v1_admin_memory_health_get",
         "parameters": [
           {
@@ -24434,6 +24435,78 @@
         ]
       }
     },
+    "/api/v1/memory-health": {
+      "get": {
+        "operationId": "get_memory_health_api_v1_memory_health_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "context_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "const": "unattributed",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/MemoryHealthBreakdownResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/MemoryHealthDetailResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "memory-health"
+        ]
+      }
+    },
     "/api/v1/memory/access-patterns": {
       "get": {
         "operationId": "get_access_patterns_api_v1_memory_access_patterns_get",
@@ -33066,6 +33139,9 @@
     },
     {
       "name": "memory"
+    },
+    {
+      "name": "memory-health"
     },
     {
       "name": "neural-config"

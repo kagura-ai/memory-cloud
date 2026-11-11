@@ -321,10 +321,8 @@
     "workspaceSettings": "ワークスペース",
     "admin": "管理",
     "users": "ユーザー",
-    "quotas": "クォータ・制限",
     "neuralConfig": "ニューラル設定",
     "sleepReports": "Sleep レポート",
-    "memoryHealth": "メモリーヘルス",
     "cost": "コスト",
     "environment": "環境設定",
     "workerApps": "ワーカーアプリ",
@@ -2767,32 +2765,16 @@
       "cancel": "キャンセル",
       "loading": "読み込み中...",
       "noResults": "結果が見つかりません",
-      "noWorkspaces": "ワークスペースが見つかりません",
       "noChanges": "プラン変更の記録はありません",
       "error": "エラー",
       "success": "成功"
     },
     "plans": {
-      "title": "クォータ・制限",
-      "description": "ワークスペースのティアとクォータを管理します。注：すべてのユーザーは最大10個のワークスペースを所有できます。招待を通じて他のワークスペースにメンバーとして参加できます。",
-      "tabs": {
-        "workspaces": "ワークスペース",
-        "tiers": "ティア一覧",
-        "audit": "監査ログ"
-      },
-      "workspacesTable": {
-        "title": "ワークスペース",
-        "description": "ティアと使用状況を含むすべてのワークスペース",
-        "workspace": "ワークスペース",
-        "plan": "ティア",
-        "memories": "メモリー",
-        "storage": "ストレージ (MB)",
-        "usage": "使用率 %",
-        "actions": "操作",
+      "actions": {
         "changePlan": "ティア変更",
         "editAddons": "アドオン編集",
         "editSpendCap": "上限額を編集",
-        "owner": "所有者: {name}"
+        "quotaDetail": "クォータ"
       },
       "tiersTable": {
         "title": "ティア比較",
@@ -2803,7 +2785,7 @@
         "emptyDescription": "バックエンドからティアが返されませんでした。デプロイの PLAN_* 設定を確認してください。",
         "infoCard": {
           "title": "値の見方",
-          "addonBody": "各 quota は Workspaces タブの addon ダイアログから extra_* addon (memory=+10k、storage=+100MB 等) で workspace 単位で増設できます。",
+          "addonBody": "各 quota はワークスペースの所有者のユーザーページにある「アドオン編集」から extra_* addon (memory=+10k、storage=+100MB 等) で workspace 単位で増設できます。",
           "zeroFloorBody": "基準値が 0 の行は addon で解除できません（zero-floor 方針、#569）。先にワークスペースのティアを上げてから addon を購入してください。",
           "envOverrideBody": "下記の数値はリクエスト時にサーバーから取得されるため、PLAN_*_* の環境変数 override は UI 再ビルド無しで反映されます。"
         },
@@ -2868,7 +2850,8 @@
         "usageEffective": "使用量 / 有効値",
         "connector": "コネクタ",
         "memoriesPerDay": "メモリー作成数/日",
-        "historyRetention": "操作履歴の保持期間（日）"
+        "historyRetention": "操作履歴の保持期間（日）",
+        "loadError": "クォータ詳細の読み込みに失敗しました"
       },
       "addonDialog": {
         "title": "アドオン編集",
@@ -2930,7 +2913,8 @@
         "workspace": "ワークスペース",
         "change": "変更",
         "changedBy": "変更者",
-        "reason": "理由"
+        "reason": "理由",
+        "emptyDescription": "ユーザーのページで行ったティア変更がここに表示されます。"
       },
       "changePlanDialog": {
         "title": "ティアを変更",
@@ -2942,18 +2926,29 @@
         "confirm": "変更を確定"
       },
       "messages": {
-        "loadError": "ワークスペースの読み込みに失敗しました",
+        "loadError": "ティア変更履歴の読み込みに失敗しました",
         "changeSuccess": "プランを{oldPlan}から{newPlan}に変更しました",
         "changeError": "ティアの変更に失敗しました",
         "addonUpdateSuccess": "アドオンを更新しました",
         "spendCapUpdateSuccess": "上限額を更新しました",
         "spendCapUpdateError": "上限額の更新に失敗しました",
-        "quotaRefreshError": "クォータ詳細の再取得に失敗しました"
+        "quotaRefreshError": "クォータ詳細の再取得に失敗しました",
+        "addonUpdateError": "アドオンの更新に失敗しました"
       }
     },
     "users": {
       "title": "ユーザー管理",
       "description": "すべてのユーザーを管理し、統計を表示し、権限を制御します",
+      "tabs": {
+        "users": "ユーザー",
+        "planTiers": "プランティア",
+        "planChanges": "プラン変更履歴"
+      },
+      "tabHelp": {
+        "users": "すべてのユーザーと、その所属ワークスペース・ワークスペース上限です。ユーザーを開くと、そのユーザーが所有するワークスペースのプラン・アドオン・上限額を管理できます。",
+        "planTiers": "稼働中のサーバーが適用している、プランティアごとの上限と機能です。ワークスペースのプランを変更する前のティア選びに使います。",
+        "planChanges": "全ワークスペースの直近のティア変更と、その変更者です。いつ誰がプランを変えたかの確認に使います。"
+      },
       "search": {
         "placeholder": "名前、メールアドレス、またはユーザーIDで検索...",
         "showing": "{total}人中{filtered}人のユーザーを表示"
@@ -3050,8 +3045,8 @@
           },
           "primaryBadge": "プライマリ",
           "notAvailable": "N/A",
-          "changePlanButton": "プラン変更",
-          "empty": "ワークスペースなし"
+          "empty": "ワークスペースなし",
+          "ownerManagesPlan": "所有者のページで管理"
         },
         "workspaceCapacity": {
           "title": "ワークスペース上限",
@@ -3082,14 +3077,6 @@
           "memoryBreakdown": "Working: {working} | Persistent: {persistent}",
           "activeApiKeys": "有効な API キー"
         },
-        "changePlanDialog": {
-          "title": "ワークスペースプラン変更",
-          "description": "{workspaceName} のプラン階層を変更",
-          "currentPlanLabel": "現在のプラン",
-          "newPlanLabel": "新しいプラン",
-          "warningText": "⚠️ プラン変更は即時反映され、クォータ上限が更新されます。",
-          "confirm": "プラン変更"
-        },
         "reasonModal": {
           "title": "理由を入力してください",
           "description": "この変更はユーザーの現在の保有数より下に上限を下げます。",
@@ -3101,8 +3088,6 @@
         },
         "messages": {
           "loadError": "ユーザー詳細の読み込みに失敗しました",
-          "planChangeSuccessDesc": "{workspace} のプランを {plan} に変更しました",
-          "planChangeErrorDesc": "プラン変更に失敗しました",
           "bonusUpdateSuccessTitle": "更新しました",
           "bonusUpdateSuccessDesc": "スロットボーナス: {before} → {after}",
           "bonusUpdateErrorDesc": "スロットボーナスの更新に失敗しました",
@@ -3294,40 +3279,6 @@
         "forbiddenWorkspace": "コスト集計の閲覧には workspace の owner または admin 権限が必要です。",
         "noWorkspaceSelected": "workspace が選択されていません。workspace を作成または選択してからコスト集計を確認してください。",
         "unknown": "コスト集計の読み込み中に不明なエラーが発生しました。"
-      }
-    },
-    "memoryHealth": {
-      "title": "メモリーヘルス",
-      "description": "コンテキスト別セルフ診断：consolidation / graph / retrieval のシグナルを ok/warn/fail で判定",
-      "refresh": "更新",
-      "overall": "総合",
-      "back": "コンテキスト一覧へ戻る",
-      "unattributed": "未帰属（コンテキストなし）",
-      "emptyTitle": "まだ判定対象がありません",
-      "emptyDescription": "コンテキストまたは記録されたシグナルができると、ここにヘルス項目が表示されます。",
-      "emptyValue": "—",
-      "status": {
-        "ok": "正常",
-        "warn": "警告",
-        "fail": "異常"
-      },
-      "sections": {
-        "consolidation": "統合（consolidation）",
-        "graph": "グラフ（graph）",
-        "retrieval": "検索（retrieval）"
-      },
-      "notes": {
-        "latest_sleep_failed": "直近の Sleep 実行が失敗しました — judge が全滅しています。Sleep の LLM 設定を確認してください。",
-        "judge_failures": "ウィンドウ内の judge 失敗: {count} 件（degraded 実行: {degraded_runs} 件）— 部分的に停止した judge は 'degraded' と判定され、静かに 'completed' にはなりません。",
-        "degraded_runs": "judge 失敗なしの degraded 実行が {count} 件 — メンテナンスフェーズがクラッシュしています。実行の error message を確認してください。",
-        "failed_runs_recovered": "ウィンドウ内に {count} 件の失敗した Sleep 実行 — 直近は回復していますが、最近の不安定さは確認する価値があります。",
-        "deferred_pairs": "{count} 件の候補ペアが未判定のまま繰り延べ（クラスタ上限）— dedup が構造的に追いついていない可能性があります。",
-        "merge_backlog_old": "最古のマージ敗者が {oldest_days} 日前のものです（{threshold_days} 日超）— 保持期間の設定を検討してください。",
-        "edge_weight_violations": "{count} 本のエッジが重み範囲 [{min}, {max}] を外れています — 未クランプ累積系のバグです。",
-        "cold_graph": "アクティブメモリが {active_memories} 件あるのにエッジが 0 本 — グラフが一度も温まっていません。エッジ形成ゲートと sleep モードを確認してください。",
-        "write_only_store": "直近 {window_days} 日間、メモリの書き込みはあるのに成功した recall 呼び出しがありません（アクティブメモリ {active_memories} 件） — ストアが書き込み専用になっています。",
-        "idle_store": "直近 {window_days} 日間、成功した MCP の recall も書き込みもありません（アクティブメモリ {active_memories} 件） — 書き込み専用ではなく、使われていない状態に見えます。Web UI・REST API・コネクタ経由の書き込みはここでは数えていません。",
-        "unknown": "未知のヘルス注記です（コード: {code}）。"
       }
     },
     "sleepReports": {
@@ -4045,6 +3996,53 @@
       "deleted": "{count, plural, other {# 件のメモリーを削除しました}}",
       "progress": "{count, plural, other {削除中… # 件削除しました}}",
       "partial": "{count, plural, other {エラーの前に # 件を削除しました。続けるには件数を確認し直してください。}}"
+    }
+  },
+  "memoryHealth": {
+    "tabLabel": "ヘルス",
+    "description": "このコンテキストのメモリの手入れ、メモリ同士のつながり、検索での使われ方を、あなた自身の利用状況から判定します。警告は確認するとよい点、失敗は動作しなかったことを示します。",
+    "refresh": "更新",
+    "overall": "総合",
+    "generatedAt": "確認日時 {time}",
+    "loadError": "ヘルスレポートを読み込めませんでした。「更新」でもう一度お試しください。",
+    "emptyValue": "—",
+    "badgeLabel": "メモリヘルス: {status}。ヘルスタブを開く",
+    "status": {
+      "ok": "正常",
+      "warn": "警告",
+      "fail": "異常"
+    },
+    "sections": {
+      "consolidation": {
+        "title": "手入れ（Sleep）",
+        "description": "重複したメモリをまとめ、このコンテキストを整理する Sleep の実行状況です。"
+      },
+      "graph": {
+        "title": "つながり",
+        "description": "関連するメモリを検索で呼び出すための、メモリ同士のつながりです。"
+      },
+      "retrieval": {
+        "title": "利用",
+        "description": "直近の数日間に、エージェントがこのコンテキストへ書き込み・検索した状況です。"
+      }
+    },
+    "notes": {
+      "latest_sleep_failed": "直近の Sleep 実行が失敗しました。メモリを比較するモデルが応答せず、何もまとめられていません。次の実行も失敗する場合は、このコンテキストの Sleep 設定を確認するか、管理者に相談してください。",
+      "judge_failures": "最近の Sleep 実行でメモリの比較が {count} 件失敗しました（一部のみ完了した実行: {degraded_runs} 件）。一部の重複は後の実行までまとめられないことがあります。続くようなら管理者に相談してください。",
+      "degraded_runs": "最近の Sleep 実行のうち {count} 件は、手入れの一部の手順が途中で止まったため一部のみ完了しました。メモリそのものには影響ありません。続くようなら管理者に相談してください。",
+      "failed_runs_recovered": "最近 {count} 件の Sleep 実行が失敗しましたが、直近の実行は成功しています。失敗が再発しなければ対応は不要です。",
+      "deferred_pairs": "重複の可能性があるメモリの組 {count} 件が後の実行に回されました（1 回の実行で比較できる数には上限があります）。後の実行で追いつきますが、それまでは検索結果に重複が出ることがあります。",
+      "merge_backlog_old": "Sleep で他のメモリにまとめられたメモリは、復元できるようしばらく保管されます。最も古いものは {oldest_days} 日前です（{threshold_days} 日超）。検索結果には出ません。保管期間は管理者が決めます。",
+      "edge_weight_violations": "メモリ同士のつながり {count} 本の強さが許容範囲 [{min}, {max}] を外れています。メモリの内容ではなくシステムの不具合を示すものです。管理者に報告してください。",
+      "cold_graph": "このコンテキストには {active_memories} 件のメモリがありますが、メモリ同士のつながりがまだありません。そのため検索で関連するメモリを呼び出せません。つながりはメモリが一緒に検索されたときと Sleep の実行時にできます。このコンテキストの Sleep 設定を確認してください。",
+      "write_only_store": "直近 {window_days} 日間、メモリの書き込みはありますが検索で呼び出されていません（このコンテキストのメモリ {active_memories} 件）。エージェントがこのコンテキストを使う想定なら、ここから recall しているか確認してください。",
+      "idle_store": "直近 {window_days} 日間、MCP 経由の書き込みも検索もありません（このコンテキストのメモリ {active_memories} 件）。使われていないコンテキストのようです。この Web アプリ、REST API、コネクタからの書き込みはここでは数えていません。"
+    },
+    "noteUnknown": "このページがまだ知らないヘルスシグナルです（コード: {code}）。",
+    "unattributed": {
+      "title": "あなたのコンテキスト外のアクティビティ",
+      "description": "あなたのアクティビティの一部は、あなたが作成したコンテキストの外に記録されています。アカウント全体の Sleep 実行、複数コンテキストをまたぐ検索、削除されたコンテキストや他のメンバーが作成したコンテキストでの作業などです。",
+      "action": "レポートを見る"
     }
   },
   "contextSettings": {

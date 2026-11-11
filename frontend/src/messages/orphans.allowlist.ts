@@ -28,7 +28,6 @@ export const ORPHAN_ALLOWLIST: readonly string[] = [
   "admin.neuralConfig.actions.edit",
   "admin.neuralConfig.actions.save",
   "admin.neuralConfig.messages.resetSuccess",
-  "admin.plans.workspacesTable.storage",
   "admin.systemAdmins.actions.cannotDemote",
   "admin.systemAdmins.actions.demote",
   "admin.systemAdmins.description",

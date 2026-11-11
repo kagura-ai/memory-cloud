@@ -1,5 +1,6 @@
 /**
- * Addon metadata for the admin plans page (Issue #663).
+ * Addon metadata for the admin plan components (Issue #663; the Quotas page
+ * that first used it was folded into the admin user detail in #2765).
  *
  * Single source of truth for the 9 quota dimensions that the admin can
  * adjust via the addon dialog. Both the quota detail panel (read-only

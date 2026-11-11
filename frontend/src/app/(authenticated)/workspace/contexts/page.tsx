@@ -12,6 +12,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { useTranslations, useLocale } from "next-intl";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
@@ -19,6 +20,12 @@ import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { SleepModeBadge } from "@/components/contexts/SleepModeBadge";
 import { CurrentContextBadge } from "@/components/contexts/CurrentContextBadge";
 import { ContextPrivacyChoice } from "@/components/contexts/ContextPrivacyChoice";
+import {
+  MemoryHealthReport,
+  MemoryHealthStatusBadge,
+} from "@/components/contexts/MemoryHealthReport";
+import { useMemoryHealthBreakdown } from "@/hooks/useMemoryHealthBreakdown";
+import { UNATTRIBUTED_SCOPE } from "@/lib/api/memory-health";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import {
   Plus,
@@ -37,6 +44,7 @@ import {
   Users,
   Globe,
   Database,
+  Activity,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -239,6 +247,21 @@ export default function ContextsPage() {
   const [apiKeySaving, setApiKeySaving] = useState(false);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const { toast } = useToast();
+
+  // #2764: memory health of the contexts the caller created. One request per
+  // page load, never awaited by the list: badges and the unattributed card
+  // fill in when it arrives, and a failed request leaves them out silently.
+  const tHealth = useTranslations("memoryHealth");
+  const { breakdown: healthBreakdown } = useMemoryHealthBreakdown();
+  const healthByContext = new Map(
+    (healthBreakdown?.contexts ?? []).flatMap((entry) =>
+      entry.context_id ? [[entry.context_id, entry.overall_status] as const] : [],
+    ),
+  );
+  const unattributedHealth = healthBreakdown?.contexts.find(
+    (entry) => entry.context_id === null,
+  );
+  const [unattributedHealthOpen, setUnattributedHealthOpen] = useState(false);
 
   // Stats state
   const [contextStats, setContextStats] = useState<
@@ -733,6 +756,44 @@ export default function ContextsPage() {
         </Alert>
       )}
 
+      {/* #2764: signals recorded outside the caller's own contexts (account-
+          wide sleep runs, cross-context recalls, deleted or someone else's
+          contexts) have no row to badge, so they get one card. */}
+      {unattributedHealth && (
+        <Card className="mb-6" data-testid="health-unattributed-card">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+            <div className="flex min-w-0 items-start gap-3">
+              <Activity className="mt-0.5 h-4 w-4 flex-shrink-0 text-muted-foreground" />
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{tHealth("unattributed.title")}</span>
+                  <MemoryHealthStatusBadge status={unattributedHealth.overall_status} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {tHealth("unattributed.description")}
+                </p>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setUnattributedHealthOpen(true)}
+            >
+              {tHealth("unattributed.action")}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+      <Dialog open={unattributedHealthOpen} onOpenChange={setUnattributedHealthOpen}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{tHealth("unattributed.title")}</DialogTitle>
+            <DialogDescription>{tHealth("unattributed.description")}</DialogDescription>
+          </DialogHeader>
+          <MemoryHealthReport scope={UNATTRIBUTED_SCOPE} />
+        </DialogContent>
+      </Dialog>
+
       {/* Advanced Create Dialog */}
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
@@ -1134,6 +1195,7 @@ export default function ContextsPage() {
               {visibleContexts.map((context) => {
                 const isCurrent = context.id === currentContextId;
                 const ownerKind = ownerKindOf(context);
+                const healthStatus = healthByContext.get(context.id);
                 return (
                   <tr
                     key={context.id}
@@ -1154,6 +1216,24 @@ export default function ContextsPage() {
                               {context.display_name || context.name}
                             </span>
                             {isCurrent && <CurrentContextBadge />}
+                            {healthStatus && (
+                              <Link
+                                href={`/workspace/contexts/${context.id}?tab=health`}
+                                data-testid={`health-badge-${context.id}`}
+                                aria-label={tHealth("badgeLabel", {
+                                  status: tHealth(`status.${healthStatus}`),
+                                })}
+                                title={tHealth("badgeLabel", {
+                                  status: tHealth(`status.${healthStatus}`),
+                                })}
+                                className="leading-none"
+                              >
+                                <MemoryHealthStatusBadge
+                                  status={healthStatus}
+                                  className="px-1 py-0 text-[10px]"
+                                />
+                              </Link>
+                            )}
                             {context.is_default && (
                               <Badge
                                 variant="outline"

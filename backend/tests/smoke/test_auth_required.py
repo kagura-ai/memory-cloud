@@ -29,6 +29,8 @@ AUTH_REQUIRED_ENDPOINTS = [
     # Contexts
     ("GET", "/api/v1/contexts"),
     ("POST", "/api/v1/contexts"),
+    # Memory health report (#2764: session users, not admin-only)
+    ("GET", "/api/v1/memory-health"),
     # Memory operations
     ("POST", "/api/v1/memory/remember"),
     ("POST", "/api/v1/memory/recall"),

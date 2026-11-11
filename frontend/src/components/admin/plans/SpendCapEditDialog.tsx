@@ -3,9 +3,10 @@
 /**
  * Spend Cap Edit Dialog (Issue #712, #709 follow-up)
  *
- * Per-workspace BYOK embedding spend cap override editor. Clones the Edit
- * Addons Dialog pattern (page.tsx) but extracted as a standalone component so
- * the null/0/positive input mapping can be unit-tested in isolation.
+ * Per-workspace BYOK embedding spend cap override editor. Same pattern as
+ * AddonEditDialog, a standalone component so the null/0/positive input
+ * mapping can be unit-tested in isolation. Opened from WorkspaceQuotaDetail
+ * on the admin user detail (#2765; it lived on the Quotas page before).
  *
  * Input semantics (admin.ts:204-215):
  * - empty  -> null payload  (clears the override, inherits the tier default)

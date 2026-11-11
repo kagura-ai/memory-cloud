@@ -7,7 +7,7 @@
 
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
@@ -46,6 +46,8 @@ import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSecti
 import { MembersSection } from "@/components/contexts/MembersSection";
 import { ProtectionSection } from "@/components/contexts/ProtectionSection";
 import { ExportContextButton } from "@/components/contexts/ExportContextButton";
+import { MemoryHealthReport } from "@/components/contexts/MemoryHealthReport";
+import { useMemoryHealthBreakdown } from "@/hooks/useMemoryHealthBreakdown";
 // Issue #233: graph viz tab — lazy-loaded so d3 modules are code-split.
 const GraphTabPanel = dynamic(
   () =>
@@ -119,7 +121,21 @@ function ScopedContextDetail() {
       currentWorkspace?.current_user_role,
       WorkspaceRole.Owner,
     ) && currentWorkspace?.analyses_enabled === true;
-  const visibleTabs = canSeeAnalysesTab ? OWNER_CONTEXT_TABS : ADMIN_CONTEXT_TABS;
+  // #2764: the Health tab is for the person who created the context. The
+  // breakdown lists exactly the caller's own contexts, so it decides; while
+  // it loads, or when it fails, there is no tab (and no error: the report is
+  // an extra, not a precondition). A ?tab=health deep link without the tab
+  // falls back to the default tab through useTabParam's allowed values.
+  const { breakdown } = useMemoryHealthBreakdown();
+  const canSeeHealthTab =
+    breakdown?.contexts.some((entry) => entry.context_id === contextId) === true;
+  const tHealth = useTranslations("memoryHealth");
+  const visibleTabs = useMemo<readonly string[]>(() => {
+    const base = canSeeAnalysesTab ? OWNER_CONTEXT_TABS : ADMIN_CONTEXT_TABS;
+    if (!canSeeHealthTab) return base;
+    // Health sits before Settings, like Analyses.
+    return [...base.slice(0, -1), "health", "settings"];
+  }, [canSeeAnalysesTab, canSeeHealthTab]);
   const [tab, setTab] = useTabParam("overview", "tab", visibleTabs);
   const [context, setContext] = useState<Context | null>(null);
   const [loading, setLoading] = useState(true);
@@ -315,6 +331,9 @@ function ScopedContextDetail() {
           {canSeeAnalysesTab && (
             <TabsTrigger value="analyses">{tAnalyses("tabLabel")}</TabsTrigger>
           )}
+          {canSeeHealthTab && (
+            <TabsTrigger value="health">{tHealth("tabLabel")}</TabsTrigger>
+          )}
           <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
         </TabsList>
 
@@ -373,6 +392,11 @@ function ScopedContextDetail() {
               contextId={contextId}
               contextName={context.display_name || context.name}
             />
+          </TabsContent>
+        )}
+        {canSeeHealthTab && (
+          <TabsContent value="health">
+            <MemoryHealthReport scope={contextId} />
           </TabsContent>
         )}
       </Tabs>

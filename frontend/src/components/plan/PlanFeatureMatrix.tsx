@@ -122,7 +122,7 @@ const GATE_BY_FIELD: ReadonlyMap<keyof PlanTierFeature, GateKey> = new Map(
 
 // GiB/MiB storage, matching the admin plan-tiers convention. The shared
 // `formatBytes` util renders MB/GB, which diverges from the GiB convention
-// used for plan quotas (see admin/plans/_addon-types.ts).
+// used for plan quotas (see components/admin/plans/_addon-types.ts).
 function formatStorage(bytes: number): string {
   const gib = bytes / 1024 ** 3;
   if (gib >= 1) {

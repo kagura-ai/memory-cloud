@@ -12,6 +12,17 @@ vi.mock("@/lib/api/contexts", () => ({
   getContext: (...a: unknown[]) => mockGetContext(...a),
 }));
 
+// #2764: the Health tab is decided by the caller's memory-health breakdown.
+const mockGetMemoryHealthBreakdown = vi.fn();
+vi.mock("@/lib/api/memory-health", () => ({
+  getMemoryHealthBreakdown: (...a: unknown[]) => mockGetMemoryHealthBreakdown(...a),
+}));
+vi.mock("@/components/contexts/MemoryHealthReport", () => ({
+  MemoryHealthReport: ({ scope }: { scope: string }) => (
+    <div data-testid="health-panel" data-scope={scope} />
+  ),
+}));
+
 const mockUseParams = vi.fn();
 const mockUseSearchParams = vi.fn();
 const mockReplace = vi.fn();
@@ -116,8 +127,25 @@ function setupWithRole(role: Role, urlTab: string | null = null) {
   mockGetContext.mockResolvedValue(makeContext());
 }
 
+/** A breakdown naming the given context ids (the caller's own contexts). */
+function breakdownListing(...contextIds: string[]) {
+  return {
+    generated_at: "2026-11-11T00:00:00Z",
+    overall_status: "ok",
+    contexts: contextIds.map((id) => ({
+      context_id: id,
+      name: id,
+      overall_status: "ok",
+      sections: { consolidation: "ok", graph: "ok", retrieval: "ok" },
+    })),
+  };
+}
+
+// Default: the viewer did not create ctx-1, so no Health tab.
 beforeEach(() => {
   mockGetContext.mockReset();
+  mockGetMemoryHealthBreakdown.mockReset();
+  mockGetMemoryHealthBreakdown.mockResolvedValue(breakdownListing());
   mockUseParams.mockReset();
   mockUseSearchParams.mockReset();
   mockUseAuth.mockReset();
@@ -241,5 +269,69 @@ describe("ContextDetailPage deep-link tab guard (#398)", () => {
         typeof c[0] === "string" && (c[0] as string).includes("tab=overview"),
     );
     expect(overviewSnaps.length).toBe(0);
+  });
+});
+
+describe("ContextDetailPage Health tab (#2764)", () => {
+  it.each(["owner", "member"] as const)(
+    "shows the Health tab to a %s who created the context, with the report for it",
+    async (role) => {
+      setupWithRole(role, "health");
+      mockGetMemoryHealthBreakdown.mockResolvedValue(
+        breakdownListing("other-ctx", "ctx-1"),
+      );
+      render(<ContextDetailPage />);
+      const tab = await screen.findByRole("tab", { name: "tabLabel" });
+      expect(tab).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByTestId("health-panel")).toHaveAttribute("data-scope", "ctx-1");
+      expect(mockGetMemoryHealthBreakdown).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("shows no Health tab when the breakdown does not list the context", async () => {
+    setupWithRole("owner");
+    mockGetMemoryHealthBreakdown.mockResolvedValue(breakdownListing("other-ctx"));
+    render(<ContextDetailPage />);
+    await screen.findByRole("tab", { name: "tabs.overview" });
+    await waitFor(() => expect(mockGetMemoryHealthBreakdown).toHaveBeenCalled());
+    // Let the breakdown promise settle before asserting absence.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByRole("tab", { name: "tabLabel" })).toBeNull();
+  });
+
+  it("falls back to the default tab on a ?tab=health deep link to someone else's context", async () => {
+    setupWithRole("owner", "health");
+    mockGetMemoryHealthBreakdown.mockResolvedValue(breakdownListing("other-ctx"));
+    render(<ContextDetailPage />);
+    await screen.findByRole("tab", { name: "tabs.overview" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByRole("tab", { name: "tabs.overview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByTestId("health-panel")).toBeNull();
+    expect(screen.queryByRole("tab", { name: "tabLabel" })).toBeNull();
+  });
+
+  it("shows no Health tab while the breakdown is still loading", async () => {
+    setupWithRole("owner", "health");
+    mockGetMemoryHealthBreakdown.mockReturnValue(new Promise(() => {}));
+    render(<ContextDetailPage />);
+    await screen.findByRole("tab", { name: "tabs.overview" });
+    expect(screen.queryByRole("tab", { name: "tabLabel" })).toBeNull();
+    expect(screen.queryByTestId("health-panel")).toBeNull();
+  });
+
+  it("renders the page without the tab and without an error when the breakdown fails", async () => {
+    setupWithRole("owner");
+    mockGetMemoryHealthBreakdown.mockRejectedValue(new Error("boom"));
+    render(<ContextDetailPage />);
+    await screen.findByRole("tab", { name: "tabs.overview" });
+    await waitFor(() => expect(mockGetMemoryHealthBreakdown).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByRole("tab", { name: "tabLabel" })).toBeNull();
+    expect(screen.queryByText("failedToLoad")).toBeNull();
+    expect(screen.queryByText("boom")).toBeNull();
+    expect(screen.getByTestId("overview-panel")).toBeInTheDocument();
   });
 });

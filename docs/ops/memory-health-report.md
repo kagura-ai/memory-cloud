@@ -1,6 +1,6 @@
-# Memory Health Report (#1211, #1225)
+# Memory Health Report (#1211, #1225, #2764)
 
-`GET /api/v1/admin/memory-health` assembles the signals the system already
+`GET /api/v1/memory-health` assembles the signals the system already
 emits — Sleep reports, graph invariants, usage stats, search-config posture —
 into thresholded self-diagnosis documents. The motivating failure class:
 memory bugs that manifest as *plausible successes* (`sleep_summary.ok=true`
@@ -10,39 +10,66 @@ each document's `overall_status` is the worst section.
 Scoping (#1225, Phase 2): the report is broken down **per context**, so a
 warning always names the context it came from.
 
-- `GET /api/v1/admin/memory-health` — the breakdown: one graded entry per
+- `GET /api/v1/memory-health` — the breakdown: one graded entry per
   owned context (`context_id`, display name, `overall_status`, per-section
   statuses). No metric is summed across contexts; the page-level
   `overall_status` is the worst entry. A user with zero contexts gets `ok`
   with an empty list.
-- `GET /api/v1/admin/memory-health?context_id=<uuid>` — the 3-section
+- `GET /api/v1/memory-health?context_id=<uuid>` — the 3-section
   detailed document for that single context. Ownership is validated
-  (`created_by` = caller, not deleted); anything else is a uniform 404.
+  (`created_by` = caller, not deleted, in a live workspace the caller can
+  still open — a member as below, or the workspace's owner — #2764);
+  anything else is a uniform 404.
   A private context created by a **linked account** is covered too, but
   only where the caller can open it as itself — the rule of the context
   read path: a member of the context's (live) workspace as owner/admin, as
   a viewer with no whitelist, or with a whitelist that names the context.
   A member with no whitelist is suspended and stays excluded. The link
   widens ownership, not membership (#1874).
-- `GET /api/v1/admin/memory-health?context_id=unattributed` — the detail
+- `GET /api/v1/memory-health?context_id=unattributed` — the detail
   document for signals that do not belong to an owned, live context:
   recorded **without** a `context_id` (account-wide sleep runs, legacy
   rows), or under a **soft-deleted** context, or under a **shared context
-  created by another member**. These fold into one explicit "unattributed"
+  created by another member**, or under a context the caller created in a
+  workspace it left or that was deleted. These fold into one explicit "unattributed"
   breakdown entry instead of being silently dropped — dropping them would
   hide Phase-1 warnings behind the new grouping. The unattributed entry
   skips the cold-graph and write-only heuristics (it mixes scopes, so both
   would be noise) while still grading deterministic facts like failed
   sleep runs and edge-weight violations.
 
-Everything stays self-scoped (the calling admin's own data partition, same
+Everything stays self-scoped (the caller's own data partition, same
 discipline as the manual sleep trigger). Workspace-level rollup across
 members is deliberately Phase 3. Label-free signals only; gold-label rates
 (`stale_only`, P@k) belong to the eval CI gates
 ([eval README](../../backend/tests/eval/README.md), #1210).
 
-Web UI: **Admin → Memory Health** renders the breakdown as a status list
-with drill-down into the per-context detail.
+Access (#2764): any signed-in user, through a browser session only. An API
+key or an OAuth bearer token gets `403`; there is no MCP tool for the report.
+No system-admin or workspace role is checked, because the report holds
+nothing but the caller's own signals for the contexts the caller created.
+A workspace admin or a member who did not create a context does not see its
+health: the signals are per user, so showing a shared context to them would
+need a rollup across members, not a wider permission.
+
+`GET /api/v1/admin/memory-health` is a **deprecated alias** of the same
+handler, kept for one release behind the system-admin gate (it answers a
+system admin with the same document and is marked `deprecated` in the
+OpenAPI document). A later release removes it; scripts that call it switch
+to `GET /api/v1/memory-health` with a session.
+
+Web UI: the **Health** tab of a context's detail page
+(`/workspace/contexts/<id>?tab=health`) shows the 3-section detail; the tab
+appears only on contexts the viewer created (the breakdown lists exactly
+those). The context list puts a status badge on each of them and, when
+signals were recorded outside them, one "Activity outside your contexts"
+card that opens the unattributed detail. The system-admin menu no longer
+has a Memory Health entry, and `/admin/memory-health` no longer exists.
+
+The note texts in the web UI are written for the person who created the
+context, not for an operator: they say what the signal means for that
+context and what they can do, and point at an administrator where only an
+operator can act. The operator-facing rationale stays in the tables below.
 
 ## Grading philosophy
 
@@ -122,7 +149,7 @@ quota and workspace usage analytics never count them.
 
 Section notes are structured records — `{"code": "<note_code>", "params":
 {...}}` — not prose. The frontend maps codes to localized strings
-(`en.json` / `ja.json` under `admin.memoryHealth.notes`) and interpolates
+(`en.json` / `ja.json` under `memoryHealth.notes`) and interpolates
 the params; an unknown code renders a generic localized fallback (never a
 crash, never a blank). GitHub issue references never appear in the payload
 or the rendered UI — the note-code → design-rationale mapping in the tables

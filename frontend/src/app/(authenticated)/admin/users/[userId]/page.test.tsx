@@ -1,11 +1,10 @@
 /**
  * Tests for the Workspace Capacity section of the admin user detail page (#676).
  *
- * Scope is intentionally narrow — the rest of the page (workspaces table,
- * accessible contexts, change-plan dialog) is not exercised here. Only the
- * slot-bonus inc/dec UX, the conditional reason modal, and the
- * optimistic-update + rollback behavior on PATCH success/failure are
- * covered.
+ * Covers the slot-bonus inc/dec UX, the conditional reason modal, the
+ * optimistic-update + rollback behavior on PATCH success/failure, and (#2765)
+ * the plan actions of the workspaces table: change plan, quota detail, add-on
+ * and spend-cap editing on workspaces the user owns, none on the others.
  *
  * jsdom does not fire Radix Dialog's pointerdown/pointerup dance reliably,
  * so the test uses Testing Library's role-based queries against the visible
@@ -21,8 +20,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PLAN_TIER_ORDER } from "@/lib/utils/planLabel";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockGet = vi.fn();
 const mockUpdateBonus = vi.fn();
@@ -38,9 +36,24 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-vi.mock("@/lib/api/admin", () => ({
-  updateWorkspaceSlotBonus: (...args: unknown[]) => mockUpdateBonus(...args),
-}));
+// #2765: the plan actions of the workspaces table call the same admin plan
+// API functions the Quotas page called.
+const mockUpdateWorkspacePlan = vi.fn();
+const mockGetWorkspaceQuotas = vi.fn();
+const mockUpdateWorkspaceAddons = vi.fn();
+vi.mock("@/lib/api/admin", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/api/admin")>("@/lib/api/admin");
+  return {
+    ...actual,
+    updateWorkspaceSlotBonus: (...args: unknown[]) => mockUpdateBonus(...args),
+    updateWorkspacePlan: (...args: unknown[]) =>
+      mockUpdateWorkspacePlan(...args),
+    getWorkspaceQuotas: (...args: unknown[]) => mockGetWorkspaceQuotas(...args),
+    updateWorkspaceAddons: (...args: unknown[]) =>
+      mockUpdateWorkspaceAddons(...args),
+  };
+});
 
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
@@ -115,6 +128,7 @@ vi.mock("@/components/common/PageHeader", () => ({
 }));
 
 import UserDetailPage from "./page";
+import { QUOTA_DETAIL_PRO } from "@/components/admin/plans/plans.fixtures";
 import { USER_DETAIL_TEST_IDS } from "./testids";
 
 const BASE_USER_DETAIL = {
@@ -188,8 +202,12 @@ describe("Workspace Capacity section (#676)", () => {
     expect(capDisplay.textContent).toMatch(/base=1/);
     expect(capDisplay.textContent).toMatch(/bonus=2/);
     expect(capDisplay.parentElement?.textContent).toMatch(/pct=67/);
-    expect(screen.getByText("Personal")).toBeInTheDocument();
-    expect(screen.getByText("Side project")).toBeInTheDocument();
+    // Scoped: the owned workspaces are rows of the workspaces table too (#2765).
+    const section = screen.getByTestId(
+      USER_DETAIL_TEST_IDS.workspaceCapacitySection,
+    );
+    expect(within(section).getByText("Personal")).toBeInTheDocument();
+    expect(within(section).getByText("Side project")).toBeInTheDocument();
   });
 
   it("shows 'at cap' badge when is_at_cap is true", async () => {
@@ -493,56 +511,222 @@ describe("Workspace Capacity section (#676)", () => {
   });
 });
 
-describe("Change-plan dialog plan labels (#1848)", () => {
-  const WORKSPACE = {
-    workspace_id: "ws-1",
-    workspace_name: "Personal",
+describe("Workspaces table plan actions (#2765)", () => {
+  const OWNED = {
+    workspace_id: "ws-pro",
+    workspace_name: "Pro Workspace",
     role: "owner",
     is_primary: true,
+    plan_name: "pro",
+    joined_at: new Date().toISOString(),
+  };
+  const JOINED = {
+    workspace_id: "ws-team",
+    workspace_name: "Team Workspace",
+    role: "member",
+    is_primary: false,
     plan_name: "basic",
     joined_at: new Date().toISOString(),
   };
-  const detailWithWorkspace = { ...BASE_USER_DETAIL, workspaces: [WORKSPACE] };
+  const detail = { ...BASE_USER_DETAIL, workspaces: [OWNED, JOINED] };
 
-  const openPlanDialog = async () => {
-    render(<UserDetailPage />);
-    fireEvent.click(await screen.findByText("workspaces.changePlanButton"));
-    await screen.findByText("changePlanDialog.title");
-    // The page has one Select: the dialog's new-plan picker.
-    const select = screen.getByTestId("select-mock");
-    return within(select).getAllByRole("option") as HTMLOptionElement[];
-  };
+  const row = (name: string) =>
+    within(screen.getByText(name).closest("tr") as HTMLElement);
 
-  afterEach(() => {
-    delete process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES;
-  });
-
-  it("labels the plan options with the OSS default S/M/L/XL when no env map is set", async () => {
-    mockGet.mockResolvedValueOnce(detailWithWorkspace);
-    const options = await openPlanDialog();
-    expect(options.map((o) => o.value)).toEqual([...PLAN_TIER_ORDER]);
-    expect(options.map((o) => o.textContent)).toEqual(["S", "M", "L", "XL"]);
-    expect(
-      screen.queryByText(/changePlanDialog\.planOptions/),
-    ).not.toBeInTheDocument();
-  });
-
-  it("labels the options and the current plan with the configured display names, like PlanBadge", async () => {
-    process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES = JSON.stringify({
-      en: { free: "Free", basic: "Starter", pro: "Pro", promax: "Max" },
+  beforeEach(() => {
+    mockGet.mockResolvedValue(detail);
+    mockGetWorkspaceQuotas.mockResolvedValue(QUOTA_DETAIL_PRO);
+    mockUpdateWorkspacePlan.mockResolvedValue({ message: "ok" });
+    mockUpdateWorkspaceAddons.mockResolvedValue({
+      message: "ok",
+      warnings: [],
     });
-    mockGet.mockResolvedValueOnce(detailWithWorkspace);
-    const options = await openPlanDialog();
-    expect(options.map((o) => o.textContent)).toEqual([
-      "Free",
-      "Starter",
-      "Pro",
-      "Max",
-    ]);
-    // The current-plan PlanBadge resolves the same way: "Starter" appears
-    // twice inside the dialog (badge + option) and the raw/legacy names never.
-    const dialogText = screen.getByRole("dialog").textContent ?? "";
-    expect(dialogText.match(/Starter/g)).toHaveLength(2);
-    expect(dialogText).not.toMatch(/basic/i);
+  });
+
+  it("offers the plan actions only on a workspace the user owns", async () => {
+    render(<UserDetailPage />);
+    await screen.findByText("Pro Workspace");
+
+    expect(
+      row("Pro Workspace").getByRole("button", { name: /actions.changePlan/ }),
+    ).toBeInTheDocument();
+    expect(
+      row("Pro Workspace").getByRole("button", { name: /actions.quotaDetail/ }),
+    ).toBeInTheDocument();
+
+    // A workspace the user only joined: the plan read-only, no buttons at all.
+    expect(row("Team Workspace").queryAllByRole("button")).toHaveLength(0);
+    expect(
+      row("Team Workspace").getByText("workspaces.ownerManagesPlan"),
+    ).toBeInTheDocument();
+    expect(row("Team Workspace").getByText("M")).toBeInTheDocument();
+  });
+
+  // A legacy workspace can carry owner_user_id without a matching member row
+  // (workspace_ownership_service), or with a member row of another role. The
+  // owner is workspaces.owner_user_id, which owned_workspaces reports.
+  const summaryOwning = (...owned: { id: string; name: string; plan_name: string }[]) => ({
+    owned_count: owned.length,
+    workspace_slot_bonus: 0,
+    base_cap: 1,
+    tier_grant: 0,
+    tier: "pro",
+    cap: 1 + owned.length,
+    is_at_cap: false,
+    owned_workspaces: owned,
+  });
+
+  it("offers the plan actions on an owned workspace whose member row has another role", async () => {
+    mockGet.mockResolvedValue({
+      ...detail,
+      workspaces: [{ ...JOINED, role: "admin" }],
+      workspace_summary: summaryOwning({
+        id: "ws-team",
+        name: "Team Workspace",
+        plan_name: "basic",
+      }),
+    });
+    render(<UserDetailPage />);
+    await screen.findAllByText("Team Workspace");
+    const table = screen.getByRole("table");
+    const teamRow = within(
+      within(table).getByText("Team Workspace").closest("tr") as HTMLElement,
+    );
+    expect(
+      teamRow.getByRole("button", { name: /actions.changePlan/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("lists and manages an owned workspace the user has no member row in", async () => {
+    mockGet.mockResolvedValue({
+      ...detail,
+      workspaces: [JOINED],
+      workspace_summary: summaryOwning({
+        id: "ws-legacy",
+        name: "Legacy Workspace",
+        plan_name: "pro",
+      }),
+    });
+    render(<UserDetailPage />);
+    await screen.findAllByText("Legacy Workspace");
+    const table = screen.getByRole("table");
+    const legacyRow = within(
+      within(table).getByText("Legacy Workspace").closest("tr") as HTMLElement,
+    );
+    fireEvent.click(
+      legacyRow.getByRole("button", { name: /actions.changePlan/ }),
+    );
+    await screen.findByText("changePlanDialog.title");
+    fireEvent.change(screen.getByTestId("select-mock"), {
+      target: { value: "promax" },
+    });
+    fireEvent.click(screen.getByText("changePlanDialog.confirm"));
+    await waitFor(() =>
+      expect(mockUpdateWorkspacePlan).toHaveBeenCalledWith("ws-legacy", {
+        plan_name: "promax",
+      }),
+    );
+    // The joined workspace stays read-only.
+    const teamRow = within(
+      within(table).getByText("Team Workspace").closest("tr") as HTMLElement,
+    );
+    expect(teamRow.queryAllByRole("button")).toHaveLength(0);
+  });
+
+  it("changes the plan with the Quotas page's request and reloads the user", async () => {
+    render(<UserDetailPage />);
+    await screen.findByText("Pro Workspace");
+    fireEvent.click(
+      row("Pro Workspace").getByRole("button", { name: /actions.changePlan/ }),
+    );
+    await screen.findByText("changePlanDialog.title");
+
+    fireEvent.change(screen.getByTestId("select-mock"), {
+      target: { value: "promax" },
+    });
+    expect(screen.getByText("changePlanDialog.warning")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("changePlanDialog.confirm"));
+
+    await waitFor(() =>
+      expect(mockUpdateWorkspacePlan).toHaveBeenCalledWith("ws-pro", {
+        plan_name: "promax",
+      }),
+    );
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows the quota detail and edits the add-ons with the Quotas page's request", async () => {
+    render(<UserDetailPage />);
+    await screen.findByText("Pro Workspace");
+    fireEvent.click(
+      row("Pro Workspace").getByRole("button", { name: /actions.quotaDetail/ }),
+    );
+
+    const memoryRow = (await screen.findByText("quota.memory")).closest(
+      "div.grid",
+    );
+    expect(mockGetWorkspaceQuotas).toHaveBeenCalledWith("ws-pro");
+    expect(memoryRow).toHaveTextContent("50,000 / 110,000");
+
+    fireEvent.click(screen.getByText("actions.editAddons"));
+    await screen.findByText("addonDialog.title");
+    fireEvent.click(screen.getByText("addonDialog.save"));
+
+    await waitFor(() =>
+      expect(mockUpdateWorkspaceAddons).toHaveBeenCalledTimes(1),
+    );
+    const [workspaceId, body] = mockUpdateWorkspaceAddons.mock.calls[0];
+    expect(workspaceId).toBe("ws-pro");
+    expect(body).toEqual({
+      addon_memory_bonus: 10_000,
+      addon_mcp_quota_bonus: 0,
+      addon_rest_quota_bonus: 0,
+      addon_public_quota_bonus: 0,
+      addon_member_bonus: 0,
+      addon_context_bonus: 0,
+      addon_analysis_bonus: 0,
+      addon_storage_bonus_mb: 0,
+      addon_sleep_contexts_bonus: 0,
+      addon_connector_bonus: 0,
+      addon_memories_per_day_bonus: 0,
+      addon_history_retention_days_bonus: 0,
+    });
+  });
+
+  it("opens the spend cap dialog when the workspace has a spend cap", async () => {
+    mockGetWorkspaceQuotas.mockResolvedValue({
+      ...QUOTA_DETAIL_PRO,
+      spend_cap: {
+        tier_default_daily_usd: 10,
+        tier_default_monthly_usd: 100,
+        override_daily_usd: null,
+        override_monthly_usd: null,
+        effective_daily_usd: 10,
+        effective_monthly_usd: 100,
+        current_daily_usd: 1,
+        current_monthly_usd: 5,
+      },
+    });
+    render(<UserDetailPage />);
+    await screen.findByText("Pro Workspace");
+    fireEvent.click(
+      row("Pro Workspace").getByRole("button", { name: /actions.quotaDetail/ }),
+    );
+    fireEvent.click(await screen.findByText("actions.editSpendCap"));
+    expect(await screen.findByText("spendCapDialog.title")).toBeInTheDocument();
+  });
+
+  it("hides the quota detail again on a second click", async () => {
+    render(<UserDetailPage />);
+    await screen.findByText("Pro Workspace");
+    const toggle = row("Pro Workspace").getByRole("button", {
+      name: /actions.quotaDetail/,
+    });
+    fireEvent.click(toggle);
+    await screen.findByText("quota.memory");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(toggle);
+    expect(screen.queryByText("quota.memory")).toBeNull();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 });

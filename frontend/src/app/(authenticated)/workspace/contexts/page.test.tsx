@@ -40,6 +40,22 @@ vi.mock("@/lib/api/contexts", () => ({
   getEmbeddingModels: (...args: unknown[]) => mockGetEmbeddingModels(...args),
 }));
 
+// #2764: the caller's memory-health breakdown (badges + unattributed card).
+const mockGetMemoryHealthBreakdown = vi.fn();
+vi.mock("@/lib/api/memory-health", () => ({
+  UNATTRIBUTED_SCOPE: "unattributed",
+  getMemoryHealthBreakdown: (...args: unknown[]) =>
+    mockGetMemoryHealthBreakdown(...args),
+}));
+vi.mock("@/components/contexts/MemoryHealthReport", () => ({
+  MemoryHealthReport: ({ scope }: { scope: string }) => (
+    <div data-testid="health-report" data-scope={scope} />
+  ),
+  MemoryHealthStatusBadge: ({ status }: { status: string }) => (
+    <span data-testid={`health-status-${status}`}>{status}</span>
+  ),
+}));
+
 vi.mock("@/lib/api/workspaces", () => ({
   checkOpenAIKeyStatus: (...args: unknown[]) =>
     mockCheckOpenAIKeyStatus(...args),
@@ -113,6 +129,19 @@ vi.mock("@/hooks/usePlanFeatures", () => ({
 
 // ---------- Helpers ----------------------------------------------------------
 
+function healthEntry(contextId: string | null, status: string) {
+  return {
+    context_id: contextId,
+    name: contextId,
+    overall_status: status,
+    sections: { consolidation: status, graph: "ok", retrieval: "ok" },
+  };
+}
+
+function healthBreakdown(...entries: ReturnType<typeof healthEntry>[]) {
+  return { generated_at: "2026-11-11T00:00:00Z", overall_status: "ok", contexts: entries };
+}
+
 type Role = "owner" | "admin" | "member" | "viewer";
 
 const WORKSPACE_ID = "ws-1";
@@ -150,6 +179,9 @@ beforeEach(() => {
     refresh: vi.fn(),
   });
   mockGetContexts.mockReset();
+  mockGetMemoryHealthBreakdown.mockReset();
+  // Default: the caller created none of the listed contexts.
+  mockGetMemoryHealthBreakdown.mockResolvedValue(healthBreakdown());
   mockCheckOpenAIKeyStatus.mockReset();
   mockGetEmbeddingModels.mockReset();
   mockToast.mockReset();
@@ -1373,5 +1405,77 @@ describe("ContextsPage owner filter resets and hydration (#1755)", () => {
         within(group()).getByRole("button", { name: "ownerFilter.all" }),
       ).toHaveAttribute("aria-pressed", "true"),
     );
+  });
+});
+
+describe("ContextsPage memory health (#2764)", () => {
+  it("badges the caller's own contexts and links each badge to the Health tab", async () => {
+    setupWithThreeContextsAndCurrent(null);
+    mockGetMemoryHealthBreakdown.mockResolvedValue(
+      healthBreakdown(healthEntry("ctx-full", "warn"), healthEntry("ctx-skip", "ok")),
+    );
+    render(<ContextsPage />);
+
+    const badge = await screen.findByTestId("health-badge-ctx-full");
+    expect(badge).toHaveAttribute("href", "/workspace/contexts/ctx-full?tab=health");
+    expect(within(badge).getByTestId("health-status-warn")).toBeInTheDocument();
+    expect(screen.getByTestId("health-badge-ctx-skip")).toBeInTheDocument();
+    // A context the breakdown does not cover gets no badge.
+    expect(screen.queryByTestId("health-badge-ctx-edges")).toBeNull();
+    // One breakdown request per page load.
+    expect(mockGetMemoryHealthBreakdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the list without waiting for the breakdown", async () => {
+    setupWithThreeContextsAndCurrent(null);
+    mockGetMemoryHealthBreakdown.mockReturnValue(new Promise(() => {}));
+    render(<ContextsPage />);
+
+    expect(await screen.findByText("Full Context")).toBeInTheDocument();
+    expect(screen.queryByTestId("health-badge-ctx-full")).toBeNull();
+    expect(screen.queryByTestId("health-unattributed-card")).toBeNull();
+  });
+
+  it("shows the list without badges or an error when the breakdown fails", async () => {
+    setupWithThreeContextsAndCurrent(null);
+    mockGetMemoryHealthBreakdown.mockRejectedValue(new Error("boom"));
+    render(<ContextsPage />);
+
+    expect(await screen.findByText("Full Context")).toBeInTheDocument();
+    await waitFor(() => expect(mockGetMemoryHealthBreakdown).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByTestId("health-badge-ctx-full")).toBeNull();
+    expect(screen.queryByText("boom")).toBeNull();
+    expect(screen.queryByText("Failed to load contexts")).toBeNull();
+  });
+
+  it("shows the unattributed card and opens its report in a dialog", async () => {
+    setupWithThreeContextsAndCurrent(null);
+    mockGetMemoryHealthBreakdown.mockResolvedValue(
+      healthBreakdown(healthEntry("ctx-full", "ok"), healthEntry(null, "fail")),
+    );
+    render(<ContextsPage />);
+
+    const card = await screen.findByTestId("health-unattributed-card");
+    expect(within(card).getByText("unattributed.title")).toBeInTheDocument();
+    expect(within(card).getByTestId("health-status-fail")).toBeInTheDocument();
+    expect(screen.queryByTestId("health-report")).toBeNull();
+
+    fireEvent.click(within(card).getByRole("button", { name: "unattributed.action" }));
+
+    const report = await screen.findByTestId("health-report");
+    expect(report).toHaveAttribute("data-scope", "unattributed");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("shows no unattributed card when every signal belongs to a context", async () => {
+    setupWithThreeContextsAndCurrent(null);
+    mockGetMemoryHealthBreakdown.mockResolvedValue(
+      healthBreakdown(healthEntry("ctx-full", "ok")),
+    );
+    render(<ContextsPage />);
+
+    await screen.findByTestId("health-badge-ctx-full");
+    expect(screen.queryByTestId("health-unattributed-card")).toBeNull();
   });
 });

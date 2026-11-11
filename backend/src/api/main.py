@@ -369,6 +369,10 @@ openapi_tags = [
     {"name": "contexts", "description": "Context management"},
     {"name": "context-search-config", "description": "Per-context search settings"},
     {
+        "name": "memory-health",
+        "description": "Per-context memory health report for the contexts the caller created",
+    },
+    {
         "name": "memory",
         "description": "MCP memory operations (remember, recall, forget, explore, reference)",
     },
@@ -481,7 +485,9 @@ openapi_tags = [
     },
     {
         "name": "admin-memory-health",
-        "description": "Admin: per-context memory health diagnosis and signal breakdown",
+        "description": (
+            "Admin: deprecated alias of GET /api/v1/memory-health, removed in a later release"
+        ),
     },
     {"name": "admin-neural", "description": "Admin: trigger Neural Memory recalibration"},
     {
@@ -826,7 +832,7 @@ for _exc_cls in (
 
 from api.routes import (  # noqa: E402
     admin,
-    admin_memory_health,  # Issue #1211: consolidated memory-health report
+    admin_memory_health,  # Issue #2764: deprecated alias of memory_health
     admin_neural,  # Issue #406: Manual kNN calibration recalibrate trigger
     admin_plans,
     admin_referrals,  # Issue #1470: referral ledger + per-grant revoke
@@ -860,6 +866,7 @@ from api.routes import (  # noqa: E402
     me_terms,  # Issue #1665: terms-of-service re-acceptance
     member_credentials,
     memory,
+    memory_health,  # Issue #1211 / #2764: per-context memory-health report
     mfa_settings,
     neural_config,
     oauth,
@@ -976,7 +983,9 @@ app.include_router(analyses.router, prefix="/api/v1")
 # Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)
 app.include_router(admin_sleep.router, prefix="/api/v1")
 
-# Consolidated memory-health report (Issue #1211)
+# Consolidated memory-health report (Issue #1211); session users since #2764,
+# the admin path is a deprecated alias for one release.
+app.include_router(memory_health.router, prefix="/api/v1")
 app.include_router(admin_memory_health.router, prefix="/api/v1")
 
 # Admin Neural calibrate trigger (Issue #406 Phase B - Manual kNN recalibration)

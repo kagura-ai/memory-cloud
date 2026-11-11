@@ -1,6 +1,6 @@
 import type { ElementType } from "react";
 import { Role, WorkspaceRole } from "@/lib/auth/rbac";
-import { Compass, Activity, Brain, Key, Settings, Puzzle, Database, Sliders, KeyRound, Users, BarChart, CreditCard, Lock, Gauge, Moon, ShieldCheck, DollarSign, Plug, HardDrive } from "lucide-react";
+import { Compass, Brain, Key, Settings, Puzzle, Database, Sliders, KeyRound, Users, BarChart, CreditCard, Lock, Moon, ShieldCheck, DollarSign, Plug, HardDrive } from "lucide-react";
 
 export interface NavItem {
   nameKey: string; // Translation key
@@ -171,12 +171,6 @@ export const navigationGroups: NavGroup[] = [
         requiredRole: Role.ADMIN,
       },
       {
-        nameKey: "quotas",
-        href: "/admin/plans",
-        icon: Gauge,
-        requiredRole: Role.ADMIN,
-      },
-      {
         nameKey: "neuralConfig",
         href: "/admin/neural-config",
         icon: Brain,
@@ -186,13 +180,6 @@ export const navigationGroups: NavGroup[] = [
         nameKey: "sleepReports",
         href: "/admin/sleep-reports",
         icon: Moon,
-        requiredRole: Role.ADMIN,
-      },
-      {
-        // Issue #1211: consolidated memory-health report
-        nameKey: "memoryHealth",
-        href: "/admin/memory-health",
-        icon: Activity,
         requiredRole: Role.ADMIN,
       },
       {

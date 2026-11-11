@@ -6,12 +6,19 @@
  * Issue #164: User Management拡張 - User detail page
  *
  * Shows comprehensive user information including workspaces, contexts, and stats.
+ *
+ * #2765: plan management lives here. For each workspace the user OWNS the
+ * workspaces table offers what the old Quotas page offered (change plan,
+ * quota detail, add-ons, spend cap); workspaces the user only joined show
+ * their plan read-only. Ownership is the workspace's owner (the backend's
+ * `workspace_summary.owned_workspaces`), so a legacy workspace whose owner has
+ * no member row, or a member row with another role, is still listed and
+ * managed here.
  */
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
-import { useLocale as usePlanLocale } from "@/i18n";
 import { PlanBadge } from "@/components/common/PlanBadge";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
@@ -38,19 +45,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   ArrowLeft,
   Building2,
   FolderOpen,
   BarChart2,
   Shield,
   Star,
+  ChevronDown,
   CreditCard,
   Layers,
   Minus,
@@ -63,7 +64,11 @@ import {
   type WorkspaceSummary,
 } from "@/lib/api/admin";
 import { formatRelativeTime } from "@/lib/utils/datetime";
-import { PLAN_TIER_ORDER, planLabelFromEnv } from "@/lib/utils/planLabel";
+import {
+  PlanChangeDialog,
+  type PlanChangeTarget,
+} from "@/components/admin/plans/PlanChangeDialog";
+import { WorkspaceQuotaDetail } from "@/components/admin/plans/WorkspaceQuotaDetail";
 import { useToast } from "@/hooks/use-toast";
 import { USER_DETAIL_TEST_IDS } from "./testids";
 
@@ -118,25 +123,20 @@ export default function UserDetailPage() {
   const router = useRouter();
   const t = useTranslations("admin.users.detail");
   const tCommon = useTranslations("admin.common");
+  const tPlans = useTranslations("admin.plans");
   const locale = useLocale();
-  // The plan-label locale comes from the same hook PlanBadge reads (#1848).
-  const { locale: planLocale } = usePlanLocale();
   const userId = params.userId as string;
   const [userDetail, setUserDetail] = useState<UserDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [planDialog, setPlanDialog] = useState<{
-    open: boolean;
-    workspaceId: string | null;
-    workspaceName: string | null;
-    currentPlan: string | null;
-  }>({
-    open: false,
-    workspaceId: null,
-    workspaceName: null,
-    currentPlan: null,
-  });
-  const [newPlan, setNewPlan] = useState<string>("");
+  // #2765: the workspace the plan change dialog is open for, the workspace
+  // whose quota detail is expanded, and a counter that refetches that detail
+  // after its plan changed.
+  const [planTarget, setPlanTarget] = useState<PlanChangeTarget | null>(null);
+  const [expandedWorkspaceId, setExpandedWorkspaceId] = useState<string | null>(
+    null,
+  );
+  const [quotaRefreshKey, setQuotaRefreshKey] = useState(0);
 
   // Workspace slot bonus state (#676)
   // `bonusPending` is the in-flight delta (so we can show a spinner on the
@@ -185,54 +185,15 @@ export default function UserDetailPage() {
     }
   };
 
-  const openPlanDialog = (workspace: UserDetail["workspaces"][0]) => {
-    setPlanDialog({
-      open: true,
-      workspaceId: workspace.workspace_id,
-      workspaceName: workspace.workspace_name,
-      currentPlan: workspace.plan_name || "free",
-    });
-    setNewPlan(workspace.plan_name || "free");
+  const toggleQuotaDetail = (workspaceId: string) => {
+    setExpandedWorkspaceId((current) =>
+      current === workspaceId ? null : workspaceId,
+    );
   };
 
-  const handleChangePlan = async () => {
-    if (!planDialog.workspaceId || !newPlan) return;
-
-    try {
-      await apiClient.put(
-        `/api/v1/admin/plans/workspaces/${planDialog.workspaceId}/plan`,
-        {
-          plan_name: newPlan,
-          reason: "Changed by admin via user detail page",
-        },
-      );
-
-      toast({
-        title: tCommon("success"),
-        description: t("messages.planChangeSuccessDesc", {
-          plan: newPlan,
-          workspace: planDialog.workspaceName ?? "",
-        }),
-      });
-
-      setPlanDialog({
-        open: false,
-        workspaceId: null,
-        workspaceName: null,
-        currentPlan: null,
-      });
-      loadUserDetail();
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : t("messages.planChangeErrorDesc");
-      toast({
-        title: tCommon("error"),
-        description: message,
-        variant: "destructive",
-      });
-    }
+  const handlePlanChanged = () => {
+    void loadUserDetail();
+    setQuotaRefreshKey((key) => key + 1);
   };
 
   // ---------- #676 workspace slot bonus handlers ----------
@@ -417,6 +378,29 @@ export default function UserDetailPage() {
     );
   }
 
+  // #2765: plan actions go to the workspaces this user owns. The owner is
+  // `workspaces.owner_user_id` (owned_workspaces); a member row says the same
+  // except on legacy workspaces, whose owner may have no member row at all:
+  // those are listed too, or no admin page would reach them.
+  const ownedWorkspaceIds = new Set(
+    (userDetail.workspace_summary?.owned_workspaces ?? []).map((ws) => ws.id),
+  );
+  const memberWorkspaceIds = new Set(
+    userDetail.workspaces.map((ws) => ws.workspace_id),
+  );
+  const workspaceRows: UserDetail["workspaces"] = [
+    ...userDetail.workspaces,
+    ...(userDetail.workspace_summary?.owned_workspaces ?? [])
+      .filter((ws) => !memberWorkspaceIds.has(ws.id))
+      .map((ws) => ({
+        workspace_id: ws.id,
+        workspace_name: ws.name,
+        role: "owner",
+        is_primary: false,
+        plan_name: ws.plan_name,
+      })),
+  ];
+
   return (
     <PageContainer>
       <PageHeader
@@ -500,13 +484,13 @@ export default function UserDetailPage() {
             <Building2 className="h-5 w-5" />
             <CardTitle>
               {t("workspaces.title", {
-                count: userDetail.workspaces.length,
+                count: workspaceRows.length,
               })}
             </CardTitle>
           </div>
         </CardHeader>
         <CardContent>
-          {userDetail.workspaces.length > 0 ? (
+          {workspaceRows.length > 0 ? (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -520,49 +504,96 @@ export default function UserDetailPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {userDetail.workspaces.map((workspace) => (
-                  <TableRow key={workspace.workspace_id}>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        {workspace.is_primary && (
-                          <Star className="h-4 w-4 text-yellow-500" />
-                        )}
-                        <span className="font-medium">
-                          {workspace.workspace_name}
-                        </span>
-                        {workspace.is_primary && (
-                          <Badge variant="outline" className="text-xs">
-                            {t("workspaces.primaryBadge")}
-                          </Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge>{getLocalizedRole(workspace.role)}</Badge>
-                    </TableCell>
-                    <TableCell>
-                      <PlanBadge
-                        planName={workspace.plan_name || "free"}
-                        size="sm"
-                      />
-                    </TableCell>
-                    <TableCell className="text-sm text-gray-500">
-                      {workspace.joined_at
-                        ? formatRelativeTime(workspace.joined_at, locale)
-                        : t("workspaces.notAvailable")}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => openPlanDialog(workspace)}
-                      >
-                        <CreditCard className="h-4 w-4 mr-2" />
-                        {t("workspaces.changePlanButton")}
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {workspaceRows.map((workspace) => {
+                  // Plan actions only where this user is the owner (#2765).
+                  const owns =
+                    workspace.role === "owner" ||
+                    ownedWorkspaceIds.has(workspace.workspace_id);
+                  const expanded =
+                    owns && expandedWorkspaceId === workspace.workspace_id;
+                  return (
+                    <Fragment key={workspace.workspace_id}>
+                      <TableRow>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            {workspace.is_primary && (
+                              <Star className="h-4 w-4 text-yellow-500" />
+                            )}
+                            <span className="font-medium">
+                              {workspace.workspace_name}
+                            </span>
+                            {workspace.is_primary && (
+                              <Badge variant="outline" className="text-xs">
+                                {t("workspaces.primaryBadge")}
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge>{getLocalizedRole(workspace.role)}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <PlanBadge
+                            planName={workspace.plan_name || "free"}
+                            size="sm"
+                          />
+                        </TableCell>
+                        <TableCell className="text-sm text-gray-500">
+                          {workspace.joined_at
+                            ? formatRelativeTime(workspace.joined_at, locale)
+                            : t("workspaces.notAvailable")}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {owns ? (
+                            <div className="flex justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                aria-expanded={expanded}
+                                onClick={() =>
+                                  toggleQuotaDetail(workspace.workspace_id)
+                                }
+                              >
+                                <ChevronDown
+                                  className={`h-4 w-4 mr-2 transition-transform ${expanded ? "rotate-180" : ""}`}
+                                />
+                                {tPlans("actions.quotaDetail")}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() =>
+                                  setPlanTarget({
+                                    id: workspace.workspace_id,
+                                    name: workspace.workspace_name,
+                                    planName: workspace.plan_name,
+                                  })
+                                }
+                              >
+                                <CreditCard className="h-4 w-4 mr-2" />
+                                {tPlans("actions.changePlan")}
+                              </Button>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              {t("workspaces.ownerManagesPlan")}
+                            </span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                      {expanded && (
+                        <TableRow>
+                          <TableCell colSpan={5} className="bg-muted/30 p-4">
+                            <WorkspaceQuotaDetail
+                              workspaceId={workspace.workspace_id}
+                              refreshKey={quotaRefreshKey}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </TableBody>
             </Table>
           ) : (
@@ -801,83 +832,14 @@ export default function UserDetailPage() {
         </CardContent>
       </Card>
 
-      {/* Change Plan Dialog */}
-      <Dialog
-        open={planDialog.open}
-        onOpenChange={(open) => setPlanDialog({ ...planDialog, open })}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("changePlanDialog.title")}</DialogTitle>
-            <DialogDescription>
-              {t("changePlanDialog.description", {
-                workspaceName: planDialog.workspaceName ?? "",
-              })}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-4 py-4">
-            <div>
-              <label className="text-sm font-medium">
-                {t("changePlanDialog.currentPlanLabel")}
-              </label>
-              <div className="mt-2">
-                <PlanBadge
-                  planName={planDialog.currentPlan || "free"}
-                  size="sm"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium">
-                {t("changePlanDialog.newPlanLabel")}
-              </label>
-              <Select value={newPlan} onValueChange={setNewPlan}>
-                <SelectTrigger className="mt-2">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PLAN_TIER_ORDER.map((plan) => (
-                    <SelectItem key={plan} value={plan}>
-                      {/* Same resolver as the PlanBadge above (#1848). */}
-                      {planLabelFromEnv(plan, planLocale)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="bg-yellow-50 border border-yellow-200 rounded p-3">
-              <p className="text-sm text-yellow-800">
-                {t("changePlanDialog.warningText")}
-              </p>
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() =>
-                setPlanDialog({
-                  open: false,
-                  workspaceId: null,
-                  workspaceName: null,
-                  currentPlan: null,
-                })
-              }
-            >
-              {tCommon("cancel")}
-            </Button>
-            <Button
-              onClick={handleChangePlan}
-              disabled={newPlan === planDialog.currentPlan}
-            >
-              {t("changePlanDialog.confirm")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Change Plan Dialog (#2765: the one dialog, shared component) */}
+      {planTarget && (
+        <PlanChangeDialog
+          workspace={planTarget}
+          onClose={() => setPlanTarget(null)}
+          onChanged={handlePlanChanged}
+        />
+      )}
 
       {/* Destructive slot bonus modal (#676) */}
       <Dialog
