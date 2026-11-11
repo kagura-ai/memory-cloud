@@ -619,6 +619,9 @@ that color, or `./scripts/deploy.sh --rollback` to switch back.
 > before `deploy.sh` starts, so a refused second run would still empty the
 > first run's log. Give each run its own log file (for example
 > `tee "deploy-$(date -u +%Y%m%dT%H%M%SZ).log"`) or append with `tee -a`.
+> The same holds for the steps above it: check that no deploy runs
+> (`flock -n /opt/kagura-memory/deploy.lock true` succeeds) before you move the
+> checkout with `git fetch` / `git reset --hard`.
 
 > **The co-resident consumer worker.** Both the deploy and the rollback path
 > restart it right after the Caddy switch (Step 6b), because a flip would

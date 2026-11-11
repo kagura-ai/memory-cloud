@@ -883,7 +883,7 @@ acquire_deploy_lock() {
     # `<>` opens read-write WITHOUT truncating: a refused run must leave the
     # holder's line in the file intact.
     if ! exec 9<> "$DEPLOY_LOCK_FILE"; then
-        error "Cannot open the deploy lock $DEPLOY_LOCK_FILE (set DEPLOY_LOCK_FILE to a writable path). Nothing was changed."
+        error "Cannot open the deploy lock $DEPLOY_LOCK_FILE. Make it writable by the deploy user (for example: sudo chown \"$(id -un)\" \"$DEPLOY_LOCK_FILE\"); pointing DEPLOY_LOCK_FILE elsewhere would let two runs overlap. Nothing was changed."
     fi
     if ! flock -n 9; then
         local holder
