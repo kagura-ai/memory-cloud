@@ -1222,7 +1222,7 @@ Workspace owner only (session or owner API key) for the credential routes; the o
 }
 ```
 
-- `channel_routes` is the full list: it replaces every stored route; `[]` or `null` removes them all; absent leaves them. `action` is `route` (default; needs `context_id`) or `skip` (do not ingest the channel; takes no `context_id`). At most 500 items, each `channel_id` once, by the `channel_ids` rule. Routes do not depend on `channel_ids`.
+- `channel_routes` is the full list: it replaces every stored route; `[]` or `null` removes them all; absent leaves them. `action` is `route` (default; needs `context_id`) or `skip` (do not ingest the channel; takes no `context_id`). At most 500 items, each `channel_id` once, by the `channel_ids` rule, and exactly as the platform names the channel: no surrounding whitespace or control characters, and on a Slack connector a conversation id (uppercase letters and digits, e.g. `C01ABCDEF`, never a `#name`), since the worker matches ids exactly. Routes do not depend on `channel_ids`.
 - `unrouted_private_channels`: `default` (a private channel without a route goes to the connector's context) or `skip` (it is not ingested). `null` is invalid.
 - A channel with a route never falls back to the connector's context: when its destination is deleted, it is not ingested until an admin picks a new one (`status: "destination_missing"` in the read model).
 

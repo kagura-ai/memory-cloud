@@ -18,6 +18,7 @@ from services.connector_channel_routes import (
     CHANNEL_ROUTES_CAPABILITY,
     MAX_CHANNEL_ROUTES,
     ChannelRouteInput,
+    check_route_channel_ids_for,
     effective_routing_from_rows,
     effective_unrouted,
     parse_capabilities,
@@ -100,6 +101,61 @@ def test_malformed_routes_are_refused_on_the_field(items):
     with pytest.raises(ValidationError) as exc:
         parse_channel_routes(items)
     assert exc.value.details.get("field") == "channel_routes"
+
+
+@pytest.mark.parametrize(
+    "channel_id",
+    [
+        pytest.param(" C01", id="leading-space"),
+        pytest.param("C01 ", id="trailing-space"),
+        pytest.param("C01\n", id="trailing-newline"),
+        pytest.param("C0\t1", id="inner-tab"),
+        pytest.param("C0\n1", id="inner-newline"),
+        pytest.param("C01​", id="zero-width-space"),
+        pytest.param("C01\x00", id="nul"),
+    ],
+)
+@pytest.mark.parametrize("action", ["route", "skip"])
+def test_an_id_the_worker_could_never_match_is_refused(channel_id, action):
+    """#1759 review: the worker matches channel ids exactly. A route whose id
+    carries whitespace or a control character matches no channel, so the
+    channel would keep landing in the default context (a silent fail-open)."""
+    item = {"channel_id": channel_id, "action": action}
+    if action == "route":
+        item["context_id"] = str(uuid4())
+    with pytest.raises(ValidationError) as exc:
+        parse_channel_routes([item])
+    assert exc.value.details.get("field") == "channel_routes"
+
+
+@pytest.mark.parametrize(
+    "channel_id",
+    [
+        pytest.param("#secret", id="channel-name"),
+        pytest.param("secret", id="bare-name"),
+        pytest.param("c01abc", id="lowercase-id"),
+        pytest.param("C01-ABC", id="punctuation"),
+        pytest.param("C01 ABC", id="inner-space"),
+        pytest.param("Ｃ01", id="fullwidth-letter"),
+    ],
+)
+def test_a_slack_route_must_be_a_conversation_id(channel_id):
+    route = ChannelRouteInput(channel_id, "skip", None)
+    with pytest.raises(ValidationError) as exc:
+        check_route_channel_ids_for("slack", [route])
+    assert exc.value.details.get("field") == "channel_routes"
+    assert channel_id in str(exc.value)
+    assert "channel_id" not in exc.value.details
+
+
+def test_slack_conversation_ids_and_other_platforms_pass():
+    check_route_channel_ids_for(
+        "slack",
+        [ChannelRouteInput("C01ABCDEF", "skip", None), ChannelRouteInput("G0PRIV", "skip", None)],
+    )
+    # Other platforms keep the generic rule (Discord snowflakes, Teams ids).
+    check_route_channel_ids_for("teams", [ChannelRouteInput("19:abc@thread.tacv2", "skip", None)])
+    check_route_channel_ids_for("discord", [ChannelRouteInput("1234567890", "skip", None)])
 
 
 def test_the_list_is_capped():

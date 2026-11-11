@@ -47,6 +47,7 @@ from utils.exceptions import (
     ConflictError,
     ConnectorScopeError,
     ConnectorTeamConnectedHereError,
+    FeatureNotAvailableError,
     InternalError,
     MemoryCloudException,
     NotFoundException,
@@ -258,7 +259,12 @@ class ConnectorChannelRouteInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     channel_id: str = Field(
-        ..., description="Platform channel id (same rule as channel_ids: non-blank, <= 64 chars)"
+        ...,
+        description=(
+            "Platform channel id, exactly as the platform names it (non-blank, <= 64 "
+            "chars, no surrounding whitespace or control characters; on a Slack "
+            "connector a conversation id such as C01ABCDEF, never a #name)"
+        ),
     )
     action: Literal["route", "skip"] = Field(
         "route",
@@ -831,7 +837,10 @@ async def update_workspace_connector_settings(
         # ids are caller-supplied (URL / body), so this leaks nothing.
         await db.rollback()
         raise
-    except (ConflictError, ValidationError):
+    except (ConflictError, ValidationError, FeatureNotAvailableError):
+        # FeatureNotAvailableError (#1759): the route destination check reads
+        # the caller's seat; an admin whose seat is suspended gets that
+        # refusal, not a 500.
         await db.rollback()
         raise
     except Exception as exc:

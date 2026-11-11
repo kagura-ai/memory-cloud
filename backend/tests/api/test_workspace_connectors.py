@@ -979,6 +979,33 @@ async def test_update_settings_route_context_not_found_not_masked_as_connector()
     db.commit.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_update_settings_route_passes_a_seat_refusal_through():
+    """#1759: the route destination check reads the caller's seat; a
+    suspended seat is the FEAT refusal, not the catch-all 500."""
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+    from utils.exceptions import FeatureNotAvailableError
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    db.commit = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate(
+        {"channel_routes": [{"channel_id": "C01", "context_id": str(uuid4())}]}
+    )
+    refusal = FeatureNotAvailableError("seat")
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(side_effect=refusal)
+        with pytest.raises(FeatureNotAvailableError) as exc:
+            await update_workspace_connector_settings(uuid4(), request, admin, db)
+    assert exc.value is refusal
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
 def test_update_settings_request_forbids_unknown_fields():
     """#1376 review: a silently-dropped typo'd field name would read as a
     successful partial update — unknown keys must 422 at the request layer."""

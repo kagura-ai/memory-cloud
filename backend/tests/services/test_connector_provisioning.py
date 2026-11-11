@@ -947,6 +947,7 @@ def _settings_conn(**over):
         # override this to a falsy value.
         "kmc_api_key_encrypted": "ENC:kmc",
         "unrouted_private_channels": "default",
+        "connector_type": "slack",
     }
     base.update(over)
     return _SettingsConn(**base)
@@ -1432,6 +1433,32 @@ async def test_update_settings_at_least_one_field_names_the_routing_fields():
         )
     assert "channel_routes" in str(exc.value)
     assert "unrouted_private_channels" in str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_id", ["#secret", "c01abc"])
+async def test_update_settings_refuses_a_slack_route_no_channel_can_match(channel_id):
+    """#1759 review: a Slack route names a conversation id. A channel name or
+    a lowercased id would never match, and the channel would silently keep
+    landing in the default context."""
+    conn = _settings_conn()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+    with (
+        _routing_flag(True),
+        patch("services.connector_provisioning.stored_routes", new=AsyncMock(return_value=set())),
+        pytest.raises(ValidationError) as exc,
+    ):
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            channel_routes=[{"channel_id": channel_id, "action": "skip"}],
+        )
+    assert exc.value.details["field"] == "channel_routes"
+    assert channel_id in str(exc.value)
+    db.flush.assert_not_awaited()
 
 
 @pytest.mark.asyncio

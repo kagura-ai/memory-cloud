@@ -31,6 +31,7 @@ from services.connector_channel_routes import (
     UNROUTED_VALUES,
     ChannelRouteInput,
     ChannelRouteView,
+    check_route_channel_ids_for,
     effective_unrouted,
     parse_channel_routes,
     route_views,
@@ -1499,6 +1500,9 @@ class ConnectorProvisioningService:
             # #1759 check 2 (needs the connector's key): the key's owner may
             # write each destination. Same reasoning as the #1428 guard above
             # for a connector without a key or a default context.
+            # A route only the connector's platform can tell is unmatchable
+            # (a Slack channel name, a lowercased id) is refused, not stored.
+            check_route_channel_ids_for(connector.connector_type, new_routes)
             default_context = connector.context_id if context_id is _UNSET else context_id
             if not connector.kmc_api_key_encrypted or default_context is None:
                 raise ValidationError(

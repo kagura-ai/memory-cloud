@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import unicodedata
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -133,6 +135,15 @@ def parse_channel_routes(raw: Any) -> list[ChannelRouteInput]:
                 f"({MAX_CHANNEL_ID_CHARS} chars max)",
                 field=_FIELD,
             )
+        if not _exact_channel_id(channel_id):
+            # The worker matches channel ids exactly: " C01" or "C01\n" would
+            # never match a real channel, so the admin would believe it routed
+            # while its messages kept landing in the default context.
+            raise ValidationError(
+                "channel_routes: channel_id must not carry surrounding whitespace "
+                "or control characters",
+                field=_FIELD,
+            )
         if channel_id in seen:
             raise ValidationError(
                 f"channel_routes: channel {channel_id} appears more than once", field=_FIELD
@@ -168,6 +179,44 @@ def parse_channel_routes(raw: Any) -> list[ChannelRouteInput]:
             ) from exc
         parsed.append(ChannelRouteInput(channel_id, ROUTE, context_id))
     return parsed
+
+
+def _exact_channel_id(channel_id: str) -> bool:
+    """No surrounding whitespace and no control / format character anywhere:
+    an id the worker's exact match could ever meet."""
+    return channel_id == channel_id.strip() and not any(
+        unicodedata.category(ch).startswith("C") for ch in channel_id
+    )
+
+
+# A Slack conversation id (``C…`` public, ``G…`` private / group, ``D…`` DM):
+# uppercase letters and digits only.
+_SLACK_CONVERSATION_ID = re.compile(r"[A-Z0-9]+")
+
+
+def check_route_channel_ids_for(connector_type: str, routes: Iterable[ChannelRouteInput]) -> None:
+    """Refuse a route a ``connector_type`` channel id can never match (#1759).
+
+    A route whose id matches no real channel is a silent fail-open: the
+    channel keeps landing in the default context while the admin believes it
+    is routed. For Slack the id must be a conversation id (``C01ABC``), not a
+    name like ``#secret`` nor a lowercased id. Other platforms keep the
+    generic rule of ``parse_channel_routes``.
+
+    Raises:
+        ValidationError: on ``channel_routes``, naming the channel id at fault.
+    """
+    if connector_type != "slack":
+        return
+    for route in routes:
+        if not _SLACK_CONVERSATION_ID.fullmatch(route.channel_id):
+            raise ValidationError(
+                f"channel_routes: {route.channel_id!r} is not a Slack channel id "
+                "(uppercase letters and digits, e.g. C01ABCDEF)",
+                # No ``channel_id`` detail: the settings UI reads that one as
+                # "the key's owner cannot write there" on the row.
+                field=_FIELD,
+            )
 
 
 def parse_capabilities(raw: str | None) -> frozenset[str]:
