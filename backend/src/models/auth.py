@@ -935,7 +935,8 @@ class OAuth2Client(Base):
 
     # Migration 036: Provider type (claude, chatgpt, cursor, gemini, custom; DCR
     # also stores codex, hermes, openclaw for loopback native clients — #1657;
-    # gemini by exact Google redirect — #2222; muse by its exact callback URIs — #2410, #2487)
+    # gemini by exact Google redirect — #2222; muse by its exact callback URIs — #2410, #2487;
+    # grok by its exact callback URI — #2779)
     provider: Mapped[str] = mapped_column(String(50), nullable=False, server_default="custom")
 
     # Relationships

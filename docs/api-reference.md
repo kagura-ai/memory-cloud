@@ -1400,7 +1400,10 @@ written as is or percent-encoded; no `..`, query, fragment or params), or (Muse)
 `https://muse.ai/api/hatch/oauth/callback` or
 `https://platform.muse.ai/oauth/credential-test/callback` exactly, as written
 ([#2410](https://github.com/kagura-ai/memory-cloud/issues/2410),
-[#2487](https://github.com/kagura-ai/memory-cloud/issues/2487)), or (Google
+[#2487](https://github.com/kagura-ai/memory-cloud/issues/2487)), or (Grok)
+it is `https://grok.com/connectors-oauth-exchange-code/` exactly, as written,
+trailing slash included
+([#2779](https://github.com/kagura-ai/memory-cloud/issues/2779)), or (Google
 connected apps) it is listed in `GOOGLE_CONNECTED_APPS_REDIRECT_URIS`, as
 written ([#2773](https://github.com/kagura-ai/memory-cloud/issues/2773)). A
 registration gets the provider `google_connected_apps` only when every entry
