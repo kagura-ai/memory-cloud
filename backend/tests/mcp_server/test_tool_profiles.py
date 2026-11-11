@@ -183,8 +183,9 @@ def test_load_guardrails_stays_out_of_core():
     assert "load_guardrails" not in CORE_TOOLS
 
 
-def test_profiles_are_full_and_core():
-    assert list(PROFILES) == ["full", "core"]
+def test_profiles_are_full_core_and_google():
+    # #2773: google is pinned in test_google_profile.
+    assert list(PROFILES) == ["full", "core", "google"]
 
 
 def test_core_list_stays_under_its_character_budget():

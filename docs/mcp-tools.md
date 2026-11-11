@@ -12,6 +12,7 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 |--------------|----------------------|--------------|
 | `/mcp` (or `?profile=core`) | The 21 core tools — the default: `remember`, `remember_batch`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `create_edge`, `get_context_info`, `list_contexts`, `list_tags`, `create_context`, `update_context`, `delete_context`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap` | ≈ 40k chars |
 | `/mcp?profile=full` | All 72 tools | ≈ 108k chars (about 2.7× the default) |
+| `/mcp?profile=google` | The core tools without `describe_tools` and `guide`, with prose that names no other tool and a read-only `recall` — for Google's connected apps ([below](#the-google-profile)) | ≈ 38k chars |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 11k chars for these three |
 | `/mcp?add_tools=list_edges` (or `?profile=core&add_tools=list_edges,merge_contexts`) | The profile (`core` when none is given) plus the named tools — ignored when `tools` is present | the profile plus each added tool |
 
@@ -19,7 +20,7 @@ Sizes are the compact JSON of the `tools` array, measured at v0.135.0, when `exp
 
 - Tool names (in `tools` and `add_tools`) are comma-separated and case-sensitive; surrounding whitespace is trimmed, duplicates collapse, and at most 100 names are read. The result is always in registry order, whatever order the URL uses.
 - `add_tools` adds to the profile instead of replacing it, so one extra tool does not mean spelling out the whole core list ([#2354](https://github.com/kagura-ai/memory-cloud/issues/2354)). With `profile=full` it changes nothing. Next to `tools` it is ignored (and logged): a URL that already has an allowlist keeps exactly that list.
-- Unknown names are ignored (and logged by the server), so a URL keeps working if a tool is later renamed or removed. An `add_tools` that matches nothing is not an error — the profile still answers. If **no** `tools` name matches, or `profile` is anything other than `full` / `core`, `tools/list` fails with JSON-RPC `-32602` (invalid params) and a message naming the valid values.
+- Unknown names are ignored (and logged by the server), so a URL keeps working if a tool is later renamed or removed. An `add_tools` that matches nothing is not an error — the profile still answers. If **no** `tools` name matches, or `profile` is anything other than `full` / `core` / `google`, `tools/list` fails with JSON-RPC `-32602` (invalid params) and a message naming the valid values.
 - `explore` is opt-in: `?add_tools=explore` or `?profile=full` lists it (or name it in `tools`). It walks the Neural Memory graph, for questions that follow a chain of decisions or changes. See [`explore`](#explore).
 - Both transports honour the parameters — session-based Streamable HTTP and stateless MCP 2026-07-28 — on `/mcp` as well as `/mcp/w/{workspace_id}`.
 
@@ -28,6 +29,18 @@ Sizes are the compact JSON of the `tools` array, measured at v0.135.0, when `exp
 > **Upgrading to v0.135.0.** `explore` is no longer in the core profile, so the default URL does not list it. A client that follows `tools/list` adds `?add_tools=explore` or `?profile=full` to its URL (`&` when the URL already has a query; a URL that has `tools` or `add_tools` adds the name to that list; the `kagura-mcp` stdio bridge uses `--tool-profile full`). A direct `tools/call` keeps working. `include_explore_hints=true` on a URL that does not list it returns `explore_hints_omitted` instead of `explore_hints`.
 
 > **Upgrading from v0.92.0 or earlier.** The bare `/mcp` URL used to list every tool; it now lists the core profile. A client that needs the other tools adds `?profile=full` to its URL (`&profile=full` when the URL already has a query) — most clients let the model call listed tools only, so this is the step that makes them usable; `describe_tools` tells the model which ones exist. Nothing changes on the server side (`tools/call` accepts every registered tool); connectors that cache `tools/list` (ChatGPT until Refresh, Codex per `initialize`) show the new list at their next read.
+
+### The `google` profile
+
+`?profile=google` ([#2773](https://github.com/kagura-ai/memory-cloud/issues/2773)) serves the surface Google's connected-apps policy asks for: no discovery function, no tool prose that references another tool or sets a rule for using one, nothing that asks for the conversation. It applies when the URL has `profile=google` and no `tools=` (an allowlist wins over `profile`, as everywhere).
+
+- **Tools:** the core tools without `describe_tools` and `guide`; `add_tools` cannot bring those two back (ignored and logged), other names work as on `core` and are served with their standard text.
+- **Schemas:** identical to the core schemas — only descriptions differ. Each google description is pinned to a fingerprint of the core text it replaces, so changing a core description fails a test until its google text is updated.
+- **`recall`:** makes no learning writes on this URL — no Hebbian reweighting, pruning or eviction, no working → persistent promotion — and is annotated `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`. Access counters still move. Every other tool keeps its [annotations](#tool-annotations), and the OAuth scope a call needs does not depend on the URL.
+- **Server instructions:** a short base text that names no tool (or its default-context variant), never a [guardrail digest](#server-instructions).
+- **Replies:** no `Manual: guide([...])` on caller errors, a neutral `unknown_tool` help, no quick-reference `instructions` in `get_context_info` / `bootstrap`; sentences of a reply's own `help`, `hint` and `message` that point at another tool are dropped. Stored data passes through unchanged.
+
+Console setup (which tools to mark for user confirmation): [Google Connected Apps](google-connected-apps.md).
 
 ### Listing profile vs enforced restriction
 

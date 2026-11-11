@@ -535,6 +535,7 @@ async def _instructions_base(
     key_workspace_id: "UUID | None",
     era: Literal["legacy", "stateless"],
     deadline: float,
+    google: bool = False,
 ) -> tuple[str, bool]:
     """The base text for this connection and whether it varies by caller (#2125).
 
@@ -551,21 +552,29 @@ async def _instructions_base(
     keeps the reads #1621 pins. Fails open to the base text, like the digest,
     and shares the digest's ``deadline``: the handshake waits at most one
     ``mcp_guardrail_digest_timeout_ms`` for both reads together.
+
+    #2773: ``google`` swaps in the google view's texts, which name no tool.
     """
     from mcp_server.tools._default_context import select_default_context
+    from mcp_server.tools._google_profile import (
+        GOOGLE_INSTRUCTIONS_BASE,
+        google_default_context_instructions,
+    )
     from mcp_server.tools._helpers import get_mcp_credential_default_context
 
+    base_text = GOOGLE_INSTRUCTIONS_BASE if google else SERVER_INSTRUCTIONS_BASE
+    named = google_default_context_instructions if google else default_context_instructions
     selection = select_default_context(query_string)
     if selection.mode == "none":
         credential_default = get_mcp_credential_default_context()
         if credential_default is None:
-            return SERVER_INSTRUCTIONS_BASE, False
+            return base_text, False
         context_id, source = credential_default, "credential"
     elif selection.mode == "invalid" or selection.context_id is None:
         logger.info(
             "mcp_context_param_invalid: len=%d parsed=False era=%s", selection.raw_length, era
         )
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base_text, True
     else:
         context_id, source = selection.context_id, "url"
 
@@ -582,16 +591,16 @@ async def _instructions_base(
         logger.warning(
             "mcp_default_context_instructions_failed: reason=%s era=%s", type(e).__name__, era
         )
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base_text, True
     if name is None:
-        return SERVER_INSTRUCTIONS_BASE, True
+        return base_text, True
     logger.info(
         "mcp_default_context_instructions_served: context_id=%s era=%s source=%s",
         str(context_id),
         era,
         source,
     )
-    return default_context_instructions(name), True
+    return named(name), True
 
 
 async def build_instructions(
@@ -636,11 +645,17 @@ async def build_instructions(
     and never fail the handshake. Denies produce no signal beyond debug level;
     a resolver deny for an agent credential still writes its
     ``memory_access_events`` row (successes write nothing).
+
+    #2773: on the google view (``?profile=google`` without ``tools=``) the
+    result is the google base text (or its default-context variant) with no
+    digest at all: the digest lists rules for when to call tools, which
+    Google's connected-apps policy does not allow server text to set.
     """
     from auth.agent_scope import get_agent_scope
     from mcp_server.auth import get_mcp_connector_credential
     from mcp_server.tools._default_context import select_default_context
     from mcp_server.tools._helpers import get_mcp_credential_default_context
+    from mcp_server.tools._profiles import is_google_view
     from services.guardrail_digest import (
         GuardrailSelection,
         render_instructions,
@@ -651,13 +666,17 @@ async def build_instructions(
     settings = get_settings()
     # One budget for the default-context name and the digest together.
     deadline = asyncio.get_running_loop().time() + settings.mcp_guardrail_digest_timeout_ms / 1000
+    google = is_google_view(query_string)
     base, base_private = await _instructions_base(
         user_id=user_id,
         query_string=query_string,
         key_workspace_id=key_workspace_id,
         era=era,
         deadline=deadline,
+        google=google,
     )
+    if google:
+        return base, base_private
     selection = select_guardrail_context(query_string)
     default_selection = select_default_context(query_string)
     if selection.mode == "binding" and default_selection.mode == "url":

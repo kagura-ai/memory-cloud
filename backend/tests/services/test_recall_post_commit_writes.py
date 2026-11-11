@@ -401,3 +401,44 @@ class TestHebbianLearningLock:
             pytest.raises(_Reached),
         ):
             await self._learn(service, graph_db)
+
+
+class TestReadOnlyRecall:
+    """#2773: ``learning=False`` (the MCP recall on the google view) writes
+    nothing later results depend on; the access bookkeeping still runs."""
+
+    @pytest.mark.asyncio
+    async def test_no_promotion_but_the_stats_still_move(self, service):
+        old = _memory(created_at=datetime.utcnow() - timedelta(days=30))
+        responses = [_response(old)]
+        session = _isolated(service)
+        repo = MagicMock()
+        repo.bulk_update_access_stats = AsyncMock(
+            return_value={old.id: _stats(clients=["claude", "api"])}
+        )
+        repo.bulk_promote_to_persistent = AsyncMock(return_value=[old.id])
+
+        with patch("services.memory_service.MemoryRepository", return_value=repo):
+            await service._recall_record_access(
+                responses, {"a": old}, client="claude", promote=False
+            )
+
+        repo.bulk_update_access_stats.assert_awaited_once_with([old.id], "claude")
+        repo.bulk_promote_to_persistent.assert_not_awaited()
+        session.commit.assert_awaited_once()
+        assert responses[0].scope == "working"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("learning", [True, False])
+    async def test_the_hebbian_pass_and_promotion_follow_learning(self, learning):
+        from tests.services.test_supersede_fold import _mem, _pool, _run_recall
+
+        hits, memories = _pool((_mem(0), 0.8), (_mem(1), 0.7))
+        service = MemoryService(db=AsyncMock())
+        kwargs = {} if learning else {"learning": False}
+        await _run_recall(service, hits, memories, {}, neural_enabled=True, **kwargs)
+
+        assert service._recall_run_hebbian_learning.await_count == (1 if learning else 0)
+        service._recall_record_access.assert_awaited_once()
+        expected = {"client": "api"} if learning else {"client": "api", "promote": False}
+        assert service._recall_record_access.await_args.kwargs == expected
