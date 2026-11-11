@@ -185,7 +185,11 @@ jobs:
       - name: ShellCheck check-image-contents.sh
         run: shellcheck .github/scripts/check-image-contents.sh
 
-      - name: Bats — wait-for-api phase verdicts, image contents verdicts
+      # #2771: the tag/server.json version guard of publish-mcp-registry.yml.
+      - name: ShellCheck check-server-json-version.sh
+        run: shellcheck .github/scripts/check-server-json-version.sh
+
+      - name: Bats — wait-for-api phase verdicts, image contents and server.json version verdicts
         run: bats .github/scripts/tests/
 
   backend-unit:

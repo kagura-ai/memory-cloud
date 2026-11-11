@@ -184,6 +184,8 @@ git ls-remote --tags origin refs/tags/vX.Y.Z           # confirm the tag landed
 
 The tag push triggers the `push: tags: ["v*"]` CI run in `.github/workflows/ci.yml`.
 
+It also triggers `.github/workflows/publish-mcp-registry.yml`, which publishes `server.json` to the Official MCP Registry (GitHub OIDC, no secret); it fails before publishing when the tag is not `v` + `server.json`'s `version`. A failed publish does not block the release or the deploy: fix the cause, then re-run it on the tag with `gh workflow run publish-mcp-registry.yml --ref vX.Y.Z` (a dispatch on a tag publishes like the push; a dispatch on a branch is a dry run that publishes nothing). Check the listing with `curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=kagura&version=latest'`.
+
 ### 11. Create the GitHub Release
 
 Derive `summary.md` from the CHANGELOG entry: a `## Summary` section (theme + one bullet per headline change, with issue numbers) and a `## Migration` section (`None.` plus what is additive, or the migration steps). `--generate-notes` appends `## What's Changed` and the compare link after it.
