@@ -23,11 +23,17 @@ their reply: ``describe_tools``, and ``recall``, which leaves out ``explore``
 hints where the URL does not list that tool (#2470). Do not use a profile
 to restrict what a key can do — that is what workspace and context roles are
 for.
+
+``profile=google`` (#2773) is the core set without ``describe_tools`` and
+``guide`` (Google's connected-apps policy refuses discovery functions and tool
+prose that points at other tools), served with the prose and ``recall``
+annotations of ``_google_profile``; ``add_tools`` cannot bring the two back.
 """
 
 from urllib.parse import parse_qsl
 
 from mcp_server.tools._definitions import get_tool_definitions
+from mcp_server.tools._google_profile import apply_google_surface
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -64,8 +70,19 @@ CORE_TOOLS: tuple[str, ...] = (
     "bootstrap",
 )
 
+# #2773: the core set for Google's connected apps, without the discovery tool
+# and the manual (both exist to point at other tools). Its prose and recall's
+# annotations come from ``_google_profile``.
+GOOGLE_PROFILE = "google"
+GOOGLE_EXCLUDED_TOOLS = frozenset({"describe_tools", "guide"})
+GOOGLE_TOOLS: tuple[str, ...] = tuple(n for n in CORE_TOOLS if n not in GOOGLE_EXCLUDED_TOOLS)
+
 # ``None`` = no filter. Insertion order is the order error messages list them in.
-PROFILES: dict[str, tuple[str, ...] | None] = {"full": None, "core": CORE_TOOLS}
+PROFILES: dict[str, tuple[str, ...] | None] = {
+    "full": None,
+    "core": CORE_TOOLS,
+    GOOGLE_PROFILE: GOOGLE_TOOLS,
+}
 
 # What ``tools/list`` returns when the URL selects nothing (#1849). ``full``
 # remains one query parameter away; ``tools/call`` never reads a profile.
@@ -122,6 +139,28 @@ def _read_names(value: str, param: str, known: set[str]) -> tuple[set[str], list
     return set(requested) - set(unknown), unknown
 
 
+def _read_params(query_string: bytes | str | None) -> dict[str, str]:
+    """The URL's query parameters, the first value winning when one repeats."""
+    if isinstance(query_string, bytes):
+        query_string = query_string.decode("utf-8", "replace")
+    params: dict[str, str] = {}
+    for key, value in parse_qsl(query_string or "", keep_blank_values=True):
+        params.setdefault(key, value)
+    return params
+
+
+def is_google_view(query_string: bytes | str | None) -> bool:
+    """Whether this URL's view is the ``google`` profile (#2773).
+
+    ``profile=google`` (trimmed, as ``select_tool_definitions`` reads it) and
+    no ``tools=``, which wins over ``profile``. ``None`` (no request) is not.
+    """
+    if query_string is None:
+        return False
+    params = _read_params(query_string)
+    return "tools" not in params and params.get("profile", "").strip() == GOOGLE_PROFILE
+
+
 def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
     """Return the tool definitions the endpoint URL asks ``tools/list`` for.
 
@@ -135,7 +174,8 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
     - ``add_tools`` (#2354): names added to the profile (the given one, or
       ``DEFAULT_PROFILE``), read like ``tools``. Unknown names are ignored and
       logged; matching none is not an error, the profile alone still answers.
-      Ignored (and logged) when ``tools`` is present.
+      Ignored (and logged) when ``tools`` is present. Under ``profile=google``
+      ``describe_tools`` and ``guide`` are ignored (and logged) too.
 
     Args:
         query_string: The raw ASGI ``scope["query_string"]`` (percent-encoded
@@ -144,18 +184,15 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
     Returns:
         The selected definitions, always in registry order. With no selection
         this is the ``DEFAULT_PROFILE`` (core) list; ``profile=full`` is
-        ``get_tool_definitions()`` unchanged.
+        ``get_tool_definitions()`` unchanged; ``profile=google`` carries the
+        google prose and annotations (``_google_profile``).
 
     Raises:
         ToolProfileError: ``profile`` names no known profile, or ``tools``
             matches no known tool.
     """
     definitions = get_tool_definitions()
-    if isinstance(query_string, bytes):
-        query_string = query_string.decode("utf-8", "replace")
-    params: dict[str, str] = {}
-    for key, value in parse_qsl(query_string or "", keep_blank_values=True):
-        params.setdefault(key, value)
+    params = _read_params(query_string)
     known = {tool["name"] for tool in definitions}
 
     if "tools" in params:
@@ -190,8 +227,19 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
     wanted = set(selected)
     if "add_tools" in params:
         added, _ = _read_names(params["add_tools"], "add_tools", known)
+        if profile == GOOGLE_PROFILE and added & GOOGLE_EXCLUDED_TOOLS:
+            logger.info(
+                "mcp_tool_profile_names_ignored",
+                param="add_tools",
+                excluded=sorted(added & GOOGLE_EXCLUDED_TOOLS),
+                profile=profile,
+            )
+            added -= GOOGLE_EXCLUDED_TOOLS
         wanted |= added
-    return [tool for tool in definitions if tool["name"] in wanted]
+    selected_tools = [tool for tool in definitions if tool["name"] in wanted]
+    if profile == GOOGLE_PROFILE:
+        return apply_google_surface(selected_tools)
+    return selected_tools
 
 
 def tool_view_names(query_string: bytes | str | None) -> frozenset[str]:
@@ -220,6 +268,9 @@ def not_listed_reason(name: str, query_string: bytes | str | None) -> str | None
             return None
     except ToolProfileError as e:
         return e.message
+    if is_google_view(query_string):
+        # #2773: the google view's replies name no other tool.
+        return "Not available on this connection."
     return (
         f"{name} is not listed on this connection: add it to the tools= or add_tools= "
         f"list in the MCP URL's query if it has one, otherwise add add_tools={name} or "

@@ -40,7 +40,7 @@ from mcp_server.tools._helpers import (
     get_mcp_key_workspace_scope,
     get_mcp_tool_view_query,
 )
-from mcp_server.tools._profiles import not_listed_reason
+from mcp_server.tools._profiles import is_google_view, not_listed_reason
 from mcp_server.tools._reference_adoption import mark_first_read, unmark_read
 from services.memory_service import (
     DEDUPE_MODES,
@@ -1381,6 +1381,9 @@ async def handle_recall(
     explore_hints_omitted = (
         not_listed_reason("explore", get_mcp_tool_view_query()) if include_explore_hints else None
     )
+    # #2773: on the google view recall is advertised read-only, so it makes no
+    # learning writes (Hebbian pass, promotion) and adds no hint naming list().
+    learning = not is_google_view(get_mcp_tool_view_query())
 
     request = RecallRequest(
         query=args["query"],
@@ -1515,7 +1518,12 @@ async def handle_recall(
                     related_index=True,
                     # #2754: may add the hint towards list() when
                     # RECALL_LIST_HINT_ENABLED is set; only this tool has list.
-                    list_hint=True,
+                    # Not on the google view, whose replies name no other tool
+                    # (the opt-in literal is pinned by test_recall_list_hint_callers).
+                    list_hint=True if learning else False,
+                    # #2773: False on the google view: no Hebbian pass, no
+                    # promotion (access bookkeeping still runs).
+                    learning=learning,
                 ),
                 operation_name="recall",
             )

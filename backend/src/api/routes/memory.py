@@ -500,6 +500,8 @@ async def guardrail_digest(
         Authorization: Bearer <api_key>
     """
     from config.settings import get_settings
+    from mcp_server.tools._google_profile import GOOGLE_INSTRUCTIONS_BASE
+    from mcp_server.tools._profiles import is_google_view
     from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
     from services.guardrail_digest import (
         EXPORT_CAPS,
@@ -557,9 +559,13 @@ async def guardrail_digest(
                 if v
             }
         )
-        body = render_instructions(
-            SERVER_INSTRUCTIONS_BASE, entries, tool_names=tool_view_names(query)
-        )
+        if is_google_view(query):
+            # #2773: the google view serves its base text and never a digest.
+            body = GOOGLE_INSTRUCTIONS_BASE
+        else:
+            body = render_instructions(
+                SERVER_INSTRUCTIONS_BASE, entries, tool_names=tool_view_names(query)
+            )
         media_type = "text/plain"
 
     return PlainTextResponse(

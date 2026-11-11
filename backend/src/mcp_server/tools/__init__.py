@@ -190,9 +190,15 @@ _CALLER_ERRORS = frozenset(
 
 
 def _manual_help(tool_name: str) -> str | None:
-    """``Manual: guide(["<tool>"])`` for a tool with a guide topic, else None."""
+    """``Manual: guide(["<tool>"])`` for a tool with a guide topic, else None.
+
+    None on the google view (#2773): its replies point at no other tool.
+    """
+    from mcp_server.tools._google_profile import google_mode_active
     from mcp_server.tools.guide import GUIDE_INDEX
 
+    if google_mode_active():
+        return None
     return f'Manual: guide(["{tool_name}"])' if tool_name in GUIDE_INDEX else None
 
 
@@ -567,6 +573,25 @@ async def execute_tool_call(
 ) -> list[TextContent]:
     """Execute MCP tool call directly (used by Streamable HTTP Transport).
 
+    #2773: on the google view (``?profile=google``) the reply's static
+    pointers to other tools are dropped last (``scrub_google_reply``).
+    """
+    from mcp_server.tools._google_profile import google_mode_active, scrub_google_reply
+
+    result = await _execute_tool_call(tool_name, arguments, user_id, workspace_id)
+    if google_mode_active():
+        return scrub_google_reply(tool_name, result)
+    return result
+
+
+async def _execute_tool_call(
+    tool_name: str,
+    arguments: dict[str, Any],
+    user_id: str,
+    workspace_id: UUID | None = None,
+) -> list[TextContent]:
+    """The dispatch behind ``execute_tool_call``.
+
     Issue #172: Refactored to extract common boilerplate into helpers.
     Issue #245: context_id is now obtained from arguments["context_id"] (required).
     Issue #7: Registry-based dispatch replaces if/elif chain.
@@ -588,13 +613,17 @@ async def execute_tool_call(
     # Validate tool exists before expensive checks (avoids DB query for unknown tools)
     handler = _TOOL_REGISTRY.get(tool_name)
     if handler is None:
+        from mcp_server.tools._google_profile import UNKNOWN_TOOL_HELP, google_mode_active
+
         return _error_response(
             "unknown_tool",
             f"Unknown tool: {tool_name}",
             help=(
-                "Call tools/list to see the tools this URL lists; describe_tools() names the "
-                "rest. ?add_tools=<name> on the URL adds one to the list, and ?profile=full "
-                "lists every tool."
+                UNKNOWN_TOOL_HELP
+                if google_mode_active()
+                else "Call tools/list to see the tools this URL lists; describe_tools() names "
+                "the rest. ?add_tools=<name> on the URL adds one to the list, and "
+                "?profile=full lists every tool."
             ),
         )
 
@@ -675,14 +704,25 @@ async def execute_tool_call(
     if tool_name not in _TOOLS_WITHOUT_CONTEXT_ID:
         has_context_ids = "context_ids" in args and isinstance(args.get("context_ids"), list)
         if "context_id" not in args and not has_context_ids:
+            from mcp_server.tools._google_profile import (
+                CONTEXT_ID_REQUIRED_HELP,
+                google_mode_active,
+            )
+
             manual = _manual_help(tool_name)
             # #2125: a tool that takes the connection default says how to set one;
             # an exempt tool (delete_context, …) always needs the explicit id.
-            hint = (
-                _CONTEXT_ID_REQUIRED_HELP
-                if takes_default_context(tool_name)
-                else "Use list_contexts() first to discover available context IDs."
-            )
+            # #2773: the google view's help names no other tool.
+            if google_mode_active():
+                hint = (
+                    CONTEXT_ID_REQUIRED_HELP
+                    if takes_default_context(tool_name)
+                    else "Pass context_id."
+                )
+            elif takes_default_context(tool_name):
+                hint = _CONTEXT_ID_REQUIRED_HELP
+            else:
+                hint = "Use list_contexts() first to discover available context IDs."
             return _error_response(
                 "context_id_required",
                 f"{tool_name} requires context_id argument.",
