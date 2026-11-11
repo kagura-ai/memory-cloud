@@ -43,9 +43,13 @@ TOKEN="k1591ScrubLiveTokenAbCdEfGhIjKlMnOpQrStUv_-9"
 # A resource token (resource-ingest credential, sent in the X-Resource-API-Key
 # request header). Distinct from TOKEN so a leak names the header it came from.
 RESOURCE_TOKEN="rtokScrubLiveResourceTokenZyXwVuTsRqPoNmLkJiHg"
+# Distinct, synthetic OIDC credentials with the provider's 43-character suffix.
+OIDC_CODE="kmc_oidc_code_k2781CodeAbCdEfGhIjKlMnOpQrStUvWxYz01234567"
+OIDC_ACCESS="kmc_oidc_at_k2781AccessAbCdEfGhIjKlMnOpQrStUvWxYz012345"
+OIDC_REFRESH="kmc_oidc_rt_k2781RefreshAbCdEfGhIjKlMnOpQrStUvWxYz01234"
 
-EXPECTED_CASES=28   # access-log lines: one per fire() below
-EXPECTED_ERRORS=7   # error-log lines: one per *-down case
+EXPECTED_CASES=37   # access-log lines: one per fire() below
+EXPECTED_ERRORS=10  # error-log lines: one per *-down case
 
 # A workspace invitation id as the API's management routes carry it: it must
 # NOT be mistaken for a token.
@@ -112,6 +116,9 @@ setup_file() {
 http://:8080 {
 	@down header X-Stub-Down 1
 	abort @down
+	@oidc_redirect header X-Stub-Oidc-Redirect 1
+	header @oidc_redirect Refresh "0;url=https://client.example.test/auth/callback?{http.request.uri.query}"
+	redir @oidc_redirect https://client.example.test/auth/callback?{http.request.uri.query} 302
 	respond "stub api" 200
 }
 
@@ -189,6 +196,17 @@ CADDYEOF
     fire plain-accept  "/api/v1/invitations/accept"
     fire plain-pending "/api/v1/invitations/pending"
     fire plain-ws-inv  "/api/v1/workspaces/$WORKSPACE_ID/invitations/$INVITATION_ID"
+    # A pasted credential must not enter URI diagnostics, even when a client
+    # sends it through a query instead of the protocol's normal body/header.
+    fire oidc-code     "/oidc/token?code=$OIDC_CODE&state=kept"
+    fire oidc-access   "/oidc/userinfo?access_token=$OIDC_ACCESS&details=kept"
+    fire oidc-refresh  "/oidc/token?refresh_token=$OIDC_REFRESH&details=kept"
+    # The API returns the authorization code in Location. The same filters
+    # must also scrub other credential prefixes if an upstream echoes them.
+    local redirect=(-H "X-Stub-Oidc-Redirect: 1")
+    fire oidc-code-redirect "/oidc/authorize?code=$OIDC_CODE&state=kept" "${redirect[@]}"
+    fire oidc-access-redirect "/oidc/authorize?access_token=$OIDC_ACCESS&state=kept" "${redirect[@]}"
+    fire oidc-refresh-redirect "/oidc/authorize?refresh_token=$OIDC_REFRESH&state=kept" "${redirect[@]}"
     # The invite shapes again, an ordinary request and the ingest shape,
     # against a failing upstream (join/invite reach `web`, the others the API).
     local down=(-H "X-Stub-Down: 1")
@@ -199,6 +217,9 @@ CADDYEOF
     fire invitation-down "/api/v1/invitations/$TOKEN"                        "${down[@]}"
     fire plain-down    "/api/v1/memories?limit=5&q=join"                     "${down[@]}"
     fire ingest-down   "/api/v1/resources/products/events"                   "${down[@]}" -X POST -H "Content-Type: application/json" -d '{"op":"upsert","id":"x","version":1,"payload":{}}'
+    fire oidc-code-down "/oidc/token?code=$OIDC_CODE&state=kept"              "${down[@]}"
+    fire oidc-access-down "/oidc/userinfo?access_token=$OIDC_ACCESS&details=kept" "${down[@]}"
+    fire oidc-refresh-down "/oidc/token?refresh_token=$OIDC_REFRESH&details=kept" "${down[@]}"
 
     # The access-log line is written after the response completes; give the
     # last one a moment to land. stdout = access log (`output stdout`),
@@ -324,8 +345,8 @@ PYEOF
     # Both encoders: the default logger (error lines) and the site's access
     # logger (log0).
     # shellcheck disable=SC2016  # literal ${N}: the regexp's capture references
-    expect "$output" 'default regexp ${1}${2}${4}${5}${6}${7}REDACTED${3}
-log0 regexp ${1}${2}${4}${5}${6}${7}REDACTED${3}'
+    expect "$output" 'default regexp ${1}${2}${4}${5}${6}${7}${8}REDACTED${3}
+log0 regexp ${1}${2}${4}${5}${6}${7}${8}REDACTED${3}'
 }
 
 @test "live: customising the default logger does not copy the access log onto stderr" {
@@ -454,12 +475,46 @@ log0 writes to: stdout'
     expect "$output" "/api/v1/workspaces/$WORKSPACE_ID/invitations/$INVITATION_ID"
 }
 
+@test "live: OIDC code, access and refresh credentials are redacted in request URIs" {
+    require_live
+    for c in oidc-code oidc-access oidc-refresh; do
+        run logged "$c" status
+        expect "$output" "200"
+    done
+    run logged oidc-code uri
+    expect "$output" "/oidc/token?code=kmc_oidc_code_REDACTED&state=kept"
+    run logged oidc-access uri
+    expect "$output" "/oidc/userinfo?access_token=kmc_oidc_at_REDACTED&details=kept"
+    run logged oidc-refresh uri
+    expect "$output" "/oidc/token?refresh_token=kmc_oidc_rt_REDACTED&details=kept"
+}
+
+@test "live: OIDC redirect Location and Refresh retain diagnostics without credential values" {
+    require_live
+    local c query
+    for c in code access refresh; do
+        case "$c" in
+            code) query="code=kmc_oidc_code_REDACTED&state=kept" ;;
+            access) query="access_token=kmc_oidc_at_REDACTED&state=kept" ;;
+            refresh) query="refresh_token=kmc_oidc_rt_REDACTED&state=kept" ;;
+        esac
+        run logged "oidc-$c-redirect" status
+        expect "$output" "302"
+        run logged "oidc-$c-redirect" uri
+        expect "$output" "/oidc/authorize?$query"
+        run logged "oidc-$c-redirect" resp:Location
+        expect "$output" "https://client.example.test/auth/callback?$query"
+        run logged "oidc-$c-redirect" resp:Refresh
+        expect "$output" "0;url=https://client.example.test/auth/callback?$query"
+    done
+}
+
 @test "live: no Referer / Cookie / Next-Router-State-Tree / Next-Url / X-Resource-Api-Key key in any line" {
     require_live
     for c in join join-rsc join-pasted join-slash preview login login-first \
              plain-api plain-mcp plain-root plain-invites \
              invite invite-rsc invite-slash invitation login-return login-return-lc \
-             plain-accept plain-pending plain-ws-inv; do
+             plain-accept plain-pending plain-ws-inv oidc-code oidc-access oidc-refresh; do
         run logged "$c" req_headers
         [ "$status" -eq 0 ] || { echo "$output"; return 1; }
         # What is left is exactly what curl sent besides the five.
@@ -491,7 +546,8 @@ log0 writes to: stdout'
 
 @test "live: a failing upstream is a 502 plus an http.log.error line on stderr (guard not vacuous)" {
     require_live
-    for c in join-down preview-down login-down invite-down invitation-down plain-down ingest-down; do
+    for c in join-down preview-down login-down invite-down invitation-down plain-down ingest-down \
+             oidc-code-down oidc-access-down oidc-refresh-down; do
         run logged "$c" status
         expect "$output" "502"
         # The second line exists, is about this request, and names the 502.
@@ -555,7 +611,20 @@ log0 writes to: stdout'
     expect "$output" "/api/v1/resources/products/events"
 }
 
-@test "live: neither token appears ANYWHERE in what the container printed (stdout + stderr)" {
+@test "live: OIDC credentials are scrubbed from both loggers when the upstream fails" {
+    require_live
+    local logger
+    for logger in logged err_logged; do
+        run "$logger" oidc-code-down uri
+        expect "$output" "/oidc/token?code=kmc_oidc_code_REDACTED&state=kept"
+        run "$logger" oidc-access-down uri
+        expect "$output" "/oidc/userinfo?access_token=kmc_oidc_at_REDACTED&details=kept"
+        run "$logger" oidc-refresh-down uri
+        expect "$output" "/oidc/token?refresh_token=kmc_oidc_rt_REDACTED&details=kept"
+    done
+}
+
+@test "live: no credential appears ANYWHERE in what the container printed (stdout + stderr)" {
     require_live
     run grep -c "$TOKEN" "$WORK/access.log" "$WORK/runtime.log"
     [[ "$output" == *"access.log:0"* ]]
@@ -563,6 +632,12 @@ log0 writes to: stdout'
     run grep -c "$RESOURCE_TOKEN" "$WORK/access.log" "$WORK/runtime.log"
     [[ "$output" == *"access.log:0"* ]]
     [[ "$output" == *"runtime.log:0"* ]]
+    local credential
+    for credential in "$OIDC_CODE" "$OIDC_ACCESS" "$OIDC_REFRESH"; do
+        run grep -c "$credential" "$WORK/access.log" "$WORK/runtime.log"
+        [[ "$output" == *"access.log:0"* ]] || { echo "$output"; return 1; }
+        [[ "$output" == *"runtime.log:0"* ]] || { echo "$output"; return 1; }
+    done
 }
 
 @test "live: ordinary requests keep their full URI" {
