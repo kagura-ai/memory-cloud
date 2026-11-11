@@ -202,8 +202,12 @@ describe("Workspace Capacity section (#676)", () => {
     expect(capDisplay.textContent).toMatch(/base=1/);
     expect(capDisplay.textContent).toMatch(/bonus=2/);
     expect(capDisplay.parentElement?.textContent).toMatch(/pct=67/);
-    expect(screen.getByText("Personal")).toBeInTheDocument();
-    expect(screen.getByText("Side project")).toBeInTheDocument();
+    // Scoped: the owned workspaces are rows of the workspaces table too (#2765).
+    const section = screen.getByTestId(
+      USER_DETAIL_TEST_IDS.workspaceCapacitySection,
+    );
+    expect(within(section).getByText("Personal")).toBeInTheDocument();
+    expect(within(section).getByText("Side project")).toBeInTheDocument();
   });
 
   it("shows 'at cap' badge when is_at_cap is true", async () => {
@@ -556,6 +560,77 @@ describe("Workspaces table plan actions (#2765)", () => {
       row("Team Workspace").getByText("workspaces.ownerManagesPlan"),
     ).toBeInTheDocument();
     expect(row("Team Workspace").getByText("M")).toBeInTheDocument();
+  });
+
+  // A legacy workspace can carry owner_user_id without a matching member row
+  // (workspace_ownership_service), or with a member row of another role. The
+  // owner is workspaces.owner_user_id, which owned_workspaces reports.
+  const summaryOwning = (...owned: { id: string; name: string; plan_name: string }[]) => ({
+    owned_count: owned.length,
+    workspace_slot_bonus: 0,
+    base_cap: 1,
+    tier_grant: 0,
+    tier: "pro",
+    cap: 1 + owned.length,
+    is_at_cap: false,
+    owned_workspaces: owned,
+  });
+
+  it("offers the plan actions on an owned workspace whose member row has another role", async () => {
+    mockGet.mockResolvedValue({
+      ...detail,
+      workspaces: [{ ...JOINED, role: "admin" }],
+      workspace_summary: summaryOwning({
+        id: "ws-team",
+        name: "Team Workspace",
+        plan_name: "basic",
+      }),
+    });
+    render(<UserDetailPage />);
+    await screen.findAllByText("Team Workspace");
+    const table = screen.getByRole("table");
+    const teamRow = within(
+      within(table).getByText("Team Workspace").closest("tr") as HTMLElement,
+    );
+    expect(
+      teamRow.getByRole("button", { name: /actions.changePlan/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("lists and manages an owned workspace the user has no member row in", async () => {
+    mockGet.mockResolvedValue({
+      ...detail,
+      workspaces: [JOINED],
+      workspace_summary: summaryOwning({
+        id: "ws-legacy",
+        name: "Legacy Workspace",
+        plan_name: "pro",
+      }),
+    });
+    render(<UserDetailPage />);
+    await screen.findAllByText("Legacy Workspace");
+    const table = screen.getByRole("table");
+    const legacyRow = within(
+      within(table).getByText("Legacy Workspace").closest("tr") as HTMLElement,
+    );
+    fireEvent.click(
+      legacyRow.getByRole("button", { name: /actions.changePlan/ }),
+    );
+    await screen.findByText("changePlanDialog.title");
+    fireEvent.change(screen.getByTestId("select-mock"), {
+      target: { value: "promax" },
+    });
+    fireEvent.click(screen.getByText("changePlanDialog.confirm"));
+    await waitFor(() =>
+      expect(mockUpdateWorkspacePlan).toHaveBeenCalledWith("ws-legacy", {
+        plan_name: "promax",
+      }),
+    );
+    // The joined workspace stays read-only.
+    const teamRow = within(
+      within(table).getByText("Team Workspace").closest("tr") as HTMLElement,
+    );
+    expect(teamRow.queryAllByRole("button")).toHaveLength(0);
   });
 
   it("changes the plan with the Quotas page's request and reloads the user", async () => {

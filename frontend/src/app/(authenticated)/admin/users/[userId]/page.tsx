@@ -10,8 +10,10 @@
  * #2765: plan management lives here. For each workspace the user OWNS the
  * workspaces table offers what the old Quotas page offered (change plan,
  * quota detail, add-ons, spend cap); workspaces the user only joined show
- * their plan read-only. Every workspace has exactly one owner, so each one is
- * reachable through its owner's page.
+ * their plan read-only. Ownership is the workspace's owner (the backend's
+ * `workspace_summary.owned_workspaces`), so a legacy workspace whose owner has
+ * no member row, or a member row with another role, is still listed and
+ * managed here.
  */
 
 import { Fragment, useEffect, useState } from "react";
@@ -376,6 +378,29 @@ export default function UserDetailPage() {
     );
   }
 
+  // #2765: plan actions go to the workspaces this user owns. The owner is
+  // `workspaces.owner_user_id` (owned_workspaces); a member row says the same
+  // except on legacy workspaces, whose owner may have no member row at all:
+  // those are listed too, or no admin page would reach them.
+  const ownedWorkspaceIds = new Set(
+    (userDetail.workspace_summary?.owned_workspaces ?? []).map((ws) => ws.id),
+  );
+  const memberWorkspaceIds = new Set(
+    userDetail.workspaces.map((ws) => ws.workspace_id),
+  );
+  const workspaceRows: UserDetail["workspaces"] = [
+    ...userDetail.workspaces,
+    ...(userDetail.workspace_summary?.owned_workspaces ?? [])
+      .filter((ws) => !memberWorkspaceIds.has(ws.id))
+      .map((ws) => ({
+        workspace_id: ws.id,
+        workspace_name: ws.name,
+        role: "owner",
+        is_primary: false,
+        plan_name: ws.plan_name,
+      })),
+  ];
+
   return (
     <PageContainer>
       <PageHeader
@@ -459,13 +484,13 @@ export default function UserDetailPage() {
             <Building2 className="h-5 w-5" />
             <CardTitle>
               {t("workspaces.title", {
-                count: userDetail.workspaces.length,
+                count: workspaceRows.length,
               })}
             </CardTitle>
           </div>
         </CardHeader>
         <CardContent>
-          {userDetail.workspaces.length > 0 ? (
+          {workspaceRows.length > 0 ? (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -479,9 +504,11 @@ export default function UserDetailPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {userDetail.workspaces.map((workspace) => {
+                {workspaceRows.map((workspace) => {
                   // Plan actions only where this user is the owner (#2765).
-                  const owns = workspace.role === "owner";
+                  const owns =
+                    workspace.role === "owner" ||
+                    ownedWorkspaceIds.has(workspace.workspace_id);
                   const expanded =
                     owns && expandedWorkspaceId === workspace.workspace_id;
                   return (
