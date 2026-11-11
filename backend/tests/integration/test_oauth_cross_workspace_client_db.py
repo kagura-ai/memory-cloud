@@ -343,8 +343,10 @@ async def test_the_refresh_needs_the_client_secret(
 async def test_the_registered_method_is_the_only_one_accepted(
     world, sync_factory, test_db, monkeypatch
 ):
-    """A client created for the body form refuses HTTP Basic, and the other way round:
-    the method the client is created with has to be the one Microsoft sends."""
+    """A client created for the body form refuses HTTP Basic: the client's method
+    has to be the one Microsoft sends. The owner switches it in place (the
+    documented remedy), keeping the client ID and secret, and then the body form
+    is the one refused."""
     post = await _create_client(world, sync_factory, "client_secret_post")
 
     with _Browser(world, sync_factory, monkeypatch) as api:
@@ -353,3 +355,19 @@ async def test_the_registered_method_is_the_only_one_accepted(
         refused = await asyncio.to_thread(_refresh, api, as_basic, tokens["refresh_token"])
         assert refused.status_code in (400, 401)
         assert refused.json()["error"] == "invalid_client"
+
+        updated = await oauth_routes.update_oauth2_client(
+            _request(world.a),
+            post.id,
+            oauth_routes.OAuth2ClientUpdateRequest(
+                token_endpoint_auth_method="client_secret_basic"
+            ),
+            {"user_id": world.a},
+        )
+        assert updated.token_endpoint_auth_method == "client_secret_basic"
+
+        switched = await asyncio.to_thread(_refresh, api, as_basic, tokens["refresh_token"])
+        assert switched.status_code == 200, switched.text
+        as_post = await asyncio.to_thread(_refresh, api, post, switched.json()["refresh_token"])
+        assert as_post.status_code in (400, 401)
+        assert as_post.json()["error"] == "invalid_client"
