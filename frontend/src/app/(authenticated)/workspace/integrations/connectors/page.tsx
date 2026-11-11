@@ -199,6 +199,16 @@ function toResourceId(seed: string): string {
   return `slack-${slug || "team"}`.slice(0, CONNECTOR_NAME_MAX);
 }
 
+// #1759: identity of the stored routes + switch a routes draft is based on.
+function routeBaseKey(c: WorkspaceConnectorSummary): string {
+  return JSON.stringify([
+    (c.channel_routes ?? [])
+      .map((r) => [r.channel_id, r.action, r.context_id])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    c.unrouted_private_channels ?? "default",
+  ]);
+}
+
 export default function ConnectorsPage() {
   const t = useTranslations("connectors");
   const tCommon = useTranslations("common");
@@ -369,6 +379,12 @@ export default function ConnectorsPage() {
   const [routeRowErrors, setRouteRowErrors] = useState<
     Record<string, "notFound" | "keyOwner">
   >({});
+  // The stored routes + switch the draft was built from. When a re-sync
+  // (e.g. after a 409) brings different ones, the draft is rebuilt from them:
+  // the full-replacement save must never resend a stale list over another
+  // admin's change (that could drop a "Do not ingest" on a private channel).
+  const routeBaseRef = useRef("");
+  const [routesReloaded, setRoutesReloaded] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   // #1388: deleting the stored LLM bundle is an explicit destructive action
   // (confirm dialog + immediate PATCH), not a latched save-time toggle.
@@ -566,9 +582,22 @@ export default function ConnectorsPage() {
       setRouteDraft(routeDraftFromStored(c.channel_routes));
       setRouteUnrouted(c.unrouted_private_channels ?? "default");
       setRouteRowErrors({});
+      routeBaseRef.current = routeBaseKey(c);
+      setRoutesReloaded(false);
     },
     [],
   );
+
+  useEffect(() => {
+    if (!settingsFor) return;
+    const key = routeBaseKey(settingsFor);
+    if (key === routeBaseRef.current) return;
+    routeBaseRef.current = key;
+    setRouteDraft(routeDraftFromStored(settingsFor.channel_routes));
+    setRouteUnrouted(settingsFor.unrouted_private_channels ?? "default");
+    setRouteRowErrors({});
+    setRoutesReloaded(true);
+  }, [settingsFor]);
 
   // #1388: after a PATCH failure (usually a 409 from a stale snapshot),
   // re-sync the dialog snapshot from the server so a retry rides the fresh
@@ -1599,6 +1628,11 @@ export default function ConnectorsPage() {
                   />
                 )}
               </div>
+              {settingsFor && channelRoutingEnabled && routesReloaded && (
+                <p role="status" className="text-xs text-amber-700 dark:text-amber-500">
+                  {t("routesReloaded")}
+                </p>
+              )}
               {settingsFor &&
                 (channelRoutingEnabled ? (
                   <ChannelRoutesEditor

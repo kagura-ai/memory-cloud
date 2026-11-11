@@ -2550,4 +2550,44 @@ describe("connector channel destinations (#1759)", () => {
       await within(row).findByText("routeDestinationNotFound"),
     ).toBeInTheDocument();
   });
+
+  it("flag on: after a 409 the draft follows the newer stored routes, never resent stale", async () => {
+    setWorkspace("admin");
+    mockUseSystemFeatures.mockReturnValue({ connector_channel_routing: true });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_routes: [storedRoute] }),
+    ]);
+    mockUpdateConnectorSettings.mockRejectedValue(
+      new ApiError({ status: 409, error: "CONFLICT-001", message: "stale" }),
+    );
+    await openSettings();
+    await screen.findByTestId("channel-routes-editor");
+    fireEvent.click(screen.getByRole("switch"));
+    // Meanwhile another admin added "Do not ingest" for private channel G9.
+    mockListConnectors.mockResolvedValue([
+      makeConnector({
+        config_version: 4,
+        channel_routes: [
+          storedRoute,
+          {
+            channel_id: "G9",
+            action: "skip",
+            context_id: null,
+            context_name: null,
+            context_is_private: null,
+            status: "ok",
+          },
+        ],
+      }),
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    expect(await screen.findByText("routesReloaded")).toBeInTheDocument();
+    expect(await screen.findByTestId("route-row-G9")).toBeInTheDocument();
+    expect(mockUpdateConnectorSettings).toHaveBeenCalledTimes(1);
+    // The draft now equals what is stored: a second save sends no routes.
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    expect(await screen.findByText("noChanges")).toBeInTheDocument();
+    expect(mockUpdateConnectorSettings).toHaveBeenCalledTimes(1);
+  });
 });

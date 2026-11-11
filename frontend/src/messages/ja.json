@@ -4693,6 +4693,7 @@
     "routesUnroutedPrivateHelp": "オンにすると、private チャンネルは上で保存先を指定したときだけ取り込まれます。",
     "routesReadOnlyHelp": "このデプロイではチャンネルごとの保存先が有効になっていません。以下の保存先は引き続き適用されます。",
     "routesSummaryUnroutedSkip": "保存先のない private チャンネルは取り込まれません。",
+    "routesReloaded": "その間に別の管理者がチャンネルごとの保存先を変更しました。現在の保存内容を表示しています。変更をもう一度行ってください。",
     "channelsHelp": "Slack でチャンネル名を右クリック→「チャンネル ID をコピー」で取得できます(例: C0123ABC456)。複数はカンマ区切り。空にするとクリアされます。",
     "channelsSearchLabel": "チャンネルを検索",
     "channelsSearchPlaceholder": "チャンネルを絞り込み…",

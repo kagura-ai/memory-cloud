@@ -4693,6 +4693,7 @@
     "routesUnroutedPrivateHelp": "On: a private channel is ingested only when you give it a destination above.",
     "routesReadOnlyHelp": "Channel routing is not enabled on this deployment. These destinations still apply.",
     "routesSummaryUnroutedSkip": "Private channels without a destination are not ingested.",
+    "routesReloaded": "Another admin changed the channel destinations meanwhile. They are shown as now stored; make your changes again.",
     "channelsHelp": "Right-click a channel name in Slack → “Copy channel ID” to get an ID (e.g. C0123ABC456). Separate multiple IDs with commas. Leave empty to clear.",
     "channelsSearchLabel": "Search channels",
     "channelsSearchPlaceholder": "Filter channels…",
