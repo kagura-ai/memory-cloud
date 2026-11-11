@@ -8,7 +8,7 @@ resource token scoped to that resource.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -24,6 +24,18 @@ from config.constants import is_valid_resource_id
 from config.plan_tiers import has_feature, lowest_tier_with_limit, quota_gate_details
 from models.auth import Workspace, WorkspaceMember
 from models.resource import Resource, ResourceSchema, ResourceToken, WorkspaceConnector
+from services.connector_channel_routes import (
+    ROUTE,
+    ROUTING_DISABLED_MESSAGE,
+    UNROUTED_SKIP,
+    UNROUTED_VALUES,
+    ChannelRouteInput,
+    ChannelRouteView,
+    effective_unrouted,
+    parse_channel_routes,
+    route_views,
+    stored_routes,
+)
 from services.resource_lookup import resolve_resource_pk, upsert_resource
 from utils.datetime import utcnow
 from utils.exceptions import (
@@ -127,6 +139,9 @@ class ConnectorListItem:
     # so the two figures above cover both and cannot be read as this connector's
     # own traffic (#1449 review).
     ingest_context_shared: bool = False
+    # #1759: per-channel destinations and the unrouted-private switch.
+    channel_routes: list[ChannelRouteView] = field(default_factory=list)
+    unrouted_private_channels: str = "default"
 
 
 @dataclass(frozen=True)
@@ -161,6 +176,9 @@ class ConnectorSettingsUpdateResult:
     locale: str | None
     config_version: int
     context_id: UUID | None
+    # #1759: per-channel destinations and the unrouted-private switch.
+    channel_routes: list[ChannelRouteView] = field(default_factory=list)
+    unrouted_private_channels: str = "default"
 
 
 # Sentinel distinguishing "field not provided" from an explicit null (clear)
@@ -814,6 +832,8 @@ class ConnectorProvisioningService:
         # Under-reporting is a false alarm; over-reporting hides an outage — so
         # keep the never-under-reporting key and mark the ambiguity instead.
         shared = {ctx for ctx in bound_contexts if bound_contexts.count(ctx) > 1}
+        # #1759: every connector's routes in one more query.
+        views = await route_views(self.db, [(c.id, workspace_id) for c, _, _, _ in rows])
         items: list[ConnectorListItem] = []
         for connector, resource_id, resource_name, context_name in rows:
             last_memory_at, memories_last_7d = (
@@ -830,6 +850,10 @@ class ConnectorProvisioningService:
                     last_memory_at=last_memory_at,
                     memories_last_7d=memories_last_7d,
                     ingest_context_shared=connector.context_id in shared,
+                    channel_routes=views.get(connector.id, []),
+                    unrouted_private_channels=effective_unrouted(
+                        connector.unrouted_private_channels
+                    ),
                 )
             )
         return items
@@ -1312,8 +1336,10 @@ class ConnectorProvisioningService:
         llm_config: dict[str, Any] | None = _UNSET,
         locale: str | None = _UNSET,
         context_id: UUID | None = _UNSET,
+        channel_routes: list[Any] | None = _UNSET,
+        unrouted_private_channels: str | None = _UNSET,
     ) -> ConnectorSettingsUpdateResult:
-        """PATCH-update connector vend settings (#1376, #1428).
+        """PATCH-update connector vend settings (#1376, #1428, #1759).
 
         Fields left at ``_UNSET`` are untouched; an explicit ``None`` clears.
         Repairs UI-created connectors born un-vendable (the create endpoint is
@@ -1329,15 +1355,28 @@ class ConnectorProvisioningService:
         workspace (soft-deleted contexts are rejected); an explicit ``None``
         clears the binding back to the legacy no-context state.
 
+        ``channel_routes`` (#1759) replaces the connector's per-channel
+        destinations as a whole (``[]`` / ``None`` removes them all);
+        ``unrouted_private_channels`` is ``default`` or ``skip`` (never null).
+        Where ``CONNECTOR_CHANNEL_ROUTING_ENABLED`` is off, only clearing is
+        accepted. Each ``route`` destination must be a live context of this
+        workspace the CALLER can read (otherwise the uniform "Context"
+        NotFound) and one the connector key's OWNER may write (the write path's
+        own check, otherwise a ValidationError naming the channel).
+
         Raises:
             ValidationError: no field provided, malformed ``channel_ids``
                 (empty list / blank or non-string ids are rejected so the
                 stored "no channels" state has exactly one canonical shape —
                 the explicit null the vend already coalesces to ``[]``), an
-                un-vendable ``llm_config`` shape, or a locale outside the
-                worker contract.
+                un-vendable ``llm_config`` shape, a locale outside the
+                worker contract, malformed ``channel_routes`` / switch, routing
+                while the deployment flag is off, routes on a connector
+                without a write key or default context, or a destination the
+                key's owner cannot write.
             NotFoundException: unknown or cross-workspace connector, or a
-                ``context_id`` that is not a live context in this workspace.
+                ``context_id`` / route destination that is not a live context
+                in this workspace the caller can read.
             ConflictError: stale ``expected_config_version``.
         """
         provided_names = sorted(
@@ -1348,13 +1387,16 @@ class ConnectorProvisioningService:
                 ("llm_config", llm_config),
                 ("locale", locale),
                 ("context_id", context_id),
+                ("channel_routes", channel_routes),
+                ("unrouted_private_channels", unrouted_private_channels),
             )
             if value is not _UNSET
         )
         if not provided_names:
             raise ValidationError(
                 "Provide at least one of channel_ids, litellm_virtual_key_id, "
-                "llm_config, locale, context_id",
+                "llm_config, locale, context_id, channel_routes, "
+                "unrouted_private_channels",
                 field="body",
             )
 
@@ -1371,6 +1413,18 @@ class ConnectorProvisioningService:
                 locale = normalize_worker_locale(locale)
             except ValueError as ve:
                 raise ValidationError(str(ve), field="locale") from ve
+
+        new_routes: list[ChannelRouteInput] | None = None
+        if channel_routes is not _UNSET:
+            new_routes = parse_channel_routes(channel_routes)
+        if unrouted_private_channels is not _UNSET and (
+            unrouted_private_channels not in UNROUTED_VALUES
+        ):
+            raise ValidationError(
+                "unrouted_private_channels must be 'default' or 'skip'",
+                field="unrouted_private_channels",
+            )
+        self._refuse_routing_when_disabled(new_routes, unrouted_private_channels)
 
         # Re-point validation runs BEFORE the connector row lock so a bad
         # target fails without holding SELECT FOR UPDATE. A cross-workspace or
@@ -1390,6 +1444,11 @@ class ConnectorProvisioningService:
             ).scalar_one_or_none()
             if target is None:
                 raise NotFoundException("Context", str(context_id))
+
+        # #1759 check 1, before the lock too: each destination is a live
+        # context of this workspace the caller can read.
+        if new_routes:
+            await self._check_route_destinations_readable(new_routes, workspace_id, user_id)
 
         connector = await self._get_connector_for_update(
             workspace_id, connector_id, expected_config_version
@@ -1415,6 +1474,19 @@ class ConnectorProvisioningService:
                 field="context_id",
             )
 
+        if new_routes:
+            # #1759 check 2 (needs the connector's key): the key's owner may
+            # write each destination. Same reasoning as the #1428 guard above
+            # for a connector without a key or a default context.
+            default_context = connector.context_id if context_id is _UNSET else context_id
+            if not connector.kmc_api_key_encrypted or default_context is None:
+                raise ValidationError(
+                    "This connector has no write credentials or no default context; "
+                    "channel routes need both. Re-create it bound to a context first.",
+                    field="channel_routes",
+                )
+            await self._check_route_destinations_writable(new_routes, connector)
+
         llm_changed = False
         if llm_config is not _UNSET:
             try:
@@ -1432,6 +1504,14 @@ class ConnectorProvisioningService:
                 ("context_id", context_id),
             )
         )
+        routes_changed = False
+        if new_routes is not None:
+            routes_changed = await self._replace_channel_routes(connector.id, new_routes)
+        if unrouted_private_channels is not _UNSET:
+            if connector.unrouted_private_channels != unrouted_private_channels:
+                routes_changed = True
+            # Validated above: 'default' or 'skip'.
+            connector.unrouted_private_channels = str(unrouted_private_channels)
 
         if channel_ids is not _UNSET:
             connector.channel_ids = channel_ids
@@ -1462,7 +1542,10 @@ class ConnectorProvisioningService:
                 )
         if history_context_id is None:
             history_context_id = connector.context_id
-        if settings_changed:
+        history_fields = (["channel_routes"] if routes_changed else []) + (
+            ["settings"] if settings_changed else []
+        )
+        if history_fields:
             record_operation(
                 self.db,
                 operation="integration.updated",
@@ -1470,13 +1553,14 @@ class ConnectorProvisioningService:
                 workspace_id=workspace_id,
                 context_id=history_context_id,
                 target_id=connector.id,
-                changed_fields=["settings"],
+                changed_fields=history_fields,
                 event_key=f"connector-update:{connector.id}:{connector.config_version + 1}",
             )
         connector.config_version += 1
         await self.db.flush()
 
-        # Field NAMES only — the llm_config bundle carries credentials.
+        # Field NAMES only — the llm_config bundle carries credentials, and a
+        # route's context is never named here.
         logger.info(
             "workspace_connector_settings_updated",
             connector_id=str(connector_id),
@@ -1485,6 +1569,7 @@ class ConnectorProvisioningService:
             changed_fields=provided_names,
             config_version=connector.config_version,
         )
+        views = await route_views(self.db, [(connector.id, workspace_id)])
         return ConnectorSettingsUpdateResult(
             channel_ids=connector.channel_ids,
             litellm_virtual_key_id=connector.litellm_virtual_key_id,
@@ -1492,7 +1577,143 @@ class ConnectorProvisioningService:
             locale=connector.locale,
             config_version=connector.config_version,
             context_id=connector.context_id,
+            channel_routes=views.get(connector.id, []),
+            unrouted_private_channels=effective_unrouted(connector.unrouted_private_channels),
         )
+
+    @staticmethod
+    def _refuse_routing_when_disabled(
+        new_routes: list[ChannelRouteInput] | None, unrouted_private_channels: Any
+    ) -> None:
+        """Deployment flag off (#1759): only clearing is accepted.
+
+        A non-empty ``channel_routes`` or the switch set to ``skip`` would need
+        a worker that honours them; the flag says the operator upgraded it.
+        Routes already stored keep applying whatever the flag says.
+        """
+        from config.settings import get_settings
+
+        if get_settings().connector_channel_routing_enabled:
+            return
+        if new_routes:
+            raise ValidationError(ROUTING_DISABLED_MESSAGE, field="channel_routes")
+        if unrouted_private_channels == UNROUTED_SKIP:
+            raise ValidationError(ROUTING_DISABLED_MESSAGE, field="unrouted_private_channels")
+
+    async def _check_route_destinations_readable(
+        self, routes: list[ChannelRouteInput], workspace_id: UUID, user_id: str
+    ) -> None:
+        """Each ``route`` destination is a live context of ``workspace_id`` the
+        caller can read: the uniform "Context" NotFound otherwise, the same
+        answer for unknown, other-workspace, soft-deleted and "exists but you
+        cannot see it" (no existence disclosure)."""
+        from services.capacity_lock import CapacityPolicy
+        from services.permission_service import PermissionService
+        from utils.exceptions import AuthorizationError
+
+        permissions = PermissionService(self.db)
+        for route in routes:
+            if route.action != ROUTE or route.context_id is None:
+                continue
+            try:
+                await permissions.check_context_access(
+                    user_id,
+                    route.context_id,
+                    capacity=CapacityPolicy.ALLOWED,
+                    key_workspace_id=workspace_id,
+                )
+            except (NotFoundException, AuthorizationError) as exc:
+                raise NotFoundException("Context", str(route.context_id)) from exc
+
+    async def _check_route_destinations_writable(
+        self, routes: list[ChannelRouteInput], connector: WorkspaceConnector
+    ) -> None:
+        """The connector writes as its KMC key's owner: each ``route``
+        destination must pass the write path's own check for that user
+        (``check_context_write``; ``ALLOWED``: this is configuration, not a
+        memory write). The key itself is not changed or narrowed."""
+        from services.capacity_lock import CapacityPolicy
+        from services.permission_service import PermissionService
+        from utils.exceptions import AuthorizationError
+
+        owner = await self._connector_key_owner(connector)
+        if owner is None:
+            raise ValidationError(
+                "This connector's write key matches no active API key; rotate it "
+                "before adding channel routes.",
+                field="channel_routes",
+            )
+        permissions = PermissionService(self.db)
+        for route in routes:
+            if route.action != ROUTE or route.context_id is None:
+                continue
+            try:
+                await permissions.check_context_write(
+                    owner,
+                    route.context_id,
+                    capacity=CapacityPolicy.ALLOWED,
+                    key_workspace_id=connector.workspace_id,
+                )
+            except (NotFoundException, AuthorizationError, FeatureNotAvailableError) as exc:
+                raise ValidationError(
+                    f"channel_routes: channel {route.channel_id} cannot be routed there. "
+                    "The connector writes as its key's owner, who cannot write to that "
+                    "context; pick a shared context or one that user created.",
+                    field="channel_routes",
+                    channel_id=route.channel_id,
+                ) from exc
+
+    async def _connector_key_owner(self, connector: WorkspaceConnector) -> str | None:
+        """The user the connector's stored KMC key acts as: the owner of the
+        live ``api_keys`` row it hashes to (the row ``rotate_kmc_key``
+        revokes), or ``None`` when there is none or it cannot be read."""
+        from models.auth import APIKey
+        from utils.hashing import sha256_hex
+
+        try:
+            plaintext = connector.get_kmc_api_key()
+        except Exception:
+            return None
+        if not plaintext:
+            return None
+        return (
+            await self.db.execute(
+                select(APIKey.user_id).where(
+                    APIKey.workspace_id == connector.workspace_id,
+                    or_(APIKey.connector_id == connector.id, APIKey.connector_id.is_(None)),
+                    APIKey.key_hash == sha256_hex(plaintext),
+                    APIKey.revoked_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def _replace_channel_routes(
+        self, connector_id: UUID, routes: list[ChannelRouteInput]
+    ) -> bool:
+        """Replace the connector's route rows with ``routes`` (the caller holds
+        the connector row lock); returns whether the stored set changed."""
+        from models.resource import WorkspaceConnectorChannelRoute as Route
+
+        before = await stored_routes(self.db, connector_id)
+        after = {(r.channel_id, r.action, r.context_id) for r in routes}
+        if before == after:
+            return False
+        await self.db.execute(delete(Route).where(Route.connector_id == connector_id))
+        if routes:
+            await self.db.execute(
+                pg_insert(Route).values(
+                    [
+                        {
+                            "connector_id": connector_id,
+                            "channel_id": r.channel_id,
+                            "action": r.action,
+                            "context_id": r.context_id,
+                        }
+                        for r in routes
+                    ]
+                )
+            )
+        return True
 
     async def rotate_kmc_key(
         self,

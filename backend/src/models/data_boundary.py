@@ -132,6 +132,9 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # it is why the table needs no entry in account_erasure_service's sweep.
         "referral_grants",
         "workspace_connectors",
+        # Per-channel destinations of a connector (#1759): channel ids and
+        # context ids an admin configured, no memory content, nothing learned.
+        "workspace_connector_channel_routes",
         # Global external-app verification control plane (#1315). Contains
         # Fernet ciphertext and lifecycle metadata, never user-authored memory.
         "worker_app_identities",

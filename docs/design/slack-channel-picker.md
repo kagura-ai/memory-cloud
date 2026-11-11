@@ -92,6 +92,15 @@ worker may also need:
 - Channel IDs already selected but not present in the fetched list (e.g. a
   private channel) render as opaque ID chips — never silently dropped by a
   save.
+- Per-channel destinations (#1759, shown where `features.connector_channel_routing`
+  is on): a destination editor next to the picker lists every selected channel
+  and every channel that has a route, with Default (the connector's context) /
+  a context / Do not ingest, and the "private channels without a route are not
+  ingested" switch. `is_private` comes from this same listing and is never
+  stored: the editor warns when a private channel's effective destination is a
+  shared context, and says that privacy is unknown when the listing is
+  unavailable. Deselecting a channel keeps its route (removed only by choosing
+  Default). The flag off shows stored routes read-only.
 
 ## Security summary
 

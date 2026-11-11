@@ -21,7 +21,12 @@ from api.routes.operation_history import get_operation_history
 from db.base import Base
 from models.auth import APIKey, Context, IdentityLink, User, Workspace, WorkspaceMember
 from models.operation_history import OperationHistory as Event
-from models.resource import Resource, ResourceToken, WorkspaceConnector
+from models.resource import (
+    Resource,
+    ResourceToken,
+    WorkspaceConnector,
+    WorkspaceConnectorChannelRoute,
+)
 from services.operation_history import read_history
 from services.operation_history_erasure import erase_operation_history
 from services.operation_history_writer import record_operation
@@ -56,6 +61,8 @@ async def history_db():
             Resource,
             ResourceToken,
             WorkspaceConnector,
+            # #1759: the connector settings path reads its channel routes.
+            WorkspaceConnectorChannelRoute,
             APIKey,
         )
     }

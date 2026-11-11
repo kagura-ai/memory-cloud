@@ -169,3 +169,14 @@ def test_system_info_exposes_the_llm_selector_plan_gate_default_off(info_with) -
     assert info_with().json()["features"]["llm_selector_require_plan"] is False
     gated = info_with(llm_selector_require_plan=True).json()
     assert gated["features"]["llm_selector_require_plan"] is True
+
+
+def test_system_info_exposes_the_connector_channel_routing_flag_default_off(
+    info_with, monkeypatch
+) -> None:
+    """#1759: the connector settings dialog offers per-channel destinations only
+    when the deployment says the worker can honour them. Default OFF."""
+    monkeypatch.delenv("CONNECTOR_CHANNEL_ROUTING_ENABLED", raising=False)
+    assert info_with().json()["features"]["connector_channel_routing"] is False
+    enabled = info_with(connector_channel_routing_enabled=True).json()
+    assert enabled["features"]["connector_channel_routing"] is True

@@ -137,6 +137,9 @@ SAFE_FIELDS = frozenset(
         "allowed_context_ids",
         "runtime",
         "settings",
+        # #1759: a connector's per-channel destinations or its unrouted-private
+        # switch changed (field name only: never a channel or context name).
+        "channel_routes",
         "credential",
         "pinned",
         "expires_at",

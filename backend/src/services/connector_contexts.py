@@ -1,7 +1,10 @@
 """A connector's write target belongs to the workspace (#2417, #2422).
 
 ``workspace_connectors.context_id`` names the context a chat connector's
-worker writes into. Connectors create theirs private, yet it serves the
+worker writes into by default, and every ``route`` row of
+``workspace_connector_channel_routes`` names one more: the context one channel
+is written into instead (#1759). Each is a write target, the routed ones on
+the same terms as the default one. Connectors create theirs private, yet it serves the
 workspace, not the account that created it: whatever its privacy flag, it is
 never that account's own context, and it never passes to a linked account
 through the identity-link hand-over. When its creator leaves it goes to the
@@ -12,7 +15,8 @@ the context it writes into keep one owner (#2557, #2420).
 The one definition every deletion path reads:
 
 * :func:`connector_write_target_ids` — the ids, as a sub-select for SQL
-  predicates (``user_deletion_service._personal``);
+  predicates (``user_deletion_service._personal``): the default contexts and
+  the route destinations, in one ``UNION``;
 * :func:`connector_write_targets_among` — which of a list of contexts are
   write targets, in one query (``identity_link_service.private_context_takeovers``,
   ``user_deletion_service.transfer_user_ownership``);
@@ -26,18 +30,26 @@ from collections.abc import Collection
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import CompoundSelect, select, union, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context, Workspace
-from models.resource import WorkspaceConnector
+from models.resource import WorkspaceConnector, WorkspaceConnectorChannelRoute
 from services.erasure_details import locked_ids
 
 
-def connector_write_target_ids() -> Select[Any]:
-    """The ids of every connector's write-target context, as a sub-select."""
-    return select(WorkspaceConnector.context_id).where(WorkspaceConnector.context_id.is_not(None))
+def connector_write_target_ids() -> CompoundSelect[Any]:
+    """The ids of every connector's write-target context, as a sub-select:
+    each connector's default context and each channel route's destination
+    (#1759). Plain reads of both tables: used inside a ``FOR UPDATE`` query it
+    locks only that query's own rows, never a connector or a route."""
+    return union(
+        select(WorkspaceConnector.context_id).where(WorkspaceConnector.context_id.is_not(None)),
+        select(WorkspaceConnectorChannelRoute.context_id).where(
+            WorkspaceConnectorChannelRoute.context_id.is_not(None)
+        ),
+    )
 
 
 async def connector_write_targets_among(
@@ -47,10 +59,14 @@ async def connector_write_targets_among(
     the whole collection. Read-only, and it locks nothing."""
     if not context_ids:
         return set()
+    wanted = list(context_ids)
     rows = await db.execute(
-        select(WorkspaceConnector.context_id)
-        .where(WorkspaceConnector.context_id.in_(list(context_ids)))
-        .distinct()
+        union(
+            select(WorkspaceConnector.context_id).where(WorkspaceConnector.context_id.in_(wanted)),
+            select(WorkspaceConnectorChannelRoute.context_id).where(
+                WorkspaceConnectorChannelRoute.context_id.in_(wanted)
+            ),
+        )
     )
     return {context_id for context_id in rows.scalars() if context_id is not None}
 

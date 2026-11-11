@@ -1478,6 +1478,8 @@ Notes:
 - `resource: dict[str, Any] | None` — optional
 - `llm: dict[str, Any] | None` — optional
 - `pii_guardrail_config: dict[str, Any] | None` — optional
+- `channel_routes: list[WorkerChannelRouteToContext | WorkerChannelRouteSkip] | None` — present only when the request declares `capabilities=channel_routes` (#1759): `{channel_id, action: "route", context_id}` or `{channel_id, action: "skip"}`, the EFFECTIVE destinations (a deleted destination is vended as `skip`). Omitted from the body otherwise.
+- `unrouted_private_channels: "default" | "skip" | None` — same condition (#1759). Contract: [`docs/connector-ingest-contract.md`](../connector-ingest-contract.md#worker-config-vend-per-channel-destinations-1759).
 
 ## workspace.py
 
@@ -1574,6 +1576,23 @@ Notes:
 - `config_version: int` — required
 - `created_at: datetime` — required
 - `created_by: str | None` — optional
+- `channel_routes: list[ConnectorChannelRoute]` — optional (default `[]`, #1759)
+- `unrouted_private_channels: "default" | "skip"` — optional (default `"default"`, #1759)
+
+### ConnectorChannelRoute (BaseModel) (#1759)
+> One stored channel destination as the admin reads it. Shared by the connector list and the settings PATCH response.
+- `channel_id: str` — required
+- `action: "route" | "skip"` — required (an unknown stored action reads as `skip`)
+- `context_id: UUID | None` — optional (null for `skip`, a hard-deleted destination, or a context outside the workspace)
+- `context_name: str | None` — optional (set only while the destination is live)
+- `context_is_private: bool | None` — optional (same)
+- `status: "ok" | "destination_missing"` — required (`destination_missing`: the channel is not ingested until an admin picks a new destination)
+
+### WorkspaceConnectorSettingsUpdateResponse (BaseModel)
+> Post-update connector settings (`PATCH /workspace-connectors/{connector_id}`). The LLM bundle is never echoed.
+- `connector_id: UUID`, `channel_ids`, `litellm_virtual_key_id`, `llm_config_present: bool`, `locale`, `config_version: int`, `context_id` — as before
+- `channel_routes: list[ConnectorChannelRoute]` — optional (default `[]`, #1759)
+- `unrouted_private_channels: "default" | "skip"` — optional (default `"default"`, #1759)
 
 ### RotateKmcKeyResponse (TZAwareBaseModel, L96)
 > Response after rotating a connector's KMC write key. Shown exactly once.

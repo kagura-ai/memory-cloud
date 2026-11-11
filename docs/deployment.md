@@ -3896,6 +3896,36 @@ the index each of those reads scans the table.
 Run `reprocess_erasures --all` (plan, then `--apply --yes`) only after the
 index exists; see `docs/ops/erasure-runbook.md` §2.5.
 
+### Migration `f35_1759_channel_routes` and `CONNECTOR_CHANNEL_ROUTING_ENABLED` (#1759)
+
+Per-channel destination contexts for chat connectors. The migration adds
+`workspace_connectors.unrouted_private_channels` (`default` | `skip`, NOT NULL,
+server default `default`: existing connectors keep today's behaviour; its CHECK
+is added `NOT VALID` and validated in a transaction of its own) and the empty
+table `workspace_connector_channel_routes`. The old image never reads either,
+so a blue-green deploy is safe.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CONNECTOR_CHANNEL_ROUTING_ENABLED` | `false` | Off: the connector settings PATCH refuses to create or change a channel route or to set `unrouted_private_channels` to `skip` (`422`, `channel routing is not enabled on this deployment`); clearing them is always allowed, and the settings dialog shows no editor. On: admins can route each channel to its own context or skip it. Shown as `features.connector_channel_routing` in `/system/info`. |
+
+**Rollout order:** upgrade the connector worker to a version that sends
+`capabilities=channel_routes` on `GET /api/v1/workers/config`, then set the
+flag. Whatever the flag says, a connector that has a route (or the switch on
+`skip`) is not served to a worker without the capability (`404`, API log
+`worker_config_not_ready` with `reason=channel_routing_unsupported`): that
+worker would write every channel into the default context. The worker contract
+is in [`docs/connector-ingest-contract.md`](connector-ingest-contract.md#worker-config-vend-per-channel-destinations-1759).
+
+**Rolling back** below this release: an older image vends no routes, so its
+worker config would send routed and skipped channels, private ones included,
+into each connector's default context. Before rolling the image back, clear
+the routes and set the switch back to `default` on every connector
+(`PATCH /api/v1/workspace-connectors/{id}` with
+`{"channel_routes": [], "unrouted_private_channels": "default"}`), or stop the
+connector worker. The `f35` downgrade refuses to run while any connector still
+uses routing.
+
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 
 A tier's `features` set is env-overridable too. `PLAN_<KEY>_FEATURES` is a

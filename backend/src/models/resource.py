@@ -12,6 +12,8 @@ Provides ORM models for:
     - ``workspace_addons`` — Addon purchase system
     - ``workspace_connectors`` — ai-worker chat-ingest connector profiles
       (Issue #850, F6-a of #755; 1:1 with ``resources``)
+    - ``workspace_connector_channel_routes`` — per-channel destination
+      contexts of a connector (Issue #1759)
 
 Phase 1 (Issue #323, shipped v0.12.0): ``resource_pk`` and
 ``resource_tokens.workspace_id`` introduced as nullable shadow columns
@@ -547,6 +549,13 @@ class WorkspaceConnector(Base):
     # worker endpoint to omit the additive runtime block, preserving worker
     # defaults. Admin writes are validated and normalized before storage.
     runtime_config: Mapped[dict[str, Any] | None] = mapped_column(NullableJSONB, nullable=True)
+    # #1759: what happens to a private channel WITHOUT a channel route:
+    # ``default`` (written to ``context_id``, the behaviour before routes) or
+    # ``skip`` (not ingested). Read through
+    # ``services.connector_channel_routes.effective_unrouted`` (unknown = skip).
+    unrouted_private_channels: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="default", server_default="default"
+    )
     litellm_virtual_key_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     config_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
@@ -576,6 +585,10 @@ class WorkspaceConnector(Base):
             "app_key",
             "external_team_id",
             unique=True,
+        ),
+        CheckConstraint(
+            "unrouted_private_channels IN ('default', 'skip')",
+            name="check_workspace_connectors_unrouted_private_channels",
         ),
     )
 
@@ -660,6 +673,72 @@ class WorkspaceConnector(Base):
         if not self.resource_token_encrypted:
             return None
         return get_encryptor().decrypt(self.resource_token_encrypted)
+
+
+class WorkspaceConnectorChannelRoute(Base):
+    """One channel's destination on a chat connector (#1759).
+
+    ``route`` writes the channel into ``context_id`` instead of the
+    connector's default context; ``skip`` does not ingest it. A channel with a
+    row never falls back to the default context: a ``route`` whose context is
+    hard-deleted (``context_id`` SET NULL), soft-deleted or outside the
+    connector's workspace is a missing destination and is not ingested
+    (``services.connector_channel_routes``). The row set is replaced as a whole
+    by the settings PATCH and goes with its connector (CASCADE).
+
+    A routed context is a connector write target like the default one
+    (``services.connector_contexts``).
+
+    Attributes:
+        id: Primary key (UUID)
+        connector_id: Owning connector (CASCADE)
+        channel_id: Platform channel id (Slack ``C…`` / ``G…``), <= 64 chars
+        action: ``route`` | ``skip``
+        context_id: Destination of a ``route`` (NULL for ``skip``, and for a
+            ``route`` whose context was hard-deleted)
+        created_at / updated_at: Lifecycle timestamps (naive UTC)
+    """
+
+    __tablename__ = "workspace_connector_channel_routes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    connector_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace_connectors.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(10), nullable=False)
+    context_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("contexts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "connector_id", "channel_id", name="uq_workspace_connector_channel_routes_channel"
+        ),
+        Index("ix_workspace_connector_channel_routes_context_id", "context_id"),
+        CheckConstraint(
+            "action IN ('route', 'skip')",
+            name="check_workspace_connector_channel_routes_action",
+        ),
+        CheckConstraint(
+            "action = 'route' OR context_id IS NULL",
+            name="check_workspace_connector_channel_routes_skip_no_context",
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

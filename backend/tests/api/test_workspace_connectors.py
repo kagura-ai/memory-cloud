@@ -570,6 +570,9 @@ async def test_list_workspace_connectors_returns_summaries():
         last_memory_at=datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
         memories_last_7d=0,
         ingest_context_shared=False,
+        # #1759
+        channel_routes=[],
+        unrouted_private_channels="default",
     )
 
     with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
@@ -983,3 +986,156 @@ def test_update_settings_request_forbids_unknown_fields():
 
     with pytest.raises(PydanticValidationError):
         WorkspaceConnectorSettingsUpdateRequest.model_validate({"locail": "ja"})
+
+
+# ---------------------------------------------------------------------------
+# #1759: per-channel destinations on the settings PATCH and the list
+# ---------------------------------------------------------------------------
+
+
+def test_update_settings_request_takes_channel_routes_and_the_switch():
+    from api.routes.workspace_connectors import WorkspaceConnectorSettingsUpdateRequest
+
+    ctx = uuid4()
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate(
+        {
+            "channel_routes": [
+                {"channel_id": "C01", "context_id": str(ctx)},
+                {"channel_id": "C02", "action": "skip"},
+            ],
+            "unrouted_private_channels": "skip",
+        }
+    )
+    dumped = request.model_dump(exclude_unset=True)
+    assert dumped["unrouted_private_channels"] == "skip"
+    assert dumped["channel_routes"][0] == {"channel_id": "C01", "context_id": ctx}
+    assert dumped["channel_routes"][1] == {"channel_id": "C02", "action": "skip"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"unrouted_private_channels": None}, id="switch-null"),
+        pytest.param({"unrouted_private_channels": "maybe"}, id="switch-unknown"),
+        pytest.param({"channel_routes": [{"channel_id": "C01", "extra": 1}]}, id="item-extra"),
+        pytest.param({"channel_routes": [{"channel_id": "C01", "action": "x"}]}, id="bad-action"),
+    ],
+)
+def test_update_settings_request_rejects_malformed_routing(body):
+    from api.routes.workspace_connectors import WorkspaceConnectorSettingsUpdateRequest
+
+    with pytest.raises(PydanticValidationError):
+        WorkspaceConnectorSettingsUpdateRequest.model_validate(body)
+
+
+@pytest.mark.asyncio
+async def test_update_settings_route_forwards_routes_and_returns_their_read_model():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+    from services.connector_channel_routes import ChannelRouteView
+    from services.connector_provisioning import ConnectorSettingsUpdateResult
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    ctx = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate(
+        {
+            "channel_routes": [{"channel_id": "C01", "context_id": str(ctx)}],
+            "unrouted_private_channels": "skip",
+            "expected_config_version": 2,
+        }
+    )
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            return_value=ConnectorSettingsUpdateResult(
+                channel_ids=None,
+                litellm_virtual_key_id=None,
+                llm_config_present=False,
+                locale=None,
+                config_version=3,
+                context_id=uuid4(),
+                channel_routes=[
+                    ChannelRouteView("C01", "route", ctx, "Sales", True, "ok"),
+                    ChannelRouteView("C02", "route", None, None, None, "destination_missing"),
+                ],
+                unrouted_private_channels="skip",
+            )
+        )
+        response = await update_workspace_connector_settings(uuid4(), request, admin, db)
+
+    kwargs = service_cls.return_value.update_connector_settings.await_args.kwargs
+    assert kwargs["channel_routes"] == [{"channel_id": "C01", "context_id": ctx}]
+    assert kwargs["unrouted_private_channels"] == "skip"
+    body = response.model_dump(mode="json")
+    assert body["unrouted_private_channels"] == "skip"
+    assert body["channel_routes"] == [
+        {
+            "channel_id": "C01",
+            "action": "route",
+            "context_id": str(ctx),
+            "context_name": "Sales",
+            "context_is_private": True,
+            "status": "ok",
+        },
+        {
+            "channel_id": "C02",
+            "action": "route",
+            "context_id": None,
+            "context_name": None,
+            "context_is_private": None,
+            "status": "destination_missing",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_workspace_connectors_carries_the_routes():
+    from types import SimpleNamespace
+
+    from api.routes.workspace_connectors import list_workspace_connectors
+    from services.connector_channel_routes import ChannelRouteView
+
+    c = MagicMock()
+    c.id = uuid4()
+    c.connector_type = "slack"
+    c.app_key = "default"
+    c.context_id = uuid4()
+    c.config_version = 1
+    c.runtime_config = None
+    c.created_at = datetime(2026, 6, 2, 0, 0, 0)
+    c.created_by = "user-1"
+    c.channel_ids = ["C01"]
+    c.locale = None
+    c.litellm_virtual_key_id = None
+    c.llm_config_encrypted = None
+    c.external_team_id = "T01"
+    item = SimpleNamespace(
+        connector=c,
+        resource_id="slug",
+        display_name=None,
+        context_name="general",
+        last_memory_at=None,
+        memories_last_7d=0,
+        ingest_context_shared=False,
+        channel_routes=[ChannelRouteView("C09", "skip", None, None, None, "ok")],
+        unrouted_private_channels="skip",
+    )
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.list_connectors = AsyncMock(return_value=[item])
+        result = await list_workspace_connectors(
+            {"user_id": "user-1", "current_workspace_id": uuid4()}, MagicMock()
+        )
+    assert result[0].unrouted_private_channels == "skip"
+    assert [r.model_dump() for r in result[0].channel_routes] == [
+        {
+            "channel_id": "C09",
+            "action": "skip",
+            "context_id": None,
+            "context_name": None,
+            "context_is_private": None,
+            "status": "ok",
+        }
+    ]
