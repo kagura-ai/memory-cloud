@@ -1050,10 +1050,13 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
 
         The row is still locked ``FOR UPDATE`` by
         :meth:`authenticate_refresh_token` (after the owner's ``users`` row),
-        so a revocation or a second refresh with the same token waits for
-        this commit. The second refresh then succeeds too and replaces this
-        access token in turn: a client that retries a refresh only loses the
-        access token of the earlier answer. The update matches only the
+        so a second refresh with the same token waits for this commit, then
+        succeeds too and replaces this access token in turn: a client that
+        retries a refresh only loses the access token of the earlier answer.
+        ``/revoke`` reads the row unlocked and revokes it with one UPDATE by
+        id that waits for this commit and stamps both columns with
+        ``COALESCE(existing, now)``, so a revocation racing this refresh
+        also revokes the access token written here. The update matches only the
         unrevoked row (``refresh_token_revoked_at`` and ``revoked``); a
         refresh token revoked meanwhile is ``invalid_grant``.
 

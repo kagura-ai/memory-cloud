@@ -1431,7 +1431,9 @@ The reverse proxy already forwards `/.well-known/*` to the API, so the file
 needs no proxy change. A kept refresh token has no expiry, like every refresh
 token here; it ends when the client revokes it (`/revoke` with the refresh
 token or with the current access token), when the user's password is reset, or
-when the account is erased.
+when the account is erased. A revocation that arrives while a refresh of the
+same token is running still ends the link: it waits for that refresh and then
+revokes the refresh token and the access token the refresh just issued.
 
 ## Supersede suggestions and k-NN seeding: log events (Issue #2023)
 

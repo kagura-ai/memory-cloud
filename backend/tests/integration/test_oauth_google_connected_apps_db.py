@@ -9,6 +9,7 @@ racing a refresh.
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from time import monotonic, sleep
@@ -221,7 +222,16 @@ def test_concurrent_refreshes_with_one_kept_token_both_succeed(store):
     assert rows[0].refresh_token_revoked_at is None
 
 
-def test_revocation_waiting_on_a_refresh_still_ends_the_link(store):
+@pytest.mark.parametrize("presented", ["access_token", "refresh_token"])
+@pytest.mark.parametrize("first", ["refresh", "revoke"])
+def test_revocation_racing_a_refresh_ends_the_link(store, presented, first):
+    # Revoke must win a race with a refresh (#2773). A holder keeps the row
+    # locked while the refresh and the revocation queue up behind it in the
+    # chosen order; row-lock waiters are served first come, first served.
+    # With ``first="refresh"`` the revocation looked the row up by the
+    # CURRENT token, but the refresh rewrites the row's access token before
+    # the revocation writes: the revocation must still revoke the refresh
+    # token and the access token the refresh just issued.
     tokens = _issue(store)
     with (
         patch("api.routes.oauth.get_sync_session", side_effect=store.factory),
@@ -229,18 +239,45 @@ def test_revocation_waiting_on_a_refresh_still_ends_the_link(store):
         ThreadPoolExecutor(max_workers=2) as executor,
     ):
         holder.query(OAuth2Token).filter_by(client_id=store.client_id).with_for_update().one()
-        refresh = executor.submit(_refresh, store, tokens["refresh_token"])
-        revoke = executor.submit(_revoke, store, tokens["refresh_token"])
+        if first == "refresh":
+            refresh = executor.submit(_refresh, store, tokens["refresh_token"])
+            _wait_for_lock_waiters(store, 1)
+            revoke = executor.submit(_revoke, store, tokens[presented])
+        else:
+            revoke = executor.submit(_revoke, store, tokens[presented])
+            _wait_for_lock_waiters(store, 1)
+            refresh = executor.submit(_refresh, store, tokens["refresh_token"])
         _wait_for_lock_waiters(store, 2)
         holder.commit()
         refreshed, revoked = refresh.result(timeout=30), revoke.result(timeout=30)
 
-    assert revoked.status_code == 200
-    # Whichever ran first, the refresh token is revoked afterwards and no
-    # access token of the row works.
-    assert refreshed.status_code in (200, 400)
+    assert revoked.status_code == 200, revoked.text
+    if first == "refresh":
+        assert refreshed.status_code == 200, refreshed.text
+        new_access = refreshed.json()["access_token"]
+        assert asyncio.run(_bearer(new_access)) is None
+    else:
+        assert refreshed.status_code == 400, refreshed.text
+        assert refreshed.json()["error"] == "invalid_grant"
+    assert asyncio.run(_bearer(tokens["access_token"])) is None
     row = _rows(store)[0]
     assert row.refresh_token_revoked_at is not None
     assert row.access_token_revoked_at is not None
     with patch("api.routes.oauth.get_sync_session", side_effect=store.factory):
-        assert _refresh(store, tokens["refresh_token"]).status_code == 400
+        again = _refresh(store, tokens["refresh_token"])
+    assert again.status_code == 400, again.text
+    assert again.json()["error"] == "invalid_grant"
+
+
+def test_revoking_an_access_token_already_replaced_changes_nothing(store):
+    # Accepted rule (#2773): an access token a refresh already replaced
+    # matches no row, so its revocation is a 200 no-op and the link stays.
+    tokens = _issue(store)
+    with patch("api.routes.oauth.get_sync_session", side_effect=store.factory):
+        refreshed = _refresh(store, tokens["refresh_token"])
+        assert refreshed.status_code == 200, refreshed.text
+        assert _revoke(store, tokens["access_token"]).status_code == 200
+        row = _rows(store)[0]
+        assert row.refresh_token_revoked_at is None
+        assert row.access_token_revoked_at is None
+        assert _refresh(store, tokens["refresh_token"]).status_code == 200

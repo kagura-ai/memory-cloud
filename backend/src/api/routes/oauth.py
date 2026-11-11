@@ -65,6 +65,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from python_multipart.exceptions import MultipartParseError
+from sqlalchemy import func, literal
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
@@ -3933,6 +3934,29 @@ async def introspect_token(request: Request) -> TokenIntrospectionResponse | JSO
     return await _run_sync(_sync)
 
 
+def _revoked_columns(*, by_access: bool, by_refresh: bool, keeps_refresh: bool) -> list[Any]:
+    """The ``oauth_tokens`` revocation columns a ``/revoke`` stamps.
+
+    A refresh token revokes the access token issued with it too. For a client
+    that keeps its refresh token (Google connected apps, #2773) any token of
+    the row ends the link, since its refresh would otherwise mint a new
+    access token; for every other client an access token revokes only itself.
+
+    Args:
+        by_access: The presented token is the row's access token.
+        by_refresh: The presented token is the row's refresh token.
+        keeps_refresh: ``keeps_refresh_token`` holds for the caller.
+
+    Returns:
+        The columns to stamp (empty when the token matched neither).
+    """
+    if by_refresh or (keeps_refresh and by_access):
+        return [OAuth2Token.access_token_revoked_at, OAuth2Token.refresh_token_revoked_at]
+    if by_access:
+        return [OAuth2Token.access_token_revoked_at]
+    return []
+
+
 @router.post(
     "/revoke",
     response_model=None,
@@ -3995,15 +4019,22 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
             if isinstance(caller, JSONResponse):
                 return caller
 
-            # Locked so a refresh that rewrites this row in place (#2773)
-            # and this revocation serialize; only the token row is locked.
+            # Read without a row lock, then revoke with one UPDATE by id
+            # (#2773). A refresh of a Google connected-apps client rewrites
+            # this row's access token in place and holds the row while it
+            # does: a locked read by the presented token would wait for it,
+            # then match nothing and leave the link alive. The UPDATE waits
+            # for that refresh instead and stamps each column with
+            # COALESCE(existing, now) on whatever the refresh committed, so
+            # the revocation wins either way. No lock is taken beyond the
+            # UPDATE's own row lock on oauth_tokens.
+            candidates = token_lookup_values(token)
             oauth_token = (
                 db_session.query(OAuth2Token)
                 .filter(
-                    OAuth2Token.access_token.in_(token_lookup_values(token))
-                    | OAuth2Token.refresh_token.in_(token_lookup_values(token))
+                    OAuth2Token.access_token.in_(candidates)
+                    | OAuth2Token.refresh_token.in_(candidates)
                 )
-                .with_for_update()
                 .first()
             )
 
@@ -4013,20 +4044,20 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
                     caller_client_id=caller.client_id,
                 )
             elif oauth_token is not None:
-                now = utcnow()
-                if (
-                    token_matches(token, oauth_token.access_token)
-                    and oauth_token.access_token_revoked_at is None
-                ):
-                    oauth_token.access_token_revoked_at = now
-                ends_link = token_matches(token, oauth_token.refresh_token) or (
-                    token_matches(token, oauth_token.access_token) and keeps_refresh_token(caller)
+                columns = _revoked_columns(
+                    by_access=token_matches(token, oauth_token.access_token),
+                    by_refresh=token_matches(token, oauth_token.refresh_token),
+                    keeps_refresh=keeps_refresh_token(caller),
                 )
-                if ends_link:
-                    if oauth_token.refresh_token_revoked_at is None:
-                        oauth_token.refresh_token_revoked_at = now
-                    if oauth_token.access_token_revoked_at is None:
-                        oauth_token.access_token_revoked_at = now
+                if columns:
+                    now = utcnow()
+                    db_session.query(OAuth2Token).filter(OAuth2Token.id == oauth_token.id).update(
+                        {
+                            column: func.coalesce(column, literal(now, type_=column.type))
+                            for column in columns
+                        },
+                        synchronize_session=False,
+                    )
                 db_session.commit()
                 logger.info(
                     "oauth_token_revoked",
