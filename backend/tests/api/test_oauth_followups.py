@@ -1,9 +1,11 @@
-"""OAuth form and diagnostic hardening regressions (#2238)."""
+"""OAuth form and diagnostic hardening regressions (#2238), Basic client auth (#2778)."""
 
-from unittest.mock import AsyncMock, patch
+import base64
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from authlib.oauth2.rfc6749.errors import InvalidRequestError
+from authlib.oauth2.rfc6749.errors import InvalidClientError, InvalidRequestError
 from fastapi.testclient import TestClient
 from python_multipart.exceptions import MultipartParseError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -16,6 +18,7 @@ from api.routes.oauth import (
     _render_authorization_request_error,
     _render_invalid_redirect_uri_error,
 )
+from auth.oauth2_server import authenticate_client_secret_basic
 
 _ROUTES = ["token", "authorize", "revoke", "introspect"]
 
@@ -113,3 +116,94 @@ async def test_non_parse_http_errors_are_not_reclassified():
         with pytest.raises(StarletteHTTPException) as caught:
             await _preload_oauth_form(request)
     assert caught.value.status_code == 503
+
+
+# --- #2778: malformed HTTP Basic client credentials at /token ----------------
+
+
+def _token_with_basic(credentials: bytes):
+    """POST a refresh request to /token carrying only ``Authorization: Basic``.
+
+    The sync session refuses a NUL in a query parameter the way the Postgres
+    driver does, so a credential that reaches the client lookup is a 500.
+    """
+    db = MagicMock()
+    db.query.side_effect = ValueError("A string literal cannot contain NUL (0x00) characters.")
+    with (
+        patch("api.routes.oauth.get_sync_session", return_value=db),
+        patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)),
+    ):
+        response = TestClient(
+            app, base_url="https://testserver", raise_server_exceptions=False
+        ).post(
+            "/api/v1/oauth/token",
+            content=b"grant_type=refresh_token&refresh_token=x",
+            headers={
+                "content-type": "application/x-www-form-urlencoded",
+                "Authorization": b"Basic " + credentials,
+            },
+        )
+    return response, db
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        b"//79",  # base64 of bytes that are not UTF-8
+        base64.b64encode(b"\xff\xfe:secret"),
+        base64.b64encode(b"oauth\x00client:secret"),  # NUL in the client_id
+        base64.b64encode(b"oauth_client:sec\x00ret"),  # NUL in the secret
+        b"not base64!",
+        b"\xe9t\xe9",  # not ASCII (Latin-1 on the wire)
+    ],
+)
+def test_malformed_basic_credentials_at_token_are_invalid_client(credentials):
+    response, db = _token_with_basic(credentials)
+
+    assert response.status_code == 401, response.text
+    assert response.json()["error"] == "invalid_client"
+    db.query.assert_not_called()
+
+
+def _basic_request(header: str | None):
+    headers = {} if header is None else {"Authorization": header}
+    return SimpleNamespace(headers=headers)
+
+
+def _basic(raw: bytes) -> str:
+    return "Basic " + base64.b64encode(raw).decode()
+
+
+def test_basic_client_auth_returns_the_client_whose_secret_matches():
+    client = MagicMock()
+    client.check_client_secret.side_effect = lambda secret: secret == "s e+c"
+    query_client = MagicMock(return_value=client)
+
+    # RFC 6749 §2.3.1: both parts are form-urlencoded before base64.
+    found = authenticate_client_secret_basic(
+        query_client, _basic_request(_basic(b"oauth%3Aclient:s+e%2Bc"))
+    )
+
+    assert found is client
+    query_client.assert_called_once_with("oauth:client")
+
+
+@pytest.mark.parametrize(
+    "header",
+    [None, "Bearer abc", _basic(b"oauth_client:"), _basic(b"oauth_client:wrong")],
+)
+def test_basic_client_auth_without_matching_credentials_is_none(header):
+    client = MagicMock()
+    client.check_client_secret.return_value = False
+    assert (
+        authenticate_client_secret_basic(MagicMock(return_value=client), _basic_request(header))
+        is None
+    )
+
+
+def test_basic_client_auth_for_an_unknown_client_is_invalid_client_401():
+    with pytest.raises(InvalidClientError) as raised:
+        authenticate_client_secret_basic(
+            MagicMock(return_value=None), _basic_request(_basic(b"nobody:secret"))
+        )
+    assert raised.value.status_code == 401

@@ -20,8 +20,6 @@ Security:
 """
 
 import asyncio
-import base64
-import binascii
 import contextlib
 import contextvars
 import hashlib
@@ -42,7 +40,6 @@ from typing import Any, TypeVar
 from urllib.parse import (
     parse_qsl,
     unquote,
-    unquote_plus,
     urlencode,
     urlparse,
     urlsplit,
@@ -86,6 +83,7 @@ from auth.oauth2_server import (
     _OAuthUser,
     browser_session_is_live,
     create_authorization_server,
+    decode_basic_client_credentials,
     repeated_parameter,
     share_lock_owner,
     validate_authorization_parameters,
@@ -3648,27 +3646,6 @@ def _invalid_client_response(description: str) -> JSONResponse:
     return response
 
 
-def _basic_client_credentials(header: str) -> tuple[str, str] | None:
-    """Decode an ``Authorization: Basic`` header into (client_id, secret).
-
-    RFC 6749 §2.3.1: both parts are form-urlencoded before base64 encoding.
-
-    Raises:
-        ValueError: The header is not valid Basic credentials.
-    """
-    scheme, _, value = header.partition(" ")
-    if scheme.lower() != "basic":
-        return None
-    try:
-        decoded = base64.b64decode(value.strip(), validate=True).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError) as e:
-        raise ValueError("malformed Basic credentials") from e
-    client_id, sep, secret = decoded.partition(":")
-    if not sep or not client_id:
-        raise ValueError("malformed Basic credentials")
-    return unquote_plus(client_id), unquote_plus(secret)
-
-
 def _authenticate_endpoint_client(
     request: Request,
     db_session: Session,
@@ -3701,7 +3678,7 @@ def _authenticate_endpoint_client(
     secret = form_client_secret
     if header:
         try:
-            basic = _basic_client_credentials(header)
+            basic = decode_basic_client_credentials(header)
         except ValueError:
             return _invalid_client_response("Malformed client credentials.")
         if basic is not None:

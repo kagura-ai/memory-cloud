@@ -31,15 +31,19 @@ References:
     - RFC 6749: The OAuth 2.0 Authorization Framework
 """
 
+import base64
+import binascii
 import logging
 import secrets
 from datetime import timedelta
 from typing import Any, cast
+from urllib.parse import unquote_plus
 
 from authlib.oauth2 import OAuth2Request
 from authlib.oauth2.rfc6749 import grants
 from authlib.oauth2.rfc6749.errors import (
     AccessDeniedError,
+    InvalidClientError,
     InvalidGrantError,
     InvalidRequestError,
     InvalidScopeError,
@@ -427,6 +431,81 @@ class _OAuthUser:
 # ============================================================================
 # Query Functions (Required by Authlib)
 # ============================================================================
+
+
+def decode_basic_client_credentials(header: str) -> tuple[str, str] | None:
+    """Decode an ``Authorization: Basic`` header into (client_id, secret).
+
+    RFC 6749 §2.3.1: both parts are form-urlencoded before base64 encoding.
+    A NUL in either part is refused here: the database driver rejects it in
+    a query parameter, so it would otherwise surface as a server error.
+
+    Args:
+        header: The ``Authorization`` header value.
+
+    Returns:
+        The decoded credentials, or None when the scheme is not Basic.
+
+    Raises:
+        ValueError: The header is not valid Basic credentials.
+    """
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "basic":
+        return None
+    try:
+        decoded = base64.b64decode(value.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as e:
+        raise ValueError("malformed Basic credentials") from e
+    client_id, sep, secret = decoded.partition(":")
+    if not sep or not client_id:
+        raise ValueError("malformed Basic credentials")
+    client_id, secret = unquote_plus(client_id), unquote_plus(secret)
+    if "\x00" in client_id or "\x00" in secret:
+        raise ValueError("malformed Basic credentials")
+    return client_id, secret
+
+
+def authenticate_client_secret_basic(query_client: Any, request: Any) -> Any:
+    """Authlib's ``client_secret_basic`` method with a strict header decoder (#2778).
+
+    Authlib's own decoder lets a non-UTF-8 or non-ASCII header escape as an
+    exception, which the token endpoint answered with a 500. Here a malformed
+    header is ``invalid_client`` (401, RFC 6749 §5.2), decoded the same way as
+    at the revocation and introspection endpoints.
+
+    Args:
+        query_client: Authlib's client lookup.
+        request: The OAuth2 request (its ``headers`` are read).
+
+    Returns:
+        The client whose secret matches, or None when the request carries no
+        usable Basic credentials (another method may still authenticate it).
+
+    Raises:
+        InvalidClientError: The header is malformed or names an unknown client.
+    """
+    header = request.headers.get("Authorization")
+    if not header:
+        return None
+    try:
+        credentials = decode_basic_client_credentials(header)
+    except ValueError:
+        raise InvalidClientError(
+            status_code=401, description="Malformed client credentials."
+        ) from None
+    if credentials is None:
+        return None
+    client_id, secret = credentials
+    if not secret:
+        return None
+    client = query_client(client_id)
+    if not client:
+        raise InvalidClientError(
+            status_code=401, description="The client does not exist on this server."
+        )
+    if client.check_client_secret(secret):
+        return client
+    return None
 
 
 def query_client(session: Session, client_id: str) -> OAuth2Client | None:
@@ -1396,6 +1475,9 @@ class OAuth2AuthorizationServer:
         # Set query_client and save_token as attributes (Authlib v1.3+ style)
         self.server.query_client = query_client_func
         self.server.save_token = save_token_func
+        self.server.register_client_auth_method(
+            "client_secret_basic", authenticate_client_secret_basic
+        )
 
         # Issue #141: Token generation is now handled by Grant classes
         # (AuthorizationCodeGrant.generate_token() and RefreshTokenGrant.generate_token())
