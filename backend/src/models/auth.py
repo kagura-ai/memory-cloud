@@ -1522,11 +1522,12 @@ class OAuth2Token(Base):
         Required by Authlib (for refresh token grant).
 
         Returns:
-            True if refresh token exists and is not revoked
+            True if refresh token exists and is not revoked (neither its own
+            column nor the row's ``revoked`` flag)
         """
         if not self.refresh_token:
             return False
-        if self.refresh_token_revoked_at is not None:
+        if self.revoked or self.refresh_token_revoked_at is not None:
             return False
         return True
 

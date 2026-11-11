@@ -977,7 +977,7 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
             logger.warning(
                 "oauth_refresh_token_invalid",
                 token_id=token.id,
-                revoked=token.refresh_token_revoked_at is not None,
+                revoked=bool(token.revoked) or token.refresh_token_revoked_at is not None,
             )
 
         return None

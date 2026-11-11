@@ -189,7 +189,11 @@ def _active(db_factory: sessionmaker, access_token: str) -> bool:
 
 class TestPredicate:
     def _client(self, **fields: Any) -> OAuth2Client:
-        values: dict[str, Any] = {"provider": "google_connected_apps", "redirect_uris": [APP_URI]}
+        values: dict[str, Any] = {
+            "provider": "google_connected_apps",
+            "redirect_uris": [APP_URI],
+            "grant_types": ["authorization_code", "refresh_token"],
+        }
         values.update(fields)
         return OAuth2Client(**values)
 
@@ -210,6 +214,9 @@ class TestPredicate:
             {"redirect_uris": ["https://oauth-redirect.googleusercontent.com/r/another-app"]},
             {"provider": "gemini"},
             {"provider": "custom"},
+            # A device-code poller gets the tokens without Google's redirector.
+            {"grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]},
+            {"grant_types": ["authorization_code", "refresh_token", "client_credentials"]},
         ],
     )
     def test_anything_else_rotates(self, fields: dict[str, Any]) -> None:
@@ -329,7 +336,6 @@ class TestKeptRefreshToken:
         "row",
         [
             {"refresh_token_revoked_at": utcnow()},
-            # ``is_refresh_token_active`` ignores ``revoked``; the rewrite does not.
             {"revoked": True},
         ],
     )
@@ -391,6 +397,41 @@ class TestRotationElsewhere:
         assert [e["event"] for e in logs if e["event"].startswith("oauth_refresh_token_")] == [
             "oauth_refresh_token_rotated"
         ]
+
+    @pytest.mark.parametrize("client_id", [GEMINI_CLIENT, CLAUDE_CLIENT])
+    def test_a_revoked_row_cannot_be_refreshed(
+        self, api: TestClient, db_factory: sessionmaker, client_id: str
+    ) -> None:
+        # ``revoked`` set with ``refresh_token_revoked_at`` still NULL.
+        tokens = _issue(db_factory, client_id)
+        with db_factory() as db:
+            db.query(OAuth2Token).update({"revoked": True})
+            db.commit()
+
+        response = _refresh(api, client_id, tokens["refresh_token"])
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_grant"
+        assert len(_rows(db_factory, client_id)) == 1
+
+    @pytest.mark.usefixtures("listed")
+    def test_a_google_client_with_the_device_grant_rotates(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        with db_factory() as db:
+            client = db.query(OAuth2Client).filter_by(client_id=GOOGLE_CLIENT).one()
+            client.grant_types = [
+                "urn:ietf:params:oauth:grant-type:device_code",
+                "refresh_token",
+            ]
+            db.commit()
+        tokens = _issue(db_factory, GOOGLE_CLIENT)
+
+        response = _refresh(api, GOOGLE_CLIENT, tokens["refresh_token"])
+
+        assert response.status_code == 200, response.text
+        assert response.json()["refresh_token"] != tokens["refresh_token"]
+        assert _refresh(api, GOOGLE_CLIENT, tokens["refresh_token"]).status_code == 400
 
     def test_emptied_setting_restores_rotation(
         self, api: TestClient, db_factory: sessionmaker
