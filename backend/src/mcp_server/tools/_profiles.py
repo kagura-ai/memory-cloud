@@ -17,7 +17,8 @@ the URL selects (#2354) and is ignored when ``tools`` is present. A tool left ou
 ``describe_tools`` names the hidden ones and returns their schemas on request.
 
 A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``:
-``tools/call`` never gates on it, so a tool left out of the list stays callable,
+``tools/call`` never gates on it (except that the google view refuses ``describe_tools``
+and ``guide``, see ``_google_profile``), so a tool left out of the list stays callable,
 subject to the same role checks as before. Two tools read the URL's view for
 their reply: ``describe_tools``, and ``recall``, which leaves out ``explore``
 hints where the URL does not list that tool (#2470). Do not use a profile

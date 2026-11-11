@@ -43,7 +43,7 @@ The client belongs to the account that created it (`owner_id`) and to that accou
 
 ### Refresh tokens
 
-Every refresh returns a new refresh token, and the previous one stops working (refresh-token rotation, RFC 6819 §5.2.2.3). Microsoft's token store keeps the newest token; Microsoft's documentation does not forbid rotation. (Google's connected-apps program does, which is why [#2773](https://github.com/kagura-ai/memory-cloud/issues/2773) keeps refresh tokens for Google's client only; see [MCP Client Setup › Google connected apps](mcp-clients.md#google-connected-apps).) A user who signs out of the agent in Copilot clears Microsoft's stored token; the grant itself is revoked from the user's Settings like any other app's.
+Every refresh returns a new refresh token, and the previous one stops working (refresh-token rotation, RFC 6819 §5.2.2.3). Microsoft's token store keeps the newest token; Microsoft's documentation does not forbid rotation. (Google's connected-apps program does, which is why [#2773](https://github.com/kagura-ai/memory-cloud/issues/2773) keeps refresh tokens for Google's client only; see [MCP Client Setup › Google connected apps](mcp-clients.md#google-connected-apps).) A user who signs out of the agent in Copilot clears only Microsoft's stored token. The grant on this server ends when the client calls `/revoke`, when the user's password is reset (which revokes every OAuth/MCP grant) or when the account is erased; the Connected apps list in Settings shows the grant but has no per-app revoke.
 
 ## 3. Teams developer portal: OAuth client registration
 
@@ -102,4 +102,4 @@ Microsoft's validation guidelines for agents ask for the following; whether they
 - `backend/tests/api/test_oauth_microsoft_redirect_uri.py` — the exact Teams redirect URI.
 - `backend/tests/integration/test_oauth_cross_workspace_client_db.py` — on PostgreSQL: a client created by one account is authorized by a user of another workspace, whose calls run as that user and whose refresh token rotates, with either client authentication method.
 
-A profile is a view, not an authorization boundary ([Tool Profiles](mcp-tools.md#tool-profiles)): `tools/call` still accepts any registered tool under the usual role checks.
+A profile is a view, not an authorization boundary ([Tool Profiles](mcp-tools.md#tool-profiles)), with one exception for the connector policies: On this view a `tools/call` naming `describe_tools` or `guide` is answered `unknown_tool`; every other registered tool stays callable under the usual role checks.

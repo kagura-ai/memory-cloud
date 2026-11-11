@@ -9,7 +9,8 @@ other tools on purpose (``context_id`` "from list_contexts()", ``Manual:
 guide(...)``), so ``?profile=google`` serves its own prose for the same tools:
 
 * ``GOOGLE_PROSE``: per tool, per description path, the text served instead of
-  the core one. Only prose differs: ``tools/call`` never reads the profile, so
+  the core one. Only prose differs: ``tools/call`` reads the profile only to refuse ``describe_tools``
+  and ``guide`` and for recall's learning switch, so
   names, types, enums, limits and ``required`` stay the core schema's. Each
   entry carries the fingerprint of the core text it replaces;
   ``tests/mcp_server/test_google_profile.py`` fails when a core description

@@ -22,7 +22,7 @@ Everything below applies only to a request whose URL selects `profile=google` wi
 | Area | Core profile | `google` profile |
 |---|---|---|
 | Tools listed | The core tools ([Tool Profiles](mcp-tools.md#tool-profiles)) | The core tools without `describe_tools` and `guide` |
-| Input schemas | — | Identical to the core schemas (names, types, enums, limits, `required`); `tools/call` never reads the profile |
+| Input schemas | — | Identical to the core schemas (names, types, enums, limits, `required`); `tools/call` reads the profile only to refuse `describe_tools` and `guide` and for `recall`'s learning switch |
 | Descriptions | Point at other tools and the manual | No description, at any depth, names another tool or says when to use one; `remember_batch` says "store what the user asks to keep" |
 | `recall` | `destructiveHint: true`: learns associations (Hebbian reweighting, pruning) and promotes working memories | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`: no learning writes and no promotion; only access counters move |
 | Other annotations | `TOOL_ANNOTATIONS` | The same |
@@ -52,4 +52,4 @@ The rest are read-only on this profile and need no confirmation: `recall`, `refe
 - `backend/src/services/memory_service.py` — `recall(learning=False)`: no Hebbian pass, no promotion.
 - `backend/tests/mcp_server/test_google_profile.py` — the policy checks: no description names another tool, schemas equal the core ones, a phrase blocklist for conversation content, instructions without a tool name or digest, read-only `recall`.
 
-A profile is a view, not an authorization boundary ([Tool Profiles](mcp-tools.md#tool-profiles)): `tools/call` still accepts any registered tool under the usual role checks.
+A profile is a view, not an authorization boundary ([Tool Profiles](mcp-tools.md#tool-profiles)), with one exception for this policy: On this view a `tools/call` naming `describe_tools` or `guide` is answered `unknown_tool`; every other registered tool stays callable under the usual role checks.
