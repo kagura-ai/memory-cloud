@@ -126,23 +126,25 @@ export function MemoryHealthReport({ scope }: { scope: string }) {
   const { user } = useAuth();
   const [detail, setDetail] = useState<MemoryHealthDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // A flag, not the message: the fetch must not depend on the translator, or
+  // a new translator identity would refetch the report.
+  const [failed, setFailed] = useState(false);
   // A response lands only if no newer request superseded it.
   const requestSeq = useRef(0);
 
   const load = useCallback(async () => {
     const seq = ++requestSeq.current;
     setLoading(true);
-    setError(null);
+    setFailed(false);
     try {
       const data = await getMemoryHealthDetail(scope);
       if (seq === requestSeq.current) setDetail(data);
     } catch {
-      if (seq === requestSeq.current) setError(t("loadError"));
+      if (seq === requestSeq.current) setFailed(true);
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [scope, t]);
+  }, [scope]);
 
   useEffect(() => {
     void load();
@@ -164,7 +166,7 @@ export function MemoryHealthReport({ scope }: { scope: string }) {
         </Button>
       </div>
 
-      <ErrorBanner error={error} />
+      <ErrorBanner error={failed ? t("loadError") : null} />
 
       {loading && !detail && <CardLoadingState count={3} />}
 

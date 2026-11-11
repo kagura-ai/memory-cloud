@@ -61,9 +61,6 @@ vi.mock("@/contexts/MemoryContextContext", () => ({
 vi.mock("@/components/contexts/OverviewTabPanel", () => ({
   OverviewTabPanel: () => <div data-testid="overview-panel" />,
 }));
-vi.mock("@/components/contexts/MemoriesTabPanel", () => ({
-  MemoriesTabPanel: () => <div data-testid="memories-panel" />,
-}));
 vi.mock("@/components/contexts/ConnectionsTabPanel", () => ({
   ConnectionsTabPanel: () => <div data-testid="connections-panel" />,
 }));

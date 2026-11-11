@@ -29,8 +29,18 @@ const stableTranslator = Object.assign(
     values && Object.keys(values).length > 0 ? `${key}:${JSON.stringify(values)}` : key,
   { has: (key: string) => !key.startsWith("notes.") || CATALOG_NOTE_KEYS.has(key) },
 );
+// Some tests hand out a NEW translator function on every call, as a provider
+// re-render or a locale switch can: the fetch must not follow its identity.
+let freshTranslatorPerRender = false;
 vi.mock("next-intl", () => ({
-  useTranslations: () => stableTranslator,
+  useTranslations: () =>
+    freshTranslatorPerRender
+      ? Object.assign(
+          (key: string, values?: Record<string, unknown>) =>
+            stableTranslator(key, values),
+          { has: stableTranslator.has },
+        )
+      : stableTranslator,
   useLocale: () => "en",
 }));
 
@@ -61,6 +71,7 @@ const DETAIL = {
 
 beforeEach(() => {
   mockGet.mockReset();
+  freshTranslatorPerRender = false;
 });
 
 describe("MemoryHealthReport", () => {
@@ -108,6 +119,17 @@ describe("MemoryHealthReport", () => {
 
     expect(await screen.findByText("loadError")).toBeInTheDocument();
     expect(screen.queryByTestId("health-section-consolidation")).toBeNull();
+  });
+
+  it("requests once per scope even when the translator changes identity", async () => {
+    freshTranslatorPerRender = true;
+    mockGet.mockResolvedValue(DETAIL);
+    const view = render(<MemoryHealthReport scope={CTX_ID} />);
+    await screen.findByTestId("health-section-consolidation");
+    view.rerender(<MemoryHealthReport scope={CTX_ID} />);
+    // Give a would-be refetch loop time to show itself.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mockGet).toHaveBeenCalledTimes(1);
   });
 
   it("refetches on refresh", async () => {
