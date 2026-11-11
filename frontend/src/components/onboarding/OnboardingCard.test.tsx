@@ -79,8 +79,11 @@ vi.mock("@/lib/api/workspaces", () => ({
 
 // #1167: the key probe is gated on features.byok; default on, flip per-test.
 let mockFeatures: Record<string, boolean> | null = { byok: true };
+// #2760: the chat screen's ChatGPT app link reads /system/info; unset by default.
+let mockSystemInfo: { chatgpt_app_url?: string | null } | null = null;
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
+  useSystemInfo: () => mockSystemInfo,
 }));
 
 import { OnboardingCard } from "./OnboardingCard";
@@ -108,6 +111,7 @@ beforeEach(() => {
   mockUserId = "u1";
   setWorkspace("owner");
   mockFeatures = { byok: true };
+  mockSystemInfo = null;
   mockGetContexts.mockResolvedValue({ contexts: [], total: 0 });
   mockCheckKey.mockResolvedValue({
     has_key: true,
@@ -697,6 +701,30 @@ describe("OnboardingCard first screens (#2701)", () => {
     const link = await screen.findByRole("link", { name: "label newTab" });
     expect(link).toHaveAttribute("href", "https://www.kagura-ai.com/help/guide/#plugins");
     fireEvent.click(link);
+    expect(localStorage.getItem("onboarding:u1:intro")).toBe("chat");
+    expect(screen.getByText("chat.title")).toBeInTheDocument();
+  });
+
+  it("shows no ChatGPT app link on the chat screen when the deployment sets none", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    mockSystemInfo = { chatgpt_app_url: "javascript:alert(1)" };
+    render(<OnboardingCard />);
+    expect(await screen.findByText("chat.title")).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "label newTab" })).toHaveLength(1);
+    expect(screen.getAllByText("description")).toHaveLength(1);
+  });
+
+  it("opens the deployment's ChatGPT app without completing the chat screen", async () => {
+    window.localStorage.setItem("onboarding:u1:intro", "chat");
+    withPracticeContext();
+    mockSystemInfo = { chatgpt_app_url: "https://example.com/chatgpt-app" };
+    render(<OnboardingCard />);
+    expect(await screen.findByText("chat.title")).toBeInTheDocument();
+    const link = screen.getAllByRole("link").find((a) => a.getAttribute("href") === "https://example.com/chatgpt-app");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    fireEvent.click(link!);
     expect(localStorage.getItem("onboarding:u1:intro")).toBe("chat");
     expect(screen.getByText("chat.title")).toBeInTheDocument();
   });

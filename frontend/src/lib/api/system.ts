@@ -139,6 +139,11 @@ export interface SystemInfo {
    * backends — treat absent like null.
    */
   terms_version?: string | null;
+  /**
+   * The deployment's ChatGPT app listing URL (#2760), or null when
+   * `CHATGPT_APP_URL` is empty. Absent on older backends — treat like null.
+   */
+  chatgpt_app_url?: string | null;
 }
 
 /**

@@ -1395,6 +1395,24 @@ the entry stays hidden while either answer is pending, so a lower tier never
 sees a flash-then-hide. The pages themselves stay reachable by URL and carry
 the upsell state for new objects.
 
+## ChatGPT app link (Issue #2760)
+
+A deployment whose app is listed in ChatGPT's app directory can show a direct
+link to that listing next to the plugin guide link: on the welcome onboarding's
+chat connection screen and on the MCP connection card (integrations overview
+and credentials page). The user opens the listing, adds the app and signs in,
+instead of pasting the MCP URL into ChatGPT's connector settings.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `CHATGPT_APP_URL` | *(empty)* | The listing's public URL, e.g. `https://example.com/chatgpt-app`. **Empty shows no link** — the UI is exactly what it was. When set, `GET /api/v1/system/info` returns it as `chatgpt_app_url` (`null` when empty) and the link opens it in a new tab. Surrounding whitespace is trimmed; anything but an absolute `https://` URL with a host (`http://`, `javascript:`, a bare word, a relative URL) fails startup. |
+
+A listing connects to one MCP server, so only the deployment the listing points
+at sets this; a self-hosted deployment leaves it empty, and ChatGPT connects to
+it by its MCP URL as before ([MCP clients › ChatGPT](mcp-clients.md#chatgpt-desktop)).
+The web UI also renders the link only for an `https:` URL, whatever the API
+returns.
+
 ## Supersede suggestions and k-NN seeding: log events (Issue #2023)
 
 After a memory is embedded, one step reads its nearest neighbours. Two features

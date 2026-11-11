@@ -1811,6 +1811,42 @@ class Settings(BaseSettings):
             raise ValueError("TERMS_VERSION must be 1-64 characters from [A-Za-z0-9._-]")
         return v
 
+    # ChatGPT app listing (Issue #2760)
+    chatgpt_app_url: str = Field(
+        default="",
+        description=(
+            "Public URL of this deployment's app listing in ChatGPT's app "
+            "directory (#2760). When set, the web UI shows a link to it on the "
+            "onboarding chat connection screen and the MCP connection card; empty "
+            "(the default) shows no link. A listing connects to one MCP server, so "
+            "only the deployment the listing points at sets it. Must be an "
+            "absolute https:// URL with a host — anything else fails startup. "
+            "Surfaced via GET /api/v1/system/info chatgpt_app_url."
+        ),
+    )
+
+    @field_validator("chatgpt_app_url", mode="before")
+    @classmethod
+    def _check_chatgpt_app_url(cls, v: Any) -> Any:
+        """Trim whitespace; refuse anything the web UI could not link to safely.
+
+        The value is rendered as a link on public-facing pages, so only an
+        absolute ``https://`` URL with a host passes (no ``http:``, no
+        ``javascript:``, no relative or host-less value). Empty stays empty
+        (= no link).
+        """
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            return v
+        v = v.strip()
+        if not v:
+            return ""
+        parsed = urlparse(v)
+        if parsed.scheme != "https" or not parsed.hostname or any(c.isspace() for c in v):
+            raise ValueError("CHATGPT_APP_URL must be an absolute https:// URL with a host")
+        return v
+
     # Workspace Governance (Issue #1113)
     require_dual_control_force_transfer: bool = Field(
         default=False,

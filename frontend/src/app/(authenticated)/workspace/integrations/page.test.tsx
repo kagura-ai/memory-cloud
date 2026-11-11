@@ -8,12 +8,16 @@ import IntegrationsPage from "./page";
 let byok = true;
 let currentLocale = "en";
 vi.mock("@/i18n", () => ({ useLocale: () => ({ locale: currentLocale }) }));
-vi.mock("@/hooks/useSystemFeatures", () => ({ useSystemFeatures: () => ({ byok }) }));
+let chatgptAppUrl: string | null = null;
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => ({ byok }),
+  useSystemInfo: () => ({ chatgpt_app_url: chatgptAppUrl }),
+}));
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({ currentWorkspace: { name: "Studio", current_user_role: "viewer" }, currentWorkspaceId: "studio", workspaces: [{ id: "studio" }] }),
 }));
 afterEach(cleanup);
-beforeEach(() => { byok = true; currentLocale = "en"; });
+beforeEach(() => { byok = true; currentLocale = "en"; chatgptAppUrl = null; });
 
 describe("first click from Integrations", () => {
   it("keeps the provider-key entry when the deployment disables BYOK", () => {
@@ -56,4 +60,15 @@ describe("first click from Integrations", () => {
       expect(screen.getAllByRole("link")).toHaveLength(9);
     },
   );
+  it.each([["en", en], ["ja", ja]] as const)("links the deployment's ChatGPT app next to the plugin guide in %s (#2760)", (locale, messages) => {
+    currentLocale = locale;
+    chatgptAppUrl = "https://example.com/chatgpt-app";
+    render(<NextIntlClientProvider locale={locale} messages={messages}><IntegrationsPage /></NextIntlClientProvider>);
+    const link = screen.getByRole("link", { name: `${messages.chatgptApp.label} ${messages.chatgptApp.newTab.trim()}` });
+    expect(link).toHaveAttribute("href", "https://example.com/chatgpt-app");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.getByText(messages.chatgptApp.description)).toBeInTheDocument();
+    expect(screen.getAllByRole("link")).toHaveLength(10);
+  });
 });

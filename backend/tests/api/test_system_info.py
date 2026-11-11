@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from api.main import app
 from config.settings import Settings
@@ -23,6 +24,7 @@ _RERANK_ENV = [
     "DEFAULT_RERANKER_MODEL",
     "DEFAULT_CONTENT_CHUNKS_ENABLED",
     "CONTENT_CHUNKS_REQUIRE_PLAN",
+    "CHATGPT_APP_URL",
 ]
 
 
@@ -169,3 +171,54 @@ def test_system_info_exposes_the_llm_selector_plan_gate_default_off(info_with) -
     assert info_with().json()["features"]["llm_selector_require_plan"] is False
     gated = info_with(llm_selector_require_plan=True).json()
     assert gated["features"]["llm_selector_require_plan"] is True
+
+
+# ---------------------------------------------------------------------------
+# #2760: chatgpt_app_url (CHATGPT_APP_URL), the deployment's ChatGPT app listing
+# ---------------------------------------------------------------------------
+
+_LISTING = "https://example.com/chatgpt-app"
+
+
+def test_system_info_chatgpt_app_url_is_null_when_unset(info_with) -> None:
+    """Unset (the default, self-hosted): null, and nothing else in the document
+    moves — the field is the only addition."""
+    body = info_with().json()
+    assert body["chatgpt_app_url"] is None
+    with_url = info_with(chatgpt_app_url=_LISTING).json()
+    with_url.pop("chatgpt_app_url")
+    body.pop("chatgpt_app_url")
+    assert with_url == body
+
+
+def test_system_info_returns_the_chatgpt_app_url_as_is(info_with) -> None:
+    assert info_with(chatgpt_app_url=_LISTING).json()["chatgpt_app_url"] == _LISTING
+
+
+def test_system_info_chatgpt_app_url_needs_no_auth(info_with) -> None:
+    """The endpoint stays public: no cookie, no key, still 200 with the value."""
+    resp = info_with(chatgpt_app_url=_LISTING)
+    assert resp.json()["chatgpt_app_url"] == _LISTING
+
+
+def test_chatgpt_app_url_is_trimmed_and_blank_means_unset() -> None:
+    assert Settings(_env_file=None, chatgpt_app_url=f"  {_LISTING}\n").chatgpt_app_url == _LISTING
+    assert Settings(_env_file=None, chatgpt_app_url="   ").chatgpt_app_url == ""
+    assert Settings(_env_file=None).chatgpt_app_url == ""
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://example.com/chatgpt-app",
+        "chatgpt-app",
+        "javascript:alert(1)",
+        "https://",
+        "https:///chatgpt-app",
+        "//example.com/chatgpt-app",
+    ],
+)
+def test_chatgpt_app_url_refuses_anything_but_an_https_url_with_a_host(value: str) -> None:
+    """A value the UI could not safely link to fails startup instead."""
+    with pytest.raises(ValidationError, match="CHATGPT_APP_URL"):
+        Settings(_env_file=None, chatgpt_app_url=value)
