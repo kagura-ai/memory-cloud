@@ -13,7 +13,7 @@ https://example.com/mcp/w/<workspace_id>?profile=google
 
 `?context=<context_id>` may be added (`…/mcp?profile=google&context=<context_id>`) to give the connection a default context. Do not add `?tools=`: an explicit allowlist wins over `profile`, and the URL is then no longer the google view. `?add_tools=` works as on the core profile, except that it cannot bring back `describe_tools` or `guide` (they are ignored and logged); a tool added that way is served with its standard text.
 
-Authorization is the same OAuth 2.0 flow as for every connector. The operator settings Google's console needs — the exact redirect URIs of the connected-apps client and the domain verification file — are documented in [Deployment](deployment.md) (section "Google connected apps").
+Authorization is the same OAuth 2.0 flow as for every connector. The operator settings Google's console needs — the exact redirect URIs of the connected-apps client and the domain verification file — are documented in [Deployment: Google connected apps](deployment.md#google-connected-apps-issue-2773).
 
 ## 2. What the `google` profile changes
 
