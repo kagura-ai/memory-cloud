@@ -13,6 +13,7 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 | `/mcp` (or `?profile=core`) | The 21 core tools — the default: `remember`, `remember_batch`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `create_edge`, `get_context_info`, `list_contexts`, `list_tags`, `create_context`, `update_context`, `delete_context`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap` | ≈ 40k chars |
 | `/mcp?profile=full` | All 72 tools | ≈ 108k chars (about 2.7× the default) |
 | `/mcp?profile=google` | The core tools without `describe_tools` and `guide`, with prose that names no other tool and a read-only `recall` — for Google's connected apps ([below](#the-google-profile)) | ≈ 38k chars |
+| `/mcp?profile=microsoft` | The same list as `profile=google` (an alias) — for Microsoft 365 Copilot ([below](#the-google-profile)) | ≈ 38k chars |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 11k chars for these three |
 | `/mcp?add_tools=list_edges` (or `?profile=core&add_tools=list_edges,merge_contexts`) | The profile (`core` when none is given) plus the named tools — ignored when `tools` is present | the profile plus each added tool |
 
@@ -20,7 +21,7 @@ Sizes are the compact JSON of the `tools` array, measured at v0.135.0, when `exp
 
 - Tool names (in `tools` and `add_tools`) are comma-separated and case-sensitive; surrounding whitespace is trimmed, duplicates collapse, and at most 100 names are read. The result is always in registry order, whatever order the URL uses.
 - `add_tools` adds to the profile instead of replacing it, so one extra tool does not mean spelling out the whole core list ([#2354](https://github.com/kagura-ai/memory-cloud/issues/2354)). With `profile=full` it changes nothing. Next to `tools` it is ignored (and logged): a URL that already has an allowlist keeps exactly that list.
-- Unknown names are ignored (and logged by the server), so a URL keeps working if a tool is later renamed or removed. An `add_tools` that matches nothing is not an error — the profile still answers. If **no** `tools` name matches, or `profile` is anything other than `full` / `core` / `google`, `tools/list` fails with JSON-RPC `-32602` (invalid params) and a message naming the valid values.
+- Unknown names are ignored (and logged by the server), so a URL keeps working if a tool is later renamed or removed. An `add_tools` that matches nothing is not an error — the profile still answers. If **no** `tools` name matches, or `profile` is anything other than `full` / `core` / `google` / `microsoft`, `tools/list` fails with JSON-RPC `-32602` (invalid params) and a message naming the valid values.
 - `explore` is opt-in: `?add_tools=explore` or `?profile=full` lists it (or name it in `tools`). It walks the Neural Memory graph, for questions that follow a chain of decisions or changes. See [`explore`](#explore).
 - Both transports honour the parameters — session-based Streamable HTTP and stateless MCP 2026-07-28 — on `/mcp` as well as `/mcp/w/{workspace_id}`.
 
@@ -41,6 +42,8 @@ Sizes are the compact JSON of the `tools` array, measured at v0.135.0, when `exp
 - **Replies:** no `Manual: guide([...])` on caller errors, a neutral `unknown_tool` help, no quick-reference `instructions` in `get_context_info` / `bootstrap`; sentences of a reply's own `help`, `hint` and `message` that point at another tool are dropped. Stored data passes through unchanged.
 
 Console setup (which tools to mark for user confirmation): [Google Connected Apps](google-connected-apps.md).
+
+`?profile=microsoft` ([#2778](https://github.com/kagura-ai/memory-cloud/issues/2778)) is an alias of this view for Microsoft 365 Copilot: the same tools, descriptions, annotations, instructions, replies and read-only `recall`, under the same rules (no `tools=`; `add_tools` cannot bring back `describe_tools` or `guide`). Copilot runs `readOnlyHint: true` tools without asking and asks before the rest, so `recall` stays usable by its read-only Researcher agent. OAuth client and Teams developer portal setup: [Microsoft 365 Copilot](microsoft-365-copilot.md).
 
 ### Listing profile vs enforced restriction
 
