@@ -4,6 +4,12 @@
 > Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
 > Re-frozen after #993 (dead JWT path dropped; well-known metadata honesty fixes)
 
+> #2781 adds an optional, independent `/oidc` identity provider for explicitly
+> registered confidential web clients. Its RS256 ID tokens, JWKS and UserInfo
+> are described in [OIDC provider setup](../ops/oidc-provider.md). The historical
+> enumeration below describes the legacy MCP OAuth namespace; its clients,
+> credential storage, scopes and `/.well-known` metadata are unchanged.
+
 Sources read in full: `backend/src/auth/mcp_scopes.py`,
 `backend/src/api/routes/well_known.py`, `backend/src/auth/oauth2_bearer.py`,
 `backend/src/auth/dependencies.py` (scope-enforcement sections),
@@ -16,7 +22,7 @@ silent truncation.
 
 ## JWT claim shapes
 
-The platform issues **no JWT tokens**. Every credential (OAuth2 access/refresh
+The legacy MCP OAuth surface issues **no JWT tokens**. Its credentials (OAuth2 access/refresh
 tokens, API keys, resource tokens, browser sessions) is an **opaque random string**
 — they carry no claims; their attributes live in DB rows. The dashboard JWT module
 that previously lived at `auth/jwt.py` was dead code and was removed in #993 (§1).

@@ -4,6 +4,14 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## Unreleased
+
+### Added
+- **Optional identity provider for confidential web clients** ([#2781](https://github.com/kagura-ai/memory-cloud/issues/2781)): a separate `/oidc` issuer provides Discovery, Authorization Code with mandatory S256 PKCE and nonce, RS256 ID tokens and public JWKS, UserInfo, rotating refresh tokens and revocation. Explicit client registrations, credential hashes, fixed grant lifetimes and current account revocation keep these credentials separate from MCP OAuth. See [operator setup](docs/ops/oidc-provider.md).
+
+### Migration
+- Migration `f36_2781_oidc_provider` adds independent client, grant, code and token tables. The provider stays disabled until `OIDC_ENABLED` and its issuer/signing settings are configured; existing `/oauth` clients and MCP scopes are unchanged.
+
 ## [v0.157.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.157.0) — 2026-11-11
 
 The memory health report and plan management move next to what they describe, a Slack connector can give each channel its own destination context (off by default), and each release tag now publishes the server listing to the Official MCP Registry.

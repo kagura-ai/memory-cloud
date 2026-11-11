@@ -8,7 +8,7 @@ approval (``device_confirm``) and the refresh grant. They all meet on the
 owner's ``users`` row, so the order below is the one every one of them
 follows (#1770):
 
-    users → oauth_authorization_codes → oauth_device_codes → oauth_tokens
+    users → oauth_authorization_codes → oauth_device_codes → oauth_tokens → oidc_grants
 
 - The revoker takes ``users FOR UPDATE`` first, then touches the grant
   tables in that order.
@@ -26,6 +26,10 @@ follows (#1770):
   the exchanges into this order too — give them the user lock first.
 
 Nothing here commits: the caller owns the transaction.
+
+The isolated OIDC provider also takes the user lock before its grant/code/token
+locks. Revoking its family refuses pending codes and every access/refresh pair;
+erasure deletes that family and cascades the children (#2781).
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.expression import Executable
 
 from models.auth import OAuth2AuthorizationCode, OAuth2DeviceCode, OAuth2Token, User
+from models.oidc import OIDCGrant
 from utils.datetime import utcnow
 
 
@@ -50,6 +55,7 @@ class RevokedGrants:
     authorization_codes: int
     device_codes: int
     tokens: int
+    identity_grants: int = 0
 
 
 def grant_revocation_statements(
@@ -72,6 +78,7 @@ def grant_revocation_statements(
     yield delete(OAuth2DeviceCode).where(OAuth2DeviceCode.user_id == user_id)
     if delete_tokens:
         yield delete(OAuth2Token).where(OAuth2Token.user_id == user_id)
+        yield delete(OIDCGrant).where(OIDCGrant.user_id == user_id)
         return
     now = utcnow()
     yield (
@@ -88,6 +95,14 @@ def grant_revocation_statements(
             access_token_revoked_at=func.coalesce(OAuth2Token.access_token_revoked_at, now),
             refresh_token_revoked_at=func.coalesce(OAuth2Token.refresh_token_revoked_at, now),
         )
+    )
+    # Identity writers also lock users first, then the identity grant and its
+    # code/token. Updating the family invalidates both pending and issued
+    # credentials atomically with the reset. Erasure cascades its children.
+    yield (
+        update(OIDCGrant)
+        .where(OIDCGrant.user_id == user_id, OIDCGrant.revoked_at.is_(None))
+        .values(revoked_at=utcnow())
     )
 
 
@@ -135,11 +150,12 @@ def revoke_oauth_grants_sync(
 
 
 def _revoked(results: Sequence[Result[Any]]) -> RevokedGrants:
-    _lock, codes, devices, tokens = results
+    _lock, codes, devices, tokens, identity = results
     return RevokedGrants(
         authorization_codes=_rowcount(codes),
         device_codes=_rowcount(devices),
         tokens=_rowcount(tokens),
+        identity_grants=_rowcount(identity),
     )
 
 

@@ -33188,6 +33188,123 @@
         ]
       }
     },
+    "/oidc/.well-known/openid-configuration": {
+      "get": {
+        "operationId": "discovery_oidc__well_known_openid_configuration_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "oidc"
+        ]
+      }
+    },
+    "/oidc/authorize": {
+      "get": {
+        "operationId": "authorize_oidc_authorize_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "oidc"
+        ]
+      },
+      "post": {
+        "operationId": "authorize_oidc_authorize_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "oidc"
+        ]
+      }
+    },
+    "/oidc/jwks": {
+      "get": {
+        "operationId": "jwks_oidc_jwks_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "oidc"
+        ]
+      }
+    },
+    "/oidc/revoke": {
+      "post": {
+        "operationId": "revoke_oidc_revoke_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "oidc"
+        ]
+      }
+    },
+    "/oidc/token": {
+      "post": {
+        "operationId": "token_oidc_token_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "oidc"
+        ]
+      }
+    },
+    "/oidc/userinfo": {
+      "get": {
+        "operationId": "userinfo_oidc_userinfo_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "oidc"
+        ]
+      }
+    },
     "/readiness": {
       "get": {
         "operationId": "readiness_readiness_get",

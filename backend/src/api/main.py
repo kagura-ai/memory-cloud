@@ -872,6 +872,7 @@ from api.routes import (  # noqa: E402
     oauth,
     observability,  # Issue #2679: internal read-only observability API
     observation_credentials,  # Issue #2679: read-only observability credentials
+    oidc,  # #2781: identity provider with independent clients and grants
     operation_history,
     passkeys,
     password,  # Issue #1678: self-service password endpoints
@@ -926,6 +927,7 @@ app.include_router(password.me_router, prefix="/api/v1")
 
 # OAuth2 Server routes (Issue #33 - OAuth2 client management)
 app.include_router(oauth.router, prefix="/api/v1")
+app.include_router(oidc.router, prefix="/oidc")
 
 # API Keys routes (Issue #34 - API Keys management)
 app.include_router(api_keys.router, prefix="/api/v1")

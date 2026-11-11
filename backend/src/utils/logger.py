@@ -12,6 +12,7 @@ from typing import TextIO
 
 import structlog
 
+from auth.oidc_logging import redact_oidc_credentials
 from utils.url_redact import redact_invite_tokens
 
 # #1359: asyncpg composes CHECK/constraint-violation messages with a
@@ -40,7 +41,7 @@ def _scrub_text(text: str) -> str:
     """
     if "DETAIL:" in text:
         text = _PG_DETAIL_RE.sub(_REDACTED, text)
-    return redact_invite_tokens(text)
+    return redact_oidc_credentials(redact_invite_tokens(text))
 
 
 def _scrub_detail(value):  # noqa: ANN001, ANN202
@@ -114,7 +115,7 @@ def _redacting_console_traceback(sio, exc_info) -> None:
     """
     buffer = io.StringIO()
     structlog.dev.plain_traceback(buffer, exc_info)
-    sio.write(_PG_DETAIL_RE.sub(_REDACTED, buffer.getvalue()))
+    sio.write(_scrub_text(buffer.getvalue()))
 
 
 def _wrap_uvicorn_handlers() -> None:
