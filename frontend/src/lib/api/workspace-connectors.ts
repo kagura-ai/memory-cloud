@@ -72,6 +72,37 @@ export interface WorkspaceConnectorSummary {
   // the pair's combined traffic. Without this a dead connector could read as
   // healthy off its sibling — the one case where these numbers can mislead.
   ingest_context_shared: boolean;
+  // #1759: per-channel destinations and what happens to a private channel
+  // without one. Optional only for a server that predates them (rolling
+  // deploy) — treat absent as no routes / "default".
+  channel_routes?: ConnectorChannelRoute[];
+  unrouted_private_channels?: UnroutedPrivateChannels;
+}
+
+// #1759: what happens to a private channel that has no route.
+export type UnroutedPrivateChannels = "default" | "skip";
+
+/**
+ * #1759: one stored channel destination as the server reads it back.
+ * `destination_missing`: the route's context was deleted — the channel is not
+ * ingested until an admin picks a new destination (never the default context).
+ * `context_name` / `context_is_private` are set only while it is live.
+ */
+export interface ConnectorChannelRoute {
+  channel_id: string;
+  action: "route" | "skip";
+  context_id: string | null;
+  context_name: string | null;
+  context_is_private: boolean | null;
+  status: "ok" | "destination_missing";
+}
+
+/** #1759: one channel destination in a settings PATCH. */
+export interface ConnectorChannelRouteInput {
+  channel_id: string;
+  action: "route" | "skip";
+  // Required for "route", absent for "skip".
+  context_id?: string;
 }
 
 export interface ConnectorReadiness {
@@ -236,6 +267,11 @@ export interface UpdateConnectorSettingsRequest {
   // #1428: re-point the write-target context in place (no delete→recreate).
   // Must be a live context in this workspace; null clears the binding.
   context_id?: string | null;
+  // #1759: the FULL list of per-channel destinations (replaces the stored
+  // ones; [] or null removes them all). Omit to leave them untouched.
+  channel_routes?: ConnectorChannelRouteInput[] | null;
+  // #1759: never null; omit to leave it untouched.
+  unrouted_private_channels?: UnroutedPrivateChannels;
 }
 
 export interface UpdateConnectorSettingsResponse {
@@ -246,6 +282,9 @@ export interface UpdateConnectorSettingsResponse {
   locale: string | null;
   config_version: number;
   context_id: string | null;
+  // #1759
+  channel_routes?: ConnectorChannelRoute[];
+  unrouted_private_channels?: UnroutedPrivateChannels;
 }
 
 export async function updateConnectorSettings(

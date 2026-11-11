@@ -83,6 +83,14 @@ import { useErrorGate } from "@/hooks/useErrorGate";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
+import {
+  ChannelRoutesEditor,
+  ChannelRoutesSummary,
+  buildRoutesPatch,
+  routeDraftFromStored,
+  routeErrorsFromApiError,
+  type RouteDraft,
+} from "./ChannelRoutesEditor";
 import { MissingScopesNotice } from "./MissingScopesNotice";
 import {
   TeamConflictAlert,
@@ -239,6 +247,9 @@ export default function ConnectorsPage() {
   // LLM as un-vendable. Missing flag → false (OSS/self-host default-off).
   const features = useSystemFeatures();
   const managedConnectors = features?.managed_connectors === true;
+  // #1759: per-channel destinations are editable only where the deployment
+  // says the worker honours them; stored ones are shown read-only otherwise.
+  const channelRoutingEnabled = features?.connector_channel_routing === true;
 
   // Copy with the shared per-key feedback hook (unmount-safe, 2000ms standard);
   // surface clipboard failures via the destructive-toast channel.
@@ -349,6 +360,15 @@ export default function ConnectorsPage() {
   const [llmModel, setLlmModel] = useState("");
   const [llmApiKey, setLlmApiKey] = useState("");
   const [settingsSaving, setSettingsSaving] = useState(false);
+  // #1759: per-channel destinations draft, the unrouted-private switch, and
+  // the server's per-row refusals (ChannelRoutesEditor).
+  const [routeDraft, setRouteDraft] = useState<RouteDraft>({});
+  const [routeUnrouted, setRouteUnrouted] = useState<"default" | "skip">(
+    "default",
+  );
+  const [routeRowErrors, setRouteRowErrors] = useState<
+    Record<string, "notFound" | "keyOwner">
+  >({});
   const [settingsError, setSettingsError] = useState<string | null>(null);
   // #1388: deleting the stored LLM bundle is an explicit destructive action
   // (confirm dialog + immediate PATCH), not a latched save-time toggle.
@@ -543,6 +563,9 @@ export default function ConnectorsPage() {
       setLlmModel("");
       setLlmApiKey("");
       setSettingsError(null);
+      setRouteDraft(routeDraftFromStored(c.channel_routes));
+      setRouteUnrouted(c.unrouted_private_channels ?? "default");
+      setRouteRowErrors({});
     },
     [],
   );
@@ -615,6 +638,24 @@ export default function ConnectorsPage() {
         ...(llmApiKey.trim() ? { api_key: llmApiKey.trim() } : {}),
       };
     }
+    // #1759: routes and the switch ride the same PATCH, only when changed.
+    setRouteRowErrors({});
+    if (channelRoutingEnabled) {
+      const routes = buildRoutesPatch(
+        routeDraft,
+        routeUnrouted,
+        settingsFor.channel_routes,
+        settingsFor.unrouted_private_channels,
+      );
+      if (!routes.ok) {
+        setRouteRowErrors(
+          Object.fromEntries(routes.missing.map((id) => [id, "notFound"])),
+        );
+        setSettingsError(t("routeChooseDestination"));
+        return;
+      }
+      Object.assign(patch, routes.patch);
+    }
     // #1471: memory_link_template is a RUNTIME field, so it rides the other
     // endpoint. Empty input clears the override to null rather than storing "".
     const newLinkTemplate = memoryLinkTemplate.trim() || null;
@@ -658,6 +699,7 @@ export default function ConnectorsPage() {
       void reload();
     } catch (err) {
       setSettingsError(err instanceof Error ? err.message : String(err));
+      setRouteRowErrors(routeErrorsFromApiError(err, routeDraft));
       // Recover from a stale-snapshot 409: without the re-sync every retry
       // re-sends the same stale expected_config_version and loops.
       void resyncSettingsSnapshot();
@@ -673,6 +715,9 @@ export default function ConnectorsPage() {
     llmProvider,
     llmModel,
     llmApiKey,
+    channelRoutingEnabled,
+    routeDraft,
+    routeUnrouted,
     t,
     toast,
     reload,
@@ -1554,6 +1599,26 @@ export default function ConnectorsPage() {
                   />
                 )}
               </div>
+              {settingsFor &&
+                (channelRoutingEnabled ? (
+                  <ChannelRoutesEditor
+                    connectorId={settingsFor.connector_id}
+                    selectedChannelIds={parseChannelIds(chText)}
+                    value={routeDraft}
+                    onChange={setRouteDraft}
+                    unrouted={routeUnrouted}
+                    onUnroutedChange={setRouteUnrouted}
+                    storedRoutes={settingsFor.channel_routes}
+                    defaultContextId={settingsFor.context_id}
+                    defaultContextName={settingsFor.context_name}
+                    rowErrors={routeRowErrors}
+                  />
+                ) : (
+                  <ChannelRoutesSummary
+                    routes={settingsFor.channel_routes}
+                    unrouted={settingsFor.unrouted_private_channels}
+                  />
+                ))}
             </section>
             {/* Section 2 — language */}
             <section className="space-y-2 border-t pt-4">

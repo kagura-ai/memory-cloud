@@ -2425,3 +2425,129 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(mockUpdateConnectorSettings).not.toHaveBeenCalled();
   });
 });
+
+// #1759: per-channel destinations in the settings dialog. The editor itself
+// is covered by ChannelRoutesEditor.test.tsx; these pin the page wiring:
+// the flag, what the save sends, and where a refusal shows.
+describe("connector channel destinations (#1759)", () => {
+  const storedRoute = {
+    channel_id: "C1",
+    action: "route" as const,
+    context_id: "ctx-a",
+    context_name: "Sales",
+    context_is_private: false,
+    status: "ok" as const,
+  };
+
+  beforeEach(() => {
+    mockGetContexts.mockResolvedValue({
+      contexts: [
+        { id: "ctx-a", name: "sales", display_name: "Sales", is_private: false },
+      ],
+    });
+  });
+
+  async function openSettings() {
+    render(<ConnectorsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+  }
+
+  it("flag off: no editor, stored routes read-only, never sent", async () => {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([
+      makeConnector({
+        channel_routes: [storedRoute],
+        unrouted_private_channels: "skip",
+      }),
+    ]);
+    mockUpdateConnectorSettings.mockResolvedValue({
+      connector_id: "connector-1",
+      channel_ids: ["C1", "C2"],
+      config_version: 4,
+    });
+    await openSettings();
+
+    expect(
+      await screen.findByTestId("channel-routes-summary"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("channel-routes-editor")).toBeNull();
+    fireEvent.change(await screen.findByLabelText("channelsLabel"), {
+      target: { value: "C1, C2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { channel_ids: ["C1", "C2"] },
+        3,
+      ),
+    );
+  });
+
+  it("flag on: the switch alone is sent, with the version guard", async () => {
+    setWorkspace("admin");
+    mockUseSystemFeatures.mockReturnValue({ connector_channel_routing: true });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_routes: [storedRoute] }),
+    ]);
+    mockUpdateConnectorSettings.mockResolvedValue({
+      connector_id: "connector-1",
+      channel_ids: ["C1"],
+      config_version: 4,
+    });
+    await openSettings();
+
+    expect(
+      await screen.findByTestId("channel-routes-editor"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("channel-routes-summary")).toBeNull();
+    fireEvent.click(screen.getByRole("switch"));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { unrouted_private_channels: "skip" },
+        3,
+      ),
+    );
+  });
+
+  it("flag on: an unchanged dialog sends nothing", async () => {
+    setWorkspace("admin");
+    mockUseSystemFeatures.mockReturnValue({ connector_channel_routing: true });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_routes: [storedRoute] }),
+    ]);
+    await openSettings();
+    await screen.findByTestId("channel-routes-editor");
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    expect(await screen.findByText("noChanges")).toBeInTheDocument();
+    expect(mockUpdateConnectorSettings).not.toHaveBeenCalled();
+  });
+
+  it("flag on: a refused destination shows next to its row", async () => {
+    setWorkspace("admin");
+    mockUseSystemFeatures.mockReturnValue({ connector_channel_routing: true });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_routes: [storedRoute] }),
+    ]);
+    mockUpdateConnectorSettings.mockRejectedValue(
+      new ApiError({
+        status: 404,
+        error: "RES-001",
+        message: "Context not found: ctx-a",
+      }),
+    );
+    await openSettings();
+    await screen.findByTestId("channel-routes-editor");
+    fireEvent.click(screen.getByRole("switch"));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    const row = await screen.findByTestId("route-row-C1");
+    expect(
+      await within(row).findByText("routeDestinationNotFound"),
+    ).toBeInTheDocument();
+  });
+});
