@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import delete
 
 from auth.workspace_roles import WorkspaceRole
 from models.auth import (
@@ -875,6 +876,16 @@ async def _join(db, workspace_id, user_id, role, allowed=None) -> None:
     await db.flush()
 
 
+async def _leave(db, workspace_id, user_id) -> None:
+    """Remove a member row, as leaving or being removed from a workspace does."""
+    await db.execute(
+        delete(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id, WorkspaceMember.user_id == user_id
+        )
+    )
+    await db.flush()
+
+
 async def _memory(db, user_id: str, workspace_id, context_id) -> None:
     db.add(
         Memory(
@@ -1043,13 +1054,16 @@ class TestLinkedAccountScopeRespectsMembership:
         assert await self._covered(db_session, a, ctx) is False
 
     @pytest.mark.asyncio
-    async def test_the_callers_own_context_needs_no_membership(self, db_session) -> None:
-        """The ``created_by == caller`` branch is unchanged."""
+    async def test_the_callers_own_context_needs_a_membership(self, db_session) -> None:
+        """#2764: the caller's own contexts follow the same open-workspace rule
+        (it used to need no membership while the report was admin-only)."""
         a, b = _uid("a"), _uid("b")
         await _link(db_session, a, b)
         ws = await _workspace(db_session, b)
         mine = await _private_context(db_session, ws, a)
 
+        assert await self._covered(db_session, a, mine) is False
+        await _join(db_session, ws, a, WorkspaceRole.MEMBER, [mine])
         assert await self._covered(db_session, a, mine) is True
 
     @pytest.mark.asyncio
@@ -1067,6 +1081,107 @@ class TestLinkedAccountScopeRespectsMembership:
             assert resolved.await_count == 2
             await svc.build_context_report(a, None)
             assert resolved.await_count == 3
+
+
+class TestOwnContextNeedsAnOpenWorkspace:
+    """#2764: the report is open to every signed-in user, so "contexts the
+    caller created" means those in a live workspace the caller can still
+    open. A caller who left the workspace, or whose workspace was deleted,
+    gets neither the context's name nor its config posture; the caller's own
+    rows recorded there fold into the unattributed bucket."""
+
+    async def _created_in_someone_elses_workspace(self, db) -> tuple[str, uuid.UUID, uuid.UUID]:
+        caller, owner = _uid("c"), _uid("o")
+        ws = await _workspace(db, owner)
+        await _join(db, ws, owner, WorkspaceRole.OWNER)
+        await _join(db, ws, caller, WorkspaceRole.ADMIN)
+        ctx = await _private_context(db, ws, caller)
+        await _memory(db, caller, ws, ctx)
+        db.add(
+            SleepReport(
+                user_id=caller,
+                workspace_id=ws,
+                context_id=ctx,
+                status="failed",
+                source="sleep",
+                paid_by="platform",
+                started_at=utcnow(),
+            )
+        )
+        await db.flush()
+        return caller, ws, ctx
+
+    @staticmethod
+    async def _listed(db, caller: str, ctx: uuid.UUID) -> bool:
+        svc = MemoryHealthService(db)
+        breakdown = await svc.build_breakdown(caller)
+        listed = str(ctx) in {e["context_id"] for e in breakdown["contexts"]}
+        # The breakdown and the detail path agree.
+        assert (await svc.build_context_report(caller, ctx) is not None) is listed
+        return listed
+
+    @pytest.mark.asyncio
+    async def test_a_member_sees_the_context_they_created(self, db_session) -> None:
+        caller, _, ctx = await self._created_in_someone_elses_workspace(db_session)
+
+        assert await self._listed(db_session, caller, ctx) is True
+
+    @pytest.mark.asyncio
+    async def test_removed_member_no_longer_sees_it(self, db_session) -> None:
+        caller, ws, ctx = await self._created_in_someone_elses_workspace(db_session)
+        await _leave(db_session, ws, caller)
+
+        assert await self._listed(db_session, caller, ctx) is False
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_workspace_no_longer_shows_it(self, db_session) -> None:
+        caller = _uid("c")
+        ws = await _workspace(db_session, caller)
+        await _join(db_session, ws, caller, WorkspaceRole.OWNER)
+        ctx = await _private_context(db_session, ws, caller)
+        (await db_session.get(Workspace, ws)).deleted_at = utcnow()
+        await db_session.flush()
+
+        assert await self._listed(db_session, caller, ctx) is False
+
+    @pytest.mark.asyncio
+    async def test_legacy_owner_without_a_member_row_still_sees_it(self, db_session) -> None:
+        caller = _uid("c")
+        ws = await _workspace(db_session, caller)  # owner_user_id only, no member row
+        ctx = await _private_context(db_session, ws, caller)
+
+        assert await self._listed(db_session, caller, ctx) is True
+
+    @pytest.mark.asyncio
+    async def test_own_rows_of_an_excluded_context_fold_into_unattributed(self, db_session) -> None:
+        caller, ws, ctx = await self._created_in_someone_elses_workspace(db_session)
+        await _leave(db_session, ws, caller)
+
+        breakdown = await MemoryHealthService(db_session).build_breakdown(caller)
+
+        assert [(e["context_id"], e["name"]) for e in breakdown["contexts"]] == [(None, None)]
+        # The failed sleep run did not vanish: it grades the unattributed bucket.
+        assert breakdown["contexts"][0]["sections"]["consolidation"] == STATUS_FAIL
+        detail = await MemoryHealthService(db_session).build_context_report(caller, None)
+        assert detail["context_name"] is None
+        assert detail["sections"]["graph"]["metrics"]["active_memories"] == 1
+
+    @pytest.mark.asyncio
+    async def test_route_answers_the_unknown_id_404(self, db_session) -> None:
+        from fastapi import HTTPException
+
+        from api.routes.memory_health import get_memory_health
+
+        caller, ws, ctx = await self._created_in_someone_elses_workspace(db_session)
+        await _leave(db_session, ws, caller)
+
+        user = {"user_id": caller}
+        with pytest.raises(HTTPException) as left:
+            await get_memory_health(user, ctx, db_session)
+        with pytest.raises(HTTPException) as unknown:
+            await get_memory_health(user, uuid.uuid4(), db_session)
+        assert left.value.status_code == unknown.value.status_code == 404
+        assert left.value.detail == unknown.value.detail
 
 
 class TestAnalysisReportsDoNotGradeSleep:

@@ -17,7 +17,9 @@ warning always names the context it came from.
   with an empty list.
 - `GET /api/v1/memory-health?context_id=<uuid>` — the 3-section
   detailed document for that single context. Ownership is validated
-  (`created_by` = caller, not deleted); anything else is a uniform 404.
+  (`created_by` = caller, not deleted, in a live workspace the caller can
+  still open — a member as below, or the workspace's owner — #2764);
+  anything else is a uniform 404.
   A private context created by a **linked account** is covered too, but
   only where the caller can open it as itself — the rule of the context
   read path: a member of the context's (live) workspace as owner/admin, as
@@ -28,7 +30,8 @@ warning always names the context it came from.
   document for signals that do not belong to an owned, live context:
   recorded **without** a `context_id` (account-wide sleep runs, legacy
   rows), or under a **soft-deleted** context, or under a **shared context
-  created by another member**. These fold into one explicit "unattributed"
+  created by another member**, or under a context the caller created in a
+  workspace it left or that was deleted. These fold into one explicit "unattributed"
   breakdown entry instead of being silently dropped — dropping them would
   hide Phase-1 warnings behind the new grouping. The unattributed entry
   skips the cold-graph and write-only heuristics (it mixes scopes, so both

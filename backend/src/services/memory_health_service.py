@@ -19,8 +19,9 @@ Scope rules (gate1/COO, #1211; per-context leaf scoping added by #1225):
 - **Conservative thresholds**: FAIL only on deterministic facts (latest run
   failed, invariant violated); WARN on degradation signals. A false FAIL
   erodes dashboard trust (the eval-infra lesson).
-- **Self-scoped**: reports cover the calling admin's own data partition,
-  broken down per owned context (#1225). Signals that do not belong to an
+- **Self-scoped**: reports cover the caller's own data partition, broken
+  down per owned context (#1225) — a context the caller created in a live
+  workspace it can still open (#2764). Signals that do not belong to an
   owned, live context — recorded without a ``context_id`` (account-wide
   sleep runs, legacy rows), or under a soft-deleted context, or under a
   shared context created by another member — fold into one explicit
@@ -43,7 +44,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, literal_column, or_, select
+from sqlalchemy import and_, false, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import reachable_context_ids
@@ -140,10 +141,11 @@ class _CallerScope:
     """What one report needs to know about the caller, resolved once (#1874).
 
     ``owners`` is the identity-link set (the caller included). The other two
-    fields describe which contexts the caller can open as itself, and are only
-    filled when the caller has a linked account: ``open_workspaces`` are the
-    live workspaces where its membership admits every context,
-    ``whitelists`` the per-workspace ``allowed_context_ids`` of the others.
+    fields describe which contexts the caller can open as itself (#2764: for
+    every caller, not only a linked one): ``open_workspaces`` are the live
+    workspaces where its membership admits every context, plus the live
+    workspaces it owns without a member row (legacy), ``whitelists`` the
+    per-workspace ``allowed_context_ids`` of the others.
     """
 
     owners: frozenset[str]
@@ -249,13 +251,10 @@ class MemoryHealthService:
     # -------------------------------------------------------------- scoping
 
     async def _resolve_caller_scope(self, user_id: str) -> _CallerScope:
-        """The link set and, for a linked caller, its workspace memberships:
-        one lookup each per report (#1874)."""
+        """The link set and the caller's live workspace memberships: one
+        lookup each per report (#1874), plus the live workspaces it owns
+        (#2764)."""
         owners = await linked_user_ids(self.db, user_id)
-        if owners <= {user_id}:
-            # No linked account: only ``created_by == caller`` can match, and
-            # that branch asks nothing of the caller's memberships.
-            return _CallerScope(owners=owners)
         rows = await self.db.execute(
             select(
                 WorkspaceMember.workspace_id,
@@ -277,6 +276,17 @@ class MemoryHealthService:
                 open_workspaces.add(workspace_id)
             elif reachable:
                 whitelists.append((workspace_id, reachable))
+        # #2764: a legacy workspace can carry ``owner_user_id`` without a
+        # member row for its owner; the owner still opens all of it.
+        member_of = {workspace_id for workspace_id, _ in whitelists} | open_workspaces
+        owned_rows = await self.db.execute(
+            select(Workspace.id).where(
+                Workspace.owner_user_id == user_id, Workspace.deleted_at.is_(None)
+            )
+        )
+        for (workspace_id,) in owned_rows.all():
+            if workspace_id not in member_of:
+                open_workspaces.add(workspace_id)
         return _CallerScope(
             owners=owners,
             open_workspaces=frozenset(open_workspaces),
@@ -286,33 +296,37 @@ class MemoryHealthService:
     @staticmethod
     def _owned_context_filter(user_id: str, caller: _CallerScope) -> tuple[Any, ...]:
         """The Phase-1 self-scope predicate, defined once. Phase 3 replaces
-        this with workspace semantics — every consumer updates together."""
-        owned: Any = Context.created_by == user_id
-        # #1834: the identity-link set owns PRIVATE contexts together, so the
-        # report also covers the private contexts a linked account created.
-        # Its shared contexts stay out: a link grants ownership, not
-        # membership. ``caller`` holds materialised sets, so the predicate is
-        # indexable equalities, not a correlated subquery.
-        #
-        # #1874: ... and only where the caller can open the context as itself
-        # — the rule PermissionService applies on the context read path. The
-        # caller's own contexts (the branch above) are unchanged.
-        linked = caller.owners - {user_id}
+        this with workspace semantics — every consumer updates together.
+
+        A context counts only where the caller can open it as itself — the
+        rule PermissionService applies on the context read path: a live
+        workspace the caller is a member of, as owner/admin, as a viewer with
+        no whitelist, or with a whitelist naming the context (#1874 for the
+        linked branch, #2764 for the caller's own contexts, since the report
+        is no longer admin-only). A legacy workspace owner without a member
+        row opens its whole workspace. ``caller`` holds materialised sets, so
+        the predicate is indexable equalities, not a correlated subquery.
+        """
         openable: list[Any] = []
         if caller.open_workspaces:
             openable.append(Context.workspace_id.in_(caller.open_workspaces))
         for workspace_id, context_ids in caller.whitelists:
             openable.append(and_(Context.workspace_id == workspace_id, Context.id.in_(context_ids)))
-        if linked and openable:
+        if not openable:
+            # No workspace the caller can open: no context counts.
+            return (false(), Context.deleted_at.is_(None))
+        owned: Any = Context.created_by == user_id
+        # #1834: the identity-link set owns PRIVATE contexts together, so the
+        # report also covers the private contexts a linked account created.
+        # Its shared contexts stay out: a link grants ownership, not
+        # membership.
+        linked = caller.owners - {user_id}
+        if linked:
             owned = or_(
                 owned,
-                and_(
-                    Context.created_by.in_(linked),
-                    Context.is_private.is_(True),
-                    or_(*openable),
-                ),
+                and_(Context.created_by.in_(linked), Context.is_private.is_(True)),
             )
-        return (owned, Context.deleted_at.is_(None))
+        return (owned, or_(*openable), Context.deleted_at.is_(None))
 
     @staticmethod
     def _rows_of(
