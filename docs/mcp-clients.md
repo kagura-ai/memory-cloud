@@ -264,6 +264,10 @@ Gemini registers redirect URIs on Google's three OAuth redirector hosts (`oauth-
 2. Add that URL as a remote MCP server in Muse.
 3. Sign in to Kagura and approve access when prompted. KMC handles OAuth client registration automatically for Muse’s supported callbacks.
 
+## Google connected apps
+
+A deployment registered in Google's connected apps program lists its app's redirect URIs in `GOOGLE_CONNECTED_APPS_REDIRECT_URIS` ([deployment](deployment.md#google-connected-apps-issue-2773)). Google's client registers itself with exactly those URIs and, as Google's persistent-linking rule requires, keeps its refresh token: a refresh returns the same refresh token and a new access token. Every other client (Claude, ChatGPT, Gemini's custom connector, Muse, CLIs) gets a new refresh token on each refresh and the old one stops working. Revoking the refresh token, or the current access token, ends Google's link at once.
+
 ## Gemini CLI
 
 Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):

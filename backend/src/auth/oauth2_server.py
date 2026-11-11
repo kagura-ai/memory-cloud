@@ -53,11 +53,12 @@ from authlib.oauth2.rfc7636.challenge import (
     compare_s256_code_challenge,
 )
 from authlib.oauth2.rfc8628 import DeviceCodeGrant as _DeviceCodeGrant
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
+from auth.google_connected_apps import keeps_refresh_token
 from auth.mcp_resource import is_same_mcp_resource, mcp_resource_identifier
 from auth.oauth_scope import client_registered_scope, granted_scope
 from auth.oauth_token_storage import hash_oauth_token, issuance_storage_mode, token_lookup_values
@@ -862,11 +863,18 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
         - Rotation is atomic: one refresh per refresh token issues a token
         - The requested scope cannot exceed the original grant
         - The new token keeps the audience of the refreshed one (RFC 8707)
+        - A Google connected-apps client (``keeps_refresh_token``, #2773)
+          is not rotated: its refresh answers with the same refresh token
+          and rewrites the access token of the same row
     """
 
     # Token endpoint auth methods (Issue #157: Public Client + PKCE support)
     TOKEN_ENDPOINT_AUTH_METHODS = _TOKEN_ENDPOINT_AUTH_METHODS
     TOKEN_EXPIRES_IN = 3600
+
+    #: Whether this refresh keeps the refresh token (#2773), decided once per
+    #: request from the authenticated client in ``validate_token_request``.
+    keep_refresh_token: bool = False
 
     def validate_token_request(self) -> None:
         """Validate the refresh request and settle the new token's audience.
@@ -888,6 +896,20 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
         self.token_resource = settle_audience(
             requested_resource(self.request.payload), credential.resource
         )
+        self.keep_refresh_token = keeps_refresh_token(self.request.client)
+
+    def issue_token(self, user: Any, refresh_token: OAuth2Token) -> dict[str, Any]:
+        """Issue the new token; a kept refresh token is echoed back (#2773).
+
+        Google's persistent linking asks for "the exact same Refresh Token in
+        the JSON response". Only digests are stored, so the value is the one
+        the client sent in this request, which found the row through
+        ``token_lookup_values`` in :meth:`authenticate_refresh_token`.
+        """
+        token = cast(dict[str, Any], super().issue_token(user, refresh_token))
+        if self.keep_refresh_token:
+            token["refresh_token"] = self.request.form["refresh_token"]
+        return token
 
     def generate_token(
         self,
@@ -982,9 +1004,15 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
         row, so of two refreshes with one refresh token only one issues a
         token.
 
+        A kept refresh token (#2773) is handled by :meth:`_rewrite_access_token`
+        instead: no rotation, the same row gets the new access token.
+
         Raises:
             InvalidGrantError: The refresh token was rotated by another request.
         """
+        if self.keep_refresh_token:
+            self._rewrite_access_token(token)
+            return
         credential = cast(OAuth2Token, self.request.refresh_token)
         client_id, user_id = credential.client_id, credential.user_id
         session = self.server.db_session
@@ -1009,6 +1037,64 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
             raise InvalidGrantError()
         super().save_token(token)
         logger.info("oauth_refresh_token_rotated", client_id=client_id, user_id=user_id)
+
+    def _rewrite_access_token(self, token: dict[str, Any]) -> None:
+        """Store the new access token in the refreshed row, keeping its refresh token.
+
+        Google connected apps (#2773): the row keeps its refresh token digest
+        and stays unrevoked; the access token digest, ``issued_at`` (the same
+        database clock as the INSERT default), lifetime, scope and audience
+        are rewritten. The previous access token of the row stops working at
+        once, as its digest is replaced; that is accepted (the client was
+        asking for a new one).
+
+        The row is still locked ``FOR UPDATE`` by
+        :meth:`authenticate_refresh_token` (after the owner's ``users`` row),
+        so a revocation or a second refresh with the same token waits for
+        this commit. The second refresh then succeeds too and replaces this
+        access token in turn: a client that retries a refresh only loses the
+        access token of the earlier answer. The update matches only the
+        unrevoked row (``refresh_token_revoked_at`` and ``revoked``); a
+        refresh token revoked meanwhile is ``invalid_grant``.
+
+        Raises:
+            InvalidGrantError: The refresh token was revoked by another request.
+        """
+        credential = cast(OAuth2Token, self.request.refresh_token)
+        client_id, user_id = credential.client_id, credential.user_id
+        session = self.server.db_session
+        storage_mode = issuance_storage_mode(session)
+        access_token = (
+            hash_oauth_token(token["access_token"])
+            if storage_mode == "hashed"
+            else token["access_token"]
+        )
+        rewritten = (
+            session.query(OAuth2Token)
+            .filter(
+                OAuth2Token.id == credential.id,
+                OAuth2Token.refresh_token_revoked_at.is_(None),
+                OAuth2Token.revoked.is_(False),
+            )
+            .update(
+                {
+                    OAuth2Token.access_token: access_token,
+                    OAuth2Token.access_token_revoked_at: None,
+                    OAuth2Token.issued_at: func.now(),
+                    OAuth2Token.expires_in: token.get("expires_in", self.TOKEN_EXPIRES_IN),
+                    OAuth2Token.token_type: token.get("token_type", "Bearer"),
+                    OAuth2Token.scope: token.get("scope", ""),
+                    OAuth2Token.resource: self.token_resource,
+                },
+                synchronize_session=False,
+            )
+        )
+        if rewritten != 1:
+            session.rollback()
+            logger.warning("refresh_token_kept_revoked", client_id=client_id)
+            raise InvalidGrantError()
+        session.commit()
+        logger.info("oauth_refresh_token_kept", client_id=client_id, user_id=user_id)
 
     def revoke_old_credential(self, credential: OAuth2Token) -> None:
         """Called by Authlib after issuing the new token pair.

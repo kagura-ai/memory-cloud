@@ -72,6 +72,11 @@ from starlette.requests import ClientDisconnect
 
 from auth.consent_csrf import consent_csrf_token, consent_csrf_valid
 from auth.dependencies import SessionUser, require_admin
+from auth.google_connected_apps import (
+    GOOGLE_CONNECTED_APPS_PROVIDER,
+    is_google_connected_apps_redirect_uri,
+    keeps_refresh_token,
+)
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
     AUTHORIZATION_REQUEST_SINGLE_VALUED,
@@ -88,6 +93,10 @@ from auth.oauth_scope import client_registered_scope, granted_scope, registratio
 from auth.oauth_token_storage import token_lookup_values, token_matches
 from auth.session import SESSION_COOKIE_NAME
 from auth.starlette_oauth2_request import StarletteOAuth2Payload, StarletteOAuth2Request
+from config.google_connected_apps import (
+    GEMINI_CUSTOM_MCP_PATH_PREFIX,
+    GOOGLE_OAUTH_REDIRECTOR_HOSTS,
+)
 from config.settings import get_settings
 from db.base import get_sync_session
 from db.redis import increment_counter
@@ -746,14 +755,7 @@ _PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
 # binding on the redirector.
 # Hosts are an ordered tuple (not a frozenset) so the match order is fixed.
 _PROVIDER_EXACT_REDIRECTS: dict[str, tuple[tuple[str, ...], str]] = {
-    "gemini": (
-        (
-            "oauth-redirect.googleusercontent.com",
-            "oauth-redirect-sandbox.googleusercontent.com",
-            "oauth-redirect-test.googleusercontent.com",
-        ),
-        "/r/user_bound_custom-mcp-",
-    ),
+    "gemini": (GOOGLE_OAUTH_REDIRECTOR_HOSTS, GEMINI_CUSTOM_MCP_PATH_PREFIX),
 }
 
 # ``(base, provider)`` pairs, ``base`` = ``https://<host><prefix>``, built once.
@@ -839,11 +841,14 @@ _LOOPBACK_CLIENT_LABELS: tuple[str, ...] = (
 # is a superset of ``_PROVIDER_HOSTNAMES``), then the exact-redirect ones. The
 # exact-redirect providers are NOT loopback keywords: a loopback registration
 # whose ``client_name`` says "Gemini" stays refused (#2222). The exact-URI
-# providers (#2410) follow the same rule.
+# providers (#2410) follow the same rule, and so does Google connected apps
+# (#2773), whose exact URIs come from ``GOOGLE_CONNECTED_APPS_REDIRECT_URIS``
+# and are read at registration time.
 _DCR_ALLOWED_PROVIDERS: tuple[str, ...] = (
     *_LOOPBACK_PROVIDER_KEYWORDS,
     *_PROVIDER_EXACT_REDIRECTS,
     *_PROVIDER_EXACT_URIS,
+    GOOGLE_CONNECTED_APPS_PROVIDER,
 )
 
 
@@ -865,7 +870,9 @@ def _match_exact_redirect_provider(redirect_uri: str) -> str | None:
     """Return the exact-URI or exact-redirect provider ``redirect_uri`` names, or None.
 
     An ``_PROVIDER_EXACT_URIS`` provider (#2410) matches only its listed URIs,
-    whole and as written.
+    whole and as written; so does ``google_connected_apps`` (#2773), whose
+    URIs are ``GOOGLE_CONNECTED_APPS_REDIRECT_URIS`` as configured now (the
+    setting refuses any entry under the gemini prefix, so the two never meet).
 
     The raw string must be ``https://<host><prefix><segment>`` for one of the
     provider's hosts, character for character: the scheme and host are
@@ -883,6 +890,8 @@ def _match_exact_redirect_provider(redirect_uri: str) -> str | None:
     for provider, uris in _PROVIDER_EXACT_URIS.items():
         if redirect_uri in uris:
             return provider
+    if is_google_connected_apps_redirect_uri(redirect_uri):
+        return GOOGLE_CONNECTED_APPS_PROVIDER
     for base, provider in _EXACT_REDIRECT_BASES:
         if not redirect_uri.startswith(base):
             continue
@@ -899,7 +908,8 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
     """Detect the DCR provider from ``redirect_uri`` (+ ``client_name`` for loopback).
 
     Returns one of ``"chatgpt"``, ``"claude"``, ``"cursor"``, ``"codex"``,
-    ``"hermes"``, ``"openclaw"``, ``"gemini"``, ``"muse"``, or ``"custom"``. The caller rejects
+    ``"hermes"``, ``"openclaw"``, ``"gemini"``, ``"muse"``, ``"google_connected_apps"``,
+    or ``"custom"``. The caller rejects
     ``"custom"`` with an RFC 6749 §5.2 error response.
 
     Strategy:
@@ -913,7 +923,8 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
            ``gemini``): exact https host + pinned path prefix + one segment,
            compared as written (issue #2222); an exact-URI provider
            (``_PROVIDER_EXACT_URIS``, ``muse``): the whole URI as written
-           (issue #2410).
+           (issue #2410); ``google_connected_apps``: the whole URI as written,
+           listed in ``GOOGLE_CONNECTED_APPS_REDIRECT_URIS`` (issue #2773).
         3. Otherwise → match the parsed hostname (case-insensitive) against
            ``_PROVIDER_HOSTNAMES`` (``chatgpt`` / ``claude`` / ``cursor``)
            as exact host or single-suffix subdomain.
@@ -1082,7 +1093,9 @@ async def dynamic_client_registration(
     # list: a refused entry is never stored, so /authorize and /token never
     # accept it, and the client is the one the caller could get by sending the
     # passing entries alone. The registration is refused only when none
-    # passes. The client's provider is the first *passing* entry's.
+    # passes. The client's provider is the first *passing* entry's, except
+    # that google_connected_apps (#2773) is only ever the provider of a list
+    # made of its configured URIs alone (see below).
     accepted: list[tuple[str, str]] = []
     refused: list[str] = []
     for uri in data.redirect_uris:
@@ -1100,6 +1113,22 @@ async def dynamic_client_registration(
             accepted.append((uri, provider))
         else:
             refused.append(uri)
+
+    # A google_connected_apps client keeps its refresh token on refresh
+    # (#2773), so it must have no callback but the configured ones: next to
+    # any other accepted entry (a loopback, a gemini binding, another
+    # provider's callback) the configured entries are dropped, and the rest
+    # are registered as they would be without them.
+    connected_app_uris = [
+        uri for uri, provider in accepted if provider == GOOGLE_CONNECTED_APPS_PROVIDER
+    ]
+    if connected_app_uris and len(connected_app_uris) != len(accepted):
+        refused.extend(connected_app_uris)
+        accepted = [
+            (uri, provider)
+            for uri, provider in accepted
+            if provider != GOOGLE_CONNECTED_APPS_PROVIDER
+        ]
 
     if not accepted:
         logger.warning(
@@ -1121,7 +1150,9 @@ async def dynamic_client_registration(
                 f"Gemini must use {_GEMINI_REDIRECT_HOSTS_TEXT} with the path "
                 f"{_PROVIDER_EXACT_REDIRECTS['gemini'][1]}<one segment> and no "
                 "query or fragment. "
-                f"Muse must use exactly {_MUSE_CALLBACKS_TEXT}."
+                f"Muse must use exactly {_MUSE_CALLBACKS_TEXT}. "
+                "Google connected apps must use only the redirect URIs this "
+                "server is configured with."
             ),
         )
 
@@ -3935,7 +3966,11 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
     ``client_id``, a confidential client with its secret by HTTP Basic or
     the form. A token issued to another client is left alone and answered
     like an unknown token, ``200`` (§2.2). Revoking a refresh token also
-    revokes the access token issued with it.
+    revokes the access token issued with it. For a Google connected-apps
+    client that keeps its refresh token (#2773), revoking the current access
+    token revokes the refresh token too, so the link ends either way; an
+    access token already replaced by a refresh matches no row and is
+    answered ``200`` with nothing changed, like an unknown token.
 
     The form body is read bounded before it is parsed and before the client
     is authenticated (#2207): over ``_OAUTH_FORM_MAX_BODY_BYTES`` is
@@ -3960,12 +3995,15 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
             if isinstance(caller, JSONResponse):
                 return caller
 
+            # Locked so a refresh that rewrites this row in place (#2773)
+            # and this revocation serialize; only the token row is locked.
             oauth_token = (
                 db_session.query(OAuth2Token)
                 .filter(
                     OAuth2Token.access_token.in_(token_lookup_values(token))
                     | OAuth2Token.refresh_token.in_(token_lookup_values(token))
                 )
+                .with_for_update()
                 .first()
             )
 
@@ -3981,7 +4019,10 @@ async def oauth_revoke(request: Request) -> dict[str, str] | JSONResponse:
                     and oauth_token.access_token_revoked_at is None
                 ):
                     oauth_token.access_token_revoked_at = now
-                if token_matches(token, oauth_token.refresh_token):
+                ends_link = token_matches(token, oauth_token.refresh_token) or (
+                    token_matches(token, oauth_token.access_token) and keeps_refresh_token(caller)
+                )
+                if ends_link:
                     if oauth_token.refresh_token_revoked_at is None:
                         oauth_token.refresh_token_revoked_at = now
                     if oauth_token.access_token_revoked_at is None:

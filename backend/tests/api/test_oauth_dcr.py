@@ -1564,3 +1564,194 @@ class TestDcrPatternFollowups:
 
         with pytest.raises(ValidationError):
             getattr(oauth, schema)(client_name="manual", redirect_uris=["ftp://claude.ai/callback"])
+
+
+# ---------------------------------------------------------------------------
+# Google connected apps (#2773): exact redirect URIs from a setting
+# ---------------------------------------------------------------------------
+
+_GCA_URI = "https://oauth-redirect.googleusercontent.com/r/example-connected-app"
+_GCA_SANDBOX_URI = "https://oauth-redirect-sandbox.googleusercontent.com/r/example-connected-app"
+_GCA_GEMINI_URI = "https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-abc"
+
+
+@pytest.fixture
+def gca_listed(monkeypatch):
+    """List the two connected-app URIs in the setting, as an operator would."""
+    from config.settings import get_settings
+
+    monkeypatch.setattr(
+        get_settings(),
+        "google_connected_apps_redirect_uris",
+        f"{_GCA_URI},{_GCA_SANDBOX_URI}",
+    )
+
+
+class TestDetectDcrProviderGoogleConnectedApps:
+    @pytest.mark.usefixtures("gca_listed")
+    @pytest.mark.parametrize("redirect_uri", [_GCA_URI, _GCA_SANDBOX_URI])
+    def test_listed_uri_is_the_provider(self, redirect_uri):
+        assert detect_dcr_provider(redirect_uri, "Any Client") == "google_connected_apps"
+
+    @pytest.mark.usefixtures("gca_listed")
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            # Same host, another app or a variant of the listed one.
+            "https://oauth-redirect.googleusercontent.com/r/another-app",
+            f"{_GCA_URI}/",
+            f"{_GCA_URI}x",
+            f"{_GCA_URI}?x=1",
+            f"{_GCA_URI}#x",
+            "https://oauth-redirect-test.googleusercontent.com/r/example-connected-app",
+            "https://OAUTH-REDIRECT.googleusercontent.com/r/example-connected-app",
+            "https://oauth-redirect.googleusercontent.com:443/r/example-connected-app",
+            "https://oauth-redirect.googleusercontent.com/a/example-connected-app",
+        ],
+    )
+    def test_unlisted_uri_on_the_same_host_is_not_the_provider(self, redirect_uri):
+        assert detect_dcr_provider(redirect_uri, "Any Client") != "google_connected_apps"
+
+    def test_nothing_is_the_provider_while_the_setting_is_empty(self):
+        assert detect_dcr_provider(_GCA_URI, "Any Client") == "custom"
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_gemini_prefix_stays_gemini(self):
+        assert detect_dcr_provider(_GCA_GEMINI_URI, "Any Client") == "gemini"
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_loopback_naming_google_stays_refused(self):
+        assert detect_dcr_provider("http://localhost:8080/cb", "google_connected_apps") == "custom"
+
+    def test_allowed_explicitly(self):
+        from api.routes.oauth import _DCR_ALLOWED_PROVIDERS, _LOOPBACK_PROVIDER_KEYWORDS
+
+        assert "google_connected_apps" in _DCR_ALLOWED_PROVIDERS
+        assert "google_connected_apps" not in _LOOPBACK_PROVIDER_KEYWORDS
+
+
+class TestDcrEndpointGoogleConnectedApps:
+    """``POST /api/v1/oauth/register`` for Google connected apps (#2773)."""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app) as c:
+            yield c
+
+    def _register(self, client, redirect_uris: list[str]):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={"client_name": "Google", "redirect_uris": redirect_uris},
+            )
+        return response, fake_session
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_listed_uris_register_as_the_provider(self, client):
+        response, fake_session = self._register(client, [_GCA_URI, _GCA_SANDBOX_URI])
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == "google_connected_apps"
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "google_connected_apps"
+        assert stored.redirect_uris == [_GCA_URI, _GCA_SANDBOX_URI]
+        assert stored.token_endpoint_auth_method == "none"
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_unlisted_uri_on_the_same_host_is_refused(self, client):
+        response, fake_session = self._register(
+            client, ["https://oauth-redirect.googleusercontent.com/r/another-app"]
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_client_metadata"
+        fake_session.add.assert_not_called()
+
+    def test_listed_uri_is_refused_while_the_setting_is_empty(self, client):
+        response, fake_session = self._register(client, [_GCA_URI])
+
+        assert response.status_code == 400, response.text
+        fake_session.add.assert_not_called()
+
+    @pytest.mark.usefixtures("gca_listed")
+    @pytest.mark.parametrize(
+        "other",
+        [
+            "http://127.0.0.1:8080/callback",  # loopback without a client_name keyword
+            _GCA_GEMINI_URI,
+            "https://claude.ai/api/mcp/auth_callback",
+            _MUSE_URI,
+        ],
+    )
+    @pytest.mark.parametrize("listed_first", [True, False])
+    def test_mixed_list_never_becomes_the_provider(self, client, other, listed_first):
+        # Gate1 (#2773): a listed URI next to anything else must not carry the
+        # no-rotation provider onto an attacker's callback; the listed entries
+        # are dropped and the rest keep today's handling.
+        uris = [_GCA_URI, other] if listed_first else [other, _GCA_URI]
+        response, fake_session = self._register(client, uris)
+
+        assert response.status_code == 201, response.text
+        stored = fake_session.add.call_args.args[0]
+        if other.startswith("http://127.0.0.1"):
+            # The loopback entry is refused on its own (no client_name keyword),
+            # so what is stored is the configured URI alone, nothing else.
+            assert stored.provider == "google_connected_apps"
+            assert stored.redirect_uris == [_GCA_URI]
+            return
+        assert stored.provider != "google_connected_apps"
+        assert stored.redirect_uris == [other]
+        assert response.json()["redirect_uris"] == [other]
+
+    @pytest.mark.usefixtures("gca_listed")
+    def test_mixed_list_with_a_loopback_keyword_client(self, client):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": "Claude Code",
+                    "redirect_uris": [_GCA_URI, "http://127.0.0.1:8080/callback"],
+                },
+            )
+
+        assert response.status_code == 201, response.text
+        stored = fake_session.add.call_args.args[0]
+        assert stored.provider == "claude"
+        assert stored.redirect_uris == ["http://127.0.0.1:8080/callback"]
+
+    def test_manual_creation_with_the_provider_is_422(self):
+        # Gate1 (#2773): only DCR, through the exact list, stores this provider.
+        from auth.dependencies import require_session_auth
+
+        app.dependency_overrides[require_session_auth] = lambda: {
+            "user_id": "manual-user",
+            "current_workspace_id": None,
+        }
+        try:
+            with (
+                patch("api.routes.oauth.get_sync_session") as get_session,
+                TestClient(app) as c,
+            ):
+                response = c.post(
+                    "/api/v1/oauth/clients",
+                    json={
+                        "client_name": "manual",
+                        "redirect_uris": [_GCA_URI],
+                        "provider": "google_connected_apps",
+                    },
+                )
+        finally:
+            app.dependency_overrides.pop(require_session_auth, None)
+
+        assert response.status_code == 422, response.text
+        get_session.assert_not_called()
