@@ -28,6 +28,9 @@ for.
 ``guide`` (Google's connected-apps policy refuses discovery functions and tool
 prose that points at other tools), served with the prose and ``recall``
 annotations of ``_google_profile``; ``add_tools`` cannot bring the two back.
+``profile=microsoft`` (#2778) is the same view under a second name, for
+Microsoft 365 Copilot: everything that reads "the google view" (the list, the
+instructions, the replies, recall's learning switch) reads both names.
 """
 
 from urllib.parse import parse_qsl
@@ -76,12 +79,19 @@ CORE_TOOLS: tuple[str, ...] = (
 GOOGLE_PROFILE = "google"
 GOOGLE_EXCLUDED_TOOLS = frozenset({"describe_tools", "guide"})
 GOOGLE_TOOLS: tuple[str, ...] = tuple(n for n in CORE_TOOLS if n not in GOOGLE_EXCLUDED_TOOLS)
+# #2778: Microsoft 365 Copilot gets the google view under its own name (an
+# alias: same tools, prose, annotations, instructions and replies). Copilot
+# runs ``readOnlyHint: true`` tools without asking, and its Researcher agent
+# uses only those, so the read-only ``recall`` of this view is what it needs.
+MICROSOFT_PROFILE = "microsoft"
+GOOGLE_VIEW_PROFILES = frozenset({GOOGLE_PROFILE, MICROSOFT_PROFILE})
 
 # ``None`` = no filter. Insertion order is the order error messages list them in.
 PROFILES: dict[str, tuple[str, ...] | None] = {
     "full": None,
     "core": CORE_TOOLS,
     GOOGLE_PROFILE: GOOGLE_TOOLS,
+    MICROSOFT_PROFILE: GOOGLE_TOOLS,
 }
 
 # What ``tools/list`` returns when the URL selects nothing (#1849). ``full``
@@ -150,15 +160,16 @@ def _read_params(query_string: bytes | str | None) -> dict[str, str]:
 
 
 def is_google_view(query_string: bytes | str | None) -> bool:
-    """Whether this URL's view is the ``google`` profile (#2773).
+    """Whether this URL's view is the ``google`` profile (#2773) or its alias.
 
-    ``profile=google`` (trimmed, as ``select_tool_definitions`` reads it) and
-    no ``tools=``, which wins over ``profile``. ``None`` (no request) is not.
+    ``profile=google`` or ``profile=microsoft`` (#2778; trimmed, as
+    ``select_tool_definitions`` reads it) and no ``tools=``, which wins over
+    ``profile``. ``None`` (no request) is not.
     """
     if query_string is None:
         return False
     params = _read_params(query_string)
-    return "tools" not in params and params.get("profile", "").strip() == GOOGLE_PROFILE
+    return "tools" not in params and params.get("profile", "").strip() in GOOGLE_VIEW_PROFILES
 
 
 def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
@@ -175,7 +186,8 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
       ``DEFAULT_PROFILE``), read like ``tools``. Unknown names are ignored and
       logged; matching none is not an error, the profile alone still answers.
       Ignored (and logged) when ``tools`` is present. Under ``profile=google``
-      ``describe_tools`` and ``guide`` are ignored (and logged) too.
+      (and its alias ``microsoft``) ``describe_tools`` and ``guide`` are
+      ignored (and logged) too.
 
     Args:
         query_string: The raw ASGI ``scope["query_string"]`` (percent-encoded
@@ -184,8 +196,9 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
     Returns:
         The selected definitions, always in registry order. With no selection
         this is the ``DEFAULT_PROFILE`` (core) list; ``profile=full`` is
-        ``get_tool_definitions()`` unchanged; ``profile=google`` carries the
-        google prose and annotations (``_google_profile``).
+        ``get_tool_definitions()`` unchanged; ``profile=google`` and
+        ``profile=microsoft`` carry the google prose and annotations
+        (``_google_profile``).
 
     Raises:
         ToolProfileError: ``profile`` names no known profile, or ``tools``
@@ -227,7 +240,7 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
     wanted = set(selected)
     if "add_tools" in params:
         added, _ = _read_names(params["add_tools"], "add_tools", known)
-        if profile == GOOGLE_PROFILE and added & GOOGLE_EXCLUDED_TOOLS:
+        if profile in GOOGLE_VIEW_PROFILES and added & GOOGLE_EXCLUDED_TOOLS:
             logger.info(
                 "mcp_tool_profile_names_ignored",
                 param="add_tools",
@@ -237,7 +250,7 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
             added -= GOOGLE_EXCLUDED_TOOLS
         wanted |= added
     selected_tools = [tool for tool in definitions if tool["name"] in wanted]
-    if profile == GOOGLE_PROFILE:
+    if profile in GOOGLE_VIEW_PROFILES:
         return apply_google_surface(selected_tools)
     return selected_tools
 
