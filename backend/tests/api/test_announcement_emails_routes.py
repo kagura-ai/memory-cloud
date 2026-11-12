@@ -235,7 +235,7 @@ class _NoTouchDb:
     """A session that fails the test if anything uses it."""
 
     def __getattr__(self, name):  # pragma: no cover - only hit on a regression
-        raise AssertionError(f"database used for an invalid token: {name}")
+        raise AttributeError(f"database used for an invalid token: {name}")
 
 
 @pytest.fixture

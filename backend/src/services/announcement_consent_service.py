@@ -54,9 +54,6 @@ from models.announcement_consent import (
 from models.auth import User
 from models.erasure import STATUS_COOLING_OFF, STATUS_IN_PROGRESS, STATUS_PENDING, ErasureRequest
 from utils.exceptions import NotFoundException
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
 
 __all__ = [
     "ANNOUNCEMENT_CONSENT_WORDING_VERSION",

@@ -38,7 +38,6 @@ from services.announcement_consent_service import (
 from services.announcement_consent_service import SignupAnnouncementConsent
 from tests.api.test_auth_signup_prefs import (  # noqa: F401
     KEY,
-    _only_state,
     ensure_user,
     github_client,
     google_manager,
