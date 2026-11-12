@@ -642,7 +642,8 @@ async def memory_cloud_exception_handler(
     request: Request, exc: MemoryCloudException
 ) -> JSONResponse:
     """Handle MemoryCloudException."""
-    logger.error(
+    log = logger.warning if exc.log_level == "warning" else logger.error
+    log(
         "exception_occurred",
         error=exc.error_code,
         message=exc.message,

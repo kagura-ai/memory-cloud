@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +38,12 @@ from services.provider_link_confirmation_service import (
     PROVIDER_LABELS,
     ProviderLinkConfirmationService,
 )
-from utils.exceptions import RateLimitError, RedisError, SurfaceSwitchedOffError
+from utils.exceptions import (
+    RateLimitError,
+    RedisError,
+    SignupSessionUnavailableError,
+    SurfaceSwitchedOffError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -150,11 +155,8 @@ async def complete_provider_link(
     # way a password sign-in does: write it, then sign the account out
     # everywhere else under the per-account sweep lock. It proves nothing
     # for identity linking (no fresh proof of the account was given).
-    unavailable = HTTPException(
-        status_code=503,
-        detail=(
-            f"{PROVIDER_LABELS[confirmed.provider]} was connected to your account. Sign in again."
-        ),
+    unavailable = SignupSessionUnavailableError(
+        f"{PROVIDER_LABELS[confirmed.provider]} was connected to your account. Sign in again."
     )
     session_manager = auth_module._session_manager
     if session_manager is None:

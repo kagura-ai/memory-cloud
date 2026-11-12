@@ -30,6 +30,7 @@ from utils.exceptions import (
     ProviderLinkWrongBrowserError,
     RateLimitError,
     RedisError,
+    SignupSessionUnavailableError,
 )
 from utils.hashing import sha256_hex
 
@@ -191,12 +192,36 @@ class TestComplete:
             confirmed.sweep.side_effect = outcome
         else:
             confirmed.sweep.return_value = outcome
-        with pytest.raises(HTTPException) as info:
+        with pytest.raises(SignupSessionUnavailableError) as info:
             await routes.complete_provider_link(
                 routes.ProviderLinkTokenBody(token=TOKEN), _request(), db=MagicMock()
             )
         assert info.value.status_code == 503
-        assert "GitHub was connected" in info.value.detail
+        assert "GitHub was connected" in info.value.message
+
+    @pytest.mark.asyncio
+    async def test_the_503_body_and_log_level_are_those_of_a_raw_http_exception(
+        self, monkeypatch
+    ) -> None:
+        import api.main as main_module
+
+        message = "GitHub was connected to your account. Sign in again."
+        request = MagicMock()
+        request.url.path = "/api/v1/auth/link-confirm/complete"
+        logger = MagicMock()
+        monkeypatch.setattr(main_module, "logger", logger)
+
+        typed = await main_module.memory_cloud_exception_handler(
+            request, SignupSessionUnavailableError(message)
+        )
+        raw = await main_module.http_exception_handler(
+            request, HTTPException(status_code=503, detail=message)
+        )
+
+        assert typed.status_code == raw.status_code == 503
+        assert typed.body == raw.body
+        assert logger.warning.call_count == 2
+        logger.error.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_attempts_are_limited_per_ip(self, counters) -> None:

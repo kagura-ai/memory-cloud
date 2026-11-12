@@ -6,7 +6,7 @@ Based on: kagura-ai/src/kagura/exceptions.py
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 from config.constants import (
     GATE_ALLOWLIST,
@@ -27,7 +27,12 @@ class MemoryCloudException(Exception):
         status_code: HTTP status code for API responses
         error_code: Machine-readable error code (e.g., "AUTH-001")
         details: Additional context about the error
+        log_level: The level the API's exception handler logs it at; a
+            subclass that replaces a raw ``HTTPException`` keeps that
+            handler's ``warning``.
     """
+
+    log_level: ClassVar[Literal["error", "warning"]] = "error"
 
     def __init__(
         self,
@@ -1455,19 +1460,27 @@ class SurfaceSwitchedOffError(MemoryCloudException):
     """A route group switched off for this deployment (404, #1734, #2786).
 
     The body is the one an unknown path gets (``HTTP-404`` / ``Not Found``),
-    so a switched-off surface cannot be told apart from no surface.
+    so a switched-off surface cannot be told apart from no surface. Logged at
+    ``warning``, as the raw ``HTTPException`` it replaces was.
     """
+
+    log_level = "warning"
 
     def __init__(self) -> None:
         super().__init__("Not Found", status_code=404, error_code="HTTP-404")
 
 
 class SignupSessionUnavailableError(MemoryCloudException):
-    """The email sign-up account was created but no session opened (503, #1734).
+    """The account change was committed but no session opened (503).
 
-    The account is committed; the person signs in with the address and the
-    new password. The body keeps the ``HTTP-503`` code of a plain 503.
+    Email sign-up (#1734): the account is committed; the person signs in with
+    the address and the new password. A link confirmed by email (#2786): the
+    provider is connected; the person signs in again (pass that message).
+    The body keeps the ``HTTP-503`` code of a plain 503, and it is logged at
+    ``warning`` as that raw ``HTTPException`` was.
     """
+
+    log_level = "warning"
 
     def __init__(
         self,
