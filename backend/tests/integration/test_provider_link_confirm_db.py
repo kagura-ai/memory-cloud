@@ -29,6 +29,7 @@ import fakeredis.aioredis
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.provider_link import provider_link_established
@@ -371,6 +372,44 @@ class TestDecline:
             )
         assert await _github_links(db_session, user_id) == 0
         assert await _users_for(db_session, email) == 1
+
+    async def test_a_failed_write_keeps_the_link_for_a_retry(
+        self,
+        gate_off,
+        maker,  # noqa: F811
+        db_session,
+        redis,
+    ) -> None:
+        email, user_id = await _email_account(maker, domain="example.test")
+        token = await _offer(maker, redis, email, _sub())
+
+        async def blocked() -> object:
+            db_session.expire_all()
+            return (
+                await db_session.execute(
+                    select(User.provider_auto_link_blocked_at).where(User.user_id == user_id)
+                )
+            ).scalar_one()
+
+        down = OperationalError("COMMIT", {}, Exception("database unavailable"))
+        async with maker() as s:
+            with (
+                patch.object(s, "commit", AsyncMock(side_effect=down)),
+                pytest.raises(OperationalError),
+            ):
+                await svc.ProviderLinkConfirmationService(s, redis=redis).cancel(
+                    raw_token=token, ip_address="203.0.113.6", user_agent="pytest"
+                )
+        assert await blocked() is None
+        assert await redis.ttl(f"link_confirm:{sha256_hex(token)}") > 0
+
+        await _cancel(maker, redis, token)  # the owner clicks again
+
+        assert await blocked() is not None
+        assert (await _actions(db_session, user_id)).count(
+            "oauth_provider_link_confirmation_declined"
+        ) == 1
+        assert await redis.get(f"link_confirm:{sha256_hex(token)}") is None
 
     async def test_complete_racing_cancel_ends_one_way(
         self,

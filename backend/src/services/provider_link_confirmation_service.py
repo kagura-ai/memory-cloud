@@ -755,15 +755,16 @@ class ProviderLinkConfirmationService:
         ``provider_auto_link_blocked_at`` (kept when already set), so the
         same sign-in mails nobody again and Google no longer links
         automatically. Connecting a provider from Profile still works.
+
+        The record is taken first (a completion racing this ends one way
+        only); when the database step fails it is put back for the rest of
+        its lifetime, so a retry of the same link still sets the marker.
         """
         if not _well_formed_token(raw_token):
             return
         record = PendingProviderLink.from_json(await self.redis.getdel(_record_key(raw_token)))
         if record is None:
             return
-        await self.redis.delete(
-            _pointer_key(record.account_user_id, record.provider, record.identity_hmac)
-        )
         try:
             user = (
                 await self.db.execute(
@@ -777,6 +778,7 @@ class ProviderLinkConfirmationService:
                 _address_hmac(user.email), record.email_hmac
             ):
                 await self.db.rollback()
+                await self._drop_pointer(record)
                 return
             if user.provider_auto_link_blocked_at is None:
                 user.provider_auto_link_blocked_at = utcnow()
@@ -793,9 +795,31 @@ class ProviderLinkConfirmationService:
             await self.db.commit()
         except BaseException:
             await self.db.rollback()
+            await self._put_back(raw_token, record)
             raise
+        await self._drop_pointer(record)
         logger.info(
             "provider_link_confirmation_declined",
             provider=record.provider,
             identity_hmac=record.identity_hmac,
         )
+
+    async def _drop_pointer(self, record: PendingProviderLink) -> None:
+        await self.redis.delete(
+            _pointer_key(record.account_user_id, record.provider, record.identity_hmac)
+        )
+
+    async def _put_back(self, raw_token: str, record: PendingProviderLink) -> None:
+        """Restore a taken record for the rest of its lifetime. Never raises."""
+        try:
+            remaining = int((datetime.fromisoformat(record.expires_at) - utcnow()).total_seconds())
+            if remaining > 0:
+                await self.redis.set(
+                    _record_key(raw_token), record.to_json(), ex=remaining, nx=True
+                )
+        except Exception as exc:  # noqa: BLE001 - the caller re-raises the real error
+            logger.warning(
+                "provider_link_confirmation_restore_failed",
+                provider=record.provider,
+                error_type=type(exc).__name__,
+            )
