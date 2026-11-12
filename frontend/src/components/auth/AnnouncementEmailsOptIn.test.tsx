@@ -5,6 +5,7 @@ vi.mock("next-intl", () => ({
   useTranslations: (ns: string) => (k: string) => `${ns}.${k}`,
 }));
 
+import ja from "@/messages/ja.json";
 import { AnnouncementEmailsOptIn } from "./AnnouncementEmailsOptIn";
 
 /** #2761: the sign-up opt-in is its own checkbox with its own label. */
@@ -31,5 +32,10 @@ describe("AnnouncementEmailsOptIn", () => {
     );
     fireEvent.click(screen.getByRole("checkbox"));
     expect(onChange).toHaveBeenCalledWith(true);
+  });
+
+  it("uses the catalog's full-width parentheses in Japanese", () => {
+    expect(ja.announcementEmails.optIn).toContain("（任意）");
+    expect(ja.announcementEmails.optIn).not.toMatch(/[()]/);
   });
 });

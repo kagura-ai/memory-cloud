@@ -9,6 +9,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import ja from "@/messages/ja.json";
 
 const mockGetInvitationInfo = vi.fn();
 vi.mock("@/lib/api/invitations", () => ({
@@ -104,5 +105,15 @@ describe("/invite/[token] — email sign-up (#1734)", () => {
       "href",
       `/login?method=password&return_to=${encodeURIComponent(`/invite/${TOKEN}`)}`,
     );
+  });
+});
+
+describe("/invite/[token] Japanese sign-in wording", () => {
+  it("says ログイン throughout the sign-in card, as its existing strings do", () => {
+    const card = ja.invitation.loginRequired;
+    for (const text of Object.values(card)) {
+      expect(text).not.toContain("サインイン");
+    }
+    expect(card.passwordSignIn).toBe("メールアドレスとパスワードでログイン");
   });
 });
