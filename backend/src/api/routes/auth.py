@@ -1166,6 +1166,12 @@ async def google_callback(
                 pending_invites = await invitation_service.get_pending_invitations_for_email(
                     email=owner_email
                 )
+                # #2785: addressed invitations are accepted by a verified address
+                # only; only then do they stand in for the personal workspace.
+                if pending_invites and not await invitation_service.account_address_verified(
+                    owner_id
+                ):
+                    pending_invites = []
 
                 if pending_invites:
                     # Issue #276: Skip personal workspace creation if user has pending invitations
@@ -2674,6 +2680,11 @@ async def github_callback(
                 pending_invites = await invitation_service.get_pending_invitations_for_email(
                     email=db_email
                 )
+                # #2785: as for Google, only for a verified address.
+                if pending_invites and not await invitation_service.account_address_verified(
+                    db_user_id
+                ):
+                    pending_invites = []
 
                 if not pending_invites:
                     workspace_service = WorkspaceService(db)

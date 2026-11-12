@@ -695,8 +695,7 @@ What an admission grants, and what the operator can do about it:
   `team_invitations` (its invitations then admit nobody); read `signup_admitted`
   to see who was admitted by whose invitation. Revoking does not remove an
   account already created.
-- **Invite an address the person controls now.** A provider vouches for an
-  address it verified at some point; an old address may have changed hands.
+- **Invite an address the person controls now.**
 
 Addressed invitations need a verified address on the accepting side too:
 `GET /api/v1/invitations/pending` lists, and `POST /api/v1/invitations/accept`
