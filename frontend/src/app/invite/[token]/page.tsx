@@ -58,11 +58,17 @@ type PageState =
   | "loading"
   | "login_required"
   | "email_mismatch"
+  | "address_unverified"
   | "accepting"
   | "terms_required"
   | "plan_blocked"
   | "success"
   | "error";
+
+// #2785: part of the accept refusal for an addressed invitation when the
+// account's address is not verified (backend UNVERIFIED_ADDRESS_ACCEPT_MSG,
+// pinned by backend/tests/services/test_invitation_unverified_message.py).
+const UNVERIFIED_ADDRESS_MARKER = "account whose email address is verified";
 
 interface CurrentUser {
   user_id: string;
@@ -229,6 +235,8 @@ export default function AcceptInvitationPage({
       } else if (errorMessage.includes("already a member")) {
         // Already a member - treat as success
         router.push("/workspace/members");
+      } else if (errorMessage.includes(UNVERIFIED_ADDRESS_MARKER)) {
+        setState("address_unverified");
       } else {
         setState("error");
         setError(errorMessage);
@@ -506,6 +514,49 @@ export default function AcceptInvitationPage({
             <p className="text-xs text-center text-gray-500 dark:text-gray-400">
               {t("emailMismatch.returnNote")}
             </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // #2785: an addressed invitation, an account without a verified address
+  if (state === "address_unverified") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
+        <div className="absolute top-4 right-4">
+          <LanguageSelector />
+        </div>
+        <div className="max-w-md w-full">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8">
+            <div className="flex items-center justify-center w-16 h-16 bg-amber-100 dark:bg-amber-900/20 rounded-full mx-auto mb-4">
+              <AlertCircle className="w-8 h-8 text-amber-600 dark:text-amber-400" />
+            </div>
+
+            <h2 className="text-2xl font-bold text-center text-gray-900 dark:text-gray-100 mb-2">
+              {t("addressUnverified.title")}
+            </h2>
+
+            <p className="text-center text-gray-600 dark:text-gray-400 mb-6">
+              {t("addressUnverified.message")}
+            </p>
+
+            <Button
+              onClick={handleLogout}
+              size="lg"
+              className="w-full mb-4 text-base [&_svg]:size-5"
+            >
+              <LogIn />
+              {t("addressUnverified.logoutButton")}
+            </Button>
+
+            <Button
+              onClick={() => router.push("/workspace/dashboard")}
+              variant="secondary"
+              className="w-full"
+            >
+              {t("error.goToDashboard")}
+            </Button>
           </div>
         </div>
       </div>

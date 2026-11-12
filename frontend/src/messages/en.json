@@ -2738,6 +2738,11 @@
       "logoutButton": "Log out and log in with correct email",
       "returnNote": "You will return to this invitation page after logout"
     },
+    "addressUnverified": {
+      "title": "Confirm your email address to accept",
+      "message": "This invitation is addressed to an email address. It can be accepted by an account whose address is confirmed. Sign in with a method that confirms this address, then open this link again.",
+      "logoutButton": "Log out and sign in another way"
+    },
     "success": {
       "title": "Welcome to {workspaceName}!",
       "message": "You have successfully joined as a",
