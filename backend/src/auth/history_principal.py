@@ -11,7 +11,16 @@ from dataclasses import dataclass
 from typing import Literal
 
 PrincipalKind = Literal[
-    "session", "api_key", "oauth", "resource_token", "management_grant", "system", "unknown"
+    "session",
+    "api_key",
+    "oauth",
+    "resource_token",
+    "management_grant",
+    "system",
+    # #2767: an operator console in SYSTEM_ADMIN_MODE=service. Stored without
+    # an actor id (see operation_history_writer.record_operation).
+    "operator",
+    "unknown",
 ]
 
 

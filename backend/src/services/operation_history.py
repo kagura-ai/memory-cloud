@@ -156,8 +156,10 @@ async def read_history(
             "id": event.id,
             "occurred_at": event.occurred_at,
             "context_id": event.context_id,
-            "actor_user_id": event.actor_user_id,
-            "actor_name": name,
+            # #2767: a service operator is never shown to workspace members
+            # (the writer stores no actor for it; masked here as well).
+            "actor_user_id": None if event.principal_kind == "operator" else event.actor_user_id,
+            "actor_name": None if event.principal_kind == "operator" else name,
             "subject_user_id": event.subject_user_id,
             "agent_id": event.agent_id,
             "principal_kind": event.principal_kind,

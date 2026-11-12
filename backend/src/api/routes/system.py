@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser
+from auth.system_admin_mode import session_admin_enabled
 from config.constants import APP_VERSION
 from db.base import get_db
 
@@ -145,6 +146,11 @@ async def system_info():
         # startup); the web UI links to it next to the plugin guide.
         "chatgpt_app_url": settings.chatgpt_app_url or None,
         "features": {
+            # Issue #2767: true only when this process serves the system-admin
+            # surface to signed-in admins (SYSTEM_ADMIN_MODE=session). The web
+            # UI hides the admin menu and /admin/* otherwise (also in service
+            # mode, where only the operator console reaches it).
+            "system_admin": session_admin_enabled(),
             "neural_memory": settings.enable_neural_memory,
             "research_tools": settings.enable_research_tools,
             # Issue #1145: the web UI hides the Plan page + nav entry unless this

@@ -76,7 +76,6 @@
     }
   },
   "featureAccess": {
-    "accessDenied": "Access denied",
     "about": {
       "dashboard": "Review activity and memory statistics for this workspace.",
       "resources": "Inspect data ingested from external systems.",
@@ -87,15 +86,13 @@
       "connectors": "Connect external tools to this workspace.",
       "plan": "Review the workspace plan and manage billing.",
       "workspaceSettings": "Manage the selected workspace's settings.",
-      "externalKeys": "Configure provider keys used by this workspace.",
-      "admin": "Manage platform-wide settings and records."
+      "externalKeys": "Configure provider keys used by this workspace."
     },
     "workspaceLoadFailed": "We could not load your workspace. Try again before continuing.",
     "workspace": "Workspace: {name}",
     "owner": "Only the workspace owner can manage this feature.",
     "admin": "You need the workspace owner or administrator role to manage this feature.",
     "member": "You need at least the member role to use this feature.",
-    "systemAdmin": "This feature requires a system administrator. Changing the workspace plan will not grant access.",
     "lookupFailed": "We could not check whether this feature is enabled.",
     "retry": "Try again",
     "deployment": "This feature is not enabled on this deployment. Changing your workspace plan will not enable it.",
@@ -5469,6 +5466,7 @@
     "target": "Target",
     "system": "System",
     "unknown": "Unknown actor",
+    "operator": "Service operator",
     "credential": "Credential: {id}",
     "client": "Client: {id}",
     "principalAccount": "Credential account: {id}",

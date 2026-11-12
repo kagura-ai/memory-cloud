@@ -29,6 +29,7 @@ import { sidebarNavigationGroups as navigationGroups, type NavItem } from "@/lib
 import { useBetaInvites } from "@/hooks/useBetaInvites";
 import {
   hasRole,
+  isSystemAdmin,
   hasWorkspaceRole,
   WorkspaceRole,
 } from "@/lib/auth/rbac";
@@ -663,7 +664,7 @@ export function Sidebar() {
                   >
                     {user.name}
                   </p>
-                  {user.role === "admin" && (
+                  {isSystemAdmin(user, systemFeatures) && (
                     <p
                       className={cn(
                         typography.caption,

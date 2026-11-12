@@ -361,7 +361,7 @@ class TestRevealTerms:
 
     def test_non_admin_returns_403(self, mock_db: MagicMock) -> None:
         """Non-admin role is rejected by require_admin (no override here)."""
-        from auth.dependencies import get_current_user
+        from auth.dependencies import get_current_user, get_current_user_optional
 
         async def _non_admin():
             return {"email": "user@example.com", "role": "user"}
@@ -370,6 +370,10 @@ class TestRevealTerms:
             yield mock_db
 
         app.dependency_overrides[get_current_user] = _non_admin
+
+        # #2767: require_admin reads the session through get_current_user_optional.
+
+        app.dependency_overrides[get_current_user_optional] = _non_admin
         app.dependency_overrides[get_db] = _db
         try:
             tc = TestClient(app, raise_server_exceptions=False)

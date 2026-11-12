@@ -41,6 +41,8 @@ import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import LinkedAccounts from "@/components/auth/LinkedAccounts";
 import PasskeySettings from "@/components/auth/PasskeySettings";
 import { usePasswordSetup } from "@/hooks/usePasswordSetup";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { isSystemAdmin } from "@/lib/auth/rbac";
 import { PreferencesRefreshError, saveUserPreferences } from "@/lib/auth/saveUserPreferences";
 import PasswordSettings from "@/components/auth/PasswordSettings";
 import { MfaSettings } from "@/components/auth/MfaSettings";
@@ -64,6 +66,8 @@ export default function ProfilePage() {
   const t = useTranslations("profile");
   const tCommon = useTranslations("common");
   const { user, refetchUser } = useAuth();
+  // #2767: the System Administrator field only where the role grants something.
+  const systemFeatures = useSystemFeatures();
   const passwordSetup = usePasswordSetup(user?.id);
   const { toast } = useToast();
   const [isEditMode, setIsEditMode] = useState(false);
@@ -449,7 +453,7 @@ export default function ProfilePage() {
                 <p className="text-xs text-slate-500">{t("localeDesc")}</p>
               </div>
 
-              {user.role === "admin" && (
+              {isSystemAdmin(user, systemFeatures) && (
                 <div className="space-y-2">
                   <Label htmlFor="role">{t("systemRole")}</Label>
                   <Input

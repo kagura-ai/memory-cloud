@@ -191,6 +191,13 @@ async def update_config(
     # needed here.
     svc = SignupGateService(db)
     config = await svc.update_config(enabled=payload.enabled, mode=payload.mode)
+    # #2767: the change carries its actor (no audit row yet).
+    logger.info(
+        "admin_signup_gate_config_updated",
+        enabled=payload.enabled,
+        mode=payload.mode,
+        actor=user.get("user_id"),
+    )
     return SignupGateConfigResponse.model_validate(config)
 
 
@@ -333,3 +340,9 @@ async def remove_from_allowlist(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Allowlist entry not found"
         ) from exc
+    # #2767: the removal carries its actor (no audit row yet).
+    logger.info(
+        "admin_signup_allowlist_entry_removed",
+        entry_id=str(entry_id),
+        actor=user.get("user_id"),
+    )

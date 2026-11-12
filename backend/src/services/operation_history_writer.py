@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from auth.history_principal import HistoryPrincipal, get_history_principal
+from auth.system_admin_mode import OPERATOR_PRINCIPAL_PREFIX
 from config.plan_tiers import plans_with_feature
 from models.auth import Context, Workspace
 from models.operation_history import OperationHistory
@@ -209,6 +210,13 @@ def record_operation(
         raise ValueError("Unsupported operation history surface")
     if source == "system":
         principal = HistoryPrincipal("system")
+        actor_user_id = None
+    if principal.kind == "operator" or (actor_user_id or "").startswith(OPERATOR_PRINCIPAL_PREFIX):
+        # #2767: a service operator is staff, not a workspace member. Its
+        # address never enters this customer-visible table (the read API
+        # returns and filters on actor_user_id); accountability stays in the
+        # audit_logs row the same operation writes, as for the system surface.
+        principal = HistoryPrincipal("operator")
         actor_user_id = None
     occurred_at = at or datetime.now(UTC)
     # Existing source records use naive UTC. Never let the process timezone

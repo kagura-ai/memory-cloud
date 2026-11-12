@@ -463,6 +463,87 @@ NEXT_PUBLIC_APP_URL=https://your-domain.com
 # NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME=Premium Max
 ```
 
+## System-admin surface (Issue #2767)
+
+`SYSTEM_ADMIN_MODE` decides where the system-admin surface is served: every route
+behind the admin gate (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`,
+`POST /api/v1/config/batch`, `GET /api/v1/oauth/providers`). A deployment that
+does not set it behaves exactly as before.
+
+| Mode | Who reaches the admin routes | Web UI |
+|---|---|---|
+| `session` (default) | A signed-in user whose `users.role` is `admin` (as before). | Admin menu and `/admin/*` pages for system admins. |
+| `off` | Nobody. Every admin route answers `404` with the body an unknown path gets, before any session, API key or header is read; the admin operations are left out of `/openapi.json`, `/docs`, `/redoc`. | Admin menu hidden; `/admin/*` renders "not found". |
+| `service` | Only an operator console presenting the service credential. Sessions are ignored (a cookie alone gets `401`). | Same as `off`: the console is the admin UI. |
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SYSTEM_ADMIN_MODE` | `session` | `session`, `off` or `service`. Surrounding blanks are trimmed; an empty value or any other value (`Off` included) stops startup. Set it on **every** process that serves HTTP: both deploy colours and any extra container of the image. |
+| `SYSTEM_ADMIN_SERVICE_TOKEN` | *(empty)* | The bearer credential (`Authorization: Bearer …`) of the console in `service` mode. Empty: every admin route answers `503 SYSADMIN-001`. Set it on the `service` process only; the others ignore it (with a startup warning). No blanks or commas. Under `ENVIRONMENT=production` it must be 32+ characters, not a shipped placeholder, and differ from `BILLING_SERVICE_TOKEN` and `WORKER_SERVICE_TOKEN`. Use `openssl rand -hex 32`. |
+| `SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS` | *(empty)* | Comma-separated earlier credentials, still accepted during a rotation (a WARNING at startup while it is set, and a `system_admin_service_token_previous_used` log line with the slot number each time one matches). Production applies the same rules as to the current credential: a previous credential is a live credential. |
+| `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS` | *(empty)* | Optional comma-separated CIDR ranges allowed to call the admin routes in `service` mode; any other client address gets `404`. Empty allows any address (the credential is still required). A malformed range stops startup. The address is the TCP peer unless `FORWARDED_ALLOW_IPS` trusts a proxy. |
+
+At startup the API logs `system_admin_mode` with the mode and whether a
+credential is configured (never its value); at WARNING in `service`.
+
+**Running `service`.** The `service` process must not be reachable from the
+internet: run it on an internal network only, never behind the public proxy,
+and set `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS` to the console's addresses. Run it
+with `SCHEDULER_LEADER_ENABLED=false` so scheduled jobs stay on the public
+processes. The public processes run `off`.
+
+Each request of the console carries the credential and `X-Operator-Email`, the
+address of the person acting (exactly one header value; lower-cased; ASCII; at
+most 246 characters; local part `[a-z0-9._+-]`). memory-cloud trusts the
+credential holder to name the operator: the console must take the address from
+its own verified sign-in, never from user input, and must not relay cookies or
+client-supplied headers. The order of refusals is: address outside the
+allow-list `404`, credential not configured `503 SYSADMIN-001`, credential
+missing or wrong (another scheme, a lower-case `bearer`, a non-ASCII value
+included) `401 SYSADMIN-002` with `WWW-Authenticate: Bearer`, bad operator
+address `400 SYSADMIN-003`. Routes that act on the caller's own account
+(`POST /admin/sleep/run`, `POST /admin/sleep/actions/{id}/undo-merge`, the
+deprecated `GET /admin/memory-health`) and applying `POST /admin/contexts/recover`
+(`dry_run=false`) answer `403 SYSADMIN-004` to an operator.
+
+**What an operator leaves behind.** Admin writes store the operator as
+`operator:<address>` wherever they store an actor (audit rows, plan changes,
+add-ons, allowlist entries, erasure and force-transfer requests, worker apps).
+`PUT /admin/users/{id}/role` now writes a `system_role_update` audit row in
+every mode. The customer-visible operation history stores an operator's action
+without an actor id (`principal_kind = operator`, shown as "Service operator").
+These are operator accountability records: erasing a product account, even one
+with the same address, does not rewrite them. On a force transfer, the four-eyes
+check also refuses an approver whose address equals the initiator's, across
+`session` and `service` (`alice@…` and `operator:alice@…` are one person); in
+`service` mode two distinct operators are attested by the console alone, so its
+dual control is as strong as the console's operator sign-in.
+
+**`role = admin` outside `session`.** Accounts keep their `role` column, but it
+grants nothing: no admin route, no uncapped beta-invite quota, no hosted
+configuration category. The first account created on an empty database gets
+`user` (not initial admin). It is still admitted through a closed signup gate
+(as in `session`), so a fresh `off` deployment gets its first user from that
+first sign-up, from `ALLOW_REGISTRATION=true`, an allowlisted identity, or a
+CLI-created account. Accounts that already have `role=admin` keep it (the
+initial and last admin cannot be demoted); a process started without the
+setting serves them the session surface again, which is why the mode must be
+set on every process. Batch beta invites stay CLI-only in every mode
+([Dated beta invite batches](#dated-beta-invite-batches)).
+
+**Rotating the credential.** Set the new value as `SYSTEM_ADMIN_SERVICE_TOKEN`
+and the old one in `SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS`, restart the `service`
+process, switch the console to the new value, then remove the previous entry and
+restart again. After a suspected leak, rotate **without** a previous entry: the
+console gets `401` until it has the new value.
+
+**Residuals in `off`.** The paths are public source and `features.system_admin`
+publishes the mode, so these are not secrets, and none runs a handler or opens a
+database session: a wrong method on an admin path answers `405`, a trailing
+slash `307`, a CORS preflight is answered by the CORS middleware, and a
+`POST`/`PUT`/`PATCH` with an undecodable JSON body `422` (FastAPI decodes the
+body before it runs the gate).
+
 ## Closed-beta invite links (Issue #1581)
 
 For a deployment that runs with the **signup gate closed** (Admin → Signup
@@ -476,7 +557,7 @@ inviter) where admins can see and prune it as usual.
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `ENABLE_BETA_INVITES` | `false` | Master switch **and kill switch**. When `false` every `/api/v1/beta-invites*` route answers 404, `features.beta_invites` is `false` (the web UI shows no entry points), an `invite=` parameter on OAuth login is ignored, and **redemption at the OAuth callback is disabled too** — links already handed out stop working. Allowlist rows written by earlier redemptions are not touched; remove them on the admin signup-gate page. |
-| `BETA_INVITE_QUOTA_PER_USER` | `4` | Links a non-admin user may hold at once. Active (unused, unexpired) and redeemed links count; expired and revoked ones free their slot. System admins (`role=admin`) are uncapped. `0` lets only system admins mint. |
+| `BETA_INVITE_QUOTA_PER_USER` | `4` | Links a non-admin user may hold at once. Active (unused, unexpired) and redeemed links count; expired and revoked ones free their slot. System admins (`role=admin`) are uncapped in `SYSTEM_ADMIN_MODE=session` only; in `off` / `service` an admin-role account is capped like everyone ([System-admin surface](#system-admin-surface-issue-2767)). `0` lets only system admins mint. |
 
 The 7-day lifetime is fixed in code. Notes for operators:
 

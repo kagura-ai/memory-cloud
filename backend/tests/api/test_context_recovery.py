@@ -236,7 +236,7 @@ class TestRestoreContextRoute:
     @staticmethod
     def _override(user: dict) -> None:
         from api.main import app
-        from auth.dependencies import get_current_user
+        from auth.dependencies import get_current_user, get_current_user_optional
         from db.base import get_db
 
         async def current_user():
@@ -246,6 +246,10 @@ class TestRestoreContextRoute:
             yield AsyncMock()
 
         app.dependency_overrides[get_current_user] = current_user
+
+        # #2767: require_admin reads the session through get_current_user_optional.
+
+        app.dependency_overrides[get_current_user_optional] = current_user
         app.dependency_overrides[get_db] = no_db
 
     def test_non_admin_gets_403(self, client):

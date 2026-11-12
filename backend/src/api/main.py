@@ -96,11 +96,32 @@ async def _close_qdrant_on_shutdown() -> None:
         logger.warning("qdrant_close_failed", error_type=type(exc).__name__, error=str(exc))
 
 
+def _log_system_admin_mode() -> None:
+    """Say at startup where the system-admin surface is served (#2767).
+
+    WARNING in ``service``: such a process must sit on an internal network
+    only. Never logs the credential, only whether one is configured.
+    """
+    from auth.system_admin_mode import system_admin_mode
+
+    mode = system_admin_mode()
+    settings = get_settings()
+    log = logger.warning if mode == "service" else logger.info
+    log(
+        "system_admin_mode",
+        mode=mode,
+        service_token_configured=bool(settings.system_admin_service_token),
+        previous_service_tokens=len(settings.system_admin_service_previous_tokens),
+        allowed_cidrs_configured=bool(settings.system_admin_service_allowed_networks),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup
     logger.info("application_starting", version=app.version)
+    _log_system_admin_mode()
 
     # Fail-closed: refuse to boot if OAuth endpoint overrides (E2E test-IdP
     # harness, #937) are active in production — they would redirect token
@@ -1107,6 +1128,58 @@ app.include_router(system.router, prefix="/api/v1")
 
 # Well-known endpoints (OAuth2 metadata)
 app.include_router(well_known.router, prefix="/.well-known")
+
+
+def _system_admin_mode_openapi() -> dict:
+    """The OpenAPI document, without the admin operations in ``off`` mode (#2767).
+
+    ``off`` answers 404 on every route behind ``require_admin``; a public
+    document should not advertise them. Covers ``/openapi.json``, ``/docs``,
+    ``/redoc`` and the ``/static/api/openapi.json`` fallback (all call
+    ``app.openapi()``). Tags left without an operation by the filter are
+    dropped too. ``session`` and ``service`` serve the stock document.
+    """
+    from fastapi.openapi.utils import get_openapi
+    from fastapi.routing import APIRoute, iter_route_contexts
+
+    from auth.system_admin_mode import route_requires_admin, system_admin_mode
+
+    if system_admin_mode() != "off":
+        return FastAPI.openapi(app)
+    # Built once per route table, like FastAPI caches the stock document.
+    cached = _off_mode_openapi_cache.get(len(app.routes))
+    if cached is not None:
+        return cached
+    shown, hidden = [], []
+    for context in iter_route_contexts(app.routes):
+        gated = isinstance(context.original_route, APIRoute) and route_requires_admin(context)
+        (hidden if gated else shown).append(context)
+    shown_tags = {tag for context in shown for tag in getattr(context, "tags", None) or []}
+    emptied = {tag for context in hidden for tag in context.tags or []} - shown_tags
+    tags = [tag for tag in app.openapi_tags or [] if tag.get("name") not in emptied]
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        summary=app.summary,
+        description=app.description,
+        terms_of_service=app.terms_of_service,
+        contact=app.contact,
+        license_info=app.license_info,
+        routes=shown,
+        webhooks=app.webhooks.routes,
+        tags=tags or None,
+        servers=app.servers,
+        separate_input_output_schemas=app.separate_input_output_schemas,
+        external_docs=app.openapi_external_docs,
+    )
+    _off_mode_openapi_cache.clear()
+    _off_mode_openapi_cache[len(app.routes)] = schema
+    return schema
+
+
+_off_mode_openapi_cache: dict[int, dict] = {}
+app.openapi = _system_admin_mode_openapi  # type: ignore[method-assign]
 
 # In-process Stripe billing plugin removed (#1096): the OSS backend is now
 # Stripe-agnostic. Entitlement arrives via the internal billing endpoint

@@ -18,7 +18,11 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from api.routes.config import get_config_categories, get_config_schema, mask_url_credentials
-from auth.dependencies import get_current_user, get_user_from_api_key_or_session
+from auth.dependencies import (
+    get_current_user,
+    get_current_user_optional,
+    get_user_from_api_key_or_session,
+)
 from config.settings import Settings
 from db.base import get_db
 
@@ -83,6 +87,8 @@ def client_as(db, monkeypatch):
 
         app.dependency_overrides[get_user_from_api_key_or_session] = mock_user
         app.dependency_overrides[get_current_user] = mock_user
+        # #2767: require_admin reads the session through get_current_user_optional.
+        app.dependency_overrides[get_current_user_optional] = mock_user
         app.dependency_overrides[get_db] = mock_db
         return TestClient(app, raise_server_exceptions=False)
 

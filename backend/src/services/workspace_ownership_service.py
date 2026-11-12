@@ -49,6 +49,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.system_admin_mode import operator_address
 from auth.workspace_roles import WorkspaceRole
 from models.auth import (
     FORCE_TRANSFER_STATUS_APPROVED,
@@ -604,7 +605,9 @@ class WorkspaceOwnershipService:
         (recording BOTH identities) commit atomically.
 
         Security notes:
-          * Four-eyes is enforced by ``user_id`` inequality. It assumes the
+          * Four-eyes is enforced by ``user_id`` inequality and, across
+            ``SYSTEM_ADMIN_MODE`` principals (#2767), by inequality of the bare
+            address (``operator:<a>`` and ``<a>`` are one person). It assumes the
             operational invariant "one human ⇒ at most one system-admin account";
             a single operator holding two admin accounts can still satisfy it.
             That invariant is an identity-provisioning concern, not enforced here.
@@ -638,7 +641,14 @@ class WorkspaceOwnershipService:
         # eyes. Checked before the lock (cheap, request-only) so we fail fast. This
         # is the exact attack the control exists to stop, so log the denial as an
         # alertable security signal.
-        if approver_user_id == request.initiated_by_user_id:
+        # #2767: also refuse the same person under another principal (a session
+        # admin and the operator console share one database while a deployment
+        # moves from session to service): compare the bare addresses too.
+        approver_address = operator_address(approver_email)
+        if approver_user_id == request.initiated_by_user_id or (
+            approver_address is not None
+            and approver_address == operator_address(request.initiated_by_email)
+        ):
             logger.warning(
                 "workspace_ownership_force_transfer_self_approval_denied",
                 workspace_id=str(request.workspace_id),
