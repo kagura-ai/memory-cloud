@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
     from models.auth import User as _UserModel
     from models.auth import UserOAuthProvider as _UserOAuthProviderModel
+    from services.announcement_consent_service import SignupAnnouncementConsent
 
 logger = get_logger(__name__)
 
@@ -292,6 +293,7 @@ class RoleManager:
         user_agent: str | None = None,
         locale: str | None = None,
         timezone: str | None = None,
+        announcement_consent: SignupAnnouncementConsent | None = None,
     ) -> Role:
         """Ensure user exists; on existing users, sync email/name from IdP.
 
@@ -325,6 +327,11 @@ class RoleManager:
                 an unsupported value leaves the column default ``en``.
             timezone: IANA time zone the browser reported (#2700). Same rule
                 as ``locale``; the column default is ``UTC``.
+            announcement_consent: The announcement-email opt-in the sign-up
+                page carried (#2761), already validated. Recorded (source
+                ``signup``) only when this call creates the account, in the
+                same commit as the ``users`` row; an existing account keeps its
+                own answer. ``None`` records nothing ("never answered").
 
         Returns:
             The user's assigned role.
@@ -358,6 +365,7 @@ class RoleManager:
                 user_agent=user_agent,
                 locale=locale,
                 timezone=timezone,
+                announcement_consent=announcement_consent,
             )
 
         # In-memory backend (testing only) — keyed by email for backward
@@ -384,6 +392,7 @@ class RoleManager:
         user_agent: str | None,
         locale: str | None = None,
         timezone: str | None = None,
+        announcement_consent: SignupAnnouncementConsent | None = None,
     ) -> Role:
         """PostgreSQL-backed ``ensure_user``. See ``ensure_user`` docstring."""
         from sqlalchemy import select
@@ -487,6 +496,25 @@ class RoleManager:
                     )
                 )
             try:
+                # #2761: the sign-up opt-in, in the same transaction as the user
+                # (and so rolled back with it on IntegrityError). Neither
+                # _sync_existing_user nor the race retry below ever adds it, so
+                # an existing account keeps its answer. The row has a foreign
+                # key to users.user_id but no relationship(), so the unit of
+                # work does not order the two inserts: flush the user first,
+                # inside this try so a collision takes the handling below.
+                if announcement_consent is not None:
+                    from services.announcement_consent_service import new_consent_row
+
+                    await db.flush()
+                    db.add(
+                        new_consent_row(
+                            user_id=user_id,
+                            value=announcement_consent.value,
+                            source="signup",
+                            wording_version=announcement_consent.wording_version,
+                        )
+                    )
                 await db.commit()
                 return role
             except IntegrityError as exc:
