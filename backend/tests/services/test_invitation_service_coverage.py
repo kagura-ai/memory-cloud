@@ -53,12 +53,17 @@ def _uid() -> str:
     return f"user-{uuid.uuid4()}"
 
 
-async def _make_user(db, *, name: str | None = None, email: str | None = None) -> User:
+async def _make_user(
+    db, *, name: str | None = None, email: str | None = None, verified: bool = True
+) -> User:
+    # Verified by default, as after a sign-in through a provider that attests
+    # the address: an addressed invitation needs it to be accepted (#2785).
     user = User(
         email=email or f"{uuid.uuid4()}@example.com",
         user_id=_uid(),
         name=name,
         role="user",
+        email_verified_at=utcnow() if verified else None,
     )
     db.add(user)
     await db.flush()
@@ -582,6 +587,29 @@ class TestAcceptInvitation:
         assert inv.accepted_by == accepter.user_id
         # user's current workspace updated to invited workspace
         assert accepter.current_workspace_id == ws.id
+
+    async def test_addressed_invitation_needs_a_verified_address(self, db_session):
+        """#2785: an account whose address is unverified cannot accept an
+        invitation addressed to it; nothing is written."""
+        owner, ws, inv = await self._seed_pending(db_session)
+        accepter = await _make_user(db_session, email="invitee@example.com", verified=False)
+        svc = _service(db_session)
+
+        with pytest.raises(ValidationError, match="verified"):
+            await svc.accept_invitation(
+                token=inv.token, user_id=accepter.user_id, user_email="invitee@example.com"
+            )
+        assert inv.accepted_at is None
+
+    async def test_link_only_invitation_needs_no_verified_address(self, db_session):
+        owner, ws, inv = await self._seed_pending(db_session, email=None)
+        accepter = await _make_user(db_session, verified=False)
+        svc = _service(db_session)
+
+        _, member = await svc.accept_invitation(
+            token=inv.token, user_id=accepter.user_id, user_email=accepter.email
+        )
+        assert member.user_id == accepter.user_id
 
     async def test_email_case_insensitive_match(self, db_session):
         """Email match is case-insensitive."""

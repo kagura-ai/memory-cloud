@@ -101,11 +101,19 @@ contact its owner. Such an invitation does not admit a new account while registr
 is closed, and does not suppress creation of a new user's personal workspace.
 Acceptance still checks the workspace's current plan at the time of the request.
 
+Addressed invitations need a verified address: `GET /api/v1/invitations/pending`
+lists, and `POST /api/v1/invitations/accept` accepts, an invitation addressed to an
+email address only when the signed-in account's address is verified; otherwise the
+list is empty and accept answers `400`. A link-only invitation is accepted as before.
+
 The public preview `GET /api/v1/invitations/{token}` also returns
 `email_signup_available`: whether a person without an account can create one with
-this invitation's address by email (email sign-up on, and the sign-up controls
-admit it: signup gate off and the invitation addressed to an email on a plan that
-allows invitations, or `ALLOW_REGISTRATION=true`, or no account exists yet). It
+this invitation's address by email. True when email sign-up is on and the sign-up
+controls admit it: the invitation is addressed to an email, is not an owner-role
+invitation, and its workspace exists on a plan that allows invitations (signup gate
+on or off, see
+[deployment](deployment.md#workspace-invitations-and-the-signup-gate-issue-2785));
+or the gate is off and `ALLOW_REGISTRATION=true`; or no account exists yet. It
 names no address.
 
 ### Email + password sign-up

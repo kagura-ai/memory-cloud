@@ -44,7 +44,14 @@ class TestCheckAccess:
         )
 
         assert result is None
-        svc._legacy_check.assert_awaited_once_with("a@b.com", "1234")
+        svc._legacy_check.assert_awaited_once_with(
+            "a@b.com",
+            "1234",
+            provider="github",
+            email_verified=False,
+            ip_address=None,
+            user_agent=None,
+        )
 
     @pytest.mark.asyncio
     async def test_disabled_delegates_and_blocks(self):
@@ -125,6 +132,8 @@ class TestCheckAccess:
             oauth_sub="108276939729829363",
             email="invited@example.com",
             username="invited@example.com",
+            # #2785: the pending row is matched by address — verified only.
+            email_verified=True,
         )
 
         assert result is None
@@ -150,7 +159,14 @@ class TestCheckAccess:
 
         assert result is None
         svc._promote_pending_google_entry.assert_not_awaited()
-        svc._legacy_check.assert_awaited_once_with("a@b.com", "1234")
+        svc._legacy_check.assert_awaited_once_with(
+            "a@b.com",
+            "1234",
+            provider="github",
+            email_verified=False,
+            ip_address=None,
+            user_agent=None,
+        )
 
     @pytest.mark.asyncio
     async def test_disabled_google_not_allowlisted_no_pending_falls_through(self):
@@ -171,7 +187,14 @@ class TestCheckAccess:
         )
 
         assert result is legacy_redirect
-        svc._legacy_check.assert_awaited_once_with("stranger@example.com", "108276939729829363")
+        svc._legacy_check.assert_awaited_once_with(
+            "stranger@example.com",
+            "108276939729829363",
+            provider="google",
+            email_verified=False,
+            ip_address=None,
+            user_agent=None,
+        )
 
     @pytest.mark.asyncio
     async def test_enabled_google_now_gated(self):
@@ -447,6 +470,8 @@ class TestCheckAccess:
             oauth_sub="108276939729829363",
             email="newcomer@example.com",
             username="newcomer@example.com",
+            # #2785: the pending row is matched by address — verified only.
+            email_verified=True,
         )
 
         assert result is None
@@ -958,7 +983,14 @@ class TestLegacyCheckPassesUserIdThrough:
             username="octocat",
         )
 
-        svc._legacy_check.assert_awaited_once_with("user@example.com", "gh-sub-99")
+        svc._legacy_check.assert_awaited_once_with(
+            "user@example.com",
+            "gh-sub-99",
+            provider="github",
+            email_verified=False,
+            ip_address=None,
+            user_agent=None,
+        )
 
 
 class TestAddToAllowlistEntry:

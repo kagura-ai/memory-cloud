@@ -53,6 +53,7 @@ def _closed_gate_new_user(svc: SignupGateService) -> None:
     svc._is_first_user = AsyncMock(return_value=False)
     svc._is_allowlisted = AsyncMock(return_value=False)
     svc._promote_pending_google_entry = AsyncMock(return_value=False)
+    svc._admit_by_workspace_invitation = AsyncMock(return_value=False)
     svc._record_blocked_signup = AsyncMock()
 
 
@@ -114,7 +115,13 @@ class TestInvitePathPlacement:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "admitting_lookup",
-        ["_is_existing_user", "_is_first_user", "_is_allowlisted", "_promote_pending_google_entry"],
+        [
+            "_is_existing_user",
+            "_is_first_user",
+            "_is_allowlisted",
+            "_promote_pending_google_entry",
+            "_admit_by_workspace_invitation",
+        ],
     )
     async def test_anyone_admitted_without_the_invite_keeps_the_token(self, admitting_lookup):
         """An existing user logging in with ``invite=`` must not burn the link."""
@@ -129,6 +136,8 @@ class TestInvitePathPlacement:
             email="someone@example.test",
             username="someone@example.test",
             beta_invite_token_hash=TOKEN_HASH,
+            # The address-matched admissions (#2785) need a verified address.
+            email_verified=True,
         )
 
         assert result is None

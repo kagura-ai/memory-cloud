@@ -721,7 +721,7 @@ async def test_a_member_added_to_a_sole_owned_workspace_waits_for_the_erasure(
     the newcomer's membership is never deleted with W."""
     world = connector_world
     subject = await world.user("subject")
-    newcomer = await world.user("newcomer")
+    newcomer = await world.user("newcomer", verified=True)
     ws_id = (await world.workspace(subject)).id
     await db_session.commit()
     maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
@@ -823,7 +823,7 @@ async def test_an_invitation_accepted_into_a_sole_owned_workspace_waits_for_the_
     used to end in."""
     world = connector_world
     subject = await world.user("subject")
-    newcomer = await world.user("newcomer")
+    newcomer = await world.user("newcomer", verified=True)
     ws_id = (await world.workspace(subject)).id
     own_id = (await world.workspace(newcomer)).id
     await _current_workspace(db_session, newcomer, own_id)
@@ -890,7 +890,7 @@ async def test_an_invitation_accepted_into_a_workspace_deleted_meanwhile_is_a_40
     the deleted workspace."""
     world = connector_world
     owner = await world.user("owner")
-    newcomer = await world.user("newcomer")
+    newcomer = await world.user("newcomer", verified=True)
     ws_id = (await world.workspace(owner)).id
     email = f"{newcomer}@example.com"
     token = await _pending_invitation(db_session, ws_id, owner, email)
@@ -1014,7 +1014,7 @@ async def test_an_accept_locks_the_accepters_users_row_before_its_rows(db_sessio
     was that UPDATE, flushed with the invitation's."""
     world = connector_world
     owner = await world.user("owner")
-    newcomer = await world.user("newcomer")
+    newcomer = await world.user("newcomer", verified=True)
     ws_id = (await world.workspace(owner)).id
     email = f"{newcomer}@example.com"
     token = await _pending_invitation(db_session, ws_id, owner, email)
@@ -1062,7 +1062,7 @@ async def _accept_during_the_accepters_erasure(
     (step 3 deletes it). Then the erasure goes on: it finishes, or with
     ``step_three_fails`` it fails at step 3 and rolls back."""
     owner = await world.user("owner")
-    newcomer = await world.user("newcomer")
+    newcomer = await world.user("newcomer", verified=True)
     ws_id = (await world.workspace(owner)).id
     own_id = (await world.workspace(newcomer)).id
     await _current_workspace(db_session, newcomer, own_id)
@@ -1209,7 +1209,7 @@ async def test_an_accept_does_not_wait_on_the_accepters_open_remember(db_session
 
     world = connector_world
     owner = await world.user("owner")
-    newcomer = await world.user("newcomer")
+    newcomer = await world.user("newcomer", verified=True)
     ws_id = (await world.workspace(owner, **{newcomer: "member"})).id
     email = f"{newcomer}@example.com"
     token = await _pending_invitation(db_session, ws_id, owner, email)

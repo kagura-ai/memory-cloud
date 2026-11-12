@@ -530,8 +530,10 @@ The 7-day lifetime is fixed in code. Notes for operators:
   is recreated.
 - The invite is only consumed when the gate would otherwise have blocked the
   sign-in. Existing users, the first user, identities already on the allowlist,
-  and any deployment with the gate disabled (where `ALLOW_REGISTRATION` decides)
-  never use one up. With [email sign-up](#email-sign-up-issue-1734) on, the
+  people admitted by a pending
+  [workspace invitation](#workspace-invitations-and-the-signup-gate-issue-2785)
+  addressed to their verified address, and any deployment with the gate
+  disabled (where `ALLOW_REGISTRATION` decides) never use one up. With [email sign-up](#email-sign-up-issue-1734) on, the
   `/join` page also offers an email form; that invite is consumed only when the
   emailed link is followed and the account is created.
 - Invitees are ordinary users and get their own quota, so invitations chain.
@@ -644,8 +646,66 @@ Upgrading from a release that did not scrub these shapes:
    `DELETE /api/v1/workspaces/{workspace_id}/invitations/{invitation_id}` for
    each entry of `GET /api/v1/workspaces/{workspace_id}/invitations`, then
    invite again. A token on its own does not join the workspace — accepting
-   needs a session signed in as the invited address — so this is a precaution,
-   most relevant for invitations with a long or no expiry.
+   needs a session signed in as the invited address, verified — so this is a
+   precaution, most relevant for invitations with a long or no expiry.
+
+### Workspace invitations and the signup gate (Issue #2785)
+
+A pending workspace invitation addressed to a person admits that person as a
+new account, with the signup gate (Admin → Signup gate) on or off, for Google, GitHub and [email sign-up](#email-sign-up-issue-1734) alike —
+when the address is verified:
+
+| Sign-in | Verified address |
+|---|---|
+| Google | the account's address with `email_verified` true |
+| GitHub | the primary address, verified at GitHub (the only one the API keeps) |
+| Email sign-up | the address the sign-up link was mailed to and followed |
+
+"Pending" means the invitation exists (a revoked one is deleted), is neither
+accepted nor expired, is not an owner-role invitation, and belongs to a
+workspace that is not deleted and whose plan has `team_invitations`. A
+link-only invitation (no address) admits nobody, and an address that does not
+match exactly (ASCII, case-insensitive) admits nobody. With the gate on the
+invitation is tried after the allowlist and before a
+[beta invite](#closed-beta-invite-links-issue-1581), so an invitee who also
+carries a beta invite keeps it. A pending Google allowlist entry
+(`pending:<email>`) is likewise claimed only by a verified address.
+
+What an admission grants, and what the operator can do about it:
+
+- **The account, not the membership.** The person joins the workspace by
+  accepting the invitation, as before. Opened from the invitation link, the
+  sign-up comes back to the invitation page, which accepts it. Someone who signs
+  up from `/login` instead (or opens the email sign-up link in another browser)
+  lands without a workspace: they open the invitation link again.
+- **No count limit.** While the gate is on, every admin of a workspace whose
+  plan has `team_invitations` (and that workspace's owner API keys) can admit
+  people by inviting them. The member quota counts pending invitations at one
+  time only: revoking an invitation, or removing the member, frees the seat,
+  and the account stays. One pending invitation admits each identity that
+  proves the address until it is accepted or revoked.
+- **The record.** Each admission writes an audit row `signup_admitted`
+  (`user_metadata.admission = "workspace_invitation"`, the provider, and per
+  invitation its public id `winv_…`, workspace id and inviter, up to five, plus
+  the total). The address is stored as an HMAC only. The row commits with the
+  admission (OAuth: before the account is created; email: with the account), so
+  an admission without a record does not happen, and it stays readable after
+  the invitation row is revoked or purged.
+- **The levers.** Revoke the invitation; move the workspace off a plan with
+  `team_invitations` (its invitations then admit nobody); read `signup_admitted`
+  to see who was admitted by whose invitation. Revoking does not remove an
+  account already created.
+- **Invite an address the person controls now.** A provider vouches for an
+  address it verified at some point; an old address may have changed hands.
+
+Addressed invitations need a verified address on the accepting side too:
+`GET /api/v1/invitations/pending` lists, and `POST /api/v1/invitations/accept`
+accepts, an invitation addressed to an email address only for an account whose
+address is verified (`users.email_verified_at`). Accounts without one are those
+created by the admin CLI (`@local` addresses) and OAuth accounts whose provider
+did not report the address as verified; signing in once with a provider that
+verifies the address sets it. A link-only invitation is accepted by whoever
+holds the link, as before.
 
 ## Terms-of-service acceptance (Issue #1665)
 
@@ -942,7 +1002,7 @@ same sign-up controls as for Google and GitHub apply.
 
 | Signup gate | Admits an email sign-up |
 |---|---|
-| on (`/admin/signup-gate`) | a valid [beta invite](#closed-beta-invite-links-issue-1581) (the `/join/{token}` page); the first account of an empty deployment |
+| on (`/admin/signup-gate`) | a pending [workspace invitation](#workspace-invitations-and-the-signup-gate-issue-2785) addressed to the address (a link-only invitation admits nobody, as for Google / GitHub); a valid [beta invite](#closed-beta-invite-links-issue-1581) (the `/join/{token}` page); the first account of an empty deployment |
 | off | `ALLOW_REGISTRATION=true`; a pending [workspace invitation](#workspace-invitation-links) addressed to the address (a link-only invitation admits nobody, as for Google / GitHub); the first account of an empty deployment |
 
 `ALLOW_REGISTRATION` is ignored while the gate is on, for Google, GitHub and
