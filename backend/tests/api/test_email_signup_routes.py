@@ -190,6 +190,89 @@ class TestRequest:
         }
         assert [r["email"] for r in ran] == ["x@example.test", "y@example.test"]
 
+    @pytest.mark.asyncio
+    async def test_nothing_about_the_address_runs_before_the_answer(
+        self, enabled, counters, monkeypatch
+    ) -> None:
+        work = AsyncMock()
+        monkeypatch.setattr(routes, "process_signup_request", work)
+        answer, tasks = await _ask("someone@example.test")
+        assert answer.status == "accepted"
+        work.assert_not_awaited()
+        assert [func for func, _ in tasks] == [work]
+
+    def test_new_existing_closed_and_throttled_addresses_get_identical_answers(
+        self, enabled, monkeypatch
+    ) -> None:
+        """Byte-identical HTTP answers while the real background work differs."""
+        import services.email_signup_service as svc_module
+        from services.email_service import redact_recipient
+        from services.email_signup_service import (
+            AccountExistsNotice,
+            EmailSignupService,
+            PendingSignupEmail,
+        )
+
+        counts: dict[str, int] = {}
+
+        async def _incr(key: str, ttl: int | None = None) -> int:
+            counts[key] = counts.get(key, 0) + 1
+            return counts[key]
+
+        monkeypatch.setattr(routes, "increment_counter", _incr)
+        outcomes = {
+            "new@example.test": PendingSignupEmail(
+                to_email="new@example.test",
+                verify_url="https://example.com/signup/verify?token=t",
+                expires_in_minutes=60,
+                locale=None,
+            ),
+            "known@example.test": AccountExistsNotice(to_email="known@example.test", locale=None),
+            "closed@example.test": None,
+        }
+        asked: list[str] = []
+
+        async def _decide(self, *, email: str, **_kwargs):
+            asked.append(email)
+            return outcomes[email]
+
+        class _NoSession:
+            async def __aenter__(self):
+                return MagicMock()
+
+            async def __aexit__(self, *exc) -> None:
+                return None
+
+        sent = AsyncMock()
+        monkeypatch.setattr(EmailSignupService, "request", _decide)
+        monkeypatch.setattr(EmailSignupService, "send", sent)
+        monkeypatch.setattr(svc_module, "_get_session_factory", lambda: _NoSession)
+        # This address already used its per-address allowance.
+        counts[f"email_signup_email:{redact_recipient('throttled@example.test')}"] = 3
+
+        client = TestClient(app)
+        answers = [
+            client.post("/api/v1/auth/signup/email/request", json={"email": address})
+            for address in [*outcomes, "throttled@example.test"]
+        ]
+        skip = {"date", "x-request-id", "x-response-time", "x-process-time"}
+        shapes = {
+            (
+                a.status_code,
+                a.content,
+                tuple(sorted((k, v) for k, v in a.headers.items() if k.lower() not in skip)),
+            )
+            for a in answers
+        }
+        assert len(shapes) == 1
+        assert next(iter(shapes))[0] == 202
+        # The work did run, and did different things, after each answer.
+        assert asked == list(outcomes)
+        assert [call.args[0] for call in sent.await_args_list] == [
+            outcomes["new@example.test"],
+            outcomes["known@example.test"],
+        ]
+
 
 class TestComplete:
     @pytest.fixture

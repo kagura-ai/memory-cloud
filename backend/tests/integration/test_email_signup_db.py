@@ -347,6 +347,58 @@ class TestBetaInvite:
         ) == 1
         monkeypatch.undo()
 
+    @pytest.mark.parametrize("column", ["revoked_at", "redeemed_at"])
+    async def test_invite_revoked_or_used_after_the_check_is_never_claimed(
+        self, env, maker, db_session, someone, monkeypatch, column: str
+    ) -> None:
+        """The guarded claim, not the pre-check, decides (revoke / redeem race)."""
+        await _gate(db_session, enabled=True)
+        invite_id, invite = await _mint(maker, someone)
+        email = _addr("killed")
+        token = _token((await _request(maker, email, invite)).verify_url)
+        original = BetaInviteService.find_redeemable
+
+        async def _then_killed(self, token_hash, now):
+            found = await original(self, token_hash, now)
+            # Another transaction revokes or redeems the invite between the
+            # completion's pre-check and its claim.
+            async with maker() as other:
+                await other.execute(
+                    update(BetaInvite).where(BetaInvite.id == invite_id).values({column: utcnow()})
+                )
+                await other.commit()
+            return found
+
+        monkeypatch.setattr(BetaInviteService, "find_redeemable", _then_killed)
+        with pytest.raises(SignupNotAllowedError):
+            await _complete(maker, token)
+        assert await _users_for(db_session, email) == 0
+        db_session.expire_all()
+        assert (await db_session.get(BetaInvite, invite_id)).redeemed_allowlist_entry_id is None
+        assert (
+            await db_session.scalar(
+                select(func.count())
+                .select_from(SignupAllowlistEntry)
+                .where(SignupAllowlistEntry.subject_label == email)
+            )
+        ) == 0
+
+    async def test_an_invite_over_its_daily_request_limit_sends_nothing(
+        self, env, maker, db_session, someone, monkeypatch
+    ) -> None:
+        await _gate(db_session, enabled=True)
+        _, invite = await _mint(maker, someone)
+        monkeypatch.setattr(svc_module, "_over_daily_invite_limit", AsyncMock(return_value=True))
+        email = _addr("limited")
+        assert await _request(maker, email, invite) is None
+        assert (
+            await db_session.scalar(
+                select(func.count())
+                .select_from(EmailSignupRequest)
+                .where(EmailSignupRequest.email == email)
+            )
+        ) == 0
+
 
 class TestOneAccountPerAddress:
     async def _existing(self, db_session, email: str, *, verified: bool) -> str:
@@ -506,6 +558,65 @@ class TestAutoLink:
                 await _google(maker, email, f"g-{uuid4().hex[:10]}")
             assert await _users_for(db_session, email) == 1
 
+    @pytest.mark.parametrize(
+        ("provider", "domain", "extra"),
+        [
+            # GitHub never links in v1, even for a verified Gmail / Workspace address.
+            ("github", "gmail.com", {}),
+            ("github", "example.test", {"hd": "example.test"}),
+            # A consumer Google account on another domain is not authoritative.
+            ("google", "example.test", {}),
+        ],
+    )
+    async def test_github_and_non_authoritative_google_get_email_in_use(
+        self, gate_off, maker, db_session, provider: str, domain: str, extra: dict
+    ) -> None:
+        """The callbacks' decision, end to end: refused, one row, no link."""
+        from api.routes.auth import provider_authoritative_for_address
+
+        email, user_id = await _email_account(maker, domain=domain)
+        user_info = {"email": email, "email_verified": True, **extra}
+        with (
+            _fresh_get_db(maker),
+            patch("services.security_notification_service.spawn_security_notification"),
+            pytest.raises(ConflictError),
+        ):
+            await RoleManager(use_postgres=True).ensure_user(
+                email=email,
+                user_id=f"{provider[:2]}-{uuid4().hex[:10]}",
+                name="From Provider",
+                auth_provider=provider,
+                email_verified=True,
+                email_authoritative=provider_authoritative_for_address(provider, user_info),
+            )
+        assert await _users_for(db_session, email) == 1
+        assert (
+            await db_session.scalar(
+                select(func.count())
+                .select_from(UserOAuthProvider)
+                .where(UserOAuthProvider.user_id == user_id)
+            )
+        ) == 0
+
+    async def test_auto_link_waits_for_a_concurrent_block_and_honours_it(
+        self, gate_off, maker, db_session
+    ) -> None:
+        """The conditions are read under the row lock an unlink or a reset holds."""
+        email, user_id = await _email_account(maker)
+        async with maker() as holder:
+            user = (
+                await holder.execute(select(User).where(User.user_id == user_id).with_for_update())
+            ).scalar_one()
+            user.provider_auto_link_blocked_at = utcnow()
+            await holder.flush()
+            sign_in = asyncio.create_task(_google(maker, email, f"g-{uuid4().hex[:10]}"))
+            await asyncio.sleep(0.5)
+            assert not sign_in.done()  # waiting for the row lock
+            await holder.commit()
+        with pytest.raises(ConflictError):
+            await sign_in
+        assert await _users_for(db_session, email) == 1
+
     async def test_unlink_blocks_the_next_auto_link(self, gate_off, maker, db_session) -> None:
         from services.account_linking_service import AccountLinkingService
 
@@ -602,6 +713,58 @@ class TestHousekeeping:
             )
         ).scalar_one()
         assert entry.subject_label == entry.github_username == ERASED_ALLOWLIST_LABEL
+
+    async def test_erasure_blanks_linked_provider_rows_and_spares_others(
+        self, env, maker, db_session, someone
+    ) -> None:
+        """The pre-existing gap: rows of the account's linked identities, too."""
+        from services.account_erasure_service import (
+            ERASED_ALLOWLIST_LABEL,
+            AccountErasureService,
+        )
+
+        await _gate(db_session, enabled=True)
+        _, invite = await _mint(maker, someone)
+        email = _addr("eraselinked")
+        created = await _complete(maker, _token((await _request(maker, email, invite)).verify_url))
+        sub = f"g-{uuid4().hex[:10]}"
+        await _google(maker, email, sub)
+
+        def _row(subject_id: str, label: str) -> SignupAllowlistEntry:
+            return SignupAllowlistEntry(
+                provider="google",
+                subject_id=subject_id,
+                subject_label=label,
+                github_user_id=f"google:{subject_id}",
+                github_username=label,
+                source="manual",
+                state="active",
+            )
+
+        other_sub = f"g-{uuid4().hex[:10]}"
+        other_label = _addr("bystander")
+        db_session.add_all([_row(sub, email), _row(other_sub, other_label)])
+        await db_session.commit()
+
+        async with maker() as s:
+            changed = await AccountErasureService(s)._blank_signup_allowlist_labels(created.user_id)
+            await s.commit()
+        assert changed == 2
+        db_session.expire_all()
+        labels = dict(
+            (
+                await db_session.execute(
+                    select(
+                        SignupAllowlistEntry.subject_id, SignupAllowlistEntry.subject_label
+                    ).where(SignupAllowlistEntry.subject_id.in_([created.user_id, sub, other_sub]))
+                )
+            ).all()
+        )
+        assert labels == {
+            created.user_id: ERASED_ALLOWLIST_LABEL,
+            sub: ERASED_ALLOWLIST_LABEL,
+            other_sub: other_label,
+        }
 
     async def test_cli_password_admin_is_never_an_email_account(
         self, env, maker, db_session, monkeypatch

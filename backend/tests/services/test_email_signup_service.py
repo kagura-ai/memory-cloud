@@ -22,7 +22,7 @@ from services.email_signup_service import (
     process_signup_request,
     validate_signup_address,
 )
-from utils.exceptions import PasswordLinkInvalidError, ValidationError
+from utils.exceptions import PasswordLinkInvalidError, RedisError, ValidationError
 
 GOOD_PASSWORD = "Correct-Horse-Battery-42"
 
@@ -127,6 +127,58 @@ class TestBackgroundTask:
             )
         assert "a@example.test" not in repr(log.mock_calls)
         log.error.assert_called_once()
+
+
+class TestMailLimits:
+    """The per-invite and the account-exists notice limits fail closed."""
+
+    @pytest.mark.asyncio
+    async def test_an_invite_admits_five_requests_a_day(self, monkeypatch) -> None:
+        keys: list[str] = []
+
+        async def _incr(key: str, ttl: int | None = None) -> int:
+            keys.append(key)
+            return len(keys)
+
+        monkeypatch.setattr(svc_module, "increment_counter", _incr)
+        invite_hash = "ab" * 32
+        over = [await svc_module._over_daily_invite_limit(invite_hash) for _ in range(6)]
+        assert over == [False] * 5 + [True]
+        assert len(set(keys)) == 1
+        assert invite_hash not in keys[0]
+
+    @pytest.mark.asyncio
+    async def test_invite_limit_fails_closed_without_redis(self, monkeypatch) -> None:
+        async def _down(key: str, ttl: int | None = None) -> int:
+            raise RedisError("down")
+
+        monkeypatch.setattr(svc_module, "increment_counter", _down)
+        assert await svc_module._over_daily_invite_limit("ab" * 32) is True
+
+    @pytest.mark.asyncio
+    async def test_one_notice_per_address_a_day(self, monkeypatch) -> None:
+        claimed: dict[str, int] = {}
+
+        async def _set_if_absent(key: str, value: str, ttl: int) -> bool:
+            if key in claimed:
+                return False
+            claimed[key] = ttl
+            return True
+
+        monkeypatch.setattr(svc_module, "set_if_absent", _set_if_absent)
+        assert await svc_module._claim_notice_slot("a@example.test") is True
+        assert await svc_module._claim_notice_slot("a@example.test") is False
+        assert await svc_module._claim_notice_slot("b@example.test") is True
+        assert all("example.test" not in key for key in claimed)
+        assert set(claimed.values()) == {24 * 60 * 60}
+
+    @pytest.mark.asyncio
+    async def test_notice_fails_closed_without_redis(self, monkeypatch) -> None:
+        async def _down(key: str, value: str, ttl: int) -> bool:
+            raise RedisError("down")
+
+        monkeypatch.setattr(svc_module, "set_if_absent", _down)
+        assert await svc_module._claim_notice_slot("a@example.test") is False
 
 
 @pytest.mark.parametrize(
