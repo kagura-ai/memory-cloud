@@ -27,6 +27,15 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        // #1734: /signup/verify carries a one-time account-creation token in
+        // the query string; same policy as /join (app/signup/layout.tsx).
+        source: "/signup/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
+      {
         source: "/join/:path*",
         headers: [
           { key: "Referrer-Policy", value: "no-referrer" },

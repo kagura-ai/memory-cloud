@@ -29,6 +29,11 @@
  * #1665: when the deployment reports a `terms_version`, the sign-up URL carries
  * it as `accepted_terms`; the backend records it with the new account.
  *
+ * #1734: with `features.email_signup` the invite also works without a Google
+ * or GitHub account: "Sign up with email" sends a link to the address, with
+ * the token (the backend redeems it when the account is created). Without any
+ * provider the form replaces the "no sign-up method" text.
+ *
  * Next.js 15: params is a Promise and must be unwrapped with React.use()
  */
 
@@ -64,6 +69,7 @@ import { Button } from "@/components/ui/button";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { EmailSignupForm } from "@/components/auth/EmailSignupForm";
 import { INVITE_HANDOFF_TEST_IDS as T } from "@/components/auth/invite-handoff.testids";
 
 type PageState =
@@ -158,6 +164,7 @@ function JoinLoading() {
 
 function JoinContent({ token }: { token: string }) {
   const t = useTranslations("betaInvites");
+  const tEmail = useTranslations("emailSignup");
   const locale = useLocale();
   const features = useSystemFeatures();
   // #1665: the terms version the checkbox refers to, when the deployment has
@@ -321,7 +328,26 @@ function JoinContent({ token }: { token: string }) {
               {t("join.valid.continueWithGitHub")}
             </Button>
           )}
-          {probe.providers.length === 0 && (
+          {features?.email_signup === true && (
+            <>
+              {probe.providers.length > 0 && (
+                <div className="my-4 flex items-center gap-3">
+                  <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                  <span className="text-sm text-gray-500 dark:text-gray-400">
+                    {tEmail("request.divider")}
+                  </span>
+                  <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                </div>
+              )}
+              <EmailSignupForm
+                invite={token}
+                returnTo={returnTo}
+                defaultOpen={probe.providers.length === 0}
+                themed
+              />
+            </>
+          )}
+          {probe.providers.length === 0 && features?.email_signup !== true && (
             <p className="text-center text-sm text-gray-600 dark:text-gray-400">
               {t("join.valid.noProviders")}
             </p>

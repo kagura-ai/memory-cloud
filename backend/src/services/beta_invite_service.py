@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, Select, Update, and_, func, select, update
+from sqlalchemy import CursorResult, Select, Update, and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.roles import Role
@@ -317,7 +317,20 @@ class BetaInviteService:
                         UserOAuthProvider.oauth_sub == SignupAllowlistEntry.subject_id,
                     ),
                 )
-                .outerjoin(User, User.user_id == UserOAuthProvider.user_id)
+                # #1734: an invite redeemed by email sign-up has an ``email``
+                # allowlist row keyed on the account's own ``user_id`` (no
+                # provider identity to map). ``user_oauth_providers`` never
+                # holds ``provider='email'``, so the two arms cannot both match.
+                .outerjoin(
+                    User,
+                    or_(
+                        User.user_id == UserOAuthProvider.user_id,
+                        and_(
+                            SignupAllowlistEntry.provider == "email",
+                            User.user_id == SignupAllowlistEntry.subject_id,
+                        ),
+                    ),
+                )
                 .where(BetaInvite.inviter_user_id == user_id)
                 .order_by(BetaInvite.created_at.desc(), BetaInvite.id.desc())
                 .limit(limit + 1)

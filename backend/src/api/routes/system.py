@@ -182,6 +182,14 @@ async def system_info():
             # never the per-user quota (the inviter reads that from
             # /beta-invites/me once signed in).
             "beta_invites": settings.enable_beta_invites,
+            # Issue #1734: default-off. When false every /auth/signup/email
+            # route 404s and the web UI shows no email sign-up form.
+            "email_signup": settings.enable_email_signup,
+            # Issue #1734: ALLOW_REGISTRATION as configured (env only, no DB
+            # read on this public endpoint). It is ignored while the signup
+            # gate is on, for Google / GitHub as for email; invitation pages
+            # read the invitation preview's ``email_signup_available``.
+            "open_registration": settings.allow_registration,
             # Issue #1572: false when ENABLE_RERANKING is off or the self_hosted
             # default has no endpoint; the web UI then disables the reranker card.
             "reranking": settings.enable_reranking and rerank_configured,

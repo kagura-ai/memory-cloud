@@ -877,6 +877,7 @@ from api.routes import (  # noqa: E402
     context_search_config,
     contexts,
     cost_aggregation,  # Issue #472: cost aggregation API (admin + workspace-scoped)
+    email_signup,  # Issue #1734: email + password sign-up (ENABLE_EMAIL_SIGNUP)
     external_keys,
     feedback,  # Issue #888: retrieval feedback signal
     files,  # Issue #485: platform-managed R2 file storage
@@ -949,6 +950,8 @@ app.include_router(passkeys.router, prefix="/api/v1")
 app.include_router(mfa_settings.router, prefix="/api/v1")
 app.include_router(password.router, prefix="/api/v1")
 app.include_router(password.me_router, prefix="/api/v1")
+# Email + password sign-up (Issue #1734); 404 unless ENABLE_EMAIL_SIGNUP
+app.include_router(email_signup.router, prefix="/api/v1")
 
 # OAuth2 Server routes (Issue #33 - OAuth2 client management)
 app.include_router(oauth.router, prefix="/api/v1")

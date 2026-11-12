@@ -612,7 +612,9 @@ The 7-day lifetime is fixed in code. Notes for operators:
 - The invite is only consumed when the gate would otherwise have blocked the
   sign-in. Existing users, the first user, identities already on the allowlist,
   and any deployment with the gate disabled (where `ALLOW_REGISTRATION` decides)
-  never use one up.
+  never use one up. With [email sign-up](#email-sign-up-issue-1734) on, the
+  `/join` page also offers an email form; that invite is consumed only when the
+  emailed link is followed and the account is created.
 - Invitees are ordinary users and get their own quota, so invitations chain.
   `ENABLE_BETA_INVITES=false` stops the chain immediately.
 - Minting, redemption and revocation are written to the audit log as
@@ -1012,6 +1014,84 @@ password reset (the emailed link or `python -m src.cli.reset_password`, choices
 1 and 3) removes every passkey of the account and disconnects its Google / GitHub
 sign-ins, which the owner connects again from Profile; "Disable MFA only" keeps
 them. The CLI prints how many providers it disconnected.
+
+## Email sign-up (Issue #1734)
+
+`ENABLE_EMAIL_SIGNUP=true` lets a person without a Google or GitHub account
+create an account with an email address and a password. It opens nothing: the
+same sign-up controls as for Google and GitHub apply.
+
+| Signup gate | Admits an email sign-up |
+|---|---|
+| on (`/admin/signup-gate`) | a valid [beta invite](#closed-beta-invite-links-issue-1581) (the `/join/{token}` page); the first account of an empty deployment |
+| off | `ALLOW_REGISTRATION=true`; a pending [workspace invitation](#workspace-invitation-links) addressed to the address (a link-only invitation admits nobody, as for Google / GitHub); the first account of an empty deployment |
+
+`ALLOW_REGISTRATION` is ignored while the gate is on, for Google, GitHub and
+email alike. The manual allowlist and pending Google entries are grants to a
+provider identity and never admit an email sign-up; there is no "allow this
+address" screen.
+
+How it works:
+
+1. The person types an address (`/join/{token}`, `/invite/{token}`, or `/login`
+   when `ALLOW_REGISTRATION=true`). `POST /api/v1/auth/signup/email/request`
+   always answers `202` with the same body. After the response: if the controls
+   admit a new account at that address, a link to `/signup/verify` is emailed
+   (valid `EMAIL_SIGNUP_LINK_TTL_MINUTES`, default 60, once); if the address
+   already has an account, a notice without a link goes to that account's
+   verified address at most once a day; otherwise nothing is sent to anyone. A
+   beta invite admits at most 5 requests a day. Limits: 10 requests per client
+   address per 15 minutes (`429`), 3 per address per 15 minutes (silent). When
+   Redis cannot count, nothing is sent.
+2. The link holder chooses the password (and accepts the terms when
+   `TERMS_VERSION` is set). The controls run again when the account is created:
+   a beta invite is redeemed then, a revoked / used / expired one refuses (`403`
+   `AUTH-308`), an address that got an account meanwhile refuses (`409`
+   `AUTH-309`). The account (`user_id` `email:<uuid>`, `auth_method=password`,
+   no login id, address verified) gets a personal workspace unless a workspace
+   invitation waits, and the browser is signed in. If the session cannot be
+   written after the account was created, the answer is `503` and the person
+   signs in with the password.
+
+Requirements and operator notes:
+
+- **A real email backend** (`EMAIL_PROVIDER=resend`). The logging backend never
+  writes the link, so nobody could finish a sign-up; the API logs a warning at
+  startup when the feature is on with it.
+- **Proxy logs:** the link carries its token as `?token=`. The shipped
+  `Caddyfile.tpl` redacts every `token` query parameter (this also covers
+  `/password/reset?token=` and `/password/setup?token=`); recreate the proxy
+  container to drop lines written before. Replicate it if you run another proxy.
+- The first account of an empty deployment is admitted like the first Google /
+  GitHub sign-in, and gets the role `new_account_role` gives it.
+- Invite quota: an account created by email gets the same beta-invite quota as
+  any other.
+- Pending requests (address, hashed token, hashed invite) are deleted when the
+  sign-up completes, when a newer request for the address replaces them, and by
+  the hourly cleanup once expired. Account erasure blanks the address on the
+  account's sign-up allowlist rows (`[erased]`).
+- Audit: `user.signed_up` (`user_email` `email-signup`, address only as HMAC,
+  `user_metadata.admission`), `beta_invite.redeemed` for an invite, `terms.accepted`.
+
+The same address on a later Google or GitHub sign-in:
+
+- **Google** links to the email account (the person is signed in to it, no
+  second account) only when Google is authoritative for the mailbox: the
+  address is verified **and** it is a Google Workspace account (`hd`) or a
+  `gmail.com` / `googlemail.com` address. The owner gets a "sign-in method was
+  added" notice. The link is refused (`/login?error=email_in_use`, sign in with
+  the password and connect Google in Profile) when the account has two-step
+  verification on, is a system admin, or its owner removed a provider, or a
+  password reset removed one (`users.provider_auto_link_blocked_at`).
+- **GitHub** never links automatically: GitHub verifies an address once and
+  keeps it. The person signs in with the password and connects GitHub in
+  Profile.
+- In every case one `users` row exists per address: an address that differs
+  only in case is treated as the same address and refused, never a second
+  account.
+- Before enabling, check that no existing account matches the email sign-up
+  shape: `SELECT count(*) FROM users WHERE auth_method = 'password' AND login_id IS NULL;`
+  should be 0 (CLI accounts always have a login id).
 
 ## Which sign-in provider syncs the account's email (Issues #1811, #1875)
 

@@ -254,11 +254,18 @@ def create_admin(skip_mcp_json: bool = False):
     engine = create_engine(get_sync_database_url())
 
     with Session(engine) as db:
-        # Check if password admin already exists
+        # Check if password admin already exists. ``login_id IS NOT NULL``:
+        # an account created by email sign-up (#1734) also has
+        # ``auth_method='password'`` and may hold ``role='admin'``, but it is
+        # not the CLI admin.
         admin_count = db.execute(
             select(func.count())
             .select_from(User)
-            .where(User.auth_method == "password", User.role == "admin")
+            .where(
+                User.auth_method == "password",
+                User.role == "admin",
+                User.login_id.is_not(None),
+            )
         ).scalar()
         if admin_count and admin_count > 0:
             print("\n✗ Password admin already exists.")

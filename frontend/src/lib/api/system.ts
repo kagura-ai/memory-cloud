@@ -128,6 +128,13 @@ export type SystemFeatures = Record<string, boolean> & {
   system_admin?: boolean;
   /** #1582: beta invite links. Absent on backends older than #1581 ⇒ off. */
   beta_invites?: boolean;
+  /** #1734: email + password sign-up (`ENABLE_EMAIL_SIGNUP`). Absent ⇒ off. */
+  email_signup?: boolean;
+  /**
+   * #1734: `ALLOW_REGISTRATION` — anyone may sign up while the signup gate is
+   * off. Absent ⇒ off.
+   */
+  open_registration?: boolean;
 };
 
 export interface SystemInfo {

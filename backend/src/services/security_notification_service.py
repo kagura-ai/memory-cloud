@@ -200,6 +200,9 @@ class SecurityEvent(StrEnum):
     OAUTH_SECRET_REGENERATED = "oauth_secret_regenerated"  # noqa: S105 — not a credential
     SIGN_IN_METHOD_REMOVED = "sign_in_method_removed"
     SIGN_IN_METHOD_ADDED = "sign_in_method_added"
+    # #1734: a Google sign-in with the account's address was connected to an
+    # account created by email sign-up, without a step in Profile.
+    SIGN_IN_METHOD_AUTO_LINKED = "sign_in_method_auto_linked"
     OAUTH_CLIENT_CREATED = "oauth_client_created"
     EMAIL_CHANGED = "email_changed"
     NEW_DEVICE_SIGN_IN = "new_device_sign_in"
@@ -217,6 +220,7 @@ class SecurityEvent(StrEnum):
 # The label of the sign-in method line, per event.
 _SIGN_IN_METHOD_LABELS: dict[SecurityEvent, str] = {
     SecurityEvent.SIGN_IN_METHOD_ADDED: "Added:  ",
+    SecurityEvent.SIGN_IN_METHOD_AUTO_LINKED: "Added:  ",
     SecurityEvent.EMAIL_CHANGED: "Via:    ",
     SecurityEvent.NEW_DEVICE_SIGN_IN: "Via:    ",
 }
@@ -299,6 +303,13 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
     SecurityEvent.SIGN_IN_METHOD_ADDED: (
         "A sign-in method was added to your Kagura account",
         "A new sign-in method was linked to your account.",
+    ),
+    SecurityEvent.SIGN_IN_METHOD_AUTO_LINKED: (
+        "A sign-in method was connected to your Kagura account",
+        "A sign-in provider was connected to your account because someone signed in"
+        " with it using your account's email address, which the provider reports as"
+        " verified. If this was not you, remove it in your profile and change your"
+        " password.",
     ),
     SecurityEvent.OAUTH_CLIENT_CREATED: (
         "A new OAuth app was registered on your Kagura account",

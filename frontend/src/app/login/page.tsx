@@ -17,6 +17,9 @@
  * record it; without one the requests are unchanged.
  * Issue #1678: the login ID field also takes the verified email of an account
  * with a password; "Forgot password?" leads to the self-service reset.
+ * Issue #1734: "Create an account with email" when the deployment has email
+ * sign-up on and registration open (`features.email_signup` and
+ * `features.open_registration`); the `email_in_use` copy names no method.
  */
 
 import Link from "next/link";
@@ -49,6 +52,7 @@ import {
   MailPlus,
   Sparkles,
   Shield,
+  UserPlus,
   Zap,
 } from "lucide-react";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
@@ -58,6 +62,7 @@ import { MfaCodeInput } from "@/components/auth/MfaCodeInput";
 import { isCompleteMfaCode, normalizeMfaCode } from "@/lib/auth/mfaCode";
 import PasskeyLogin from "@/components/auth/PasskeyLogin";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { EmailSignupForm } from "@/components/auth/EmailSignupForm";
 
 // #1594: how long the form waits for the session check before rendering
 // anyway. A slow or broken /auth/me must never lock anyone out of /login.
@@ -105,6 +110,8 @@ function LoginContent() {
   const [inviteEntryOpen, setInviteEntryOpen] = useState(false);
   const [inviteInput, setInviteInput] = useState("");
   const [inviteInputInvalid, setInviteInputInvalid] = useState(false);
+  // #1734: "Create an account with email" entry.
+  const [emailSignupOpen, setEmailSignupOpen] = useState(false);
 
   // MFA state
   const [mfaRequired, setMfaRequired] = useState(false);
@@ -166,19 +173,18 @@ function LoginContent() {
         }),
       );
     } else if (errorParam === "email_in_use") {
-      // Issue #481: cross-provider email collision. The user signed in with
-      // one provider (e.g. Google) using an email that's already bound to
-      // a different account. Account linking is intentionally not yet
-      // supported (#517) — direct the user to their original provider.
+      // Issue #481: the address of this sign-in already belongs to another
+      // account. #1734: that account may sign in with a provider or with an
+      // email address and password, so the copy names no method.
       setError(
         t("emailInUse", {
           default:
-            "This email is already linked to another sign-in method. Please use the provider you originally signed in with.",
+            "This email address already belongs to an account that signs in another way.",
         }),
       );
       // Issue #517: the backend appends &link_hint=true to signal that an
       // account with this email already exists — nudge the user to sign in
-      // with their original provider, then link this one from their profile.
+      // the way they did before, then link this one from their profile.
       if (searchParams.get("link_hint") === "true") {
         setNotice(t("linkHint"));
       }
@@ -738,6 +744,25 @@ function LoginContent() {
                     )}
                   </div>
                 )}
+
+                {/* #1734: open registration also takes an email address. */}
+                {features?.email_signup === true &&
+                  features?.open_registration === true && (
+                    <div className="mt-4 border-t border-gray-200 pt-4">
+                      {!emailSignupOpen ? (
+                        <button
+                          type="button"
+                          onClick={() => setEmailSignupOpen(true)}
+                          className="inline-flex items-center gap-2 text-sm font-medium text-kagura-link hover:underline"
+                        >
+                          <UserPlus className="h-4 w-4" />
+                          {t("signUpWithEmail")}
+                        </button>
+                      ) : (
+                        <EmailSignupForm defaultOpen returnTo={returnTo} />
+                      )}
+                    </div>
+                  )}
               </>
             )}
 

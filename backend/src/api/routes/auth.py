@@ -27,7 +27,7 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -225,12 +225,23 @@ async def _check_registration_allowed(
         # user_id (OAuth sub) is included as an OR condition so a returning
         # user whose email changed at the IdP is recognised as existing and
         # never blocked — RoleManager.ensure_user handles the email sync.
+        #
+        # #1734: an account created by email sign-up stores the normalized
+        # address, so an IdP address in another case finds it through the
+        # email-sign-up clause; ensure_user then links or refuses, never
+        # creates. Several rows can match the OR, hence ``.first()``.
+        from auth.roles import email_signup_account_clause
+
         if user_id is not None and user_id:
-            cond = or_(User.email == email, User.user_id == user_id)
+            cond = or_(
+                User.email == email,
+                User.user_id == user_id,
+                email_signup_account_clause(email),
+            )
         else:
-            cond = User.email == email
-        result = await session.execute(select(User).where(cond))
-        if result.scalar_one_or_none():
+            cond = or_(User.email == email, email_signup_account_clause(email))
+        result = await session.execute(select(User.id).where(cond).limit(1))
+        if result.first() is not None:
             return None
 
         # First user always allowed
@@ -1000,6 +1011,9 @@ async def google_callback(
             # Strict identity check (not bool coercion) so a stringly-typed
             # "True" / "false" from a misconfigured IdP cannot pass the gate.
             email_verified=user_info.get("email_verified") is True,
+            # #1734: only an authoritative provider may link to an account
+            # created by email sign-up for this address.
+            email_authoritative=provider_authoritative_for_address("google", user_info),
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
             # #2700: applied only when this sign-in creates the account.
@@ -1700,6 +1714,7 @@ async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
       "not new" keeps that pre-#1665 answer instead of masking it with
       ``terms_required``; no account is created either way.
     """
+    from auth.roles import email_signup_account_clause
     from models.auth import UserOAuthProvider
 
     exists = False
@@ -1712,9 +1727,17 @@ async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
         if link.scalar_one_or_none() is not None:
             exists = True
         else:
+            # #1734: plus the account email sign-up created for the address,
+            # in any case — ensure_user links to it or refuses, never inserts.
             existing = await db.execute(
                 select(User.user_id)
-                .where(or_(User.user_id == idp_sub, User.email == email))
+                .where(
+                    or_(
+                        User.user_id == idp_sub,
+                        User.email == email,
+                        email_signup_account_clause(email),
+                    )
+                )
                 .limit(1)
             )
             exists = existing.scalar_one_or_none() is not None
@@ -2347,6 +2370,41 @@ async def _github_exchange_code(code: str) -> str:
     return data["access_token"]
 
 
+_GOOGLE_CONSUMER_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
+
+
+def provider_authoritative_for_address(
+    provider: Literal["google", "github"], user_info: Mapping[str, Any]
+) -> bool:
+    """Whether the provider vouches for the mailbox NOW, not only once (#1734).
+
+    The one place that decides whether a Google / GitHub sign-in may link to
+    an account created by email sign-up for the same address
+    (``ensure_user(email_authoritative=...)``). Everything else about the
+    sign-in (the email sync, ``email_verified_at``) keeps using
+    ``email_verified``.
+
+    - Google: the address is verified (``email_verified is True``) AND Google
+      owns the mailbox: a Workspace account (``hd`` non-empty) or a Gmail
+      address. For a consumer Google account on another domain the address
+      was verified once and may have changed hands since.
+    - GitHub: never (owner decision, v1). GitHub verifies an address once and
+      keeps it verified; the person signs in with the password and connects
+      GitHub in Profile.
+    """
+    if provider != "google":
+        return False
+    if user_info.get("email_verified") is not True:
+        return False
+    hd = user_info.get("hd")
+    if isinstance(hd, str) and hd.strip():
+        return True
+    email = user_info.get("email")
+    if not isinstance(email, str) or email.count("@") != 1:
+        return False
+    return email.rsplit("@", 1)[1].strip().lower() in _GOOGLE_CONSUMER_DOMAINS
+
+
 async def _github_get_user_info(access_token: str) -> dict[str, Any]:
     """Get user info from GitHub API.
 
@@ -2517,6 +2575,8 @@ async def github_callback(
             # and always sets email_verified=True; KeyError on a missing key
             # is the desired loud failure.
             email_verified=user_info["email_verified"],
+            # #1734: GitHub never links automatically (see the helper).
+            email_authoritative=provider_authoritative_for_address("github", user_info),
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
             # #2700: applied only when this sign-in creates the account.

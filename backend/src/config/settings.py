@@ -1985,6 +1985,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Email + password sign-up (Issue #1734)
+    enable_email_signup: bool = Field(
+        default=False,
+        description=(
+            "Let a person create an account with an email address and a password "
+            "(#1734), under the same sign-up controls as Google / GitHub: the "
+            "signup gate (beta invite) when it is on; ALLOW_REGISTRATION or a "
+            "workspace invitation addressed to the verified address when it is "
+            "off. OFF by default; also the KILL SWITCH: false 404s every "
+            "/auth/signup/email route. Needs a real email backend "
+            "(EMAIL_PROVIDER=resend): the logging backend never logs the link. "
+            "Surfaced to the frontend via GET /api/v1/system/info "
+            "features.email_signup."
+        ),
+    )
+
     # Identity-link proof (Issue #1818)
     identity_link_allow_oauth_signin_proof: bool = Field(
         default=False,
@@ -2155,6 +2171,13 @@ class Settings(BaseSettings):
         ge=1,
         le=7 * 24,
         description="Lifetime of an email-verification link (hours).",
+    )
+    # Issue #1734: the email sign-up link creates an account, so it is short.
+    email_signup_link_ttl_minutes: int = Field(
+        default=60,
+        ge=1,
+        le=24 * 60,
+        description="Lifetime of an email sign-up link (minutes, at most 24 hours).",
     )
     # Security-change notification emails (Issue #1752): the first occurrences
     # of an event for a user are emailed at once; later ones in the window go
@@ -2741,6 +2764,21 @@ class Settings(BaseSettings):
                 "Lower REFERRAL_MAX_GRANTS_PER_REFERRER or the reward amounts — "
                 "otherwise a fully-used referral chain hands out the paid tier "
                 "for free."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_email_signup_without_mail(self) -> "Settings":
+        """Warn when email sign-up is on but mail goes to the log (#1734).
+
+        The logging backend never writes the sign-up link, so nobody can
+        follow it. A warning, not a refusal: development and CI run this way.
+        """
+        if self.enable_email_signup and self.email_provider == "logging":
+            logger.warning(
+                "ENABLE_EMAIL_SIGNUP is on but EMAIL_PROVIDER=logging: sign-up links are "
+                "never delivered, so nobody can finish an email sign-up. Set "
+                "EMAIL_PROVIDER=resend (docs/deployment.md, 'Email sign-up')."
             )
         return self
 

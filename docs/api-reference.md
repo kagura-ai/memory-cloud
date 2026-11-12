@@ -101,6 +101,30 @@ contact its owner. Such an invitation does not admit a new account while registr
 is closed, and does not suppress creation of a new user's personal workspace.
 Acceptance still checks the workspace's current plan at the time of the request.
 
+The public preview `GET /api/v1/invitations/{token}` also returns
+`email_signup_available`: whether a person without an account can create one with
+this invitation's address by email (email sign-up on, and the sign-up controls
+admit it: signup gate off and the invitation addressed to an email on a plan that
+allows invitations, or `ALLOW_REGISTRATION=true`, or no account exists yet). It
+names no address.
+
+### Email + password sign-up
+
+Public, `404` unless `ENABLE_EMAIL_SIGNUP=true` (see
+[deployment](deployment.md#email-sign-up-issue-1734)). The emailed link is the
+credential.
+
+| Method / path | Body | Answers |
+|---|---|---|
+| `POST /api/v1/auth/signup/email/request` | `{"email", "invite"?, "locale"?, "timezone"?}` | `202 {"status": "accepted", "message": ...}` for every address; `429` per client address; `422` only for an address of the wrong shape (one ASCII mailbox) |
+| `POST /api/v1/auth/signup/email/preview` | `{"token"}` | `200 {"email", "expires_at"}`; `400 AUTH-301` unknown, expired or used link |
+| `POST /api/v1/auth/signup/email/complete` | `{"token", "new_password", "name"?, "accepted_terms"?, "return_to"?}` | `200 {"redirect_url"}` plus the session cookie; `400 AUTH-301`; `403 AUTH-308` the sign-up controls refuse it now; `409 AUTH-309` the address has an account; `422` password policy (`field: new_password`) or terms (`field: accepted_terms`); `429`; `503` the account was created but no session could be opened (sign in with the password) |
+
+`invite` is a beta invite token (a malformed one is ignored). The request body
+has no return path: the page that started the sign-up keeps it and sends it as
+`return_to` on completion, validated like the password sign-in's (same origin
+only). The policy and terms are checked before the link is spent.
+
 ## Memory APIs
 
 ### POST /api/v1/memory/remember
@@ -1986,10 +2010,14 @@ System information. Public (no authentication): the version plus non-sensitive d
     "managed_llm": false,
     "referrals": false,
     "beta_invites": false,
+    "email_signup": false,
+    "open_registration": false,
     "reranking": true
   }
 }
 ```
+
+`features.email_signup` is `ENABLE_EMAIL_SIGNUP` and `features.open_registration` is `ALLOW_REGISTRATION` as configured (it is ignored while the signup gate is on) — see [Email + password sign-up](#email--password-sign-up).
 
 `search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance). `chatgpt_app_url` is the deployment's `CHATGPT_APP_URL` (the public URL of its app in ChatGPT's app directory), or `null` when it is empty — see [ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760). `features.system_admin` is `true` only when this process serves the system-admin surface to signed-in admins (`SYSTEM_ADMIN_MODE=session`, the default); the web UI hides the admin menu and `/admin/*` otherwise (#2767, [Admin APIs](#admin-apis)).
 

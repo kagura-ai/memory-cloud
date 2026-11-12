@@ -532,6 +532,111 @@ class ResendEmailService:
             },
         )
 
+    async def send_signup_verification(
+        self,
+        *,
+        to_email: str,
+        verify_url: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        # verify_url embeds the single-use token: body only, never log_context.
+        if locale == "ja":
+            subject = "Kagura アカウントの登録を完了してください"
+            text = (
+                "Kagura Memory Cloud へのアカウント登録を受け付けました。\n"
+                "\n"
+                "下のリンクを開いてパスワードを設定すると、アカウントが作成されます。\n"
+                "\n"
+                f"  {verify_url}\n"
+                "\n"
+                f"リンクの有効期限は {expires_in_minutes} 分で、1 回だけ使えます。\n"
+                "\n"
+                "心当たりがない場合は、このメールを無視してください。アカウントは作成されません。\n"
+            )
+        else:
+            subject = "Finish creating your Kagura account"
+            text = (
+                "Someone asked to create a Kagura Memory Cloud account with this\n"
+                "email address.\n"
+                "\n"
+                "Open the link below and choose a password to create the account:\n"
+                "\n"
+                f"  {verify_url}\n"
+                "\n"
+                f"The link expires in {expires_in_minutes} minutes and works once.\n"
+                "\n"
+                "If you did not ask for this, ignore this email — no account is\n"
+                "created.\n"
+            )
+        return await self._send(
+            to_email=to_email,
+            subject=subject,
+            text=text,
+            log_event="signup_verification_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "purpose": "email_signup",
+                "locale": locale,
+                "template": "signup_verification",
+            },
+        )
+
+    async def send_signup_account_exists(
+        self,
+        *,
+        to_email: str,
+        sign_in_url: str,
+        reset_url: str,
+        locale: str | None,
+    ) -> bool:
+        if locale == "ja":
+            subject = "このメールアドレスの Kagura アカウントはすでにあります"
+            text = (
+                "このメールアドレスで Kagura Memory Cloud のアカウント登録が\n"
+                "申し込まれましたが、このアドレスのアカウントはすでにあります。\n"
+                "\n"
+                "これまでと同じ方法(Google、GitHub、またはメールアドレスとパスワード)で\n"
+                "サインインしてください:\n"
+                "\n"
+                f"  {sign_in_url}\n"
+                "\n"
+                "パスワードを忘れた場合は、こちらから再設定できます:\n"
+                "\n"
+                f"  {reset_url}\n"
+                "\n"
+                "心当たりがない場合は、このメールを無視してください。何も変更されません。\n"
+            )
+        else:
+            subject = "You already have a Kagura account"
+            text = (
+                "Someone asked to create a Kagura Memory Cloud account with this\n"
+                "email address, but the address already has an account.\n"
+                "\n"
+                "Sign in the way you did before (Google, GitHub, or this email\n"
+                "address and your password):\n"
+                "\n"
+                f"  {sign_in_url}\n"
+                "\n"
+                "If you forgot your password, you can reset it here:\n"
+                "\n"
+                f"  {reset_url}\n"
+                "\n"
+                "If you did not ask for this, ignore this email — nothing changes.\n"
+            )
+        return await self._send(
+            to_email=to_email,
+            subject=subject,
+            text=text,
+            log_event="signup_account_exists_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "purpose": "email_signup",
+                "locale": locale,
+                "template": "signup_account_exists",
+            },
+        )
+
     async def send_security_notification(
         self,
         *,

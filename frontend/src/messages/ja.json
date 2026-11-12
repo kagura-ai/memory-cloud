@@ -457,9 +457,9 @@
     "continueWithGitHub": "GitHubで続ける",
     "redirecting": "リダイレクト中...",
     "registrationDisabled": "新規登録は無効です。管理者に招待を依頼してください。",
-    "emailInUse": "このメールアドレスは別のサインイン方法に紐づいています。最初に登録したプロバイダでサインインしてください。",
+    "emailInUse": "このメールアドレスは、別の方法でサインインするアカウントで使われています。",
     "signinCancelled": "サインインがキャンセルされました。もう一度お試しいただくか、別の方法を選択してください。",
-    "linkHint": "このメールアドレスのアカウントは既に存在します。最初に登録したプロバイダでサインインし、設定からこのプロバイダを連携してください。",
+    "linkHint": "そのアカウントで使っている方法（プロバイダ、またはメールアドレスとパスワード）でサインインし、プロフィールからこの方法を連携してください。",
     "oauthFailed": "サインインに失敗しました。もう一度お試しください。",
     "oauthExpired": "サインインリンクの有効期限が切れました。もう一度お試しください。",
     "providerUnlinked": "このサインイン方法はアカウントから削除されています。そのアカウントの別のサインイン方法でサインインしてください。",
@@ -483,6 +483,7 @@
       "submit": "招待リンクで続ける",
       "invalid": "招待リンクの形式ではありません。受け取ったリンクをそのまま貼り付けてください。"
     },
+    "signUpWithEmail": "メールアドレスでアカウントを作成",
     "forgotPassword": "パスワードをお忘れですか？"
   },
   "landing": {
@@ -2724,6 +2725,7 @@
       "messageTo": "への招待",
       "loginButton": "Googleでログイン",
       "continueWithGitHub": "GitHubでログイン",
+      "passwordSignIn": "メールアドレスとパスワードでサインイン",
       "noAccount": "アカウントをお持ちでない場合でも、ログインすると自動的にアカウントが作成されます。"
     },
     "emailMismatch": {
@@ -3492,6 +3494,7 @@
       "providerLabel": "プロバイダー",
       "providerGitHub": "GitHub",
       "providerGoogle": "Google",
+      "providerEmail": "メール",
       "addUsername": "GitHub ユーザー名",
       "addEmail": "Google メールアドレス",
       "addButton": "追加",
@@ -3512,7 +3515,8 @@
       "removeAllowlistEntry": "{username} を許可リストから削除",
       "source": {
         "manual": "手動",
-        "github_sponsors": "GitHub Sponsors"
+        "github_sponsors": "GitHub Sponsors",
+        "beta_invite": "ベータ招待"
       },
       "state": {
         "active": "有効",
@@ -5070,6 +5074,47 @@
       "continue": "設定へ",
       "invalidTitle": "このリンクは使用できません",
       "invalidBody": "リンクが無効か、使用済みか、有効期限が切れています。設定から新しいリンクをリクエストしてください。"
+    }
+  },
+  "emailSignup": {
+    "request": {
+      "toggle": "メールアドレスで登録",
+      "divider": "または",
+      "emailLabel": "メールアドレス",
+      "emailPlaceholder": "you@example.com",
+      "submit": "登録用リンクを送信",
+      "submitting": "送信中…",
+      "sentTitle": "メールを確認してください",
+      "sentMessage": "{email} で登録できる場合は、登録用リンクを送信しました。リンクの有効期限は短いため、早めにこのブラウザで開いてください。",
+      "useAnother": "別のメールアドレスを使う",
+      "invalidEmail": "有効なメールアドレスを入力してください。",
+      "tooManyRequests": "リクエストが多すぎます。しばらくしてから再度お試しください。",
+      "genericError": "エラーが発生しました。もう一度お試しください。"
+    },
+    "verify": {
+      "loading": "リンクを確認しています…",
+      "title": "アカウントを作成",
+      "description": "{email} のパスワードを設定してください。",
+      "nameLabel": "名前（任意）",
+      "submit": "アカウントを作成",
+      "submitting": "作成中…",
+      "termsRequired": "続行するには最新の利用規約に同意してください。規約が更新された直後の場合は、ページを再読み込みしてください。",
+      "invalidTitle": "このリンクは使用できません",
+      "invalidMessage": "リンクが無効、期限切れ、または使用済みです。もう一度登録を始めてください。",
+      "notAllowedTitle": "登録できません",
+      "notAllowedMessage": "このメールアドレスでは登録できなくなったか、招待が使用できなくなりました。新しい招待を依頼してください。",
+      "existsTitle": "すでにアカウントがあります",
+      "existsMessage": "サインインするか、パスワードを忘れた場合は再設定してください。",
+      "createdTitle": "アカウントを作成しました",
+      "createdMessage": "メールアドレスと、いま設定したパスワードでサインインしてください。",
+      "errorTitle": "リンクを確認できませんでした",
+      "errorMessage": "エラーが発生しました。もう一度お試しください。",
+      "retry": "再試行",
+      "signIn": "サインイン",
+      "forgotPassword": "パスワードをお忘れですか？",
+      "backToLogin": "サインインに戻る",
+      "tooManyRequests": "試行回数が多すぎます。しばらくしてから再度お試しください。",
+      "genericError": "エラーが発生しました。もう一度お試しください。"
     }
   },
   "passwordSettings": {

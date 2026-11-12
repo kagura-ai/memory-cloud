@@ -1419,6 +1419,38 @@ class PasswordSetupNotAllowedError(MemoryCloudException):
         super().__init__(message, status_code=400, error_code="AUTH-303")
 
 
+class SignupNotAllowedError(MemoryCloudException):
+    """The sign-up controls refused an email sign-up at completion (403, #1734).
+
+    The gate runs again, consuming, when the account would be created: the
+    beta invite may have been used, revoked or expired since the link was
+    sent, registration may have closed, or the workspace invitation may be
+    gone. Reached only with a link mailed to the address, so the answer is
+    visible to the mailbox holder alone.
+    """
+
+    def __init__(
+        self,
+        message: str = "Sign-up is not available for this address any more; ask for a new invitation",
+    ) -> None:
+        super().__init__(message, status_code=403, error_code="AUTH-308")
+
+
+class SignupAccountExistsError(MemoryCloudException):
+    """The address of an email sign-up already belongs to an account (409, #1734).
+
+    Raised at completion (an account was created for the address after the
+    link was sent). The link is spent. Reached only with a link mailed to the
+    address.
+    """
+
+    def __init__(
+        self,
+        message: str = "An account with this email address already exists; sign in instead",
+    ) -> None:
+        super().__init__(message, status_code=409, error_code="AUTH-309")
+
+
 class ErasureTokenInvalidError(MemoryCloudException):
     """Confirmation token is missing, expired, or does not match (400)."""
 

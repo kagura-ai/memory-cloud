@@ -7,7 +7,11 @@ work again, so this job deletes rows whose ``used_at`` or ``expires_at`` is
 older than ``email_action_token_retention_seconds``. The audit trail lives in
 ``audit_logs``, not here.
 
-The DELETE is idempotent, so a run from more than one API process at once is
+The same job deletes pending email sign-ups (``email_signup_requests``,
+#1734) whose link has expired: such a row can never complete, and it holds an
+address.
+
+The DELETEs are idempotent, so a run from more than one API process at once is
 harmless.
 """
 
@@ -22,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import EmailActionToken
+from models.auth import EmailActionToken, EmailSignupRequest
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -41,6 +45,24 @@ def spent_email_action_tokens_delete(cutoff: datetime) -> Delete:
     return delete(EmailActionToken).where(
         or_(EmailActionToken.used_at < cutoff, EmailActionToken.expires_at < cutoff)
     )
+
+
+def expired_email_signup_requests_delete(cutoff: datetime) -> Delete:
+    """Build the DELETE for pending email sign-ups that expired before ``cutoff`` (#1734)."""
+    return delete(EmailSignupRequest).where(EmailSignupRequest.expires_at < cutoff)
+
+
+async def cleanup_email_signup_requests(db: AsyncSession, now: datetime | None = None) -> int:
+    """Delete pending email sign-ups whose link has expired (#1734).
+
+    No retention window: an expired request can never complete. Caller owns
+    commit/rollback.
+
+    Returns:
+        Number of rows deleted.
+    """
+    result = await db.execute(expired_email_signup_requests_delete(now or utcnow()))
+    return int(cast(CursorResult[Any], result).rowcount or 0)
 
 
 async def cleanup_email_action_tokens(db: AsyncSession, now: datetime | None = None) -> int:
@@ -66,8 +88,13 @@ async def cleanup_email_action_tokens_task() -> None:
     async for db in get_db():
         try:
             deleted = await cleanup_email_action_tokens(db)
+            signup_requests_deleted = await cleanup_email_signup_requests(db)
             await db.commit()
-            logger.info("email_action_token_cleanup_completed", deleted=deleted)
+            logger.info(
+                "email_action_token_cleanup_completed",
+                deleted=deleted,
+                signup_requests_deleted=signup_requests_deleted,
+            )
         except Exception:
             logger.exception("email_action_token_cleanup_failed")
             await db.rollback()
