@@ -46,16 +46,44 @@
  * `&timezone=<IANA name>` (#2700): the sign-in page's language and the
  * browser's time zone, which an account created by this sign-in starts with
  * (see `signupPrefs`).
+ *
+ * `options.announcementEmails` (#2761) is the answer to the announcement-email
+ * opt-in checkbox and the consent wording version it showed
+ * (`system/info.announcement_consent_version`), sent as
+ * `&announcement_emails=true|false&announcement_consent_version=<encoded>`
+ * AFTER the prefs, and only when given — a deployment without the feature
+ * sends exactly the URL it sent before.
  */
 import { signupPrefs } from "./signupPrefs";
 
 export type OAuthProvider = "google" | "github";
+
+/** The announcement-email opt-in answer and the wording it showed (#2761). */
+export interface AnnouncementEmailsAnswer {
+  value: boolean;
+  version: string;
+}
+
+/** `&announcement_emails=…&announcement_consent_version=…`, or "" (#2761). */
+export function announcementEmailsParams(
+  answer?: AnnouncementEmailsAnswer,
+): [string, string][] {
+  if (!answer || typeof answer.version !== "string" || answer.version === "") {
+    return [];
+  }
+  return [
+    ["announcement_emails", answer.value ? "true" : "false"],
+    ["announcement_consent_version", answer.version],
+  ];
+}
 
 export interface BuildOAuthRedirectOptions {
   /** Beta invite token from `/join/{token}` (#1582). */
   invite?: string;
   /** Terms version the checkbox referred to (#1665). */
   acceptedTerms?: string;
+  /** Announcement-email opt-in answer (#2761). */
+  announcementEmails?: AnnouncementEmailsAnswer;
 }
 
 export function buildOAuthRedirect(
@@ -90,5 +118,10 @@ export function buildOAuthRedirect(
   const prefsParam =
     `&locale=${encodeURIComponent(prefs.locale)}` +
     (prefs.timezone ? `&timezone=${encodeURIComponent(prefs.timezone)}` : "");
-  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo.toString())}${inviteParam}${termsParam}${prefsParam}`;
+  const announcementParam = announcementEmailsParams(
+    options?.announcementEmails,
+  )
+    .map(([key, value]) => `&${key}=${encodeURIComponent(value)}`)
+    .join("");
+  return `${apiBaseUrl}/api/v1/auth/${provider}/login?return_to=${encodeURIComponent(absoluteReturnTo.toString())}${inviteParam}${termsParam}${prefsParam}${announcementParam}`;
 }

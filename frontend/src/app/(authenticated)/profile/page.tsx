@@ -45,6 +45,7 @@ import { PreferencesRefreshError, saveUserPreferences } from "@/lib/auth/saveUse
 import PasswordSettings from "@/components/auth/PasswordSettings";
 import { MfaSettings } from "@/components/auth/MfaSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
+import { AnnouncementEmailSettings } from "@/components/account/AnnouncementEmailSettings";
 import {
   getSignInMethodLabel,
   getProviderName,
@@ -57,6 +58,7 @@ const sections = [
   ["profile-linked-accounts", "linkedAccounts"],
   ["profile-password", "password"],
   ["profile-appearance", "appearance"],
+  ["profile-emails", "emails"],
   ["profile-deletion", "deletion"],
 ] as const;
 
@@ -71,6 +73,9 @@ export default function ProfilePage() {
   // #1678: bumped when Connected Accounts unlinks a provider, so the Password
   // section re-reads how many sign-in methods would remain.
   const [hasPasskey, setHasPasskey] = useState(false);
+  // #2761: the Emails card hides itself while the deployment does not offer
+  // announcement emails (and the setting is off); its link goes with it.
+  const [showEmails, setShowEmails] = useState(false);
   const [providersVersion, setProvidersVersion] = useState(0);
   // #1751: the linked OAuth providers, for the Sign-in method field and the
   // refresh-from-IdP block, tagged with the user they were read for. Until
@@ -298,7 +303,9 @@ export default function ProfilePage() {
 
       <PageSectionNavigation
         label={t("sections.label")}
-        sections={sections.map(([id, key]) => ({ id, label: t(`sections.${key}`) }))}
+        sections={sections
+          .filter(([id]) => id !== "profile-emails" || showEmails)
+          .map(([id, key]) => ({ id, label: t(`sections.${key}`) }))}
       />
 
       {/* Profile Information */}
@@ -542,6 +549,9 @@ export default function ProfilePage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Announcement emails (Issue #2761): opt in / out, history kept server-side. */}
+      <section id="profile-emails" tabIndex={-1} aria-label={t("sections.emails")} className="scroll-mt-24"><AnnouncementEmailSettings key={`emails-${user?.id}`} onVisibilityChange={setShowEmails} /></section>
 
       {/* Danger zone: self-serve account & data deletion (Issue #953) */}
       <section id="profile-deletion" tabIndex={-1} aria-label={t("sections.deletion")} className="scroll-mt-24"><DeleteAccountSection /></section>

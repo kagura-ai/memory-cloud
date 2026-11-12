@@ -1171,6 +1171,7 @@
       "linkedAccounts": "アカウント連携",
       "password": "パスワード",
       "appearance": "表示",
+      "emails": "メール",
       "deletion": "アカウント削除"
     },
     "title": "アカウント設定",
@@ -1217,15 +1218,18 @@
     "themeAppearanceDesc": "ダッシュボードの見た目をカスタマイズ",
     "darkMode": "ダークモード",
     "darkModeDesc": "ライトテーマとダークテーマを切り替え",
-    "notificationPreferences": "通知設定",
-    "notificationPreferencesDesc": "受け取る通知を制御",
-    "emailNotifications": "メール通知",
-    "emailNotificationsDesc": "メモリーやセッションに関するメール通知を受け取る",
-    "sessionNotifications": "セッション通知",
-    "sessionNotificationsDesc": "コーディングセッション完了時に通知",
-    "errorNotifications": "エラー通知",
-    "errorNotificationsDesc": "セッション内でエラーが記録されたときに通知",
-    "savePreferences": "設定を保存",
+    "announcementEmails": {
+      "title": "お知らせメール",
+      "description": "新機能やお知らせを時々メールでお送りします。セキュリティ、パスワード、招待など、アカウントに関するメールはこの設定に関係なく送信されます。",
+      "toggle": "お知らせメールを受け取る",
+      "notOffered": "現在お知らせメールは配信していません。オフにすることはできます。",
+      "lastChanged": "最終変更: {date}",
+      "saved": "お知らせメールを受け取ります。",
+      "savedOff": "お知らせメールの配信を停止しました。",
+      "failed": "設定を保存できませんでした。もう一度お試しください。",
+      "stale": "ページを開いた後にこの設定が変更されました。内容を確認してもう一度お試しください。",
+      "loadFailed": "メール設定を読み込めませんでした。"
+    },
     "passwordSecurity": "パスワードとセキュリティ",
     "passwordSecurityDesc": "パスワードとセキュリティ設定を更新",
     "changePassword": "パスワードを変更",
@@ -1242,8 +1246,6 @@
     "themeUpdated": "テーマを更新しました",
     "themeUpdatedLight": "ライトモードに切り替えました。",
     "themeUpdatedDark": "ダークモードに切り替えました。",
-    "preferencesSaved": "設定を保存しました",
-    "preferencesSavedDesc": "通知設定が更新されました。",
     "passwordChanged": "パスワードを変更しました",
     "passwordChangedDesc": "パスワードが正常に更新されました。",
     "passwordsDoNotMatch": "新しいパスワードが一致しません。",
@@ -4842,6 +4844,21 @@
     "reload": "再読み込み",
     "stale": "このページを開いている間に規約が再度更新されました。再読み込みして最新の内容を確認してください。",
     "failed": "同意を保存できませんでした。もう一度お試しください。"
+  },
+  "announcementEmails": {
+    "optIn": "新機能やお知らせのメールを時々受け取る(任意)。アカウント設定でいつでも変更できます。",
+    "unsubscribe": {
+      "title": "お知らせメールの配信停止",
+      "message": "新機能やお知らせのメールの配信を停止します。アカウントに関するメールは引き続き送信されます。",
+      "button": "配信を停止する",
+      "working": "処理中...",
+      "doneTitle": "受け付けました",
+      "done": "リンクが有効な場合、お知らせメールは今後送信されません。アカウントに関するサービス通知は引き続き送信されます。",
+      "invalidLink": "リンクが不完全です。メールのリンクをもう一度開くか、アカウント設定でお知らせメールをオフにしてください。",
+      "rateLimited": "試行回数が多すぎます。しばらくしてからもう一度お試しください。",
+      "error": "エラーが発生しました。もう一度お試しください。",
+      "manage": "メール設定を管理"
+    }
   },
   "gate": {
     "plan": {

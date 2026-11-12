@@ -58,6 +58,7 @@ import { MfaCodeInput } from "@/components/auth/MfaCodeInput";
 import { isCompleteMfaCode, normalizeMfaCode } from "@/lib/auth/mfaCode";
 import PasskeyLogin from "@/components/auth/PasskeyLogin";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { AnnouncementEmailsOptIn } from "@/components/auth/AnnouncementEmailsOptIn";
 
 // #1594: how long the form waits for the session check before rendering
 // anyway. A slow or broken /auth/me must never lock anyone out of /login.
@@ -83,6 +84,10 @@ function LoginContent() {
   const systemInfo = useSystemInfo();
   const systemInfoPending = systemInfo === null;
   const termsVersion = systemInfo?.terms_version ?? undefined;
+  // #2761: the announcement-email consent wording, or undefined when the
+  // deployment does not offer the emails (no checkbox, nothing sent).
+  const announcementVersion =
+    systemInfo?.announcement_consent_version ?? undefined;
 
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +96,8 @@ function LoginContent() {
   // failure, so it must NOT use the destructive red banner.
   const [notice, setNotice] = useState<string | null>(null);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
+  // #2761: unchecked by default; never gates the sign-in buttons.
+  const [announcementOptIn, setAnnouncementOptIn] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [showPasswordLogin, setShowPasswordLogin] = useState<boolean | null>(
     null,
@@ -311,21 +318,32 @@ function LoginContent() {
     router.push(`/join/${token}${query}`);
   };
 
+  // #2761: the opt-in answer, sent only when the checkbox was on screen (the
+  // OAuth area shows it while the password form is hidden). Otherwise nothing
+  // is sent and the request is exactly what it was before.
+  const announcementAnswer =
+    announcementVersion !== undefined && !showPasswordLogin
+      ? { value: announcementOptIn, version: announcementVersion }
+      : undefined;
+
   const handleGoogleLogin = async () => {
     setLoadingAction("google");
     setError(null);
     if (returnTo) {
       window.location.href = buildOAuthRedirect("google", returnTo, {
         acceptedTerms: termsVersion,
+        announcementEmails: announcementAnswer,
       });
       return;
     }
     try {
       // #1665: the argument only when there is a version, so a deployment
       // without TERMS_VERSION makes exactly the call it made before.
-      const authUrl = await (termsVersion
-        ? getAuthUrl(termsVersion)
-        : getAuthUrl());
+      const authUrl = await (announcementAnswer
+        ? getAuthUrl(termsVersion, announcementAnswer)
+        : termsVersion
+          ? getAuthUrl(termsVersion)
+          : getAuthUrl());
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);
@@ -339,13 +357,16 @@ function LoginContent() {
     if (returnTo) {
       window.location.href = buildOAuthRedirect("github", returnTo, {
         acceptedTerms: termsVersion,
+        announcementEmails: announcementAnswer,
       });
       return;
     }
     try {
-      const authUrl = await (termsVersion
-        ? getGitHubAuthUrl(termsVersion)
-        : getGitHubAuthUrl());
+      const authUrl = await (announcementAnswer
+        ? getGitHubAuthUrl(termsVersion, announcementAnswer)
+        : termsVersion
+          ? getGitHubAuthUrl(termsVersion)
+          : getGitHubAuthUrl());
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);
@@ -674,6 +695,15 @@ function LoginContent() {
                       checked={agreedToTerms}
                       onCheckedChange={setAgreedToTerms}
                     />
+                    {announcementVersion !== undefined && (
+                      <div className="mt-3">
+                        <AnnouncementEmailsOptIn
+                          checked={announcementOptIn}
+                          onCheckedChange={setAnnouncementOptIn}
+                          testId="login-announcement-optin"
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
 

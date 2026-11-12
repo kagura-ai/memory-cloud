@@ -140,6 +140,13 @@ export interface SystemInfo {
    */
   terms_version?: string | null;
   /**
+   * The announcement-email consent wording version (#2761), or null when the
+   * deployment does not offer announcement emails
+   * (`ANNOUNCEMENT_EMAILS_ENABLED` off). Absent on older backends — treat like
+   * null. The sign-up pages show the opt-in checkbox only when it is set.
+   */
+  announcement_consent_version?: string | null;
+  /**
    * The deployment's ChatGPT app listing URL (#2760), or null when
    * `CHATGPT_APP_URL` is empty. Absent on older backends — treat like null.
    */
