@@ -190,7 +190,6 @@ from models.erasure import (  # noqa: E402
 )
 from models.memory import Memory, MemoryRevision  # noqa: E402
 from services.erasure_details import (  # noqa: E402
-    AUDIT_SUBJECT_METADATA_KEYS,
     ERASURE_AUDIT_ACTION,
     ERASURE_RESOURCE_PREFIX,
     REPROCESS_AUDIT_ACTION,
@@ -202,6 +201,7 @@ from services.erasure_details import (  # noqa: E402
     SubjectDetailsErasure,
     Tenure,
     audit_actor_predicate,
+    audit_metadata_subjects,
     clear_audit_request_metadata,
     count_audit_mentions,
     count_audit_mentions_kept,
@@ -423,13 +423,8 @@ async def _audit_subs(db: AsyncSession, pseudonyms: Collection[str] | None = Non
     async for (metadata,) in rows:
         if not isinstance(metadata, dict):
             continue
-        for key in AUDIT_SUBJECT_METADATA_KEYS:
-            sub = metadata.get(key)
-            if (
-                not isinstance(sub, str)
-                or not sub
-                or (pseudonyms is not None and sub in pseudonyms)
-            ):
+        for sub in audit_metadata_subjects(metadata):
+            if not sub or (pseudonyms is not None and sub in pseudonyms):
                 continue
             # Legacy JSON accepts NUL and lone surrogates; a UTF-8 VARCHAR
             # auth sub cannot contain them. Unrelated residue must not stop the sweep.

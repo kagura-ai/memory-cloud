@@ -988,7 +988,69 @@ AUDIT_SUBJECT_METADATA_KEYS = (
     "assigned_by",
     "promoted_by",
     "demoted_by",
+    # ``beta_invite.redeemed`` on the invitee's row (#1581).
+    "inviter_user_id",
 )
+# Subjects inside a list of objects: ``(list key, item key)``. The
+# ``signup_admitted`` row names each invitation's inviter (#2785).
+AUDIT_SUBJECT_METADATA_LISTS = (("invitations", "invited_by"),)
+
+
+def audit_metadata_subjects(
+    metadata: object, keys: Sequence[str] = AUDIT_SUBJECT_METADATA_KEYS
+) -> list[str]:
+    """The subs ``metadata`` holds at a subject key, top level and nested."""
+    if not isinstance(metadata, dict):
+        return []
+    found = [value for key in keys if isinstance(value := metadata.get(key), str)]
+    for list_key, item_key in AUDIT_SUBJECT_METADATA_LISTS:
+        items = metadata.get(list_key)
+        if isinstance(items, list):
+            found.extend(
+                value
+                for item in items
+                if isinstance(item, dict) and isinstance(value := item.get(item_key), str)
+            )
+    return found
+
+
+def replace_audit_metadata_subjects(
+    metadata: dict[str, Any],
+    replacement: Callable[[str], str | None],
+    keys: Sequence[str] = AUDIT_SUBJECT_METADATA_KEYS,
+) -> tuple[dict[str, Any], set[str]] | None:
+    """``metadata`` with every subject value ``replacement`` maps rewritten.
+
+    ``replacement`` returns the new value, or ``None`` to keep the value.
+    Returns the new metadata (other keys and list items as read) with the
+    original values replaced, or ``None`` when nothing changes.
+    """
+    replaced: set[str] = set()
+    changes: dict[str, Any] = {}
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, str) and (new := replacement(value)) is not None:
+            changes[key] = new
+            replaced.add(value)
+    for list_key, item_key in AUDIT_SUBJECT_METADATA_LISTS:
+        items = metadata.get(list_key)
+        if not isinstance(items, list):
+            continue
+        rewritten: list[Any] = []
+        touched = False
+        for item in items:
+            value = item.get(item_key) if isinstance(item, dict) else None
+            if isinstance(value, str) and (new := replacement(value)) is not None:
+                rewritten.append({**item, item_key: new})
+                replaced.add(value)
+                touched = True
+            else:
+                rewritten.append(item)
+        if touched:
+            changes[list_key] = rewritten
+    if not changes:
+        return None
+    return {**metadata, **changes}, replaced
 
 
 def _audit_sub_guard(sub: str, *, orphaned_only: bool) -> ColumnElement[bool]:
@@ -1036,10 +1098,7 @@ async def _audit_metadata_ids(
     rows = await db.stream(stmt, execution_options={"yield_per": 500})
     matched: set[int] = set()
     async for row_id, metadata in rows:
-        if isinstance(metadata, dict) and any(
-            isinstance(value := metadata.get(key), str) and value in active
-            for key in AUDIT_SUBJECT_METADATA_KEYS
-        ):
+        if any(value in active for value in audit_metadata_subjects(metadata)):
             matched.add(row_id)
     return matched
 
@@ -1064,21 +1123,19 @@ async def _pseudonymize_audit_metadata(
         for row_id, metadata in rows:
             if not isinstance(metadata, dict):
                 continue
-            replacements = {
-                key: erasure_pseudonym(value)
-                for key in AUDIT_SUBJECT_METADATA_KEYS
-                if isinstance(value := metadata.get(key), str) and value in active
-            }
-            if not replacements:
+            patched = replace_audit_metadata_subjects(
+                metadata, lambda value: erasure_pseudonym(value) if value in active else None
+            )
+            if patched is None:
                 continue
-            used_subs = {metadata[key] for key in replacements}
+            new_metadata, used_subs = patched
             result = await db.execute(
                 update(AuditLog)
                 .where(
                     AuditLog.id == row_id,
                     *(_audit_sub_guard(sub, orphaned_only=orphaned_only) for sub in used_subs),
                 )
-                .values(user_metadata={**metadata, **replacements})
+                .values(user_metadata=new_metadata)
                 .returning(AuditLog.id)
                 .execution_options(synchronize_session=False)
             )
@@ -1316,8 +1373,8 @@ async def pseudonymize_audit_trail(
     or ``mention_addresses`` / ``mention_subs`` when given (the re-run: the
     mention sweep runs once per pseudonym per run).
 
-    Known top-level metadata keys are matched by exact Python string
-    comparison from streamed whole JSON (#2348): legacy JSON can contain
+    Known metadata keys (top level, and ``AUDIT_SUBJECT_METADATA_LISTS``) are
+    matched by exact Python string comparison from streamed whole JSON (#2348): legacy JSON can contain
     escaped U+0000 that PostgreSQL JSON extraction / JSONB casts reject.
     Matching ids join the same ordered lock union; fresh locked metadata
     is then patched without overwriting a concurrent writer's other keys.

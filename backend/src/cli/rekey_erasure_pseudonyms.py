@@ -209,6 +209,7 @@ from services.erasure_details import (  # noqa: E402
     ERASURE_RESOURCE_PREFIX,
     ERASURE_WRITER_ACTIONS,
     USER_RESOURCE_PREFIX,
+    audit_metadata_subjects,
     current_pseudonym_salt,
     erasure_pseudonym,
     is_pseudonym,
@@ -216,6 +217,7 @@ from services.erasure_details import (  # noqa: E402
     merged_request_summary,
     pseudonym_salt_fingerprint,
     ran_in_postgres,
+    replace_audit_metadata_subjects,
     stores_pseudonym,
     unrepaired_erasure,
 )
@@ -701,14 +703,10 @@ def _audit_change(
         change["resource"] = resource
     metadata = row.user_metadata
     if isinstance(metadata, dict):
-        replaced = {
-            key: subs[value]
-            for key in METADATA_KEYS
-            if isinstance(value := metadata.get(key), str) and value in subs
-        }
-        if replaced:
+        patched = replace_audit_metadata_subjects(metadata, subs.get, METADATA_KEYS)
+        if patched is not None:
             # the column is ``json``: the whole value, the other keys as read
-            change["user_metadata"] = {**metadata, **replaced}
+            change["user_metadata"] = patched[0]
     return change
 
 
@@ -723,9 +721,7 @@ async def _metadata_ids(db: AsyncSession, subs: Mapping[str, str]) -> set[int]:
     )
     matched: set[int] = set()
     async for row_id, metadata in rows:
-        if isinstance(metadata, dict) and any(
-            isinstance(value := metadata.get(key), str) and value in subs for key in METADATA_KEYS
-        ):
+        if any(value in subs for value in audit_metadata_subjects(metadata, METADATA_KEYS)):
             matched.add(row_id)
     return matched
 

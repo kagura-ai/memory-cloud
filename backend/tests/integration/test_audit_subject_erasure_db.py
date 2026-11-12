@@ -130,8 +130,9 @@ async def test_live_erasure_only_rewrites_exact_known_json_strings(
         db.add_all([*own, *mentions, *untouched])
         await db.commit()
         before = await _snapshot(db, subject)
-        assert await count_audit_mentions(db, [], subs=[sub], exclude_user_id=sub) == 6
-        assert await pseudonymize_audit_trail(db, sub, []) == (2, 6)
+        n = len(AUDIT_SUBJECT_METADATA_KEYS)
+        assert await count_audit_mentions(db, [], subs=[sub], exclude_user_id=sub) == n
+        assert await pseudonymize_audit_trail(db, sub, []) == (2, n)
         await db.commit()
         after = await _snapshot(db, subject)
         for row in own:
@@ -153,8 +154,46 @@ async def test_live_erasure_only_rewrites_exact_known_json_strings(
         assert await pseudonymize_audit_trail(db, sub, []) == (0, 0)
 
 
+def _admission_metadata(inviter: str) -> dict[str, Any]:
+    """A #2785 ``signup_admitted`` row's metadata naming ``inviter`` once."""
+    return {
+        "provider": "github",
+        "admission": "workspace_invitation",
+        "invitations": [
+            {"id": "inv-1", "workspace_id": "ws-1", "invited_by": "other-inviter"},
+            {"id": "inv-2", "workspace_id": "ws-2", "invited_by": inviter},
+            {"id": "inv-3", "workspace_id": "ws-3"},
+            "not-an-object",
+        ],
+        "invitation_count": 4,
+    }
+
+
+async def test_erasing_an_inviter_pseudonymizes_their_id_in_admission_records(
+    async_engine: AsyncEngine, subject: dict[str, Any]
+) -> None:
+    """#2785: the invitee's ``signup_admitted`` row names the inviter in a list."""
+    sub, pseudonym = subject["sub"], subject["p"]
+    admitted = _audit(subject, "invitee-sub", metadata=_admission_metadata(sub))
+    other = _audit(subject, "invitee-2", metadata=_admission_metadata("someone-else"))
+    async with _maker(async_engine)() as db:
+        db.add_all([admitted, other])
+        await db.commit()
+        before = await _snapshot(db, subject)
+        assert await count_audit_mentions(db, [], subs=[sub], exclude_user_id=sub) == 1
+        assert await pseudonymize_audit_trail(db, sub, []) == (0, 1)
+        await db.commit()
+        after = await _snapshot(db, subject)
+        assert after[admitted.id] == {
+            **before[admitted.id],
+            "user_metadata": _admission_metadata(pseudonym),
+        }
+        assert after[other.id] == before[other.id]
+        assert await pseudonymize_audit_trail(db, sub, []) == (0, 0)
+
+
 @pytest.mark.parametrize(
-    "location", [*AUDIT_SUBJECT_METADATA_KEYS, "email", "api_email", "resource"]
+    "location", [*AUDIT_SUBJECT_METADATA_KEYS, "invitations", "email", "api_email", "resource"]
 )
 async def test_historical_metadata_or_fallback_only_discovery(
     async_engine: AsyncEngine,
@@ -167,6 +206,8 @@ async def test_historical_metadata_or_fallback_only_discovery(
     row = _audit(subject, pseudonym)
     if location in AUDIT_SUBJECT_METADATA_KEYS:
         row.user_metadata = {location: sub, "untouched": "other-member"}
+    elif location == "invitations":
+        row.user_metadata = _admission_metadata(sub)
     elif location in {"email", "api_email"}:
         row.user_email = sub if location == "email" else f"{sub}@api"
     else:
@@ -187,6 +228,8 @@ async def test_historical_metadata_or_fallback_only_discovery(
         await db.refresh(row)
         if location in AUDIT_SUBJECT_METADATA_KEYS:
             assert row.user_metadata == {location: pseudonym, "untouched": "other-member"}
+        elif location == "invitations":
+            assert row.user_metadata == _admission_metadata(pseudonym)
         elif location in {"email", "api_email"}:
             assert row.user_email == pseudonym
         else:
