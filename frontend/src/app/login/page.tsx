@@ -815,7 +815,12 @@ function LoginContent() {
                           {t("signUpWithEmail")}
                         </button>
                       ) : (
-                        <EmailSignupForm defaultOpen returnTo={returnTo} />
+                        // The toggle unmounts on click: the form takes focus.
+                        <EmailSignupForm
+                          defaultOpen
+                          autoFocus
+                          returnTo={returnTo}
+                        />
                       )}
                     </div>
                   )}

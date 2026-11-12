@@ -45,12 +45,14 @@ vi.mock("@/components/auth/EmailSignupForm", () => ({
   EmailSignupForm: (props: {
     returnTo?: string;
     defaultOpen?: boolean;
+    autoFocus?: boolean;
     invite?: string;
   }) => (
     <div
       data-testid="email-signup-form"
       data-return-to={props.returnTo ?? ""}
       data-default-open={String(Boolean(props.defaultOpen))}
+      data-auto-focus={String(Boolean(props.autoFocus))}
       data-invite={props.invite ?? ""}
     />
   ),
@@ -79,6 +81,8 @@ describe("/login — email sign-up entry (#1734)", () => {
     expect(form).toHaveAttribute("data-return-to", "/device?user_code=ABCD");
     expect(form).toHaveAttribute("data-default-open", "true");
     expect(form).toHaveAttribute("data-invite", "");
+    // The toggle is gone after the click: focus moves to the form.
+    expect(form).toHaveAttribute("data-auto-focus", "true");
   });
 
   it("drops an unsafe return_to", async () => {

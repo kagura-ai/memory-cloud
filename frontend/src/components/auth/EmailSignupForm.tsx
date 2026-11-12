@@ -43,6 +43,12 @@ interface EmailSignupFormProps {
   returnTo?: string;
   /** Show the form at once instead of the "Sign up with email" toggle. */
   defaultOpen?: boolean;
+  /**
+   * Focus the address field on mount. Defaults to "when opened by this
+   * form's own toggle"; a page that mounts the form open from a control of
+   * its own (which then disappears) passes true so focus is not lost.
+   */
+  autoFocus?: boolean;
   /** Dark-mode colours (pages that follow the theme). */
   themed?: boolean;
 }
@@ -51,6 +57,7 @@ export function EmailSignupForm({
   invite,
   returnTo,
   defaultOpen = false,
+  autoFocus,
   themed = false,
 }: EmailSignupFormProps) {
   const t = useTranslations("emailSignup");
@@ -154,7 +161,7 @@ export function EmailSignupForm({
         }}
         placeholder={t("request.emailPlaceholder")}
         autoComplete="email"
-        autoFocus={!defaultOpen}
+        autoFocus={autoFocus ?? !defaultOpen}
         maxLength={254}
         disabled={submitting}
         aria-invalid={problem === "invalidEmail"}

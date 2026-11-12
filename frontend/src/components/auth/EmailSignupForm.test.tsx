@@ -52,6 +52,22 @@ describe("EmailSignupForm", () => {
     expect(screen.getByLabelText("request.emailLabel")).toBeVisible();
   });
 
+  it("focuses the address when opened by its own toggle", () => {
+    render(<EmailSignupForm />);
+    fireEvent.click(screen.getByRole("button", { name: "request.toggle" }));
+    expect(screen.getByLabelText("request.emailLabel")).toHaveFocus();
+  });
+
+  it("does not take focus when shown open on page load", () => {
+    render(<EmailSignupForm defaultOpen />);
+    expect(screen.getByLabelText("request.emailLabel")).not.toHaveFocus();
+  });
+
+  it("focuses the address when the page opens it from its own control", () => {
+    render(<EmailSignupForm defaultOpen autoFocus />);
+    expect(screen.getByLabelText("request.emailLabel")).toHaveFocus();
+  });
+
   it("keeps the submit disabled until an address is typed", () => {
     render(<EmailSignupForm defaultOpen />);
     expect(
