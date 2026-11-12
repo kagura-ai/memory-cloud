@@ -24,8 +24,10 @@ describe("/join referrer + indexing policy (#1588)", () => {
   it("scopes the header rules to the token-bearing routes only", async () => {
     const rules = (await nextConfig.headers?.()) ?? [];
 
-    // #1678 adds /password (reset / set-up links carry a token too).
+    // #1678 adds /password (reset / set-up links carry a token too), #1734
+    // /signup (the email sign-up link).
     expect(rules.map((rule) => rule.source)).toEqual([
+      "/signup/:path*",
       "/join/:path*",
       "/password/:path*",
     ]);

@@ -47,6 +47,12 @@ export interface InvitationInfo {
   role: string;
   expires_at: string | null;
   email_restricted: boolean;
+  /**
+   * #1734: the addressee can create an account by email from this page (email
+   * sign-up on, and the sign-up controls would admit an invitee). Absent on
+   * older backends ⇒ false. Names no address.
+   */
+  email_signup_available?: boolean;
 }
 
 /**
