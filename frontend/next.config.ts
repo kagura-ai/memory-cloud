@@ -36,6 +36,15 @@ const nextConfig: NextConfig = {
         ],
       },
       {
+        // #2786: /link/confirm carries a one-time provider link token in the
+        // query string; same policy as /join (app/link/layout.tsx).
+        source: "/link/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
+      {
         source: "/join/:path*",
         headers: [
           { key: "Referrer-Policy", value: "no-referrer" },

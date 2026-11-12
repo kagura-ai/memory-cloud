@@ -20,6 +20,9 @@
  * Issue #1734: "Create an account with email" when the deployment has email
  * sign-up on and registration open (`features.email_signup` and
  * `features.open_registration`); the `email_in_use` copy names no method.
+ * Issue #2786: where the deployment can mail a provider link confirmation
+ * (`features.provider_link_confirmation`), the `email_in_use` hint says a
+ * confirmation link may have been emailed.
  */
 
 import Link from "next/link";
@@ -95,6 +98,10 @@ function LoginContent() {
   // Kept separate from `error` — a cancellation is informational, not a
   // failure, so it must NOT use the destructive red banner.
   const [notice, setNotice] = useState<string | null>(null);
+  // Issue #517 / #2786: `email_in_use&link_hint=true`. Kept as a flag, not
+  // text, because the wording depends on /system/info, which may answer
+  // after the URL was read.
+  const [linkHint, setLinkHint] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [showPasswordLogin, setShowPasswordLogin] = useState<boolean | null>(
@@ -126,6 +133,17 @@ function LoginContent() {
     searchParams.get("return_to"),
     typeof window !== "undefined" ? window.location.origin : "",
   );
+
+  // #2786: mention the confirmation mail only where the deployment can send
+  // one (a deployment-level flag, never per account); until /system/info
+  // answers, and wherever it cannot, the hint is today's "sign in, then
+  // connect this method in Profile".
+  const linkHintNotice = linkHint
+    ? features?.provider_link_confirmation === true
+      ? t("linkHintConfirmation")
+      : t("linkHint")
+    : null;
+  const shownNotice = notice ?? linkHintNotice;
 
   const isMockAuth =
     process.env.NODE_ENV === "development" &&
@@ -175,7 +193,10 @@ function LoginContent() {
     } else if (errorParam === "email_in_use") {
       // Issue #481: the address of this sign-in already belongs to another
       // account. #1734: that account may sign in with a provider or with an
-      // email address and password, so the copy names no method.
+      // email address and password, so the copy names no method. #2786: an
+      // account created by email sign-up may also have been mailed a link to
+      // connect this sign-in; the answer is the same either way, so the page
+      // cannot tell and says "if" (`linkHintNotice`).
       setError(
         t("emailInUse", {
           default:
@@ -184,9 +205,10 @@ function LoginContent() {
       );
       // Issue #517: the backend appends &link_hint=true to signal that an
       // account with this email already exists — nudge the user to sign in
-      // the way they did before, then link this one from their profile.
+      // the way they did before, then link this one from their profile, or
+      // (#2786) to open the confirmation link if one was mailed.
       if (searchParams.get("link_hint") === "true") {
-        setNotice(t("linkHint"));
+        setLinkHint(true);
       }
     } else if (errorParam === "oauth_failed") {
       // #1381: the OAuth callback redirects non-cancel failures here with a
@@ -430,11 +452,12 @@ function LoginContent() {
               </p>
             </div>
 
-            {/* Cancellation notice (Issue #727) — neutral, not an error */}
-            {notice && (
+            {/* Cancellation notice (Issue #727) and the email_in_use link
+                hint (#517, #2786) — neutral, not an error */}
+            {shownNotice && (
               <Alert className="mb-6 border-blue-200 bg-blue-50 text-blue-800">
                 <Info className="h-4 w-4" />
-                <AlertDescription>{notice}</AlertDescription>
+                <AlertDescription>{shownNotice}</AlertDescription>
               </Alert>
             )}
 

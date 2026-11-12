@@ -130,6 +130,12 @@ export type SystemFeatures = Record<string, boolean> & {
    * off. Absent ⇒ off.
    */
   open_registration?: boolean;
+  /**
+   * #2786: an `email_in_use` sign-in may be connected to an account created
+   * by email sign-up through an emailed link (the switch is on and mail can
+   * really be sent). Per deployment, never per address. Absent ⇒ off.
+   */
+  provider_link_confirmation?: boolean;
 };
 
 export interface SystemInfo {
