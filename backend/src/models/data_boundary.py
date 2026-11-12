@@ -117,6 +117,12 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "oauth_tokens",
         "oauth_token_storage",  # #2399: global credential-storage rollout state
         "oauth_grant_settings",  # #2129: per-grant default context
+        # Identity-only OIDC (#2781): client registration, login grants and
+        # credential verifiers; no memory content or learned structure.
+        "oidc_authorization_codes",
+        "oidc_clients",
+        "oidc_grants",
+        "oidc_tokens",
         "api_keys",
         "share_keys",  # context-scoped read-only TTL share credential (#1027)
         "external_api_keys",

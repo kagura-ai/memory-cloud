@@ -22,6 +22,7 @@ The boundary itself lives in two places, and this module pins both:
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 # Import every model module so Base.metadata is fully populated, without
@@ -57,6 +58,8 @@ from models.data_boundary import (
     OPERATIONAL_TABLES,
     RAW_EXPORTABLE_TABLES,
 )
+
+importlib.import_module("models.oidc")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DESIGN_DOC = REPO_ROOT / "docs" / "derived-layer-boundary.md"

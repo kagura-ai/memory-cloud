@@ -637,7 +637,7 @@ class TestResetRevokesOAuthGrants:
         await PasswordAccountService(db)._revoke_oauth_grants("u-order")
         statements = [call.args[0] for call in db.execute.await_args_list]
         kinds = [type(stmt).__name__ for stmt in statements]
-        assert kinds == ["Select", "Delete", "Delete", "Update"]
+        assert kinds == ["Select", "Delete", "Delete", "Update", "Update"]
         lock, *writes = statements
         assert lock.get_final_froms()[0].name == "users"
         assert lock._for_update_arg is not None and not lock._for_update_arg.read
@@ -645,6 +645,7 @@ class TestResetRevokesOAuthGrants:
             "oauth_authorization_codes",
             "oauth_device_codes",
             "oauth_tokens",
+            "oidc_grants",
         ]
 
     async def test_a_code_exchange_racing_the_reset_is_revoked(

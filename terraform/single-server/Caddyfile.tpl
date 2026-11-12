@@ -53,7 +53,7 @@
 		format filter {
 			wrap json
 			fields {
-				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}REDACTED${3}`
+				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}${8}REDACTED${3}`
 				request>headers>Referer delete
 				request>headers>Cookie delete
 				request>headers>Next-Router-State-Tree delete
@@ -124,6 +124,12 @@ memory.kagura-ai.com {
 		reverse_proxy ${API_UPSTREAM}:8080
 	}
 
+	# Isolated OpenID Connect provider: discovery, keys, authorization and tokens.
+	# Keep this ahead of the frontend catch-all, as with the existing OAuth paths.
+	handle /oidc/* {
+		reverse_proxy ${API_UPSTREAM}:8080
+	}
+
 	# -------------------------------------------------------------------------
 	# MCP Streamable HTTP / SSE
 	#   flush_interval -1 is CRITICAL for SSE: without it Caddy buffers chunks
@@ -167,8 +173,10 @@ memory.kagura-ai.com {
 	# /join/<token>/ or /invite/<token>/ with a 308 whose Location and Refresh
 	# name the slash-less URL). Whatever sits in a path slot is redacted, not
 	# only a well-formed token: a pasted link with a trailing %20 is still a
-	# link. Every other request — /api/v1/memories?..., /mcp, / — is logged in
-	# full.
+	# link. The isolated OIDC provider also returns a short-lived credential in
+	# a redirect's Location header. Its code/access/refresh prefixes are scrubbed
+	# in request URIs and Location/Refresh, including the default error logger.
+	# Other requests — /api/v1/memories?..., /mcp, / — retain their diagnostics.
 	#
 	# Five request headers are dropped outright:
 	#   Referer                 a browser on the /join page may attach the URL to
@@ -221,9 +229,9 @@ memory.kagura-ai.com {
 		format filter {
 			wrap json
 			fields {
-				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}REDACTED${3}`
-				resp_headers>Location regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}REDACTED${3}`
-				resp_headers>Refresh regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}REDACTED${3}`
+				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}${8}REDACTED${3}`
+				resp_headers>Location regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}${8}REDACTED${3}`
+				resp_headers>Refresh regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}${8}REDACTED${3}`
 				request>headers>Referer delete
 				request>headers>Cookie delete
 				request>headers>Next-Router-State-Tree delete

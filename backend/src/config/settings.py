@@ -169,6 +169,13 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,
     )
 
+    # Separate identity provider; existing MCP OAuth remains unchanged (#2781).
+    oidc_enabled: bool = False
+    oidc_issuer: str = ""
+    oidc_signing_keys_file: str = ""
+    oidc_active_signing_kid: str = ""
+    oidc_rate_limit_per_minute: int = Field(default=120, ge=1)
+
     # OAuth2 - PKCE enforcement (Issue #513)
     # When True, register the Authlib CodeChallenge extension with
     # ``required=True`` so token_endpoint_auth_method="none" (public) clients

@@ -1,5 +1,7 @@
 """Data models for Kagura Memory Cloud."""
 
+import importlib
+
 # Registered-table imports (required for SQLAlchemy FK resolution at app
 # startup). ``models.auth.Workspace`` declares FKs to ``llm_pricing.id``
 # (added by #494) and is queried by ``/admin/plans`` routes; without
@@ -43,6 +45,9 @@ from models.resource import (
     WorkspaceConnector,
 )
 from models.worker_app import WorkerAppIdentity
+
+# Register identity tables for standalone metadata consumers as well as the API.
+importlib.import_module("models.oidc")
 
 __all__ = [
     "NeuralConfig",

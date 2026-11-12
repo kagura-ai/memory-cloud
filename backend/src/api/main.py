@@ -306,6 +306,10 @@ openapi_tags = [
     {"name": "authentication", "description": "OAuth2 login and session management"},
     {"name": "google-oauth2", "description": "Google OAuth2 login and callback flow"},
     {"name": "github-oauth2", "description": "GitHub OAuth2 login and callback flow"},
+    {
+        "name": "oidc",
+        "description": "Isolated OpenID Connect provider for pre-registered confidential web clients",
+    },
     {"name": "users", "description": "User profile and settings"},
     {
         "name": "account-erasure",
@@ -872,6 +876,7 @@ from api.routes import (  # noqa: E402
     oauth,
     observability,  # Issue #2679: internal read-only observability API
     observation_credentials,  # Issue #2679: read-only observability credentials
+    oidc,  # #2781: identity provider with independent clients and grants
     operation_history,
     passkeys,
     password,  # Issue #1678: self-service password endpoints
@@ -926,6 +931,7 @@ app.include_router(password.me_router, prefix="/api/v1")
 
 # OAuth2 Server routes (Issue #33 - OAuth2 client management)
 app.include_router(oauth.router, prefix="/api/v1")
+app.include_router(oidc.router, prefix="/oidc")
 
 # API Keys routes (Issue #34 - API Keys management)
 app.include_router(api_keys.router, prefix="/api/v1")
