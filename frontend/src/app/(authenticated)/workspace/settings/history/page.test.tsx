@@ -238,6 +238,17 @@ describe("workspace operation history", () => {
     expect(screen.queryByText("accountAttribution")).not.toBeInTheDocument();
   });
 
+  it("shows a service operator as staff without any identity (#2767)", async () => {
+    const data = response();
+    Object.assign(data.items[0], { principal_kind: "operator", actor_user_id: null, actor_name: null, surface: "api" });
+    state.get.mockResolvedValueOnce(data);
+    render(<HistoryView workspaceId="workspace-one" />);
+    expect(await screen.findByText("operator")).toBeInTheDocument();
+    expect(screen.queryByText("unknown")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^principalAccount:/)).not.toBeInTheDocument();
+    expect(screen.queryByText("accountAttribution")).not.toBeInTheDocument();
+  });
+
   it("names a membership target once as the affected member", async () => {
     const data = response("member-id");
     Object.assign(data.items[0], {

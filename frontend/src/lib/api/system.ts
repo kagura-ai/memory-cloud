@@ -121,6 +121,11 @@ export interface SearchDefaults {
  * flag a backend does not send reads as off.
  */
 export type SystemFeatures = Record<string, boolean> & {
+  /**
+   * #2767: this deployment serves the system-admin surface to signed-in
+   * admins (`SYSTEM_ADMIN_MODE=session`). Absent ⇒ off (fail closed).
+   */
+  system_admin?: boolean;
   /** #1582: beta invite links. Absent on backends older than #1581 ⇒ off. */
   beta_invites?: boolean;
 };

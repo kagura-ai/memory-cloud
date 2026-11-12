@@ -10,7 +10,8 @@ const fixture = vi.hoisted(() => ({
   role: "member",
   systemRole: "user",
   loading: false,
-  flags: { plan_page: true, byok: true, cost_display: true },
+  flags: { plan_page: true, byok: true, cost_display: true, system_admin: true } as Record<string, boolean>,
+  infoPending: false,
   planExcluded: true,
   lookupFailed: false,
   request: vi.fn(),
@@ -26,7 +27,7 @@ vi.mock("@/contexts/WorkspaceContext", () => ({ useWorkspace: () => ({
   currentWorkspaceId: "selected", loading: fixture.loading,
 }) }));
 vi.mock("@/hooks/useSystemFeatures", () => ({
-  useSystemInfo: () => ({ features: fixture.flags }),
+  useSystemInfo: () => (fixture.infoPending ? null : { features: fixture.flags }),
   useSystemFeatures: () => fixture.flags,
   isSystemInfoUnavailable: () => fixture.lookupFailed,
 }));
@@ -46,6 +47,7 @@ function view(landing = false) {
 beforeEach(() => {
   fixture.path = "/workspace/resources"; fixture.role = "member"; fixture.systemRole = "user";
   fixture.loading = false; fixture.planExcluded = true; fixture.lookupFailed = false; fixture.flags.plan_page = true; fixture.flags.byok = true;
+  fixture.flags.system_admin = true; fixture.infoPending = false;
   fixture.request.mockClear();
   fixture.replace.mockClear();
 });
@@ -92,15 +94,48 @@ describe("feature routes", () => {
     expect(screen.getAllByText(/XL/i).length).toBeGreaterThan(0);
     expect(fixture.request).not.toHaveBeenCalled();
   });
-  it.each(["/admin/users/any-id", "/admin/sleep-reports/not-an-id"])(
-    "workspace owners never load system admin details at %s", (path) => {
+  it.each(["/admin", "/admin/users/any-id", "/admin/sleep-reports/not-an-id"])(
+    "a workspace owner who is not a system admin gets not-found at %s (#2767)", (path) => {
       fixture.path = path; fixture.role = "owner";
       render(view());
-      expect(screen.getByText(/system administrator/i)).toBeInTheDocument();
-      expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Access denied");
+      expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("404");
+      expect(screen.getByText("The page you are looking for does not exist.")).toBeInTheDocument();
+      expect(screen.queryByText(/system administrator/i)).toBeNull();
       expect(fixture.request).not.toHaveBeenCalled();
     },
   );
+  it("a system admin gets not-found where the deployment does not serve the admin surface (#2767)", () => {
+    fixture.path = "/admin/users"; fixture.systemRole = "admin"; fixture.flags.system_admin = false;
+    render(view());
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("404");
+    expect(fixture.request).not.toHaveBeenCalled();
+  });
+  it("a system admin gets not-found when the flag is absent (fail closed, #2767)", () => {
+    fixture.path = "/admin/users"; fixture.systemRole = "admin"; delete fixture.flags.system_admin;
+    render(view());
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("404");
+    expect(fixture.request).not.toHaveBeenCalled();
+  });
+  it("a system admin reaches the admin page where the deployment serves it", () => {
+    fixture.path = "/admin/users"; fixture.systemRole = "admin";
+    render(view());
+    expect(screen.getByText("protected contents")).toBeInTheDocument();
+    expect(fixture.request).toHaveBeenCalled();
+  });
+  it("waits for /system/info before deciding an admin route", () => {
+    fixture.path = "/admin/users"; fixture.systemRole = "admin"; fixture.infoPending = true;
+    render(view());
+    expect(screen.getByText(en.common.loading)).toBeInTheDocument();
+    expect(screen.queryByText("404")).toBeNull();
+    expect(fixture.request).not.toHaveBeenCalled();
+  });
+  it("offers a retry, not a verdict, when /system/info failed on an admin route", () => {
+    fixture.path = "/admin/users"; fixture.systemRole = "admin"; fixture.lookupFailed = true;
+    render(view());
+    expect(screen.getByRole("button", { name: en.featureAccess.retry })).toBeInTheDocument();
+    expect(screen.queryByText("404")).toBeNull();
+    expect(fixture.request).not.toHaveBeenCalled();
+  });
   it("preserves the page for authorized lower-tier users with existing objects", () => {
     fixture.role = "owner"; render(view());
     expect(screen.getByText("protected contents")).toBeInTheDocument();
