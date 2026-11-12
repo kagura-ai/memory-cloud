@@ -74,22 +74,38 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Refused while any allowlist row was written by email sign-up.
+    """Refused while any allowlist row was written by email sign-up, or while
+    any account carries ``provider_auto_link_blocked_at``.
 
-    Deleting those rows would null ``beta_invites.redeemed_allowlist_entry_id``
-    (``ON DELETE SET NULL``) and lose the inviter's record of the redemption;
-    the two-provider CHECK cannot be restored while they exist. Erase or
-    re-key them first.
+    Deleting those allowlist rows would null
+    ``beta_invites.redeemed_allowlist_entry_id`` (``ON DELETE SET NULL``) and
+    lose the inviter's record of the redemption; the two-provider CHECK cannot
+    be restored while they exist. Erase or re-key them first.
+
+    ``provider_auto_link_blocked_at`` is the only record of an owner's choice
+    (an explicit unlink, a reset that unlinked a provider, "This wasn't me").
+    Dropping it and upgrading again would bring back automatic Google linking
+    and the confirmation mails for those accounts. Clear the column on purpose
+    (``UPDATE users SET provider_auto_link_blocked_at = NULL``), accepting that
+    loss, before downgrading.
     """
-    in_use = (
-        op.get_bind()
-        .execute(sa.text("SELECT 1 FROM signup_allowlist WHERE provider = 'email' LIMIT 1"))
-        .first()
-    )
+    bind = op.get_bind()
+    in_use = bind.execute(
+        sa.text("SELECT 1 FROM signup_allowlist WHERE provider = 'email' LIMIT 1")
+    ).first()
     if in_use is not None:
         raise RuntimeError(
             "f37_1734_email_signup downgrade refused: signup_allowlist still holds rows "
             "with provider='email' (beta invites redeemed by email sign-up) (#1734)"
+        )
+    blocked = bind.execute(
+        sa.text("SELECT 1 FROM users WHERE provider_auto_link_blocked_at IS NOT NULL LIMIT 1")
+    ).first()
+    if blocked is not None:
+        raise RuntimeError(
+            "f37_1734_email_signup downgrade refused: users.provider_auto_link_blocked_at "
+            "is set on some accounts; dropping it loses those owners' choice to stop "
+            "automatic provider linking. Clear it on purpose first (#1734)"
         )
     op.drop_table(_TABLE, if_exists=True)
     op.execute(

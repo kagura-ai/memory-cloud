@@ -3,8 +3,10 @@
 1. upgrade adds ``users.provider_auto_link_blocked_at``, widens the
    ``signup_allowlist`` provider CHECK to ``email`` (validated) and creates
    ``email_signup_requests`` with its unique token hash and two indexes;
-2. the downgrade is refused while an allowlist row has ``provider='email'``,
-   and runs once none does (restoring the two-provider CHECK);
+2. the downgrade is refused while an allowlist row has ``provider='email'``
+   or an account carries ``provider_auto_link_blocked_at`` (the owner's
+   choice would be lost), and runs once neither holds (restoring the
+   two-provider CHECK);
 3. re-upgrade works (the steps before the VALIDATE commit are re-runnable).
 
 PRIOR is read from the module, so re-chaining the revision changes one line.
@@ -78,6 +80,7 @@ def test_f37_round_trip_and_the_guarded_downgrade() -> None:
         )
 
     subject = f"email:{uuid4()}"
+    blocked_user = f"f37-blocked-{uuid4().hex[:12]}"
     try:
         _upgrade_to(prior)
         with engine.connect() as conn:
@@ -110,6 +113,27 @@ def test_f37_round_trip_and_the_guarded_downgrade() -> None:
             _downgrade_to(prior)
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM signup_allowlist WHERE subject_id = :s"), {"s": subject})
+            conn.execute(
+                text(
+                    "INSERT INTO users (email, user_id, role, timezone, locale, "
+                    "is_initial_admin, provider_auto_link_blocked_at) "
+                    "VALUES (:e, :u, 'user', 'UTC', 'en', false, now())"
+                ),
+                {"e": f"{blocked_user}@example.com", "u": blocked_user},
+            )
+        with pytest.raises(RuntimeError, match="provider_auto_link_blocked_at"):
+            _downgrade_to(prior)
+        with engine.connect() as conn:
+            assert column_exists(conn)
+            assert conn.execute(
+                text("SELECT provider_auto_link_blocked_at FROM users WHERE user_id = :u"),
+                {"u": blocked_user},
+            ).scalar()
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE users SET provider_auto_link_blocked_at = NULL WHERE user_id = :u"),
+                {"u": blocked_user},
+            )
         _downgrade_to(prior)
         with engine.connect() as conn:
             assert not table_exists(conn)
@@ -130,5 +154,6 @@ def test_f37_round_trip_and_the_guarded_downgrade() -> None:
                     conn.execute(
                         text("DELETE FROM signup_allowlist WHERE subject_id = :s"), {"s": subject}
                     )
+                    conn.execute(text("DELETE FROM users WHERE user_id = :u"), {"u": blocked_user})
             finally:
                 engine.dispose()
