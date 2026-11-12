@@ -46,6 +46,8 @@ import {
 import { useSystemInfo } from "@/hooks/useSystemFeatures";
 import { Button } from "@/components/ui/button";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { AnnouncementEmailsOptIn } from "@/components/auth/AnnouncementEmailsOptIn";
+import { INVITE_HANDOFF_TEST_IDS } from "@/components/auth/invite-handoff.testids";
 import { EmailSignupForm } from "@/components/auth/EmailSignupForm";
 import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
 import { SpinnerLoading } from "@/components/common/LoadingState";
@@ -105,6 +107,11 @@ export default function AcceptInvitationPage({
   const systemInfo = useSystemInfo();
   const termsVersion = systemInfo?.terms_version ?? undefined;
   const [agreedToTerms, setAgreedToTerms] = useState(false);
+  // #2761: the announcement-email consent wording, when offered. The box is
+  // unchecked by default and never gates the sign-in buttons.
+  const announcementVersion =
+    systemInfo?.announcement_consent_version ?? undefined;
+  const [announcementOptIn, setAnnouncementOptIn] = useState(false);
   const termsPending =
     systemInfo === null || (termsVersion !== undefined && !agreedToTerms);
 
@@ -234,6 +241,11 @@ export default function AcceptInvitationPage({
     const returnTo = window.location.pathname + window.location.search;
     window.location.href = buildOAuthRedirect(provider, returnTo, {
       acceptedTerms: termsVersion,
+      // #2761: sent (ticked or not) only when the checkbox was shown.
+      announcementEmails:
+        announcementVersion !== undefined
+          ? { value: announcementOptIn, version: announcementVersion }
+          : undefined,
     });
   };
 
@@ -362,6 +374,17 @@ export default function AcceptInvitationPage({
                   checked={agreedToTerms}
                   onCheckedChange={setAgreedToTerms}
                   themed
+                />
+              </div>
+            )}
+
+            {announcementVersion !== undefined && (
+              <div className="mb-4">
+                <AnnouncementEmailsOptIn
+                  checked={announcementOptIn}
+                  onCheckedChange={setAnnouncementOptIn}
+                  themed
+                  testId={INVITE_HANDOFF_TEST_IDS.inviteAnnouncementOptIn}
                 />
               </div>
             )}

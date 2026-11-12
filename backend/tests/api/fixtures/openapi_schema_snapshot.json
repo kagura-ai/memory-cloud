@@ -1110,6 +1110,62 @@
         ],
         "type": "object"
       },
+      "AnnouncementEmailsResponse": {
+        "properties": {
+          "announcement_emails": {},
+          "answered": {},
+          "offered": {},
+          "recorded_at": {},
+          "source": {},
+          "wording_version": {}
+        },
+        "required": [
+          "announcement_emails",
+          "answered",
+          "offered"
+        ],
+        "type": "object"
+      },
+      "AnnouncementEmailsUpdateRequest": {
+        "properties": {
+          "announcement_emails": {
+            "type": "boolean"
+          },
+          "wording_version": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "announcement_emails"
+        ],
+        "type": "object"
+      },
+      "AnnouncementEmailsUpdateResponse": {
+        "properties": {
+          "announcement_emails": {},
+          "answered": {},
+          "offered": {},
+          "recorded": {},
+          "recorded_at": {},
+          "source": {},
+          "wording_version": {}
+        },
+        "required": [
+          "announcement_emails",
+          "answered",
+          "offered",
+          "recorded"
+        ],
+        "type": "object"
+      },
       "AuditVerifyResponse": {
         "properties": {
           "broken_at": {
@@ -11873,6 +11929,27 @@
         ],
         "type": "object"
       },
+      "UnsubscribeAcceptedResponse": {
+        "properties": {
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UnsubscribeRequest": {
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
       "UpdateAddonRequest": {
         "properties": {
           "addon_analysis_bonus": {
@@ -17275,6 +17352,110 @@
         ]
       }
     },
+    "/api/v1/announcement-emails/unsubscribe": {
+      "post": {
+        "operationId": "unsubscribe_from_page_api_v1_announcement_emails_unsubscribe_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnsubscribeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsubscribeAcceptedResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
+        ]
+      }
+    },
+    "/api/v1/announcement-emails/unsubscribe/{token}": {
+      "get": {
+        "operationId": "open_unsubscribe_link_api_v1_announcement_emails_unsubscribe__token__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
+        ]
+      },
+      "post": {
+        "operationId": "one_click_unsubscribe_api_v1_announcement_emails_unsubscribe__token__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsubscribeAcceptedResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
+        ]
+      }
+    },
     "/api/v1/attachments/memories/{memory_id}": {
       "get": {
         "deprecated": true,
@@ -17769,6 +17950,36 @@
                 }
               ]
             }
+          },
+          {
+            "in": "query",
+            "name": "announcement_emails",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "announcement_consent_version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
           }
         ],
         "responses": {
@@ -17986,6 +18197,36 @@
           {
             "in": "query",
             "name": "timezone",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "announcement_emails",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "announcement_consent_version",
             "required": false,
             "schema": {
               "anyOf": [
@@ -24476,6 +24717,104 @@
         "tags": [
           "account-erasure",
           "account-linking"
+        ]
+      }
+    },
+    "/api/v1/me/announcement-emails": {
+      "get": {
+        "operationId": "get_announcement_emails_api_v1_me_announcement_emails_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnouncementEmailsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
+        ]
+      },
+      "put": {
+        "operationId": "update_announcement_emails_api_v1_me_announcement_emails_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnnouncementEmailsUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnouncementEmailsUpdateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
         ]
       }
     },
@@ -33650,6 +33989,9 @@
     },
     {
       "name": "analyses"
+    },
+    {
+      "name": "announcement-emails"
     },
     {
       "name": "api-keys"

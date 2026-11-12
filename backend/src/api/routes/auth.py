@@ -69,6 +69,10 @@ from config.settings import TERMS_VERSION_RE
 from db.base import get_db
 from models.auth import AuditLog, User
 from services.account_linking_service import AccountLinkingService
+from services.announcement_consent_service import (
+    SignupAnnouncementConsent,
+    resolve_signup_consent,
+)
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
 from services.identity_link_service import linked_user_ids
 from services.known_device_service import note_browser_sign_in
@@ -656,6 +660,8 @@ async def google_login(
     link_proof: bool = False,
     locale: str | None = None,
     timezone: str | None = None,
+    announcement_emails: str | None = None,
+    announcement_consent_version: str | None = None,
 ):
     """Initiate Google OAuth2 login flow.
 
@@ -678,6 +684,12 @@ async def google_login(
             an existing one keeps its own. Unsupported values are ignored.
         timezone: The browser's IANA time zone (e.g. ``Asia/Tokyo``, #2700).
             Same handling as ``locale``.
+        announcement_emails: The answer to the announcement-email opt-in on
+            the sign-in page (``true`` / ``false``, #2761), with
+            ``announcement_consent_version`` the wording version it showed.
+            Bound to this flow's state; recorded only when this sign-in
+            creates the account. Ignored while ANNOUNCEMENT_EMAILS_ENABLED is
+            off, with a stale version, or from a cross-site navigation.
 
     Returns:
         If return_to: RedirectResponse to Google OAuth (browser user)
@@ -730,8 +742,16 @@ async def google_login(
         # #1665: the terms version the person agreed to, bound to this state.
         _remember_accepted_terms(state, accepted_terms)
 
-        # #2700: the sign-in page's language / time zone, for a new account.
-        _remember_signup_prefs(state, locale, timezone)
+        # #2700: the sign-in page's language / time zone, for a new account;
+        # #2761: with the announcement-email opt-in shown on that page.
+        _remember_signup_prefs(
+            state,
+            locale,
+            timezone,
+            announcement=_signup_announcement_from_query(
+                request, announcement_emails, announcement_consent_version
+            ),
+        )
 
         # #1818: a sign-in that proves this account for an identity link.
         if link_proof:
@@ -923,8 +943,10 @@ async def google_callback(
     beta_invite_token_hash = _take_beta_invite_hash(state)
     # #1665: likewise single-use and taken only after the CSRF check.
     accepted_terms = _take_accepted_terms(state)
-    # #2700: likewise; seeds a new account only.
-    signup_locale, signup_timezone = _take_signup_prefs(state)
+    # #2700: likewise; seeds a new account only. #2761: the announcement-email
+    # opt-in rides in the same carrier.
+    signup_prefs = _take_signup_bundle(state)
+    signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
     # #1818: likewise.
     link_proof = _take_link_proof_intent(state)
 
@@ -1019,6 +1041,8 @@ async def google_callback(
             # #2700: applied only when this sign-in creates the account.
             locale=signup_locale,
             timezone=signup_timezone,
+            # #2761: likewise — an existing account keeps its own answer.
+            announcement_consent=signup_prefs.announcement,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).
@@ -1648,22 +1672,83 @@ _SIGNUP_PREFS_KEY = "oauth2_signup_prefs:{state}"
 _SIGNUP_PREFS_TTL = 300  # same lifetime as oauth2_state:{state}
 
 
-def _remember_signup_prefs(state: str, locale: str | None, timezone: str | None) -> None:
+def _remember_signup_prefs(
+    state: str,
+    locale: str | None,
+    timezone: str | None,
+    *,
+    announcement: SignupAnnouncementConsent | None = None,
+) -> None:
     """Bind the sign-in page's language and time zone to this OAuth ``state``.
 
     Stores ``{"locale": ..., "timezone": ...}`` with an invalid value as
-    ``null``; stores nothing when neither value is valid.
+    ``null``; stores nothing when neither value is valid and there is no
+    announcement answer. #2761: a resolved announcement-email answer adds
+    ``"announcement": {"value": <bool>, "version": <wording version>}``; without
+    one the JSON is exactly what it was before.
     """
     if not _session_manager:
         return
     valid_locale = locale if is_valid_locale(locale) else None
     valid_timezone = timezone if is_valid_timezone(timezone) else None
-    if valid_locale is None and valid_timezone is None:
+    if valid_locale is None and valid_timezone is None and announcement is None:
         return
+    payload: dict[str, Any] = {"locale": valid_locale, "timezone": valid_timezone}
+    if announcement is not None:
+        payload["announcement"] = {
+            "value": announcement.value,
+            "version": announcement.wording_version,
+        }
     _session_manager._redis.setex(
         _SIGNUP_PREFS_KEY.format(state=state),
         _SIGNUP_PREFS_TTL,
-        json.dumps({"locale": valid_locale, "timezone": valid_timezone}),
+        json.dumps(payload),
+    )
+
+
+class SignupPrefsBundle(NamedTuple):
+    """What the sign-up carrier held: language, time zone and, #2761, the
+    announcement-email opt-in. Each is ``None`` when absent or no longer valid."""
+
+    locale: str | None
+    timezone: str | None
+    announcement: SignupAnnouncementConsent | None
+
+
+def _take_signup_bundle(state: str) -> SignupPrefsBundle:
+    """Read-and-delete everything the sign-up carrier bound to ``state``.
+
+    Call only AFTER the CSRF state check has passed. Consumes the key on every
+    path; a value that is not valid any more (or JSON that is not the stored
+    shape) comes back as ``None``. The announcement answer is re-validated
+    (feature still on, wording version still current).
+    """
+    empty = SignupPrefsBundle(None, None, None)
+    if not _session_manager:
+        return empty
+    key = _SIGNUP_PREFS_KEY.format(state=state)
+    raw = _session_manager._redis.get(key)
+    if raw is None:
+        return empty
+    _session_manager._redis.delete(key)
+    try:
+        prefs = json.loads(raw)
+    except (TypeError, ValueError):
+        return empty
+    if not isinstance(prefs, dict):
+        return empty
+    locale = prefs.get("locale")
+    timezone = prefs.get("timezone")
+    stored = prefs.get("announcement")
+    announcement = (
+        resolve_signup_consent(stored.get("value"), stored.get("version"))
+        if isinstance(stored, dict)
+        else None
+    )
+    return SignupPrefsBundle(
+        locale if is_valid_locale(locale) else None,
+        timezone if is_valid_timezone(timezone) else None,
+        announcement,
     )
 
 
@@ -1672,27 +1757,47 @@ def _take_signup_prefs(state: str) -> tuple[str | None, str | None]:
 
     Call only AFTER the CSRF state check has passed. Consumes the key on every
     path; a value that is not valid any more (or JSON that is not the stored
-    shape) comes back as ``None``.
+    shape) comes back as ``None``. See :func:`_take_signup_bundle`.
     """
-    if not _session_manager:
-        return None, None
-    key = _SIGNUP_PREFS_KEY.format(state=state)
-    raw = _session_manager._redis.get(key)
-    if raw is None:
-        return None, None
-    _session_manager._redis.delete(key)
-    try:
-        prefs = json.loads(raw)
-    except (TypeError, ValueError):
-        return None, None
-    if not isinstance(prefs, dict):
-        return None, None
-    locale = prefs.get("locale")
-    timezone = prefs.get("timezone")
-    return (
-        locale if is_valid_locale(locale) else None,
-        timezone if is_valid_timezone(timezone) else None,
-    )
+    bundle = _take_signup_bundle(state)
+    return bundle.locale, bundle.timezone
+
+
+# --- the announcement-email opt-in on the sign-in page (#2761) ---------------
+#
+# ``announcement_emails=<true|false>&announcement_consent_version=<v>`` on the
+# login URL is the answer to the unchecked-by-default checkbox the sign-up
+# screens show while ANNOUNCEMENT_EMAILS_ENABLED is on. It rides in the
+# signup-prefs carrier above and is recorded only when the sign-in creates the
+# account. Anyone can publish a login link with these parameters, so an answer
+# that did not come from a click on this service's own page is dropped: with
+# Fetch Metadata, only a same-origin or same-site navigation counts (browsers
+# that send no ``Sec-Fetch-Site`` are taken at their word).
+_SAME_SITE_FETCH = frozenset({"same-origin", "same-site"})
+
+
+def _same_site_navigation(request: Request) -> bool:
+    """Whether the request came from this site's own page (or an old browser)."""
+    site = request.headers.get("sec-fetch-site")
+    return site is None or site in _SAME_SITE_FETCH
+
+
+def _signup_announcement_from_query(
+    request: Request, value: str | None, version: str | None
+) -> SignupAnnouncementConsent | None:
+    """The opt-in answer to carry, or ``None`` to carry nothing.
+
+    ``value`` must be exactly ``true`` or ``false``; the rest is
+    :func:`services.announcement_consent_service.resolve_signup_consent`.
+    """
+    if value is None:
+        return None
+    parsed = {"true": True, "false": False}.get(value)
+    if parsed is None:
+        return None
+    if not _same_site_navigation(request):
+        return None
+    return resolve_signup_consent(parsed, version)
 
 
 async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
@@ -2282,13 +2387,17 @@ async def github_login(
     accepted_terms: str | None = None,
     locale: str | None = None,
     timezone: str | None = None,
+    announcement_emails: str | None = None,
+    announcement_consent_version: str | None = None,
 ):
     """Initiate GitHub OAuth2 login flow.
 
     ``invite`` is an optional closed-beta invite token (#1581),
     ``accepted_terms`` the terms version agreed to (#1665), and ``locale`` /
     ``timezone`` the sign-in page's UI language (``en`` / ``ja``) and the
-    browser's IANA time zone, which seed a NEW account only (#2700) — see
+    browser's IANA time zone, which seed a NEW account only (#2700), and
+    ``announcement_emails`` / ``announcement_consent_version`` the
+    announcement-email opt-in for a NEW account (#2761) — see
     ``google_login``; both providers share ``_remember_beta_invite``,
     ``_remember_accepted_terms`` and ``_remember_signup_prefs``.
     """
@@ -2323,8 +2432,16 @@ async def github_login(
     # #1665: the terms version the person agreed to, bound to this state.
     _remember_accepted_terms(state, accepted_terms)
 
-    # #2700: the sign-in page's language / time zone, for a new account.
-    _remember_signup_prefs(state, locale, timezone)
+    # #2700: the sign-in page's language / time zone, for a new account;
+    # #2761: with the announcement-email opt-in shown on that page.
+    _remember_signup_prefs(
+        state,
+        locale,
+        timezone,
+        announcement=_signup_announcement_from_query(
+            request, announcement_emails, announcement_consent_version
+        ),
+    )
 
     redirect_uri = os.getenv(
         "GITHUB_REDIRECT_URI",
@@ -2502,7 +2619,8 @@ async def github_callback(
     # #1665: the accepted terms version — see google_callback.
     accepted_terms = _take_accepted_terms(state)
     # #2700: the sign-in page's language / time zone — see google_callback.
-    signup_locale, signup_timezone = _take_signup_prefs(state)
+    signup_prefs = _take_signup_bundle(state)
+    signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
 
     try:
         # 2. Exchange code for token
@@ -2582,6 +2700,8 @@ async def github_callback(
             # #2700: applied only when this sign-in creates the account.
             locale=signup_locale,
             timezone=signup_timezone,
+            # #2761: likewise — an existing account keeps its own answer.
+            announcement_consent=signup_prefs.announcement,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).

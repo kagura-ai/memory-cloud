@@ -11,6 +11,9 @@ paths:
     deployment feature flags the web UI reads before workspace context exists.
     It exposes no user/workspace data. Enforced public by
     `tests/api/test_system_info.py` + `tests/smoke/test_health.py`.
+  - `/api/v1/announcement-emails/unsubscribe[/{token}]` (#2761) is public by design:
+    the signed token is the only authority, it can only turn announcement emails off,
+    and every outcome answers the same (`tests/api/test_announcement_emails_routes.py`).
 - Session-only routes: `Depends(get_current_user)`
 - Session + API key routes: `Depends(APIKeyOrSessionUser)`
 - Admin routes: verify `system_admin` or `workspace_admin` role after auth

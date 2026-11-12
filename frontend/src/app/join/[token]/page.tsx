@@ -69,6 +69,7 @@ import { Button } from "@/components/ui/button";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { AnnouncementEmailsOptIn } from "@/components/auth/AnnouncementEmailsOptIn";
 import { EmailSignupForm } from "@/components/auth/EmailSignupForm";
 import { INVITE_HANDOFF_TEST_IDS as T } from "@/components/auth/invite-handoff.testids";
 
@@ -173,6 +174,9 @@ function JoinContent({ token }: { token: string }) {
   const systemInfo = useSystemInfo();
   const systemInfoPending = systemInfo === null;
   const termsVersion = systemInfo?.terms_version ?? undefined;
+  // #2761: the announcement-email consent wording, when offered.
+  const announcementVersion =
+    systemInfo?.announcement_consent_version ?? undefined;
   const searchParams = useSearchParams();
   // #1665: the login endpoint sends an invite sign-up without the current
   // terms version back here with this token (the version changed while the
@@ -182,6 +186,8 @@ function JoinContent({ token }: { token: string }) {
   // #1655: the validated destination, or undefined. Never parsed for a token.
   const returnTo = safeReturnTo(searchParams.get("return_to"), origin);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
+  // #2761: unchecked by default; never gates the sign-up buttons.
+  const [announcementOptIn, setAnnouncementOptIn] = useState(false);
   const [probe, setProbe] = useState<Probe>({ kind: "pending" });
   // Bumped by Retry to run the probes again.
   const [attempt, setAttempt] = useState(0);
@@ -248,6 +254,11 @@ function JoinContent({ token }: { token: string }) {
       {
         invite: token,
         acceptedTerms: termsVersion,
+        // #2761: sent (ticked or not) only when the checkbox was shown.
+        announcementEmails:
+          announcementVersion !== undefined
+            ? { value: announcementOptIn, version: announcementVersion }
+            : undefined,
       },
     );
   };
@@ -301,6 +312,16 @@ function JoinContent({ token }: { token: string }) {
                 themed
                 testId={T.joinTerms}
               />
+              {announcementVersion !== undefined && (
+                <div className="mt-3">
+                  <AnnouncementEmailsOptIn
+                    checked={announcementOptIn}
+                    onCheckedChange={setAnnouncementOptIn}
+                    themed
+                    testId={T.joinAnnouncementOptIn}
+                  />
+                </div>
+              )}
             </div>
           )}
           {probe.providers.includes("google") && (

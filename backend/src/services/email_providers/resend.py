@@ -43,6 +43,19 @@ logger = get_logger(__name__)
 _HTTP_TIMEOUT_SECONDS = 4
 
 
+def _safe_headers(headers: dict[str, str]) -> bool:
+    """True when every header name and value is a non-empty-name string pair
+    without CR or LF (no header injection), #2761."""
+    for name, value in headers.items():
+        if not isinstance(name, str) or not isinstance(value, str) or not name:
+            return False
+        if any(ch in name or ch in value for ch in ("\r", "\n")):
+            return False
+        if ":" in name or " " in name:
+            return False
+    return True
+
+
 @cache
 def _uncertain_error_types() -> tuple[type[BaseException], ...]:
     """Transport errors raised while waiting for or reading the response.
@@ -133,6 +146,7 @@ class ResendEmailService:
         log_event: str,
         log_context: dict[str, Any],
         raise_if_uncertain: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> bool:
         params: dict[str, Any] = {
             "from": self._from_email,
@@ -140,6 +154,13 @@ class ResendEmailService:
             "subject": subject,
             "text": text,
         }
+        if headers is not None:
+            # #2761: server-built headers only (List-Unsubscribe). A name or
+            # value that could end the header line is refused outright.
+            if not _safe_headers(headers):
+                logger.warning(f"{log_event}_refused_headers", **log_context)
+                return False
+            params["headers"] = dict(headers)
         try:
             response = await asyncio.to_thread(resend.Emails.send, params)
         except Exception as exc:

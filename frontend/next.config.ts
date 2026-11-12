@@ -51,6 +51,15 @@ const nextConfig: NextConfig = {
           { key: "X-Robots-Tag", value: "noindex, nofollow" },
         ],
       },
+      {
+        // #2761: /email/unsubscribe#<token> — the announcement unsubscribe
+        // link; same policy as /join and /password (app/email/layout.tsx).
+        source: "/email/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
     ];
   },
 };

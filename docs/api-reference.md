@@ -57,7 +57,7 @@ curl -H "Authorization: Bearer <access_token>" \
 
 Session-based authentication for the web management interface.
 
-The OAuth sign-in endpoints (`GET /api/v1/auth/{google,github}/login`) also take `locale` (`en` or `ja`, the sign-in page's language) and `timezone` (an IANA name such as `Asia/Tokyo`, the browser's time zone). Both are bound to the OAuth state like `accepted_terms`, and an account created by that sign-in starts with them instead of `en` / `UTC`. An existing account keeps its own settings, and an unsupported value is ignored.
+The OAuth sign-in endpoints (`GET /api/v1/auth/{google,github}/login`) also take `locale` (`en` or `ja`, the sign-in page's language) and `timezone` (an IANA name such as `Asia/Tokyo`, the browser's time zone). Both are bound to the OAuth state like `accepted_terms`, and an account created by that sign-in starts with them instead of `en` / `UTC`. An existing account keeps its own settings, and an unsupported value is ignored. With `ANNOUNCEMENT_EMAILS_ENABLED` on they also take `announcement_emails` (`true` / `false`) and `announcement_consent_version`, the answer to the sign-up opt-in for announcement emails (Issue #2761) — see [Announcement-email consent](#announcement-email-consent).
 
 ---
 
@@ -1992,6 +1992,7 @@ System information. Public (no authentication): the version plus non-sensitive d
   "description": "Remote MCP Server + Web Management",
   "environment": "production",
   "terms_version": null,
+  "announcement_consent_version": null,
   "chatgpt_app_url": null,
   "search_defaults": {
     "use_rerank": false,
@@ -2019,7 +2020,7 @@ System information. Public (no authentication): the version plus non-sensitive d
 
 `features.email_signup` is `ENABLE_EMAIL_SIGNUP` and `features.open_registration` is `ALLOW_REGISTRATION` as configured (it is ignored while the signup gate is on) — see [Email + password sign-up](#email--password-sign-up).
 
-`search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance). `chatgpt_app_url` is the deployment's `CHATGPT_APP_URL` (the public URL of its app in ChatGPT's app directory), or `null` when it is empty — see [ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760). `features.system_admin` is `true` only when this process serves the system-admin surface to signed-in admins (`SYSTEM_ADMIN_MODE=session`, the default); the web UI hides the admin menu and `/admin/*` otherwise (#2767, [Admin APIs](#admin-apis)).
+`search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance). `announcement_consent_version` is the version of the announcement-email consent wording while `ANNOUNCEMENT_EMAILS_ENABLED` is on, `null` otherwise — see [Announcement-email consent](#announcement-email-consent). `chatgpt_app_url` is the deployment's `CHATGPT_APP_URL` (the public URL of its app in ChatGPT's app directory), or `null` when it is empty — see [ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760). `features.system_admin` is `true` only when this process serves the system-admin surface to signed-in admins (`SYSTEM_ADMIN_MODE=session`, the default); the web UI hides the admin menu and `/admin/*` otherwise (#2767, [Admin APIs](#admin-apis)).
 
 ---
 
@@ -2050,6 +2051,59 @@ Session cookie only. Records that the signed-in user accepts the current terms v
 | `404` | `TERMS_VERSION` is empty — the feature is off |
 | `409` | `version` is not the current terms version (the page loaded before it changed); `detail` says to reload |
 | `401` / `403` | no session / an API key or bearer token instead of a session |
+
+---
+
+## Announcement-email consent
+
+Issue #2761. Whether the person wants announcement emails (new features, product news). Service notices (invitations, password, security, capacity, erasure) never depend on it. See [Announcement email consent](deployment.md#announcement-email-consent-issue-2761) for the operator view.
+
+- `GET /api/v1/auth/{google,github}/login?announcement_emails=<true|false>&announcement_consent_version=<version>` — the answer to the unchecked-by-default sign-up checkbox, bound to the OAuth state. Recorded (source `signup`) only when the sign-in creates the account and only with the current version from `/system/info`; ignored while `ANNOUNCEMENT_EMAILS_ENABLED` is off, for any other value, and when the request's `Sec-Fetch-Site` is `cross-site` or `none`. It never blocks a sign-in.
+
+### GET /api/v1/me/announcement-emails
+
+Session cookie only.
+
+**Response (200):**
+
+```json
+{
+  "offered": true,
+  "announcement_emails": false,
+  "answered": true,
+  "source": "signup",
+  "recorded_at": "2026-11-12T09:00:00Z",
+  "wording_version": "2026-11"
+}
+```
+
+`offered` is `false` while `ANNOUNCEMENT_EMAILS_ENABLED` is off. `answered` is `false` (and `source` / `recorded_at` `null`) when the user never answered. `wording_version` is the current consent wording to send back when turning the emails on (`null` while not offered).
+
+### PUT /api/v1/me/announcement-emails
+
+Session cookie only. Records a new answer with source `settings`; an unchanged answer writes nothing.
+
+**Request:** `{"announcement_emails": true, "wording_version": "2026-11"}` (`wording_version` is needed only to turn them on)
+
+**Response (200):** the body of `GET` plus `"recorded": true|false`.
+
+| Status | When |
+|---|---|
+| `409` | turning them on while `ANNOUNCEMENT_EMAILS_ENABLED` is off, or with a `wording_version` other than the current one (the page loaded before the wording changed); turning them off always works |
+| `429` | more than 20 changes in an hour |
+| `401` / `403` | no session / an API key or bearer token instead of a session |
+
+### POST /api/v1/announcement-emails/unsubscribe/{token}
+
+No authentication: the token from an announcement email is the only authority. The one-click target named in the `List-Unsubscribe` header (RFC 8058); the body is not read. Turns announcement emails off for the token's account (source `unsubscribe_link`) and can do nothing else. Always `200 {"status": "accepted"}` — for a valid token, a forged or malformed one, an account that no longer exists, and an answer that was already off — and never `429`. `503` only when a valid token could not be applied (try again).
+
+### GET /api/v1/announcement-emails/unsubscribe/{token}
+
+No authentication. Changes nothing: `303` to `{FRONTEND_URL}/email/unsubscribe#<token>` (the token in the fragment only when it has the token alphabet), with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+
+### POST /api/v1/announcement-emails/unsubscribe
+
+No authentication. What the unsubscribe page posts: `{"token": "<token>"}`. Same behaviour and answer as the one-click route, except that invalid tokens are counted per client address and answered `429` past 30 in 15 minutes. A valid token is never refused.
 
 ---
 

@@ -25,11 +25,13 @@ describe("/join referrer + indexing policy (#1588)", () => {
     const rules = (await nextConfig.headers?.()) ?? [];
 
     // #1678 adds /password (reset / set-up links carry a token too), #1734
-    // /signup (the email sign-up link).
+    // /signup (the email sign-up link), #2761 /email (the announcement
+    // unsubscribe link).
     expect(rules.map((rule) => rule.source)).toEqual([
       "/signup/:path*",
       "/join/:path*",
       "/password/:path*",
+      "/email/:path*",
     ]);
   });
 
