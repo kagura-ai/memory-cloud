@@ -524,6 +524,30 @@ class Settings(BaseSettings):
         default="",
         description="Shared bearer token authenticating the billing service to /internal/* (RFC 6750)",
     )
+    # Issue #2767: where the system-admin surface (every route behind
+    # require_admin) is served. "session" = signed-in role=admin users, as
+    # before; "off" = nowhere (404); "service" = an operator console with the
+    # service credential only. See docs/deployment.md, "System-admin surface".
+    system_admin_mode: Literal["session", "off", "service"] = Field(
+        default="session",
+        description=(
+            "Where the system-admin surface is served: session (signed-in admins, "
+            "default), off (nowhere) or service (operator console credential only)"
+        ),
+    )
+
+    @field_validator("system_admin_mode", mode="before")
+    @classmethod
+    def _strip_system_admin_mode(cls, v: Any) -> Any:
+        """Trim whitespace only; the ``Literal`` does the refusing (#2767).
+
+        An empty value refuses startup instead of meaning ``session``: a
+        deployment that writes ``SYSTEM_ADMIN_MODE=`` meant to set something,
+        and serving the session surface by accident is the failure this
+        setting exists to prevent. Case is not folded (``Off`` refuses).
+        """
+        return v.strip() if isinstance(v, str) else v
+
     # Issue #1093: Ed25519 signing material for owner billing handoff tokens
     # (POST /api/v1/billing/handoff). memory-cloud holds the PRIVATE key; the
     # billing service verifies with the matching public key (kid-based rotation).
