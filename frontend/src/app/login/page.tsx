@@ -251,10 +251,13 @@ function LoginContent() {
     getAuthConfig()
       .then((config) => {
         setAuthConfig(config);
-        // Auto-show the password form if no OAuth providers are configured
+        // Auto-show the password form if no OAuth providers are configured,
+        // or when the link asked for it (`?method=password`, e.g. the
+        // invitation page's "Sign in with email and password").
         const hasOAuth =
           config.google_oauth_enabled || config.github_oauth_enabled;
-        if (!hasOAuth && config.password_login_enabled) {
+        const passwordRequested = searchParams.get("method") === "password";
+        if ((!hasOAuth || passwordRequested) && config.password_login_enabled) {
           setShowPasswordLogin(true);
         } else {
           setShowPasswordLogin(false);

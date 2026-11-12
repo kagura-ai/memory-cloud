@@ -92,7 +92,7 @@ describe("/invite/[token] — email sign-up (#1734)", () => {
     expect(screen.queryByTestId("email-signup-form")).toBeNull();
   });
 
-  it("always links to the password sign-in, back to this invitation", async () => {
+  it("always links to the password sign-in, open and back to this invitation", async () => {
     mockGetInvitationInfo.mockResolvedValue({
       workspace_name: "Test Workspace",
       email_restricted: false,
@@ -102,7 +102,7 @@ describe("/invite/[token] — email sign-up (#1734)", () => {
       screen.getByRole("link", { name: "loginRequired.passwordSignIn" }),
     ).toHaveAttribute(
       "href",
-      `/login?return_to=${encodeURIComponent(`/invite/${TOKEN}`)}`,
+      `/login?method=password&return_to=${encodeURIComponent(`/invite/${TOKEN}`)}`,
     );
   });
 });

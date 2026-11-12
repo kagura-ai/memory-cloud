@@ -437,7 +437,7 @@ export default function AcceptInvitationPage({
 
             <p className="mt-4 text-center text-sm">
               <Link
-                href={`/login?return_to=${encodeURIComponent(invitePath)}`}
+                href={`/login?method=password&return_to=${encodeURIComponent(invitePath)}`}
                 className="font-medium text-kagura-link hover:underline dark:text-blue-400"
               >
                 {t("loginRequired.passwordSignIn")}
