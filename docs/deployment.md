@@ -896,14 +896,21 @@ for them. The server records every answer; it sends no announcement itself.
 - **The unsubscribe link** is `{FRONTEND_URL}/api/v1/announcement-emails/
   unsubscribe/<token>` (one-click, RFC 8058) and
   `{FRONTEND_URL}/email/unsubscribe#<token>` (a page with a button). It needs
-  no sign-in, can only turn the emails off for its own account, never expires,
-  and answers the same whether or not the link is valid. A link from an older
-  email still turns the emails off, also after the person turned them on again
-  later. It requires `/api/*`
+  no sign-in, can only turn the emails off for its own account and never
+  expires. Both `POST` routes (the one-click one and the one the page posts
+  to) answer the same whether or not the link is valid. A browser that opens
+  the one-click URL (`GET`) is redirected to the page: for a valid link with
+  a token the server issues afresh in the fragment, for any other value
+  without a fragment. That check reads no database, so the redirect differs
+  between a valid and an invalid link but says nothing about whether an
+  account exists. A link from an older email still turns the emails off, also
+  after the person turned them on again later. It requires `/api/*`
   to be routed to the API on the `FRONTEND_URL` origin, as the shipped Caddy
   configuration does. The token in the one-click path is removed from the
-  application's request logs; the proxy's access log does not remove it yet,
-  so keep that log's retention short once you send announcements.
+  application's request logs. The proxy's access log still records the token
+  in that path, and for the `GET` also the re-issued token in the `Location`
+  header's fragment; the proxy scrub for these paths comes with the first
+  announcement sender.
 - **Outside production** the development default `API_KEY_SECRET` is public,
   so anyone could forge an unsubscribe link for a known account (it can only
   turn announcement emails off). Production refuses that default at startup.
