@@ -242,6 +242,18 @@ async def new_account_role(db: AsyncSession) -> Role:
     return Role.USER
 
 
+def is_initial_admin_role(role: Role) -> bool:
+    """``users.is_initial_admin`` for a new account with the role it was given.
+
+    A bootstrap marker (Issue #166: the first admin is protected from deletion
+    and demotion), not a grant of system-admin power: it is true exactly when
+    :func:`new_account_role` chose ``admin``, which happens only in
+    ``SYSTEM_ADMIN_MODE=session``. The one comparison every account-creating
+    path shares (OAuth ``ensure_user`` and email sign-up).
+    """
+    return role == Role.ADMIN
+
+
 def _normalize_address(email: str) -> str:
     """``lower(trim())``: the form email sign-up stores (``normalize_email``)."""
     return email.strip().lower()
@@ -419,7 +431,7 @@ async def stage_email_account(
             user_id=user_id,
             name=name,
             role=role.value,
-            is_initial_admin=(role == Role.ADMIN),
+            is_initial_admin=is_initial_admin_role(role),
             auth_method="password",
             password_hash=password_hash,
             login_id=None,
@@ -698,7 +710,7 @@ class RoleManager:
                 name=name,
                 role=role.value,
                 # Issue #166: first admin protected from deletion/demotion.
-                is_initial_admin=(role == Role.ADMIN),
+                is_initial_admin=is_initial_admin_role(role),
                 last_login_at=utcnow(),
                 auth_provider=auth_provider,
                 # #1752: only an address the IdP attested as verified counts

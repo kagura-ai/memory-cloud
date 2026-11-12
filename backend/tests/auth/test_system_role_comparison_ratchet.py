@@ -21,7 +21,8 @@ PINNED: dict[str, int] = {
     # The helper itself does not compare with a literal operand (it uses a
     # module constant), so it is not listed. The gate's session branch:
     "auth/dependencies.py": 1,
-    # is_initial_admin follows the role new_account_role chose.
+    # is_initial_admin_role: the bootstrap marker follows the role new_account_role
+    # chose (one comparison shared by the OAuth and email sign-up paths).
     "auth/roles.py": 1,
     # Validation of the requested role in PUT /admin/users/{id}/role.
     "api/routes/admin.py": 1,
