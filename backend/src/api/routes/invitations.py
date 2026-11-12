@@ -476,7 +476,7 @@ async def get_invitation_info(
         Invitation info (workspace name, role, expiration)
 
     Raises:
-        HTTPException 404: Invitation not found
+        HTTPException 404: Invitation not found, or its workspace was deleted
         HTTPException 410: Invitation expired or already accepted
     """
     try:
@@ -498,6 +498,9 @@ async def get_invitation_info(
         stmt = select(Workspace).where(Workspace.id == invitation.workspace_id)
         result = await db.execute(stmt)
         workspace = result.scalar_one()
+        if workspace.deleted_at is not None:
+            # Never acceptable: answer like an unknown token, naming nothing.
+            raise NotFoundException("Invitation")
 
         email_restricted = invitation.email is not None
         plan_blocked = not has_feature(workspace.plan_name, "team_invitations")
