@@ -15,7 +15,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from auth.dependencies import get_current_user, require_admin, require_session_auth
+from auth.dependencies import (
+    get_current_user,
+    get_current_user_optional,
+    require_admin,
+    require_session_auth,
+)
 from db.base import get_db
 from tests.api.test_memory_health import CANNED_BREAKDOWN, CANNED_DETAIL
 
@@ -55,6 +60,10 @@ class TestDeprecatedAdminAlias:
             return {"user_id": "u1", "email": "member@test.com", "role": "member"}
 
         app.dependency_overrides[get_current_user] = member_user
+
+        # #2767: require_admin reads the session through get_current_user_optional.
+
+        app.dependency_overrides[get_current_user_optional] = member_user
         app.dependency_overrides[get_db] = _mock_get_db
         called = AsyncMock()
         with patch(f"{SERVICE}.build_breakdown", new=called):

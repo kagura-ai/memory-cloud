@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from api.main import memory_cloud_exception_handler
 from api.routes import admin as admin_mod
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_current_user_optional
 from db.base import get_db
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ErasureRetryScheduledError, MemoryCloudException
@@ -37,6 +37,10 @@ def _client() -> TestClient:
         yield MagicMock()
 
     app.dependency_overrides[get_current_user] = _user
+
+    # #2767: require_admin reads the session through get_current_user_optional.
+
+    app.dependency_overrides[get_current_user_optional] = _user
     app.dependency_overrides[get_db] = _db
     return TestClient(app, raise_server_exceptions=False)
 

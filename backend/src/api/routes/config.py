@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
 from auth.dependencies import AdminUser, APIKeyOrSessionUser
+from auth.system_admin_mode import is_effective_session_admin
 from config.settings import Settings, get_settings
 from utils.exceptions import ConfigReadOnlyError
 from utils.logger import get_logger
@@ -160,10 +161,11 @@ def get_visible_categories(user: dict) -> dict[str, list[str]]:
         user: Authenticated user
 
     Returns:
-        All categories for an admin; without the admin-only ones otherwise
+        All categories for a system admin; without the admin-only ones otherwise.
+        #2767: ``role = 'admin'`` counts only in ``SYSTEM_ADMIN_MODE=session``.
     """
     categories = get_config_categories()
-    if user.get("role") != "admin":
+    if not is_effective_session_admin(user):
         for category in get_admin_only_categories():
             categories.pop(category, None)
     return categories

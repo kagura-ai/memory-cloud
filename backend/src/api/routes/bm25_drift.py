@@ -238,7 +238,7 @@ async def get_drift_log_detail(
 )
 async def run_drift_now(
     body: Bm25DriftRunRequest,
-    _admin: dict = Depends(require_admin),  # noqa: ARG001 - access guard only
+    admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> Bm25DriftRunResponse:
     """Manually trigger a drift measurement. Admin-only.
@@ -273,6 +273,7 @@ async def run_drift_now(
     logger.info(
         "drift_manual_trigger_scheduled",
         scheduled=len(_spawned),
+        actor=admin.get("user_id"),  # #2767: who started it (no audit row yet)
     )
     return Bm25DriftRunResponse(scheduled_context_count=len(_spawned))
 

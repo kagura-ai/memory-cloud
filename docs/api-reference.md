@@ -1896,7 +1896,7 @@ Closed-beta invite links (Issues #1581, #1595): a signed-in user mints a one-tim
 
 - `status` is derived: `revoked` > `redeemed` > `expired` > `active`.
 - `used` counts the invites occupying a quota slot; `active` (unused, still valid) and `redeemed` are its two parts — `active + redeemed == used` always. Expired and revoked invites free their slot.
-- `quota` and `remaining` are `null` for a system admin (unlimited).
+- `quota` and `remaining` are `null` for a system admin (unlimited). Only in `SYSTEM_ADMIN_MODE=session`: in `off` / `service` an admin-role account is capped like everyone (#2767).
 - `label` (since #1595) is the inviter's own note, or `null`. Only the inviter ever sees it.
 - `redeemed_email` (since #1595) is the **current** e-mail of the account a `redeemed` invite admitted — the inviter vouched for that person, so they may see who it was. It is `null` for every other status, and `null` for a redeemed invite whose account no longer exists (erased) or whose allowlist entry an admin removed: it is read from the live account, never from a stored copy. #1581 exposed the lifecycle only; this field reverses that on purpose.
 
@@ -1976,6 +1976,7 @@ System information. Public (no authentication): the version plus non-sensitive d
     "content_chunks_enabled": false
   },
   "features": {
+    "system_admin": true,
     "neural_memory": true,
     "research_tools": false,
     "plan_page": false,
@@ -1990,7 +1991,7 @@ System information. Public (no authentication): the version plus non-sensitive d
 }
 ```
 
-`search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance). `chatgpt_app_url` is the deployment's `CHATGPT_APP_URL` (the public URL of its app in ChatGPT's app directory), or `null` when it is empty — see [ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760).
+`search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance). `chatgpt_app_url` is the deployment's `CHATGPT_APP_URL` (the public URL of its app in ChatGPT's app directory), or `null` when it is empty — see [ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760). `features.system_admin` is `true` only when this process serves the system-admin surface to signed-in admins (`SYSTEM_ADMIN_MODE=session`, the default); the web UI hides the admin menu and `/admin/*` otherwise (#2767, [Admin APIs](#admin-apis)).
 
 ---
 
@@ -2054,6 +2055,14 @@ threshold.
 
 Admin endpoints require `system_admin` or `workspace_admin` role.
 
+The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /api/v1/config/batch`, `GET /api/v1/oauth/providers`) follow the deployment's `SYSTEM_ADMIN_MODE` (#2767; [System-admin surface](deployment.md#system-admin-surface-issue-2767)):
+
+- `session` (default): a session cookie of a user with `role=admin`; `401` without a session, `403` (`HTTP-403`) otherwise. Unchanged.
+- `off`: every such route answers `404` with the unknown-path body (`HTTP-404`), whatever the caller sends, and is left out of the OpenAPI document.
+- `service`: only an operator console. Send `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` and `X-Operator-Email: <address of the person acting>`; a session cookie is ignored. Errors, in this order: `404` outside `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS`, `503 SYSADMIN-001` (credential not configured), `401 SYSADMIN-002` (credential missing, another scheme, or wrong; `WWW-Authenticate: Bearer`), `400 SYSADMIN-003` (`X-Operator-Email` missing, repeated or not a plain address), `403 SYSADMIN-004` (a route that acts on the caller's own account: `POST /admin/sleep/run`, `POST /admin/sleep/actions/{action_id}/undo-merge`, `GET /admin/memory-health`, and `POST /admin/contexts/recover` with `dry_run=false`). Writes record the actor as `operator:<address>`.
+
+`PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
+
 ### Sleep Maintenance
 
 | Endpoint                                         | Purpose                                                       |
@@ -2067,7 +2076,7 @@ See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/v1/admin/memory-health` | **Deprecated** (#2764): an alias of [`GET /api/v1/memory-health`](#memory-health) that answers a system admin with the same document, with the same `context_id` parameter. It is removed in a later release; call the new path. |
+| `GET /api/v1/admin/memory-health` | **Deprecated** (#2764): an alias of [`GET /api/v1/memory-health`](#memory-health) that answers a system admin with the same document, with the same `context_id` parameter. It is removed in a later release; call the new path. A service operator gets `403 SYSADMIN-004` (it has no contexts of its own). |
 
 ### Environment Console
 

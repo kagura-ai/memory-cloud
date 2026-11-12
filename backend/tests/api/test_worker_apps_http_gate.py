@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from api.routes import worker_apps as worker_apps_mod
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_current_user_optional
 from db.base import get_db
 from utils.exceptions import MemoryCloudException
 
@@ -47,6 +47,10 @@ def _client(role: str = "admin") -> TestClient:
         yield MagicMock()
 
     app.dependency_overrides[get_current_user] = _user
+
+    # #2767: require_admin reads the session through get_current_user_optional.
+
+    app.dependency_overrides[get_current_user_optional] = _user
     app.dependency_overrides[get_db] = _db
     return TestClient(app, raise_server_exceptions=False)
 

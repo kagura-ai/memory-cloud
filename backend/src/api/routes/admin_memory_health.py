@@ -18,7 +18,7 @@ from api.routes.memory_health import (
     MemoryHealthBreakdownResponse,
     MemoryHealthDetailResponse,
 )
-from auth.dependencies import AdminUser
+from auth.dependencies import AdminAccountUser
 from db.base import get_db
 
 router = APIRouter(prefix="/admin/memory-health", tags=["admin-memory-health"])
@@ -36,7 +36,7 @@ router = APIRouter(prefix="/admin/memory-health", tags=["admin-memory-health"])
     deprecated=True,
 )
 async def get_memory_health(
-    admin: AdminUser,
+    admin: AdminAccountUser,
     context_id: ContextScopeQuery = None,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryHealthBreakdownResponse | MemoryHealthDetailResponse:

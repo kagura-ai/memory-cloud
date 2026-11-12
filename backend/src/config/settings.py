@@ -548,6 +548,126 @@ class Settings(BaseSettings):
         """
         return v.strip() if isinstance(v, str) else v
 
+    # Issue #2767: the bearer credential an operator console presents to a
+    # process in SYSTEM_ADMIN_MODE=service. Empty there = 503 on every admin
+    # route (fail-closed). Set it on the service process only; the others have
+    # no use for it. Use: openssl rand -hex 32.
+    system_admin_service_token: str = Field(
+        default="",
+        description=(
+            "Bearer credential of the operator console in SYSTEM_ADMIN_MODE=service "
+            "(RFC 6750); empty answers 503 on the admin routes"
+        ),
+    )
+    system_admin_service_token_previous: str = Field(
+        default="",
+        description=(
+            "Comma-separated earlier service credentials still accepted during a "
+            "rotation; remove them once the console uses the new one"
+        ),
+    )
+    system_admin_service_allowed_cidrs: str = Field(
+        default="",
+        description=(
+            "Comma-separated CIDR ranges whose client addresses may call the admin "
+            "routes in SYSTEM_ADMIN_MODE=service; any other address gets 404. Empty "
+            "allows every address (the credential is still required). The address is "
+            "request.client.host: behind a proxy, set FORWARDED_ALLOW_IPS."
+        ),
+    )
+
+    @field_validator("system_admin_service_allowed_cidrs")
+    @classmethod
+    def _validate_system_admin_service_cidrs(cls, value: str) -> str:
+        """Refuse a malformed range at startup rather than allowing nobody (#2767)."""
+        _parse_cidrs(value)
+        return value
+
+    @property
+    def system_admin_service_allowed_networks(
+        self,
+    ) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+        """Parsed ``system_admin_service_allowed_cidrs``."""
+        return _parse_cidrs(self.system_admin_service_allowed_cidrs)
+
+    @property
+    def system_admin_service_previous_tokens(self) -> tuple[str, ...]:
+        """The accepted earlier service credentials, current one and blanks dropped."""
+        return split_previous_secrets(
+            self.system_admin_service_token_previous, self.system_admin_service_token
+        )
+
+    @model_validator(mode="after")
+    def _check_system_admin_service_settings(self) -> "Settings":
+        """Guard the service credential like a production secret (#2767).
+
+        A credential with a blank or a comma could never be presented or would
+        split, so it refuses startup everywhere. Under ENVIRONMENT=production
+        the current credential AND every previous one must be a private value
+        of at least the secret guard's minimum length, and none may equal the
+        billing or worker service token (one leaked value must not open two
+        surfaces): a previous credential is a live credential. Values are
+        never echoed, only env names and counts.
+        """
+        current = self.system_admin_service_token
+        previous = [part.strip() for part in self.system_admin_service_token_previous.split(",")]
+        previous = [entry for entry in previous if entry]
+        if any(ch.isspace() or ch == "," for ch in current) or any(
+            any(ch.isspace() for ch in entry) for entry in previous
+        ):
+            raise ValueError(
+                "SYSTEM_ADMIN_SERVICE_TOKEN / SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS must not "
+                "contain blanks (and the current credential no comma): use "
+                "openssl rand -hex 32."
+            )
+        if current and current in previous:
+            logger.warning(
+                "SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS repeats SYSTEM_ADMIN_SERVICE_TOKEN; "
+                "that entry is ignored."
+            )
+        if self.system_admin_service_previous_tokens:
+            logger.warning(
+                "SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS holds %d earlier service credential(s) "
+                "that still open the admin routes: remove it once the operator console "
+                "uses SYSTEM_ADMIN_SERVICE_TOKEN (docs/deployment.md, 'System-admin surface').",
+                len(self.system_admin_service_previous_tokens),
+            )
+        if (current or previous) and self.system_admin_mode != "service":
+            logger.warning(
+                "SYSTEM_ADMIN_SERVICE_TOKEN is set but SYSTEM_ADMIN_MODE is %s: the "
+                "credential is ignored on this process; set it on the service process only.",
+                self.system_admin_mode,
+            )
+        if not self.is_production:
+            return self
+        refused: list[str] = []
+        if current and (
+            is_placeholder_secret(current) or len(current) < _PRODUCTION_SECRET_MIN_LEN
+        ):
+            refused.append("SYSTEM_ADMIN_SERVICE_TOKEN")
+        if any(
+            is_placeholder_secret(entry) or len(entry) < _PRODUCTION_SECRET_MIN_LEN
+            for entry in previous
+        ):
+            refused.append("SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS")
+        if refused:
+            raise ValueError(
+                "ENVIRONMENT=production refuses development-default or short service "
+                f"credentials: {', '.join(refused)}. Set each to a private value of at "
+                f"least {_PRODUCTION_SECRET_MIN_LEN} characters (openssl rand -hex 32) "
+                "and restart."
+            )
+        other_tokens = {
+            token for token in (self.billing_service_token, self.worker_service_token) if token
+        }
+        if other_tokens.intersection([current, *previous]):
+            raise ValueError(
+                "ENVIRONMENT=production refuses a system-admin service credential equal to "
+                "BILLING_SERVICE_TOKEN or WORKER_SERVICE_TOKEN: each service credential "
+                "must be its own value (openssl rand -hex 32)."
+            )
+        return self
+
     # Issue #1093: Ed25519 signing material for owner billing handoff tokens
     # (POST /api/v1/billing/handoff). memory-cloud holds the PRIVATE key; the
     # billing service verifies with the matching public key (kid-based rotation).

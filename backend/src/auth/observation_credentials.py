@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ipaddress
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -352,6 +353,20 @@ def _client_allowed(request: Request) -> bool:
     networks = get_settings().observability_api_allowed_networks
     if not networks:
         return True
+    return client_in_networks(request, networks)
+
+
+def client_in_networks(
+    request: Request,
+    networks: Sequence[ipaddress.IPv4Network | ipaddress.IPv6Network],
+) -> bool:
+    """Whether the request's client address is inside one of ``networks``.
+
+    The address is ``request.client.host``: the TCP peer, or the forwarded
+    address when uvicorn trusts the proxy (``FORWARDED_ALLOW_IPS``). No address
+    or an unparsable one is outside. Shared by the observability API and the
+    ``service`` system-admin surface (#2767).
+    """
     host = request.client.host if request.client else None
     if not host:
         return False

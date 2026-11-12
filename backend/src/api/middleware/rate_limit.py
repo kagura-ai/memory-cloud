@@ -106,7 +106,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not user_id:
             return await call_next(request)
 
-        # 4. Admin bypass (system admins have unlimited access)
+        # 4. Admin bypass (system admins have unlimited access). #2767: left as
+        # is on purpose. RateLimit runs outside SessionMiddleware (api/main.py),
+        # so request.state.user is never set here and this branch is not
+        # reached; the role-comparison ratchet pins this file.
         if user and user.get("role") == "admin":
             logger.debug("rate_limit_admin_bypass", user_id=user_id, path=path)
             return await call_next(request)

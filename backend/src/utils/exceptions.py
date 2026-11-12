@@ -129,6 +129,48 @@ class AdminProtectionError(MemoryCloudException):
         self.reason = reason
 
 
+# System-admin surface modes (#2767). ``SYSADMIN-*`` codes; ``ADMIN-*`` stays
+# the admin-protection family above.
+
+
+class SystemAdminNotConfiguredError(MemoryCloudException):
+    """``SYSTEM_ADMIN_MODE=service`` without a service credential (503, fail-closed)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The system-admin service credential is not configured on this server",
+            status_code=503,
+            error_code="SYSADMIN-001",
+        )
+
+
+class SystemAdminCredentialError(AuthenticationError):
+    """Missing or wrong service credential in ``service`` mode (401).
+
+    One message for a missing header, another scheme and a wrong value, so a
+    caller learns nothing about which part failed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "A valid system-admin service credential is required",
+            error_code="SYSADMIN-002",
+        )
+        self.response_headers = {"WWW-Authenticate": "Bearer"}
+
+
+class OperatorPrincipalNotSupportedError(MemoryCloudException):
+    """A service operator called a route that acts on the caller's own account (403)."""
+
+    def __init__(
+        self,
+        message: str = (
+            "This route acts on the calling admin's own account; a service operator has none"
+        ),
+    ) -> None:
+        super().__init__(message, status_code=403, error_code="SYSADMIN-004")
+
+
 class APIKeyError(MemoryCloudException):
     """API key related error (401)."""
 
@@ -448,6 +490,18 @@ class BadRequestError(MemoryCloudException):
         **details: Any,
     ) -> None:
         super().__init__(message, status_code=400, error_code=error_code, **details)
+
+
+# System-admin surface modes (#2767), SYSADMIN-003; the others sit after
+# AdminProtectionError.
+class OperatorEmailInvalidError(BadRequestError):
+    """``X-Operator-Email`` missing, repeated or malformed (400). Never echoes the value."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Exactly one valid X-Operator-Email header is required",
+            error_code="SYSADMIN-003",
+        )
 
 
 class WorkerAppNotFoundError(MemoryCloudException):

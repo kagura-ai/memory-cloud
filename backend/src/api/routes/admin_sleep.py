@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
-from auth.dependencies import AdminUser
+from auth.dependencies import AdminAccountUser
 from config.constants import TOMBSTONE_PURGER_CLAUSE
 from db.base import get_db
 from models.auth import Context
@@ -202,7 +202,7 @@ def _log_background_task_result(task: asyncio.Task[Any]) -> None:
 )
 async def trigger_sleep_run(
     request: SleepRunRequest,
-    admin: AdminUser,
+    admin: AdminAccountUser,
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Manually trigger a Sleep Maintenance run for the calling admin.
@@ -377,7 +377,7 @@ _UNDO_ERROR_STATUS = {
 )
 async def undo_merge(
     action_id: int,
-    admin: AdminUser,
+    admin: AdminAccountUser,
     db: AsyncSession = Depends(get_db),
 ) -> UndoMergeResponse:
     """Restore the loser of ONE dedup merge — row and Qdrant vector (#1209).
