@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
 from pydantic import ValidationError as PydanticValidationError
 
@@ -23,7 +23,7 @@ from api.routes import email_signup as routes
 from auth.roles import Role
 from config.settings import get_settings
 from services.email_signup_service import CreatedEmailAccount, process_signup_request
-from utils.exceptions import RateLimitError, RedisError
+from utils.exceptions import RateLimitError, RedisError, SignupSessionUnavailableError
 
 
 def _request(ip: str = "192.0.2.10") -> SimpleNamespace:
@@ -69,6 +69,8 @@ class TestKillSwitch:
         monkeypatch.setattr(get_settings(), "enable_email_signup", False)
         resp = TestClient(app).post(f"/api/v1/auth/signup/email/{path}")
         assert resp.status_code == 404
+        # The body of an unknown path: the switch cannot be told apart from no route.
+        assert resp.json() == {"error": "HTTP-404", "message": "Not Found", "details": {}}
 
 
 class TestRequest:
@@ -327,14 +329,15 @@ class TestComplete:
             "_create_password_session",
             AsyncMock(side_effect=RuntimeError("redis down")),
         )
-        with pytest.raises(HTTPException) as info:
+        with pytest.raises(SignupSessionUnavailableError) as info:
             await routes.complete_email_signup(
                 routes.EmailSignupCompleteBody(token="t", new_password="pw"),
                 _request(),
                 db=MagicMock(),
             )
         assert info.value.status_code == 503
-        assert "account was created" in info.value.detail
+        assert info.value.error_code == "HTTP-503"
+        assert "account was created" in info.value.message
 
     @pytest.mark.asyncio
     async def test_link_attempts_are_limited_per_ip(self, enabled, counters) -> None:

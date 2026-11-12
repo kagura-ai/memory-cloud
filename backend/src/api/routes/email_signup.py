@@ -27,7 +27,7 @@ import re
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,7 +46,12 @@ from services.email_signup_service import (
 )
 from services.known_device_service import note_browser_sign_in
 from services.workspace_service import ensure_first_workspace
-from utils.exceptions import RateLimitError, RedisError
+from utils.exceptions import (
+    RateLimitError,
+    RedisError,
+    SignupSessionUnavailableError,
+    SurfaceSwitchedOffError,
+)
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
 
@@ -68,7 +73,7 @@ def _require_enabled() -> None:
     route must be indistinguishable from one that does not exist.
     """
     if not get_settings().enable_email_signup:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+        raise SurfaceSwitchedOffError()
 
 
 router = APIRouter(
@@ -258,10 +263,7 @@ async def complete_email_signup(
         logger.error(
             "email_signup_session_failed", user_id=created.user_id, error_type=type(exc).__name__
         )
-        raise HTTPException(
-            status_code=503,
-            detail="Your account was created. Sign in with your email address and password.",
-        ) from None
+        raise SignupSessionUnavailableError() from None
     response = Response(
         content=EmailSignupCompleteResponse(
             redirect_url=auth_module._safe_redirect_url(body.return_to)

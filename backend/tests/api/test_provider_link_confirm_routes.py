@@ -71,6 +71,8 @@ class TestSwitch:
         monkeypatch.setattr(get_settings(), "enable_provider_link_confirmation", False)
         resp = TestClient(app).post(f"/api/v1/auth/link-confirm/{path}")
         assert resp.status_code == 404
+        # The body of an unknown path: the switch cannot be told apart from no route.
+        assert resp.json() == {"error": "HTTP-404", "message": "Not Found", "details": {}}
 
     @pytest.mark.parametrize("path", ["preview", "complete", "cancel"])
     def test_routes_exist_when_on(self, path, monkeypatch) -> None:

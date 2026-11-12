@@ -1451,6 +1451,31 @@ class SignupAccountExistsError(MemoryCloudException):
         super().__init__(message, status_code=409, error_code="AUTH-309")
 
 
+class SurfaceSwitchedOffError(MemoryCloudException):
+    """A route group switched off for this deployment (404, #1734, #2786).
+
+    The body is the one an unknown path gets (``HTTP-404`` / ``Not Found``),
+    so a switched-off surface cannot be told apart from no surface.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Not Found", status_code=404, error_code="HTTP-404")
+
+
+class SignupSessionUnavailableError(MemoryCloudException):
+    """The email sign-up account was created but no session opened (503, #1734).
+
+    The account is committed; the person signs in with the address and the
+    new password. The body keeps the ``HTTP-503`` code of a plain 503.
+    """
+
+    def __init__(
+        self,
+        message: str = "Your account was created. Sign in with your email address and password.",
+    ) -> None:
+        super().__init__(message, status_code=503, error_code="HTTP-503")
+
+
 class ProviderLinkConfirmable(ConflictError):
     """``ensure_user``: the address belongs to an email sign-up account that may
     take this identity once its owner confirms by email (#2786).

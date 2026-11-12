@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +38,7 @@ from services.provider_link_confirmation_service import (
     PROVIDER_LABELS,
     ProviderLinkConfirmationService,
 )
-from utils.exceptions import RateLimitError, RedisError
+from utils.exceptions import RateLimitError, RedisError, SurfaceSwitchedOffError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -51,7 +51,7 @@ _ATTEMPTS_PER_IP = 20
 def _require_enabled() -> None:
     """404 the whole surface when the confirmation is off for this deployment."""
     if not get_settings().enable_provider_link_confirmation:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+        raise SurfaceSwitchedOffError()
 
 
 router = APIRouter(
