@@ -857,7 +857,7 @@ for them. The server records every answer; it sends no announcement itself.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `ANNOUNCEMENT_EMAILS_ENABLED` | `false` | `true` offers announcement emails: the sign-up screens (`/login` for Google / GitHub sign-up, `/join/{token}`, the workspace invitation page) show an **unchecked** opt-in checkbox next to, never merged with, the terms checkbox, and account settings (Profile → Emails) show a toggle. `false` shows neither, `GET /api/v1/system/info` reports `announcement_consent_version: null`, and every sign-in request is exactly what it was before. |
+| `ANNOUNCEMENT_EMAILS_ENABLED` | `false` | `true` offers announcement emails: the sign-up screens (`/login` for Google / GitHub sign-up, `/signup/verify` for email sign-up, `/join/{token}`, the workspace invitation page) show an **unchecked** opt-in checkbox next to, never merged with, the terms checkbox, and account settings (Profile → Emails) show a toggle. `false` shows neither, `GET /api/v1/system/info` reports `announcement_consent_version: null`, and every sign-in request is exactly what it was before. |
 
 - **What is recorded.** Each answer is one row in
   `announcement_email_consents`: the value, the version of the consent wording
@@ -865,15 +865,20 @@ for them. The server records every answer; it sends no announcement itself.
   time. Rows are never changed; the newest one is the current answer. A person
   with no row never answered and gets no announcement. No IP address or user
   agent is stored. The rows are deleted with the account.
-- **Sign-up.** The answer travels on the Google / GitHub login URL
-  (`announcement_emails`, `announcement_consent_version`), bound to the OAuth
-  `state` like the language and time zone, and is recorded only when that
-  sign-in creates the account: an unchecked box records "no", a page that did
-  not show the box records nothing, an existing account keeps its answer. An
-  answer from a link on another site (`Sec-Fetch-Site: cross-site` or `none`)
-  is ignored, and a "yes" is recorded only when the sign-in finishes in the
-  browser that opened the login URL, so nobody can publish a sign-up link that
-  opts people in.
+- **Sign-up.** The answer is recorded only when the sign-up creates the
+  account: an unchecked box records "no", a page that did not show the box
+  records nothing, an existing account keeps its answer.
+  - Google / GitHub: the answer travels on the login URL
+    (`announcement_emails`, `announcement_consent_version`), bound to the
+    OAuth `state` like the language and time zone. An answer from a link on
+    another site (`Sec-Fetch-Site: cross-site` or `none`) is ignored, and a
+    "yes" is recorded only when the sign-in finishes in the browser that
+    opened the login URL, so nobody can publish a sign-up link that opts
+    people in.
+  - Email sign-up: `/signup/verify` sends the same two fields with the
+    completion (`POST /api/v1/auth/signup/email/complete`), which carries the
+    token from the emailed link; the answer is written in the transaction
+    that creates the account.
 - **Turning it off always works.** With the variable `false`, nobody can turn
   the emails on, but the settings toggle still turns them off and the
   unsubscribe link still works.
