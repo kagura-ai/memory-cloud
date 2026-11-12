@@ -27,7 +27,7 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -187,7 +187,11 @@ class CallbackResponse(BaseModel):
 
 
 async def _check_registration_allowed(
-    email: str, db: AsyncSession | None = None, *, user_id: str | None = None
+    email: str,
+    db: AsyncSession | None = None,
+    *,
+    user_id: str | None = None,
+    admit_by_invitation: Callable[[], Awaitable[bool]] | None = None,
 ) -> RedirectResponse | None:
     """Check if a new user is allowed to register.
 
@@ -196,7 +200,9 @@ async def _check_registration_allowed(
     - Existing users: always allowed (login, not registration)
     - First user (no users exist): always allowed (need initial admin)
     - ALLOW_REGISTRATION=true: always allowed
-    - Pending invitation for this email: always allowed
+    - A pending workspace invitation addressed to this email: allowed through
+      ``admit_by_invitation``, which the signup gate passes only when the
+      provider reports the address verified (#2785)
     - Otherwise: blocked → redirect to login with error
 
     Args:
@@ -208,12 +214,16 @@ async def _check_registration_allowed(
             *either* email or user_id counts as "existing" so a returning
             user whose IdP email changed is still recognised as a login (not
             blocked as a new signup).
+        admit_by_invitation: The signup gate's invitation admission
+            (``SignupGateService._admit_by_workspace_invitation``, on the same
+            session): True when a pending invitation is addressed to the
+            address, with the admission recorded. None (the default) = no
+            invitation admits.
     """
     from sqlalchemy import func, or_, select
 
     from config.settings import get_settings
     from models.auth import User
-    from services.invitation_service import InvitationService
 
     settings = get_settings()
 
@@ -257,10 +267,9 @@ async def _check_registration_allowed(
         if settings.allow_registration:
             return None
 
-        # Invited users bypass gate (invitations addressed to this email only)
-        invitation_service = InvitationService(session)
-        pending_invites = await invitation_service.get_pending_invitations_for_email(email=email)
-        if pending_invites:
+        # Invited users bypass the gate: a pending invitation addressed to this
+        # (verified) address, the same rule as with the signup gate on.
+        if admit_by_invitation is not None and await admit_by_invitation():
             return None
 
         # Block. Log the HMAC of the email rather than the plaintext —
@@ -1014,6 +1023,8 @@ async def google_callback(
             user_agent=request.headers.get("user-agent"),
             # #1581: tried last, only if the gate would otherwise block.
             beta_invite_token_hash=beta_invite_token_hash,
+            # #2785: an address matches an invitation only when verified.
+            email_verified=user_info.get("email_verified") is True,
         )
         if blocked:
             return blocked
@@ -1179,6 +1190,12 @@ async def google_callback(
                 pending_invites = await invitation_service.get_pending_invitations_for_email(
                     email=owner_email
                 )
+                # #2785: addressed invitations are accepted by a verified address
+                # only; only then do they stand in for the personal workspace.
+                if pending_invites and not await invitation_service.account_address_verified(
+                    owner_id
+                ):
+                    pending_invites = []
 
                 if pending_invites:
                     # Issue #276: Skip personal workspace creation if user has pending invitations
@@ -2669,6 +2686,9 @@ async def github_callback(
             user_agent=request.headers.get("user-agent"),
             # #1581: tried last, only if the gate would otherwise block.
             beta_invite_token_hash=beta_invite_token_hash,
+            # #2785: the verified primary address (an invariant of
+            # _github_get_user_info); strict, as for Google.
+            email_verified=user_info.get("email_verified") is True,
         )
         if blocked:
             return blocked
@@ -2780,6 +2800,11 @@ async def github_callback(
                 pending_invites = await invitation_service.get_pending_invitations_for_email(
                     email=db_email
                 )
+                # #2785: as for Google, only for a verified address.
+                if pending_invites and not await invitation_service.account_address_verified(
+                    db_user_id
+                ):
+                    pending_invites = []
 
                 if not pending_invites:
                     workspace_service = WorkspaceService(db)

@@ -2,10 +2,13 @@
 
 Parity with Google / GitHub: gate off -> first account, ALLOW_REGISTRATION, a
 pending invitation addressed to the address (a beta invite is ignored); gate
-on -> first account or a redeemable beta invite (ALLOW_REGISTRATION and
-invitations ignored, sponsor modes treated as manual). Never the manual
-allowlist or pending Google rows. The staged redemption is in a savepoint
-and never commits. Real transactions: ``tests/integration/test_email_signup_db.py``.
+on -> first account, a pending invitation addressed to the address (#2785,
+before the beta invite) or a redeemable beta invite (ALLOW_REGISTRATION
+ignored, sponsor modes treated as manual). Never the manual allowlist or
+pending Google rows. The staged redemption is in a savepoint and never
+commits; an invitation admission stages its ``signup_admitted`` row. Real
+transactions: ``tests/integration/test_email_signup_db.py`` and
+``tests/integration/test_signup_gate_invitation_db.py``.
 """
 
 from __future__ import annotations
@@ -52,9 +55,23 @@ def settings(monkeypatch):
     return s
 
 
+def _invitation_row(**overrides) -> SimpleNamespace:
+    row = {
+        "email": "a@example.test",
+        "role": "member",
+        "public_id": "winv_abc",
+        "workspace_id": uuid4(),
+        "invited_by": "workspace-admin",
+    }
+    row.update(overrides)
+    return SimpleNamespace(**row)
+
+
 def _invitations(found: bool):
     service = MagicMock()
-    service.get_pending_invitations_for_email = AsyncMock(return_value=[object()] if found else [])
+    service.get_pending_invitations_for_email = AsyncMock(
+        return_value=[_invitation_row()] if found else []
+    )
     return patch("services.invitation_service.InvitationService", return_value=service)
 
 
@@ -126,15 +143,52 @@ class TestGateOn:
         assert await _admissible(_svc(), enabled=True) is None
 
     @pytest.mark.asyncio
-    async def test_open_registration_and_invitations_do_not_admit(
-        self, settings, monkeypatch
-    ) -> None:
+    async def test_open_registration_does_not_admit(self, settings, monkeypatch) -> None:
         monkeypatch.setattr(settings, "allow_registration", True)
-        assert await _admissible(_svc(), enabled=True, token=None, invitation=True) is None
+        assert await _admissible(_svc(), enabled=True, token=None, invitation=False) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["manual", "github_sponsors", "both"])
+    async def test_addressed_invitation_admits(self, settings, mode) -> None:
+        assert (
+            await _admissible(_svc(), enabled=True, mode=mode, token=None, invitation=True)
+            == "workspace_invitation"
+        )
+
+    @pytest.mark.asyncio
+    async def test_addressed_invitation_comes_before_the_beta_invite(self, settings) -> None:
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=SimpleNamespace(enabled=True, mode="manual"))
+        with (
+            _invitations(True),
+            patch("services.signup_gate_service.BetaInviteService") as invites_cls,
+        ):
+            invites_cls.return_value.find_redeemable = AsyncMock()
+            assert (
+                await svc.email_signup_admissible(
+                    email="a@example.test", beta_invite_token_hash=TOKEN_HASH
+                )
+                == "workspace_invitation"
+            )
+        invites_cls.return_value.find_redeemable.assert_not_awaited()
+        svc.db.add.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_corrupted_mode_refuses(self, settings) -> None:
         assert await _admissible(_svc(), enabled=True, mode="nonsense") is None
+
+    @pytest.mark.asyncio
+    async def test_corrupted_mode_refuses_before_the_invitation_lookup(self, settings) -> None:
+        svc = _svc()
+        svc._load_config = AsyncMock(return_value=SimpleNamespace(enabled=True, mode="nonsense"))
+        with _invitations(True) as service_cls:
+            assert (
+                await svc.email_signup_admissible(
+                    email="a@example.test", beta_invite_token_hash=None
+                )
+                is None
+            )
+        service_cls.return_value.get_pending_invitations_for_email.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_admissible_never_writes(self, settings) -> None:
@@ -144,10 +198,21 @@ class TestGateOn:
         svc.db.commit.assert_not_awaited()
 
 
-async def _admit(svc, *, claimed=True, redeemable=True, flush_error=False):
+async def _admit(
+    svc,
+    *,
+    claimed=True,
+    redeemable=True,
+    flush_error=False,
+    invitation=False,
+    gate_enabled=True,
+):
     if flush_error:
         svc.db.flush = AsyncMock(side_effect=IntegrityError("INSERT", {}, Exception("dup")))
-    with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
+    with (
+        _invitations(invitation),
+        patch("services.signup_gate_service.BetaInviteService") as invites_cls,
+    ):
         invites_cls.return_value.find_redeemable = AsyncMock(
             return_value=SimpleNamespace(id=uuid4(), inviter_user_id="inviter")
             if redeemable
@@ -155,7 +220,7 @@ async def _admit(svc, *, claimed=True, redeemable=True, flush_error=False):
         )
         invites_cls.return_value.mark_redeemed = AsyncMock(return_value=claimed)
         return await svc.admit_email_signup(
-            gate_enabled=True,
+            gate_enabled=gate_enabled,
             gate_mode="manual",
             email="a@example.test",
             new_user_id="email:new",
@@ -210,11 +275,57 @@ class TestConsumingRedemption:
         svc.db.add.assert_not_called()
 
 
+class TestInvitationAdmissionRecord:
+    """#2785: an admission by invitation stages one ``signup_admitted`` row in
+    the account-creating transaction; the beta invite stays unredeemed."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("gate_enabled", [True, False])
+    async def test_stages_the_record_and_never_commits(self, settings, gate_enabled) -> None:
+        svc = _svc()
+        assert (
+            await _admit(svc, invitation=True, gate_enabled=gate_enabled) == "workspace_invitation"
+        )
+        added = [c.args[0] for c in svc.db.add.call_args_list]
+        (audit,) = added
+        assert isinstance(audit, AuditLog)
+        assert audit.action == "signup_admitted"
+        assert (audit.user_email, audit.user_id) == ("email-signup", "email:new")
+        assert audit.resource == "signup_gate:email"
+        assert audit.user_metadata["admission"] == "workspace_invitation"
+        assert audit.user_metadata["invitations"][0]["id"] == "winv_abc"
+        assert audit.user_metadata["invitations"][0]["invited_by"] == "workspace-admin"
+        assert audit.user_metadata["invitation_count"] == 1
+        assert "a@example.test" not in repr(vars(audit))
+        svc.db.commit.assert_not_awaited()
+        svc.db.begin_nested.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_request_time_check_records_nothing(self, settings) -> None:
+        svc = _svc()
+        assert await _admissible(svc, enabled=True, invitation=True) == "workspace_invitation"
+        svc.db.add.assert_not_called()
+        svc.db.commit.assert_not_awaited()
+
+
 class TestInvitationPreviewFlag:
-    async def _flag(self, svc, *, enabled, restricted=True, blocked=False):
-        svc._load_config = AsyncMock(return_value=SimpleNamespace(enabled=enabled, mode="manual"))
+    async def _flag(
+        self,
+        svc,
+        *,
+        enabled,
+        restricted=True,
+        blocked=False,
+        owner=False,
+        deleted=False,
+        mode="manual",
+    ):
+        svc._load_config = AsyncMock(return_value=SimpleNamespace(enabled=enabled, mode=mode))
         return await svc.email_signup_available_for_invitation(
-            email_restricted=restricted, plan_blocked=blocked
+            email_restricted=restricted,
+            plan_blocked=blocked,
+            owner_role=owner,
+            workspace_deleted=deleted,
         )
 
     @pytest.mark.asyncio
@@ -234,10 +345,25 @@ class TestInvitationPreviewFlag:
         assert await self._flag(_svc(), enabled=False, restricted=False) is True
 
     @pytest.mark.asyncio
-    async def test_gate_on_never_except_first_account(self, settings, monkeypatch) -> None:
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_owner_role_or_deleted_workspace_admits_nobody(self, settings, enabled) -> None:
+        assert await self._flag(_svc(), enabled=enabled, owner=True) is False
+        assert await self._flag(_svc(), enabled=enabled, deleted=True) is False
+
+    @pytest.mark.asyncio
+    async def test_gate_on_addressed_invitation(self, settings, monkeypatch) -> None:
+        # #2785: the same eligibility as with the gate off.
         monkeypatch.setattr(settings, "allow_registration", True)
+        assert await self._flag(_svc(), enabled=True) is True
+        assert await self._flag(_svc(), enabled=True, restricted=False) is False
+        assert await self._flag(_svc(), enabled=True, blocked=True) is False
+        assert await self._flag(_svc(), enabled=True, mode="nonsense") is False
+        assert await self._flag(_svc(first_user=True), enabled=True, restricted=False) is True
+
+    @pytest.mark.asyncio
+    async def test_gate_on_off_when_email_signup_is_off(self, settings, monkeypatch) -> None:
+        monkeypatch.setattr(settings, "enable_email_signup", False)
         assert await self._flag(_svc(), enabled=True) is False
-        assert await self._flag(_svc(first_user=True), enabled=True) is True
 
 
 class TestExistingUserPredicate:

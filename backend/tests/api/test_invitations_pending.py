@@ -2,7 +2,9 @@
 
 An invitation without an email (a legacy row, or one written outside the API)
 is reachable by whoever holds its link; it is not listed to every signed-in
-user. The handler runs against a real ``db_session``.
+user. Addressed invitations need a verified address (#2785): an account whose
+``email_verified_at`` is unset is listed none. The handler runs against a real
+``db_session``.
 """
 
 import uuid
@@ -32,6 +34,18 @@ async def _workspace(db) -> tuple[User, Workspace]:
     db.add(ws)
     await db.flush()
     return owner, ws
+
+
+async def _caller(db, email: str, *, verified: bool = True) -> dict:
+    user = User(
+        email=email,
+        user_id=f"user-{uuid.uuid4()}",
+        role="user",
+        email_verified_at=utcnow() if verified else None,
+    )
+    db.add(user)
+    await db.flush()
+    return {"user_id": user.user_id, "email": email}
 
 
 def _invitation(ws: Workspace, owner: User, email: str | None) -> WorkspaceInvitation:
@@ -64,13 +78,26 @@ async def test_invitation_addressed_to_the_caller_is_listed(db_session):
     addressed = _invitation(ws_b, owner_b, email.upper())
     db_session.add_all([_invitation(ws_a, owner_a, None), addressed])
     await db_session.flush()
-    caller = {"user_id": f"user-{uuid.uuid4()}", "email": email}
+    caller = await _caller(db_session, email)
 
     response = await get_pending_invitations(current_user=caller, db=db_session)
 
     assert response.count == 1
     assert [item.id for item in response.pending_invitations] == [addressed.public_id]
     assert response.pending_invitations[0].workspace_id == str(ws_b.id)
+
+
+async def test_addressed_invitation_is_not_listed_to_an_unverified_address(db_session):
+    owner, ws = await _workspace(db_session)
+    email = f"x-{uuid.uuid4()}@example.com"
+    db_session.add(_invitation(ws, owner, email))
+    await db_session.flush()
+    caller = await _caller(db_session, email, verified=False)
+
+    response = await get_pending_invitations(current_user=caller, db=db_session)
+
+    assert response.count == 0
+    assert response.pending_invitations == []
 
 
 @pytest.mark.parametrize("plan,blocked", [("free", True), ("pro", False)])
@@ -84,7 +111,8 @@ async def test_plan_blocked_invites_stay_visible_but_are_not_eligible(db_session
     db_session.add(invitation)
     await db_session.flush()
 
-    response = await get_pending_invitations(current_user={"email": email}, db=db_session)
+    caller = await _caller(db_session, email)
+    response = await get_pending_invitations(current_user=caller, db=db_session)
     assert response.count == 1
     assert response.pending_invitations[0].plan_blocked is blocked
     info = await get_invitation_info(invitation.token, db=db_session)

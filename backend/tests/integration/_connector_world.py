@@ -22,6 +22,7 @@ from models.erasure import REASON_USER_REQUEST_VIA_SUPPORT, STATUS_COMPLETE, Era
 from services.account_erasure_service import AccountErasureService, _audit_salt
 from services.connector_key_ownership import DEPARTED_MEMBER_CREDENTIALS_ACTION
 from services.workspace_service import WorkspaceService
+from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 
 
@@ -34,8 +35,10 @@ class _ConnectorWorld:
         self.workspace_ids: list[UUID] = []
         self.targets: list[str] = []
 
-    async def user(self, prefix: str) -> str:
-        """A ``users`` row (only the erased subjects need one)."""
+    async def user(self, prefix: str, *, verified: bool = False) -> str:
+        """A ``users`` row (only the erased subjects need one). ``verified``:
+        its address is verified, as an addressed invitation's accepter's must
+        be (#2785)."""
         user_id = f"{prefix}_{uuid4().hex[:8]}"
         self.db.add(
             User(
@@ -46,6 +49,7 @@ class _ConnectorWorld:
                 is_initial_admin=False,
                 auth_method="oauth",
                 auth_provider="google",
+                email_verified_at=utcnow() if verified else None,
             )
         )
         await self.db.flush()

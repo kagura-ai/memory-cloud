@@ -390,6 +390,9 @@ async def get_pending_invitations(
     - Not yet accepted (accepted_at IS NULL)
     - Not expired
 
+    Addressed invitations need a verified address (#2785): an account whose
+    ``email_verified_at`` is unset gets an empty list.
+
     Args:
         current_user: Authenticated user
         db: Database session
@@ -400,9 +403,12 @@ async def get_pending_invitations(
     user_email = current_user.get("email")
 
     invitation_service = InvitationService(db)
-    invitations = await invitation_service.get_pending_invitations_for_email(
-        user_email, include_plan_blocked=True
-    )
+    if await invitation_service.account_address_verified(current_user.get("user_id")):
+        invitations = await invitation_service.get_pending_invitations_for_email(
+            user_email, include_plan_blocked=True
+        )
+    else:
+        invitations = []
 
     # Build response with workspace info
     from sqlalchemy import select
@@ -496,12 +502,15 @@ async def get_invitation_info(
         email_restricted = invitation.email is not None
         plan_blocked = not has_feature(workspace.plan_name, "team_invitations")
         # #1734: whether the email sign-up form can work for this invitation's
-        # addressee (the sign-up controls, as for Google / GitHub). Names no
-        # address.
+        # addressee (the sign-up controls, as for Google / GitHub; #2785 the
+        # same eligibility as the admission). Names no address.
         from services.signup_gate_service import SignupGateService
 
         email_signup_available = await SignupGateService(db).email_signup_available_for_invitation(
-            email_restricted=email_restricted, plan_blocked=plan_blocked
+            email_restricted=email_restricted,
+            plan_blocked=plan_blocked,
+            owner_role=invitation.role == WorkspaceRole.OWNER,
+            workspace_deleted=workspace.deleted_at is not None,
         )
         return {
             "workspace_name": workspace.name,
