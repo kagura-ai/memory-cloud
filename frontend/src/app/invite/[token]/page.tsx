@@ -19,10 +19,17 @@
  * login prompt asks for it like /login does and sends it as `accepted_terms`.
  * Without a version the prompt is unchanged.
  *
+ * Issue #1734: the login prompt also offers "Sign in with email and password"
+ * (back here afterwards) and, where the preview says the addressee can sign up
+ * by email (`email_signup_available`), the email sign-up form. The form keeps
+ * this page as the destination in this browser, so the new account comes back
+ * here to accept.
+ *
  * Next.js 15: params is now a Promise and must be unwrapped with React.use()
  */
 
 import { use, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
@@ -39,6 +46,7 @@ import {
 import { useSystemInfo } from "@/hooks/useSystemFeatures";
 import { Button } from "@/components/ui/button";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { EmailSignupForm } from "@/components/auth/EmailSignupForm";
 import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
@@ -79,6 +87,7 @@ export default function AcceptInvitationPage({
   const router = useRouter();
   const { token } = use(params);
   const t = useTranslations("invitation");
+  const tEmail = useTranslations("emailSignup");
 
   const [state, setState] = useState<PageState>("loading");
   const [invitationInfo, setInvitationInfo] = useState<InvitationInfo | null>(
@@ -317,6 +326,8 @@ export default function AcceptInvitationPage({
 
   // Login Required State
   if (state === "login_required") {
+    // #1734: where an email sign-up or a password sign-in comes back to.
+    const invitePath = `/invite/${encodeURIComponent(token)}`;
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
         <div className="absolute top-4 right-4">
@@ -378,6 +389,28 @@ export default function AcceptInvitationPage({
 
             <p className="text-xs text-center text-gray-500 dark:text-gray-400">
               {t("loginRequired.noAccount")}
+            </p>
+
+            {invitationInfo?.email_signup_available === true && (
+              <>
+                <div className="my-4 flex items-center gap-3">
+                  <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                  <span className="text-sm text-gray-500 dark:text-gray-400">
+                    {tEmail("request.divider")}
+                  </span>
+                  <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                </div>
+                <EmailSignupForm returnTo={invitePath} themed />
+              </>
+            )}
+
+            <p className="mt-4 text-center text-sm">
+              <Link
+                href={`/login?return_to=${encodeURIComponent(invitePath)}`}
+                className="font-medium text-kagura-link hover:underline dark:text-blue-400"
+              >
+                {t("loginRequired.passwordSignIn")}
+              </Link>
             </p>
           </div>
         </div>

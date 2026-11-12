@@ -460,9 +460,9 @@
     "continueWithGitHub": "Continue with GitHub",
     "redirecting": "Redirecting...",
     "registrationDisabled": "Registration is disabled. Please ask an admin for an invitation.",
-    "emailInUse": "This email is already linked to another sign-in method. Please use the provider you originally signed in with.",
+    "emailInUse": "This email address already belongs to an account that signs in another way.",
     "signinCancelled": "Sign-in cancelled. You can try again or choose a different method.",
-    "linkHint": "An account with this email already exists. Sign in with your original provider, then link this one from your settings.",
+    "linkHint": "Sign in the way you use for that account (a provider, or your email address and password), then connect this one in your profile.",
     "oauthFailed": "Sign-in failed. Please try again.",
     "oauthExpired": "The sign-in link has expired. Please try again.",
     "providerUnlinked": "This sign-in method was removed from its account. Sign in with another method of that account.",
@@ -486,6 +486,7 @@
       "submit": "Continue with invite",
       "invalid": "That doesn't look like an invite link. Paste the whole link you received."
     },
+    "signUpWithEmail": "Create an account with email",
     "forgotPassword": "Forgot password?"
   },
   "landing": {
@@ -2727,6 +2728,7 @@
       "messageTo": "to",
       "loginButton": "Continue with Google",
       "continueWithGitHub": "Continue with GitHub",
+      "passwordSignIn": "Sign in with email and password",
       "noAccount": "Don't have an account? Logging in will create one automatically."
     },
     "emailMismatch": {
@@ -3495,6 +3497,7 @@
       "providerLabel": "Provider",
       "providerGitHub": "GitHub",
       "providerGoogle": "Google",
+      "providerEmail": "Email",
       "addUsername": "GitHub username",
       "addEmail": "Google email",
       "addButton": "Add",
@@ -3515,7 +3518,8 @@
       "removeAllowlistEntry": "Remove {username} from allowlist",
       "source": {
         "manual": "Manual",
-        "github_sponsors": "GitHub Sponsors"
+        "github_sponsors": "GitHub Sponsors",
+        "beta_invite": "Beta invite"
       },
       "state": {
         "active": "Active",
@@ -5073,6 +5077,47 @@
       "continue": "Go to your settings",
       "invalidTitle": "This link can't be used",
       "invalidBody": "The link is invalid, was already used, or has expired. Request a new one from your settings."
+    }
+  },
+  "emailSignup": {
+    "request": {
+      "toggle": "Sign up with email",
+      "divider": "or",
+      "emailLabel": "Email address",
+      "emailPlaceholder": "you@example.com",
+      "submit": "Send sign-up link",
+      "submitting": "Sending…",
+      "sentTitle": "Check your email",
+      "sentMessage": "If {email} can be used to sign up, we sent it a link. Open the link in this browser soon: it is valid for a limited time.",
+      "useAnother": "Use a different address",
+      "invalidEmail": "Enter a valid email address.",
+      "tooManyRequests": "Too many requests. Please try again later.",
+      "genericError": "Something went wrong. Please try again."
+    },
+    "verify": {
+      "loading": "Checking your link…",
+      "title": "Create your account",
+      "description": "Choose a password for {email}.",
+      "nameLabel": "Name (optional)",
+      "submit": "Create account",
+      "submitting": "Creating…",
+      "termsRequired": "Please agree to the current terms to continue. If they were just updated, reload the page.",
+      "invalidTitle": "This link can't be used",
+      "invalidMessage": "The link is invalid, expired or already used. Start the sign-up again.",
+      "notAllowedTitle": "Sign-up isn't available",
+      "notAllowedMessage": "This address can't be used to sign up any more, or the invitation can no longer be used. Ask for a new invitation.",
+      "existsTitle": "You already have an account",
+      "existsMessage": "Sign in, or reset your password if you forgot it.",
+      "createdTitle": "Your account was created",
+      "createdMessage": "Sign in with your email address and the password you just chose.",
+      "errorTitle": "We couldn't check your link",
+      "errorMessage": "Something went wrong. Please try again.",
+      "retry": "Try again",
+      "signIn": "Sign in",
+      "forgotPassword": "Forgot password?",
+      "backToLogin": "Back to sign in",
+      "tooManyRequests": "Too many attempts. Please try again later.",
+      "genericError": "Something went wrong. Please try again."
     }
   },
   "passwordSettings": {

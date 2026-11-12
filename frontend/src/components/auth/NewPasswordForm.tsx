@@ -23,6 +23,13 @@ interface NewPasswordFormProps {
   /** The server refused the password (422): shown under the field. */
   policyError: boolean;
   onSubmit: (newPassword: string) => void;
+  /**
+   * #1734: extra fields shown between the password fields and the submit
+   * button (the sign-up page's terms checkbox).
+   */
+  children?: React.ReactNode;
+  /** #1734: keeps the submit button disabled (e.g. terms not ticked yet). */
+  submitDisabled?: boolean;
 }
 
 export function NewPasswordForm({
@@ -31,6 +38,8 @@ export function NewPasswordForm({
   submitting,
   policyError,
   onSubmit,
+  children,
+  submitDisabled = false,
 }: NewPasswordFormProps) {
   const t = useTranslations("passwordRecovery");
   const [newPassword, setNewPassword] = useState("");
@@ -84,10 +93,13 @@ export function NewPasswordForm({
           </p>
         )}
       </div>
+      {children}
       <Button
         type="submit"
         className="w-full"
-        disabled={submitting || !newPassword || !confirmPassword}
+        disabled={
+          submitting || submitDisabled || !newPassword || !confirmPassword
+        }
       >
         {submitting && <InlineSpinner className="mr-2" />}
         {submitting ? submittingLabel : submitLabel}

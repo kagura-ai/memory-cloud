@@ -307,15 +307,16 @@ export default function AdminSignupGatePage() {
                     // Display label: subject_label is canonical post-#655;
                     // fall back to github_username for any row missing it.
                     const label = entry.subject_label || entry.github_username;
-                    const providerKey =
-                      entry.provider === "google" ? "google" : "github";
+                    // #1734: an email sign-up row has its own label.
+                    const providerLabel =
+                      entry.provider === "google"
+                        ? t("providerGoogle")
+                        : entry.provider === "email"
+                          ? t("providerEmail")
+                          : t("providerGitHub");
                     return (
                       <TableRow key={entry.id}>
-                        <TableCell>
-                          {t(
-                            `provider${providerKey === "google" ? "Google" : "GitHub"}`,
-                          )}
-                        </TableCell>
+                        <TableCell>{providerLabel}</TableCell>
                         <TableCell className="font-medium">
                           {label}
                           {entry.provider === "github" &&

@@ -16,6 +16,13 @@ export type SignupGateMode = "manual" | "github_sponsors" | "both";
 
 export type SignupGateProvider = "github" | "google";
 
+/**
+ * #1734: an allowlist row can also record an email sign-up (`provider='email'`,
+ * written when a beta invite is redeemed by email). Read rows only: the admin
+ * add form never creates one.
+ */
+export type SignupAllowlistProvider = SignupGateProvider | "email";
+
 export interface SignupGateConfig {
   enabled: boolean;
   mode: SignupGateMode;
@@ -30,7 +37,7 @@ export interface SignupGateConfigUpdate {
 export interface SignupAllowlistEntry {
   id: string;
   // Issue #655 canonical provider-aware fields.
-  provider: SignupGateProvider;
+  provider: SignupAllowlistProvider;
   subject_id: string;
   subject_label: string;
   // Legacy fields kept by the backend for pre-#655 admin tooling — they are
@@ -38,7 +45,7 @@ export interface SignupAllowlistEntry {
   // rows). Read-only here; UI prefers `subject_label` for display.
   github_user_id: string;
   github_username: string;
-  source: "manual" | "github_sponsors";
+  source: "manual" | "github_sponsors" | "beta_invite";
   state: "active" | "grace" | "revoked";
   added_by_user_id: string | null;
 }
