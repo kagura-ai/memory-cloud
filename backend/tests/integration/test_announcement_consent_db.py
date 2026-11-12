@@ -24,7 +24,11 @@ import pytest_asyncio
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from auth.announcement_unsubscribe import UnsubscribeClaim, read_unsubscribe_token
+from auth.announcement_unsubscribe import (
+    UnsubscribeClaim,
+    issue_unsubscribe_token,
+    read_unsubscribe_token,
+)
 from config.settings import get_settings
 from models.announcement_consent import AnnouncementEmailConsent
 from models.auth import User
@@ -239,6 +243,43 @@ async def test_unsubscribe_turns_off_only_the_named_account(
         await db_session.execute(select(User).where(User.user_id == dave.user_id))
     ).scalar_one()
     assert refreshed.email == dave.email and refreshed.role == "user"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_link_of_an_erased_account_does_not_touch_a_recreated_one(
+    db_session: AsyncSession,
+) -> None:
+    """The same OAuth subject signs up again after erasure: a new users row with
+    the same user_id. A link minted for the old row does nothing to the new one."""
+    old = _new_user()
+    db_session.add(old)
+    await db_session.commit()
+    await db_session.refresh(old)
+    old_id, user_id, email = old.id, old.user_id, old.email
+    claim = read_unsubscribe_token(issue_unsubscribe_token(account_id=old_id, user_id=user_id))
+    assert claim == UnsubscribeClaim(old_id, user_id)
+
+    await db_session.execute(text("DELETE FROM users WHERE user_id = :uid"), {"uid": user_id})
+    await db_session.commit()
+    db_session.expunge_all()
+    again = _new_user()
+    again.user_id = user_id
+    again.email = email
+    db_session.add(again)
+    await db_session.commit()
+    await db_session.refresh(again)
+    try:
+        assert again.id != old_id
+        await _set(db_session, again, True)
+
+        assert await svc.apply_unsubscribe(db_session, claim) is False
+        await db_session.commit()
+
+        assert await _history(db_session, user_id) == [(True, "settings", V)]
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(User).where(User.user_id == user_id))
+        await db_session.commit()
 
 
 @pytest.mark.asyncio(loop_scope="session")
