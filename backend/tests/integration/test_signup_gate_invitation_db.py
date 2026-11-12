@@ -37,6 +37,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import services.email_signup_service as email_signup_module
+from api.routes import auth as auth_routes
 from api.routes.invitations import get_pending_invitations
 from auth.roles import RoleManager
 from config.settings import get_settings
@@ -208,12 +209,16 @@ async def _rows(db: AsyncSession, subject: str, action: str) -> list[AuditLog]:
     )
 
 
-def _fresh_get_db(maker):
+def _fresh_get_db_factory(maker):
     async def _fake():
         async with maker() as s:
             yield s
 
-    return patch("db.base.get_db", new=_fake)
+    return _fake
+
+
+def _fresh_get_db(maker):
+    return patch("db.base.get_db", new=_fresh_get_db_factory(maker))
 
 
 class TestGateOnAdmits:
@@ -393,6 +398,74 @@ class TestExistingAccountNeverReachesTheInvitation:
             select(func.count()).select_from(User).where(func.lower(User.email) == email)
         )
         assert count == 1
+
+
+class TestCaseVariantHolderSpendsNothing:
+    """An account holding the address in another letter case counts as existing.
+
+    ensure_user refuses such a sign-in (``email_in_use``); the gates must not
+    redeem a beta invite or record an admission for it first.
+    """
+
+    @pytest_asyncio.fixture(loop_scope="session", params=["gate_on", "gate_off"])
+    async def either_gate(self, world: _World, monkeypatch, request) -> _World:
+        if request.param == "gate_off":
+            monkeypatch.setattr(get_settings(), "allow_registration", False)
+        await SignupGateService(world.db).update_config(
+            enabled=request.param == "gate_on", mode="manual"
+        )
+        return world
+
+    @pytest.mark.parametrize("invited", [True, False])
+    async def test_no_invite_spent_no_admission_then_email_in_use(
+        self, either_gate, maker, monkeypatch, invited
+    ) -> None:
+        w = either_gate
+        monkeypatch.setattr(get_settings(), "enable_beta_invites", True)
+        monkeypatch.setattr(get_settings(), "beta_invite_quota_per_user", 4)
+        async with maker() as s:
+            minted = await BetaInviteService(s).create(
+                user_id=w.owner, user_email="owner@example.test"
+            )
+        token = minted.url.rsplit("/", 1)[1]
+        email = _addr("bob")
+        if invited:
+            await w.invite(email)
+        await w.account(email.upper(), verified=True, auth_method="oauth", auth_provider="google")
+
+        result, sub = await _gate(
+            maker, w, provider="github", email=email, beta_hash=sha256_hex(token)
+        )
+
+        assert result is None  # existing: ensure_user decides
+        assert await _rows(w.db, sub, "signup_admitted") == []
+        assert await _rows(w.db, sub, "beta_invite.redeemed") == []
+        w.db.expire_all()
+        invite = await w.db.get(BetaInvite, minted.invite.id)
+        assert invite is not None and invite.redeemed_at is None
+        allowlisted = await w.db.scalar(
+            select(func.count())
+            .select_from(SignupAllowlistEntry)
+            .where(SignupAllowlistEntry.subject_id == sub)
+        )
+        assert allowlisted == 0
+        # The terms check counts it as existing too (no terms prompt first).
+        with patch("api.routes.auth.get_db", new=_fresh_get_db_factory(maker)):
+            assert await auth_routes._identity_exists("github", sub, email) is True
+        with (
+            _fresh_get_db(maker),
+            patch("services.security_notification_service.spawn_security_notification"),
+            pytest.raises(ConflictError),
+        ):
+            await RoleManager(use_postgres=True).ensure_user(
+                email=email,
+                user_id=sub,
+                auth_provider="github",
+                email_verified=True,
+                email_authoritative=False,
+            )
+        await w.db.execute(delete(BetaInvite).where(BetaInvite.id == minted.invite.id))
+        await w.db.commit()
 
 
 class TestLanding:

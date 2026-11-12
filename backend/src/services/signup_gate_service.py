@@ -37,7 +37,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.roles import _OAUTH_CALLBACK_ACTOR, email_signup_account_clause
+from auth.roles import _OAUTH_CALLBACK_ACTOR, address_holder_clause
 from auth.system_admin_mode import first_user_bootstrap_applies
 from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
@@ -839,18 +839,14 @@ class SignupGateService:
         # RoleManager._sync_existing_user when the UPDATE attempts the
         # email move.
         #
-        # #1734: plus the account email sign-up created for the address, in
-        # any case: ensure_user links to it or refuses, never creates. Folded
-        # into the same SELECT.
+        # #1734: the address in any letter case (an email sign-up account
+        # stores it normalized; any other holder in another case is refused
+        # by ensure_user with email_in_use): ensure_user links to it or
+        # refuses, never creates, so nothing is spent or admitted for it.
+        # Folded into the same SELECT.
         result = await self.db.execute(
             select(User.id)
-            .where(
-                or_(
-                    User.email == email,
-                    User.user_id == user_id,
-                    email_signup_account_clause(email),
-                )
-            )
+            .where(or_(address_holder_clause(email), User.user_id == user_id))
             .limit(1)
         )
         return result.first() is not None

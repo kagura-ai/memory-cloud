@@ -243,20 +243,15 @@ async def _check_registration_allowed(
         # user whose email changed at the IdP is recognised as existing and
         # never blocked — RoleManager.ensure_user handles the email sync.
         #
-        # #1734: an account created by email sign-up stores the normalized
-        # address, so an IdP address in another case finds it through the
-        # email-sign-up clause; ensure_user then links or refuses, never
+        # #1734: the address in any letter case (an email sign-up account
+        # stores it normalized); ensure_user then links or refuses, never
         # creates. Several rows can match the OR, hence ``.first()``.
-        from auth.roles import email_signup_account_clause
+        from auth.roles import address_holder_clause
 
         if user_id is not None and user_id:
-            cond = or_(
-                User.email == email,
-                User.user_id == user_id,
-                email_signup_account_clause(email),
-            )
+            cond = or_(address_holder_clause(email), User.user_id == user_id)
         else:
-            cond = or_(User.email == email, email_signup_account_clause(email))
+            cond = address_holder_clause(email)
         result = await session.execute(select(User.id).where(cond).limit(1))
         if result.first() is not None:
             return None
@@ -2003,14 +1998,13 @@ async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
       IntegrityError retry refuses it (``/login?error=provider_unlinked``)
       rather than creating anything, and that answer must not be masked by
       ``terms_required`` either;
-    - a ``users`` row holding ``email`` — ensure_user's insert trips the
-      ``users.email`` UNIQUE constraint and raises ``ConflictError``
-      (``/login?error=email_in_use``). Plain equality, like that constraint,
-      and regardless of ``email_verified``, like the insert. Treating it as
+    - a ``users`` row holding ``email`` in any letter case — ensure_user
+      links to it or raises ``ConflictError`` (``/login?error=email_in_use``),
+      regardless of ``email_verified``, never inserting (#1734). Treating it as
       "not new" keeps that pre-#1665 answer instead of masking it with
       ``terms_required``; no account is created either way.
     """
-    from auth.roles import email_signup_account_clause
+    from auth.roles import address_holder_clause
     from models.auth import UserOAuthProvider
 
     exists = False
@@ -2023,17 +2017,11 @@ async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
         if link.scalar_one_or_none() is not None:
             exists = True
         else:
-            # #1734: plus the account email sign-up created for the address,
-            # in any case — ensure_user links to it or refuses, never inserts.
+            # #1734: the address in any letter case — ensure_user links to
+            # its holder or refuses, never inserts.
             existing = await db.execute(
                 select(User.user_id)
-                .where(
-                    or_(
-                        User.user_id == idp_sub,
-                        User.email == email,
-                        email_signup_account_clause(email),
-                    )
-                )
+                .where(or_(User.user_id == idp_sub, address_holder_clause(email)))
                 .limit(1)
             )
             exists = existing.scalar_one_or_none() is not None

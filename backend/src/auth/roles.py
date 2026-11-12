@@ -297,6 +297,23 @@ async def _address_held_by_another(db: AsyncSession, email: str, user_id: str) -
     return result.scalar_one_or_none() is not None
 
 
+def address_holder_clause(email: str) -> ColumnElement[bool]:
+    """Any account holding ``email``, exactly or in another letter case (#1734).
+
+    The sign-in gates count such an account as existing, as
+    ``ensure_user``'s new-user path does (``func.lower(User.email)`` under
+    :func:`lock_address`): it links to it or refuses, never creates. A gate
+    that missed a case-variant holder would admit (spend an invite, record
+    an admission) a sign-in that then ends in ``email_in_use``. Covers
+    :func:`email_signup_account_clause`; uses ``ix_users_email_lower``.
+    """
+    from sqlalchemy import or_
+
+    from models.auth import User
+
+    return or_(User.email == email, func.lower(User.email) == _normalize_address(email))
+
+
 def email_signup_account_clause(email: str) -> ColumnElement[bool]:
     """The account created by email sign-up for ``email`` (#1734).
 
