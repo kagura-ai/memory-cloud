@@ -524,6 +524,150 @@ class Settings(BaseSettings):
         default="",
         description="Shared bearer token authenticating the billing service to /internal/* (RFC 6750)",
     )
+    # Issue #2767: where the system-admin surface (every route behind
+    # require_admin) is served. "session" = signed-in role=admin users, as
+    # before; "off" = nowhere (404); "service" = an operator console with the
+    # service credential only. See docs/deployment.md, "System-admin surface".
+    system_admin_mode: Literal["session", "off", "service"] = Field(
+        default="session",
+        description=(
+            "Where the system-admin surface is served: session (signed-in admins, "
+            "default), off (nowhere) or service (operator console credential only)"
+        ),
+    )
+
+    @field_validator("system_admin_mode", mode="before")
+    @classmethod
+    def _strip_system_admin_mode(cls, v: Any) -> Any:
+        """Trim whitespace only; the ``Literal`` does the refusing (#2767).
+
+        An empty value refuses startup instead of meaning ``session``: a
+        deployment that writes ``SYSTEM_ADMIN_MODE=`` meant to set something,
+        and serving the session surface by accident is the failure this
+        setting exists to prevent. Case is not folded (``Off`` refuses).
+        """
+        return v.strip() if isinstance(v, str) else v
+
+    # Issue #2767: the bearer credential an operator console presents to a
+    # process in SYSTEM_ADMIN_MODE=service. Empty there = 503 on every admin
+    # route (fail-closed). Set it on the service process only; the others have
+    # no use for it. Use: openssl rand -hex 32.
+    system_admin_service_token: str = Field(
+        default="",
+        description=(
+            "Bearer credential of the operator console in SYSTEM_ADMIN_MODE=service "
+            "(RFC 6750); empty answers 503 on the admin routes"
+        ),
+    )
+    system_admin_service_token_previous: str = Field(
+        default="",
+        description=(
+            "Comma-separated earlier service credentials still accepted during a "
+            "rotation; remove them once the console uses the new one"
+        ),
+    )
+    system_admin_service_allowed_cidrs: str = Field(
+        default="",
+        description=(
+            "Comma-separated CIDR ranges whose client addresses may call the admin "
+            "routes in SYSTEM_ADMIN_MODE=service; any other address gets 404. Empty "
+            "allows every address (the credential is still required). The address is "
+            "request.client.host: behind a proxy, set FORWARDED_ALLOW_IPS."
+        ),
+    )
+
+    @field_validator("system_admin_service_allowed_cidrs")
+    @classmethod
+    def _validate_system_admin_service_cidrs(cls, value: str) -> str:
+        """Refuse a malformed range at startup rather than allowing nobody (#2767)."""
+        _parse_cidrs(value)
+        return value
+
+    @property
+    def system_admin_service_allowed_networks(
+        self,
+    ) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+        """Parsed ``system_admin_service_allowed_cidrs``."""
+        return _parse_cidrs(self.system_admin_service_allowed_cidrs)
+
+    @property
+    def system_admin_service_previous_tokens(self) -> tuple[str, ...]:
+        """The accepted earlier service credentials, current one and blanks dropped."""
+        return split_previous_secrets(
+            self.system_admin_service_token_previous, self.system_admin_service_token
+        )
+
+    @model_validator(mode="after")
+    def _check_system_admin_service_settings(self) -> "Settings":
+        """Guard the service credential like a production secret (#2767).
+
+        A credential with a blank or a comma could never be presented or would
+        split, so it refuses startup everywhere. Under ENVIRONMENT=production
+        the current credential AND every previous one must be a private value
+        of at least the secret guard's minimum length, and none may equal the
+        billing or worker service token (one leaked value must not open two
+        surfaces): a previous credential is a live credential. Values are
+        never echoed, only env names and counts.
+        """
+        current = self.system_admin_service_token
+        previous = [part.strip() for part in self.system_admin_service_token_previous.split(",")]
+        previous = [entry for entry in previous if entry]
+        if any(ch.isspace() or ch == "," for ch in current) or any(
+            any(ch.isspace() for ch in entry) for entry in previous
+        ):
+            raise ValueError(
+                "SYSTEM_ADMIN_SERVICE_TOKEN / SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS must not "
+                "contain blanks (and the current credential no comma): use "
+                "openssl rand -hex 32."
+            )
+        if current and current in previous:
+            logger.warning(
+                "SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS repeats SYSTEM_ADMIN_SERVICE_TOKEN; "
+                "that entry is ignored."
+            )
+        if self.system_admin_service_previous_tokens:
+            logger.warning(
+                "SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS holds %d earlier service credential(s) "
+                "that still open the admin routes: remove it once the operator console "
+                "uses SYSTEM_ADMIN_SERVICE_TOKEN (docs/deployment.md, 'System-admin surface').",
+                len(self.system_admin_service_previous_tokens),
+            )
+        if (current or previous) and self.system_admin_mode != "service":
+            logger.warning(
+                "SYSTEM_ADMIN_SERVICE_TOKEN is set but SYSTEM_ADMIN_MODE is %s: the "
+                "credential is ignored on this process; set it on the service process only.",
+                self.system_admin_mode,
+            )
+        if not self.is_production:
+            return self
+        refused: list[str] = []
+        if current and (
+            is_placeholder_secret(current) or len(current) < _PRODUCTION_SECRET_MIN_LEN
+        ):
+            refused.append("SYSTEM_ADMIN_SERVICE_TOKEN")
+        if any(
+            is_placeholder_secret(entry) or len(entry) < _PRODUCTION_SECRET_MIN_LEN
+            for entry in previous
+        ):
+            refused.append("SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS")
+        if refused:
+            raise ValueError(
+                "ENVIRONMENT=production refuses development-default or short service "
+                f"credentials: {', '.join(refused)}. Set each to a private value of at "
+                f"least {_PRODUCTION_SECRET_MIN_LEN} characters (openssl rand -hex 32) "
+                "and restart."
+            )
+        other_tokens = {
+            token for token in (self.billing_service_token, self.worker_service_token) if token
+        }
+        if other_tokens.intersection([current, *previous]):
+            raise ValueError(
+                "ENVIRONMENT=production refuses a system-admin service credential equal to "
+                "BILLING_SERVICE_TOKEN or WORKER_SERVICE_TOKEN: each service credential "
+                "must be its own value (openssl rand -hex 32)."
+            )
+        return self
+
     # Issue #1093: Ed25519 signing material for owner billing handoff tokens
     # (POST /api/v1/billing/handoff). memory-cloud holds the PRIVATE key; the
     # billing service verifies with the matching public key (kid-based rotation).
@@ -1841,6 +1985,40 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Email + password sign-up (Issue #1734)
+    enable_email_signup: bool = Field(
+        default=False,
+        description=(
+            "Let a person create an account with an email address and a password "
+            "(#1734), under the same sign-up controls as Google / GitHub: the "
+            "signup gate when it is on (a beta invite, or a pending workspace "
+            "invitation addressed to the verified address, #2785); "
+            "ALLOW_REGISTRATION or a workspace invitation addressed to the "
+            "verified address when it is off. OFF by default; also the KILL "
+            "SWITCH: false 404s every "
+            "/auth/signup/email route. Needs a real email backend "
+            "(EMAIL_PROVIDER=resend): the logging backend never logs the link. "
+            "Surfaced to the frontend via GET /api/v1/system/info "
+            "features.email_signup."
+        ),
+    )
+    # Issue #2786: a GitHub sign-in (or a Google one without authority over
+    # the mailbox) with the address of an email sign-up account.
+    enable_provider_link_confirmation: bool = Field(
+        default=True,
+        description=(
+            "When a GitHub sign-in, or a Google sign-in Google is not authoritative "
+            "for, uses the address of an account created by email sign-up, email "
+            "that account a confirmation link: opened in the browser that started "
+            "the sign-in, it connects the provider to the account (#2786). Only "
+            "accounts created by email sign-up are concerned, so nothing changes "
+            "while none exists. false: those sign-ins end at email_in_use as "
+            "before, nothing is mailed, and every /auth/link-confirm route 404s. "
+            "Surfaced to the frontend via GET /api/v1/system/info "
+            "features.provider_link_confirmation (also false with EMAIL_PROVIDER=logging)."
+        ),
+    )
+
     # Identity-link proof (Issue #1818)
     identity_link_allow_oauth_signin_proof: bool = Field(
         default=False,
@@ -1889,6 +2067,23 @@ class Settings(BaseSettings):
         if v and not TERMS_VERSION_RE.fullmatch(v):
             raise ValueError("TERMS_VERSION must be 1-64 characters from [A-Za-z0-9._-]")
         return v
+
+    # Announcement-email consent (Issue #2761)
+    announcement_emails_enabled: bool = Field(
+        default=False,
+        description=(
+            "Offer announcement emails (#2761). FALSE (the default): no opt-in "
+            "checkbox on the sign-up screens, no toggle offered in account "
+            "settings, /system/info announcement_consent_version is null and the "
+            "announcement recipient helper selects nobody. TRUE: new accounts can "
+            "opt in at sign-up and every user can switch it on or off in account "
+            "settings; each answer is kept in announcement_email_consents. "
+            "Turning the setting OFF in account settings and the unsubscribe link "
+            "in an announcement email work whatever this value is. Service notices "
+            "(invitations, password, security, capacity, erasure) never depend on "
+            "it."
+        ),
+    )
 
     # ChatGPT app listing (Issue #2760)
     chatgpt_app_url: str = Field(
@@ -2011,6 +2206,13 @@ class Settings(BaseSettings):
         ge=1,
         le=7 * 24,
         description="Lifetime of an email-verification link (hours).",
+    )
+    # Issue #1734: the email sign-up link creates an account, so it is short.
+    email_signup_link_ttl_minutes: int = Field(
+        default=60,
+        ge=1,
+        le=24 * 60,
+        description="Lifetime of an email sign-up link (minutes, at most 24 hours).",
     )
     # Security-change notification emails (Issue #1752): the first occurrences
     # of an event for a user are emailed at once; later ones in the window go
@@ -2597,6 +2799,21 @@ class Settings(BaseSettings):
                 "Lower REFERRAL_MAX_GRANTS_PER_REFERRER or the reward amounts — "
                 "otherwise a fully-used referral chain hands out the paid tier "
                 "for free."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_email_signup_without_mail(self) -> "Settings":
+        """Warn when email sign-up is on but mail goes to the log (#1734).
+
+        The logging backend never writes the sign-up link, so nobody can
+        follow it. A warning, not a refusal: development and CI run this way.
+        """
+        if self.enable_email_signup and self.email_provider == "logging":
+            logger.warning(
+                "ENABLE_EMAIL_SIGNUP is on but EMAIL_PROVIDER=logging: sign-up links are "
+                "never delivered, so nobody can finish an email sign-up. Set "
+                "EMAIL_PROVIDER=resend (docs/deployment.md, 'Email sign-up')."
             )
         return self
 

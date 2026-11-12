@@ -19,10 +19,17 @@
  * login prompt asks for it like /login does and sends it as `accepted_terms`.
  * Without a version the prompt is unchanged.
  *
+ * Issue #1734: the login prompt also offers "Sign in with email and password"
+ * (back here afterwards) and, where the preview says the addressee can sign up
+ * by email (`email_signup_available`), the email sign-up form. The form keeps
+ * this page as the destination in this browser, so the new account comes back
+ * here to accept.
+ *
  * Next.js 15: params is now a Promise and must be unwrapped with React.use()
  */
 
 import { use, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
@@ -39,6 +46,9 @@ import {
 import { useSystemInfo } from "@/hooks/useSystemFeatures";
 import { Button } from "@/components/ui/button";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { AnnouncementEmailsOptIn } from "@/components/auth/AnnouncementEmailsOptIn";
+import { INVITE_HANDOFF_TEST_IDS } from "@/components/auth/invite-handoff.testids";
+import { EmailSignupForm } from "@/components/auth/EmailSignupForm";
 import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
@@ -48,11 +58,17 @@ type PageState =
   | "loading"
   | "login_required"
   | "email_mismatch"
+  | "address_unverified"
   | "accepting"
   | "terms_required"
   | "plan_blocked"
   | "success"
   | "error";
+
+// #2785: part of the accept refusal for an addressed invitation when the
+// account's address is not verified (backend UNVERIFIED_ADDRESS_ACCEPT_MSG,
+// pinned by backend/tests/services/test_invitation_unverified_message.py).
+const UNVERIFIED_ADDRESS_MARKER = "account whose email address is verified";
 
 interface CurrentUser {
   user_id: string;
@@ -79,6 +95,7 @@ export default function AcceptInvitationPage({
   const router = useRouter();
   const { token } = use(params);
   const t = useTranslations("invitation");
+  const tEmail = useTranslations("emailSignup");
 
   const [state, setState] = useState<PageState>("loading");
   const [invitationInfo, setInvitationInfo] = useState<InvitationInfo | null>(
@@ -96,6 +113,11 @@ export default function AcceptInvitationPage({
   const systemInfo = useSystemInfo();
   const termsVersion = systemInfo?.terms_version ?? undefined;
   const [agreedToTerms, setAgreedToTerms] = useState(false);
+  // #2761: the announcement-email consent wording, when offered. The box is
+  // unchecked by default and never gates the sign-in buttons.
+  const announcementVersion =
+    systemInfo?.announcement_consent_version ?? undefined;
+  const [announcementOptIn, setAnnouncementOptIn] = useState(false);
   const termsPending =
     systemInfo === null || (termsVersion !== undefined && !agreedToTerms);
 
@@ -213,6 +235,8 @@ export default function AcceptInvitationPage({
       } else if (errorMessage.includes("already a member")) {
         // Already a member - treat as success
         router.push("/workspace/members");
+      } else if (errorMessage.includes(UNVERIFIED_ADDRESS_MARKER)) {
+        setState("address_unverified");
       } else {
         setState("error");
         setError(errorMessage);
@@ -225,6 +249,11 @@ export default function AcceptInvitationPage({
     const returnTo = window.location.pathname + window.location.search;
     window.location.href = buildOAuthRedirect(provider, returnTo, {
       acceptedTerms: termsVersion,
+      // #2761: sent (ticked or not) only when the checkbox was shown.
+      announcementEmails:
+        announcementVersion !== undefined
+          ? { value: announcementOptIn, version: announcementVersion }
+          : undefined,
     });
   };
 
@@ -317,6 +346,8 @@ export default function AcceptInvitationPage({
 
   // Login Required State
   if (state === "login_required") {
+    // #1734: where an email sign-up or a password sign-in comes back to.
+    const invitePath = `/invite/${encodeURIComponent(token)}`;
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
         <div className="absolute top-4 right-4">
@@ -355,6 +386,17 @@ export default function AcceptInvitationPage({
               </div>
             )}
 
+            {announcementVersion !== undefined && (
+              <div className="mb-4">
+                <AnnouncementEmailsOptIn
+                  checked={announcementOptIn}
+                  onCheckedChange={setAnnouncementOptIn}
+                  themed
+                  testId={INVITE_HANDOFF_TEST_IDS.inviteAnnouncementOptIn}
+                />
+              </div>
+            )}
+
             <Button
               onClick={() => startOAuthLogin("google")}
               disabled={termsPending}
@@ -378,6 +420,28 @@ export default function AcceptInvitationPage({
 
             <p className="text-xs text-center text-gray-500 dark:text-gray-400">
               {t("loginRequired.noAccount")}
+            </p>
+
+            {invitationInfo?.email_signup_available === true && (
+              <>
+                <div className="my-4 flex items-center gap-3">
+                  <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                  <span className="text-sm text-gray-500 dark:text-gray-400">
+                    {tEmail("request.divider")}
+                  </span>
+                  <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                </div>
+                <EmailSignupForm returnTo={invitePath} themed />
+              </>
+            )}
+
+            <p className="mt-4 text-center text-sm">
+              <Link
+                href={`/login?method=password&return_to=${encodeURIComponent(invitePath)}`}
+                className="font-medium text-kagura-link hover:underline dark:text-blue-400"
+              >
+                {t("loginRequired.passwordSignIn")}
+              </Link>
             </p>
           </div>
         </div>
@@ -450,6 +514,49 @@ export default function AcceptInvitationPage({
             <p className="text-xs text-center text-gray-500 dark:text-gray-400">
               {t("emailMismatch.returnNote")}
             </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // #2785: an addressed invitation, an account without a verified address
+  if (state === "address_unverified") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
+        <div className="absolute top-4 right-4">
+          <LanguageSelector />
+        </div>
+        <div className="max-w-md w-full">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8">
+            <div className="flex items-center justify-center w-16 h-16 bg-amber-100 dark:bg-amber-900/20 rounded-full mx-auto mb-4">
+              <AlertCircle className="w-8 h-8 text-amber-600 dark:text-amber-400" />
+            </div>
+
+            <h2 className="text-2xl font-bold text-center text-gray-900 dark:text-gray-100 mb-2">
+              {t("addressUnverified.title")}
+            </h2>
+
+            <p className="text-center text-gray-600 dark:text-gray-400 mb-6">
+              {t("addressUnverified.message")}
+            </p>
+
+            <Button
+              onClick={handleLogout}
+              size="lg"
+              className="w-full mb-4 text-base [&_svg]:size-5"
+            >
+              <LogIn />
+              {t("addressUnverified.logoutButton")}
+            </Button>
+
+            <Button
+              onClick={() => router.push("/workspace/dashboard")}
+              variant="secondary"
+              className="w-full"
+            >
+              {t("error.goToDashboard")}
+            </Button>
           </div>
         </div>
       </div>

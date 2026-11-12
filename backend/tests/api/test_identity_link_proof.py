@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from fastapi import Response
 
 from api.routes import auth as auth_routes
 from auth.oauth2 import OAuth2Manager
@@ -110,14 +111,16 @@ class TestLoginRoute:
 
     @pytest.mark.asyncio
     async def test_link_proof_is_bound_to_the_state(self, manager, idp) -> None:
-        response = await auth_routes.google_login(FakeRequest(), link_proof=True)
+        response = await auth_routes.google_login(
+            FakeRequest(), response=Response(), link_proof=True
+        )
 
         assert manager._redis.store[PROOF_KEY.format(state=response.state)] == "1"
         assert idp.get_authorization_url_web.call_args.kwargs["request_auth_time"] is True
 
     @pytest.mark.asyncio
     async def test_an_ordinary_login_binds_nothing_and_asks_for_nothing(self, manager, idp) -> None:
-        response = await auth_routes.google_login(FakeRequest())
+        response = await auth_routes.google_login(FakeRequest(), response=Response())
 
         assert PROOF_KEY.format(state=response.state) not in manager._redis.store
         assert idp.get_authorization_url_web.call_args.kwargs["request_auth_time"] is False

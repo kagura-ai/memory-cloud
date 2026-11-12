@@ -42,3 +42,24 @@ describe("system-admin navigation", () => {
     expect(navigationForPath("/admin/quotas")).toBeUndefined();
   });
 });
+
+describe("system-admin surface flag (#2767)", () => {
+  it("every admin item needs the system role and features.system_admin", () => {
+    const adminGroup = navigationGroups.find((group) => group.titleKey === "admin");
+    expect(adminGroup?.items.length).toBeGreaterThan(0);
+    for (const item of adminGroup?.items ?? []) {
+      expect(item.href.startsWith("/admin/")).toBe(true);
+      expect(item.requiredRole).toBe("admin");
+      expect([item.requiredFeature].flat()).toContain("system_admin");
+    }
+  });
+
+  it("no other item carries the system_admin flag", () => {
+    const others = navigationGroups
+      .filter((group) => group.titleKey !== "admin")
+      .flatMap((group) => group.items.flatMap((item) => [item, ...(item.children ?? [])]));
+    for (const item of others) {
+      expect([item.requiredFeature].flat()).not.toContain("system_admin");
+    }
+  });
+});

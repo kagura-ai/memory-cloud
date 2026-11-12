@@ -311,6 +311,35 @@ describe("AdminSignupGatePage", () => {
     }
   });
 
+  it("labels an email sign-up row (#1734) and its beta-invite source", async () => {
+    initialTab = "allowlist";
+    mockGetConfig.mockResolvedValue(baseConfig);
+    mockListAllowlist.mockResolvedValue([
+      {
+        ...sampleEntry,
+        id: "entry-email",
+        provider: "email",
+        subject_id: "email:00000000-0000-4000-8000-000000000000",
+        subject_label: "new@example.com",
+        github_user_id: "email:legacy",
+        github_username: "new@example.com",
+        source: "beta_invite",
+      },
+    ]);
+
+    render(<AdminSignupGatePage />);
+
+    expect(await screen.findByText("new@example.com")).toBeInTheDocument();
+    expect(
+      screen.getByText("admin.signupGate.providerEmail"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("admin.signupGate.source.beta_invite"),
+    ).toBeInTheDocument();
+    // Not a GitHub row: no GitHub id suffix.
+    expect(screen.queryByText(/admin\.signupGate\.githubUserId/)).toBeNull();
+  });
+
   it("renders an ErrorBanner on load failure", async () => {
     mockGetConfig.mockRejectedValue(new Error("network down"));
     mockListAllowlist.mockRejectedValue(new Error("network down"));

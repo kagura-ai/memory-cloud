@@ -25,7 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from auth.dependencies import get_current_user, require_admin
+from auth.dependencies import get_current_user, get_current_user_optional, require_admin
 from db.base import get_db
 from services.cost_aggregation_service import (
     CostAggregationRow,
@@ -142,6 +142,10 @@ def _install_workspace_overrides(
         yield _mock_session()
 
     app.dependency_overrides[get_current_user] = mock_user
+
+    # #2767: require_admin reads the session through get_current_user_optional.
+
+    app.dependency_overrides[get_current_user_optional] = mock_user
     app.dependency_overrides[get_db] = mock_db
 
     # Patch PermissionService.check_workspace_admin so the test does not
@@ -222,6 +226,10 @@ class TestAdminRoute:
             yield _mock_session()
 
         app.dependency_overrides[get_current_user] = mock_user
+
+        # #2767: require_admin reads the session through get_current_user_optional.
+
+        app.dependency_overrides[get_current_user_optional] = mock_user
         app.dependency_overrides[get_db] = mock_db
 
         response = client.get(

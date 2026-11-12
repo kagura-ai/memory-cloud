@@ -32,10 +32,13 @@ vi.mock("@/lib/auth/auth", () => ({
   acceptTerms: (...args: unknown[]) => mockAcceptTerms(...args),
 }));
 
-// /system/info never answers: the gate must not need it.
+// /system/info never answers: the gate must not need it. An admin route
+// (#2767) needs it, so a test may set the answer.
+let mockSystemInfo: { features: Record<string, boolean> } | null = null;
 vi.mock("@/hooks/useSystemFeatures", () => ({
-  useSystemInfo: () => null,
-  useSystemFeatures: () => null,
+  useSystemInfo: () => mockSystemInfo,
+  useSystemFeatures: () => mockSystemInfo?.features ?? null,
+  isSystemInfoUnavailable: () => false,
 }));
 
 vi.mock("@/i18n", () => ({
@@ -86,6 +89,7 @@ beforeEach(() => {
   mockHasSelection = true;
   mockAcceptTerms.mockReset();
   mockPathname = "/workspace/dashboard";
+  mockSystemInfo = null;
   mockWorkspaces = [{ id: "w1", current_user_role: "member" }];
   mockPush.mockClear();
   mockReplace.mockClear();
@@ -143,6 +147,7 @@ describe("(authenticated) layout — terms re-acceptance gate (#1665)", () => {
   it("allows a system admin to open platform users without any workspace", async () => {
     mockUser = { id: "u1", role: "admin" };
     mockPathname = "/admin/users";
+    mockSystemInfo = { features: { system_admin: true } };
     mockWorkspaces = [];
     render(<DashboardLayout><p>platform users</p></DashboardLayout>);
     expect(await screen.findByText("platform users")).toBeInTheDocument();

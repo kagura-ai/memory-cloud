@@ -57,7 +57,7 @@ curl -H "Authorization: Bearer <access_token>" \
 
 Session-based authentication for the web management interface.
 
-The OAuth sign-in endpoints (`GET /api/v1/auth/{google,github}/login`) also take `locale` (`en` or `ja`, the sign-in page's language) and `timezone` (an IANA name such as `Asia/Tokyo`, the browser's time zone). Both are bound to the OAuth state like `accepted_terms`, and an account created by that sign-in starts with them instead of `en` / `UTC`. An existing account keeps its own settings, and an unsupported value is ignored.
+The OAuth sign-in endpoints (`GET /api/v1/auth/{google,github}/login`) also take `locale` (`en` or `ja`, the sign-in page's language) and `timezone` (an IANA name such as `Asia/Tokyo`, the browser's time zone). Both are bound to the OAuth state like `accepted_terms`, and an account created by that sign-in starts with them instead of `en` / `UTC`. An existing account keeps its own settings, and an unsupported value is ignored. With `ANNOUNCEMENT_EMAILS_ENABLED` on they also take `announcement_emails` (`true` / `false`) and `announcement_consent_version`, the answer to the sign-up opt-in for announcement emails (Issue #2761) — see [Announcement-email consent](#announcement-email-consent).
 
 ---
 
@@ -100,6 +100,62 @@ current plan prevents acceptance. The invitation stays visible, with guidance to
 contact its owner. Such an invitation does not admit a new account while registration
 is closed, and does not suppress creation of a new user's personal workspace.
 Acceptance still checks the workspace's current plan at the time of the request.
+
+Addressed invitations need a verified address: `GET /api/v1/invitations/pending`
+lists, and `POST /api/v1/invitations/accept` accepts, an invitation addressed to an
+email address only when the signed-in account's address is verified; otherwise the
+list is empty and accept answers `400`. A link-only invitation is accepted as before.
+
+The public preview `GET /api/v1/invitations/{token}` also returns
+`email_signup_available`: whether a person without an account can create one with
+this invitation's address by email. True when email sign-up is on and the sign-up
+controls admit it: the invitation is addressed to an email, is not an owner-role
+invitation, and its workspace exists on a plan that allows invitations (signup gate
+on or off, see
+[deployment](deployment.md#workspace-invitations-and-the-signup-gate-issue-2785));
+or the gate is off and `ALLOW_REGISTRATION=true`; or no account exists yet. It
+names no address.
+
+### Email + password sign-up
+
+Public, `404` unless `ENABLE_EMAIL_SIGNUP=true` (see
+[deployment](deployment.md#email-sign-up-issue-1734)). The emailed link is the
+credential.
+
+| Method / path | Body | Answers |
+|---|---|---|
+| `POST /api/v1/auth/signup/email/request` | `{"email", "invite"?, "locale"?, "timezone"?}` | `202 {"status": "accepted", "message": ...}` for every address; `429` per client address; `422` only for an address of the wrong shape (one ASCII mailbox) |
+| `POST /api/v1/auth/signup/email/preview` | `{"token"}` | `200 {"email", "expires_at"}`; `400 AUTH-301` unknown, expired or used link |
+| `POST /api/v1/auth/signup/email/complete` | `{"token", "new_password", "name"?, "accepted_terms"?, "return_to"?, "announcement_emails"?, "announcement_consent_version"?}` | `200 {"redirect_url"}` plus the session cookie; `400 AUTH-301`; `403 AUTH-308` the sign-up controls refuse it now; `409 AUTH-309` the address has an account; `422` password policy (`field: new_password`) or terms (`field: accepted_terms`); `429`; `503` the account was created but no session could be opened (sign in with the password) |
+
+`invite` is a beta invite token (a malformed one is ignored). The request body
+has no return path: the page that started the sign-up keeps it and sends it as
+`return_to` on completion, validated like the password sign-in's (same origin
+only). The policy and terms are checked before the link is spent.
+`announcement_emails` is the answer to the announcement-email opt-in shown on
+the completion page, sent with the `announcement_consent_version` from
+`/system/info`; the new account records it (an absent answer, a stale version or
+the feature switched off records nothing). The request body never carries it.
+
+### Provider link confirmation
+
+Public, `404` when `ENABLE_PROVIDER_LINK_CONFIRMATION=false` (see
+[deployment](deployment.md#connecting-github-to-an-email-account-by-email-issue-2786)).
+The emailed token and the browser nonce cookie set by
+`GET /api/v1/auth/{google,github}/login` are the credentials; send requests
+with cookies (`credentials: "include"`).
+
+| Method / path | Body | Answers |
+|---|---|---|
+| `POST /api/v1/auth/link-confirm/preview` | `{"token"}` | `200 {"provider", "provider_login", "provider_name", "provider_avatar_url", "expires_at", "same_browser"}`; `400 AUTH-301` unknown, expired or used link; `429` |
+| `POST /api/v1/auth/link-confirm/complete` | `{"token"}` | `200 {"redirect_url"}` plus the session cookie; `403 AUTH-310` not the browser that started the sign-in (the link stays usable there); `400 AUTH-301` unknown, expired or used link, or an account that cannot take the link any more; `429`; `503` the provider was connected but no session could be opened (sign in again) |
+| `POST /api/v1/auth/link-confirm/cancel` | `{"token"}` | `204` always ("This wasn't me": the link is discarded and the account gets no further offers and no automatic Google link); `429` |
+
+Preview consumes nothing. `provider` is `github` or `google`; `provider_login`
+is the GitHub login or the Google address (show it as the primary
+identifier); `provider_name` is free text from the provider (at most 80
+characters, secondary); `provider_avatar_url` is `null` or an https URL on the
+provider's avatar host. Only `same_browser: true` can complete.
 
 ## Memory APIs
 
@@ -1896,7 +1952,7 @@ Closed-beta invite links (Issues #1581, #1595): a signed-in user mints a one-tim
 
 - `status` is derived: `revoked` > `redeemed` > `expired` > `active`.
 - `used` counts the invites occupying a quota slot; `active` (unused, still valid) and `redeemed` are its two parts — `active + redeemed == used` always. Expired and revoked invites free their slot.
-- `quota` and `remaining` are `null` for a system admin (unlimited).
+- `quota` and `remaining` are `null` for a system admin (unlimited). Only in `SYSTEM_ADMIN_MODE=session`: in `off` / `service` an admin-role account is capped like everyone (#2767).
 - `label` (since #1595) is the inviter's own note, or `null`. Only the inviter ever sees it.
 - `redeemed_email` (since #1595) is the **current** e-mail of the account a `redeemed` invite admitted — the inviter vouched for that person, so they may see who it was. It is `null` for every other status, and `null` for a redeemed invite whose account no longer exists (erased) or whose allowlist entry an admin removed: it is read from the live account, never from a stored copy. #1581 exposed the lifecycle only; this field reverses that on purpose.
 
@@ -1968,6 +2024,7 @@ System information. Public (no authentication): the version plus non-sensitive d
   "description": "Remote MCP Server + Web Management",
   "environment": "production",
   "terms_version": null,
+  "announcement_consent_version": null,
   "chatgpt_app_url": null,
   "search_defaults": {
     "use_rerank": false,
@@ -1976,6 +2033,7 @@ System information. Public (no authentication): the version plus non-sensitive d
     "content_chunks_enabled": false
   },
   "features": {
+    "system_admin": true,
     "neural_memory": true,
     "research_tools": false,
     "plan_page": false,
@@ -1985,12 +2043,19 @@ System information. Public (no authentication): the version plus non-sensitive d
     "managed_llm": false,
     "referrals": false,
     "beta_invites": false,
+    "email_signup": false,
+    "open_registration": false,
+    "provider_link_confirmation": false,
     "reranking": true
   }
 }
 ```
 
-`search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance). `chatgpt_app_url` is the deployment's `CHATGPT_APP_URL` (the public URL of its app in ChatGPT's app directory), or `null` when it is empty — see [ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760).
+`features.email_signup` is `ENABLE_EMAIL_SIGNUP` and `features.open_registration` is `ALLOW_REGISTRATION` as configured (it is ignored while the signup gate is on) — see [Email + password sign-up](#email--password-sign-up).
+
+`features.provider_link_confirmation` is `ENABLE_PROVIDER_LINK_CONFIRMATION` while a mail backend other than `logging` is configured: when true, a sign-in that ends at `email_in_use` may have mailed a confirmation link to an email sign-up account — see [Provider link confirmation](#provider-link-confirmation). It is per deployment and says nothing about any address.
+
+`search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance). `announcement_consent_version` is the version of the announcement-email consent wording while `ANNOUNCEMENT_EMAILS_ENABLED` is on, `null` otherwise — see [Announcement-email consent](#announcement-email-consent). `chatgpt_app_url` is the deployment's `CHATGPT_APP_URL` (the public URL of its app in ChatGPT's app directory), or `null` when it is empty — see [ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760). `features.system_admin` is `true` only when this process serves the system-admin surface to signed-in admins (`SYSTEM_ADMIN_MODE=session`, the default); the web UI hides the admin menu and `/admin/*` otherwise (#2767, [Admin APIs](#admin-apis)).
 
 ---
 
@@ -2024,6 +2089,59 @@ Session cookie only. Records that the signed-in user accepts the current terms v
 
 ---
 
+## Announcement-email consent
+
+Issue #2761. Whether the person wants announcement emails (new features, product news). Service notices (invitations, password, security, capacity, erasure) never depend on it. See [Announcement email consent](deployment.md#announcement-email-consent-issue-2761) for the operator view.
+
+- `GET /api/v1/auth/{google,github}/login?announcement_emails=<true|false>&announcement_consent_version=<version>` — the answer to the unchecked-by-default sign-up checkbox, bound to the OAuth state. Recorded (source `signup`) only when the sign-in creates the account and only with the current version from `/system/info`; ignored while `ANNOUNCEMENT_EMAILS_ENABLED` is off, for any other value, and when the request's `Sec-Fetch-Site` is `cross-site` or `none`; a `true` answer is recorded only when the callback runs in the browser that called this URL (its sign-in nonce cookie). It never blocks a sign-in.
+
+### GET /api/v1/me/announcement-emails
+
+Session cookie only.
+
+**Response (200):**
+
+```json
+{
+  "offered": true,
+  "announcement_emails": false,
+  "answered": true,
+  "source": "signup",
+  "recorded_at": "2026-11-12T09:00:00Z",
+  "wording_version": "2026-11"
+}
+```
+
+`offered` is `false` while `ANNOUNCEMENT_EMAILS_ENABLED` is off. `answered` is `false` (and `source` / `recorded_at` `null`) when the user never answered. `wording_version` is the current consent wording to send back when turning the emails on (`null` while not offered).
+
+### PUT /api/v1/me/announcement-emails
+
+Session cookie only. Records a new answer with source `settings`; an unchanged answer writes nothing.
+
+**Request:** `{"announcement_emails": true, "wording_version": "2026-11"}` (`wording_version` is needed only to turn them on)
+
+**Response (200):** the body of `GET` plus `"recorded": true|false`.
+
+| Status | When |
+|---|---|
+| `409` | turning them on while `ANNOUNCEMENT_EMAILS_ENABLED` is off, or with a `wording_version` other than the current one (the page loaded before the wording changed); turning them off always works |
+| `429` | more than 20 changes in an hour |
+| `401` / `403` | no session / an API key or bearer token instead of a session |
+
+### POST /api/v1/announcement-emails/unsubscribe/{token}
+
+No authentication: the token from an announcement email is the only authority. The one-click target named in the `List-Unsubscribe` header (RFC 8058); the body is not read. Turns announcement emails off for the token's account (source `unsubscribe_link`) and can do nothing else. Always `200 {"status": "accepted"}` — for a valid token, a forged or malformed one, an account that no longer exists, and an answer that was already off — and never `429`. `503` only when a valid token could not be applied (try again).
+
+### GET /api/v1/announcement-emails/unsubscribe/{token}
+
+No authentication. Changes nothing: `303` to `{FRONTEND_URL}/email/unsubscribe`, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. For a valid token the fragment (`#<token>`) holds a token the server issues afresh for the same account; the path's own text never goes into `Location`, and any other value lands on the page without a fragment. Checking the token reads no database.
+
+### POST /api/v1/announcement-emails/unsubscribe
+
+No authentication. What the unsubscribe page posts: `{"token": "<token>"}`. Same behaviour and answer as the one-click route, except that invalid tokens are counted per client address and answered `429` past 30 in 15 minutes. A valid token is never refused.
+
+---
+
 ## Memory Health
 
 The per-context memory health report (#1211, #1225), for the contexts the
@@ -2054,6 +2172,14 @@ threshold.
 
 Admin endpoints require `system_admin` or `workspace_admin` role.
 
+The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /api/v1/config/batch`, `GET /api/v1/oauth/providers`) follow the deployment's `SYSTEM_ADMIN_MODE` (#2767; [System-admin surface](deployment.md#system-admin-surface-issue-2767)):
+
+- `session` (default): a session cookie of a user with `role=admin`; `401` without a session, `403` (`HTTP-403`) otherwise. Unchanged.
+- `off`: every such route answers `404` with the unknown-path body (`HTTP-404`), whatever the caller sends, and is left out of the OpenAPI document.
+- `service`: only an operator console. Send `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` and `X-Operator-Email: <address of the person acting>`; a session cookie is ignored. Errors, in this order: `404` outside `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS`, `503 SYSADMIN-001` (credential not configured), `401 SYSADMIN-002` (credential missing, another scheme, or wrong; `WWW-Authenticate: Bearer`), `400 SYSADMIN-003` (`X-Operator-Email` missing, repeated or not a plain address), `403 SYSADMIN-004` (a route that acts on the caller's own account: `POST /admin/sleep/run`, `POST /admin/sleep/actions/{action_id}/undo-merge`, `GET /admin/memory-health`, and `POST /admin/contexts/recover` with `dry_run=false`). Writes record the actor as `operator:<address>`.
+
+`PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
+
 ### Sleep Maintenance
 
 | Endpoint                                         | Purpose                                                       |
@@ -2067,7 +2193,7 @@ See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/v1/admin/memory-health` | **Deprecated** (#2764): an alias of [`GET /api/v1/memory-health`](#memory-health) that answers a system admin with the same document, with the same `context_id` parameter. It is removed in a later release; call the new path. |
+| `GET /api/v1/admin/memory-health` | **Deprecated** (#2764): an alias of [`GET /api/v1/memory-health`](#memory-health) that answers a system admin with the same document, with the same `context_id` parameter. It is removed in a later release; call the new path. A service operator gets `403 SYSADMIN-004` (it has no contexts of its own). |
 
 ### Environment Console
 

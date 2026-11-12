@@ -159,13 +159,14 @@ export function HistoryView({ workspaceId }: { workspaceId: string }) {
                   <TableBody role="rowgroup" className="grid gap-4 xl:table-row-group [&_tr:last-child]:border xl:[&_tr:last-child]:border-0">{page.items.map(item => {
                     // A shared credential's account is not the physical caller:
                     // say so only where a credential or client is known.
-                    const viaCredential = Boolean(item.credential_id || item.client_id) && item.principal_kind !== "session" && item.principal_kind !== "system";
+                    const viaCredential = Boolean(item.credential_id || item.client_id) && item.principal_kind !== "session" && item.principal_kind !== "system" && item.principal_kind !== "operator";
                     return (
                     <TableRow role="row" key={item.id} className="grid min-w-0 gap-3 rounded-lg border bg-background p-4 even:bg-background dark:even:bg-background xl:table-row xl:rounded-none xl:border-0 xl:border-b xl:bg-transparent xl:p-0 xl:even:bg-slate-50/50 xl:dark:even:bg-slate-900/50">
                       <TableCell role="cell" className="block p-0 align-top xl:table-cell xl:whitespace-nowrap xl:p-2">{mobileLabel("time")}<time dateTime={item.occurred_at}>{formatDateTime(item.occurred_at, timezone, locale)}</time></TableCell>
                       <TableCell role="cell" className="block min-w-0 whitespace-normal p-0 align-top [overflow-wrap:anywhere] xl:table-cell xl:max-w-64 xl:p-2">
                         {mobileLabel("actor")}
                         <div>{item.principal_kind === "system" ? t("system")
+                          : item.principal_kind === "operator" ? t("operator")
                           : item.principal_kind === "session" ? item.actor_name || item.actor_user_id || t("unknown")
                             : item.credential_id ? t("credential", { id: item.credential_id })
                               : item.client_id ? t("client", { id: item.client_id }) : t("unknown")}</div>

@@ -135,11 +135,13 @@ from models.auth import (
     AuditLog,
     Context,
     ContextMember,
+    EmailSignupRequest,
     ExternalAPIKey,
     OAuth2Client,
     OAuthGrantSetting,
     User,
     UserKnownDevice,
+    UserOAuthProvider,
     WebAuthnCredential,
     Workspace,
     WorkspaceInvitation,
@@ -246,6 +248,9 @@ _CONFIRM_TOKEN_KEY_PREFIX = "erasure_token:"  # noqa: S105 — not a credential
 # not make the link demand one. A bare request id (a password request, or a
 # key written before this change) keeps the confirm-time password check.
 _EMAIL_LINK_SUFFIX = ":email-link"
+
+# #1734: what an erased account's sign-up allowlist rows keep as their label.
+ERASED_ALLOWLIST_LABEL = "[erased]"
 
 # Timeout for the OAuth confirmation-email dispatch. Chosen so a stalled
 # email provider cannot hold a DB transaction open and exhaust the
@@ -2462,6 +2467,17 @@ class AccountErasureService:
             OAuthGrantSetting, OAuthGrantSetting.user_id == user_id
         )
 
+        # #1734: the sign-up allowlist keeps a display label (the address, or
+        # the GitHub login) per admitted identity: the account's own row from
+        # an email sign-up (``subject_id`` = its ``user_id``) and the rows of
+        # its linked Google / GitHub identities. The rows stay (a beta invite's
+        # redemption record points at them); the labels go. A pending email
+        # sign-up for the address goes too.
+        counts["signup_allowlist_labels"] = await self._blank_signup_allowlist_labels(user_id)
+        counts["email_signup_requests"] = await self._count_and_delete(
+            EmailSignupRequest, EmailSignupRequest.email == func.lower(func.trim(target.email))
+        )
+
         # Direct per-user tables.
         # #1769: the FK cascades too; deleted and counted here so the erasure
         # summary lists them (the password reset deletes the same rows with
@@ -2866,6 +2882,36 @@ class AccountErasureService:
         member removal, the admin user delete and ``cli.delete_admin`` (#2352).
         """
         return await settle_departing_credentials(self.db, user_id, path="erasure")
+
+    async def _blank_signup_allowlist_labels(self, user_id: str) -> int:
+        """Blank the allowlist labels of the subject's admitted identities (#1734)."""
+        from models.signup_gate import SignupAllowlistEntry
+
+        linked = select(UserOAuthProvider.provider, UserOAuthProvider.oauth_sub).where(
+            UserOAuthProvider.user_id == user_id
+        )
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(SignupAllowlistEntry)
+                .where(
+                    or_(
+                        and_(
+                            SignupAllowlistEntry.provider == "email",
+                            SignupAllowlistEntry.subject_id == user_id,
+                        ),
+                        tuple_(SignupAllowlistEntry.provider, SignupAllowlistEntry.subject_id).in_(
+                            linked
+                        ),
+                    )
+                )
+                .values(
+                    subject_label=ERASED_ALLOWLIST_LABEL, github_username=ERASED_ALLOWLIST_LABEL
+                )
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        return result.rowcount or 0
 
     async def _count_and_delete(self, model: Any, where_clause: Any) -> int:
         """Delete rows and return the affected count from the cursor.

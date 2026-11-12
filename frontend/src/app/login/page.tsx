@@ -17,6 +17,12 @@
  * record it; without one the requests are unchanged.
  * Issue #1678: the login ID field also takes the verified email of an account
  * with a password; "Forgot password?" leads to the self-service reset.
+ * Issue #1734: "Create an account with email" when the deployment has email
+ * sign-up on and registration open (`features.email_signup` and
+ * `features.open_registration`); the `email_in_use` copy names no method.
+ * Issue #2786: where the deployment can mail a provider link confirmation
+ * (`features.provider_link_confirmation`), the `email_in_use` hint says a
+ * confirmation link may have been emailed.
  */
 
 import Link from "next/link";
@@ -49,6 +55,7 @@ import {
   MailPlus,
   Sparkles,
   Shield,
+  UserPlus,
   Zap,
 } from "lucide-react";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
@@ -58,6 +65,8 @@ import { MfaCodeInput } from "@/components/auth/MfaCodeInput";
 import { isCompleteMfaCode, normalizeMfaCode } from "@/lib/auth/mfaCode";
 import PasskeyLogin from "@/components/auth/PasskeyLogin";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { AnnouncementEmailsOptIn } from "@/components/auth/AnnouncementEmailsOptIn";
+import { EmailSignupForm } from "@/components/auth/EmailSignupForm";
 
 // #1594: how long the form waits for the session check before rendering
 // anyway. A slow or broken /auth/me must never lock anyone out of /login.
@@ -83,6 +92,10 @@ function LoginContent() {
   const systemInfo = useSystemInfo();
   const systemInfoPending = systemInfo === null;
   const termsVersion = systemInfo?.terms_version ?? undefined;
+  // #2761: the announcement-email consent wording, or undefined when the
+  // deployment does not offer the emails (no checkbox, nothing sent).
+  const announcementVersion =
+    systemInfo?.announcement_consent_version ?? undefined;
 
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +103,13 @@ function LoginContent() {
   // Kept separate from `error` — a cancellation is informational, not a
   // failure, so it must NOT use the destructive red banner.
   const [notice, setNotice] = useState<string | null>(null);
+  // Issue #517 / #2786: `email_in_use&link_hint=true`. Kept as a flag, not
+  // text, because the wording depends on /system/info, which may answer
+  // after the URL was read.
+  const [linkHint, setLinkHint] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
+  // #2761: unchecked by default; never gates the sign-in buttons.
+  const [announcementOptIn, setAnnouncementOptIn] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [showPasswordLogin, setShowPasswordLogin] = useState<boolean | null>(
     null,
@@ -105,6 +124,8 @@ function LoginContent() {
   const [inviteEntryOpen, setInviteEntryOpen] = useState(false);
   const [inviteInput, setInviteInput] = useState("");
   const [inviteInputInvalid, setInviteInputInvalid] = useState(false);
+  // #1734: "Create an account with email" entry.
+  const [emailSignupOpen, setEmailSignupOpen] = useState(false);
 
   // MFA state
   const [mfaRequired, setMfaRequired] = useState(false);
@@ -119,6 +140,17 @@ function LoginContent() {
     searchParams.get("return_to"),
     typeof window !== "undefined" ? window.location.origin : "",
   );
+
+  // #2786: mention the confirmation mail only where the deployment can send
+  // one (a deployment-level flag, never per account); until /system/info
+  // answers, and wherever it cannot, the hint is today's "sign in, then
+  // connect this method in Profile".
+  const linkHintNotice = linkHint
+    ? features?.provider_link_confirmation === true
+      ? t("linkHintConfirmation")
+      : t("linkHint")
+    : null;
+  const shownNotice = notice ?? linkHintNotice;
 
   const isMockAuth =
     process.env.NODE_ENV === "development" &&
@@ -166,21 +198,24 @@ function LoginContent() {
         }),
       );
     } else if (errorParam === "email_in_use") {
-      // Issue #481: cross-provider email collision. The user signed in with
-      // one provider (e.g. Google) using an email that's already bound to
-      // a different account. Account linking is intentionally not yet
-      // supported (#517) — direct the user to their original provider.
+      // Issue #481: the address of this sign-in already belongs to another
+      // account. #1734: that account may sign in with a provider or with an
+      // email address and password, so the copy names no method. #2786: an
+      // account created by email sign-up may also have been mailed a link to
+      // connect this sign-in; the answer is the same either way, so the page
+      // cannot tell and says "if" (`linkHintNotice`).
       setError(
         t("emailInUse", {
           default:
-            "This email is already linked to another sign-in method. Please use the provider you originally signed in with.",
+            "This email address already belongs to an account that signs in another way.",
         }),
       );
       // Issue #517: the backend appends &link_hint=true to signal that an
       // account with this email already exists — nudge the user to sign in
-      // with their original provider, then link this one from their profile.
+      // the way they did before, then link this one from their profile, or
+      // (#2786) to open the confirmation link if one was mailed.
       if (searchParams.get("link_hint") === "true") {
-        setNotice(t("linkHint"));
+        setLinkHint(true);
       }
     } else if (errorParam === "oauth_failed") {
       // #1381: the OAuth callback redirects non-cancel failures here with a
@@ -216,10 +251,13 @@ function LoginContent() {
     getAuthConfig()
       .then((config) => {
         setAuthConfig(config);
-        // Auto-show the password form if no OAuth providers are configured
+        // Auto-show the password form if no OAuth providers are configured,
+        // or when the link asked for it (`?method=password`, e.g. the
+        // invitation page's "Sign in with email and password").
         const hasOAuth =
           config.google_oauth_enabled || config.github_oauth_enabled;
-        if (!hasOAuth && config.password_login_enabled) {
+        const passwordRequested = searchParams.get("method") === "password";
+        if ((!hasOAuth || passwordRequested) && config.password_login_enabled) {
           setShowPasswordLogin(true);
         } else {
           setShowPasswordLogin(false);
@@ -311,21 +349,32 @@ function LoginContent() {
     router.push(`/join/${token}${query}`);
   };
 
+  // #2761: the opt-in answer, sent only when the checkbox was on screen (the
+  // OAuth area shows it while the password form is hidden). Otherwise nothing
+  // is sent and the request is exactly what it was before.
+  const announcementAnswer =
+    announcementVersion !== undefined && !showPasswordLogin
+      ? { value: announcementOptIn, version: announcementVersion }
+      : undefined;
+
   const handleGoogleLogin = async () => {
     setLoadingAction("google");
     setError(null);
     if (returnTo) {
       window.location.href = buildOAuthRedirect("google", returnTo, {
         acceptedTerms: termsVersion,
+        announcementEmails: announcementAnswer,
       });
       return;
     }
     try {
       // #1665: the argument only when there is a version, so a deployment
       // without TERMS_VERSION makes exactly the call it made before.
-      const authUrl = await (termsVersion
-        ? getAuthUrl(termsVersion)
-        : getAuthUrl());
+      const authUrl = await (announcementAnswer
+        ? getAuthUrl(termsVersion, announcementAnswer)
+        : termsVersion
+          ? getAuthUrl(termsVersion)
+          : getAuthUrl());
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);
@@ -339,13 +388,16 @@ function LoginContent() {
     if (returnTo) {
       window.location.href = buildOAuthRedirect("github", returnTo, {
         acceptedTerms: termsVersion,
+        announcementEmails: announcementAnswer,
       });
       return;
     }
     try {
-      const authUrl = await (termsVersion
-        ? getGitHubAuthUrl(termsVersion)
-        : getGitHubAuthUrl());
+      const authUrl = await (announcementAnswer
+        ? getGitHubAuthUrl(termsVersion, announcementAnswer)
+        : termsVersion
+          ? getGitHubAuthUrl(termsVersion)
+          : getGitHubAuthUrl());
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);
@@ -424,11 +476,12 @@ function LoginContent() {
               </p>
             </div>
 
-            {/* Cancellation notice (Issue #727) — neutral, not an error */}
-            {notice && (
+            {/* Cancellation notice (Issue #727) and the email_in_use link
+                hint (#517, #2786) — neutral, not an error */}
+            {shownNotice && (
               <Alert className="mb-6 border-blue-200 bg-blue-50 text-blue-800">
                 <Info className="h-4 w-4" />
-                <AlertDescription>{notice}</AlertDescription>
+                <AlertDescription>{shownNotice}</AlertDescription>
               </Alert>
             )}
 
@@ -674,6 +727,15 @@ function LoginContent() {
                       checked={agreedToTerms}
                       onCheckedChange={setAgreedToTerms}
                     />
+                    {announcementVersion !== undefined && (
+                      <div className="mt-3">
+                        <AnnouncementEmailsOptIn
+                          checked={announcementOptIn}
+                          onCheckedChange={setAnnouncementOptIn}
+                          testId="login-announcement-optin"
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -738,6 +800,30 @@ function LoginContent() {
                     )}
                   </div>
                 )}
+
+                {/* #1734: open registration also takes an email address. */}
+                {features?.email_signup === true &&
+                  features?.open_registration === true && (
+                    <div className="mt-4 border-t border-gray-200 pt-4">
+                      {!emailSignupOpen ? (
+                        <button
+                          type="button"
+                          onClick={() => setEmailSignupOpen(true)}
+                          className="inline-flex items-center gap-2 text-sm font-medium text-kagura-link hover:underline"
+                        >
+                          <UserPlus className="h-4 w-4" />
+                          {t("signUpWithEmail")}
+                        </button>
+                      ) : (
+                        // The toggle unmounts on click: the form takes focus.
+                        <EmailSignupForm
+                          defaultOpen
+                          autoFocus
+                          returnTo={returnTo}
+                        />
+                      )}
+                    </div>
+                  )}
               </>
             )}
 

@@ -5,22 +5,31 @@
  */
 
 import { apiClient } from "../api/base";
+import {
+  announcementEmailsParams,
+  type AnnouncementEmailsAnswer,
+} from "./buildOAuthRedirect";
 import { signupPrefs, type SignupPrefs } from "./signupPrefs";
 
 /**
  * Build the query string for the JSON-mode OAuth login: `accepted_terms`
  * (#1665) when a terms version is in play, then the sign-in page's `locale`
  * and, when known, the browser's `timezone` (#2700), which an account created
- * by this sign-in starts with.
+ * by this sign-in starts with, then the announcement-email opt-in answer
+ * (#2761) when the page showed the checkbox.
  */
 function oauthLoginQuery(
   acceptedTerms?: string,
   prefs: SignupPrefs = signupPrefs(),
+  announcement?: AnnouncementEmailsAnswer,
 ): string {
   const params = new URLSearchParams();
   if (acceptedTerms) params.set("accepted_terms", acceptedTerms);
   params.set("locale", prefs.locale);
   if (prefs.timezone) params.set("timezone", prefs.timezone);
+  for (const [key, value] of announcementEmailsParams(announcement)) {
+    params.set(key, value);
+  }
   return `?${params.toString()}`;
 }
 
@@ -89,10 +98,13 @@ export interface AuthResponse {
  * `if (returnTo)` branch in `handleGoogleLogin` / `handleGitHubLogin` of
  * `/app/login/page.tsx` for the canonical pattern.
  */
-export async function getAuthUrl(acceptedTerms?: string): Promise<string> {
+export async function getAuthUrl(
+  acceptedTerms?: string,
+  announcement?: AnnouncementEmailsAnswer,
+): Promise<string> {
   try {
     const response = await apiClient.get<{ authorization_url: string }>(
-      `/api/v1/auth/google/login${oauthLoginQuery(acceptedTerms)}`,
+      `/api/v1/auth/google/login${oauthLoginQuery(acceptedTerms, undefined, announcement)}`,
     );
     return response.authorization_url;
   } catch (error) {
@@ -108,10 +120,11 @@ export async function getAuthUrl(acceptedTerms?: string): Promise<string> {
  */
 export async function getGitHubAuthUrl(
   acceptedTerms?: string,
+  announcement?: AnnouncementEmailsAnswer,
 ): Promise<string> {
   try {
     const response = await apiClient.get<{ authorization_url: string }>(
-      `/api/v1/auth/github/login${oauthLoginQuery(acceptedTerms)}`,
+      `/api/v1/auth/github/login${oauthLoginQuery(acceptedTerms, undefined, announcement)}`,
     );
     return response.authorization_url;
   } catch (error) {

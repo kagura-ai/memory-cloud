@@ -445,6 +445,12 @@ development-default or short key in `API_KEY_SECRET_PREVIOUS` only logs a
 warning, since moving the stored values off such a key is what the variable is
 for. An entry equal to `API_KEY_SECRET` is ignored with a warning.
 
+The unsubscribe links in announcement emails (Issue #2761) are signed with a
+key derived from the same ring. A link in an email sent before the rotation
+keeps working while its key is in `API_KEY_SECRET_PREVIOUS`; once that key is
+removed, the link still answers but does nothing, and the person turns the
+emails off in account settings instead.
+
 ## Frontend Environment Variables
 
 Copy `frontend/.env.example` to `frontend/.env.local` and configure:
@@ -463,6 +469,87 @@ NEXT_PUBLIC_APP_URL=https://your-domain.com
 # NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME=Premium Max
 ```
 
+## System-admin surface (Issue #2767)
+
+`SYSTEM_ADMIN_MODE` decides where the system-admin surface is served: every route
+behind the admin gate (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`,
+`POST /api/v1/config/batch`, `GET /api/v1/oauth/providers`). A deployment that
+does not set it behaves exactly as before.
+
+| Mode | Who reaches the admin routes | Web UI |
+|---|---|---|
+| `session` (default) | A signed-in user whose `users.role` is `admin` (as before). | Admin menu and `/admin/*` pages for system admins. |
+| `off` | Nobody. Every admin route answers `404` with the body an unknown path gets, before any session, API key or header is read; the admin operations are left out of `/openapi.json`, `/docs`, `/redoc`. | Admin menu hidden; `/admin/*` renders "not found". |
+| `service` | Only an operator console presenting the service credential. Sessions are ignored (a cookie alone gets `401`). | Same as `off`: the console is the admin UI. |
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SYSTEM_ADMIN_MODE` | `session` | `session`, `off` or `service`. Surrounding blanks are trimmed; an empty value or any other value (`Off` included) stops startup. Set it on **every** process that serves HTTP: both deploy colours and any extra container of the image. |
+| `SYSTEM_ADMIN_SERVICE_TOKEN` | *(empty)* | The bearer credential (`Authorization: Bearer …`) of the console in `service` mode. Empty: every admin route answers `503 SYSADMIN-001`. Set it on the `service` process only; the others ignore it (with a startup warning). No blanks or commas. Under `ENVIRONMENT=production` it must be 32+ characters, not a shipped placeholder, and differ from `BILLING_SERVICE_TOKEN` and `WORKER_SERVICE_TOKEN`. Use `openssl rand -hex 32`. |
+| `SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS` | *(empty)* | Comma-separated earlier credentials, still accepted during a rotation (a WARNING at startup while it is set, and a `system_admin_service_token_previous_used` log line with the slot number each time one matches). Production applies the same rules as to the current credential: a previous credential is a live credential. |
+| `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS` | *(empty)* | Optional comma-separated CIDR ranges allowed to call the admin routes in `service` mode; any other client address gets `404`. Empty allows any address (the credential is still required). A malformed range stops startup. The address is the TCP peer unless `FORWARDED_ALLOW_IPS` trusts a proxy. |
+
+At startup the API logs `system_admin_mode` with the mode and whether a
+credential is configured (never its value); at WARNING in `service`.
+
+**Running `service`.** The `service` process must not be reachable from the
+internet: run it on an internal network only, never behind the public proxy,
+and set `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS` to the console's addresses. Run it
+with `SCHEDULER_LEADER_ENABLED=false` so scheduled jobs stay on the public
+processes. The public processes run `off`.
+
+Each request of the console carries the credential and `X-Operator-Email`, the
+address of the person acting (exactly one header value; lower-cased; ASCII; at
+most 246 characters; local part `[a-z0-9._+-]`). memory-cloud trusts the
+credential holder to name the operator: the console must take the address from
+its own verified sign-in, never from user input, and must not relay cookies or
+client-supplied headers. The order of refusals is: address outside the
+allow-list `404`, credential not configured `503 SYSADMIN-001`, credential
+missing or wrong (another scheme, a lower-case `bearer`, a non-ASCII value
+included) `401 SYSADMIN-002` with `WWW-Authenticate: Bearer`, bad operator
+address `400 SYSADMIN-003`. Routes that act on the caller's own account
+(`POST /admin/sleep/run`, `POST /admin/sleep/actions/{id}/undo-merge`, the
+deprecated `GET /admin/memory-health`) and applying `POST /admin/contexts/recover`
+(`dry_run=false`) answer `403 SYSADMIN-004` to an operator.
+
+**What an operator leaves behind.** Admin writes store the operator as
+`operator:<address>` wherever they store an actor (audit rows, plan changes,
+add-ons, allowlist entries, erasure and force-transfer requests, worker apps).
+`PUT /admin/users/{id}/role` now writes a `system_role_update` audit row in
+every mode. The customer-visible operation history stores an operator's action
+without an actor id (`principal_kind = operator`, shown as "Service operator").
+These are operator accountability records: erasing a product account, even one
+with the same address, does not rewrite them. On a force transfer, the four-eyes
+check also refuses an approver whose address equals the initiator's, across
+`session` and `service` (`alice@…` and `operator:alice@…` are one person); in
+`service` mode two distinct operators are attested by the console alone, so its
+dual control is as strong as the console's operator sign-in.
+
+**`role = admin` outside `session`.** Accounts keep their `role` column, but it
+grants nothing: no admin route, no uncapped beta-invite quota, no hosted
+configuration category. The first account created on an empty database gets
+`user` (not initial admin). It is still admitted through a closed signup gate
+(as in `session`), so a fresh `off` deployment gets its first user from that
+first sign-up, from `ALLOW_REGISTRATION=true`, an allowlisted identity, or a
+CLI-created account. Accounts that already have `role=admin` keep it (the
+initial and last admin cannot be demoted); a process started without the
+setting serves them the session surface again, which is why the mode must be
+set on every process. Batch beta invites stay CLI-only in every mode
+([Dated beta invite batches](#dated-beta-invite-batches)).
+
+**Rotating the credential.** Set the new value as `SYSTEM_ADMIN_SERVICE_TOKEN`
+and the old one in `SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS`, restart the `service`
+process, switch the console to the new value, then remove the previous entry and
+restart again. After a suspected leak, rotate **without** a previous entry: the
+console gets `401` until it has the new value.
+
+**Residuals in `off`.** The paths are public source and `features.system_admin`
+publishes the mode, so these are not secrets, and none runs a handler or opens a
+database session: a wrong method on an admin path answers `405`, a trailing
+slash `307`, a CORS preflight is answered by the CORS middleware, and a
+`POST`/`PUT`/`PATCH` with an undecodable JSON body `422` (FastAPI decodes the
+body before it runs the gate).
+
 ## Closed-beta invite links (Issue #1581)
 
 For a deployment that runs with the **signup gate closed** (Admin → Signup
@@ -476,7 +563,7 @@ inviter) where admins can see and prune it as usual.
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `ENABLE_BETA_INVITES` | `false` | Master switch **and kill switch**. When `false` every `/api/v1/beta-invites*` route answers 404, `features.beta_invites` is `false` (the web UI shows no entry points), an `invite=` parameter on OAuth login is ignored, and **redemption at the OAuth callback is disabled too** — links already handed out stop working. Allowlist rows written by earlier redemptions are not touched; remove them on the admin signup-gate page. |
-| `BETA_INVITE_QUOTA_PER_USER` | `4` | Links a non-admin user may hold at once. Active (unused, unexpired) and redeemed links count; expired and revoked ones free their slot. System admins (`role=admin`) are uncapped. `0` lets only system admins mint. |
+| `BETA_INVITE_QUOTA_PER_USER` | `4` | Links a non-admin user may hold at once. Active (unused, unexpired) and redeemed links count; expired and revoked ones free their slot. System admins (`role=admin`) are uncapped in `SYSTEM_ADMIN_MODE=session` only; in `off` / `service` an admin-role account is capped like everyone ([System-admin surface](#system-admin-surface-issue-2767)). `0` lets only system admins mint. |
 
 The 7-day lifetime is fixed in code. Notes for operators:
 
@@ -530,8 +617,12 @@ The 7-day lifetime is fixed in code. Notes for operators:
   is recreated.
 - The invite is only consumed when the gate would otherwise have blocked the
   sign-in. Existing users, the first user, identities already on the allowlist,
-  and any deployment with the gate disabled (where `ALLOW_REGISTRATION` decides)
-  never use one up.
+  people admitted by a pending
+  [workspace invitation](#workspace-invitations-and-the-signup-gate-issue-2785)
+  addressed to their verified address, and any deployment with the gate
+  disabled (where `ALLOW_REGISTRATION` decides) never use one up. With [email sign-up](#email-sign-up-issue-1734) on, the
+  `/join` page also offers an email form; that invite is consumed only when the
+  emailed link is followed and the account is created.
 - Invitees are ordinary users and get their own quota, so invitations chain.
   `ENABLE_BETA_INVITES=false` stops the chain immediately.
 - Minting, redemption and revocation are written to the audit log as
@@ -642,8 +733,65 @@ Upgrading from a release that did not scrub these shapes:
    `DELETE /api/v1/workspaces/{workspace_id}/invitations/{invitation_id}` for
    each entry of `GET /api/v1/workspaces/{workspace_id}/invitations`, then
    invite again. A token on its own does not join the workspace — accepting
-   needs a session signed in as the invited address — so this is a precaution,
-   most relevant for invitations with a long or no expiry.
+   needs a session signed in as the invited address, verified — so this is a
+   precaution, most relevant for invitations with a long or no expiry.
+
+### Workspace invitations and the signup gate (Issue #2785)
+
+A pending workspace invitation addressed to a person admits that person as a
+new account, with the signup gate (Admin → Signup gate) on or off, for Google, GitHub and [email sign-up](#email-sign-up-issue-1734) alike —
+when the address is verified:
+
+| Sign-in | Verified address |
+|---|---|
+| Google | the account's address with `email_verified` true |
+| GitHub | the primary address, verified at GitHub (the only one the API keeps) |
+| Email sign-up | the address the sign-up link was mailed to and followed |
+
+"Pending" means the invitation exists (a revoked one is deleted), is neither
+accepted nor expired, is not an owner-role invitation, and belongs to a
+workspace that is not deleted and whose plan has `team_invitations`. A
+link-only invitation (no address) admits nobody, and an address that does not
+match exactly (ASCII, case-insensitive) admits nobody. With the gate on the
+invitation is tried after the allowlist and before a
+[beta invite](#closed-beta-invite-links-issue-1581), so an invitee who also
+carries a beta invite keeps it. A pending Google allowlist entry
+(`pending:<email>`) is likewise claimed only by a verified address.
+
+What an admission grants, and what the operator can do about it:
+
+- **The account, not the membership.** The person joins the workspace by
+  accepting the invitation, as before. Opened from the invitation link, the
+  sign-up comes back to the invitation page, which accepts it. Someone who signs
+  up from `/login` instead (or opens the email sign-up link in another browser)
+  lands without a workspace: they open the invitation link again.
+- **No count limit.** While the gate is on, every admin of a workspace whose
+  plan has `team_invitations` (and that workspace's owner API keys) can admit
+  people by inviting them. The member quota counts pending invitations at one
+  time only: revoking an invitation, or removing the member, frees the seat,
+  and the account stays. One pending invitation admits each identity that
+  proves the address until it is accepted or revoked.
+- **The record.** Each admission writes an audit row `signup_admitted`
+  (`user_metadata.admission = "workspace_invitation"`, the provider, and per
+  invitation its public id `winv_…`, workspace id and inviter, up to five, plus
+  the total). The address is stored as an HMAC only. The row commits with the
+  admission (OAuth: before the account is created; email: with the account), so
+  an admission without a record does not happen, and it stays readable after
+  the invitation row is revoked or purged.
+- **The levers.** Revoke the invitation; move the workspace off a plan with
+  `team_invitations` (its invitations then admit nobody); read `signup_admitted`
+  to see who was admitted by whose invitation. Revoking does not remove an
+  account already created.
+- **Invite an address the person controls now.**
+
+Addressed invitations need a verified address on the accepting side too:
+`GET /api/v1/invitations/pending` lists, and `POST /api/v1/invitations/accept`
+accepts, an invitation addressed to an email address only for an account whose
+address is verified (`users.email_verified_at`). Accounts without one are those
+created by the admin CLI (`@local` addresses) and OAuth accounts whose provider
+did not report the address as verified; signing in once with a provider that
+verifies the address sets it. A link-only invitation is accepted by whoever
+holds the link, as before.
 
 ## Terms-of-service acceptance (Issue #1665)
 
@@ -701,6 +849,71 @@ enforcement off again; the recorded history stays in `terms_acceptances`.
 
 Adding an account from the account switcher follows the same rule: an identity
 that has no account yet is refused until it signs up from `/login`.
+
+## Announcement email consent (Issue #2761)
+
+Announcement emails (new features, product news) go only to people who asked
+for them. The server records every answer; it sends no announcement itself.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `ANNOUNCEMENT_EMAILS_ENABLED` | `false` | `true` offers announcement emails: the sign-up screens (`/login` for Google / GitHub sign-up, `/signup/verify` for email sign-up, `/join/{token}`, the workspace invitation page) show an **unchecked** opt-in checkbox next to, never merged with, the terms checkbox, and account settings (Profile → Emails) show a toggle. `false` shows neither, `GET /api/v1/system/info` reports `announcement_consent_version: null`, and every sign-in request is exactly what it was before. |
+
+- **What is recorded.** Each answer is one row in
+  `announcement_email_consents`: the value, the version of the consent wording
+  the person saw, the source (`signup`, `settings`, `unsubscribe_link`) and the
+  time. Rows are never changed; the newest one is the current answer. A person
+  with no row never answered and gets no announcement. No IP address or user
+  agent is stored. The rows are deleted with the account.
+- **Sign-up.** The answer is recorded only when the sign-up creates the
+  account: an unchecked box records "no", a page that did not show the box
+  records nothing, an existing account keeps its answer.
+  - Google / GitHub: the answer travels on the login URL
+    (`announcement_emails`, `announcement_consent_version`), bound to the
+    OAuth `state` like the language and time zone. An answer from a link on
+    another site (`Sec-Fetch-Site: cross-site` or `none`) is ignored, and a
+    "yes" is recorded only when the sign-in finishes in the browser that
+    opened the login URL, so nobody can publish a sign-up link that opts
+    people in.
+  - Email sign-up: `/signup/verify` sends the same two fields with the
+    completion (`POST /api/v1/auth/signup/email/complete`), which carries the
+    token from the emailed link; the answer is written in the transaction
+    that creates the account.
+- **Turning it off always works.** With the variable `false`, nobody can turn
+  the emails on, but the settings toggle still turns them off and the
+  unsubscribe link still works.
+- **The wording version** is part of the code and changes with the consent
+  text. A "yes" given to older wording stays valid; a page loaded before a
+  wording change gets `409` and reloads.
+- **Senders.** Any code that sends announcement email must pick recipients
+  with `select_announcement_recipients` (`backend/src/services/
+  announcement_consent_service.py`) right before each batch: it returns only
+  people whose newest answer is "yes", whose address is verified and not a
+  local CLI address, and who have no erasure request pending, and each
+  recipient carries its `List-Unsubscribe` / `List-Unsubscribe-Post` headers
+  and the unsubscribe link for the body. Invitations, password and security
+  emails, capacity warnings and erasure notices never consult it.
+- **The unsubscribe link** is `{FRONTEND_URL}/api/v1/announcement-emails/
+  unsubscribe/<token>` (one-click, RFC 8058) and
+  `{FRONTEND_URL}/email/unsubscribe#<token>` (a page with a button). It needs
+  no sign-in, can only turn the emails off for its own account and never
+  expires. Both `POST` routes (the one-click one and the one the page posts
+  to) answer the same whether or not the link is valid. A browser that opens
+  the one-click URL (`GET`) is redirected to the page: for a valid link with
+  a token the server issues afresh in the fragment, for any other value
+  without a fragment. That check reads no database, so the redirect differs
+  between a valid and an invalid link but says nothing about whether an
+  account exists. A link from an older email still turns the emails off, also
+  after the person turned them on again later. It requires `/api/*`
+  to be routed to the API on the `FRONTEND_URL` origin, as the shipped Caddy
+  configuration does. The token in the one-click path is removed from the
+  application's request logs. The proxy's access log still records the token
+  in that path, and for the `GET` also the re-issued token in the `Location`
+  header's fragment; the proxy scrub for these paths comes with the first
+  announcement sender.
+- **Outside production** the development default `API_KEY_SECRET` is public,
+  so anyone could forge an unsubscribe link for a known account (it can only
+  turn announcement emails off). Production refuses that default at startup.
 
 ## Email + password sign-in (Issue #1678)
 
@@ -932,12 +1145,159 @@ password reset (the emailed link or `python -m src.cli.reset_password`, choices
 sign-ins, which the owner connects again from Profile; "Disable MFA only" keeps
 them. The CLI prints how many providers it disconnected.
 
+## Email sign-up (Issue #1734)
+
+`ENABLE_EMAIL_SIGNUP=true` lets a person without a Google or GitHub account
+create an account with an email address and a password. It opens nothing: the
+same sign-up controls as for Google and GitHub apply.
+
+| Signup gate | Admits an email sign-up |
+|---|---|
+| on (`/admin/signup-gate`) | a pending [workspace invitation](#workspace-invitations-and-the-signup-gate-issue-2785) addressed to the address (a link-only invitation admits nobody, as for Google / GitHub); a valid [beta invite](#closed-beta-invite-links-issue-1581) (the `/join/{token}` page); the first account of an empty deployment |
+| off | `ALLOW_REGISTRATION=true`; a pending [workspace invitation](#workspace-invitation-links) addressed to the address (a link-only invitation admits nobody, as for Google / GitHub); the first account of an empty deployment |
+
+`ALLOW_REGISTRATION` is ignored while the gate is on, for Google, GitHub and
+email alike. The manual allowlist and pending Google entries are grants to a
+provider identity and never admit an email sign-up; there is no "allow this
+address" screen.
+
+How it works:
+
+1. The person types an address (`/join/{token}`, `/invite/{token}`, or `/login`
+   when `ALLOW_REGISTRATION=true`). `POST /api/v1/auth/signup/email/request`
+   always answers `202` with the same body. After the response: if the controls
+   admit a new account at that address, a link to `/signup/verify` is emailed
+   (valid `EMAIL_SIGNUP_LINK_TTL_MINUTES`, default 60, once); if the address
+   already has an account, a notice without a link goes to that account's
+   verified address at most once a day; otherwise nothing is sent to anyone. A
+   beta invite admits at most 5 requests a day. Limits: 10 requests per client
+   address per 15 minutes (`429`), 3 per address per 15 minutes (silent). When
+   Redis cannot count, nothing is sent.
+2. The link holder chooses the password (and accepts the terms when
+   `TERMS_VERSION` is set). The controls run again when the account is created:
+   a beta invite is redeemed then, a revoked / used / expired one refuses (`403`
+   `AUTH-308`), an address that got an account meanwhile refuses (`409`
+   `AUTH-309`). The account (`user_id` `email:<uuid>`, `auth_method=password`,
+   no login id, address verified) gets a personal workspace unless a workspace
+   invitation waits, and the browser is signed in. If the session cannot be
+   written after the account was created, the answer is `503` and the person
+   signs in with the password.
+
+Requirements and operator notes:
+
+- **A real email backend** (`EMAIL_PROVIDER=resend`). The logging backend never
+  writes the link, so nobody could finish a sign-up; the API logs a warning at
+  startup when the feature is on with it.
+- **Proxy logs:** the link carries its token as `?token=`. The shipped
+  `Caddyfile.tpl` redacts every `token` query parameter (this also covers
+  `/password/reset?token=` and `/password/setup?token=`); recreate the proxy
+  container to drop lines written before. Replicate it if you run another proxy.
+- The first account of an empty deployment is admitted like the first Google /
+  GitHub sign-in, and gets the role `new_account_role` gives it.
+- Invite quota: an account created by email gets the same beta-invite quota as
+  any other.
+- Pending requests (address, hashed token, hashed invite) are deleted when the
+  sign-up completes, when a newer request for the address replaces them, and by
+  the hourly cleanup once expired. Account erasure blanks the address on the
+  account's sign-up allowlist rows (`[erased]`).
+- Audit: `user.signed_up` (`user_email` `email-signup`, address only as HMAC,
+  `user_metadata.admission`), `beta_invite.redeemed` for an invite, `terms.accepted`.
+
+The same address on a later Google or GitHub sign-in:
+
+- **Google** links to the email account (the person is signed in to it, no
+  second account) only when Google is authoritative for the mailbox: the
+  address is verified **and** it is a Google Workspace account (`hd`) or a
+  `gmail.com` / `googlemail.com` address. The owner gets a "sign-in method was
+  added" notice. The link is refused (`/login?error=email_in_use`, sign in with
+  the password and connect Google in Profile) when the account has two-step
+  verification on, is a system admin, or its owner removed a provider, or a
+  password reset removed one (`users.provider_auto_link_blocked_at`).
+- **GitHub** never links automatically: GitHub verifies an address once and
+  keeps it. The person signs in with the password and connects GitHub in
+  Profile, or confirms by email (below). The same goes for a Google sign-in
+  Google is not authoritative for.
+- In every case one `users` row exists per address: an address that differs
+  only in case is treated as the same address and refused, never a second
+  account.
+- Before enabling, check that no existing account matches the email sign-up
+  shape: `SELECT count(*) FROM users WHERE auth_method = 'password' AND login_id IS NULL;`
+  should be 0 (CLI accounts always have a login id).
+
+### Connecting GitHub to an email account by email (Issue #2786)
+
+`ENABLE_PROVIDER_LINK_CONFIRMATION` (default `true`) lets the owner of an
+account created by email sign-up connect a GitHub sign-in, or a Google
+sign-in Google is not authoritative for, without signing in with the password
+first. Only accounts created by email sign-up are concerned, so nothing
+changes on a deployment that never had `ENABLE_EMAIL_SIGNUP` on.
+
+1. The sign-in uses the address of such an account. The answer is the usual
+   `/login?error=email_in_use&link_hint=true`, whatever happens next. After
+   it, the account gets one email naming the provider account (GitHub login,
+   or the Google address) with a link to `/link/confirm?token=…`, valid 15
+   minutes, once.
+2. The link connects the provider and signs the person in only when it is
+   opened **in the browser that started the sign-in**: `/auth/{provider}/login`
+   gives that browser an HttpOnly nonce cookie (`__Host-kagura_oauth_browser`
+   in production, `kagura_oauth_browser` over plain http, 20 minutes), and the
+   confirmation is bound to it. Opened anywhere else, the page shows the
+   provider account and a "This wasn't me" button, and nothing is connected.
+   No password is asked: the mailbox and the browser are the proof.
+3. Before connecting, everything is checked again under the account's row
+   lock: an account that changed meanwhile (password, two-step verification,
+   role, address, a removed provider) or a provider account linked elsewhere
+   meanwhile links nothing. The owner gets a "sign-in method was connected"
+   notice naming the provider account. The new link proves nothing for
+   identity linking during the link window, like any newly attached provider.
+4. **"This wasn't me"** discards the link and sets
+   `users.provider_auto_link_blocked_at`: no further confirmation mails for the
+   account and no automatic Google link. Connecting a provider from Profile
+   still works.
+
+No offer is made (the answer stays `email_in_use`, nothing is mailed) when the
+account has two-step verification on, is not an ordinary `user` (a system
+admin), was blocked as above (an unlinked provider, a reset that unlinked
+one, a declined confirmation), already has a provider of that kind, when the
+provider does not report the address as verified, or when the sign-in is an
+"add another account" or identity-link proof flow.
+
+Operator notes:
+
+- **Mail:** at most 3 confirmation mails per account and 3 per provider
+  account a day; a newer sign-in by the same provider account replaces its
+  older link. When Redis cannot count, nothing is sent. With
+  `EMAIL_PROVIDER=logging` the mail is logged without its link, so nothing can
+  be connected this way; `GET /api/v1/system/info` then reports
+  `features.provider_link_confirmation: false` and the login page keeps its
+  usual hint.
+- **What degrades silently to `email_in_use`:** a sign-in started without a
+  browser cookie (an API client using the JSON mode of `/login` without
+  cookies, a native or device flow, a browser that blocks the cookie), and a
+  deployment whose provider redirect URI points at another host than the one
+  the browser calls for `/auth/{provider}/login` (the cookie never reaches the
+  callback). Both are the safe failure: nothing is offered.
+- **Proxy logs:** the link carries its token as `?token=`; the shipped
+  `Caddyfile.tpl` already redacts every `token` query parameter.
+- `ENABLE_PROVIDER_LINK_CONFIRMATION=false`: those sign-ins end at
+  `email_in_use` as before, nothing is mailed and every
+  `/api/v1/auth/link-confirm` route answers `404`.
+- Audit: `oauth_provider_link_confirmation_sent`, `oauth_provider_link_confirmed`,
+  `oauth_provider_link_confirmation_declined` (`user_email` `link-confirmation`,
+  the provider account only as an HMAC in `user_metadata.identity_hmac`).
+  Pending links live in Redis only (15 minutes); no migration.
+
 ## Which sign-in provider syncs the account's email (Issues #1811, #1875)
 
 `users.auth_provider` names the account's **primary** sign-in provider. Only
 a sign-in through it syncs the account's email and name from the identity
 provider; a sign-in through any other provider on the **Connected accounts**
 card updates nothing but that provider's last-used time.
+
+The email syncs only when no other account holds the new address in any
+letter case (#1734): otherwise the account keeps its address, the sign-in
+goes through, and the API logs `oauth_email_sync_skipped_address_in_use`
+(with an HMAC of the address, never the address).
 
 An OAuth account can have no primary provider (`auth_provider` NULL): a row
 from before the pointer existed, or an account that set a password and then

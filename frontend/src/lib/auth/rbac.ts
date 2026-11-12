@@ -90,12 +90,18 @@ export function getRoleBadgeColor(
 // ============================================================================
 
 /**
- * Check if user is a system administrator
+ * Check if user is a system administrator on this deployment
  *
  * System admins have platform-wide access, independent of workspace roles.
+ * #2767: `role === "admin"` counts only where the deployment serves the
+ * system-admin surface to sessions (`features.system_admin`); elsewhere the
+ * role grants nothing and the admin UI is hidden. Absent features ⇒ false.
  */
-export function isSystemAdmin(user: User | null | undefined): boolean {
-  return user?.role === "admin";
+export function isSystemAdmin(
+  user: User | null | undefined,
+  features: { system_admin?: boolean } | null | undefined,
+): boolean {
+  return user?.role === "admin" && features?.system_admin === true;
 }
 
 /**

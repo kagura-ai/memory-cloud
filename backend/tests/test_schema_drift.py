@@ -88,6 +88,7 @@ from db.base import Base
 # by name in this file.
 _MODEL_MODULES: tuple[str, ...] = (
     "models.analysis",
+    "models.announcement_consent",
     "models.auth",
     "models.bm25_drift",
     "models.config",

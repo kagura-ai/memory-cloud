@@ -121,8 +121,26 @@ export interface SearchDefaults {
  * flag a backend does not send reads as off.
  */
 export type SystemFeatures = Record<string, boolean> & {
+  /**
+   * #2767: this deployment serves the system-admin surface to signed-in
+   * admins (`SYSTEM_ADMIN_MODE=session`). Absent ⇒ off (fail closed).
+   */
+  system_admin?: boolean;
   /** #1582: beta invite links. Absent on backends older than #1581 ⇒ off. */
   beta_invites?: boolean;
+  /** #1734: email + password sign-up (`ENABLE_EMAIL_SIGNUP`). Absent ⇒ off. */
+  email_signup?: boolean;
+  /**
+   * #1734: `ALLOW_REGISTRATION` — anyone may sign up while the signup gate is
+   * off. Absent ⇒ off.
+   */
+  open_registration?: boolean;
+  /**
+   * #2786: an `email_in_use` sign-in may be connected to an account created
+   * by email sign-up through an emailed link (the switch is on and mail can
+   * really be sent). Per deployment, never per address. Absent ⇒ off.
+   */
+  provider_link_confirmation?: boolean;
 };
 
 export interface SystemInfo {
@@ -139,6 +157,13 @@ export interface SystemInfo {
    * backends — treat absent like null.
    */
   terms_version?: string | null;
+  /**
+   * The announcement-email consent wording version (#2761), or null when the
+   * deployment does not offer announcement emails
+   * (`ANNOUNCEMENT_EMAILS_ENABLED` off). Absent on older backends — treat like
+   * null. The sign-up pages show the opt-in checkbox only when it is set.
+   */
+  announcement_consent_version?: string | null;
   /**
    * The deployment's ChatGPT app listing URL (#2760), or null when
    * `CHATGPT_APP_URL` is empty. Absent on older backends — treat like null.

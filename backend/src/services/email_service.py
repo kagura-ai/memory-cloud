@@ -310,6 +310,96 @@ class EmailService(Protocol):
         """
         ...
 
+    async def send_signup_verification(
+        self,
+        *,
+        to_email: str,
+        verify_url: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        """Deliver an email sign-up link (Issue #1734).
+
+        Sent after ``POST /auth/signup/email/request`` when the address has
+        no account and the sign-up controls admit it. Following the link
+        proves the mailbox and lets its holder choose a password; no account
+        exists before that. The caller answers the request identically
+        whether or not anything was sent. Same redaction rules as
+        ``send_password_reset``.
+
+        Args:
+            to_email: The normalized address the person typed.
+            verify_url: Front-end ``/signup/verify`` URL embedding the raw
+                token. **Sensitive** — do not log.
+            expires_in_minutes: Link lifetime, for the body.
+            locale: ``ja`` for Japanese, anything else English.
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+        """
+        ...
+
+    async def send_signup_account_exists(
+        self,
+        *,
+        to_email: str,
+        sign_in_url: str,
+        reset_url: str,
+        locale: str | None,
+    ) -> bool:
+        """Tell an address that asked to sign up that it already has an account (#1734).
+
+        Sent instead of a sign-up link, at most once a day per address, only
+        to an address the account verified and only when the request would
+        otherwise have been admitted. Carries no token. The account may have
+        been created with Google or GitHub, so the body names every way back
+        in. The recipient is logged only as a digest.
+
+        Args:
+            to_email: The account's verified address.
+            sign_in_url: Front-end ``/login`` URL (no token).
+            reset_url: Front-end forgotten-password URL (no token).
+            locale: ``ja`` for Japanese, anything else English.
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+        """
+        ...
+
+    async def send_provider_link_confirmation(
+        self,
+        *,
+        to_email: str,
+        confirm_url: str,
+        provider_label: str,
+        provider_login: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        """Ask the owner of an email sign-up account to confirm a provider link (#2786).
+
+        Sent after a GitHub sign-in (or a Google one without authority over
+        the mailbox) tried to use the account's address. Opened in the
+        browser that started that sign-in, the link connects the provider
+        account to this account; opened anywhere else it connects nothing.
+        The body names the provider account and says what forwarding the
+        link would do. Same redaction rules as ``send_password_reset``.
+
+        Args:
+            to_email: The account's verified address.
+            confirm_url: Front-end ``/link/confirm`` URL embedding the raw
+                token. **Sensitive** — do not log.
+            provider_label: ``GitHub`` or ``Google``.
+            provider_login: The provider account (GitHub login, or the Google
+                address), already restricted to the provider's alphabet.
+            expires_in_minutes: Link lifetime, for the body.
+            locale: ``ja`` for Japanese, anything else English.
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+        """
+        ...
+
     async def send_security_notification(
         self,
         *,
@@ -643,6 +733,72 @@ class LoggingEmailService:
             expires_in_minutes=expires_in_minutes,
             email_dispatch_required=True,
             template="password_setup",
+        )
+        return True
+
+    async def send_signup_verification(
+        self,
+        *,
+        to_email: str,
+        verify_url: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        # The URL carries the token: never logged. With this backend no link
+        # can be followed, so email sign-up needs a real provider (#1734).
+        del verify_url
+        logger.info(
+            "signup_verification_email",
+            recipient_hash=redact_recipient(to_email),
+            purpose="email_signup",
+            expires_in_minutes=expires_in_minutes,
+            locale=locale,
+            email_dispatch_required=True,
+            template="signup_verification",
+        )
+        return True
+
+    async def send_signup_account_exists(
+        self,
+        *,
+        to_email: str,
+        sign_in_url: str,
+        reset_url: str,
+        locale: str | None,
+    ) -> bool:
+        del sign_in_url, reset_url
+        logger.info(
+            "signup_account_exists_email",
+            recipient_hash=redact_recipient(to_email),
+            purpose="email_signup",
+            locale=locale,
+            email_dispatch_required=True,
+            template="signup_account_exists",
+        )
+        return True
+
+    async def send_provider_link_confirmation(
+        self,
+        *,
+        to_email: str,
+        confirm_url: str,
+        provider_label: str,
+        provider_login: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        # The URL carries the token: never logged. With this backend no link
+        # can be followed, so nothing can be connected this way (#2786).
+        del confirm_url, provider_login
+        logger.info(
+            "provider_link_confirmation_email",
+            recipient_hash=redact_recipient(to_email),
+            purpose="provider_link_confirm",
+            provider=provider_label,
+            expires_in_minutes=expires_in_minutes,
+            locale=locale,
+            email_dispatch_required=True,
+            template="provider_link_confirmation",
         )
         return True
 

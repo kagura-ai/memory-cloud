@@ -142,3 +142,37 @@ class TermsService:
         await self.db.commit()
         logger.info("terms_accepted", user_id=user_id, version=version, source=source)
         return RecordResult(version=version, recorded=True)
+
+    def stage_initial_acceptance(
+        self,
+        *,
+        user_id: str,
+        user_email: str,
+        version: str,
+        source: TermsAcceptanceSource,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> None:
+        """Stage the first acceptance of a brand-new account; never commits (#1734).
+
+        For the email sign-up completion, which creates the ``users`` row and
+        must commit it together with the acceptance, the gate's writes and the
+        audit row, or not at all. No lock and no "already accepted" check: the
+        account is new and not yet visible to anyone else. The caller flushes
+        the new ``User`` first (the acceptance's foreign key) and commits.
+        """
+        acceptance = TermsAcceptance(
+            id=uuid.uuid4(), user_id=user_id, version=version, source=source
+        )
+        self.db.add(acceptance)
+        self.db.add(
+            AuditLog(
+                user_email=user_email,
+                user_id=user_id,
+                action=TERMS_ACCEPTED_ACTION,
+                resource=f"terms_acceptance:{acceptance.id}",
+                user_metadata={"version": version},
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        )

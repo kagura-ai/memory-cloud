@@ -29,6 +29,11 @@
  * #1665: when the deployment reports a `terms_version`, the sign-up URL carries
  * it as `accepted_terms`; the backend records it with the new account.
  *
+ * #1734: with `features.email_signup` the invite also works without a Google
+ * or GitHub account: "Sign up with email" sends a link to the address, with
+ * the token (the backend redeems it when the account is created). Without any
+ * provider the form replaces the "no sign-up method" text.
+ *
  * Next.js 15: params is a Promise and must be unwrapped with React.use()
  */
 
@@ -64,6 +69,8 @@ import { Button } from "@/components/ui/button";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { AnnouncementEmailsOptIn } from "@/components/auth/AnnouncementEmailsOptIn";
+import { EmailSignupForm } from "@/components/auth/EmailSignupForm";
 import { INVITE_HANDOFF_TEST_IDS as T } from "@/components/auth/invite-handoff.testids";
 
 type PageState =
@@ -158,6 +165,7 @@ function JoinLoading() {
 
 function JoinContent({ token }: { token: string }) {
   const t = useTranslations("betaInvites");
+  const tEmail = useTranslations("emailSignup");
   const locale = useLocale();
   const features = useSystemFeatures();
   // #1665: the terms version the checkbox refers to, when the deployment has
@@ -166,6 +174,9 @@ function JoinContent({ token }: { token: string }) {
   const systemInfo = useSystemInfo();
   const systemInfoPending = systemInfo === null;
   const termsVersion = systemInfo?.terms_version ?? undefined;
+  // #2761: the announcement-email consent wording, when offered.
+  const announcementVersion =
+    systemInfo?.announcement_consent_version ?? undefined;
   const searchParams = useSearchParams();
   // #1665: the login endpoint sends an invite sign-up without the current
   // terms version back here with this token (the version changed while the
@@ -175,6 +186,8 @@ function JoinContent({ token }: { token: string }) {
   // #1655: the validated destination, or undefined. Never parsed for a token.
   const returnTo = safeReturnTo(searchParams.get("return_to"), origin);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
+  // #2761: unchecked by default; never gates the sign-up buttons.
+  const [announcementOptIn, setAnnouncementOptIn] = useState(false);
   const [probe, setProbe] = useState<Probe>({ kind: "pending" });
   // Bumped by Retry to run the probes again.
   const [attempt, setAttempt] = useState(0);
@@ -241,6 +254,11 @@ function JoinContent({ token }: { token: string }) {
       {
         invite: token,
         acceptedTerms: termsVersion,
+        // #2761: sent (ticked or not) only when the checkbox was shown.
+        announcementEmails:
+          announcementVersion !== undefined
+            ? { value: announcementOptIn, version: announcementVersion }
+            : undefined,
       },
     );
   };
@@ -294,6 +312,16 @@ function JoinContent({ token }: { token: string }) {
                 themed
                 testId={T.joinTerms}
               />
+              {announcementVersion !== undefined && (
+                <div className="mt-3">
+                  <AnnouncementEmailsOptIn
+                    checked={announcementOptIn}
+                    onCheckedChange={setAnnouncementOptIn}
+                    themed
+                    testId={T.joinAnnouncementOptIn}
+                  />
+                </div>
+              )}
             </div>
           )}
           {probe.providers.includes("google") && (
@@ -321,7 +349,26 @@ function JoinContent({ token }: { token: string }) {
               {t("join.valid.continueWithGitHub")}
             </Button>
           )}
-          {probe.providers.length === 0 && (
+          {features?.email_signup === true && (
+            <>
+              {probe.providers.length > 0 && (
+                <div className="my-4 flex items-center gap-3">
+                  <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                  <span className="text-sm text-gray-500 dark:text-gray-400">
+                    {tEmail("request.divider")}
+                  </span>
+                  <div className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+                </div>
+              )}
+              <EmailSignupForm
+                invite={token}
+                returnTo={returnTo}
+                defaultOpen={probe.providers.length === 0}
+                themed
+              />
+            </>
+          )}
+          {probe.providers.length === 0 && features?.email_signup !== true && (
             <p className="text-center text-sm text-gray-600 dark:text-gray-400">
               {t("join.valid.noProviders")}
             </p>

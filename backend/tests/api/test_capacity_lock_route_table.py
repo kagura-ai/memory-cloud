@@ -39,6 +39,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "admin_referrals": NOT_APPLICABLE,
     "admin_signup_gate": NOT_APPLICABLE,
     "admin_sleep": NOT_APPLICABLE,
+    "announcement_emails": NOT_APPLICABLE,  # #2761: the caller's own consent; public unsubscribe
     "api_keys": NOT_APPLICABLE,
     "auth": NOT_APPLICABLE,
     "beta_invites": NOT_APPLICABLE,
@@ -47,6 +48,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "config": NOT_APPLICABLE,
     "connectors_slack": NOT_APPLICABLE,
     "cost_aggregation": NOT_APPLICABLE,
+    "email_signup": NOT_APPLICABLE,
     "external_keys": NOT_APPLICABLE,
     "internal_billing": NOT_APPLICABLE,
     "invitations": NOT_APPLICABLE,
@@ -63,6 +65,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "oidc": NOT_APPLICABLE,  # #2781: account identity, no memory content access
     "passkeys": NOT_APPLICABLE,  # Personal sign-in credentials are independent of workspace capacity.
     "password": NOT_APPLICABLE,
+    "provider_link_confirm": NOT_APPLICABLE,  # #2786: a sign-in method, no memory content
     "referrals": NOT_APPLICABLE,
     "secrets": NOT_APPLICABLE,
     "system": NOT_APPLICABLE,

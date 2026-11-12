@@ -183,6 +183,10 @@ class AccountLinkingService:
             raise ConflictError("Cannot unlink the only remaining sign-in method")
 
         await self.db.delete(target)
+        # #1734: an explicit removal is the owner's decision; a later Google
+        # sign-in with the account's address must not quietly add it back.
+        # Connecting a provider from Profile (fresh proof) still works.
+        user.provider_auto_link_blocked_at = utcnow()
         # Edge case 7: repoint the legacy "primary" pointer off the removed
         # provider. For an OAuth account it follows the sign-in rule
         # (``RoleManager._adopt_primary_provider``): only the identity the

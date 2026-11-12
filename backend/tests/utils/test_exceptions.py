@@ -1,5 +1,7 @@
 """Tests for custom exceptions."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from config.constants import GATE_ALLOWLIST, GATE_DEPLOYMENT, GATE_PLAN, GATE_QUOTA
@@ -30,6 +32,8 @@ from utils.exceptions import (
     QuotaExceededError,
     RateLimitError,
     RedisError,
+    SignupSessionUnavailableError,
+    SurfaceSwitchedOffError,
     TokenExpiredError,
     TokenRevokedError,
     ValidationError,
@@ -401,3 +405,36 @@ class TestConfigAndInternalErrors:
         exc = NotFoundException("test")
         assert isinstance(exc, MemoryCloudException)
         assert isinstance(exc, Exception)
+
+
+class TestHandlerLogLevel:
+    """Typed exceptions that replace a raw ``HTTPException`` keep its ``warning``.
+
+    The raw one is logged at ``warning`` by ``http_exception_handler``; a
+    switched-off route probed from outside, or a sign-in whose session could
+    not be opened, must not start logging at ``error`` because it became typed.
+    """
+
+    @pytest.mark.parametrize(
+        "exc,level",
+        [
+            (SurfaceSwitchedOffError(), "warning"),
+            (SignupSessionUnavailableError(), "warning"),
+            (MemoryCloudException("boom"), "error"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_level(self, monkeypatch, exc, level) -> None:
+        import api.main as main_module
+
+        logger = MagicMock()
+        monkeypatch.setattr(main_module, "logger", logger)
+        request = MagicMock()
+        request.url.path = "/api/v1/x"
+
+        response = await main_module.memory_cloud_exception_handler(request, exc)
+
+        assert response.status_code == exc.status_code
+        getattr(logger, level).assert_called_once()
+        other = "error" if level == "warning" else "warning"
+        getattr(logger, other).assert_not_called()

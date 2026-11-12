@@ -49,6 +49,13 @@ _INVITE_TOKEN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # ...&return_to=https%3A%2F%2Fapp%2Finvite%2F<token> — the token alphabet is
     # unreserved, so it is the one part of the URL that encoding leaves as is.
     (re.compile(r"(%2[Ff]invite%2[Ff])" + _TOKEN_SHAPE), r"\1" + _INVITE_TOKEN_PLACEHOLDER),
+    # #2761: /api/v1/announcement-emails/unsubscribe/<token> — the one-click
+    # unsubscribe link. It never expires and names an account, so any segment
+    # in that slot goes.
+    (
+        re.compile(r"(/announcement-emails/unsubscribe/)[^/?#\s\"'<>]+"),
+        r"\1" + _INVITE_TOKEN_PLACEHOLDER,
+    ),
 )
 # Cheap substring gate so the hot logging path pays for a regex only when one
 # of these shapes can actually be present. "invite%2" covers both cases of the
@@ -60,6 +67,7 @@ _INVITE_TOKEN_MARKERS = (
     "/v1/invitations/",
     "/invite/",
     "invite%2",
+    "/announcement-emails/unsubscribe/",
 )
 
 
@@ -73,8 +81,10 @@ def redact_invite_tokens(text: str) -> str:
     writer) runs its text through here. A workspace invitation token
     (``/api/v1/invitations/<token>``, ``/invite/<token>``) is a single-use
     join credential that lives up to a year, or has no expiry, and is handled
-    the same way. Everything that is not one of the invite URL shapes is
-    returned unchanged.
+    the same way, and so is the announcement unsubscribe link
+    (``/api/v1/announcement-emails/unsubscribe/<token>``, #2761), which never
+    expires. Everything that is not one of these URL shapes is returned
+    unchanged.
 
     Args:
         text: A request path, a full URL, or an already-rendered log line.

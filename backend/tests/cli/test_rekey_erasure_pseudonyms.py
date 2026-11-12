@@ -15,6 +15,7 @@ import asyncio
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -260,6 +261,51 @@ class TestTheResourceRewrite:
         values = {**VALUES, shifted: "f" * 64}
         resource = f"{'x' * 221}ab{P[:32]}"
         assert cli.rekeyed_resource(resource, P, SUBS, values, sorted(values), 255) == resource
+
+
+class TestTheMetadataRewrite:
+    """Subjects in ``user_metadata``: top-level keys and the #2785 invitation list."""
+
+    @staticmethod
+    def _change(metadata: object) -> dict[str, object]:
+        row = SimpleNamespace(
+            user_id="someone-else",
+            user_email="x@example.com",
+            resource="workspace:1",
+            user_metadata=metadata,
+        )
+        return cli._audit_change(row, SUBS, VALUES, KEYS, 255)
+
+    def test_top_level_keys(self):
+        assert self._change({"inviter_user_id": P, "initiated_by": OTHER, "keep": E}) == {
+            "user_metadata": {"inviter_user_id": NEW[P], "initiated_by": NEW[OTHER], "keep": E}
+        }
+
+    def test_the_inviters_of_an_admission_record(self):
+        metadata = {
+            "admission": "workspace_invitation",
+            "invitations": [
+                {"id": "a", "invited_by": P},
+                {"id": "b", "invited_by": "not-a-pseudonym"},
+                {"id": "c"},
+                "text",
+            ],
+        }
+        assert self._change(metadata) == {
+            "user_metadata": {
+                "admission": "workspace_invitation",
+                "invitations": [
+                    {"id": "a", "invited_by": NEW[P]},
+                    {"id": "b", "invited_by": "not-a-pseudonym"},
+                    {"id": "c"},
+                    "text",
+                ],
+            }
+        }
+
+    def test_nothing_to_re_key(self):
+        assert self._change({"invitations": [{"invited_by": "x"}], "target_user_id": E}) == {}
+        assert self._change(["not", "a", "dict"]) == {}
 
 
 class TestTheColumnList:

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser
+from auth.system_admin_mode import session_admin_enabled
 from config.constants import APP_VERSION
 from db.base import get_db
 
@@ -115,6 +116,7 @@ async def system_info():
     """
     from config.settings import get_settings
     from repositories.config_repository import new_search_config_defaults
+    from services.announcement_consent_service import ANNOUNCEMENT_CONSENT_WORDING_VERSION
 
     settings = get_settings()
 
@@ -140,11 +142,22 @@ async def system_info():
         # TERMS_VERSION is empty (server-side acceptance disabled). The sign-in
         # pages send it back as ``accepted_terms`` once the box is ticked.
         "terms_version": settings.terms_version or None,
+        # Issue #2761: the announcement-email consent copy version, or null
+        # when ANNOUNCEMENT_EMAILS_ENABLED is off. The sign-up pages show the
+        # opt-in checkbox only when it is set and send it back with the answer.
+        "announcement_consent_version": (
+            ANNOUNCEMENT_CONSENT_WORDING_VERSION if settings.announcement_emails_enabled else None
+        ),
         # Issue #2760: the deployment's ChatGPT app listing, or null when
         # CHATGPT_APP_URL is empty. A public listing URL (https only, checked at
         # startup); the web UI links to it next to the plugin guide.
         "chatgpt_app_url": settings.chatgpt_app_url or None,
         "features": {
+            # Issue #2767: true only when this process serves the system-admin
+            # surface to signed-in admins (SYSTEM_ADMIN_MODE=session). The web
+            # UI hides the admin menu and /admin/* otherwise (also in service
+            # mode, where only the operator console reaches it).
+            "system_admin": session_admin_enabled(),
             "neural_memory": settings.enable_neural_memory,
             "research_tools": settings.enable_research_tools,
             # Issue #1145: the web UI hides the Plan page + nav entry unless this
@@ -176,6 +189,20 @@ async def system_info():
             # never the per-user quota (the inviter reads that from
             # /beta-invites/me once signed in).
             "beta_invites": settings.enable_beta_invites,
+            # Issue #1734: default-off. When false every /auth/signup/email
+            # route 404s and the web UI shows no email sign-up form.
+            "email_signup": settings.enable_email_signup,
+            # Issue #1734: ALLOW_REGISTRATION as configured (env only, no DB
+            # read on this public endpoint). It is ignored while the signup
+            # gate is on, for Google / GitHub as for email; invitation pages
+            # read the invitation preview's ``email_signup_available``.
+            "open_registration": settings.allow_registration,
+            # Issue #2786: whether a sign-in that ends at email_in_use may have
+            # mailed a confirmation link to an email sign-up account. Per
+            # deployment, never per account: the login page words its hint
+            # by it. False when mail goes to the log (no link can be followed).
+            "provider_link_confirmation": settings.enable_provider_link_confirmation
+            and settings.email_provider != "logging",
             # Issue #1572: false when ENABLE_RERANKING is off or the self_hosted
             # default has no endpoint; the web UI then disables the reranker card.
             "reranking": settings.enable_reranking and rerank_configured,

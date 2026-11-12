@@ -18,6 +18,7 @@ from sqlalchemy.pool import NullPool
 from api.main import app
 from auth.dependencies import (
     get_current_user,
+    get_current_user_optional,
     get_user_from_api_key_or_session,
     require_session_auth,
 )
@@ -96,6 +97,8 @@ def authed_client(db_engine):
                 await session.rollback()
 
     app.dependency_overrides[get_current_user] = override_user
+    # #2767: require_admin reads the session through get_current_user_optional.
+    app.dependency_overrides[get_current_user_optional] = override_user
     app.dependency_overrides[get_user_from_api_key_or_session] = override_user
     app.dependency_overrides[require_session_auth] = override_user
     app.dependency_overrides[get_db] = override_db

@@ -1110,6 +1110,62 @@
         ],
         "type": "object"
       },
+      "AnnouncementEmailsResponse": {
+        "properties": {
+          "announcement_emails": {},
+          "answered": {},
+          "offered": {},
+          "recorded_at": {},
+          "source": {},
+          "wording_version": {}
+        },
+        "required": [
+          "announcement_emails",
+          "answered",
+          "offered"
+        ],
+        "type": "object"
+      },
+      "AnnouncementEmailsUpdateRequest": {
+        "properties": {
+          "announcement_emails": {
+            "type": "boolean"
+          },
+          "wording_version": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "announcement_emails"
+        ],
+        "type": "object"
+      },
+      "AnnouncementEmailsUpdateResponse": {
+        "properties": {
+          "announcement_emails": {},
+          "answered": {},
+          "offered": {},
+          "recorded": {},
+          "recorded_at": {},
+          "source": {},
+          "wording_version": {}
+        },
+        "required": [
+          "announcement_emails",
+          "answered",
+          "offered",
+          "recorded"
+        ],
+        "type": "object"
+      },
       "AuditVerifyResponse": {
         "properties": {
           "broken_at": {
@@ -3855,6 +3911,172 @@
         },
         "required": [
           "redirect_uris"
+        ],
+        "type": "object"
+      },
+      "EmailSignupAcceptedResponse": {
+        "properties": {
+          "message": {
+            "default": "If this address can be used to sign up, we sent a link to it.",
+            "type": "string"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "EmailSignupCompleteBody": {
+        "properties": {
+          "accepted_terms": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "announcement_consent_version": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "announcement_emails": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "new_password": {
+            "type": "string"
+          },
+          "return_to": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "token": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "new_password",
+          "token"
+        ],
+        "type": "object"
+      },
+      "EmailSignupCompleteResponse": {
+        "properties": {
+          "redirect_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "redirect_url"
+        ],
+        "type": "object"
+      },
+      "EmailSignupPreviewResponse": {
+        "properties": {
+          "email": {},
+          "expires_at": {}
+        },
+        "required": [
+          "email",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "EmailSignupRequestBody": {
+        "properties": {
+          "email": {
+            "maxLength": 254,
+            "minLength": 3,
+            "type": "string"
+          },
+          "invite": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "maxLength": 16,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "type": "object"
+      },
+      "EmailSignupTokenBody": {
+        "properties": {
+          "token": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
         ],
         "type": "object"
       },
@@ -8465,6 +8687,49 @@
         ],
         "type": "object"
       },
+      "ProviderLinkCompleteResponse": {
+        "properties": {
+          "redirect_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "redirect_url"
+        ],
+        "type": "object"
+      },
+      "ProviderLinkPreviewResponse": {
+        "properties": {
+          "expires_at": {},
+          "provider": {},
+          "provider_avatar_url": {},
+          "provider_login": {},
+          "provider_name": {},
+          "same_browser": {}
+        },
+        "required": [
+          "expires_at",
+          "provider",
+          "provider_avatar_url",
+          "provider_login",
+          "provider_name",
+          "same_browser"
+        ],
+        "type": "object"
+      },
+      "ProviderLinkTokenBody": {
+        "properties": {
+          "token": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
       "ProvidersListResponse": {
         "properties": {
           "providers": {
@@ -11725,6 +11990,27 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "UnsubscribeAcceptedResponse": {
+        "properties": {
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UnsubscribeRequest": {
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
         ],
         "type": "object"
       },
@@ -17130,6 +17416,110 @@
         ]
       }
     },
+    "/api/v1/announcement-emails/unsubscribe": {
+      "post": {
+        "operationId": "unsubscribe_from_page_api_v1_announcement_emails_unsubscribe_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnsubscribeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsubscribeAcceptedResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
+        ]
+      }
+    },
+    "/api/v1/announcement-emails/unsubscribe/{token}": {
+      "get": {
+        "operationId": "open_unsubscribe_link_api_v1_announcement_emails_unsubscribe__token__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
+        ]
+      },
+      "post": {
+        "operationId": "one_click_unsubscribe_api_v1_announcement_emails_unsubscribe__token__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnsubscribeAcceptedResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
+        ]
+      }
+    },
     "/api/v1/attachments/memories/{memory_id}": {
       "get": {
         "deprecated": true,
@@ -17624,6 +18014,36 @@
                 }
               ]
             }
+          },
+          {
+            "in": "query",
+            "name": "announcement_emails",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "announcement_consent_version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
           }
         ],
         "responses": {
@@ -17852,6 +18272,36 @@
                 }
               ]
             }
+          },
+          {
+            "in": "query",
+            "name": "announcement_emails",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "announcement_consent_version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
           }
         ],
         "responses": {
@@ -17876,6 +18326,112 @@
           "authentication",
           "authentication",
           "google-oauth2"
+        ]
+      }
+    },
+    "/api/v1/auth/link-confirm/cancel": {
+      "post": {
+        "operationId": "cancel_provider_link_api_v1_auth_link_confirm_cancel_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderLinkTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/link-confirm/complete": {
+      "post": {
+        "operationId": "complete_provider_link_api_v1_auth_link_confirm_complete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderLinkTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderLinkCompleteResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/link-confirm/preview": {
+      "post": {
+        "operationId": "preview_provider_link_api_v1_auth_link_confirm_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderLinkTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderLinkPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
         ]
       }
     },
@@ -18826,6 +19382,120 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ProvidersResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/signup/email/complete": {
+      "post": {
+        "operationId": "complete_email_signup_api_v1_auth_signup_email_complete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailSignupCompleteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailSignupCompleteResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/signup/email/preview": {
+      "post": {
+        "operationId": "preview_email_signup_api_v1_auth_signup_email_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailSignupTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailSignupPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/signup/email/request": {
+      "post": {
+        "operationId": "request_email_signup_api_v1_auth_signup_email_request_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailSignupRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailSignupAcceptedResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -24217,6 +24887,104 @@
         "tags": [
           "account-erasure",
           "account-linking"
+        ]
+      }
+    },
+    "/api/v1/me/announcement-emails": {
+      "get": {
+        "operationId": "get_announcement_emails_api_v1_me_announcement_emails_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnouncementEmailsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
+        ]
+      },
+      "put": {
+        "operationId": "update_announcement_emails_api_v1_me_announcement_emails_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnnouncementEmailsUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnouncementEmailsUpdateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "announcement-emails"
         ]
       }
     },
@@ -33391,6 +34159,9 @@
     },
     {
       "name": "analyses"
+    },
+    {
+      "name": "announcement-emails"
     },
     {
       "name": "api-keys"

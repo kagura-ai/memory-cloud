@@ -41,10 +41,13 @@ import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import LinkedAccounts from "@/components/auth/LinkedAccounts";
 import PasskeySettings from "@/components/auth/PasskeySettings";
 import { usePasswordSetup } from "@/hooks/usePasswordSetup";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { isSystemAdmin } from "@/lib/auth/rbac";
 import { PreferencesRefreshError, saveUserPreferences } from "@/lib/auth/saveUserPreferences";
 import PasswordSettings from "@/components/auth/PasswordSettings";
 import { MfaSettings } from "@/components/auth/MfaSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
+import { AnnouncementEmailSettings } from "@/components/account/AnnouncementEmailSettings";
 import {
   getSignInMethodLabel,
   getProviderName,
@@ -57,6 +60,7 @@ const sections = [
   ["profile-linked-accounts", "linkedAccounts"],
   ["profile-password", "password"],
   ["profile-appearance", "appearance"],
+  ["profile-emails", "emails"],
   ["profile-deletion", "deletion"],
 ] as const;
 
@@ -64,6 +68,8 @@ export default function ProfilePage() {
   const t = useTranslations("profile");
   const tCommon = useTranslations("common");
   const { user, refetchUser } = useAuth();
+  // #2767: the System Administrator field only where the role grants something.
+  const systemFeatures = useSystemFeatures();
   const passwordSetup = usePasswordSetup(user?.id);
   const { toast } = useToast();
   const [isEditMode, setIsEditMode] = useState(false);
@@ -71,6 +77,10 @@ export default function ProfilePage() {
   // #1678: bumped when Connected Accounts unlinks a provider, so the Password
   // section re-reads how many sign-in methods would remain.
   const [hasPasskey, setHasPasskey] = useState(false);
+  // #2761: the Emails card hides itself while the deployment does not offer
+  // announcement emails (and the setting is off); its link and its section
+  // landmark go with it, and nothing shows before the card is known to show.
+  const [showEmails, setShowEmails] = useState(false);
   const [providersVersion, setProvidersVersion] = useState(0);
   // #1751: the linked OAuth providers, for the Sign-in method field and the
   // refresh-from-IdP block, tagged with the user they were read for. Until
@@ -298,7 +308,9 @@ export default function ProfilePage() {
 
       <PageSectionNavigation
         label={t("sections.label")}
-        sections={sections.map(([id, key]) => ({ id, label: t(`sections.${key}`) }))}
+        sections={sections
+          .filter(([id]) => id !== "profile-emails" || showEmails)
+          .map(([id, key]) => ({ id, label: t(`sections.${key}`) }))}
       />
 
       {/* Profile Information */}
@@ -449,7 +461,7 @@ export default function ProfilePage() {
                 <p className="text-xs text-slate-500">{t("localeDesc")}</p>
               </div>
 
-              {user.role === "admin" && (
+              {isSystemAdmin(user, systemFeatures) && (
                 <div className="space-y-2">
                   <Label htmlFor="role">{t("systemRole")}</Label>
                   <Input
@@ -542,6 +554,12 @@ export default function ProfilePage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Announcement emails (Issue #2761): opt in / out, history kept server-side.
+          Mounted always (the card asks the server whether it shows), but
+          hidden until it does: no empty landmark or skeleton on deployments
+          that do not offer the emails. */}
+      <section id="profile-emails" tabIndex={-1} aria-label={t("sections.emails")} hidden={!showEmails} className="scroll-mt-24"><AnnouncementEmailSettings key={`emails-${user?.id}`} onVisibilityChange={setShowEmails} /></section>
 
       {/* Danger zone: self-serve account & data deletion (Issue #953) */}
       <section id="profile-deletion" tabIndex={-1} aria-label={t("sections.deletion")} className="scroll-mt-24"><DeleteAccountSection /></section>

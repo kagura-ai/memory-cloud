@@ -78,6 +78,12 @@ def _user_id_unique_violation() -> IntegrityError:
     )
 
 
+# #1734: the new-user path takes the per-address advisory lock and then reads
+# the accounts holding the address (``scalars().all()``) before the insert.
+_LOCK = object()
+_NO_HOLDERS: dict = {"holders": []}
+
+
 def _execute_returns(*results):
     """Build a side_effect list of MagicMock execute results.
 
@@ -93,7 +99,11 @@ def _execute_returns(*results):
     side_effects = []
     for r in results:
         result_mock = MagicMock()
-        if isinstance(r, dict) and "scalar" in r:
+        if r is _LOCK:
+            pass
+        elif isinstance(r, dict) and "holders" in r:
+            result_mock.scalars.return_value.all.return_value = list(r["holders"])
+        elif isinstance(r, dict) and "scalar" in r:
             result_mock.scalar = MagicMock(return_value=r["scalar"])
             result_mock.scalar_one_or_none = MagicMock(return_value=None)
         else:
@@ -105,7 +115,10 @@ def _execute_returns(*results):
 
 def _make_db_mock(execute_results):
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=execute_results)
+    # #1734: an email sync ends with the address lock and the lookup of
+    # another account holding the new address (none here). A sync is the
+    # last DB work of ensure_user, so tests that do not sync never reach them.
+    db.execute = AsyncMock(side_effect=[*execute_results, *_execute_returns(_LOCK, None)])
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
     db.add = MagicMock()
@@ -310,7 +323,11 @@ class TestLinkedProviderSkipsSync:
         itself goes through.
         """
         race_existing = _user_row(email="alice@old.com", name="Alice", auth_provider=None)
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, _oauth_link_row()))
+        db = _make_db_mock(
+            _execute_returns(
+                None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, _oauth_link_row()
+            )
+        )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with _patch_get_db(db):
@@ -448,7 +465,9 @@ class TestAdoptsAPrimaryProvider:
         (the row is selected by ``(provider, oauth_sub == user_id)``)."""
         race_existing = self._account()
         link = self._link(oauth_sub="u1", linked=linked)
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link))
+        db = _make_db_mock(
+            _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, link)
+        )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         await self._sign_in(role_manager, db, sub="u1", provider="google")
@@ -464,7 +483,9 @@ class TestAdoptsAPrimaryProvider:
         no sync, nothing committed."""
         race_existing = self._account()
         link_row = None if link is None else self._link(user_id=link, linked=timedelta(days=30))
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link_row))
+        db = _make_db_mock(
+            _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, link_row)
+        )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with (
@@ -631,7 +652,7 @@ class TestCreatePath:
     async def test_first_user_gets_admin(self, role_manager):
         # Sequence (#517 NEW path, #938 no legacy fallback): link lookup miss →
         # count=0 → commit succeeds.
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}))
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS))
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(
@@ -650,7 +671,7 @@ class TestCreatePath:
     async def test_second_user_gets_user(self, role_manager):
         # Sequence (#517 NEW path, #938 no legacy fallback): link lookup miss →
         # count=1 → commit succeeds.
-        db = _make_db_mock(_execute_returns(None, {"scalar": 1}))
+        db = _make_db_mock(_execute_returns(None, {"scalar": 1}, _LOCK, _NO_HOLDERS))
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(
@@ -686,7 +707,9 @@ class TestCreatePath:
         # Known provider also inserts a UserOAuthProvider row in the create
         # unit of work (rolled back with the user on the race).
         link = _oauth_link_row()
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link))
+        db = _make_db_mock(
+            _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, link)
+        )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with _patch_get_db(db):
@@ -712,7 +735,7 @@ class TestCreatePath:
     @pytest.mark.asyncio
     async def test_new_user_takes_the_sign_in_page_prefs(self, role_manager):
         """#2700: the language / time zone the sign-in page carried."""
-        db = _make_db_mock(_execute_returns(None, {"scalar": 1}))
+        db = _make_db_mock(_execute_returns(None, {"scalar": 1}, _LOCK, _NO_HOLDERS))
 
         with _patch_get_db(db):
             await role_manager.ensure_user(
@@ -739,7 +762,7 @@ class TestCreatePath:
         (asserted against a real table in tests/integration)."""
         from models.auth import User
 
-        db = _make_db_mock(_execute_returns(None, {"scalar": 1}))
+        db = _make_db_mock(_execute_returns(None, {"scalar": 1}, _LOCK, _NO_HOLDERS))
 
         with _patch_get_db(db):
             await role_manager.ensure_user(
@@ -764,7 +787,9 @@ class TestCreatePath:
         race_existing.locale = "en"
         race_existing.timezone = "America/New_York"
         link = _oauth_link_row()
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link))
+        db = _make_db_mock(
+            _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, link)
+        )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with _patch_get_db(db):
@@ -786,7 +811,7 @@ class TestCreatePath:
     async def test_email_collision_on_create_raises_conflict(self, role_manager):
         # #517 NEW path (#938 legacy fallback removed): link lookup MISS → count=5
         # → commit raises → re-lookup also miss → ConflictError.
-        db = _make_db_mock(_execute_returns(None, {"scalar": 5}, None))
+        db = _make_db_mock(_execute_returns(None, {"scalar": 5}, _LOCK, _NO_HOLDERS, None))
         db.commit = AsyncMock(side_effect=_email_unique_violation())
 
         with _patch_get_db(db), structlog.testing.capture_logs() as logs:
@@ -883,7 +908,7 @@ class TestEmailVerifiedAt:
     @pytest.mark.parametrize(("verified", "expect_set"), [(True, True), (False, False)])
     @pytest.mark.asyncio
     async def test_new_user(self, role_manager, verified, expect_set):
-        db = _make_db_mock(_execute_returns(None, {"scalar": 1}))
+        db = _make_db_mock(_execute_returns(None, {"scalar": 1}, _LOCK, _NO_HOLDERS))
         with _patch_get_db(db):
             await role_manager.ensure_user(
                 email="new@example.com",

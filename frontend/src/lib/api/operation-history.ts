@@ -15,7 +15,8 @@ export interface HistoryItem {
   actor_user_id: string | null;
   actor_name: string | null;
   subject_user_id: string | null;
-  principal_kind: "session" | "api_key" | "oauth" | "resource_token" | "management_grant" | "system" | "unknown";
+  // #2767: "operator" = a service operator (staff); stored without an actor id.
+  principal_kind: "session" | "api_key" | "oauth" | "resource_token" | "management_grant" | "system" | "operator" | "unknown";
   credential_id: string | null;
   client_id: string | null;
   agent_id: string | null;

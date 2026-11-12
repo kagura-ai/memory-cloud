@@ -17,6 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import require_admin
+from auth.system_admin_mode import is_operator_principal
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from config.settings import get_settings
 from db.base import get_db
@@ -48,6 +49,7 @@ from utils.exceptions import (
     BonusBelowZeroError,
     InsufficientReasonError,
     NotFoundException,
+    OperatorPrincipalNotSupportedError,
     ValidationError,
 )
 from utils.logger import get_logger
@@ -776,6 +778,25 @@ async def update_user_role(
 
         old_role = target_user.role
         target_user.role = request.role
+        # #2767 (gate1 fit R7): the role change carries its actor, in the same
+        # commit, as POST /admin/system-admins does. For a service operator
+        # the actor strings are ``operator:<address>``.
+        db.add(
+            AuditLog(
+                user_email=admin.get("email") or admin_id,
+                user_id=admin_id,
+                action="system_role_update",
+                resource=f"user:{user_id}",
+                old_value_hash=str(old_role),
+                new_value_hash=request.role,
+                user_metadata={
+                    "actor_user_id": admin_id,
+                    "target_user_id": user_id,
+                    "old_role": old_role,
+                    "new_role": request.role,
+                },
+            )
+        )
         await db.commit()
 
         logger.info(
@@ -783,6 +804,7 @@ async def update_user_role(
             user_id=user_id,
             old_role=old_role,
             new_role=request.role,
+            actor=admin_id,
         )
 
         return {
@@ -1721,7 +1743,17 @@ async def recover_context(
     (#1804) brings it back from them.
 
     Default is dry_run=True — shows what would be recovered without making changes.
+
+    #2767: a service operator may run it as a dry run only. Applying it would
+    make the operator the owner of a recreated context and the author of
+    memories without one, and an operator has no account.
     """
+    if not request_body.dry_run and is_operator_principal(user):
+        raise OperatorPrincipalNotSupportedError(
+            "Applying a context recovery needs a system admin account; a service "
+            "operator may run it as a dry run only"
+        )
+
     import re
     from uuid import UUID as PyUUID
 

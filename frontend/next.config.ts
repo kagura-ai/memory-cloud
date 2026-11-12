@@ -27,6 +27,24 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        // #1734: /signup/verify carries a one-time account-creation token in
+        // the query string; same policy as /join (app/signup/layout.tsx).
+        source: "/signup/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
+      {
+        // #2786: /link/confirm carries a one-time provider link token in the
+        // query string; same policy as /join (app/link/layout.tsx).
+        source: "/link/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
+      {
         source: "/join/:path*",
         headers: [
           { key: "Referrer-Policy", value: "no-referrer" },
@@ -37,6 +55,15 @@ const nextConfig: NextConfig = {
         // #1678: /password/reset and /password/setup carry a one-time token in
         // the query string; same policy as /join (app/password/layout.tsx).
         source: "/password/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
+      {
+        // #2761: /email/unsubscribe#<token> — the announcement unsubscribe
+        // link; same policy as /join and /password (app/email/layout.tsx).
+        source: "/email/:path*",
         headers: [
           { key: "Referrer-Policy", value: "no-referrer" },
           { key: "X-Robots-Tag", value: "noindex, nofollow" },

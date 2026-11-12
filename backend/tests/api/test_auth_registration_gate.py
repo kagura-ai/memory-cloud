@@ -1,8 +1,10 @@
 """``_check_registration_allowed``: the invited-user bypass of a closed signup gate.
 
 With registration closed, a new address passes the gate when a pending
-invitation is addressed to it. An email-less invitation in some workspace is
-not addressed to anyone, so it lets no address through. Runs against a real
+invitation is addressed to it and the provider reports the address verified
+(#2785: the signup gate then hands over its invitation admission, which records
+``signup_admitted``). An email-less invitation in some workspace is not
+addressed to anyone, so it lets no address through. Runs against a real
 ``db_session``.
 """
 
@@ -12,9 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.responses import RedirectResponse
+from sqlalchemy import delete, select
 
 from api.routes.auth import _check_registration_allowed
-from models.auth import User, Workspace, WorkspaceInvitation
+from models.auth import AuditLog, User, Workspace, WorkspaceInvitation
+from services.signup_gate_service import SignupGateService
 from utils.datetime import utcnow
 
 
@@ -55,17 +59,64 @@ async def _workspace_with_invitation(db, email: str | None) -> WorkspaceInvitati
     return invitation
 
 
+def _admission(db, email: str, sub: str):
+    async def admit() -> bool:
+        return await SignupGateService(db)._admit_by_workspace_invitation(
+            provider="github", oauth_sub=sub, email=email, ip_address=None, user_agent=None
+        )
+
+    return admit
+
+
 async def test_invitation_addressed_to_the_email_passes_the_gate(db_session):
     email = f"invited-{uuid.uuid4()}@example.com"
-    await _workspace_with_invitation(db_session, email.upper())
+    sub = f"gh-{uuid.uuid4().hex[:12]}"
+    invitation = await _workspace_with_invitation(db_session, email.upper())
+    workspace_id, owner_id = invitation.workspace_id, invitation.invited_by
+    try:
+        assert (
+            await _check_registration_allowed(
+                email,
+                db_session,
+                user_id=sub,
+                admit_by_invitation=_admission(db_session, email, sub),
+            )
+            is None
+        )
+        rows = list(
+            await db_session.scalars(select(AuditLog.action).where(AuditLog.user_id == sub))
+        )
+        assert rows == ["signup_admitted"]
+    finally:
+        # The admission commits its record (and the seeded rows with it).
+        await db_session.rollback()
+        await db_session.execute(delete(AuditLog).where(AuditLog.user_id == sub))
+        await db_session.execute(
+            delete(WorkspaceInvitation).where(WorkspaceInvitation.workspace_id == workspace_id)
+        )
+        await db_session.execute(delete(Workspace).where(Workspace.id == workspace_id))
+        await db_session.execute(delete(User).where(User.user_id == owner_id))
+        await db_session.commit()
 
-    assert await _check_registration_allowed(email, db_session) is None
+
+async def test_without_the_gate_admission_an_invitation_admits_nobody(db_session):
+    """No ``admit_by_invitation`` = the provider did not report the address verified."""
+    email = f"invited-{uuid.uuid4()}@example.com"
+    await _workspace_with_invitation(db_session, email)
+
+    blocked = await _check_registration_allowed(email, db_session)
+
+    assert isinstance(blocked, RedirectResponse)
+    assert "error=registration_disabled" in blocked.headers["location"]
 
 
 async def test_email_less_invitation_does_not_pass_an_unrelated_address(db_session):
     await _workspace_with_invitation(db_session, None)
+    email = f"y-{uuid.uuid4()}@example.com"
 
-    blocked = await _check_registration_allowed(f"y-{uuid.uuid4()}@example.com", db_session)
+    blocked = await _check_registration_allowed(
+        email, db_session, admit_by_invitation=_admission(db_session, email, "gh-none")
+    )
 
     assert isinstance(blocked, RedirectResponse)
     assert blocked.status_code == 303
@@ -83,6 +134,8 @@ async def test_plan_blocked_invitation_does_not_admit_a_new_address(db_session):
     workspace.plan_name = "free"
     await db_session.flush()
 
-    blocked = await _check_registration_allowed(email, db_session)
+    blocked = await _check_registration_allowed(
+        email, db_session, admit_by_invitation=_admission(db_session, email, "gh-none")
+    )
     assert isinstance(blocked, RedirectResponse)
     assert "error=registration_disabled" in blocked.headers["location"]

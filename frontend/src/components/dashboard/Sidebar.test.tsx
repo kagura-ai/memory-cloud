@@ -217,12 +217,33 @@ describe("Sidebar", () => {
     // Operators still need to see what the platform spends; only the
     // workspace-facing entry is money the deployment hides.
     mockUser.role = "admin";
-    mockFeatures = { plan_page: true, byok: true, cost_display: false };
+    mockFeatures = { plan_page: true, byok: true, cost_display: false, system_admin: true };
     render(<Sidebar />);
     const costLinks = screen.getAllByRole("link", { name: "cost" });
     expect(costLinks.map((a) => a.getAttribute("href"))).toEqual([
       "/admin/cost",
     ]);
+  });
+
+  it.each([
+    ["off", { plan_page: true, byok: true, cost_display: true, system_admin: false }],
+    ["absent", { plan_page: true, byok: true, cost_display: true }],
+  ])("hides the admin group and caption for a system admin when features.system_admin is %s (#2767)", (_label, features) => {
+    mockUser.role = "admin";
+    mockFeatures = features;
+    render(<Sidebar />);
+    for (const href of ["/admin/users", "/admin/neural-config", "/admin/sleep-reports", "/admin/cost", "/admin/environment", "/admin/worker-apps", "/admin/signup-gate"]) {
+      expect(screen.queryAllByRole("link").some((a) => a.getAttribute("href") === href)).toBe(false);
+    }
+    expect(screen.queryByText("systemAdmin")).toBeNull();
+  });
+
+  it("shows the admin group and caption for a system admin where the deployment serves it (#2767)", () => {
+    mockUser.role = "admin";
+    mockFeatures = { plan_page: true, byok: true, cost_display: true, system_admin: true };
+    render(<Sidebar />);
+    expect(screen.queryAllByRole("link").some((a) => a.getAttribute("href") === "/admin/users")).toBe(true);
+    expect(screen.getByText("systemAdmin")).toBeInTheDocument();
   });
 
   it("skips the owner embedding-availability probe when byok is off (#1167)", () => {

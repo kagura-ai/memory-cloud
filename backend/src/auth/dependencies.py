@@ -13,9 +13,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import VerifiedKey
 from auth.oauth2_bearer import is_oauth_bearer_token, verify_oauth_bearer_token
+from auth.system_admin_mode import (
+    OPERATOR_EMAIL_HEADER,
+    build_operator_principal,
+    is_operator_principal,
+    normalize_operator_email,
+    system_admin_mode,
+    verify_service_credential,
+)
 from db.base import get_db
 from models.auth import User
-from utils.exceptions import AuthorizationError
+from utils.exceptions import (
+    AuthorizationError,
+    OperatorPrincipalNotSupportedError,
+    SystemAdminCredentialError,
+)
 from utils.logger import get_logger
 
 # HTTP method → required OAuth scope. GET/HEAD/OPTIONS → memory:read;
@@ -111,6 +123,16 @@ async def get_current_user(request: Request) -> dict:
         async def get_me(user: dict = Depends(get_current_user)):
             return user
     """
+    # SessionMiddleware sets request.state.user if logged in
+    return _session_user_or_401(request, getattr(request.state, "user", None))
+
+
+def _session_user_or_401(request: Request, user: dict | None) -> dict:
+    """The session principal, with the side effects every session gate needs.
+
+    Shared by ``get_current_user`` and the ``session`` branch of
+    ``require_admin`` so the two cannot drift (#2767).
+    """
     # Issue #1281 item 3: symmetric agent-scope reset (mirrors the MCP transport
     # and get_user_from_api_key_or_session). Session auth never carries an agent
     # scope; make that explicit and stale-proof.
@@ -120,13 +142,12 @@ async def get_current_user(request: Request) -> dict:
     set_agent_scope(None)
     set_history_principal()
 
-    # SessionMiddleware sets request.state.user if logged in
-    if not hasattr(request.state, "user") or request.state.user is None:
+    if user is None:
         logger.warning("unauthorized_access_attempt", path=request.url.path)
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     set_history_principal("session")
-    return request.state.user
+    return user
 
 
 async def get_current_user_optional(request: Request) -> dict | None:
@@ -148,17 +169,25 @@ async def get_current_user_optional(request: Request) -> dict | None:
     return getattr(request.state, "user", None)
 
 
-async def require_admin(user: dict = Depends(get_current_user)) -> dict:
-    """Require ADMIN role.
+async def require_admin(
+    request: Request,
+    session_user: dict | None = Depends(get_current_user_optional),
+) -> dict:
+    """The one gate of the system-admin surface; honours ``SYSTEM_ADMIN_MODE`` (#2767).
 
-    Args:
-        user: Current user (from get_current_user)
+    - ``session`` (default): today's behaviour: 401 without a session, 403
+      unless ``users.role`` is ``admin``.
+    - ``off``: 404 with the body an unknown path gets, before any credential
+      is read.
+    - ``service``: client address allow-list (404), then the service
+      credential (503 unset / 401), then ``X-Operator-Email`` (400); returns
+      an operator principal. A session cookie is ignored.
 
-    Returns:
-        User info dict
-
-    Raises:
-        HTTPException: 403 if not admin
+    Depends on ``get_current_user_optional`` (never raises) so that ``off``
+    and ``service`` are decided before anything about the session. Headers are
+    read from ``request``, not declared as parameters, so the OpenAPI document
+    of the admin routes is the same in every mode. Use ``require_admin_account``
+    on routes that act on the caller's own account.
 
     Example:
         @app.delete("/admin/users/{user_id}")
@@ -166,15 +195,74 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
             # Only admins can access
             ...
     """
-    if user.get("role") != "admin":
-        logger.warning(
-            "unauthorized_admin_access",
-            user_email=user.get("email"),
-            user_role=user.get("role"),
-        )
-        raise HTTPException(status_code=403, detail="Admin role required")
+    mode = system_admin_mode()
+    if mode == "session":
+        user = _session_user_or_401(request, session_user)
+        if user.get("role") != "admin":
+            logger.warning(
+                "unauthorized_admin_access",
+                user_email=user.get("email"),
+                user_role=user.get("role"),
+            )
+            raise HTTPException(status_code=403, detail="Admin role required")
+        return user
+    if mode == "service":
+        return _require_service_operator(request)
+    # "off", and any value the settings Literal should have refused: no
+    # error path may fall through to the session branch.
+    raise HTTPException(status_code=404, detail="Not Found")
 
-    return user
+
+def _require_service_operator(request: Request) -> dict:
+    """``service`` branch of ``require_admin``: the operator principal or a refusal."""
+    from auth.agent_scope import set_agent_scope
+    from auth.history_principal import set_history_principal
+    from auth.observation_credentials import client_in_networks
+    from config.settings import get_settings
+
+    set_agent_scope(None)
+    set_history_principal()
+    # R10: a relayed cookie must not bill usage or attribute anything to the
+    # cookie's user; the operator principal is the only identity here.
+    request.state.user = None
+    request.state.user_id = None
+
+    networks = get_settings().system_admin_service_allowed_networks
+    if networks and not client_in_networks(request, networks):
+        raise HTTPException(status_code=404, detail="Not Found")
+    try:
+        slot = verify_service_credential(request.headers.get("authorization"))
+    except SystemAdminCredentialError:
+        logger.warning(
+            "system_admin_service_auth_failed",
+            client_host=request.client.host if request.client else None,
+            method=request.method,
+            path=request.url.path,
+        )
+        raise
+    if slot > 0:
+        logger.warning("system_admin_service_token_previous_used", slot=slot)
+    address = normalize_operator_email(request.headers.getlist(OPERATOR_EMAIL_HEADER))
+    principal = build_operator_principal(address)
+    set_history_principal("operator")
+    logger.info(
+        "system_admin_operator_request",
+        operator=principal["user_id"],
+        method=request.method,
+        path=request.url.path,
+    )
+    return principal
+
+
+async def require_admin_account(admin: dict = Depends(require_admin)) -> dict:
+    """``require_admin`` for routes that act on the calling admin's own account.
+
+    A service operator has no account (no contexts, no reports), so these
+    routes refuse it with 403 ``SYSADMIN-004`` (#2767).
+    """
+    if is_operator_principal(admin):
+        raise OperatorPrincipalNotSupportedError()
+    return admin
 
 
 # ============================================================================
@@ -969,6 +1057,8 @@ async def get_share_key_principal(
 CurrentUser = Annotated[dict, Depends(get_current_user)]
 CurrentUserOptional = Annotated[dict | None, Depends(get_current_user_optional)]
 AdminUser = Annotated[dict, Depends(require_admin)]
+# #2767: admin routes that act on the caller's own account (refuse operators).
+AdminAccountUser = Annotated[dict, Depends(require_admin_account)]
 APIKeyUser = Annotated[dict, Depends(verify_api_key_user)]
 APIKeyOrSessionUser = Annotated[dict, Depends(get_user_from_api_key_or_session)]
 SessionUser = Annotated[dict, Depends(require_session_auth)]  # Issue #252

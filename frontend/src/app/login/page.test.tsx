@@ -909,6 +909,28 @@ describe("LoginPage password sign-in entry (#1677)", () => {
     expect(screen.queryByRole("button", { name: "passwordLogin" })).toBeNull();
   });
 
+  it("opens the password form at once for ?method=password", async () => {
+    mockSearchParams.set("method", "password");
+    mockSearchParams.set("return_to", "/invite/abc");
+    renderLogin();
+
+    expect(await screen.findByLabelText("loginId")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "passwordLogin" })).toBeNull();
+  });
+
+  it("ignores ?method=password where password sign-in is off", async () => {
+    mockGetAuthConfig.mockResolvedValue({
+      password_login_enabled: false,
+      google_oauth_enabled: true,
+      github_oauth_enabled: false,
+    });
+    mockSearchParams.set("method", "password");
+    renderLogin();
+
+    await screen.findByRole("button", { name: /continueWithGoogle/ });
+    expect(screen.queryByLabelText("loginId")).toBeNull();
+  });
+
   it("names the entry by sign-in method in both catalogs", () => {
     expect(en.login.passwordLogin).toBe("Sign in with password");
     expect(ja.login.passwordLogin).toBe("パスワードでログイン");

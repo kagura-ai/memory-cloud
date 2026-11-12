@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from fastapi import Response
 from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_routes
@@ -134,7 +135,9 @@ class TestLoginRoutes:
         monkeypatch.setattr(auth_routes, "_oauth2_manager", manager)
         monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/cb")
 
-        response = await auth_routes.google_login(FakeRequest(), accepted_terms=VERSION)
+        response = await auth_routes.google_login(
+            FakeRequest(), response=Response(), accepted_terms=VERSION
+        )
 
         assert redis.store[KEY.format(state=response.state)] == VERSION
 
@@ -142,7 +145,9 @@ class TestLoginRoutes:
     async def test_github_login_binds_accepted_terms(self, redis, terms_on, monkeypatch) -> None:
         monkeypatch.setenv("GITHUB_CLIENT_ID", "client-id")
 
-        response = await auth_routes.github_login(FakeRequest(), accepted_terms=VERSION)
+        response = await auth_routes.github_login(
+            FakeRequest(), response=Response(), accepted_terms=VERSION
+        )
 
         assert redis.store[KEY.format(state=response.state)] == VERSION
 
@@ -152,7 +157,7 @@ class TestLoginRoutes:
     ) -> None:
         monkeypatch.setenv("GITHUB_CLIENT_ID", "client-id")
 
-        await auth_routes.github_login(FakeRequest())
+        await auth_routes.github_login(FakeRequest(), response=Response())
 
         assert not any(k.startswith("oauth2_accepted_terms:") for k in redis.store)
 
@@ -632,7 +637,11 @@ class TestInviteFlowBouncesToJoin:
         monkeypatch.setenv("GITHUB_CLIENT_ID", "client-id")
 
         response = await auth_routes.github_login(
-            FakeRequest(), return_to=self.RETURN_TO, invite=INVITE, accepted_terms=presented
+            FakeRequest(),
+            response=Response(),
+            return_to=self.RETURN_TO,
+            invite=INVITE,
+            accepted_terms=presented,
         )
 
         location = urlparse(response.headers["location"])
@@ -649,7 +658,7 @@ class TestInviteFlowBouncesToJoin:
         self, redis, terms_on, invites_on, google_manager
     ) -> None:
         response = await auth_routes.google_login(
-            FakeRequest(), return_to="https://evil.example/x", invite=INVITE
+            FakeRequest(), response=Response(), return_to="https://evil.example/x", invite=INVITE
         )
 
         location = urlparse(response.headers["location"])
@@ -663,7 +672,11 @@ class TestInviteFlowBouncesToJoin:
         self, redis, terms_on, invites_on, google_manager
     ) -> None:
         response = await auth_routes.google_login(
-            FakeRequest(), return_to=self.RETURN_TO, invite=INVITE, accepted_terms=VERSION
+            FakeRequest(),
+            response=Response(),
+            return_to=self.RETURN_TO,
+            invite=INVITE,
+            accepted_terms=VERSION,
         )
 
         assert response.headers["location"] == "https://idp.example.test/auth"
@@ -680,7 +693,9 @@ class TestInviteFlowBouncesToJoin:
         return_to = None if case == "no_return_to" else self.RETURN_TO
         invite = "<bad>" if case == "malformed_invite" else INVITE
 
-        response = await auth_routes.github_login(FakeRequest(), return_to=return_to, invite=invite)
+        response = await auth_routes.github_login(
+            FakeRequest(), response=Response(), return_to=return_to, invite=invite
+        )
 
         location = getattr(response, "headers", {}).get("location") or response.authorization_url
         assert "/join/" not in location

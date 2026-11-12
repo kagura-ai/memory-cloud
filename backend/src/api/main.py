@@ -96,11 +96,32 @@ async def _close_qdrant_on_shutdown() -> None:
         logger.warning("qdrant_close_failed", error_type=type(exc).__name__, error=str(exc))
 
 
+def _log_system_admin_mode() -> None:
+    """Say at startup where the system-admin surface is served (#2767).
+
+    WARNING in ``service``: such a process must sit on an internal network
+    only. Never logs the credential, only whether one is configured.
+    """
+    from auth.system_admin_mode import system_admin_mode
+
+    mode = system_admin_mode()
+    settings = get_settings()
+    log = logger.warning if mode == "service" else logger.info
+    log(
+        "system_admin_mode",
+        mode=mode,
+        service_token_configured=bool(settings.system_admin_service_token),
+        previous_service_tokens=len(settings.system_admin_service_previous_tokens),
+        allowed_cidrs_configured=bool(settings.system_admin_service_allowed_networks),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup
     logger.info("application_starting", version=app.version)
+    _log_system_admin_mode()
 
     # Fail-closed: refuse to boot if OAuth endpoint overrides (E2E test-IdP
     # harness, #937) are active in production — they would redirect token
@@ -343,6 +364,14 @@ openapi_tags = [
         "description": (
             "Terms-of-service re-acceptance (Issue #1665): the signed-in user "
             "accepts the current TERMS_VERSION. 404s unless the deployment sets it."
+        ),
+    },
+    {
+        "name": "announcement-emails",
+        "description": (
+            "Announcement-email consent (Issue #2761): the signed-in user's opt-in "
+            "toggle (session only) and the public unsubscribe link from announcement "
+            "emails, which answers the same for every token."
         ),
     },
     {
@@ -613,7 +642,8 @@ async def memory_cloud_exception_handler(
     request: Request, exc: MemoryCloudException
 ) -> JSONResponse:
     """Handle MemoryCloudException."""
-    logger.error(
+    log = logger.warning if exc.log_level == "warning" else logger.error
+    log(
         "exception_occurred",
         error=exc.error_code,
         message=exc.message,
@@ -845,6 +875,7 @@ from api.routes import (  # noqa: E402
     agent_state,  # Issue #906: REST surface for the agent session-state lane
     agents,  # Issue #1274: Agent Registry CRUD (RFC-0002 P0-1)
     analyses,  # Issue #496: Memory Analysis API endpoints
+    announcement_emails,  # Issue #2761: announcement-email consent + unsubscribe link
     api_keys,
     attachments,  # Issue #330 → deprecated by #555 (returns HTTP 410 Gone)
     auth,
@@ -856,6 +887,7 @@ from api.routes import (  # noqa: E402
     context_search_config,
     contexts,
     cost_aggregation,  # Issue #472: cost aggregation API (admin + workspace-scoped)
+    email_signup,  # Issue #1734: email + password sign-up (ENABLE_EMAIL_SIGNUP)
     external_keys,
     feedback,  # Issue #888: retrieval feedback signal
     files,  # Issue #485: platform-managed R2 file storage
@@ -880,6 +912,7 @@ from api.routes import (  # noqa: E402
     operation_history,
     passkeys,
     password,  # Issue #1678: self-service password endpoints
+    provider_link_confirm,  # Issue #2786: connect a provider after an email confirmation
     public_mcp_endpoints,  # Issue #2675: publish a resource as a public MCP endpoint
     public_mcp_usage,  # Issue #2678: public MCP usage health
     public_search,  # Issue #238: Public Search API
@@ -923,11 +956,20 @@ app.include_router(me_oauth_grants.router, prefix="/api/v1")
 # Terms-of-service re-acceptance (Issue #1665)
 app.include_router(me_terms.router, prefix="/api/v1")
 
+# Announcement-email consent: settings toggle + unsubscribe link (Issue #2761)
+app.include_router(announcement_emails.me_router, prefix="/api/v1")
+app.include_router(announcement_emails.public_router, prefix="/api/v1")
+
 # Email + password sign-in: reset / set up / change / remove (Issue #1678)
 app.include_router(passkeys.router, prefix="/api/v1")
 app.include_router(mfa_settings.router, prefix="/api/v1")
 app.include_router(password.router, prefix="/api/v1")
 app.include_router(password.me_router, prefix="/api/v1")
+# Email + password sign-up (Issue #1734); 404 unless ENABLE_EMAIL_SIGNUP
+app.include_router(email_signup.router, prefix="/api/v1")
+# Provider link confirmed by email (Issue #2786); 404 when
+# ENABLE_PROVIDER_LINK_CONFIRMATION=false
+app.include_router(provider_link_confirm.router, prefix="/api/v1")
 
 # OAuth2 Server routes (Issue #33 - OAuth2 client management)
 app.include_router(oauth.router, prefix="/api/v1")
@@ -1107,6 +1149,58 @@ app.include_router(system.router, prefix="/api/v1")
 
 # Well-known endpoints (OAuth2 metadata)
 app.include_router(well_known.router, prefix="/.well-known")
+
+
+def _system_admin_mode_openapi() -> dict:
+    """The OpenAPI document, without the admin operations in ``off`` mode (#2767).
+
+    ``off`` answers 404 on every route behind ``require_admin``; a public
+    document should not advertise them. Covers ``/openapi.json``, ``/docs``,
+    ``/redoc`` and the ``/static/api/openapi.json`` fallback (all call
+    ``app.openapi()``). Tags left without an operation by the filter are
+    dropped too. ``session`` and ``service`` serve the stock document.
+    """
+    from fastapi.openapi.utils import get_openapi
+    from fastapi.routing import APIRoute, iter_route_contexts
+
+    from auth.system_admin_mode import route_requires_admin, system_admin_mode
+
+    if system_admin_mode() != "off":
+        return FastAPI.openapi(app)
+    # Built once per route table, like FastAPI caches the stock document.
+    cached = _off_mode_openapi_cache.get(len(app.routes))
+    if cached is not None:
+        return cached
+    shown, hidden = [], []
+    for context in iter_route_contexts(app.routes):
+        gated = isinstance(context.original_route, APIRoute) and route_requires_admin(context)
+        (hidden if gated else shown).append(context)
+    shown_tags = {tag for context in shown for tag in getattr(context, "tags", None) or []}
+    emptied = {tag for context in hidden for tag in context.tags or []} - shown_tags
+    tags = [tag for tag in app.openapi_tags or [] if tag.get("name") not in emptied]
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        summary=app.summary,
+        description=app.description,
+        terms_of_service=app.terms_of_service,
+        contact=app.contact,
+        license_info=app.license_info,
+        routes=shown,
+        webhooks=app.webhooks.routes,
+        tags=tags or None,
+        servers=app.servers,
+        separate_input_output_schemas=app.separate_input_output_schemas,
+        external_docs=app.openapi_external_docs,
+    )
+    _off_mode_openapi_cache.clear()
+    _off_mode_openapi_cache[len(app.routes)] = schema
+    return schema
+
+
+_off_mode_openapi_cache: dict[int, dict] = {}
+app.openapi = _system_admin_mode_openapi  # type: ignore[method-assign]
 
 # In-process Stripe billing plugin removed (#1096): the OSS backend is now
 # Stripe-agnostic. Entitlement arrives via the internal billing endpoint

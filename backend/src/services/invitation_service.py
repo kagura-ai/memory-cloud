@@ -41,6 +41,15 @@ OWNER_INVITE_REJECTED_MSG = (
     "Use the ownership transfer flow to change the workspace owner."
 )
 
+# #2785: addressed invitations need a verified address, at the signup gate
+# and here: an invitation addressed to an email address is listed to, and
+# accepted by, an account whose address is verified (users.email_verified_at).
+UNVERIFIED_ADDRESS_ACCEPT_MSG = (
+    "This invitation is addressed to an email address. It can be accepted by an "
+    "account whose email address is verified: sign in with a method that verifies "
+    "this address."
+)
+
 # Invitation expiry presets (days)
 EXPIRY_PRESETS = {
     7: timedelta(days=7),
@@ -467,6 +476,11 @@ class InvitationService:
         ).scalar_one_or_none()
         if accepter is None:
             raise NotFoundException("User", user_id)
+        # #2785: an invitation addressed to an email address needs an account
+        # whose address is verified, the rule of the signup gate. A link-only
+        # invitation is accepted by whoever holds the link, as before.
+        if invitation.email and accepter.email_verified_at is None:
+            raise ValidationError(UNVERIFIED_ADDRESS_ACCEPT_MSG)
 
         # #2564: re-read the invitation under the workspace lock. Every accept
         # of this token waits on the same workspace row, so one that got it
@@ -630,6 +644,19 @@ class InvitationService:
             logger.info(f"Cleaned up {count} expired invitations")
 
         return count
+
+    async def account_address_verified(self, user_id: str | None) -> bool:
+        """Is the account's email address verified (``users.email_verified_at``)? (#2785)
+
+        Addressed invitations are listed to, and accepted by, a verified
+        address only. False for an unknown or empty ``user_id``.
+        """
+        if not user_id:
+            return False
+        verified_at = await self.db.scalar(
+            select(User.email_verified_at).where(User.user_id == user_id)
+        )
+        return verified_at is not None
 
     async def get_pending_invitations_for_email(
         self, email: str | None, *, include_plan_blocked: bool = False

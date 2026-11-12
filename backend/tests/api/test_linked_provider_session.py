@@ -319,6 +319,29 @@ async def test_invitations_are_looked_up_by_the_owning_account_email(
     assert lookup.await_args.kwargs["email"] == OWNER_EMAIL
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "sub", "idp"), PROVIDERS)
+@pytest.mark.parametrize(("verified", "workspaces_ensured"), [(True, 0), (False, 1)])
+async def test_pending_invitations_stand_in_for_the_workspace_of_a_verified_address(
+    manager, signed_in_path, request, provider, sub, idp, monkeypatch, verified, workspaces_ensured
+) -> None:
+    # #2785: addressed invitations are accepted by an account whose address is
+    # verified, so only then do they replace the personal workspace (#276).
+    invitations = MagicMock()
+    invitations.return_value.get_pending_invitations_for_email = AsyncMock(
+        return_value=[MagicMock()]
+    )
+    address_verified = AsyncMock(return_value=verified)
+    invitations.return_value.account_address_verified = address_verified
+    monkeypatch.setattr("services.invitation_service.InvitationService", invitations)
+    request.getfixturevalue(idp)
+
+    await _callback(provider)
+
+    assert address_verified.await_args.args == (OWNER_ID,)
+    assert signed_in_path.ensure_workspace.await_count == workspaces_ensured
+
+
 class TestSessionOwnerHelper:
     """``_session_owner`` on its own: resolved owner, no owner row, no DB yielded."""
 

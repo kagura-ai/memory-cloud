@@ -13,6 +13,7 @@ import importlib
 import models.agent  # noqa: F401  # Issue #1274: Agent Registry (RFC-0002 P0-1)
 import models.agent_state  # noqa: F401  # Issue #889: agent session-state lane
 import models.analysis  # noqa: F401
+import models.announcement_consent  # noqa: F401  # Issue #2761: announcement-email consent history
 import models.beta_invite  # noqa: F401  # Issue #1581: closed-beta invite links
 import models.deferred_point_delete  # noqa: F401  # Issue #2476: deferred forget point deletes
 import models.erasure  # noqa: F401  # Vector cleanup jobs reference erasure_requests.

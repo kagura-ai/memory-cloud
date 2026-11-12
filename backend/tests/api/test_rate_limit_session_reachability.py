@@ -84,12 +84,19 @@ def test_registration_order_matches_the_real_app() -> None:
 
 
 def test_session_middleware_is_the_only_writer_of_request_state_user_id() -> None:
-    """Nothing sets ``user_id`` earlier, so the limiter cannot see one another way."""
+    """Nothing sets ``user_id`` earlier, so the limiter cannot see one another way.
+
+    Assignments of ``None`` are not writers: they only clear it.
+    """
     writers: set[str] = set()
     for path in sorted(SRC_ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Assign):
+                continue
+            # Clearing it (#2767: the service-mode admin gate drops a relayed
+            # cookie's user) can never make the limiter see a user.
+            if isinstance(node.value, ast.Constant) and node.value.value is None:
                 continue
             for target in node.targets:
                 if (

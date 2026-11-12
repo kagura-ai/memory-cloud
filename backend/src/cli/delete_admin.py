@@ -76,8 +76,16 @@ class _Ws:
 
 
 async def _password_admin(db: AsyncSession) -> User | None:
+    # ``login_id IS NOT NULL``: an admin created by email sign-up (#1734) is
+    # a password account without a login ID, and is not the CLI admin.
     return (
-        await db.execute(select(User).where(User.auth_method == "password", User.role == "admin"))
+        await db.execute(
+            select(User).where(
+                User.auth_method == "password",
+                User.role == "admin",
+                User.login_id.is_not(None),
+            )
+        )
     ).scalar_one_or_none()
 
 

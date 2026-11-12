@@ -6,7 +6,7 @@ Based on: kagura-ai/src/kagura/exceptions.py
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 from config.constants import (
     GATE_ALLOWLIST,
@@ -27,7 +27,12 @@ class MemoryCloudException(Exception):
         status_code: HTTP status code for API responses
         error_code: Machine-readable error code (e.g., "AUTH-001")
         details: Additional context about the error
+        log_level: The level the API's exception handler logs it at; a
+            subclass that replaces a raw ``HTTPException`` keeps that
+            handler's ``warning``.
     """
+
+    log_level: ClassVar[Literal["error", "warning"]] = "error"
 
     def __init__(
         self,
@@ -127,6 +132,48 @@ class AdminProtectionError(MemoryCloudException):
     def __init__(self, message: str, *, reason: str | None = None) -> None:
         super().__init__(message, status_code=403, error_code="ADMIN-001")
         self.reason = reason
+
+
+# System-admin surface modes (#2767). ``SYSADMIN-*`` codes; ``ADMIN-*`` stays
+# the admin-protection family above.
+
+
+class SystemAdminNotConfiguredError(MemoryCloudException):
+    """``SYSTEM_ADMIN_MODE=service`` without a service credential (503, fail-closed)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The system-admin service credential is not configured on this server",
+            status_code=503,
+            error_code="SYSADMIN-001",
+        )
+
+
+class SystemAdminCredentialError(AuthenticationError):
+    """Missing or wrong service credential in ``service`` mode (401).
+
+    One message for a missing header, another scheme and a wrong value, so a
+    caller learns nothing about which part failed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "A valid system-admin service credential is required",
+            error_code="SYSADMIN-002",
+        )
+        self.response_headers = {"WWW-Authenticate": "Bearer"}
+
+
+class OperatorPrincipalNotSupportedError(MemoryCloudException):
+    """A service operator called a route that acts on the caller's own account (403)."""
+
+    def __init__(
+        self,
+        message: str = (
+            "This route acts on the calling admin's own account; a service operator has none"
+        ),
+    ) -> None:
+        super().__init__(message, status_code=403, error_code="SYSADMIN-004")
 
 
 class APIKeyError(MemoryCloudException):
@@ -448,6 +495,18 @@ class BadRequestError(MemoryCloudException):
         **details: Any,
     ) -> None:
         super().__init__(message, status_code=400, error_code=error_code, **details)
+
+
+# System-admin surface modes (#2767), SYSADMIN-003; the others sit after
+# AdminProtectionError.
+class OperatorEmailInvalidError(BadRequestError):
+    """``X-Operator-Email`` missing, repeated or malformed (400). Never echoes the value."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Exactly one valid X-Operator-Email header is required",
+            error_code="SYSADMIN-003",
+        )
 
 
 class WorkerAppNotFoundError(MemoryCloudException):
@@ -1363,6 +1422,105 @@ class PasswordSetupNotAllowedError(MemoryCloudException):
         self, message: str = "A password cannot be set up by email for this account"
     ) -> None:
         super().__init__(message, status_code=400, error_code="AUTH-303")
+
+
+class SignupNotAllowedError(MemoryCloudException):
+    """The sign-up controls refused an email sign-up at completion (403, #1734).
+
+    The gate runs again, consuming, when the account would be created: the
+    beta invite may have been used, revoked or expired since the link was
+    sent, registration may have closed, or the workspace invitation may be
+    gone. Reached only with a link mailed to the address, so the answer is
+    visible to the mailbox holder alone.
+    """
+
+    def __init__(
+        self,
+        message: str = "Sign-up is not available for this address any more; ask for a new invitation",
+    ) -> None:
+        super().__init__(message, status_code=403, error_code="AUTH-308")
+
+
+class SignupAccountExistsError(MemoryCloudException):
+    """The address of an email sign-up already belongs to an account (409, #1734).
+
+    Raised at completion (an account was created for the address after the
+    link was sent). The link is spent. Reached only with a link mailed to the
+    address.
+    """
+
+    def __init__(
+        self,
+        message: str = "An account with this email address already exists; sign in instead",
+    ) -> None:
+        super().__init__(message, status_code=409, error_code="AUTH-309")
+
+
+class SurfaceSwitchedOffError(MemoryCloudException):
+    """A route group switched off for this deployment (404, #1734, #2786).
+
+    The body is the one an unknown path gets (``HTTP-404`` / ``Not Found``),
+    so a switched-off surface cannot be told apart from no surface. Logged at
+    ``warning``, as the raw ``HTTPException`` it replaces was.
+    """
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__("Not Found", status_code=404, error_code="HTTP-404")
+
+
+class SignupSessionUnavailableError(MemoryCloudException):
+    """The account change was committed but no session opened (503).
+
+    Email sign-up (#1734): the account is committed; the person signs in with
+    the address and the new password. A link confirmed by email (#2786): the
+    provider is connected; the person signs in again (pass that message).
+    The body keeps the ``HTTP-503`` code of a plain 503, and it is logged at
+    ``warning`` as that raw ``HTTPException`` was.
+    """
+
+    log_level = "warning"
+
+    def __init__(
+        self,
+        message: str = "Your account was created. Sign in with your email address and password.",
+    ) -> None:
+        super().__init__(message, status_code=503, error_code="HTTP-503")
+
+
+class ProviderLinkConfirmable(ConflictError):
+    """``ensure_user``: the address belongs to an email sign-up account that may
+    take this identity once its owner confirms by email (#2786).
+
+    A ``ConflictError`` with exactly the message of the plain refusal, so a
+    caller that does not handle it still answers ``email_in_use``. The
+    account id and the account stamp are attributes only: they never reach
+    the message or the details, so an uncaught one serializes like any other
+    conflict.
+    """
+
+    def __init__(self, *, account_user_id: str, account_stamp: str) -> None:
+        super().__init__("Email address is already in use by another account")
+        self.account_user_id = account_user_id
+        self.account_stamp = account_stamp
+
+
+class ProviderLinkWrongBrowserError(MemoryCloudException):
+    """A provider link confirmation was opened in another browser (403, #2786).
+
+    The confirmation links nothing unless the browser that opens the emailed
+    link is the one that started the provider sign-in. The pending link is
+    kept, so opening the link in the right browser still works.
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "Open this link in the browser where you started the sign-in; nothing was connected"
+        ),
+    ) -> None:
+        super().__init__(message, status_code=403, error_code="AUTH-310")
 
 
 class ErasureTokenInvalidError(MemoryCloudException):

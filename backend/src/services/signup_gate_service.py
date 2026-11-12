@@ -12,12 +12,22 @@ trust-Google's-test-users-list contract; Google's "Testing" status does not
 enforce that list for non-sensitive scopes, so the gate now applies
 provider-uniformly. Both providers match on the immutable IdP identity
 (``provider`` + ``subject_id``) — GitHub numeric ID for github rows, OIDC
-``sub`` claim for google rows. Email is never used for matching to keep
-email-change attacks closed.
+``sub`` claim for google rows. Allowlist grants never match on an email
+address, which keeps email-change attacks closed.
+
+The one address match (#2785): a pending workspace invitation addressed to the
+applicant admits a new person, in both gate states, only when the provider
+reports the address verified (Google ``email_verified``, GitHub's verified
+primary address; an email sign-up's address is proven by the followed link).
+It writes no grant: the invitation admits while it is pending, and each
+admission is recorded as a ``signup_admitted`` audit row. The same rule holds
+for a pending Google allowlist row (``pending:<email>``), which is promoted
+only for a verified address.
 """
 
 import hashlib
 import os
+from collections.abc import Awaitable, Callable
 from typing import Literal, cast
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
@@ -27,10 +37,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.roles import _OAUTH_CALLBACK_ACTOR
+from auth.roles import _OAUTH_CALLBACK_ACTOR, address_holder_clause
+from auth.system_admin_mode import first_user_bootstrap_applies
+from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import AuditLog, User
+from models.auth import AuditLog, User, WorkspaceInvitation
 from models.signup_gate import SignupAllowlistEntry, SignupGateConfig
 from services.beta_invite_service import BetaInviteService
 from utils.datetime import utcnow
@@ -41,7 +53,20 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 SignupGateMode = Literal["manual", "github_sponsors", "both"]
+# The providers whose identities the gate admits. ``email`` (#1734) is never
+# one of them: an ``email`` allowlist row records a beta invite redeemed by an
+# email sign-up and admits no OAuth identity.
 SignupGateProvider = Literal["github", "google"]
+# Which sign-up control admitted an email sign-up (#1734).
+EmailSignupAdmission = Literal[
+    "first_user", "open_registration", "workspace_invitation", "beta_invite"
+]
+# ``audit_logs.user_email`` actor label of the email sign-up's rows.
+EMAIL_SIGNUP_ACTOR = "email-signup"
+# Audit action of a sign-up admitted by a pending workspace invitation (#2785).
+SIGNUP_ADMITTED_ACTION = "signup_admitted"
+# How many invitations a ``signup_admitted`` row names (the total is recorded too).
+_ADMISSION_RECORD_INVITATIONS = 5
 
 # ``signup_allowlist.github_user_id`` is a deprecated ``String(64)``
 # kept NOT NULL during the #655 migration window. For non-github
@@ -90,6 +115,7 @@ async def check_signup_access(
     ip_address: str | None = None,
     user_agent: str | None = None,
     beta_invite_token_hash: str | None = None,
+    email_verified: bool = False,
 ) -> RedirectResponse | None:
     """Run the signup gate for an OAuth callback.
 
@@ -103,8 +129,10 @@ async def check_signup_access(
         oauth_sub: Immutable IdP identity — GitHub numeric ID (as string)
             for github, OIDC ``sub`` claim for google. Matched verbatim
             against ``signup_allowlist.subject_id``.
-        email: Candidate signup email. Used only for the existing-user /
-            legacy-gate paths; never for allowlist matching.
+        email: Candidate signup email. Used for the existing-user check and,
+            when ``email_verified``, to find a pending workspace invitation
+            addressed to it (#2785) or a pending Google allowlist row; never
+            to match an allowlist grant.
         username: Display label (GitHub login for github, email for google).
             Stored in ``audit_logs.user_metadata`` and structlog only; not
             a matching key.
@@ -115,6 +143,11 @@ async def check_signup_access(
         beta_invite_token_hash: ``sha256_hex`` of a closed-beta invite token
             carried through the OAuth round trip (#1581), or None. Only ever
             the hash — the callback never sees the plaintext.
+        email_verified: True only when the provider reports ``email`` as
+            verified (Google ``email_verified is True``; always True for
+            GitHub, whose callback keeps only the verified primary address).
+            The default is False: an address nobody vouched for matches no
+            invitation and no pending row.
 
     Returns:
         None when signup is allowed, a RedirectResponse when blocked.
@@ -129,6 +162,7 @@ async def check_signup_access(
             ip_address=ip_address,
             user_agent=user_agent,
             beta_invite_token_hash=beta_invite_token_hash,
+            email_verified=email_verified,
         )
     return None
 
@@ -153,18 +187,24 @@ class SignupGateService:
         ip_address: str | None = None,
         user_agent: str | None = None,
         beta_invite_token_hash: str | None = None,
+        email_verified: bool = False,
     ) -> RedirectResponse | None:
         """Return None when signup is allowed, RedirectResponse when blocked.
 
         Rules (top-down, applied uniformly across both providers since #655):
-        1. ``enabled=false`` → delegate to legacy env-based gate (OSS path).
+        1. ``enabled=false`` → the manual allowlist, a pending Google row
+           (verified address only), then the legacy env-based gate (OSS path),
+           whose invitation branch admits a verified address only (#2785).
         2. Existing user (users row matching this email or user_id/sub) → allowed
            (login not signup; user_id match handles email-change-at-IdP case).
         3. First user (users table empty) → allowed (initial admin bootstrap).
         4. ``mode == "manual"`` → allowed iff ``(provider, subject_id=oauth_sub)``
            is on the allowlist with ``state='active'`` (``source`` ``manual`` or
-           ``beta_invite``), or — last, only when everything above said no — a
-           valid closed-beta invite is redeemed for this identity (#1581).
+           ``beta_invite``), or a pending Google row is promoted (verified
+           address only), or a pending workspace invitation is addressed to the
+           verified address (#2785, recorded as ``signup_admitted``), or — last,
+           only when everything above said no — a valid closed-beta invite is
+           redeemed for this identity (#1581).
         5. ``mode in ("github_sponsors", "both")`` → NotImplementedError when
            provider is ``"github"`` (Phase 2 work). When provider is
            ``"google"`` these modes fall back to manual semantics (sponsorship
@@ -187,11 +227,21 @@ class SignupGateService:
             # that row to the real OIDC sub on first callback so the pre-grant
             # is honored under the disabled gate too. GitHub has no email-only
             # pending state (its IDs resolve at add-time), so it is skipped.
-            if provider == "google" and await self._promote_pending_google_entry(
-                email=email, oauth_sub=oauth_sub
+            # The row is matched by address: a verified address only (#2785).
+            if (
+                provider == "google"
+                and email_verified
+                and await self._promote_pending_google_entry(email=email, oauth_sub=oauth_sub)
             ):
                 return None
-            return await self._legacy_check(email, oauth_sub)
+            return await self._legacy_check(
+                email,
+                oauth_sub,
+                provider=provider,
+                email_verified=email_verified,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
         # #655: the historical Google pass-through is removed. Google's
         # "Testing" status does NOT enforce the test-users list for
@@ -239,9 +289,23 @@ class SignupGateService:
             # logins match the regular ``(provider, subject_id)`` path
             # above. GitHub has no email-only fallback because
             # ``resolve_github_user_id`` resolves to a numeric ID at
-            # add-time, so the pending state only exists for Google.
-            if provider == "google" and await self._promote_pending_google_entry(
-                email=email, oauth_sub=oauth_sub
+            # add-time, so the pending state only exists for Google. The row
+            # is matched by address: a verified address only (#2785).
+            if (
+                provider == "google"
+                and email_verified
+                and await self._promote_pending_google_entry(email=email, oauth_sub=oauth_sub)
+            ):
+                return None
+            # #2785: a pending workspace invitation addressed to the verified
+            # address admits, before the beta invite so an invitee keeps the
+            # token. Nothing is consumed; the admission is recorded.
+            if email_verified and await self._admit_by_workspace_invitation(
+                provider=provider,
+                oauth_sub=oauth_sub,
+                email=email,
+                ip_address=ip_address,
+                user_agent=user_agent,
             ):
                 return None
             # #1581: closed-beta invite link — the LAST thing tried, only where
@@ -281,6 +345,272 @@ class SignupGateService:
             "selecting these modes; reaching this branch indicates a "
             "direct DB edit."
         )
+
+    # ------------------------------------------------------------------
+    # Email sign-up (#1734)
+    # ------------------------------------------------------------------
+
+    async def email_signup_admissible(
+        self, *, email: str, beta_invite_token_hash: str | None
+    ) -> EmailSignupAdmission | None:
+        """Would the sign-up controls admit a NEW account at ``email``? Consumes nothing.
+
+        The request-time check of an email sign-up: advisory only, the
+        completion runs :meth:`admit_email_signup`. An existing account at
+        the address is not an admission here (the caller handles it).
+
+        Same controls as the OAuth callbacks, minus the grants that belong to
+        a provider identity (the manual allowlist, pending Google rows):
+
+        - first account of an empty deployment (every gate state);
+        - gate off: ``ALLOW_REGISTRATION``, else a pending workspace
+          invitation addressed to ``email`` on a plan that allows it;
+        - gate on: a pending workspace invitation addressed to ``email``
+          (#2785), else a redeemable beta invite (``ALLOW_REGISTRATION`` does
+          not admit, as for OAuth).
+
+        The address is verified by construction: the link goes to it alone.
+        """
+        config = await self._load_config()
+        return await self._email_admission(
+            gate_enabled=config.enabled,
+            gate_mode=config.mode,
+            email=email,
+            beta_invite_token_hash=beta_invite_token_hash,
+            redeem=None,
+            record_invitations=None,
+        )
+
+    async def admit_email_signup(
+        self,
+        *,
+        gate_enabled: bool,
+        gate_mode: str,
+        email: str,
+        new_user_id: str,
+        beta_invite_token_hash: str | None,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> EmailSignupAdmission | None:
+        """Run the sign-up controls for an email account being created now. Never commits.
+
+        Called inside the account-creating transaction with the gate config
+        read before it (``_load_config`` may commit). A beta invite is
+        redeemed here: allowlist row (``provider='email'``, ``subject_id`` =
+        ``new_user_id``), the single-use claim and the audit row, in a
+        savepoint that a lost race rolls back on its own. An admission by a
+        workspace invitation stages its ``signup_admitted`` audit row (#2785),
+        committed with the account or not at all. Nothing is written when the
+        answer is ``None``.
+        """
+
+        def record_invitations(invitations: list[WorkspaceInvitation]) -> None:
+            self.db.add(
+                self._invitation_admission_record(
+                    actor=EMAIL_SIGNUP_ACTOR,
+                    provider="email",
+                    subject_id=new_user_id,
+                    email=email,
+                    invitations=invitations,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
+            )
+
+        async def redeem() -> bool:
+            return await self._stage_email_beta_invite_redemption(
+                token_hash=beta_invite_token_hash,
+                new_user_id=new_user_id,
+                email=email,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+
+        return await self._email_admission(
+            gate_enabled=gate_enabled,
+            gate_mode=gate_mode,
+            email=email,
+            beta_invite_token_hash=beta_invite_token_hash,
+            redeem=redeem,
+            record_invitations=record_invitations,
+        )
+
+    async def email_signup_available_for_invitation(
+        self,
+        *,
+        email_restricted: bool,
+        plan_blocked: bool,
+        owner_role: bool,
+        workspace_deleted: bool,
+    ) -> bool:
+        """Can a workspace invitation's addressee create an account by email? (#1734)
+
+        For the public invitation preview: true only where the email form can
+        work, so an invitation that admits nobody (link-only, plan-blocked, an
+        owner-role row, a deleted workspace) never leads to a form that
+        silently sends nothing. The same eligibility as the admission
+        (:meth:`_addressed_invitations`), in both gate states (#2785); with
+        the gate off ``ALLOW_REGISTRATION`` admits anyone. Names no address.
+        """
+        settings = get_settings()
+        if not settings.enable_email_signup:
+            return False
+        if first_user_bootstrap_applies() and await self._is_first_user():
+            return True
+        invitation_admits = (
+            email_restricted and not plan_blocked and not owner_role and not workspace_deleted
+        )
+        config = await self._load_config()
+        if config.enabled:
+            # A corrupted mode refuses every email sign-up (_email_admission).
+            return config.mode in ("manual", "github_sponsors", "both") and invitation_admits
+        if settings.allow_registration:
+            return True
+        return invitation_admits
+
+    async def _email_admission(
+        self,
+        *,
+        gate_enabled: bool,
+        gate_mode: str,
+        email: str,
+        beta_invite_token_hash: str | None,
+        redeem: Callable[[], Awaitable[bool]] | None,
+        record_invitations: Callable[[list[WorkspaceInvitation]], None] | None,
+    ) -> EmailSignupAdmission | None:
+        """The sign-up controls for an email identity, in the OAuth order.
+
+        ``redeem`` / ``record_invitations`` are None at request time (read
+        only) and stage the beta invite redemption / the ``signup_admitted``
+        row at completion, inside the account-creating transaction.
+        """
+        if first_user_bootstrap_applies() and await self._is_first_user():
+            return "first_user"
+        settings = get_settings()
+        if not gate_enabled:
+            # The legacy gate's order (``_check_registration_allowed``). A beta
+            # invite is never consumed with the gate off, as for OAuth.
+            if settings.allow_registration:
+                return "open_registration"
+            return self._invitation_admission(
+                await self._addressed_invitations(email), record_invitations
+            )
+        if gate_mode not in ("manual", "github_sponsors", "both"):
+            # A corrupted mode refuses (check_access raises for OAuth).
+            logger.warning("email_signup_unknown_gate_mode")
+            return None
+        # #2785: a pending workspace invitation addressed to the address, before
+        # the beta invite (an invitee keeps the token, as for OAuth).
+        if self._invitation_admission(await self._addressed_invitations(email), record_invitations):
+            return "workspace_invitation"
+        # Sponsor modes are GitHub-specific; for email they mean manual (as
+        # for Google). The manual allowlist and pending Google rows belong to
+        # a provider identity and never admit an email identity.
+        if not beta_invite_token_hash or not settings.enable_beta_invites:
+            return None
+        if redeem is None:
+            invite = await BetaInviteService(self.db).find_redeemable(
+                beta_invite_token_hash, utcnow()
+            )
+            return "beta_invite" if invite is not None else None
+        return "beta_invite" if await redeem() else None
+
+    @staticmethod
+    def _invitation_admission(
+        invitations: list[WorkspaceInvitation],
+        record_invitations: Callable[[list[WorkspaceInvitation]], None] | None,
+    ) -> EmailSignupAdmission | None:
+        if not invitations:
+            return None
+        if record_invitations is not None:
+            record_invitations(invitations)
+        return "workspace_invitation"
+
+    async def _stage_email_beta_invite_redemption(
+        self,
+        *,
+        token_hash: str | None,
+        new_user_id: str,
+        email: str,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> bool:
+        """Spend a beta invite on a new email account (#1734); never commits.
+
+        The email twin of :meth:`_redeem_beta_invite`: the same three writes
+        (allowlist row, guarded single-use claim, ``beta_invite.redeemed``
+        audit row), staged in a SAVEPOINT of the account-creating transaction
+        instead of committed. A lost race or a constraint error rolls back the
+        savepoint only, and the caller refuses the sign-up.
+        """
+        if not token_hash or not get_settings().enable_beta_invites:
+            return False
+        invites = BetaInviteService(self.db)
+        now = utcnow()
+        invite = await invites.find_redeemable(token_hash, now)
+        if invite is None:
+            logger.info("beta_invite_redeem_rejected", provider="email", subject_id=new_user_id)
+            return False
+        invite_id = invite.id
+        inviter_user_id = invite.inviter_user_id
+        entry_id = uuid4()
+        savepoint = await self.db.begin_nested()
+        try:
+            self.db.add(
+                SignupAllowlistEntry(
+                    id=entry_id,
+                    provider="email",
+                    subject_id=new_user_id,
+                    subject_label=email,
+                    github_user_id=_legacy_user_id_for_non_github("email", new_user_id),
+                    github_username=email,
+                    source="beta_invite",
+                    state="active",
+                    added_by_user_id=inviter_user_id,
+                )
+            )
+            await self.db.flush()
+            claimed = await invites.mark_redeemed(
+                token_hash=token_hash, allowlist_entry_id=entry_id, now=now
+            )
+            if not claimed:
+                await savepoint.rollback()
+                logger.info(
+                    "beta_invite_redeem_lost_race",
+                    invite_id=str(invite_id),
+                    provider="email",
+                    subject_id=new_user_id,
+                )
+                return False
+            self.db.add(
+                AuditLog(
+                    user_email=EMAIL_SIGNUP_ACTOR,
+                    user_id=new_user_id,
+                    action="beta_invite.redeemed",
+                    resource=f"beta_invite:{invite_id}",
+                    new_value_hash=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+                    user_metadata={
+                        "provider": "email",
+                        "inviter_user_id": inviter_user_id,
+                        "allowlist_entry_id": str(entry_id),
+                    },
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
+            )
+            await savepoint.commit()
+        except IntegrityError:
+            await savepoint.rollback()
+            logger.info("beta_invite_redeem_conflict", provider="email", subject_id=new_user_id)
+            return False
+        logger.info(
+            "beta_invite_redeemed",
+            invite_id=str(invite_id),
+            provider="email",
+            subject_id=new_user_id,
+            inviter_user_id=inviter_user_id,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Admin: config
@@ -508,8 +838,16 @@ class SignupGateService:
         # surfaced as ConflictError → /login?error=email_in_use down in
         # RoleManager._sync_existing_user when the UPDATE attempts the
         # email move.
+        #
+        # #1734: the address in any letter case (an email sign-up account
+        # stores it normalized; any other holder in another case is refused
+        # by ensure_user with email_in_use): ensure_user links to it or
+        # refuses, never creates, so nothing is spent or admitted for it.
+        # Folded into the same SELECT.
         result = await self.db.execute(
-            select(User.id).where(or_(User.email == email, User.user_id == user_id)).limit(1)
+            select(User.id)
+            .where(or_(address_holder_clause(email), User.user_id == user_id))
+            .limit(1)
         )
         return result.first() is not None
 
@@ -621,6 +959,120 @@ class SignupGateService:
             "signup_allowlist_pending_promoted",
             email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
             pending_id=str(pending_id),
+        )
+        return True
+
+    async def _addressed_invitations(self, email: str) -> list[WorkspaceInvitation]:
+        """The pending workspace invitations that admit ``email`` (#2785). Read only.
+
+        ``InvitationService.get_pending_invitations_for_email`` with its default
+        eligible set (row exists = not revoked, not accepted, not expired,
+        workspace not deleted, plan with ``team_invitations``, addressed to
+        the address case-insensitively; a link-only row never matches), minus
+        owner-role rows (accept refuses them). ASCII addresses only, on both
+        sides, compared again here: the database's ``lower()`` and Python's can
+        differ outside ASCII. The caller has checked that the address is
+        verified.
+        """
+        if not email or not email.isascii():
+            return []
+        # Lazy: invitation_service imports workspace code that imports this module.
+        from services.invitation_service import InvitationService
+
+        wanted = email.lower()
+        found = await InvitationService(self.db).get_pending_invitations_for_email(email=email)
+        return [
+            inv
+            for inv in found
+            if inv.email is not None
+            and inv.email.isascii()
+            and inv.email.lower() == wanted
+            and inv.role != WorkspaceRole.OWNER
+        ]
+
+    def _invitation_admission_record(
+        self,
+        *,
+        actor: str,
+        provider: str,
+        subject_id: str,
+        email: str,
+        invitations: list[WorkspaceInvitation],
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> AuditLog:
+        """The ``signup_admitted`` audit row of an admission by invitation (#2785).
+
+        Each invitation is named by its public id with its workspace and
+        inviter, so the record stays readable after the invitation row is
+        revoked or purged. The address only as HMAC; never the token or URL.
+        """
+        return AuditLog(
+            user_email=actor,
+            user_id=subject_id,
+            action=SIGNUP_ADMITTED_ACTION,
+            resource=f"signup_gate:{provider}",
+            new_value_hash=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+            user_metadata={
+                "provider": provider,
+                "admission": "workspace_invitation",
+                "invitations": [
+                    {
+                        "id": inv.public_id,
+                        "workspace_id": str(inv.workspace_id),
+                        "invited_by": inv.invited_by,
+                    }
+                    for inv in invitations[:_ADMISSION_RECORD_INVITATIONS]
+                ],
+                "invitation_count": len(invitations),
+            },
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+
+    async def _admit_by_workspace_invitation(
+        self,
+        *,
+        provider: SignupGateProvider,
+        oauth_sub: str,
+        email: str,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> bool:
+        """Admit a new OAuth identity whose verified address is invited (#2785).
+
+        True = admitted: at least one invitation from
+        :meth:`_addressed_invitations`, and its ``signup_admitted`` row
+        committed. The commit is part of the admission, as for
+        :meth:`_redeem_beta_invite`: a database error propagates (the callback
+        ends in ``oauth_failed``) and nobody is admitted. Nothing is consumed,
+        so a retry is safe. Same session invariant as
+        :meth:`_record_blocked_signup`: the gate runs before any other write
+        of the callback, so the commit carries this row only.
+        """
+        invitations = await self._addressed_invitations(email)
+        if not invitations:
+            return False
+        self.db.add(
+            self._invitation_admission_record(
+                actor=_OAUTH_CALLBACK_ACTOR,
+                provider=provider,
+                subject_id=oauth_sub,
+                email=email,
+                invitations=invitations,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        )
+        count = len(invitations)
+        await self.db.commit()
+        # Never the address.
+        logger.info(
+            "signup_admitted",
+            provider=provider,
+            subject_id=oauth_sub,
+            admission="workspace_invitation",
+            invitations=count,
         )
         return True
 
@@ -803,17 +1255,44 @@ class SignupGateService:
         )
         return True
 
-    async def _legacy_check(self, email: str, user_id: str) -> RedirectResponse | None:
+    async def _legacy_check(
+        self,
+        email: str,
+        user_id: str,
+        *,
+        provider: SignupGateProvider,
+        email_verified: bool,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> RedirectResponse | None:
         """Delegate to the pre-existing env-based gate.
 
         Lazy import to avoid a circular dependency (``api.routes.auth``
         imports service modules for other flows). Shares ``self.db`` with
         ``_check_registration_allowed`` so the OAuth callback opens only one
         DB pool connection per attempt instead of two.
+
+        Its invitation branch is :meth:`_admit_by_workspace_invitation` (the
+        same eligibility and record as with the gate on), handed over only
+        for a verified address (#2785).
         """
         from api.routes.auth import _check_registration_allowed
 
-        return await _check_registration_allowed(email, self.db, user_id=user_id)
+        async def admit_by_invitation() -> bool:
+            return await self._admit_by_workspace_invitation(
+                provider=provider,
+                oauth_sub=user_id,
+                email=email,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+
+        return await _check_registration_allowed(
+            email,
+            self.db,
+            user_id=user_id,
+            admit_by_invitation=admit_by_invitation if email_verified else None,
+        )
 
     def _blocked_response(
         self,

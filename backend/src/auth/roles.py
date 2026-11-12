@@ -16,26 +16,35 @@ Example:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 
 from auth.provider_link import provider_link_established
+from auth.system_admin_mode import session_admin_enabled
 from config.settings import get_settings
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import ConflictError, UnlinkedProviderSignInError
+from utils.exceptions import (
+    ConflictError,
+    ProviderLinkConfirmable,
+    UnlinkedProviderSignInError,
+)
 from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
 from utils.user_prefs import is_valid_locale, is_valid_timezone
 
 if TYPE_CHECKING:
+    from sqlalchemy import ColumnElement
     from sqlalchemy.exc import IntegrityError as _IntegrityError
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from models.auth import User as _UserModel
     from models.auth import UserOAuthProvider as _UserOAuthProviderModel
+    from services.announcement_consent_service import SignupAnnouncementConsent
 
 logger = get_logger(__name__)
 
@@ -213,6 +222,266 @@ class UserRole(BaseModel):
     assigned_by: str | None = Field(None, description="Email of user who assigned this role")
 
 
+async def new_account_role(db: AsyncSession) -> Role:
+    """The role of an account being created now (#2767, #1734).
+
+    The one place for the first-user rule: the first account on an empty
+    users table becomes ``admin`` only while this process serves the
+    system-admin surface to sessions (``SYSTEM_ADMIN_MODE=session``); in
+    ``off`` and ``service`` every new account is a ``user``. Exactly one
+    ``db.execute`` (the count), so callers' statement sequences stay stable.
+    """
+    from sqlalchemy import select
+
+    from models.auth import User
+
+    count_result = await db.execute(select(func.count()).select_from(User))
+    user_count = count_result.scalar() or 0
+    if user_count == 0 and session_admin_enabled():
+        return Role.ADMIN
+    return Role.USER
+
+
+def is_initial_admin_role(role: Role) -> bool:
+    """``users.is_initial_admin`` for a new account with the role it was given.
+
+    A bootstrap marker (Issue #166: the first admin is protected from deletion
+    and demotion), not a grant of system-admin power: it is true exactly when
+    :func:`new_account_role` chose ``admin``, which happens only in
+    ``SYSTEM_ADMIN_MODE=session``. The one comparison every account-creating
+    path shares (OAuth ``ensure_user`` and email sign-up).
+    """
+    return role == Role.ADMIN
+
+
+def _normalize_address(email: str) -> str:
+    """``lower(trim())``: the form email sign-up stores (``normalize_email``)."""
+    return email.strip().lower()
+
+
+async def lock_address(db: AsyncSession, email: str) -> None:
+    """Serialize account creation for one address until the transaction ends (#1734).
+
+    ``users.email`` is UNIQUE but case-sensitive, so two creations whose
+    addresses differ only in case would both pass it. Every path that may
+    create an account for an address takes this transaction-scoped advisory
+    lock first and then looks the address up case-insensitively: the email
+    sign-up request and completion, and ``ensure_user``'s new-user path.
+    """
+    from sqlalchemy import text
+
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended('email_signup:' || :address, 0))"),
+        {"address": _normalize_address(email)},
+    )
+
+
+async def _address_held_by_another(db: AsyncSession, email: str, user_id: str) -> bool:
+    """Does an account other than ``user_id`` hold ``email`` in any letter case? (#1734)
+
+    Takes :func:`lock_address` first, so an account being created for the
+    address at the same moment (email sign-up, a first OAuth sign-in) is
+    either seen here or sees this account's new address. Two statements:
+    the lock and the lookup.
+    """
+    from sqlalchemy import select
+
+    from models.auth import User
+
+    await lock_address(db, email)
+    result = await db.execute(
+        select(User.user_id)
+        .where(func.lower(User.email) == _normalize_address(email), User.user_id != user_id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+def address_holder_clause(email: str) -> ColumnElement[bool]:
+    """Any account holding ``email``, exactly or in another letter case (#1734).
+
+    The sign-in gates count such an account as existing, as
+    ``ensure_user``'s new-user path does (``func.lower(User.email)`` under
+    :func:`lock_address`): it links to it or refuses, never creates. A gate
+    that missed a case-variant holder would admit (spend an invite, record
+    an admission) a sign-in that then ends in ``email_in_use``. Covers
+    :func:`email_signup_account_clause`; uses ``ix_users_email_lower``.
+    """
+    from sqlalchemy import or_
+
+    from models.auth import User
+
+    return or_(User.email == email, func.lower(User.email) == _normalize_address(email))
+
+
+def email_signup_account_clause(email: str) -> ColumnElement[bool]:
+    """The account created by email sign-up for ``email`` (#1734).
+
+    Email sign-up stores the normalized address, so plain equality on the
+    unique column finds it. It is the only kind of account with
+    ``auth_method='password'`` and no login id (every CLI account has one),
+    and its address was verified by the sign-up link.
+    """
+    from sqlalchemy import and_
+
+    from models.auth import User
+
+    return and_(
+        User.email == _normalize_address(email),
+        User.auth_method == "password",
+        User.login_id.is_(None),
+        User.email_verified_at.is_not(None),
+    )
+
+
+def email_account_link_refusal(user: _UserModel, *, address: str) -> str | None:
+    """Why a provider identity may not be connected to ``user`` now, or None.
+
+    The row-only conditions shared by the automatic link (#1734) and the link
+    confirmed by email (#2786), read under the account's row lock in both:
+
+    - ``not_an_email_signup_account``: not the account email sign-up created
+      for ``address`` (normalized here; the same fields as
+      :func:`email_signup_account_clause`);
+    - ``totp_enabled``: two-step verification is on (an OAuth sign-in never
+      asks for it);
+    - ``role``: anything but an ordinary ``user`` (a system admin connects
+      providers from Profile, with fresh proof of the account);
+    - ``blocked_by_owner``: ``provider_auto_link_blocked_at`` is set (the
+      owner removed a provider, a reset removed one, or the owner declined
+      a confirmation).
+
+    Whether a provider of the same kind is linked already needs a query and
+    is checked by the callers.
+    """
+    if not (
+        user.email == _normalize_address(address)
+        and user.auth_method == "password"
+        and user.login_id is None
+        and user.email_verified_at is not None
+    ):
+        return "not_an_email_signup_account"
+    if user.totp_enabled:
+        return "totp_enabled"
+    if user.role != Role.USER.value:
+        return "role"
+    if user.provider_auto_link_blocked_at is not None:
+        return "blocked_by_owner"
+    return None
+
+
+def account_stamp(user: _UserModel) -> str:
+    """A digest of the account's security state, for a pending link (#2786).
+
+    Covers the row id and user id, the address, the password hash, the MFA
+    generation, two-step verification, the role and the block marker: a
+    password change or reset, an MFA change, a role change, an address change
+    or a removed provider after the confirmation mail was sent makes the
+    pending link fail. An ordinary sign-in changes none of them.
+    """
+    blocked = user.provider_auto_link_blocked_at
+    state = [
+        user.id,
+        user.user_id,
+        user.email,
+        user.password_hash,
+        user.mfa_generation,
+        bool(user.totp_enabled),
+        user.role,
+        blocked.isoformat() if blocked is not None else None,
+    ]
+    return hashlib.sha256(json.dumps(state).encode()).hexdigest()
+
+
+def stage_address_link(
+    db: AsyncSession,
+    *,
+    owner_id: str,
+    provider: str,
+    oauth_sub: str,
+    action: str,
+    actor_email: str,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> None:
+    """Stage the link row and its audit row of an address link; never commits.
+
+    The one writer for both ways a provider identity is connected to an
+    email sign-up account by its address: automatically (#1734,
+    ``oauth_provider_auto_linked``) and after an email confirmation (#2786,
+    ``oauth_provider_link_confirmed``). ``linked_at`` is now, so the new link
+    proves nothing for identity linking during the link window
+    (``provider_link_established``).
+    """
+    from models.auth import UserOAuthProvider
+    from services.account_linking_service import stage_provider_audit
+
+    now = utcnow()
+    db.add(
+        UserOAuthProvider(
+            user_id=owner_id,
+            provider=provider,
+            oauth_sub=oauth_sub,
+            linked_at=now,
+            last_used_at=now,
+        )
+    )
+    stage_provider_audit(
+        db,
+        user_id=owner_id,
+        actor_email=actor_email,
+        action=action,
+        provider=provider,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+
+async def stage_email_account(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    email: str,
+    name: str | None,
+    password_hash: str,
+    locale: str | None,
+    timezone: str | None,
+) -> Role:
+    """Add the ``users`` row of an email sign-up; never commits (#1734).
+
+    The role comes from :func:`new_account_role`, the same rule as an OAuth
+    sign-up. The address counts as verified (the person followed the link
+    mailed to it). No provider and no login id: a later Google sign-in may
+    link to it (``ensure_user``), the admin CLIs never take it for theirs.
+    """
+    from models.auth import User
+
+    role = await new_account_role(db)
+    prefs: dict[str, Any] = {}
+    if is_valid_locale(locale):
+        prefs["locale"] = locale
+    if is_valid_timezone(timezone):
+        prefs["timezone"] = timezone
+    now = utcnow()
+    db.add(
+        User(
+            email=_normalize_address(email),
+            user_id=user_id,
+            name=name,
+            role=role.value,
+            is_initial_admin=is_initial_admin_role(role),
+            auth_method="password",
+            password_hash=password_hash,
+            login_id=None,
+            auth_provider=None,
+            email_verified_at=now,
+            last_login_at=now,
+            **prefs,
+        )
+    )
+    return role
+
+
 class RoleManager:
     """Manage user roles and permissions (async).
 
@@ -267,10 +536,12 @@ class RoleManager:
         auth_provider: str | None = None,
         *,
         email_verified: bool = False,
+        email_authoritative: bool = False,
         ip_address: str | None = None,
         user_agent: str | None = None,
         locale: str | None = None,
         timezone: str | None = None,
+        announcement_consent: SignupAnnouncementConsent | None = None,
     ) -> Role:
         """Ensure user exists; on existing users, sync email/name from IdP.
 
@@ -295,6 +566,10 @@ class RoleManager:
             email_verified: Whether the IdP attested that ``email`` is verified.
                 Required for the email-sync UPDATE; absent or ``False`` skips
                 the email field. Name is always sync-safe regardless.
+            email_authoritative: Whether the IdP is authoritative for the
+                mailbox (``provider_authoritative_for_address``, #1734). Drives
+                ONLY the decision to link this identity to an account created
+                by email sign-up for the same address; never the email sync.
             ip_address: Caller IP, captured for the audit log row when an email
                 change is recorded.
             user_agent: Caller User-Agent, captured for the audit log row.
@@ -304,6 +579,11 @@ class RoleManager:
                 an unsupported value leaves the column default ``en``.
             timezone: IANA time zone the browser reported (#2700). Same rule
                 as ``locale``; the column default is ``UTC``.
+            announcement_consent: The announcement-email opt-in the sign-up
+                page carried (#2761), already validated. Recorded (source
+                ``signup``) only when this call creates the account, in the
+                same commit as the ``users`` row; an existing account keeps its
+                own answer. ``None`` records nothing ("never answered").
 
         Returns:
             The user's assigned role.
@@ -333,10 +613,12 @@ class RoleManager:
                 name=name,
                 auth_provider=auth_provider,
                 email_verified=email_verified,
+                email_authoritative=email_authoritative,
                 ip_address=ip_address,
                 user_agent=user_agent,
                 locale=locale,
                 timezone=timezone,
+                announcement_consent=announcement_consent,
             )
 
         # In-memory backend (testing only) — keyed by email for backward
@@ -347,7 +629,7 @@ class RoleManager:
         if email in self._roles:
             return self._roles[email]
 
-        role = Role.ADMIN if len(self._roles) == 0 else Role.USER
+        role = Role.ADMIN if len(self._roles) == 0 and session_admin_enabled() else Role.USER
         self._roles[email] = role
         return role
 
@@ -363,6 +645,8 @@ class RoleManager:
         user_agent: str | None,
         locale: str | None = None,
         timezone: str | None = None,
+        email_authoritative: bool = False,
+        announcement_consent: SignupAnnouncementConsent | None = None,
     ) -> Role:
         """PostgreSQL-backed ``ensure_user``. See ``ensure_user`` docstring."""
         from sqlalchemy import select
@@ -424,10 +708,29 @@ class RoleManager:
                     sync_profile=user.auth_provider == auth_provider,
                 )
 
-            # New user path. Determine role: first user = ADMIN, others = USER.
-            count_result = await db.execute(select(func.count()).select_from(User))
-            user_count = count_result.scalar() or 0
-            role = Role.ADMIN if user_count == 0 else Role.USER
+            # New user path. First user = ADMIN in session mode, else USER
+            # (#2767: new_account_role is the one place for that rule).
+            role = await new_account_role(db)
+
+            # #1734: one account per address. Lock the address (every account
+            # creation takes this lock), then look at the accounts holding it
+            # in any case: an account created by email sign-up may take this
+            # identity as a linked provider; any other holder ends in
+            # ConflictError, never in a second account.
+            await lock_address(db, email)
+            linked_role = await self._link_or_refuse_address_holder(
+                db=db,
+                email=email,
+                user_id=user_id,
+                name=name,
+                auth_provider=auth_provider,
+                email_verified=email_verified,
+                email_authoritative=email_authoritative,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            if linked_role is not None:
+                return linked_role
 
             # #2700: seed the new row with the sign-in page's language and
             # time zone. Passed only when valid, so otherwise the column
@@ -445,7 +748,7 @@ class RoleManager:
                 name=name,
                 role=role.value,
                 # Issue #166: first admin protected from deletion/demotion.
-                is_initial_admin=(role == Role.ADMIN),
+                is_initial_admin=is_initial_admin_role(role),
                 last_login_at=utcnow(),
                 auth_provider=auth_provider,
                 # #1752: only an address the IdP attested as verified counts
@@ -467,6 +770,25 @@ class RoleManager:
                     )
                 )
             try:
+                # #2761: the sign-up opt-in, in the same transaction as the user
+                # (and so rolled back with it on IntegrityError). Neither
+                # _sync_existing_user nor the race retry below ever adds it, so
+                # an existing account keeps its answer. The row has a foreign
+                # key to users.user_id but no relationship(), so the unit of
+                # work does not order the two inserts: flush the user first,
+                # inside this try so a collision takes the handling below.
+                if announcement_consent is not None:
+                    from services.announcement_consent_service import new_consent_row
+
+                    await db.flush()
+                    db.add(
+                        new_consent_row(
+                            user_id=user_id,
+                            value=announcement_consent.value,
+                            source="signup",
+                            wording_version=announcement_consent.wording_version,
+                        )
+                    )
                 await db.commit()
                 return role
             except IntegrityError as exc:
@@ -538,6 +860,201 @@ class RoleManager:
         # practice but satisfies the type checker.
         return Role.USER  # pragma: no cover
 
+    async def _link_or_refuse_address_holder(
+        self,
+        *,
+        db: AsyncSession,
+        email: str,
+        user_id: str,
+        name: str | None,
+        auth_provider: str | None,
+        email_verified: bool,
+        email_authoritative: bool,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> Role | None:
+        """Decide what a new identity does with an address that has an account (#1734).
+
+        Runs on the new-user path under :func:`lock_address`. Returns ``None``
+        to let the insert proceed (no account holds the address, or the
+        identity's own removed account exists: the insert's IntegrityError
+        arms answer that as before). Returns the role after linking this
+        identity to the account email sign-up created for the address.
+        Raises ``ConflictError`` (``email_in_use``) for every other holder:
+        an account of another kind, one whose address differs only in case,
+        several holders, or an email sign-up account that may not be linked
+        automatically. Never a second account.
+
+        The account is linked only when all of these hold, read under its row
+        lock (an unlink or a password reset holds the same lock):
+
+        - the provider is authoritative for the mailbox (``email_authoritative``,
+          which needs a verified address) and the address is ASCII;
+        - the account was created by email sign-up (``email_signup_account_clause``);
+        - no two-step verification (an OAuth sign-in never asks for it);
+        - an ordinary ``user`` role (never into a system admin);
+        - the owner never removed a provider and no reset removed one
+          (``provider_auto_link_blocked_at``);
+        - no provider of this kind is linked yet.
+
+        The new link proves nothing for identity linking during the link
+        window (``provider_link_established``), never overwrites the account's
+        name or address (``sync_profile=False``), and the owner is told.
+
+        #2786: when everything but the provider's authority holds (a GitHub
+        sign-in, or a Google one without authority over the mailbox) and the
+        address is verified and ASCII, raises ``ProviderLinkConfirmable`` (a
+        ``ConflictError``) instead: the callback may then mail the account a
+        confirmation link. Authority is checked last for that reason, so the
+        exclusions above apply to the confirmation as they do to the
+        automatic link. ``ENABLE_PROVIDER_LINK_CONFIRMATION=false`` keeps the
+        plain refusal.
+        """
+        from sqlalchemy import or_, select
+        from sqlalchemy.exc import IntegrityError
+
+        from models.auth import User, UserOAuthProvider
+
+        normalized = _normalize_address(email)
+        holders = list(
+            (
+                await db.execute(
+                    select(User)
+                    .where(or_(User.user_id == user_id, func.lower(User.email) == normalized))
+                    .order_by(User.id)
+                    .limit(3)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not holders or any(h.user_id == user_id for h in holders):
+            return None
+
+        def _refuse(reason: str) -> ConflictError:
+            logger.warning(
+                "oauth_email_collision_attempt",
+                auth_provider=auth_provider,
+                new_email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+                user_id=user_id,
+                phase="create",
+                reason=reason,
+            )
+            return ConflictError("Email address is already in use by another account")
+
+        if len(holders) != 1:
+            raise _refuse("several_accounts")
+        candidate = holders[0]
+        if auth_provider not in ("google", "github"):
+            raise _refuse("unknown_provider")
+        # #2786: authority over the mailbox is decided last. Every other
+        # refusal runs first, so a sign-in without authority is offered a
+        # confirmation by email only for an account that could take the link.
+        authoritative = email_authoritative and email_verified and email.isascii()
+        if not (email_verified and email.isascii()):
+            raise _refuse("provider_not_authoritative")
+        refusal = email_account_link_refusal(candidate, address=email)
+        if refusal is not None:
+            raise _refuse(refusal)
+        already = (
+            await db.execute(
+                select(UserOAuthProvider.id)
+                .where(
+                    UserOAuthProvider.user_id == candidate.user_id,
+                    UserOAuthProvider.provider == auth_provider,
+                )
+                .limit(1)
+            )
+        ).first()
+        if already is not None:
+            raise _refuse("provider_already_linked")
+        if not authoritative:
+            if not get_settings().enable_provider_link_confirmation:
+                raise _refuse("provider_not_authoritative")
+            # Same message as every refusal: an unhandled one is email_in_use.
+            logger.warning(
+                "oauth_email_collision_attempt",
+                auth_provider=auth_provider,
+                new_email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+                user_id=user_id,
+                phase="create",
+                reason="confirmation_offered",
+            )
+            raise ProviderLinkConfirmable(
+                account_user_id=candidate.user_id, account_stamp=account_stamp(candidate)
+            )
+
+        owner_id = candidate.user_id
+        stage_address_link(
+            db,
+            owner_id=owner_id,
+            provider=auth_provider,
+            oauth_sub=user_id,
+            action="oauth_provider_auto_linked",
+            actor_email=_OAUTH_CALLBACK_ACTOR,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        try:
+            role = await self._sync_existing_user(
+                db=db,
+                user=candidate,
+                new_email=email,
+                new_name=name,
+                auth_provider=auth_provider,
+                email_verified=email_verified,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                sync_profile=False,
+            )
+        except IntegrityError:
+            # The same identity's first sign-in ran in another tab and linked
+            # it first (UNIQUE provider + sub). Sign in through that link when
+            # it points at this account; anything else is a real failure.
+            await db.rollback()
+            own_link = (
+                await db.execute(
+                    select(UserOAuthProvider).filter_by(provider=auth_provider, oauth_sub=user_id)
+                )
+            ).scalar_one_or_none()
+            if own_link is None or own_link.user_id != owner_id:
+                raise
+            owner = (
+                await db.execute(select(User).filter_by(user_id=owner_id))
+            ).scalar_one_or_none()
+            if owner is None:
+                raise
+            own_link.last_used_at = utcnow()
+            return await self._sync_existing_user(
+                db=db,
+                user=owner,
+                new_email=email,
+                new_name=name,
+                auth_provider=auth_provider,
+                email_verified=email_verified,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                sync_profile=False,
+            )
+
+        logger.info("oauth_provider_auto_linked", user_id=owner_id, provider=auth_provider)
+        from services.security_notification_service import (
+            PROVIDER_SIGN_IN_LABELS,
+            SecurityEvent,
+            spawn_security_notification,
+        )
+
+        spawn_security_notification(
+            user_id=owner_id,
+            event=SecurityEvent.SIGN_IN_METHOD_AUTO_LINKED,
+            ip=ip_address,
+            user_agent=user_agent,
+            sign_in_method=PROVIDER_SIGN_IN_LABELS.get(auth_provider, auth_provider),
+        )
+        return role
+
     async def _sync_existing_user(
         self,
         *,
@@ -585,6 +1102,18 @@ class RoleManager:
             )
         if email_verified and user.email == new_email and user.email_verified_at is None:
             user.email_verified_at = utcnow()
+        if sync_email and await _address_held_by_another(db, new_email, user.user_id):
+            # #1734: the unique index is case-sensitive, so the UPDATE would
+            # pass for a case variant and leave two accounts with one
+            # address (the other one's sign-in by address then fails
+            # closed). Keep this account's address; the sign-in goes on.
+            sync_email = False
+            logger.warning(
+                "oauth_email_sync_skipped_address_in_use",
+                auth_provider=auth_provider,
+                user_id=user.user_id,
+                new_email_hmac=hmac_sha256_hex(new_email, get_settings().audit_hmac_key),
+            )
 
         if not sync_email and not sync_name:
             user.last_login_at = utcnow()

@@ -2161,3 +2161,30 @@ class WorkspaceService:
                 )
             )
         return conditions
+
+
+async def ensure_first_workspace(db: AsyncSession, user_id: str, email: str) -> None:
+    """Give a brand-new account its personal workspace, unless invitations wait (#1734).
+
+    The rule of the OAuth callbacks (#212, #276, #2785): with a pending
+    workspace invitation addressed to ``email`` and a verified address (only
+    a verified address accepts an addressed invitation) no personal workspace
+    is created; the person joins through the invitation. Used by the email
+    sign-up completion. Never raises: the account exists already, and a
+    person without a workspace can create one (the callbacks do the same).
+    """
+    from services.invitation_service import InvitationService
+
+    try:
+        invitations = InvitationService(db)
+        pending = await invitations.get_pending_invitations_for_email(email=email)
+        if pending and await invitations.account_address_verified(user_id):
+            logger.info(
+                "first_workspace_skipped_pending_invitations",
+                user_id=user_id,
+                pending_invitations=len(pending),
+            )
+            return
+        await WorkspaceService(db).ensure_personal_workspace(user_id=user_id, email=email)
+    except Exception as exc:
+        logger.error("first_workspace_failed", user_id=user_id, error_type=type(exc).__name__)

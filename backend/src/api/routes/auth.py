@@ -27,7 +27,7 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # and reports every ``oauth_endpoints.*`` call as an unknown attribute. Runtime
 # always resolved it correctly (absolute import); this makes the intent explicit
 # for readers and analyzers alike.
+import auth.oauth_browser as oauth_browser
 import auth.oauth_endpoints as oauth_endpoints
 from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
@@ -69,6 +70,10 @@ from config.settings import TERMS_VERSION_RE
 from db.base import get_db
 from models.auth import AuditLog, User
 from services.account_linking_service import AccountLinkingService
+from services.announcement_consent_service import (
+    SignupAnnouncementConsent,
+    resolve_signup_consent,
+)
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
 from services.identity_link_service import linked_user_ids
 from services.known_device_service import note_browser_sign_in
@@ -77,6 +82,7 @@ from services.password_account_service import (
     find_password_user_by_email,
     password_unchanged,
 )
+from services.provider_link_confirmation_service import spawn_link_offer
 from services.security_notification_service import (
     PROVIDER_SIGN_IN_LABELS,
     SecurityEvent,
@@ -92,6 +98,7 @@ from utils.exceptions import (
     AuthenticationError,
     ConflictError,
     InvalidCredentialsError,
+    ProviderLinkConfirmable,
     UnlinkedProviderSignInError,
 )
 from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
@@ -183,7 +190,11 @@ class CallbackResponse(BaseModel):
 
 
 async def _check_registration_allowed(
-    email: str, db: AsyncSession | None = None, *, user_id: str | None = None
+    email: str,
+    db: AsyncSession | None = None,
+    *,
+    user_id: str | None = None,
+    admit_by_invitation: Callable[[], Awaitable[bool]] | None = None,
 ) -> RedirectResponse | None:
     """Check if a new user is allowed to register.
 
@@ -192,7 +203,9 @@ async def _check_registration_allowed(
     - Existing users: always allowed (login, not registration)
     - First user (no users exist): always allowed (need initial admin)
     - ALLOW_REGISTRATION=true: always allowed
-    - Pending invitation for this email: always allowed
+    - A pending workspace invitation addressed to this email: allowed through
+      ``admit_by_invitation``, which the signup gate passes only when the
+      provider reports the address verified (#2785)
     - Otherwise: blocked → redirect to login with error
 
     Args:
@@ -204,12 +217,16 @@ async def _check_registration_allowed(
             *either* email or user_id counts as "existing" so a returning
             user whose IdP email changed is still recognised as a login (not
             blocked as a new signup).
+        admit_by_invitation: The signup gate's invitation admission
+            (``SignupGateService._admit_by_workspace_invitation``, on the same
+            session): True when a pending invitation is addressed to the
+            address, with the admission recorded. None (the default) = no
+            invitation admits.
     """
     from sqlalchemy import func, or_, select
 
     from config.settings import get_settings
     from models.auth import User
-    from services.invitation_service import InvitationService
 
     settings = get_settings()
 
@@ -225,12 +242,18 @@ async def _check_registration_allowed(
         # user_id (OAuth sub) is included as an OR condition so a returning
         # user whose email changed at the IdP is recognised as existing and
         # never blocked — RoleManager.ensure_user handles the email sync.
+        #
+        # #1734: the address in any letter case (an email sign-up account
+        # stores it normalized); ensure_user then links or refuses, never
+        # creates. Several rows can match the OR, hence ``.first()``.
+        from auth.roles import address_holder_clause
+
         if user_id is not None and user_id:
-            cond = or_(User.email == email, User.user_id == user_id)
+            cond = or_(address_holder_clause(email), User.user_id == user_id)
         else:
-            cond = User.email == email
-        result = await session.execute(select(User).where(cond))
-        if result.scalar_one_or_none():
+            cond = address_holder_clause(email)
+        result = await session.execute(select(User.id).where(cond).limit(1))
+        if result.first() is not None:
             return None
 
         # First user always allowed
@@ -242,10 +265,9 @@ async def _check_registration_allowed(
         if settings.allow_registration:
             return None
 
-        # Invited users bypass gate (invitations addressed to this email only)
-        invitation_service = InvitationService(session)
-        pending_invites = await invitation_service.get_pending_invitations_for_email(email=email)
-        if pending_invites:
+        # Invited users bypass the gate: a pending invitation addressed to this
+        # (verified) address, the same rule as with the signup gate on.
+        if admit_by_invitation is not None and await admit_by_invitation():
             return None
 
         # Block. Log the HMAC of the email rather than the plaintext —
@@ -292,6 +314,135 @@ def _email_in_use_redirect() -> RedirectResponse:
         _safe_redirect_url(f"{frontend_url}/login?error=email_in_use&link_hint=true"),
         status_code=303,
     )
+
+
+# --- Browser binding of a sign-in (#2786) ------------------------------------
+#
+# ``google_login`` / ``github_login`` are the only writers: they give the
+# browser a nonce cookie (``auth.oauth_browser``) and store its digest under
+# ``oauth2_flow:{state}``. The callbacks take the binding with the other
+# state-bound carriers, after the state check, on every path. A provider link
+# confirmed by email is offered only for a sign-in that has one, and completes
+# only in the browser that presents the nonce.
+
+
+def _bind_oauth_flow(request: Request, state: str) -> str | None:
+    """Bind this sign-in's ``state`` to the browser; returns the nonce to set.
+
+    Reuses the nonce the request carries only while its server-side marker
+    exists, and mints a new one otherwise. Refreshes the marker every time.
+    None without a session manager (nothing can be bound).
+    """
+    if not _session_manager:
+        return None
+    redis = _session_manager._redis
+    nonce = oauth_browser.presented_nonce(request.cookies)
+    if nonce is not None and not redis.get(
+        oauth_browser.marker_key(oauth_browser.nonce_digest(nonce))
+    ):
+        nonce = None
+    if nonce is None:
+        nonce = secrets.token_urlsafe(32)
+    digest = oauth_browser.nonce_digest(nonce)
+    redis.setex(oauth_browser.marker_key(digest), oauth_browser.OAUTH_BROWSER_TTL_SECONDS, "1")
+    redis.setex(
+        oauth_browser.OAUTH_FLOW_KEY.format(state=state),
+        oauth_browser.OAUTH_FLOW_TTL_SECONDS,
+        digest,
+    )
+    return nonce
+
+
+def _set_oauth_browser_cookie(response: Response, nonce: str | None) -> None:
+    """Set (or refresh) the browser nonce cookie; no-op without a nonce."""
+    if nonce is None:
+        return
+    response.set_cookie(
+        key=oauth_browser.cookie_name(),
+        value=nonce,
+        max_age=oauth_browser.OAUTH_BROWSER_TTL_SECONDS,
+        **browser_cookie_attrs(),
+    )
+
+
+def _take_oauth_flow_binding(state: str, request: Request) -> str | None:
+    """Read-and-delete ``oauth2_flow:{state}``; the nonce digest when it matches.
+
+    Call only AFTER the CSRF state check has passed. Consumes the key on every
+    path. Returns None when the flow has no binding or the request's cookie
+    is missing or is another nonce.
+    """
+    if not _session_manager:
+        return None
+    key = oauth_browser.OAUTH_FLOW_KEY.format(state=state)
+    stored = _session_manager._redis.get(key)
+    if stored is None:
+        return None
+    _session_manager._redis.delete(key)
+    if not isinstance(stored, str):
+        return None
+    nonce = oauth_browser.presented_nonce(getattr(request, "cookies", None))
+    if not oauth_browser.matches(nonce, stored):
+        return None
+    return stored
+
+
+def _offer_link_confirmation(
+    *,
+    request: Request,
+    state: str,
+    provider: Literal["google", "github"],
+    user_info: Mapping[str, Any],
+    exc: ProviderLinkConfirmable,
+    browser_hash: str | None,
+    link_proof: bool,
+) -> RedirectResponse:
+    """Answer a sign-in that may be confirmed by email, exactly as ``email_in_use``.
+
+    The response is the plain ``_email_in_use_redirect()`` in every case: no
+    cookie, same status and location. The record and the mail are produced
+    by a detached task after it (``spawn_link_offer``), so the request ends
+    at the same moment whatever happens next. No offer is made when the
+    sign-in was not started by this browser's ``/login`` (no binding), or
+    when it carries an add-account intent or an identity-link proof: an
+    intent that cannot be honoured is refused, never turned into another
+    sign-in. Never raises.
+    """
+    try:
+        redis = _session_manager._redis if _session_manager else None
+        return_to: str | None = None
+        add_intent = None
+        if redis is not None:
+            add_key = _ADD_ACCOUNT_KEY.format(state=state)
+            return_key = f"oauth2_return_to:{state}"
+            add_intent = redis.get(add_key)
+            return_to = redis.get(return_key)
+            redis.delete(add_key, return_key)
+        if browser_hash is None or add_intent or link_proof:
+            logger.info(
+                "provider_link_confirmation_not_offered",
+                provider=provider,
+                reason="no_browser_binding" if browser_hash is None else "flow_intent",
+            )
+            return _email_in_use_redirect()
+        safe_return_to = (
+            return_to
+            if isinstance(return_to, str) and _safe_redirect_url(return_to) == return_to
+            else None
+        )
+        spawn_link_offer(
+            account_user_id=exc.account_user_id,
+            account_stamp=exc.account_stamp,
+            provider=provider,
+            user_info=dict(user_info),
+            browser_hash=browser_hash,
+            return_to=safe_return_to,
+            ip_address=_login_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    except Exception as e:
+        logger.error("provider_link_confirmation_offer_failed", error_type=type(e).__name__)
+    return _email_in_use_redirect()
 
 
 async def _maybe_refresh_redirect(
@@ -637,6 +788,7 @@ def _get_enabled_providers() -> list[ProviderInfo]:
 @google_router.get("/login")
 async def google_login(
     request: Request,
+    response: Response,
     redirect_uri: str | None = None,
     return_to: str | None = None,
     add_account: bool = False,
@@ -645,6 +797,8 @@ async def google_login(
     link_proof: bool = False,
     locale: str | None = None,
     timezone: str | None = None,
+    announcement_emails: str | None = None,
+    announcement_consent_version: str | None = None,
 ):
     """Initiate Google OAuth2 login flow.
 
@@ -667,6 +821,12 @@ async def google_login(
             an existing one keeps its own. Unsupported values are ignored.
         timezone: The browser's IANA time zone (e.g. ``Asia/Tokyo``, #2700).
             Same handling as ``locale``.
+        announcement_emails: The answer to the announcement-email opt-in on
+            the sign-in page (``true`` / ``false``, #2761), with
+            ``announcement_consent_version`` the wording version it showed.
+            Bound to this flow's state; recorded only when this sign-in
+            creates the account. Ignored while ANNOUNCEMENT_EMAILS_ENABLED is
+            off, with a stale version, or from a cross-site navigation.
 
     Returns:
         If return_to: RedirectResponse to Google OAuth (browser user)
@@ -696,6 +856,7 @@ async def google_login(
 
     # Generate CSRF state token
     state = secrets.token_urlsafe(32)
+    browser_nonce: str | None = None
 
     # Store state in Redis (5 minute TTL)
     if _session_manager:
@@ -719,8 +880,19 @@ async def google_login(
         # #1665: the terms version the person agreed to, bound to this state.
         _remember_accepted_terms(state, accepted_terms)
 
-        # #2700: the sign-in page's language / time zone, for a new account.
-        _remember_signup_prefs(state, locale, timezone)
+        # #2700: the sign-in page's language / time zone, for a new account;
+        # #2761: with the announcement-email opt-in shown on that page.
+        _remember_signup_prefs(
+            state,
+            locale,
+            timezone,
+            announcement=_signup_announcement_from_query(
+                request, announcement_emails, announcement_consent_version
+            ),
+        )
+
+        # #2786: bind this sign-in to the browser (nonce cookie below).
+        browser_nonce = _bind_oauth_flow(request, state)
 
         # #1818: a sign-in that proves this account for an identity link.
         if link_proof:
@@ -740,9 +912,14 @@ async def google_login(
 
     # Issue #102: Auto-redirect for browser/iOS users
     if return_to:
-        return RedirectResponse(auth_url, status_code=303)
+        # #2786: the cookie goes on the returned redirect itself (headers of
+        # the injected ``response`` are not merged into a returned Response).
+        redirect_response = RedirectResponse(auth_url, status_code=303)
+        _set_oauth_browser_cookie(redirect_response, browser_nonce)
+        return redirect_response
     else:
         # API client - return JSON
+        _set_oauth_browser_cookie(response, browser_nonce)
         return LoginResponse(authorization_url=auth_url, state=state)
 
 
@@ -912,8 +1089,14 @@ async def google_callback(
     beta_invite_token_hash = _take_beta_invite_hash(state)
     # #1665: likewise single-use and taken only after the CSRF check.
     accepted_terms = _take_accepted_terms(state)
-    # #2700: likewise; seeds a new account only.
-    signup_locale, signup_timezone = _take_signup_prefs(state)
+    # #2700: likewise; seeds a new account only. #2761: the announcement-email
+    # opt-in rides in the same carrier.
+    signup_prefs = _take_signup_bundle(state)
+    signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
+    # #2786: likewise; the browser binding written by google_login.
+    browser_hash = _take_oauth_flow_binding(state, request)
+    # #2761: a "yes" counts only from the browser that ran /login.
+    signup_announcement = _announcement_for_browser(signup_prefs.announcement, browser_hash)
     # #1818: likewise.
     link_proof = _take_link_proof_intent(state)
 
@@ -981,6 +1164,8 @@ async def google_callback(
             user_agent=request.headers.get("user-agent"),
             # #1581: tried last, only if the gate would otherwise block.
             beta_invite_token_hash=beta_invite_token_hash,
+            # #2785: an address matches an invitation only when verified.
+            email_verified=user_info.get("email_verified") is True,
         )
         if blocked:
             return blocked
@@ -1000,11 +1185,16 @@ async def google_callback(
             # Strict identity check (not bool coercion) so a stringly-typed
             # "True" / "false" from a misconfigured IdP cannot pass the gate.
             email_verified=user_info.get("email_verified") is True,
+            # #1734: only an authoritative provider may link to an account
+            # created by email sign-up for this address.
+            email_authoritative=provider_authoritative_for_address("google", user_info),
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
             # #2700: applied only when this sign-in creates the account.
             locale=signup_locale,
             timezone=signup_timezone,
+            # #2761: likewise — an existing account keeps its own answer.
+            announcement_consent=signup_announcement,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).
@@ -1141,6 +1331,12 @@ async def google_callback(
                 pending_invites = await invitation_service.get_pending_invitations_for_email(
                     email=owner_email
                 )
+                # #2785: addressed invitations are accepted by a verified address
+                # only; only then do they stand in for the personal workspace.
+                if pending_invites and not await invitation_service.account_address_verified(
+                    owner_id
+                ):
+                    pending_invites = []
 
                 if pending_invites:
                     # Issue #276: Skip personal workspace creation if user has pending invitations
@@ -1207,6 +1403,17 @@ async def google_callback(
         # The identity has no link row (its account removed this sign-in
         # method): no session, a banner that says so.
         return _oauth_error_redirect("google", "provider_unlinked")
+    except ProviderLinkConfirmable as exc:
+        # #2786: the same answer as email_in_use; a confirmation may be mailed.
+        return _offer_link_confirmation(
+            request=request,
+            state=state,
+            provider="google",
+            user_info=user_info,
+            exc=exc,
+            browser_hash=browser_hash,
+            link_proof=link_proof,
+        )
     except ConflictError:
         return _email_in_use_redirect()
     except SQLAlchemyError:
@@ -1634,22 +1841,83 @@ _SIGNUP_PREFS_KEY = "oauth2_signup_prefs:{state}"
 _SIGNUP_PREFS_TTL = 300  # same lifetime as oauth2_state:{state}
 
 
-def _remember_signup_prefs(state: str, locale: str | None, timezone: str | None) -> None:
+def _remember_signup_prefs(
+    state: str,
+    locale: str | None,
+    timezone: str | None,
+    *,
+    announcement: SignupAnnouncementConsent | None = None,
+) -> None:
     """Bind the sign-in page's language and time zone to this OAuth ``state``.
 
     Stores ``{"locale": ..., "timezone": ...}`` with an invalid value as
-    ``null``; stores nothing when neither value is valid.
+    ``null``; stores nothing when neither value is valid and there is no
+    announcement answer. #2761: a resolved announcement-email answer adds
+    ``"announcement": {"value": <bool>, "version": <wording version>}``; without
+    one the JSON is exactly what it was before.
     """
     if not _session_manager:
         return
     valid_locale = locale if is_valid_locale(locale) else None
     valid_timezone = timezone if is_valid_timezone(timezone) else None
-    if valid_locale is None and valid_timezone is None:
+    if valid_locale is None and valid_timezone is None and announcement is None:
         return
+    payload: dict[str, Any] = {"locale": valid_locale, "timezone": valid_timezone}
+    if announcement is not None:
+        payload["announcement"] = {
+            "value": announcement.value,
+            "version": announcement.wording_version,
+        }
     _session_manager._redis.setex(
         _SIGNUP_PREFS_KEY.format(state=state),
         _SIGNUP_PREFS_TTL,
-        json.dumps({"locale": valid_locale, "timezone": valid_timezone}),
+        json.dumps(payload),
+    )
+
+
+class SignupPrefsBundle(NamedTuple):
+    """What the sign-up carrier held: language, time zone and, #2761, the
+    announcement-email opt-in. Each is ``None`` when absent or no longer valid."""
+
+    locale: str | None
+    timezone: str | None
+    announcement: SignupAnnouncementConsent | None
+
+
+def _take_signup_bundle(state: str) -> SignupPrefsBundle:
+    """Read-and-delete everything the sign-up carrier bound to ``state``.
+
+    Call only AFTER the CSRF state check has passed. Consumes the key on every
+    path; a value that is not valid any more (or JSON that is not the stored
+    shape) comes back as ``None``. The announcement answer is re-validated
+    (feature still on, wording version still current).
+    """
+    empty = SignupPrefsBundle(None, None, None)
+    if not _session_manager:
+        return empty
+    key = _SIGNUP_PREFS_KEY.format(state=state)
+    raw = _session_manager._redis.get(key)
+    if raw is None:
+        return empty
+    _session_manager._redis.delete(key)
+    try:
+        prefs = json.loads(raw)
+    except (TypeError, ValueError):
+        return empty
+    if not isinstance(prefs, dict):
+        return empty
+    locale = prefs.get("locale")
+    timezone = prefs.get("timezone")
+    stored = prefs.get("announcement")
+    announcement = (
+        resolve_signup_consent(stored.get("value"), stored.get("version"))
+        if isinstance(stored, dict)
+        else None
+    )
+    return SignupPrefsBundle(
+        locale if is_valid_locale(locale) else None,
+        timezone if is_valid_timezone(timezone) else None,
+        announcement,
     )
 
 
@@ -1658,27 +1926,64 @@ def _take_signup_prefs(state: str) -> tuple[str | None, str | None]:
 
     Call only AFTER the CSRF state check has passed. Consumes the key on every
     path; a value that is not valid any more (or JSON that is not the stored
-    shape) comes back as ``None``.
+    shape) comes back as ``None``. See :func:`_take_signup_bundle`.
     """
-    if not _session_manager:
-        return None, None
-    key = _SIGNUP_PREFS_KEY.format(state=state)
-    raw = _session_manager._redis.get(key)
-    if raw is None:
-        return None, None
-    _session_manager._redis.delete(key)
-    try:
-        prefs = json.loads(raw)
-    except (TypeError, ValueError):
-        return None, None
-    if not isinstance(prefs, dict):
-        return None, None
-    locale = prefs.get("locale")
-    timezone = prefs.get("timezone")
-    return (
-        locale if is_valid_locale(locale) else None,
-        timezone if is_valid_timezone(timezone) else None,
-    )
+    bundle = _take_signup_bundle(state)
+    return bundle.locale, bundle.timezone
+
+
+# --- the announcement-email opt-in on the sign-in page (#2761) ---------------
+#
+# ``announcement_emails=<true|false>&announcement_consent_version=<v>`` on the
+# login URL is the answer to the unchecked-by-default checkbox the sign-up
+# screens show while ANNOUNCEMENT_EMAILS_ENABLED is on. It rides in the
+# signup-prefs carrier above and is recorded only when the sign-in creates the
+# account. Anyone can publish a login link with these parameters, so an answer
+# that did not come from a click on this service's own page is dropped: with
+# Fetch Metadata, only a same-origin or same-site navigation counts (browsers
+# that send no ``Sec-Fetch-Site`` are taken at their word).
+_SAME_SITE_FETCH = frozenset({"same-origin", "same-site"})
+
+
+def _same_site_navigation(request: Request) -> bool:
+    """Whether the request came from this site's own page (or an old browser)."""
+    site = request.headers.get("sec-fetch-site")
+    return site is None or site in _SAME_SITE_FETCH
+
+
+def _signup_announcement_from_query(
+    request: Request, value: str | None, version: str | None
+) -> SignupAnnouncementConsent | None:
+    """The opt-in answer to carry, or ``None`` to carry nothing.
+
+    ``value`` must be exactly ``true`` or ``false``; the rest is
+    :func:`services.announcement_consent_service.resolve_signup_consent`.
+    """
+    if value is None:
+        return None
+    parsed = {"true": True, "false": False}.get(value)
+    if parsed is None:
+        return None
+    if not _same_site_navigation(request):
+        return None
+    return resolve_signup_consent(parsed, version)
+
+
+def _announcement_for_browser(
+    announcement: SignupAnnouncementConsent | None, browser_hash: str | None
+) -> SignupAnnouncementConsent | None:
+    """The carried answer the callback may record, given the #2786 binding.
+
+    A missing ``Sec-Fetch-Site`` header is taken at its word on ``/login``,
+    and ``/login`` without ``return_to`` hands the authorization URL back as
+    JSON, so the request that stored the answer need not be the browser that
+    finishes the sign-in. A ``yes`` is kept only when the callback runs in the
+    browser that ran ``/login`` (its nonce cookie matches the flow binding);
+    otherwise nothing is recorded. A ``no`` is kept either way.
+    """
+    if announcement is None or not announcement.value or browser_hash is not None:
+        return announcement
+    return None
 
 
 async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
@@ -1693,13 +1998,13 @@ async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
       IntegrityError retry refuses it (``/login?error=provider_unlinked``)
       rather than creating anything, and that answer must not be masked by
       ``terms_required`` either;
-    - a ``users`` row holding ``email`` — ensure_user's insert trips the
-      ``users.email`` UNIQUE constraint and raises ``ConflictError``
-      (``/login?error=email_in_use``). Plain equality, like that constraint,
-      and regardless of ``email_verified``, like the insert. Treating it as
+    - a ``users`` row holding ``email`` in any letter case — ensure_user
+      links to it or raises ``ConflictError`` (``/login?error=email_in_use``),
+      regardless of ``email_verified``, never inserting (#1734). Treating it as
       "not new" keeps that pre-#1665 answer instead of masking it with
       ``terms_required``; no account is created either way.
     """
+    from auth.roles import address_holder_clause
     from models.auth import UserOAuthProvider
 
     exists = False
@@ -1712,9 +2017,11 @@ async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
         if link.scalar_one_or_none() is not None:
             exists = True
         else:
+            # #1734: the address in any letter case — ensure_user links to
+            # its holder or refuses, never inserts.
             existing = await db.execute(
                 select(User.user_id)
-                .where(or_(User.user_id == idp_sub, User.email == email))
+                .where(or_(User.user_id == idp_sub, address_holder_clause(email)))
                 .limit(1)
             )
             exists = existing.scalar_one_or_none() is not None
@@ -2253,19 +2560,24 @@ def build_github_authorization_url(*, client_id: str, redirect_uri: str, state: 
 @github_router.get("/login")
 async def github_login(
     request: Request,
+    response: Response,
     return_to: str | None = None,
     add_account: bool = False,
     invite: str | None = None,
     accepted_terms: str | None = None,
     locale: str | None = None,
     timezone: str | None = None,
+    announcement_emails: str | None = None,
+    announcement_consent_version: str | None = None,
 ):
     """Initiate GitHub OAuth2 login flow.
 
     ``invite`` is an optional closed-beta invite token (#1581),
     ``accepted_terms`` the terms version agreed to (#1665), and ``locale`` /
     ``timezone`` the sign-in page's UI language (``en`` / ``ja``) and the
-    browser's IANA time zone, which seed a NEW account only (#2700) — see
+    browser's IANA time zone, which seed a NEW account only (#2700), and
+    ``announcement_emails`` / ``announcement_consent_version`` the
+    announcement-email opt-in for a NEW account (#2761) — see
     ``google_login``; both providers share ``_remember_beta_invite``,
     ``_remember_accepted_terms`` and ``_remember_signup_prefs``.
     """
@@ -2300,8 +2612,19 @@ async def github_login(
     # #1665: the terms version the person agreed to, bound to this state.
     _remember_accepted_terms(state, accepted_terms)
 
-    # #2700: the sign-in page's language / time zone, for a new account.
-    _remember_signup_prefs(state, locale, timezone)
+    # #2700: the sign-in page's language / time zone, for a new account;
+    # #2761: with the announcement-email opt-in shown on that page.
+    _remember_signup_prefs(
+        state,
+        locale,
+        timezone,
+        announcement=_signup_announcement_from_query(
+            request, announcement_emails, announcement_consent_version
+        ),
+    )
+
+    # #2786: bind this sign-in to the browser (nonce cookie below).
+    browser_nonce = _bind_oauth_flow(request, state)
 
     redirect_uri = os.getenv(
         "GITHUB_REDIRECT_URI",
@@ -2313,7 +2636,11 @@ async def github_login(
     )
 
     if return_to:
-        return RedirectResponse(auth_url, status_code=303)
+        # #2786: the cookie goes on the returned redirect itself.
+        redirect_response = RedirectResponse(auth_url, status_code=303)
+        _set_oauth_browser_cookie(redirect_response, browser_nonce)
+        return redirect_response
+    _set_oauth_browser_cookie(response, browser_nonce)
     return LoginResponse(authorization_url=auth_url, state=state)
 
 
@@ -2345,6 +2672,41 @@ async def _github_exchange_code(code: str) -> str:
         raise ValueError(f"GitHub OAuth error: {data.get('error_description', data['error'])}")
 
     return data["access_token"]
+
+
+_GOOGLE_CONSUMER_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
+
+
+def provider_authoritative_for_address(
+    provider: Literal["google", "github"], user_info: Mapping[str, Any]
+) -> bool:
+    """Whether the provider vouches for the mailbox NOW, not only once (#1734).
+
+    The one place that decides whether a Google / GitHub sign-in may link to
+    an account created by email sign-up for the same address
+    (``ensure_user(email_authoritative=...)``). Everything else about the
+    sign-in (the email sync, ``email_verified_at``) keeps using
+    ``email_verified``.
+
+    - Google: the address is verified (``email_verified is True``) AND Google
+      owns the mailbox: a Workspace account (``hd`` non-empty) or a Gmail
+      address. For a consumer Google account on another domain the address
+      was verified once and may have changed hands since.
+    - GitHub: never (owner decision, v1). GitHub verifies an address once and
+      keeps it verified; the person signs in with the password and connects
+      GitHub in Profile.
+    """
+    if provider != "google":
+        return False
+    if user_info.get("email_verified") is not True:
+        return False
+    hd = user_info.get("hd")
+    if isinstance(hd, str) and hd.strip():
+        return True
+    email = user_info.get("email")
+    if not isinstance(email, str) or email.count("@") != 1:
+        return False
+    return email.rsplit("@", 1)[1].strip().lower() in _GOOGLE_CONSUMER_DOMAINS
 
 
 async def _github_get_user_info(access_token: str) -> dict[str, Any]:
@@ -2444,7 +2806,12 @@ async def github_callback(
     # #1665: the accepted terms version — see google_callback.
     accepted_terms = _take_accepted_terms(state)
     # #2700: the sign-in page's language / time zone — see google_callback.
-    signup_locale, signup_timezone = _take_signup_prefs(state)
+    signup_prefs = _take_signup_bundle(state)
+    signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
+    # #2786: the browser binding written by github_login — see google_callback.
+    browser_hash = _take_oauth_flow_binding(state, request)
+    # #2761: a "yes" counts only from the browser that ran /login.
+    signup_announcement = _announcement_for_browser(signup_prefs.announcement, browser_hash)
 
     try:
         # 2. Exchange code for token
@@ -2493,6 +2860,9 @@ async def github_callback(
             user_agent=request.headers.get("user-agent"),
             # #1581: tried last, only if the gate would otherwise block.
             beta_invite_token_hash=beta_invite_token_hash,
+            # #2785: the verified primary address (an invariant of
+            # _github_get_user_info); strict, as for Google.
+            email_verified=user_info.get("email_verified") is True,
         )
         if blocked:
             return blocked
@@ -2517,11 +2887,15 @@ async def github_callback(
             # and always sets email_verified=True; KeyError on a missing key
             # is the desired loud failure.
             email_verified=user_info["email_verified"],
+            # #1734: GitHub never links automatically (see the helper).
+            email_authoritative=provider_authoritative_for_address("github", user_info),
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
             # #2700: applied only when this sign-in creates the account.
             locale=signup_locale,
             timezone=signup_timezone,
+            # #2761: likewise — an existing account keeps its own answer.
+            announcement_consent=signup_announcement,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).
@@ -2600,6 +2974,11 @@ async def github_callback(
                 pending_invites = await invitation_service.get_pending_invitations_for_email(
                     email=db_email
                 )
+                # #2785: as for Google, only for a verified address.
+                if pending_invites and not await invitation_service.account_address_verified(
+                    db_user_id
+                ):
+                    pending_invites = []
 
                 if not pending_invites:
                     workspace_service = WorkspaceService(db)
@@ -2636,6 +3015,17 @@ async def github_callback(
     except UnlinkedProviderSignInError:
         # No link row for this identity (see google_callback): no session.
         return _oauth_error_redirect("github", "provider_unlinked")
+    except ProviderLinkConfirmable as exc:
+        # #2786: see google_callback.
+        return _offer_link_confirmation(
+            request=request,
+            state=state,
+            provider="github",
+            user_info=user_info,
+            exc=exc,
+            browser_hash=browser_hash,
+            link_proof=False,
+        )
     except ConflictError:
         return _email_in_use_redirect()
     except SQLAlchemyError:

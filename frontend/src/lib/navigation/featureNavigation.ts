@@ -169,18 +169,21 @@ export const navigationGroups: NavGroup[] = [
         href: "/admin/users",
         icon: Users,
         requiredRole: Role.ADMIN,
+        requiredFeature: "system_admin", // #2767: only where the deployment serves the admin surface
       },
       {
         nameKey: "neuralConfig",
         href: "/admin/neural-config",
         icon: Brain,
         requiredRole: Role.ADMIN,
+        requiredFeature: "system_admin", // #2767: only where the deployment serves the admin surface
       },
       {
         nameKey: "sleepReports",
         href: "/admin/sleep-reports",
         icon: Moon,
         requiredRole: Role.ADMIN,
+        requiredFeature: "system_admin", // #2767: only where the deployment serves the admin surface
       },
       {
         // Issue #473: cost dashboard
@@ -188,18 +191,21 @@ export const navigationGroups: NavGroup[] = [
         href: "/admin/cost",
         icon: DollarSign,
         requiredRole: Role.ADMIN,
+        requiredFeature: "system_admin", // #2767: only where the deployment serves the admin surface
       },
       {
         nameKey: "environment",
         href: "/admin/environment",
         icon: Settings,
         requiredRole: Role.ADMIN,
+        requiredFeature: "system_admin", // #2767: only where the deployment serves the admin surface
       },
       {
         nameKey: "workerApps",
         href: "/admin/worker-apps",
         icon: Puzzle,
         requiredRole: Role.ADMIN,
+        requiredFeature: "system_admin", // #2767: only where the deployment serves the admin surface
       },
       {
         // Issue #358: admin-configurable signup gate
@@ -207,6 +213,7 @@ export const navigationGroups: NavGroup[] = [
         href: "/admin/signup-gate",
         icon: ShieldCheck,
         requiredRole: Role.ADMIN,
+        requiredFeature: "system_admin", // #2767: only where the deployment serves the admin surface
       },
     ],
   },

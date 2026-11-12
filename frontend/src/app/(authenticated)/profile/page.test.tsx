@@ -60,6 +60,24 @@ vi.mock("@/components/auth/PasswordSettings", () => ({
 vi.mock("@/components/auth/LinkedAccounts", () => ({
   default: () => null,
 }));
+// #2761: the Emails card has its own suite and its own fetch; the stub reports
+// itself visible, as it is on a deployment that offers announcement emails.
+let mockEmailsVisible = true;
+vi.mock("@/components/account/AnnouncementEmailSettings", async () => {
+  const { useEffect } = await vi.importActual<typeof import("react")>("react");
+  return {
+    AnnouncementEmailSettings: ({
+      onVisibilityChange,
+    }: {
+      onVisibilityChange?: (visible: boolean) => void;
+    }) => {
+      useEffect(() => {
+        onVisibilityChange?.(mockEmailsVisible);
+      }, [onVisibilityChange]);
+      return null;
+    },
+  };
+});
 vi.mock("@/components/auth/ConnectedAccounts", () => ({
   default: ({ onProvidersChanged }: { onProvidersChanged?: () => void }) => (
     <button type="button" onClick={() => onProvidersChanged?.()}>
@@ -153,7 +171,7 @@ describe("ProfilePage section links", () => {
     render(<ProfilePage />);
     const navigation = screen.getByRole("navigation", { name: "sections.label" });
     const links = navigation.querySelectorAll("a");
-    expect(links).toHaveLength(6);
+    expect(links).toHaveLength(7);
     for (const link of links) {
       const id = link.getAttribute("href")!.slice(1);
       expect(document.getElementById(id)).not.toBeNull();
@@ -165,6 +183,40 @@ describe("ProfilePage section links", () => {
     expect(screen.getByRole("link", { name: "sections.appearance" })).toHaveAttribute("aria-current", "location");
     expect(screen.getByLabelText("fullName")).toHaveValue("Unsaved draft");
     expect(mockApiPut).not.toHaveBeenCalled();
+  });
+});
+
+describe("ProfilePage Emails section (#2761)", () => {
+  afterEach(() => {
+    mockEmailsVisible = true;
+  });
+
+  it("lists the Emails section while the card shows", async () => {
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    expect(await screen.findByRole("link", { name: "sections.emails" })).toHaveAttribute(
+      "href",
+      "#profile-emails",
+    );
+    expect(screen.getByRole("region", { name: "sections.emails" })).toBeVisible();
+  });
+
+  it("renders no Emails landmark while the card hides itself", () => {
+    mockEmailsVisible = false;
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    expect(screen.queryByRole("region", { name: "sections.emails" })).toBeNull();
+    // Mounted (it still asks the server), but nothing of it is shown.
+    expect(document.getElementById("profile-emails")).not.toBeVisible();
+  });
+
+  it("leaves it out while the card hides itself", () => {
+    mockEmailsVisible = false;
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    const navigation = screen.getByRole("navigation", { name: "sections.label" });
+    expect(navigation.querySelectorAll("a")).toHaveLength(6);
+    expect(screen.queryByRole("link", { name: "sections.emails" })).toBeNull();
   });
 });
 

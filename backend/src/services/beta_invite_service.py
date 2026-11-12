@@ -35,10 +35,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, Select, Update, and_, func, select, update
+from sqlalchemy import CursorResult, Select, Update, and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.roles import Role
+from auth.system_admin_mode import role_grants_system_admin
 from config.settings import get_settings
 from models.auth import AuditLog, User, UserOAuthProvider
 from models.beta_invite import BetaInvite
@@ -280,7 +281,8 @@ class BetaInviteService:
             user_id: The caller's OAuth ``sub``.
 
         Returns:
-            The summary. ``quota`` / ``remaining`` are ``None`` for a system admin.
+            The summary. ``quota`` / ``remaining`` are ``None`` for a system admin
+            (``role = 'admin'`` in ``SYSTEM_ADMIN_MODE=session`` only, #2767).
 
         Raises:
             NotFoundException: The caller's ``users`` row is missing.
@@ -315,7 +317,20 @@ class BetaInviteService:
                         UserOAuthProvider.oauth_sub == SignupAllowlistEntry.subject_id,
                     ),
                 )
-                .outerjoin(User, User.user_id == UserOAuthProvider.user_id)
+                # #1734: an invite redeemed by email sign-up has an ``email``
+                # allowlist row keyed on the account's own ``user_id`` (no
+                # provider identity to map). ``user_oauth_providers`` never
+                # holds ``provider='email'``, so the two arms cannot both match.
+                .outerjoin(
+                    User,
+                    or_(
+                        User.user_id == UserOAuthProvider.user_id,
+                        and_(
+                            SignupAllowlistEntry.provider == "email",
+                            User.user_id == SignupAllowlistEntry.subject_id,
+                        ),
+                    ),
+                )
                 .where(BetaInvite.inviter_user_id == user_id)
                 .order_by(BetaInvite.created_at.desc(), BetaInvite.id.desc())
                 .limit(limit + 1)
@@ -485,7 +500,8 @@ class BetaInviteService:
         The quota check and the insert share one transaction that first takes a
         row lock on the inviter, so parallel creates cannot both observe "one
         slot left". The role is read from that locked row rather than trusted
-        from the session, so a demoted admin with a live session is capped.
+        from the session, so a demoted admin with a live session is capped. An
+        admin-role row is uncapped only in ``SYSTEM_ADMIN_MODE=session`` (#2767).
 
         Args:
             user_id: The inviter's OAuth ``sub``.
@@ -760,8 +776,14 @@ class BetaInviteService:
     # ------------------------------------------------------------------
 
     def _quota_for(self, role: str) -> int | None:
-        """``None`` (unlimited) for a system admin, else the configured cap."""
-        if role == Role.ADMIN:
+        """``None`` (unlimited) for a system admin, else the configured cap.
+
+        #2767: ``role = 'admin'`` makes a system admin only in
+        ``SYSTEM_ADMIN_MODE=session``; in ``off`` / ``service`` it is capped
+        like everyone. Batch minting (``_require_batch_admin``) is CLI-only and
+        keeps its users-row check in every mode.
+        """
+        if role_grants_system_admin(role):
             return None
         return self.settings.beta_invite_quota_per_user
 

@@ -43,6 +43,19 @@ logger = get_logger(__name__)
 _HTTP_TIMEOUT_SECONDS = 4
 
 
+def _safe_headers(headers: dict[str, str]) -> bool:
+    """True when every header name and value is a non-empty-name string pair
+    without CR or LF (no header injection), #2761."""
+    for name, value in headers.items():
+        if not isinstance(name, str) or not isinstance(value, str) or not name:
+            return False
+        if any(ch in name or ch in value for ch in ("\r", "\n")):
+            return False
+        if ":" in name or " " in name:
+            return False
+    return True
+
+
 @cache
 def _uncertain_error_types() -> tuple[type[BaseException], ...]:
     """Transport errors raised while waiting for or reading the response.
@@ -133,6 +146,7 @@ class ResendEmailService:
         log_event: str,
         log_context: dict[str, Any],
         raise_if_uncertain: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> bool:
         params: dict[str, Any] = {
             "from": self._from_email,
@@ -140,6 +154,13 @@ class ResendEmailService:
             "subject": subject,
             "text": text,
         }
+        if headers is not None:
+            # #2761: server-built headers only (List-Unsubscribe). A name or
+            # value that could end the header line is refused outright.
+            if not _safe_headers(headers):
+                logger.warning(f"{log_event}_refused_headers", **log_context)
+                return False
+            params["headers"] = dict(headers)
         try:
             response = await asyncio.to_thread(resend.Emails.send, params)
         except Exception as exc:
@@ -529,6 +550,175 @@ class ResendEmailService:
                 "recipient_hash": redact_recipient(to_email),
                 "purpose": "set_password",
                 "template": "password_setup",
+            },
+        )
+
+    async def send_signup_verification(
+        self,
+        *,
+        to_email: str,
+        verify_url: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        # verify_url embeds the single-use token: body only, never log_context.
+        if locale == "ja":
+            subject = "Kagura アカウントの登録を完了してください"
+            text = (
+                "Kagura Memory Cloud へのアカウント登録を受け付けました。\n"
+                "\n"
+                "下のリンクを開いてパスワードを設定すると、アカウントが作成されます。\n"
+                "\n"
+                f"  {verify_url}\n"
+                "\n"
+                f"リンクの有効期限は {expires_in_minutes} 分で、1 回だけ使えます。\n"
+                "\n"
+                "心当たりがない場合は、このメールを無視してください。アカウントは作成されません。\n"
+            )
+        else:
+            subject = "Finish creating your Kagura account"
+            text = (
+                "Someone asked to create a Kagura Memory Cloud account with this\n"
+                "email address.\n"
+                "\n"
+                "Open the link below and choose a password to create the account:\n"
+                "\n"
+                f"  {verify_url}\n"
+                "\n"
+                f"The link expires in {expires_in_minutes} minutes and works once.\n"
+                "\n"
+                "If you did not ask for this, ignore this email — no account is\n"
+                "created.\n"
+            )
+        return await self._send(
+            to_email=to_email,
+            subject=subject,
+            text=text,
+            log_event="signup_verification_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "purpose": "email_signup",
+                "locale": locale,
+                "template": "signup_verification",
+            },
+        )
+
+    async def send_signup_account_exists(
+        self,
+        *,
+        to_email: str,
+        sign_in_url: str,
+        reset_url: str,
+        locale: str | None,
+    ) -> bool:
+        if locale == "ja":
+            subject = "このメールアドレスの Kagura アカウントはすでにあります"
+            text = (
+                "このメールアドレスで Kagura Memory Cloud のアカウント登録が\n"
+                "申し込まれましたが、このアドレスのアカウントはすでにあります。\n"
+                "\n"
+                "これまでと同じ方法(Google、GitHub、またはメールアドレスとパスワード)で\n"
+                "サインインしてください:\n"
+                "\n"
+                f"  {sign_in_url}\n"
+                "\n"
+                "パスワードを忘れた場合は、こちらから再設定できます:\n"
+                "\n"
+                f"  {reset_url}\n"
+                "\n"
+                "心当たりがない場合は、このメールを無視してください。何も変更されません。\n"
+            )
+        else:
+            subject = "You already have a Kagura account"
+            text = (
+                "Someone asked to create a Kagura Memory Cloud account with this\n"
+                "email address, but the address already has an account.\n"
+                "\n"
+                "Sign in the way you did before (Google, GitHub, or this email\n"
+                "address and your password):\n"
+                "\n"
+                f"  {sign_in_url}\n"
+                "\n"
+                "If you forgot your password, you can reset it here:\n"
+                "\n"
+                f"  {reset_url}\n"
+                "\n"
+                "If you did not ask for this, ignore this email — nothing changes.\n"
+            )
+        return await self._send(
+            to_email=to_email,
+            subject=subject,
+            text=text,
+            log_event="signup_account_exists_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "purpose": "email_signup",
+                "locale": locale,
+                "template": "signup_account_exists",
+            },
+        )
+
+    async def send_provider_link_confirmation(
+        self,
+        *,
+        to_email: str,
+        confirm_url: str,
+        provider_label: str,
+        provider_login: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        # confirm_url embeds the single-use token: body only, never log_context.
+        # The login is restricted to the provider's alphabet by the caller;
+        # it is still flattened to one line here.
+        login = _header_safe(provider_login)
+        label = _header_safe(provider_label, 20)
+        if locale == "ja":
+            subject = f"{label} アカウントを Kagura アカウントに連携しますか?"
+            text = (
+                f"{label} アカウント「{login}」で Kagura Memory Cloud へのサインインが\n"
+                "試みられました。このアカウントにはあなたのメールアドレスが登録されています。\n"
+                "\n"
+                f"この {label} アカウントをあなたの Kagura アカウントに連携してサインインするには、\n"
+                f"サインインを始めたのと同じブラウザで、{expires_in_minutes} 分以内に次のリンクを開いてください:\n"
+                "\n"
+                f"  {confirm_url}\n"
+                "\n"
+                "心当たりがない場合は、何も連携されていないので、何もする必要はありません。\n"
+                "リンクを開いて「心当たりがない」を選ぶと、今後このような連携の案内は届きません。\n"
+                "\n"
+                "このリンクは誰にも転送しないでください。サインインを始めたブラウザでこのリンクを\n"
+                "開いた人は、あなたのアカウントに入れるようになります。\n"
+            )
+        else:
+            subject = f"Connect your {label} account to Kagura?"
+            text = (
+                f"Someone tried to sign in to Kagura Memory Cloud with the {label} account\n"
+                f'"{login}", which uses this email address.\n'
+                "\n"
+                f"To connect this {label} account to your Kagura account and sign in, open\n"
+                f"this link in the same browser that started the sign-in, within\n"
+                f"{expires_in_minutes} minutes:\n"
+                "\n"
+                f"  {confirm_url}\n"
+                "\n"
+                "If this wasn't you, nothing was connected and you do not need to do\n"
+                'anything. If you open the link and choose "This wasn\'t me", no such\n'
+                "offer is sent again.\n"
+                "\n"
+                "Never send this link to anyone: whoever opens it in the browser that\n"
+                "started the sign-in gets into your account.\n"
+            )
+        return await self._send(
+            to_email=to_email,
+            subject=_header_safe(subject, 200),
+            text=text,
+            log_event="provider_link_confirmation_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "purpose": "provider_link_confirm",
+                "locale": locale,
+                "template": "provider_link_confirmation",
             },
         )
 

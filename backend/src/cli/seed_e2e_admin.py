@@ -76,7 +76,12 @@ def seed_e2e_admin() -> None:
                 db.execute(
                     select(func.count())
                     .select_from(User)
-                    .where(User.auth_method == "password", User.role == "admin")
+                    .where(
+                        User.auth_method == "password",
+                        User.role == "admin",
+                        # Not an admin created by email sign-up (#1734).
+                        User.login_id.is_not(None),
+                    )
                 ).scalar()
                 or 0
             ) == 0

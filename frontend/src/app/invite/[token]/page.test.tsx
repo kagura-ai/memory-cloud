@@ -116,6 +116,39 @@ describe("plan-blocked invitations", () => {
   });
 });
 
+describe("addressed invitation, account address not verified (#2785)", () => {
+  const MESSAGE =
+    "This invitation is addressed to an email address. It can be accepted by an " +
+    "account whose email address is verified: sign in with a method that verifies " +
+    "this address.";
+
+  it("shows its own translated screen, not the expired/revoked list", async () => {
+    mockApiClientGet.mockResolvedValue({ user_id: "invitee", email: "a@example.com" });
+    mockAcceptInvitation.mockRejectedValue(
+      new ApiError({ error: "HTTP-400", message: MESSAGE, status: 400 }),
+    );
+    render(<AcceptInvitationPage params={{ token: TOKEN } as unknown as Promise<{ token: string }>} />);
+    expect(await screen.findByText("addressUnverified.title")).toBeInTheDocument();
+    expect(screen.getByText("addressUnverified.message")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "addressUnverified.logoutButton" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(MESSAGE)).not.toBeInTheDocument();
+    expect(screen.queryByText("error.mayHave")).not.toBeInTheDocument();
+    expect(screen.queryByText("error.expired")).not.toBeInTheDocument();
+  });
+
+  it("keeps the generic error screen for other refusals", async () => {
+    mockApiClientGet.mockResolvedValue({ user_id: "invitee", email: "a@example.com" });
+    mockAcceptInvitation.mockRejectedValue(
+      new ApiError({ error: "HTTP-400", message: "Invitation has expired", status: 400 }),
+    );
+    render(<AcceptInvitationPage params={{ token: TOKEN } as unknown as Promise<{ token: string }>} />);
+    expect(await screen.findByText("error.mayHave")).toBeInTheDocument();
+    expect(screen.queryByText("addressUnverified.title")).not.toBeInTheDocument();
+  });
+});
+
 let hrefAssignments: string[] = [];
 
 beforeEach(() => {

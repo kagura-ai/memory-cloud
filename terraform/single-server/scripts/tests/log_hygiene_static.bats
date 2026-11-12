@@ -356,6 +356,9 @@ PYEOF
         [[ "$line" == *"(/invite/)"* ]]
         [[ "$line" == *"(/v1/invitations/)"* ]]
         [[ "$line" == *"(%2[Ff]invite%2[Ff])"* ]]
+        # Emailed one-time links (#1678, #1734): /password/reset?token=,
+        # /password/setup?token=, /signup/verify?token=.
+        [[ "$line" == *"([?&]token=)"* ]]
         # Plain `regexp` only: multi_regexp needs a newer Caddy than a
         # long-lived host is guaranteed to run under the floating
         # caddy:2-alpine tag.
