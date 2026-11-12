@@ -1100,6 +1100,8 @@ async def google_callback(
     signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
     # #2786: likewise; the browser binding written by google_login.
     browser_hash = _take_oauth_flow_binding(state, request)
+    # #2761: a "yes" counts only from the browser that ran /login.
+    signup_announcement = _announcement_for_browser(signup_prefs.announcement, browser_hash)
     # #1818: likewise.
     link_proof = _take_link_proof_intent(state)
 
@@ -1197,7 +1199,7 @@ async def google_callback(
             locale=signup_locale,
             timezone=signup_timezone,
             # #2761: likewise — an existing account keeps its own answer.
-            announcement_consent=signup_prefs.announcement,
+            announcement_consent=signup_announcement,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).
@@ -1970,6 +1972,23 @@ def _signup_announcement_from_query(
     if not _same_site_navigation(request):
         return None
     return resolve_signup_consent(parsed, version)
+
+
+def _announcement_for_browser(
+    announcement: SignupAnnouncementConsent | None, browser_hash: str | None
+) -> SignupAnnouncementConsent | None:
+    """The carried answer the callback may record, given the #2786 binding.
+
+    A missing ``Sec-Fetch-Site`` header is taken at its word on ``/login``,
+    and ``/login`` without ``return_to`` hands the authorization URL back as
+    JSON, so the request that stored the answer need not be the browser that
+    finishes the sign-in. A ``yes`` is kept only when the callback runs in the
+    browser that ran ``/login`` (its nonce cookie matches the flow binding);
+    otherwise nothing is recorded. A ``no`` is kept either way.
+    """
+    if announcement is None or not announcement.value or browser_hash is not None:
+        return announcement
+    return None
 
 
 async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
@@ -2803,6 +2822,8 @@ async def github_callback(
     signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
     # #2786: the browser binding written by github_login — see google_callback.
     browser_hash = _take_oauth_flow_binding(state, request)
+    # #2761: a "yes" counts only from the browser that ran /login.
+    signup_announcement = _announcement_for_browser(signup_prefs.announcement, browser_hash)
 
     try:
         # 2. Exchange code for token
@@ -2886,7 +2907,7 @@ async def github_callback(
             locale=signup_locale,
             timezone=signup_timezone,
             # #2761: likewise — an existing account keeps its own answer.
-            announcement_consent=signup_prefs.announcement,
+            announcement_consent=signup_announcement,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).

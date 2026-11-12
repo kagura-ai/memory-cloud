@@ -871,7 +871,9 @@ for them. The server records every answer; it sends no announcement itself.
   sign-in creates the account: an unchecked box records "no", a page that did
   not show the box records nothing, an existing account keeps its answer. An
   answer from a link on another site (`Sec-Fetch-Site: cross-site` or `none`)
-  is ignored, so nobody can publish a sign-up link that opts people in.
+  is ignored, and a "yes" is recorded only when the sign-in finishes in the
+  browser that opened the login URL, so nobody can publish a sign-up link that
+  opts people in.
 - **Turning it off always works.** With the variable `false`, nobody can turn
   the emails on, but the settings toggle still turns them off and the
   unsubscribe link still works.

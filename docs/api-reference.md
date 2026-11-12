@@ -2093,7 +2093,7 @@ Session cookie only. Records that the signed-in user accepts the current terms v
 
 Issue #2761. Whether the person wants announcement emails (new features, product news). Service notices (invitations, password, security, capacity, erasure) never depend on it. See [Announcement email consent](deployment.md#announcement-email-consent-issue-2761) for the operator view.
 
-- `GET /api/v1/auth/{google,github}/login?announcement_emails=<true|false>&announcement_consent_version=<version>` — the answer to the unchecked-by-default sign-up checkbox, bound to the OAuth state. Recorded (source `signup`) only when the sign-in creates the account and only with the current version from `/system/info`; ignored while `ANNOUNCEMENT_EMAILS_ENABLED` is off, for any other value, and when the request's `Sec-Fetch-Site` is `cross-site` or `none`. It never blocks a sign-in.
+- `GET /api/v1/auth/{google,github}/login?announcement_emails=<true|false>&announcement_consent_version=<version>` — the answer to the unchecked-by-default sign-up checkbox, bound to the OAuth state. Recorded (source `signup`) only when the sign-in creates the account and only with the current version from `/system/info`; ignored while `ANNOUNCEMENT_EMAILS_ENABLED` is off, for any other value, and when the request's `Sec-Fetch-Site` is `cross-site` or `none`; a `true` answer is recorded only when the callback runs in the browser that called this URL (its sign-in nonce cookie). It never blocks a sign-in.
 
 ### GET /api/v1/me/announcement-emails
 

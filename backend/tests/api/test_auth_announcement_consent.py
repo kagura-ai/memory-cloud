@@ -14,7 +14,11 @@ which writes the row only when it creates the account. Pinned here:
   publishing a link;
 - both providers; the callback passes ``announcement_consent`` to
   ``ensure_user``; a tampered or stale value reaches it as ``None``; a terms
-  refusal or a link round trip consumes it without creating anything.
+  refusal or a link round trip consumes it without creating anything;
+- a ``yes`` reaches ``ensure_user`` only when the callback runs in the browser
+  whose ``/login`` bound the flow (#2786 nonce cookie): a script can call
+  ``/login`` without ``Sec-Fetch-Site`` and hand the authorization URL to
+  someone else. A ``no`` passes either way.
 """
 
 # ruff: noqa: F811 — the callback fixtures are shared with test_auth_terms_acceptance
@@ -26,6 +30,7 @@ import pytest
 from fastapi import Response
 
 from api.routes import auth as auth_routes
+from auth import oauth_browser
 from config.settings import get_settings
 from services.announcement_consent_service import (
     ANNOUNCEMENT_CONSENT_WORDING_VERSION as V,
@@ -240,15 +245,34 @@ class TestCarrier:
         assert bundle.announcement is None
 
 
+NONCE = "n" * 43
+
+
+def _bind_browser(redis, state: str) -> None:
+    """What /login writes for the browser that holds ``NONCE`` (#2786)."""
+    redis.store[oauth_browser.OAUTH_FLOW_KEY.format(state=state)] = oauth_browser.nonce_digest(
+        NONCE
+    )
+
+
+async def _callback_in(provider: str, state: str, cookie: str | None):
+    request = FakeRequest()
+    if cookie is not None:
+        request.cookies[oauth_browser.cookie_name()] = cookie
+    callback = auth_routes.google_callback if provider == "google" else auth_routes.github_callback
+    return await callback(request, code="c", state=state, error=None, error_description=None)
+
+
 class TestCallback:
     @pytest.mark.asyncio
     async def test_google_passes_the_answer(
         self, redis, terms_off, google_idp, ensure_user, enabled
     ) -> None:
         _pending(redis, "st1", terms=None)
+        _bind_browser(redis, "st1")
         auth_routes._remember_signup_prefs("st1", "ja", None, announcement=YES)
 
-        await _google_callback("st1")
+        await _callback_in("google", "st1", NONCE)
 
         kwargs = ensure_user.await_args.kwargs
         assert kwargs["announcement_consent"] == YES
@@ -265,6 +289,61 @@ class TestCallback:
         await _github_callback("st1")
 
         assert ensure_user.await_args.kwargs["announcement_consent"] == NO
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["google", "github"])
+    @pytest.mark.parametrize("cookie", [None, "x" * 43])
+    async def test_a_yes_from_another_browser_is_dropped(
+        self, redis, terms_off, google_idp, github_idp, ensure_user, enabled, provider, cookie
+    ) -> None:
+        # /login ran in a script (no Sec-Fetch-Site, JSON mode); the person who
+        # finishes the sign-in never saw the checkbox.
+        _pending(redis, "st1", terms=None)
+        _bind_browser(redis, "st1")
+        auth_routes._remember_signup_prefs("st1", "ja", None, announcement=YES)
+
+        await _callback_in(provider, "st1", cookie)
+
+        kwargs = ensure_user.await_args.kwargs
+        assert kwargs["announcement_consent"] is None
+        assert kwargs["locale"] == "ja"
+        assert KEY.format(state="st1") not in redis.store
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["google", "github"])
+    async def test_a_yes_without_any_binding_is_dropped(
+        self, redis, terms_off, google_idp, github_idp, ensure_user, enabled, provider
+    ) -> None:
+        _pending(redis, "st1", terms=None)
+        auth_routes._remember_signup_prefs("st1", None, None, announcement=YES)
+
+        await _callback_in(provider, "st1", NONCE)
+
+        assert ensure_user.await_args.kwargs["announcement_consent"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["google", "github"])
+    async def test_a_no_passes_from_any_browser(
+        self, redis, terms_off, google_idp, github_idp, ensure_user, enabled, provider
+    ) -> None:
+        _pending(redis, "st1", terms=None)
+        auth_routes._remember_signup_prefs("st1", None, None, announcement=NO)
+
+        await _callback_in(provider, "st1", None)
+
+        assert ensure_user.await_args.kwargs["announcement_consent"] == NO
+
+    @pytest.mark.asyncio
+    async def test_github_passes_a_yes_from_the_bound_browser(
+        self, redis, terms_off, github_idp, ensure_user, enabled
+    ) -> None:
+        _pending(redis, "st1", terms=None)
+        _bind_browser(redis, "st1")
+        auth_routes._remember_signup_prefs("st1", None, None, announcement=YES)
+
+        await _callback_in("github", "st1", NONCE)
+
+        assert ensure_user.await_args.kwargs["announcement_consent"] == YES
 
     @pytest.mark.asyncio
     async def test_without_an_answer_ensure_user_gets_none(
