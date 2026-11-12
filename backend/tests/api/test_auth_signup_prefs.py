@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Response
 from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_routes
@@ -156,7 +157,9 @@ def _only_state(redis) -> str:
 class TestLoginRoutes:
     @pytest.mark.asyncio
     async def test_google_json_mode_stores_the_prefs(self, redis, google_manager) -> None:
-        response = await auth_routes.google_login(FakeRequest(), locale="ja", timezone="Asia/Tokyo")
+        response = await auth_routes.google_login(
+            FakeRequest(), response=Response(), locale="ja", timezone="Asia/Tokyo"
+        )
 
         assert _stored(redis, response.state) == {"locale": "ja", "timezone": "Asia/Tokyo"}
 
@@ -164,6 +167,7 @@ class TestLoginRoutes:
     async def test_google_redirect_mode_stores_the_prefs(self, redis, google_manager) -> None:
         response = await auth_routes.google_login(
             FakeRequest(),
+            response=Response(),
             return_to="http://localhost:3000/device?c=1",
             locale="ja",
             timezone="Asia/Tokyo",
@@ -174,7 +178,9 @@ class TestLoginRoutes:
 
     @pytest.mark.asyncio
     async def test_github_json_mode_stores_the_prefs(self, redis, github_client) -> None:
-        response = await auth_routes.github_login(FakeRequest(), locale="ja", timezone="Asia/Tokyo")
+        response = await auth_routes.github_login(
+            FakeRequest(), response=Response(), locale="ja", timezone="Asia/Tokyo"
+        )
 
         assert _stored(redis, response.state) == {"locale": "ja", "timezone": "Asia/Tokyo"}
 
@@ -182,6 +188,7 @@ class TestLoginRoutes:
     async def test_github_redirect_mode_stores_the_prefs(self, redis, github_client) -> None:
         response = await auth_routes.github_login(
             FakeRequest(),
+            response=Response(),
             return_to="http://localhost:3000/",
             locale="ja",
             timezone="Asia/Tokyo",
@@ -196,7 +203,7 @@ class TestLoginRoutes:
         request.cookies[SESSION_COOKIE_NAME] = "sess-1"
 
         response = await auth_routes.google_login(
-            request, add_account=True, locale="en", timezone="UTC"
+            request, response=Response(), add_account=True, locale="en", timezone="UTC"
         )
 
         assert redis.store[f"oauth2_add_to_session:{response.state}"] == "sess-1"
@@ -210,6 +217,7 @@ class TestLoginRoutes:
 
         response = await auth_routes.github_login(
             FakeRequest(),
+            response=Response(),
             return_to="http://localhost:3000/workspace/dashboard",
             invite=INVITE,
             accepted_terms=VERSION,
@@ -226,8 +234,10 @@ class TestLoginRoutes:
     async def test_login_without_the_params_stores_nothing(
         self, redis, google_manager, github_client
     ) -> None:
-        await auth_routes.google_login(FakeRequest())
-        await auth_routes.github_login(FakeRequest(), return_to="http://localhost:3000/")
+        await auth_routes.google_login(FakeRequest(), response=Response())
+        await auth_routes.github_login(
+            FakeRequest(), response=Response(), return_to="http://localhost:3000/"
+        )
 
         assert not any(k.startswith("oauth2_signup_prefs:") for k in redis.store)
 
@@ -235,7 +245,9 @@ class TestLoginRoutes:
     async def test_login_with_only_malformed_params_stores_nothing(
         self, redis, github_client
     ) -> None:
-        await auth_routes.github_login(FakeRequest(), locale="xx", timezone="../etc/passwd")
+        await auth_routes.github_login(
+            FakeRequest(), response=Response(), locale="xx", timezone="../etc/passwd"
+        )
 
         assert not any(k.startswith("oauth2_signup_prefs:") for k in redis.store)
 

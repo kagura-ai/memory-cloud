@@ -637,6 +637,70 @@ class ResendEmailService:
             },
         )
 
+    async def send_provider_link_confirmation(
+        self,
+        *,
+        to_email: str,
+        confirm_url: str,
+        provider_label: str,
+        provider_login: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        # confirm_url embeds the single-use token: body only, never log_context.
+        # The login is restricted to the provider's alphabet by the caller;
+        # it is still flattened to one line here.
+        login = _header_safe(provider_login)
+        label = _header_safe(provider_label, 20)
+        if locale == "ja":
+            subject = f"{label} アカウントを Kagura アカウントに連携しますか?"
+            text = (
+                f"{label} アカウント「{login}」で Kagura Memory Cloud へのサインインが\n"
+                "試みられました。このアカウントにはあなたのメールアドレスが登録されています。\n"
+                "\n"
+                f"この {label} アカウントをあなたの Kagura アカウントに連携してサインインするには、\n"
+                f"サインインを始めたのと同じブラウザで、{expires_in_minutes} 分以内に次のリンクを開いてください:\n"
+                "\n"
+                f"  {confirm_url}\n"
+                "\n"
+                "心当たりがない場合は、何も連携されていないので、何もする必要はありません。\n"
+                "リンクを開いて「心当たりがない」を選ぶと、今後このような連携の案内は届きません。\n"
+                "\n"
+                "このリンクは誰にも転送しないでください。サインインを始めたブラウザでこのリンクを\n"
+                "開いた人は、あなたのアカウントに入れるようになります。\n"
+            )
+        else:
+            subject = f"Connect your {label} account to Kagura?"
+            text = (
+                f"Someone tried to sign in to Kagura Memory Cloud with the {label} account\n"
+                f'"{login}", which uses this email address.\n'
+                "\n"
+                f"To connect this {label} account to your Kagura account and sign in, open\n"
+                f"this link in the same browser that started the sign-in, within\n"
+                f"{expires_in_minutes} minutes:\n"
+                "\n"
+                f"  {confirm_url}\n"
+                "\n"
+                "If this wasn't you, nothing was connected and you do not need to do\n"
+                'anything. If you open the link and choose "This wasn\'t me", no such\n'
+                "offer is sent again.\n"
+                "\n"
+                "Never send this link to anyone: whoever opens it in the browser that\n"
+                "started the sign-in gets into your account.\n"
+            )
+        return await self._send(
+            to_email=to_email,
+            subject=_header_safe(subject, 200),
+            text=text,
+            log_event="provider_link_confirmation_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "purpose": "provider_link_confirm",
+                "locale": locale,
+                "template": "provider_link_confirmation",
+            },
+        )
+
     async def send_security_notification(
         self,
         *,

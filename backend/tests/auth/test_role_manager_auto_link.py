@@ -43,6 +43,8 @@ def _email_account(**overrides):
         "totp_enabled": False,
         "provider_auto_link_blocked_at": None,
         "auth_provider": None,
+        "password_hash": "$2b$hash",
+        "mfa_generation": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -121,8 +123,6 @@ async def test_case_variant_from_the_idp_still_links() -> None:
 @pytest.mark.parametrize(
     ("overrides", "kwargs"),
     [
-        ({}, {"authoritative": False}),
-        ({}, {"provider": "github", "authoritative": False}),
         ({"totp_enabled": True}, {}),
         ({"role": "admin"}, {}),
         ({"provider_auto_link_blocked_at": datetime(2026, 2, 1)}, {}),
@@ -134,9 +134,12 @@ async def test_case_variant_from_the_idp_still_links() -> None:
 )
 @pytest.mark.asyncio
 async def test_every_refusal_is_email_in_use_and_inserts_nothing(overrides, kwargs) -> None:
+    # A sign-in without authority over the mailbox is answered by
+    # ``ProviderLinkConfirmable`` (#2786, test_role_manager_link_confirmable.py).
     db = _db(*_sequence([_email_account(**overrides)]))
-    with pytest.raises(ConflictError):
+    with pytest.raises(ConflictError) as caught:
         await _sign_in(db, **kwargs)
+    assert type(caught.value) is ConflictError
     db.add.assert_not_called()
     db.commit.assert_not_awaited()
 

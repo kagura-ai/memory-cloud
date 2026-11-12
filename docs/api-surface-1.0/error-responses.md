@@ -196,6 +196,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `AUTH-306` | `UnlinkedProviderSignInError` — exceptions.py | 401 | A Google / GitHub identity with no `user_oauth_providers` row (the account removed that sign-in method) may not sign in. Raised inside the OAuth callbacks only, which redirect to `/login?error=provider_unlinked` with no session; never a JSON response. |
 | `AUTH-308` | `SignupNotAllowedError` — exceptions.py | 403 | `POST /auth/signup/email/complete`: the sign-up controls, run again when the account would be created, refused it (the beta invite was used, revoked or expired since the link was sent, registration closed, or the workspace invitation is gone). The link is spent (#1734). |
 | `AUTH-309` | `SignupAccountExistsError` — exceptions.py | 409 | `POST /auth/signup/email/complete`: the address already has an account (created after the link was sent). The link is spent; sign in or reset the password (#1734). |
+| `AUTH-310` | `ProviderLinkWrongBrowserError` — exceptions.py | 403 | `POST /auth/link-confirm/complete`: the emailed provider link confirmation was opened in another browser than the one that started the provider sign-in. Nothing was connected and the link stays usable in that browser (#2786). |
 | `AUTH-201` | `APIKeyError` — exceptions.py:129 | 401 | Invalid or missing API key. |
 | `AUTH-202` | `APIKeyRevokedError` — exceptions.py:139 | 401 | API key revoked. |
 | `AUTH-203` | `APIKeyExpiredError` — exceptions.py:146 | 401 | API key expired. |

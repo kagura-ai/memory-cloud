@@ -34,6 +34,8 @@ def _apply(rule: re.Match[str], text: str) -> str:
     [
         ("/signup/verify?token=abcDEF_123-x", "/signup/verify?token=REDACTED"),
         ("/password/reset?token=abc123", "/password/reset?token=REDACTED"),
+        # #2786: the provider link confirmation.
+        ("/link/confirm?token=abcDEF_123-x", "/link/confirm?token=REDACTED"),
         ("/password/setup?lang=ja&token=abc123&x=1", "/password/setup?lang=ja&token=REDACTED&x=1"),
         ("/api/v1/memories?limit=5&q=token", "/api/v1/memories?limit=5&q=token"),
         ("/callback?refresh_token=keep", "/callback?refresh_token=keep"),

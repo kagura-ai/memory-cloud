@@ -125,6 +125,26 @@ has no return path: the page that started the sign-up keeps it and sends it as
 `return_to` on completion, validated like the password sign-in's (same origin
 only). The policy and terms are checked before the link is spent.
 
+### Provider link confirmation
+
+Public, `404` when `ENABLE_PROVIDER_LINK_CONFIRMATION=false` (see
+[deployment](deployment.md#connecting-github-to-an-email-account-by-email-issue-2786)).
+The emailed token and the browser nonce cookie set by
+`GET /api/v1/auth/{google,github}/login` are the credentials; send requests
+with cookies (`credentials: "include"`).
+
+| Method / path | Body | Answers |
+|---|---|---|
+| `POST /api/v1/auth/link-confirm/preview` | `{"token"}` | `200 {"provider", "provider_login", "provider_name", "provider_avatar_url", "expires_at", "same_browser"}`; `400 AUTH-301` unknown, expired or used link; `429` |
+| `POST /api/v1/auth/link-confirm/complete` | `{"token"}` | `200 {"redirect_url"}` plus the session cookie; `403 AUTH-310` not the browser that started the sign-in (the link stays usable there); `400 AUTH-301` unknown, expired or used link, or an account that cannot take the link any more; `429`; `503` the provider was connected but no session could be opened (sign in again) |
+| `POST /api/v1/auth/link-confirm/cancel` | `{"token"}` | `204` always ("This wasn't me": the link is discarded and the account gets no further offers and no automatic Google link); `429` |
+
+Preview consumes nothing. `provider` is `github` or `google`; `provider_login`
+is the GitHub login or the Google address (show it as the primary
+identifier); `provider_name` is free text from the provider (at most 80
+characters, secondary); `provider_avatar_url` is `null` or an https URL on the
+provider's avatar host. Only `same_browser: true` can complete.
+
 ## Memory APIs
 
 ### POST /api/v1/memory/remember
@@ -2011,12 +2031,15 @@ System information. Public (no authentication): the version plus non-sensitive d
     "beta_invites": false,
     "email_signup": false,
     "open_registration": false,
+    "provider_link_confirmation": false,
     "reranking": true
   }
 }
 ```
 
 `features.email_signup` is `ENABLE_EMAIL_SIGNUP` and `features.open_registration` is `ALLOW_REGISTRATION` as configured (it is ignored while the signup gate is on) — see [Email + password sign-up](#email--password-sign-up).
+
+`features.provider_link_confirmation` is `ENABLE_PROVIDER_LINK_CONFIRMATION` while a mail backend other than `logging` is configured: when true, a sign-in that ends at `email_in_use` may have mailed a confirmation link to an email sign-up account — see [Provider link confirmation](#provider-link-confirmation). It is per deployment and says nothing about any address.
 
 `search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance). `chatgpt_app_url` is the deployment's `CHATGPT_APP_URL` (the public URL of its app in ChatGPT's app directory), or `null` when it is empty — see [ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760).
 

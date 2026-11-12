@@ -8610,6 +8610,49 @@
         ],
         "type": "object"
       },
+      "ProviderLinkCompleteResponse": {
+        "properties": {
+          "redirect_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "redirect_url"
+        ],
+        "type": "object"
+      },
+      "ProviderLinkPreviewResponse": {
+        "properties": {
+          "expires_at": {},
+          "provider": {},
+          "provider_avatar_url": {},
+          "provider_login": {},
+          "provider_name": {},
+          "same_browser": {}
+        },
+        "required": [
+          "expires_at",
+          "provider",
+          "provider_avatar_url",
+          "provider_login",
+          "provider_name",
+          "same_browser"
+        ],
+        "type": "object"
+      },
+      "ProviderLinkTokenBody": {
+        "properties": {
+          "token": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
       "ProvidersListResponse": {
         "properties": {
           "providers": {
@@ -18021,6 +18064,112 @@
           "authentication",
           "authentication",
           "google-oauth2"
+        ]
+      }
+    },
+    "/api/v1/auth/link-confirm/cancel": {
+      "post": {
+        "operationId": "cancel_provider_link_api_v1_auth_link_confirm_cancel_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderLinkTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/link-confirm/complete": {
+      "post": {
+        "operationId": "complete_provider_link_api_v1_auth_link_confirm_complete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderLinkTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderLinkCompleteResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
+        ]
+      }
+    },
+    "/api/v1/auth/link-confirm/preview": {
+      "post": {
+        "operationId": "preview_provider_link_api_v1_auth_link_confirm_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderLinkTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderLinkPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "authentication"
         ]
       }
     },

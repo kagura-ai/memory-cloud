@@ -1004,13 +1004,77 @@ The same address on a later Google or GitHub sign-in:
   password reset removed one (`users.provider_auto_link_blocked_at`).
 - **GitHub** never links automatically: GitHub verifies an address once and
   keeps it. The person signs in with the password and connects GitHub in
-  Profile.
+  Profile, or confirms by email (below). The same goes for a Google sign-in
+  Google is not authoritative for.
 - In every case one `users` row exists per address: an address that differs
   only in case is treated as the same address and refused, never a second
   account.
 - Before enabling, check that no existing account matches the email sign-up
   shape: `SELECT count(*) FROM users WHERE auth_method = 'password' AND login_id IS NULL;`
   should be 0 (CLI accounts always have a login id).
+
+### Connecting GitHub to an email account by email (Issue #2786)
+
+`ENABLE_PROVIDER_LINK_CONFIRMATION` (default `true`) lets the owner of an
+account created by email sign-up connect a GitHub sign-in, or a Google
+sign-in Google is not authoritative for, without signing in with the password
+first. Only accounts created by email sign-up are concerned, so nothing
+changes on a deployment that never had `ENABLE_EMAIL_SIGNUP` on.
+
+1. The sign-in uses the address of such an account. The answer is the usual
+   `/login?error=email_in_use&link_hint=true`, whatever happens next. After
+   it, the account gets one email naming the provider account (GitHub login,
+   or the Google address) with a link to `/link/confirm?token=…`, valid 15
+   minutes, once.
+2. The link connects the provider and signs the person in only when it is
+   opened **in the browser that started the sign-in**: `/auth/{provider}/login`
+   gives that browser an HttpOnly nonce cookie (`__Host-kagura_oauth_browser`
+   in production, `kagura_oauth_browser` over plain http, 20 minutes), and the
+   confirmation is bound to it. Opened anywhere else, the page shows the
+   provider account and a "This wasn't me" button, and nothing is connected.
+   No password is asked: the mailbox and the browser are the proof.
+3. Before connecting, everything is checked again under the account's row
+   lock: an account that changed meanwhile (password, two-step verification,
+   role, address, a removed provider) or a provider account linked elsewhere
+   meanwhile links nothing. The owner gets a "sign-in method was connected"
+   notice naming the provider account. The new link proves nothing for
+   identity linking during the link window, like any newly attached provider.
+4. **"This wasn't me"** discards the link and sets
+   `users.provider_auto_link_blocked_at`: no further confirmation mails for the
+   account and no automatic Google link. Connecting a provider from Profile
+   still works.
+
+No offer is made (the answer stays `email_in_use`, nothing is mailed) when the
+account has two-step verification on, is not an ordinary `user` (a system
+admin), was blocked as above (an unlinked provider, a reset that unlinked
+one, a declined confirmation), already has a provider of that kind, when the
+provider does not report the address as verified, or when the sign-in is an
+"add another account" or identity-link proof flow.
+
+Operator notes:
+
+- **Mail:** at most 3 confirmation mails per account and 3 per provider
+  account a day; a newer sign-in by the same provider account replaces its
+  older link. When Redis cannot count, nothing is sent. With
+  `EMAIL_PROVIDER=logging` the mail is logged without its link, so nothing can
+  be connected this way; `GET /api/v1/system/info` then reports
+  `features.provider_link_confirmation: false` and the login page keeps its
+  usual hint.
+- **What degrades silently to `email_in_use`:** a sign-in started without a
+  browser cookie (an API client using the JSON mode of `/login` without
+  cookies, a native or device flow, a browser that blocks the cookie), and a
+  deployment whose provider redirect URI points at another host than the one
+  the browser calls for `/auth/{provider}/login` (the cookie never reaches the
+  callback). Both are the safe failure: nothing is offered.
+- **Proxy logs:** the link carries its token as `?token=`; the shipped
+  `Caddyfile.tpl` already redacts every `token` query parameter.
+- `ENABLE_PROVIDER_LINK_CONFIRMATION=false`: those sign-ins end at
+  `email_in_use` as before, nothing is mailed and every
+  `/api/v1/auth/link-confirm` route answers `404`.
+- Audit: `oauth_provider_link_confirmation_sent`, `oauth_provider_link_confirmed`,
+  `oauth_provider_link_confirmation_declined` (`user_email` `link-confirmation`,
+  the provider account only as an HMAC in `user_metadata.identity_hmac`).
+  Pending links live in Redis only (15 minutes); no migration.
 
 ## Which sign-in provider syncs the account's email (Issues #1811, #1875)
 

@@ -366,6 +366,40 @@ class EmailService(Protocol):
         """
         ...
 
+    async def send_provider_link_confirmation(
+        self,
+        *,
+        to_email: str,
+        confirm_url: str,
+        provider_label: str,
+        provider_login: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        """Ask the owner of an email sign-up account to confirm a provider link (#2786).
+
+        Sent after a GitHub sign-in (or a Google one without authority over
+        the mailbox) tried to use the account's address. Opened in the
+        browser that started that sign-in, the link connects the provider
+        account to this account; opened anywhere else it connects nothing.
+        The body names the provider account and says what forwarding the
+        link would do. Same redaction rules as ``send_password_reset``.
+
+        Args:
+            to_email: The account's verified address.
+            confirm_url: Front-end ``/link/confirm`` URL embedding the raw
+                token. **Sensitive** — do not log.
+            provider_label: ``GitHub`` or ``Google``.
+            provider_login: The provider account (GitHub login, or the Google
+                address), already restricted to the provider's alphabet.
+            expires_in_minutes: Link lifetime, for the body.
+            locale: ``ja`` for Japanese, anything else English.
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+        """
+        ...
+
     async def send_security_notification(
         self,
         *,
@@ -740,6 +774,31 @@ class LoggingEmailService:
             locale=locale,
             email_dispatch_required=True,
             template="signup_account_exists",
+        )
+        return True
+
+    async def send_provider_link_confirmation(
+        self,
+        *,
+        to_email: str,
+        confirm_url: str,
+        provider_label: str,
+        provider_login: str,
+        expires_in_minutes: int,
+        locale: str | None,
+    ) -> bool:
+        # The URL carries the token: never logged. With this backend no link
+        # can be followed, so nothing can be connected this way (#2786).
+        del confirm_url, provider_login
+        logger.info(
+            "provider_link_confirmation_email",
+            recipient_hash=redact_recipient(to_email),
+            purpose="provider_link_confirm",
+            provider=provider_label,
+            expires_in_minutes=expires_in_minutes,
+            locale=locale,
+            email_dispatch_required=True,
+            template="provider_link_confirmation",
         )
         return True
 
