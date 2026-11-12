@@ -78,7 +78,8 @@ export default function ProfilePage() {
   // section re-reads how many sign-in methods would remain.
   const [hasPasskey, setHasPasskey] = useState(false);
   // #2761: the Emails card hides itself while the deployment does not offer
-  // announcement emails (and the setting is off); its link goes with it.
+  // announcement emails (and the setting is off); its link and its section
+  // landmark go with it, and nothing shows before the card is known to show.
   const [showEmails, setShowEmails] = useState(false);
   const [providersVersion, setProvidersVersion] = useState(0);
   // #1751: the linked OAuth providers, for the Sign-in method field and the
@@ -554,8 +555,11 @@ export default function ProfilePage() {
         </CardContent>
       </Card>
 
-      {/* Announcement emails (Issue #2761): opt in / out, history kept server-side. */}
-      <section id="profile-emails" tabIndex={-1} aria-label={t("sections.emails")} className="scroll-mt-24"><AnnouncementEmailSettings key={`emails-${user?.id}`} onVisibilityChange={setShowEmails} /></section>
+      {/* Announcement emails (Issue #2761): opt in / out, history kept server-side.
+          Mounted always (the card asks the server whether it shows), but
+          hidden until it does: no empty landmark or skeleton on deployments
+          that do not offer the emails. */}
+      <section id="profile-emails" tabIndex={-1} aria-label={t("sections.emails")} hidden={!showEmails} className="scroll-mt-24"><AnnouncementEmailSettings key={`emails-${user?.id}`} onVisibilityChange={setShowEmails} /></section>
 
       {/* Danger zone: self-serve account & data deletion (Issue #953) */}
       <section id="profile-deletion" tabIndex={-1} aria-label={t("sections.deletion")} className="scroll-mt-24"><DeleteAccountSection /></section>

@@ -198,6 +198,16 @@ describe("ProfilePage Emails section (#2761)", () => {
       "href",
       "#profile-emails",
     );
+    expect(screen.getByRole("region", { name: "sections.emails" })).toBeVisible();
+  });
+
+  it("renders no Emails landmark while the card hides itself", () => {
+    mockEmailsVisible = false;
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    expect(screen.queryByRole("region", { name: "sections.emails" })).toBeNull();
+    // Mounted (it still asks the server), but nothing of it is shown.
+    expect(document.getElementById("profile-emails")).not.toBeVisible();
   });
 
   it("leaves it out while the card hides itself", () => {
