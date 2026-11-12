@@ -22,6 +22,8 @@ from models.announcement_consent import AnnouncementEmailConsent
 from models.auth import User, UserOAuthProvider
 from services.announcement_consent_service import SignupAnnouncementConsent
 from tests.auth.test_role_manager_postgres import (
+    _LOCK,
+    _NO_HOLDERS,
     _execute_returns,
     _make_db_mock,
     _oauth_link_row,
@@ -41,7 +43,7 @@ def _added(db) -> list[object]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", [True, False])
 async def test_new_account_adds_the_row_with_the_user(role_manager, value) -> None:  # noqa: F811
-    db = _make_db_mock(_execute_returns(None, {"scalar": 3}))
+    db = _make_db_mock(_execute_returns(None, {"scalar": 3}, _LOCK, _NO_HOLDERS))
 
     with _patch_get_db(db):
         await role_manager.ensure_user(
@@ -67,7 +69,7 @@ async def test_new_account_adds_the_row_with_the_user(role_manager, value) -> No
 
 @pytest.mark.asyncio
 async def test_no_answer_adds_no_row(role_manager) -> None:  # noqa: F811
-    db = _make_db_mock(_execute_returns(None, {"scalar": 3}))
+    db = _make_db_mock(_execute_returns(None, {"scalar": 3}, _LOCK, _NO_HOLDERS))
 
     with _patch_get_db(db):
         await role_manager.ensure_user(
@@ -102,7 +104,9 @@ async def test_user_id_race_retry_adds_no_second_row(role_manager) -> None:  # n
     """The rolled-back first attempt carried the row; the retry signs in to the
     row a concurrent first sign-in created and adds nothing."""
     race_existing = _user_row(email="alice@example.com", name="Alice")
-    db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, _oauth_link_row()))
+    db = _make_db_mock(
+        _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, _oauth_link_row())
+    )
     db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
     with _patch_get_db(db):
