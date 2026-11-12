@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from fastapi import Response
 
 from api.routes import auth as auth_routes
 from config.settings import get_settings
@@ -88,6 +89,7 @@ class TestLogin:
     ) -> None:
         response = await auth_routes.google_login(
             _request(),
+            response=Response(),
             locale="ja",
             timezone="Asia/Tokyo",
             announcement_emails=raw,
@@ -106,6 +108,7 @@ class TestLogin:
     ) -> None:
         response = await auth_routes.github_login(
             _request("same-site"),
+            response=Response(),
             announcement_emails="true",
             announcement_consent_version=V,
         )
@@ -121,7 +124,10 @@ class TestLogin:
         self, redis, github_client, enabled
     ) -> None:
         response = await auth_routes.github_login(
-            _request(None), announcement_emails="true", announcement_consent_version=V
+            _request(None),
+            response=Response(),
+            announcement_emails="true",
+            announcement_consent_version=V,
         )
 
         assert _stored(redis, response.state)["announcement"] == {"value": True, "version": V}
@@ -133,10 +139,17 @@ class TestLogin:
         self, redis, google_manager, github_client, enabled, site, raw
     ) -> None:
         g = await auth_routes.google_login(
-            _request(site), locale="ja", announcement_emails=raw, announcement_consent_version=V
+            _request(site),
+            response=Response(),
+            locale="ja",
+            announcement_emails=raw,
+            announcement_consent_version=V,
         )
         await auth_routes.github_login(
-            _request(site), announcement_emails=raw, announcement_consent_version=V
+            _request(site),
+            response=Response(),
+            announcement_emails=raw,
+            announcement_consent_version=V,
         )
 
         assert _stored(redis, g.state) == {"locale": "ja", "timezone": None}
@@ -159,7 +172,10 @@ class TestLogin:
         self, redis, github_client, enabled, raw, version
     ) -> None:
         await auth_routes.github_login(
-            _request(), announcement_emails=raw, announcement_consent_version=version
+            _request(),
+            response=Response(),
+            announcement_emails=raw,
+            announcement_consent_version=version,
         )
 
         assert _no_carrier(redis)
@@ -170,6 +186,7 @@ class TestLogin:
     ) -> None:
         response = await auth_routes.google_login(
             _request(),
+            response=Response(),
             locale="ja",
             timezone="Asia/Tokyo",
             announcement_emails="true",
