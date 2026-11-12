@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 
 from auth.provider_link import provider_link_established
+from auth.system_admin_mode import session_admin_enabled
 from config.settings import get_settings
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, UnlinkedProviderSignInError
@@ -213,6 +214,26 @@ class UserRole(BaseModel):
     assigned_by: str | None = Field(None, description="Email of user who assigned this role")
 
 
+async def new_account_role(db: AsyncSession) -> Role:
+    """The role of an account being created now (#2767, #1734).
+
+    The one place for the first-user rule: the first account on an empty
+    users table becomes ``admin`` only while this process serves the
+    system-admin surface to sessions (``SYSTEM_ADMIN_MODE=session``); in
+    ``off`` and ``service`` every new account is a ``user``. Exactly one
+    ``db.execute`` (the count), so callers' statement sequences stay stable.
+    """
+    from sqlalchemy import select
+
+    from models.auth import User
+
+    count_result = await db.execute(select(func.count()).select_from(User))
+    user_count = count_result.scalar() or 0
+    if user_count == 0 and session_admin_enabled():
+        return Role.ADMIN
+    return Role.USER
+
+
 class RoleManager:
     """Manage user roles and permissions (async).
 
@@ -347,7 +368,7 @@ class RoleManager:
         if email in self._roles:
             return self._roles[email]
 
-        role = Role.ADMIN if len(self._roles) == 0 else Role.USER
+        role = Role.ADMIN if len(self._roles) == 0 and session_admin_enabled() else Role.USER
         self._roles[email] = role
         return role
 
@@ -424,10 +445,9 @@ class RoleManager:
                     sync_profile=user.auth_provider == auth_provider,
                 )
 
-            # New user path. Determine role: first user = ADMIN, others = USER.
-            count_result = await db.execute(select(func.count()).select_from(User))
-            user_count = count_result.scalar() or 0
-            role = Role.ADMIN if user_count == 0 else Role.USER
+            # New user path. First user = ADMIN in session mode, else USER
+            # (#2767: new_account_role is the one place for that rule).
+            role = await new_account_role(db)
 
             # #2700: seed the new row with the sign-in page's language and
             # time zone. Passed only when valid, so otherwise the column
