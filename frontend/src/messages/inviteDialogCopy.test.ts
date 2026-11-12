@@ -22,7 +22,10 @@ describe("invite dialog messages", () => {
     ["en", en],
     ["ja", ja],
   ] as const)("%s address note and error name no sign-in provider", (_, m) => {
-    for (const text of [m.workspace.emailMustMatch, m.workspace.emailRequiredError]) {
+    for (const text of [
+      m.workspace.emailMustMatch,
+      m.workspace.emailRequiredError,
+    ]) {
       expect(text).toBeTruthy();
       expect(text).not.toMatch(/google|github|oauth/i);
     }
@@ -31,5 +34,15 @@ describe("invite dialog messages", () => {
   it("says the address must be the verified one the person signs in with", () => {
     expect(en.workspace.emailMustMatch).toContain("verified address");
     expect(ja.workspace.emailMustMatch).toContain("確認済みのアドレス");
+  });
+
+  it("ja names the invited person, not the one who invites", () => {
+    for (const text of [
+      ja.workspace.emailMustMatch,
+      ja.workspace.emailRequiredError,
+    ]) {
+      expect(text).toContain("招待される人");
+      expect(text).not.toContain("招待する人");
+    }
   });
 });
