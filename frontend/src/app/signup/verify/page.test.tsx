@@ -5,6 +5,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import enMessages from "@/messages/en.json";
+import jaMessages from "@/messages/ja.json";
 
 vi.mock("next-intl", () => ({
   useTranslations: () => (k: string, vars?: Record<string, unknown>) =>
@@ -266,6 +268,17 @@ describe("/signup/verify — creating the account", () => {
     submit();
     expect(await screen.findByText("policyError")).toBeVisible();
     expect(screen.getByRole("button", { name: "verify.submit" })).toBeVisible();
+  });
+
+  it("the terms message points to the emailed link, not a reload", () => {
+    // A reload loses the token (it is removed from the address bar), and the
+    // page then says the link is invalid or used though it still works.
+    const en = enMessages.emailSignup.verify.termsRequired;
+    const ja = jaMessages.emailSignup.verify.termsRequired;
+    expect(en).not.toMatch(/reload/i);
+    expect(en).toMatch(/link from the email/i);
+    expect(ja).not.toContain("再読み込み");
+    expect(ja).toContain("メールのリンク");
   });
 
   it("422 on the terms says so instead", async () => {

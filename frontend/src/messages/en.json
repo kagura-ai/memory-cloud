@@ -5121,7 +5121,7 @@
       "nameLabel": "Name (optional)",
       "submit": "Create account",
       "submitting": "Creating…",
-      "termsRequired": "Please agree to the current terms to continue. If they were just updated, reload the page.",
+      "termsRequired": "Please agree to the current terms to continue. If they were just updated, open the link from the email again.",
       "invalidTitle": "This link can't be used",
       "invalidMessage": "The link is invalid, expired or already used. Start the sign-up again.",
       "notAllowedTitle": "Sign-up isn't available",
