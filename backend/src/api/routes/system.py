@@ -197,6 +197,12 @@ async def system_info():
             # gate is on, for Google / GitHub as for email; invitation pages
             # read the invitation preview's ``email_signup_available``.
             "open_registration": settings.allow_registration,
+            # Issue #2786: whether a sign-in that ends at email_in_use may have
+            # mailed a confirmation link to an email sign-up account. Per
+            # deployment, never per account: the login page words its hint
+            # by it. False when mail goes to the log (no link can be followed).
+            "provider_link_confirmation": settings.enable_provider_link_confirmation
+            and settings.email_provider != "logging",
             # Issue #1572: false when ENABLE_RERANKING is off or the self_hosted
             # default has no endpoint; the web UI then disables the reranker card.
             "reranking": settings.enable_reranking and rerank_configured,

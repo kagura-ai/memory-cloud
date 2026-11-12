@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # and reports every ``oauth_endpoints.*`` call as an unknown attribute. Runtime
 # always resolved it correctly (absolute import); this makes the intent explicit
 # for readers and analyzers alike.
+import auth.oauth_browser as oauth_browser
 import auth.oauth_endpoints as oauth_endpoints
 from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
@@ -81,6 +82,7 @@ from services.password_account_service import (
     find_password_user_by_email,
     password_unchanged,
 )
+from services.provider_link_confirmation_service import spawn_link_offer
 from services.security_notification_service import (
     PROVIDER_SIGN_IN_LABELS,
     SecurityEvent,
@@ -96,6 +98,7 @@ from utils.exceptions import (
     AuthenticationError,
     ConflictError,
     InvalidCredentialsError,
+    ProviderLinkConfirmable,
     UnlinkedProviderSignInError,
 )
 from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
@@ -316,6 +319,135 @@ def _email_in_use_redirect() -> RedirectResponse:
         _safe_redirect_url(f"{frontend_url}/login?error=email_in_use&link_hint=true"),
         status_code=303,
     )
+
+
+# --- Browser binding of a sign-in (#2786) ------------------------------------
+#
+# ``google_login`` / ``github_login`` are the only writers: they give the
+# browser a nonce cookie (``auth.oauth_browser``) and store its digest under
+# ``oauth2_flow:{state}``. The callbacks take the binding with the other
+# state-bound carriers, after the state check, on every path. A provider link
+# confirmed by email is offered only for a sign-in that has one, and completes
+# only in the browser that presents the nonce.
+
+
+def _bind_oauth_flow(request: Request, state: str) -> str | None:
+    """Bind this sign-in's ``state`` to the browser; returns the nonce to set.
+
+    Reuses the nonce the request carries only while its server-side marker
+    exists, and mints a new one otherwise. Refreshes the marker every time.
+    None without a session manager (nothing can be bound).
+    """
+    if not _session_manager:
+        return None
+    redis = _session_manager._redis
+    nonce = oauth_browser.presented_nonce(request.cookies)
+    if nonce is not None and not redis.get(
+        oauth_browser.marker_key(oauth_browser.nonce_digest(nonce))
+    ):
+        nonce = None
+    if nonce is None:
+        nonce = secrets.token_urlsafe(32)
+    digest = oauth_browser.nonce_digest(nonce)
+    redis.setex(oauth_browser.marker_key(digest), oauth_browser.OAUTH_BROWSER_TTL_SECONDS, "1")
+    redis.setex(
+        oauth_browser.OAUTH_FLOW_KEY.format(state=state),
+        oauth_browser.OAUTH_FLOW_TTL_SECONDS,
+        digest,
+    )
+    return nonce
+
+
+def _set_oauth_browser_cookie(response: Response, nonce: str | None) -> None:
+    """Set (or refresh) the browser nonce cookie; no-op without a nonce."""
+    if nonce is None:
+        return
+    response.set_cookie(
+        key=oauth_browser.cookie_name(),
+        value=nonce,
+        max_age=oauth_browser.OAUTH_BROWSER_TTL_SECONDS,
+        **browser_cookie_attrs(),
+    )
+
+
+def _take_oauth_flow_binding(state: str, request: Request) -> str | None:
+    """Read-and-delete ``oauth2_flow:{state}``; the nonce digest when it matches.
+
+    Call only AFTER the CSRF state check has passed. Consumes the key on every
+    path. Returns None when the flow has no binding or the request's cookie
+    is missing or is another nonce.
+    """
+    if not _session_manager:
+        return None
+    key = oauth_browser.OAUTH_FLOW_KEY.format(state=state)
+    stored = _session_manager._redis.get(key)
+    if stored is None:
+        return None
+    _session_manager._redis.delete(key)
+    if not isinstance(stored, str):
+        return None
+    nonce = oauth_browser.presented_nonce(getattr(request, "cookies", None))
+    if not oauth_browser.matches(nonce, stored):
+        return None
+    return stored
+
+
+def _offer_link_confirmation(
+    *,
+    request: Request,
+    state: str,
+    provider: Literal["google", "github"],
+    user_info: Mapping[str, Any],
+    exc: ProviderLinkConfirmable,
+    browser_hash: str | None,
+    link_proof: bool,
+) -> RedirectResponse:
+    """Answer a sign-in that may be confirmed by email, exactly as ``email_in_use``.
+
+    The response is the plain ``_email_in_use_redirect()`` in every case: no
+    cookie, same status and location. The record and the mail are produced
+    by a detached task after it (``spawn_link_offer``), so the request ends
+    at the same moment whatever happens next. No offer is made when the
+    sign-in was not started by this browser's ``/login`` (no binding), or
+    when it carries an add-account intent or an identity-link proof: an
+    intent that cannot be honoured is refused, never turned into another
+    sign-in. Never raises.
+    """
+    try:
+        redis = _session_manager._redis if _session_manager else None
+        return_to: str | None = None
+        add_intent = None
+        if redis is not None:
+            add_key = _ADD_ACCOUNT_KEY.format(state=state)
+            return_key = f"oauth2_return_to:{state}"
+            add_intent = redis.get(add_key)
+            return_to = redis.get(return_key)
+            redis.delete(add_key, return_key)
+        if browser_hash is None or add_intent or link_proof:
+            logger.info(
+                "provider_link_confirmation_not_offered",
+                provider=provider,
+                reason="no_browser_binding" if browser_hash is None else "flow_intent",
+            )
+            return _email_in_use_redirect()
+        safe_return_to = (
+            return_to
+            if isinstance(return_to, str) and _safe_redirect_url(return_to) == return_to
+            else None
+        )
+        spawn_link_offer(
+            account_user_id=exc.account_user_id,
+            account_stamp=exc.account_stamp,
+            provider=provider,
+            user_info=dict(user_info),
+            browser_hash=browser_hash,
+            return_to=safe_return_to,
+            ip_address=_login_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    except Exception as e:
+        logger.error("provider_link_confirmation_offer_failed", error_type=type(e).__name__)
+    return _email_in_use_redirect()
 
 
 async def _maybe_refresh_redirect(
@@ -661,6 +793,7 @@ def _get_enabled_providers() -> list[ProviderInfo]:
 @google_router.get("/login")
 async def google_login(
     request: Request,
+    response: Response,
     redirect_uri: str | None = None,
     return_to: str | None = None,
     add_account: bool = False,
@@ -728,6 +861,7 @@ async def google_login(
 
     # Generate CSRF state token
     state = secrets.token_urlsafe(32)
+    browser_nonce: str | None = None
 
     # Store state in Redis (5 minute TTL)
     if _session_manager:
@@ -762,6 +896,9 @@ async def google_login(
             ),
         )
 
+        # #2786: bind this sign-in to the browser (nonce cookie below).
+        browser_nonce = _bind_oauth_flow(request, state)
+
         # #1818: a sign-in that proves this account for an identity link.
         if link_proof:
             _remember_link_proof_intent(state)
@@ -780,9 +917,14 @@ async def google_login(
 
     # Issue #102: Auto-redirect for browser/iOS users
     if return_to:
-        return RedirectResponse(auth_url, status_code=303)
+        # #2786: the cookie goes on the returned redirect itself (headers of
+        # the injected ``response`` are not merged into a returned Response).
+        redirect_response = RedirectResponse(auth_url, status_code=303)
+        _set_oauth_browser_cookie(redirect_response, browser_nonce)
+        return redirect_response
     else:
         # API client - return JSON
+        _set_oauth_browser_cookie(response, browser_nonce)
         return LoginResponse(authorization_url=auth_url, state=state)
 
 
@@ -956,6 +1098,8 @@ async def google_callback(
     # opt-in rides in the same carrier.
     signup_prefs = _take_signup_bundle(state)
     signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
+    # #2786: likewise; the browser binding written by google_login.
+    browser_hash = _take_oauth_flow_binding(state, request)
     # #1818: likewise.
     link_proof = _take_link_proof_intent(state)
 
@@ -1262,6 +1406,17 @@ async def google_callback(
         # The identity has no link row (its account removed this sign-in
         # method): no session, a banner that says so.
         return _oauth_error_redirect("google", "provider_unlinked")
+    except ProviderLinkConfirmable as exc:
+        # #2786: the same answer as email_in_use; a confirmation may be mailed.
+        return _offer_link_confirmation(
+            request=request,
+            state=state,
+            provider="google",
+            user_info=user_info,
+            exc=exc,
+            browser_hash=browser_hash,
+            link_proof=link_proof,
+        )
     except ConflictError:
         return _email_in_use_redirect()
     except SQLAlchemyError:
@@ -2398,6 +2553,7 @@ def build_github_authorization_url(*, client_id: str, redirect_uri: str, state: 
 @github_router.get("/login")
 async def github_login(
     request: Request,
+    response: Response,
     return_to: str | None = None,
     add_account: bool = False,
     invite: str | None = None,
@@ -2460,6 +2616,9 @@ async def github_login(
         ),
     )
 
+    # #2786: bind this sign-in to the browser (nonce cookie below).
+    browser_nonce = _bind_oauth_flow(request, state)
+
     redirect_uri = os.getenv(
         "GITHUB_REDIRECT_URI",
         "http://localhost:8080/api/v1/auth/github/callback",
@@ -2470,7 +2629,11 @@ async def github_login(
     )
 
     if return_to:
-        return RedirectResponse(auth_url, status_code=303)
+        # #2786: the cookie goes on the returned redirect itself.
+        redirect_response = RedirectResponse(auth_url, status_code=303)
+        _set_oauth_browser_cookie(redirect_response, browser_nonce)
+        return redirect_response
+    _set_oauth_browser_cookie(response, browser_nonce)
     return LoginResponse(authorization_url=auth_url, state=state)
 
 
@@ -2638,6 +2801,8 @@ async def github_callback(
     # #2700: the sign-in page's language / time zone — see google_callback.
     signup_prefs = _take_signup_bundle(state)
     signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
+    # #2786: the browser binding written by github_login — see google_callback.
+    browser_hash = _take_oauth_flow_binding(state, request)
 
     try:
         # 2. Exchange code for token
@@ -2841,6 +3006,17 @@ async def github_callback(
     except UnlinkedProviderSignInError:
         # No link row for this identity (see google_callback): no session.
         return _oauth_error_redirect("github", "provider_unlinked")
+    except ProviderLinkConfirmable as exc:
+        # #2786: see google_callback.
+        return _offer_link_confirmation(
+            request=request,
+            state=state,
+            provider="github",
+            user_info=user_info,
+            exc=exc,
+            browser_hash=browser_hash,
+            link_proof=False,
+        )
     except ConflictError:
         return _email_in_use_redirect()
     except SQLAlchemyError:

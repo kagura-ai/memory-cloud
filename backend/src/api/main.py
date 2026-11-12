@@ -911,6 +911,7 @@ from api.routes import (  # noqa: E402
     operation_history,
     passkeys,
     password,  # Issue #1678: self-service password endpoints
+    provider_link_confirm,  # Issue #2786: connect a provider after an email confirmation
     public_mcp_endpoints,  # Issue #2675: publish a resource as a public MCP endpoint
     public_mcp_usage,  # Issue #2678: public MCP usage health
     public_search,  # Issue #238: Public Search API
@@ -965,6 +966,9 @@ app.include_router(password.router, prefix="/api/v1")
 app.include_router(password.me_router, prefix="/api/v1")
 # Email + password sign-up (Issue #1734); 404 unless ENABLE_EMAIL_SIGNUP
 app.include_router(email_signup.router, prefix="/api/v1")
+# Provider link confirmed by email (Issue #2786); 404 when
+# ENABLE_PROVIDER_LINK_CONFIRMATION=false
+app.include_router(provider_link_confirm.router, prefix="/api/v1")
 
 # OAuth2 Server routes (Issue #33 - OAuth2 client management)
 app.include_router(oauth.router, prefix="/api/v1")

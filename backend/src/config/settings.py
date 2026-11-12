@@ -2000,6 +2000,22 @@ class Settings(BaseSettings):
             "features.email_signup."
         ),
     )
+    # Issue #2786: a GitHub sign-in (or a Google one without authority over
+    # the mailbox) with the address of an email sign-up account.
+    enable_provider_link_confirmation: bool = Field(
+        default=True,
+        description=(
+            "When a GitHub sign-in, or a Google sign-in Google is not authoritative "
+            "for, uses the address of an account created by email sign-up, email "
+            "that account a confirmation link: opened in the browser that started "
+            "the sign-in, it connects the provider to the account (#2786). Only "
+            "accounts created by email sign-up are concerned, so nothing changes "
+            "while none exists. false: those sign-ins end at email_in_use as "
+            "before, nothing is mailed, and every /auth/link-confirm route 404s. "
+            "Surfaced to the frontend via GET /api/v1/system/info "
+            "features.provider_link_confirmation (also false with EMAIL_PROVIDER=logging)."
+        ),
+    )
 
     # Identity-link proof (Issue #1818)
     identity_link_allow_oauth_signin_proof: bool = Field(

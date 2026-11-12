@@ -1451,6 +1451,40 @@ class SignupAccountExistsError(MemoryCloudException):
         super().__init__(message, status_code=409, error_code="AUTH-309")
 
 
+class ProviderLinkConfirmable(ConflictError):
+    """``ensure_user``: the address belongs to an email sign-up account that may
+    take this identity once its owner confirms by email (#2786).
+
+    A ``ConflictError`` with exactly the message of the plain refusal, so a
+    caller that does not handle it still answers ``email_in_use``. The
+    account id and the account stamp are attributes only: they never reach
+    the message or the details, so an uncaught one serializes like any other
+    conflict.
+    """
+
+    def __init__(self, *, account_user_id: str, account_stamp: str) -> None:
+        super().__init__("Email address is already in use by another account")
+        self.account_user_id = account_user_id
+        self.account_stamp = account_stamp
+
+
+class ProviderLinkWrongBrowserError(MemoryCloudException):
+    """A provider link confirmation was opened in another browser (403, #2786).
+
+    The confirmation links nothing unless the browser that opens the emailed
+    link is the one that started the provider sign-in. The pending link is
+    kept, so opening the link in the right browser still works.
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "Open this link in the browser where you started the sign-in; nothing was connected"
+        ),
+    ) -> None:
+        super().__init__(message, status_code=403, error_code="AUTH-310")
+
+
 class ErasureTokenInvalidError(MemoryCloudException):
     """Confirmation token is missing, expired, or does not match (400)."""
 

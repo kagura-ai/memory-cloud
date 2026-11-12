@@ -65,6 +65,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "oidc": NOT_APPLICABLE,  # #2781: account identity, no memory content access
     "passkeys": NOT_APPLICABLE,  # Personal sign-in credentials are independent of workspace capacity.
     "password": NOT_APPLICABLE,
+    "provider_link_confirm": NOT_APPLICABLE,  # #2786: a sign-in method, no memory content
     "referrals": NOT_APPLICABLE,
     "secrets": NOT_APPLICABLE,
     "system": NOT_APPLICABLE,

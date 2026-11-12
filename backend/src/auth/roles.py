@@ -16,6 +16,8 @@ Example:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -26,7 +28,11 @@ from auth.provider_link import provider_link_established
 from auth.system_admin_mode import session_admin_enabled
 from config.settings import get_settings
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import ConflictError, UnlinkedProviderSignInError
+from utils.exceptions import (
+    ConflictError,
+    ProviderLinkConfirmable,
+    UnlinkedProviderSignInError,
+)
 from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
 from utils.user_prefs import is_valid_locale, is_valid_timezone
@@ -275,6 +281,109 @@ def email_signup_account_clause(email: str) -> ColumnElement[bool]:
         User.auth_method == "password",
         User.login_id.is_(None),
         User.email_verified_at.is_not(None),
+    )
+
+
+def email_account_link_refusal(user: _UserModel, *, address: str) -> str | None:
+    """Why a provider identity may not be connected to ``user`` now, or None.
+
+    The row-only conditions shared by the automatic link (#1734) and the link
+    confirmed by email (#2786), read under the account's row lock in both:
+
+    - ``not_an_email_signup_account``: not the account email sign-up created
+      for ``address`` (normalized here; the same fields as
+      :func:`email_signup_account_clause`);
+    - ``totp_enabled``: two-step verification is on (an OAuth sign-in never
+      asks for it);
+    - ``role``: anything but an ordinary ``user`` (a system admin connects
+      providers from Profile, with fresh proof of the account);
+    - ``blocked_by_owner``: ``provider_auto_link_blocked_at`` is set (the
+      owner removed a provider, a reset removed one, or the owner declined
+      a confirmation).
+
+    Whether a provider of the same kind is linked already needs a query and
+    is checked by the callers.
+    """
+    if not (
+        user.email == _normalize_address(address)
+        and user.auth_method == "password"
+        and user.login_id is None
+        and user.email_verified_at is not None
+    ):
+        return "not_an_email_signup_account"
+    if user.totp_enabled:
+        return "totp_enabled"
+    if user.role != Role.USER.value:
+        return "role"
+    if user.provider_auto_link_blocked_at is not None:
+        return "blocked_by_owner"
+    return None
+
+
+def account_stamp(user: _UserModel) -> str:
+    """A digest of the account's security state, for a pending link (#2786).
+
+    Covers the row id and user id, the address, the password hash, the MFA
+    generation, two-step verification, the role and the block marker: a
+    password change or reset, an MFA change, a role change, an address change
+    or a removed provider after the confirmation mail was sent makes the
+    pending link fail. An ordinary sign-in changes none of them.
+    """
+    blocked = user.provider_auto_link_blocked_at
+    state = [
+        user.id,
+        user.user_id,
+        user.email,
+        user.password_hash,
+        user.mfa_generation,
+        bool(user.totp_enabled),
+        user.role,
+        blocked.isoformat() if blocked is not None else None,
+    ]
+    return hashlib.sha256(json.dumps(state).encode()).hexdigest()
+
+
+def stage_address_link(
+    db: AsyncSession,
+    *,
+    owner_id: str,
+    provider: str,
+    oauth_sub: str,
+    action: str,
+    actor_email: str,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> None:
+    """Stage the link row and its audit row of an address link; never commits.
+
+    The one writer for both ways a provider identity is connected to an
+    email sign-up account by its address: automatically (#1734,
+    ``oauth_provider_auto_linked``) and after an email confirmation (#2786,
+    ``oauth_provider_link_confirmed``). ``linked_at`` is now, so the new link
+    proves nothing for identity linking during the link window
+    (``provider_link_established``).
+    """
+    from models.auth import UserOAuthProvider
+    from services.account_linking_service import stage_provider_audit
+
+    now = utcnow()
+    db.add(
+        UserOAuthProvider(
+            user_id=owner_id,
+            provider=provider,
+            oauth_sub=oauth_sub,
+            linked_at=now,
+            last_used_at=now,
+        )
+    )
+    stage_provider_audit(
+        db,
+        user_id=owner_id,
+        actor_email=actor_email,
+        action=action,
+        provider=provider,
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
 
 
@@ -741,6 +850,15 @@ class RoleManager:
         The new link proves nothing for identity linking during the link
         window (``provider_link_established``), never overwrites the account's
         name or address (``sync_profile=False``), and the owner is told.
+
+        #2786: when everything but the provider's authority holds (a GitHub
+        sign-in, or a Google one without authority over the mailbox) and the
+        address is verified and ASCII, raises ``ProviderLinkConfirmable`` (a
+        ``ConflictError``) instead: the callback may then mail the account a
+        confirmation link. Authority is checked last for that reason, so the
+        exclusions above apply to the confirmation as they do to the
+        automatic link. ``ENABLE_PROVIDER_LINK_CONFIRMATION=false`` keeps the
+        plain refusal.
         """
         from sqlalchemy import or_, select
         from sqlalchemy.exc import IntegrityError
@@ -781,23 +899,15 @@ class RoleManager:
         candidate = holders[0]
         if auth_provider not in ("google", "github"):
             raise _refuse("unknown_provider")
-        if not (email_authoritative and email_verified and email.isascii()):
+        # #2786: authority over the mailbox is decided last. Every other
+        # refusal runs first, so a sign-in without authority is offered a
+        # confirmation by email only for an account that could take the link.
+        authoritative = email_authoritative and email_verified and email.isascii()
+        if not (email_verified and email.isascii()):
             raise _refuse("provider_not_authoritative")
-        if not (
-            candidate.email == normalized
-            and candidate.auth_method == "password"
-            and candidate.login_id is None
-            and candidate.email_verified_at is not None
-        ):
-            raise _refuse("not_an_email_signup_account")
-        if candidate.totp_enabled:
-            raise _refuse("totp_enabled")
-        # Only a plain user account: a system admin connects providers from
-        # Profile, with fresh proof of the account.
-        if candidate.role != Role.USER.value:
-            raise _refuse("role")
-        if candidate.provider_auto_link_blocked_at is not None:
-            raise _refuse("blocked_by_owner")
+        refusal = email_account_link_refusal(candidate, address=email)
+        if refusal is not None:
+            raise _refuse(refusal)
         already = (
             await db.execute(
                 select(UserOAuthProvider.id)
@@ -810,26 +920,30 @@ class RoleManager:
         ).first()
         if already is not None:
             raise _refuse("provider_already_linked")
-
-        from services.account_linking_service import stage_provider_audit
+        if not authoritative:
+            if not get_settings().enable_provider_link_confirmation:
+                raise _refuse("provider_not_authoritative")
+            # Same message as every refusal: an unhandled one is email_in_use.
+            logger.warning(
+                "oauth_email_collision_attempt",
+                auth_provider=auth_provider,
+                new_email_hmac=hmac_sha256_hex(email, get_settings().audit_hmac_key),
+                user_id=user_id,
+                phase="create",
+                reason="confirmation_offered",
+            )
+            raise ProviderLinkConfirmable(
+                account_user_id=candidate.user_id, account_stamp=account_stamp(candidate)
+            )
 
         owner_id = candidate.user_id
-        now = utcnow()
-        db.add(
-            UserOAuthProvider(
-                user_id=owner_id,
-                provider=auth_provider,
-                oauth_sub=user_id,
-                linked_at=now,
-                last_used_at=now,
-            )
-        )
-        stage_provider_audit(
+        stage_address_link(
             db,
-            user_id=owner_id,
-            actor_email=_OAUTH_CALLBACK_ACTOR,
-            action="oauth_provider_auto_linked",
+            owner_id=owner_id,
             provider=auth_provider,
+            oauth_sub=user_id,
+            action="oauth_provider_auto_linked",
+            actor_email=_OAUTH_CALLBACK_ACTOR,
             ip_address=ip_address,
             user_agent=user_agent,
         )

@@ -52,6 +52,7 @@ from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
     PasswordLinkInvalidError,
+    ProviderLinkConfirmable,
     SignupAccountExistsError,
     SignupNotAllowedError,
 )
@@ -545,8 +546,10 @@ class TestAutoLink:
         self, gate_off, maker, db_session
     ) -> None:
         email, _ = await _email_account(maker)
-        with pytest.raises(ConflictError):
+        # #2786: a ConflictError that may be confirmed by email; nothing linked.
+        with pytest.raises(ProviderLinkConfirmable):
             await _google(maker, email, f"g-{uuid4().hex[:10]}", authoritative=False)
+        assert await _users_for(db_session, email) == 1
 
         for column, value in (("totp_enabled", True), ("role", "admin")):
             email, user_id = await _email_account(maker)

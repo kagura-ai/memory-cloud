@@ -17,6 +17,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Response
 from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_routes
@@ -137,7 +138,7 @@ class TestLoginRoutes:
         monkeypatch.setattr(auth_routes, "_oauth2_manager", manager)
         monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/cb")
 
-        response = await auth_routes.google_login(FakeRequest(), invite=TOKEN)
+        response = await auth_routes.google_login(FakeRequest(), response=Response(), invite=TOKEN)
 
         assert redis.store[KEY.format(state=response.state)] == sha256_hex(TOKEN)
 
@@ -147,7 +148,7 @@ class TestLoginRoutes:
     ) -> None:
         monkeypatch.setenv("GITHUB_CLIENT_ID", "client-id")
 
-        response = await auth_routes.github_login(FakeRequest(), invite=TOKEN)
+        response = await auth_routes.github_login(FakeRequest(), response=Response(), invite=TOKEN)
 
         assert redis.store[KEY.format(state=response.state)] == sha256_hex(TOKEN)
 
@@ -157,7 +158,7 @@ class TestLoginRoutes:
     ) -> None:
         monkeypatch.setenv("GITHUB_CLIENT_ID", "client-id")
 
-        await auth_routes.github_login(FakeRequest())
+        await auth_routes.github_login(FakeRequest(), response=Response())
 
         assert not any(k.startswith("oauth2_beta_invite:") for k in redis.store)
 
@@ -167,7 +168,9 @@ class TestLoginRoutes:
     ) -> None:
         monkeypatch.setenv("GITHUB_CLIENT_ID", "client-id")
 
-        response = await auth_routes.github_login(FakeRequest(), invite="<script>")
+        response = await auth_routes.github_login(
+            FakeRequest(), response=Response(), invite="<script>"
+        )
 
         assert response.authorization_url
         assert not any(k.startswith("oauth2_beta_invite:") for k in redis.store)
