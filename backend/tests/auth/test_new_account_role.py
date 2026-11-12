@@ -20,8 +20,12 @@ def _db(user_count: int) -> AsyncMock:
     link_miss.scalar_one_or_none = MagicMock(return_value=None)
     count = MagicMock()
     count.scalar = MagicMock(return_value=user_count)
+    # #1734: the address lock, then the (empty) lookup of accounts holding it.
+    lock = MagicMock()
+    no_holders = MagicMock()
+    no_holders.scalars.return_value.all.return_value = []
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=[link_miss, count])
+    db.execute = AsyncMock(side_effect=[link_miss, count, lock, no_holders])
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
     db.add = MagicMock()
@@ -55,7 +59,7 @@ async def test_first_oauth_account(monkeypatch, mode, role, initial_admin, provi
     added = db.add.call_args_list[0].args[0]
     assert added.role == role.value
     assert added.is_initial_admin is initial_admin
-    assert db.execute.await_count == 2  # link lookup + the one count
+    assert db.execute.await_count == 4  # link lookup, the one count, address lock, holders
 
 
 @pytest.mark.asyncio
