@@ -2134,7 +2134,7 @@ No authentication: the token from an announcement email is the only authority. T
 
 ### GET /api/v1/announcement-emails/unsubscribe/{token}
 
-No authentication. Changes nothing: `303` to `{FRONTEND_URL}/email/unsubscribe#<token>` (the token in the fragment only when it has the token alphabet), with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+No authentication. Changes nothing: `303` to `{FRONTEND_URL}/email/unsubscribe`, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. For a valid token the fragment (`#<token>`) holds a token the server issues afresh for the same account; the path's own text never goes into `Location`, and any other value lands on the page without a fragment. Checking the token reads no database.
 
 ### POST /api/v1/announcement-emails/unsubscribe
 

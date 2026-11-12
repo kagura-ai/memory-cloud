@@ -10,8 +10,9 @@ Unsubscribe (no auth):
 - the one-click POST answers the same 200 for every token, never 429, and does
   no database or Redis work for an invalid token; a valid token is applied, and
   a failed write is a 503;
-- the GET redirects to the page with the token in a fragment (only a token-
-  shaped value), no-store + no-referrer, and changes nothing;
+- the GET redirects to the page with a token re-issued from a valid token's
+  claim in the fragment (never the request's text; anything else lands on the
+  page without one), no-store + no-referrer, and changes nothing;
 - the page's body POST: the same 200; invalid tokens are counted per client
   address and refused with 429 past the limit; a valid one never.
 """
@@ -22,12 +23,17 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
 from api.routes import announcement_emails as routes
-from auth.announcement_unsubscribe import UnsubscribeClaim, issue_unsubscribe_token
+from auth.announcement_unsubscribe import (
+    UnsubscribeClaim,
+    issue_unsubscribe_token,
+    read_unsubscribe_token,
+)
 from config.settings import get_settings
 from db.base import get_db
 from services.announcement_consent_service import (
@@ -318,7 +324,7 @@ class TestOneClick:
 
 
 class TestGetRedirect:
-    def test_valid_shape_goes_into_the_fragment(self, public_client) -> None:
+    def test_valid_token_is_reissued_into_the_fragment(self, public_client) -> None:
         client, _, counter = public_client
         token = _valid_token()
 
@@ -327,14 +333,33 @@ class TestGetRedirect:
         )
 
         assert response.status_code == 303
-        assert response.headers["location"] == f"https://app.example.com/email/unsubscribe#{token}"
+        location = response.headers["location"]
+        page, _, fragment = location.partition("#")
+        assert page == "https://app.example.com/email/unsubscribe"
+        # Only a token this server minted reaches the fragment: a fresh one,
+        # never the request's own text, naming the same account row.
+        assert fragment
+        assert fragment != token
+        assert read_unsubscribe_token(fragment) == UnsubscribeClaim(
+            account_id=42, user_id="google-123"
+        )
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["referrer-policy"] == "no-referrer"
         counter.assert_not_awaited()
 
-    @pytest.mark.parametrize("token", ["%0D%0ASet-Cookie:%20x=1", "a.b", "x" * 2049])
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "%0D%0ASet-Cookie:%20x=1",
+            "a.b",
+            "x" * 2049,
+            # Token-shaped but not ours (the old rule let these through).
+            "forged-token",
+            "gAAAAAB" + "a" * 120,
+        ],
+    )
     def test_other_values_land_without_a_fragment(self, public_client, token) -> None:
-        client, _, _ = public_client
+        client, _, counter = public_client
 
         response = client.get(
             f"/api/v1/announcement-emails/unsubscribe/{token}", follow_redirects=False
@@ -342,6 +367,43 @@ class TestGetRedirect:
 
         assert response.status_code == 303
         assert response.headers["location"] == "https://app.example.com/email/unsubscribe"
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        counter.assert_not_awaited()
+
+    def test_token_from_another_purpose_key_lands_without_a_fragment(self, public_client) -> None:
+        client, _, _ = public_client
+        other = (
+            Fernet(Fernet.generate_key())
+            .encrypt(b'{"p":"au1","i":42,"u":"google-123"}')
+            .decode()
+            .rstrip("=")
+        )
+
+        response = client.get(
+            f"/api/v1/announcement-emails/unsubscribe/{other}", follow_redirects=False
+        )
+
+        assert response.headers["location"] == "https://app.example.com/email/unsubscribe"
+
+    def test_redirect_never_reads_the_database(self, public_client) -> None:
+        # CPU only: the route takes no database session at all, and a valid
+        # token through the app touches none (the holder fails on any use).
+        route = next(
+            r
+            for r in routes.public_router.routes
+            if getattr(r, "path", "").endswith("/unsubscribe/{token}")
+            and "GET" in getattr(r, "methods", set())
+        )
+        assert get_db not in {d.call for d in route.dependant.dependencies}
+        client, holder, _ = public_client
+        holder["db"] = _NoTouchDb()
+
+        response = client.get(
+            f"/api/v1/announcement-emails/unsubscribe/{_valid_token()}", follow_redirects=False
+        )
+
+        assert response.status_code == 303
 
 
 class TestPagePost:

@@ -25,8 +25,10 @@ touches the database or Redis before that.
   addresses; a refused unsubscribe is lost). A valid token whose write fails
   answers 503 so the provider retries; only the token's holder can see that.
 - ``GET /unsubscribe/{token}`` — some clients open that URL in a browser: 303
-  to the web page with the token in the URL fragment. Never changes anything
-  (link scanners fetch GETs).
+  to the web page. For a valid token the URL fragment holds a token re-issued
+  from its claim (same account row, same purpose key), never the request's
+  own text; anything else gets the page without a fragment. Never changes
+  anything (link scanners fetch GETs).
 - ``POST /unsubscribe`` with ``{"token": ...}`` — what the web page posts, so the
   token is not in a request path that carries the session cookie. Invalid
   tokens are counted per client address and refused with 429 past the limit.
@@ -34,7 +36,6 @@ touches the database or Redis before that.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from typing import Literal
 
@@ -47,6 +48,7 @@ from api.routes import auth as auth_module
 from auth.announcement_unsubscribe import (
     UNSUBSCRIBE_PAGE_PATH,
     UnsubscribeClaim,
+    issue_unsubscribe_token,
     read_unsubscribe_token,
 )
 from auth.dependencies import SessionUser
@@ -74,9 +76,6 @@ _PREF_CHANGES_PER_USER = 20
 # Unsubscribe page: invalid tokens per client address.
 _UNSUB_WINDOW_SECONDS = 15 * 60
 _UNSUB_INVALID_PER_IP = 30
-
-# What may go into the redirect's fragment as is (gate1 R3).
-_FRAGMENT_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{1,2048}")
 
 _NOT_OFFERED = "Announcement emails are not offered on this deployment."
 _STALE_WORDING = (
@@ -276,12 +275,16 @@ async def one_click_unsubscribe(
 async def open_unsubscribe_link(token: str) -> RedirectResponse:
     """Send a browser to the unsubscribe page; changes nothing.
 
-    The token goes into the URL fragment (never sent to a server) only when it
-    has the token alphabet; anything else lands on the page without one.
+    Nothing from the request goes into ``Location``. A valid token (MAC
+    checked, CPU only: no database, no Redis) is answered with a token this
+    server issues afresh for the same account row, in the URL fragment (never
+    sent to a server); anything else lands on the page without one.
     """
     target = get_settings().frontend_url.rstrip("/") + UNSUBSCRIBE_PAGE_PATH
-    if _FRAGMENT_TOKEN_RE.fullmatch(token):
-        target = f"{target}#{token}"
+    claim = read_unsubscribe_token(token)
+    if claim is not None:
+        reissued = issue_unsubscribe_token(account_id=claim.account_id, user_id=claim.user_id)
+        target = f"{target}#{reissued}"
     return RedirectResponse(
         target,
         status_code=303,
