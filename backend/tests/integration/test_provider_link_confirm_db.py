@@ -242,6 +242,9 @@ class TestAccountChangedMeanwhile:
             {"role": "admin"},
             {"provider_auto_link_blocked_at": "now"},
             {"mfa_generation": "g2"},
+            # Outside the account stamp: only the eligibility re-check under
+            # the row lock refuses it.
+            {"email_verified_at": None},
         ],
     )
     async def test_a_changed_account_links_nothing(
