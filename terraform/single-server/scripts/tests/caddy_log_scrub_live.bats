@@ -48,7 +48,7 @@ OIDC_CODE="kmc_oidc_code_k2781CodeAbCdEfGhIjKlMnOpQrStUvWxYz01234567"
 OIDC_ACCESS="kmc_oidc_at_k2781AccessAbCdEfGhIjKlMnOpQrStUvWxYz012345"
 OIDC_REFRESH="kmc_oidc_rt_k2781RefreshAbCdEfGhIjKlMnOpQrStUvWxYz01234"
 
-EXPECTED_CASES=37   # access-log lines: one per fire() below
+EXPECTED_CASES=39   # access-log lines: one per fire() below
 EXPECTED_ERRORS=10  # error-log lines: one per *-down case
 
 # A workspace invitation id as the API's management routes carry it: it must
@@ -192,6 +192,10 @@ CADDYEOF
     fire invitation    "/api/v1/invitations/$TOKEN"
     fire login-return  "/api/v1/auth/google/login?return_to=https%3A%2F%2Fmemory.example.test%2Finvite%2F$TOKEN&accepted_terms=2026-01"
     fire login-return-lc "/api/v1/auth/github/login?return_to=https%3a%2f%2fmemory.example.test%2finvite%2f$TOKEN"
+    # Emailed single-use links carry their token in a `token` query parameter
+    # (email sign-up, password set-up/reset, provider link confirmation).
+    fire signup-verify "/signup/verify?token=$TOKEN"
+    fire reset-token   "/password/reset?lang=ja&token=$TOKEN"
     # Token-free routes of the same family keep their concrete path.
     fire plain-accept  "/api/v1/invitations/accept"
     fire plain-pending "/api/v1/invitations/pending"
@@ -345,8 +349,8 @@ PYEOF
     # Both encoders: the default logger (error lines) and the site's access
     # logger (log0).
     # shellcheck disable=SC2016  # literal ${N}: the regexp's capture references
-    expect "$output" 'default regexp ${1}${2}${4}${5}${6}${7}${8}REDACTED${3}
-log0 regexp ${1}${2}${4}${5}${6}${7}${8}REDACTED${3}'
+    expect "$output" 'default regexp ${1}${2}${4}${5}${6}${7}${8}${9}REDACTED${3}
+log0 regexp ${1}${2}${4}${5}${6}${7}${8}${9}REDACTED${3}'
 }
 
 @test "live: customising the default logger does not copy the access log onto stderr" {
@@ -416,6 +420,14 @@ log0 writes to: stdout'
     expect "$output" "/api/v1/auth/google/login?return_to=x&invite=REDACTED"
     run logged login-first uri
     expect "$output" "/api/v1/auth/github/login?invite=REDACTED&return_to=x"
+}
+
+@test "live: token=<token> in an emailed link is redacted, first or later in the query" {
+    require_live
+    run logged signup-verify uri
+    expect "$output" "/signup/verify?token=REDACTED"
+    run logged reset-token uri
+    expect "$output" "/password/reset?lang=ja&token=REDACTED"
 }
 
 @test "live: a trailing-slash 308 does not leak the token through Location / Refresh" {
