@@ -126,12 +126,16 @@ credential.
 |---|---|---|
 | `POST /api/v1/auth/signup/email/request` | `{"email", "invite"?, "locale"?, "timezone"?}` | `202 {"status": "accepted", "message": ...}` for every address; `429` per client address; `422` only for an address of the wrong shape (one ASCII mailbox) |
 | `POST /api/v1/auth/signup/email/preview` | `{"token"}` | `200 {"email", "expires_at"}`; `400 AUTH-301` unknown, expired or used link |
-| `POST /api/v1/auth/signup/email/complete` | `{"token", "new_password", "name"?, "accepted_terms"?, "return_to"?}` | `200 {"redirect_url"}` plus the session cookie; `400 AUTH-301`; `403 AUTH-308` the sign-up controls refuse it now; `409 AUTH-309` the address has an account; `422` password policy (`field: new_password`) or terms (`field: accepted_terms`); `429`; `503` the account was created but no session could be opened (sign in with the password) |
+| `POST /api/v1/auth/signup/email/complete` | `{"token", "new_password", "name"?, "accepted_terms"?, "return_to"?, "announcement_emails"?, "announcement_consent_version"?}` | `200 {"redirect_url"}` plus the session cookie; `400 AUTH-301`; `403 AUTH-308` the sign-up controls refuse it now; `409 AUTH-309` the address has an account; `422` password policy (`field: new_password`) or terms (`field: accepted_terms`); `429`; `503` the account was created but no session could be opened (sign in with the password) |
 
 `invite` is a beta invite token (a malformed one is ignored). The request body
 has no return path: the page that started the sign-up keeps it and sends it as
 `return_to` on completion, validated like the password sign-in's (same origin
 only). The policy and terms are checked before the link is spent.
+`announcement_emails` is the answer to the announcement-email opt-in shown on
+the completion page, sent with the `announcement_consent_version` from
+`/system/info`; the new account records it (an absent answer, a stale version or
+the feature switched off records nothing). The request body never carries it.
 
 ### Provider link confirmation
 

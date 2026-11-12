@@ -36,6 +36,7 @@ from config.settings import get_settings
 from db.base import get_db
 from db.redis import increment_counter
 from models.api_base import TZAwareBaseModel
+from services.announcement_consent_service import resolve_signup_consent
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
 from services.email_service import redact_recipient
 from services.email_signup_service import (
@@ -141,6 +142,10 @@ class EmailSignupCompleteBody(BaseModel):
     name: str | None = Field(None, max_length=255)
     accepted_terms: str | None = Field(None, max_length=64)
     return_to: str | None = Field(None, max_length=2048)
+    # #2761: the announcement-email opt-in and the wording version the page
+    # showed. Only here: the box is answered by whoever opened the link.
+    announcement_emails: bool | None = None
+    announcement_consent_version: str | None = Field(None, max_length=64)
 
 
 class EmailSignupCompleteResponse(BaseModel):
@@ -245,7 +250,12 @@ async def complete_email_signup(
         raw_token=body.token,
         new_password=body.new_password,
         name=_display_name(body.name),
-        consents=SignupConsents(terms_version=body.accepted_terms),
+        consents=SignupConsents(
+            terms_version=body.accepted_terms,
+            announcement=resolve_signup_consent(
+                body.announcement_emails, body.announcement_consent_version
+            ),
+        ),
         ip_address=ip,
         user_agent=request.headers.get("user-agent"),
     )

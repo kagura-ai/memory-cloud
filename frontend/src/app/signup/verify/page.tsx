@@ -48,6 +48,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { NewPasswordForm } from "@/components/auth/NewPasswordForm";
+import { AnnouncementEmailsOptIn } from "@/components/auth/AnnouncementEmailsOptIn";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
 import { useSystemInfo } from "@/hooks/useSystemFeatures";
 import { useToast } from "@/hooks/use-toast";
@@ -109,6 +110,9 @@ function SignupVerify() {
   const systemInfo = useSystemInfo();
   const systemInfoPending = systemInfo === null;
   const termsVersion = systemInfo?.terms_version ?? undefined;
+  // #2761: the announcement-email consent wording, when offered.
+  const announcementVersion =
+    systemInfo?.announcement_consent_version ?? undefined;
 
   // Read once: the URL loses the token right below.
   const [token] = useState<string | null>(() => searchParams.get("token"));
@@ -121,6 +125,7 @@ function SignupVerify() {
   const [attempt, setAttempt] = useState(0);
   const [name, setName] = useState("");
   const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [announcementOptIn, setAnnouncementOptIn] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [policyError, setPolicyError] = useState(false);
   const [termsError, setTermsError] = useState(false);
@@ -159,6 +164,10 @@ function SignupVerify() {
         name: name.trim() || undefined,
         acceptedTerms: termsVersion,
         returnTo: peekSignupReturnTo(window.location.origin),
+        announcementEmails:
+          announcementVersion !== undefined
+            ? { value: announcementOptIn, version: announcementVersion }
+            : undefined,
       });
       clearSignupReturnTo();
       // A full navigation: the new session cookie must reach every provider.
@@ -319,8 +328,15 @@ function SignupVerify() {
               }}
               themed
             />
-            {/* #2761 announcement opt-in */}
           </div>
+        )}
+        {/* #2761 announcement opt-in: separate from the terms, never gating */}
+        {announcementVersion !== undefined && (
+          <AnnouncementEmailsOptIn
+            checked={announcementOptIn}
+            onCheckedChange={setAnnouncementOptIn}
+            themed
+          />
         )}
         {termsError && (
           <p role="alert" className="text-sm text-red-700 dark:text-red-300">

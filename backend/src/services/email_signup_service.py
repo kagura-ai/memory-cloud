@@ -67,6 +67,10 @@ from config.settings import get_settings
 from db.base import _get_session_factory
 from db.redis import increment_counter, set_if_absent
 from models.auth import AuditLog, EmailSignupRequest, User
+from services.announcement_consent_service import (
+    SignupAnnouncementConsent,
+    new_consent_row,
+)
 from services.email_service import (
     EMAIL_SEND_TIMEOUT_SECONDS,
     EmailService,
@@ -189,9 +193,13 @@ class SignupConsents:
     Attributes:
         terms_version: The terms version the page showed and the person
             accepted, or ``None``.
+        announcement: The announcement-email opt-in (#2761) as
+            ``resolve_signup_consent`` resolved it, or ``None`` (not shown,
+            invalid, stale wording, or the feature off): no row then.
     """
 
     terms_version: str | None
+    announcement: SignupAnnouncementConsent | None = None
 
 
 async def stage_signup_consents(
@@ -200,11 +208,20 @@ async def stage_signup_consents(
     """Stage the consent rows of a new account; never commits.
 
     Called inside the account-creating transaction, after the ``users`` row is
-    flushed and the terms acceptance staged, so a refused or failed sign-up
-    writes none. The terms acceptance is staged by the caller; the
-    announcement-email opt-in (#2761) is wired here.
+    flushed (the consent row references it) and the terms acceptance staged,
+    so a refused or failed sign-up writes none. The terms acceptance is staged
+    by the caller; the announcement-email opt-in (#2761) is one ``signup``
+    history row here.
     """
-    del db, user_id, consents
+    if consents.announcement is not None:
+        db.add(
+            new_consent_row(
+                user_id=user_id,
+                value=consents.announcement.value,
+                source="signup",
+                wording_version=consents.announcement.wording_version,
+            )
+        )
 
 
 @dataclass(frozen=True)

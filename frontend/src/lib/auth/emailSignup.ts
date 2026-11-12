@@ -64,6 +64,11 @@ export interface CompleteEmailSignupInput {
   acceptedTerms?: string;
   /** The path kept by `rememberSignupReturnTo`; validated again server-side. */
   returnTo?: string;
+  /**
+   * The announcement-email opt-in (#2761), ticked or not, with the
+   * `announcement_consent_version` the page showed; absent when no box was shown.
+   */
+  announcementEmails?: { value: boolean; version: string };
 }
 
 /**
@@ -82,6 +87,10 @@ export async function completeEmailSignup(
   if (input.name) body.name = input.name;
   if (input.acceptedTerms) body.accepted_terms = input.acceptedTerms;
   if (input.returnTo) body.return_to = input.returnTo;
+  if (input.announcementEmails) {
+    body.announcement_emails = input.announcementEmails.value;
+    body.announcement_consent_version = input.announcementEmails.version;
+  }
   return apiClient.post<{ redirect_url: string }>(`${BASE}/complete`, body);
 }
 
