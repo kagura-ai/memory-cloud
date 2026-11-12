@@ -203,6 +203,36 @@ class ConfirmedProviderLink:
     oauth_sub: str
     provider_login: str
     return_to: str | None
+    # The account stamp verified under the row lock when the link was made;
+    # the session opened afterwards is kept only while it still matches.
+    account_stamp: str
+
+
+async def account_stamp_unchanged(db: AsyncSession, user_id: str, stamp: str) -> bool:
+    """Is the account still in the state the link was made in? (#1809 pattern)
+
+    The session a completed link opens is written after the link's row lock
+    is gone. A password reset, an MFA, role or address change, or a removed
+    provider signs the account out BEFORE it commits, under the row lock; a
+    session written after that sweep would outlive it. Call this AFTER the
+    session is written: ``FOR SHARE`` waits for such a write to commit and
+    then reads its result, so either the sweep deleted the session or this
+    read sees the change. The caller owns the transaction and ends it at
+    once to drop the lock.
+
+    False when the stamp differs or the account no longer exists.
+    """
+    user = (
+        await db.execute(
+            select(User)
+            .where(User.user_id == user_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        return False
+    return hmac.compare_digest(compute_account_stamp(user), stamp)
 
 
 # ---------------------------------------------------------------------------
@@ -730,6 +760,7 @@ class ProviderLinkConfirmationService:
             oauth_sub=record.oauth_sub,
             provider_login=record.provider_login,
             return_to=record.return_to,
+            account_stamp=record.account_stamp,
         )
         try:
             await db.commit()

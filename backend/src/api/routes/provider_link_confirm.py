@@ -37,6 +37,7 @@ from services.known_device_service import note_browser_sign_in
 from services.provider_link_confirmation_service import (
     PROVIDER_LABELS,
     ProviderLinkConfirmationService,
+    account_stamp_unchanged,
 )
 from utils.exceptions import (
     RateLimitError,
@@ -152,15 +153,18 @@ async def complete_provider_link(
         user_agent=request.headers.get("user-agent"),
     )
     # The link is committed and the owner is being told. Open the session the
-    # way a password sign-in does: write it, then sign the account out
-    # everywhere else under the per-account sweep lock. It proves nothing
-    # for identity linking (no fresh proof of the account was given).
+    # way a password sign-in does (#1809): write it, re-read the account (a
+    # password reset or other security change that committed after the link
+    # signed the account out before this session existed), then sign the
+    # account out everywhere else under the per-account sweep lock. It proves
+    # nothing for identity linking (no fresh proof of the account was given).
     unavailable = SignupSessionUnavailableError(
         f"{PROVIDER_LABELS[confirmed.provider]} was connected to your account. Sign in again."
     )
     session_manager = auth_module._session_manager
     if session_manager is None:
         raise unavailable
+    session_id: str | None = None
     try:
         session_id = session_manager.create_session(
             {
@@ -173,11 +177,27 @@ async def complete_provider_link(
             },
             proven_at=None,
         )
+        try:
+            unchanged = await account_stamp_unchanged(
+                db, confirmed.user_id, confirmed.account_stamp
+            )
+        finally:
+            # Drop the share lock at once.
+            await db.rollback()
+        if not unchanged:
+            session_manager.delete_session(session_id)
+            logger.warning("provider_link_confirm_session_superseded", user_id=confirmed.user_id)
+            raise unavailable
         completed = await auth_module._complete_password_sign_in(
             confirmed.user_id, confirmed.email, session_id
         )
+    except SignupSessionUnavailableError:
+        raise
     except Exception as exc:
-        # SweepLeaseLostError / TimeoutError from the sweep lock, or Redis.
+        # The re-read (database), SweepLeaseLostError / TimeoutError from the
+        # sweep lock, or Redis. The new session cannot be kept.
+        if session_id is not None:
+            session_manager.delete_session(session_id)
         logger.error(
             "provider_link_confirm_session_failed",
             user_id=confirmed.user_id,

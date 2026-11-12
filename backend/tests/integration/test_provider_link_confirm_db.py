@@ -307,6 +307,97 @@ class TestAccountChangedMeanwhile:
         assert await _github_links(db_session, user_id) == 0
 
 
+class TestRecheckAfterTheSession:
+    """``account_stamp_unchanged``: the re-read after the session is written (#1809 pattern)."""
+
+    async def test_unchanged_account_matches_its_link_stamp(
+        self,
+        gate_off,
+        maker,  # noqa: F811
+        db_session,
+        redis,
+    ) -> None:
+        email, _ = await _email_account(maker, domain="example.test")
+        token = await _offer(maker, redis, email, _sub())
+        confirmed, _ = await _complete(maker, redis, token)
+
+        async with maker() as s:
+            assert await svc.account_stamp_unchanged(s, confirmed.user_id, confirmed.account_stamp)
+            await s.rollback()
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"password_hash": "$2b$12$" + "y" * 53},
+            {"totp_enabled": True},
+            {"role": "admin"},
+            {"mfa_generation": "g3"},
+            {"provider_auto_link_blocked_at": "now"},
+        ],
+    )
+    async def test_a_change_after_the_link_is_seen(
+        self,
+        gate_off,
+        maker,  # noqa: F811
+        db_session,
+        redis,
+        change,
+    ) -> None:
+        email, user_id = await _email_account(maker, domain="example.test")
+        token = await _offer(maker, redis, email, _sub())
+        confirmed, _ = await _complete(maker, redis, token)
+        values = {k: (utcnow() if v == "now" else v) for k, v in change.items()}
+        await db_session.execute(update(User).where(User.user_id == user_id).values(values))
+        await db_session.commit()
+
+        async with maker() as s:
+            assert not await svc.account_stamp_unchanged(
+                s, confirmed.user_id, confirmed.account_stamp
+            )
+            await s.rollback()
+
+    async def test_a_gone_account_does_not_match(self, maker) -> None:  # noqa: F811
+        async with maker() as s:
+            assert not await svc.account_stamp_unchanged(s, "email:nobody-" + _sub(), "x" * 64)
+            await s.rollback()
+
+    async def test_the_reread_waits_for_a_password_write_in_progress(
+        self,
+        gate_off,
+        maker,  # noqa: F811
+        db_session,
+        redis,
+    ) -> None:
+        email, user_id = await _email_account(maker, domain="example.test")
+        token = await _offer(maker, redis, email, _sub())
+        confirmed, _ = await _complete(maker, redis, token)
+
+        async with maker() as writer:
+            # A password write holds the row FOR UPDATE until it commits.
+            await writer.execute(select(User.id).where(User.user_id == user_id).with_for_update())
+            await writer.execute(
+                update(User)
+                .where(User.user_id == user_id)
+                .values(password_hash="$2b$12$" + "z" * 53)
+            )
+
+            async def _reread() -> bool:
+                async with maker() as s:
+                    try:
+                        return await svc.account_stamp_unchanged(
+                            s, confirmed.user_id, confirmed.account_stamp
+                        )
+                    finally:
+                        await s.rollback()
+
+            reread = asyncio.create_task(_reread())
+            await asyncio.sleep(0.3)
+            assert not reread.done()
+            await writer.commit()
+
+        assert await reread is False
+
+
 class TestExclusions:
     @pytest.mark.parametrize(
         "change",

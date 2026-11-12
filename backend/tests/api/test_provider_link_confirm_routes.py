@@ -57,6 +57,12 @@ def counters(monkeypatch) -> dict[str, int]:
     return store
 
 
+def _db() -> MagicMock:
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    return db
+
+
 def _service(monkeypatch, **methods) -> MagicMock:
     service = MagicMock()
     for name, value in methods.items():
@@ -148,6 +154,7 @@ class TestComplete:
             oauth_sub="583231",
             provider_login="octo-cat",
             return_to="https://evil.example/x",
+            account_stamp="stamp-1",
         )
         service = _service(monkeypatch, complete=AsyncMock(return_value=link))
         manager = MagicMock()
@@ -161,14 +168,21 @@ class TestComplete:
         redis = MagicMock()
         redis.delete = AsyncMock()
         monkeypatch.setattr(routes, "get_redis_client", lambda: redis)
+        recheck = AsyncMock(return_value=True)
+        monkeypatch.setattr(routes, "account_stamp_unchanged", recheck)
         return SimpleNamespace(
-            service=service, manager=manager, sweep=sweep, note=note, redis=redis
+            service=service,
+            manager=manager,
+            sweep=sweep,
+            note=note,
+            redis=redis,
+            recheck=recheck,
         )
 
     @pytest.mark.asyncio
     async def test_opens_a_session_without_proof_and_drops_the_nonce(self, confirmed) -> None:
         resp = await routes.complete_provider_link(
-            routes.ProviderLinkTokenBody(token=TOKEN), _request(), db=MagicMock()
+            routes.ProviderLinkTokenBody(token=TOKEN), _request(), db=_db()
         )
 
         assert resp.status_code == 200
@@ -177,6 +191,11 @@ class TestComplete:
         assert kwargs == {"proven_at": None}
         assert data[0]["user_id"] == "email:abc" and data[0]["role"] == "user"
         confirmed.sweep.assert_awaited_once_with("email:abc", "a@example.test", "sess-1")
+        # #1809 pattern: the account is re-read after the session is written.
+        db = confirmed.recheck.await_args.args[0]
+        assert confirmed.recheck.await_args.args[1:] == ("email:abc", "stamp-1")
+        db.rollback.assert_awaited()
+        confirmed.manager.delete_session.assert_not_called()
         cookies = [v.decode() for k, v in resp.raw_headers if k.lower() == b"set-cookie"]
         assert any(c.startswith("kagura_session=sess-1") for c in cookies)
         dropped = [c for c in cookies if c.startswith("kagura_oauth_browser=")]
@@ -184,6 +203,38 @@ class TestComplete:
         confirmed.redis.delete.assert_awaited_once_with(f"oauth_browser:{sha256_hex(NONCE)}")
         assert confirmed.note.await_args.kwargs["sign_in_method"] == "GitHub"
         assert confirmed.service.complete.await_args.kwargs["browser_nonce"] == NONCE
+
+    @pytest.mark.asyncio
+    async def test_an_account_changed_after_the_link_gets_no_session(self, confirmed) -> None:
+        # A password reset (or role, MFA, address, block change) that commits
+        # between the link and the session write: its sign-out sweep ran
+        # before this session existed, so the re-read must drop it.
+        confirmed.recheck.return_value = False
+
+        with pytest.raises(SignupSessionUnavailableError) as info:
+            await routes.complete_provider_link(
+                routes.ProviderLinkTokenBody(token=TOKEN), _request(), db=_db()
+            )
+
+        assert info.value.status_code == 503
+        assert "GitHub was connected" in info.value.message
+        confirmed.manager.delete_session.assert_called_once_with("sess-1")
+        confirmed.sweep.assert_not_awaited()
+        confirmed.note.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_recheck_drops_the_session(self, confirmed) -> None:
+        confirmed.recheck.side_effect = RuntimeError("db down")
+        db = _db()
+
+        with pytest.raises(SignupSessionUnavailableError):
+            await routes.complete_provider_link(
+                routes.ProviderLinkTokenBody(token=TOKEN), _request(), db=db
+            )
+
+        confirmed.manager.delete_session.assert_called_once_with("sess-1")
+        confirmed.sweep.assert_not_awaited()
+        db.rollback.assert_awaited()
 
     @pytest.mark.parametrize("outcome", [False, RuntimeError("redis down"), TimeoutError()])
     @pytest.mark.asyncio
@@ -194,7 +245,7 @@ class TestComplete:
             confirmed.sweep.return_value = outcome
         with pytest.raises(SignupSessionUnavailableError) as info:
             await routes.complete_provider_link(
-                routes.ProviderLinkTokenBody(token=TOKEN), _request(), db=MagicMock()
+                routes.ProviderLinkTokenBody(token=TOKEN), _request(), db=_db()
             )
         assert info.value.status_code == 503
         assert "GitHub was connected" in info.value.message
