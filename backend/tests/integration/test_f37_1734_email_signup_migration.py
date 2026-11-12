@@ -5,9 +5,10 @@
    ``email_signup_requests`` with its unique token hash and two indexes;
 2. the downgrade is refused while an allowlist row has ``provider='email'``
    or an account carries ``provider_auto_link_blocked_at`` (the owner's
-   choice would be lost), and runs once neither holds (restoring the
-   two-provider CHECK);
-3. re-upgrade works (the steps before the VALIDATE commit are re-runnable).
+   choice would be lost), a refusal changes nothing, and it runs once
+   neither holds (restoring the two-provider CHECK);
+3. re-upgrade works (the steps before the VALIDATE commit are re-runnable),
+   and so does a downgrade re-run after its first transaction committed.
 
 PRIOR is read from the module, so re-chaining the revision changes one line.
 Not executed in the local unit run — needs the DB container.
@@ -111,6 +112,13 @@ def test_f37_round_trip_and_the_guarded_downgrade() -> None:
             insert_email_row(conn, subject)
         with pytest.raises(RuntimeError, match="downgrade refused"):
             _downgrade_to(prior)
+        # A refusal rolls everything back: the guards run in the transaction
+        # that swaps the CHECK and drops the column.
+        with engine.connect() as conn:
+            assert table_exists(conn)
+            assert column_exists(conn)
+            definition, validated = provider_check(conn)
+            assert "'email'" in definition and validated
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM signup_allowlist WHERE subject_id = :s"), {"s": subject})
             conn.execute(
@@ -144,6 +152,19 @@ def test_f37_round_trip_and_the_guarded_downgrade() -> None:
         _upgrade_to(_MODULE.revision)
         with engine.connect() as conn:
             assert table_exists(conn)
+            assert column_exists(conn)
+        # So are the downgrade's: a run that committed its first transaction
+        # (column gone, CHECK swapped NOT VALID) and failed at the VALIDATE.
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users DROP COLUMN provider_auto_link_blocked_at"))
+            conn.execute(text("DROP TABLE email_signup_requests"))
+        _downgrade_to(prior)
+        with engine.connect() as conn:
+            assert not column_exists(conn)
+            definition, validated = provider_check(conn)
+            assert "'email'" not in definition and validated
+        _upgrade_to(_MODULE.revision)
+        with engine.connect() as conn:
             assert column_exists(conn)
     finally:
         try:
