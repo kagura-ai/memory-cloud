@@ -20,7 +20,7 @@ A new, empty table: nothing to backfill (every existing user starts as
 Downgrade drops the table (the recorded history is lost).
 
 Revision ID: f38_2761_announcement_consents
-Revises: f36_2781_oidc_provider
+Revises: f37_1734_email_signup
 
 Note: revision IDs must stay <= 32 chars — ``alembic_version.version_num``
 is varchar(32).
@@ -32,7 +32,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "f38_2761_announcement_consents"
-down_revision: str | None = "f36_2781_oidc_provider"
+down_revision: str | None = "f37_1734_email_signup"
 branch_labels: str | None = None
 depends_on: str | None = None
 
