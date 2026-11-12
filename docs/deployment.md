@@ -1280,6 +1280,11 @@ a sign-in through it syncs the account's email and name from the identity
 provider; a sign-in through any other provider on the **Connected accounts**
 card updates nothing but that provider's last-used time.
 
+The email syncs only when no other account holds the new address in any
+letter case (#1734): otherwise the account keeps its address, the sign-in
+goes through, and the API logs `oauth_email_sync_skipped_address_in_use`
+(with an HMAC of the address, never the address).
+
 An OAuth account can have no primary provider (`auth_provider` NULL): a row
 from before the pointer existed, or an account that set a password and then
 unlinked its last provider. Such an account gets the pointer back on a

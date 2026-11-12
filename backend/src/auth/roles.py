@@ -276,6 +276,27 @@ async def lock_address(db: AsyncSession, email: str) -> None:
     )
 
 
+async def _address_held_by_another(db: AsyncSession, email: str, user_id: str) -> bool:
+    """Does an account other than ``user_id`` hold ``email`` in any letter case? (#1734)
+
+    Takes :func:`lock_address` first, so an account being created for the
+    address at the same moment (email sign-up, a first OAuth sign-in) is
+    either seen here or sees this account's new address. Two statements:
+    the lock and the lookup.
+    """
+    from sqlalchemy import select
+
+    from models.auth import User
+
+    await lock_address(db, email)
+    result = await db.execute(
+        select(User.user_id)
+        .where(func.lower(User.email) == _normalize_address(email), User.user_id != user_id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 def email_signup_account_clause(email: str) -> ColumnElement[bool]:
     """The account created by email sign-up for ``email`` (#1734).
 
@@ -1064,6 +1085,18 @@ class RoleManager:
             )
         if email_verified and user.email == new_email and user.email_verified_at is None:
             user.email_verified_at = utcnow()
+        if sync_email and await _address_held_by_another(db, new_email, user.user_id):
+            # #1734: the unique index is case-sensitive, so the UPDATE would
+            # pass for a case variant and leave two accounts with one
+            # address (the other one's sign-in by address then fails
+            # closed). Keep this account's address; the sign-in goes on.
+            sync_email = False
+            logger.warning(
+                "oauth_email_sync_skipped_address_in_use",
+                auth_provider=auth_provider,
+                user_id=user.user_id,
+                new_email_hmac=hmac_sha256_hex(new_email, get_settings().audit_hmac_key),
+            )
 
         if not sync_email and not sync_name:
             user.last_login_at = utcnow()

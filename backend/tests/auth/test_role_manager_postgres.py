@@ -115,7 +115,10 @@ def _execute_returns(*results):
 
 def _make_db_mock(execute_results):
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=execute_results)
+    # #1734: an email sync ends with the address lock and the lookup of
+    # another account holding the new address (none here). A sync is the
+    # last DB work of ensure_user, so tests that do not sync never reach them.
+    db.execute = AsyncMock(side_effect=[*execute_results, *_execute_returns(_LOCK, None)])
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
     db.add = MagicMock()
