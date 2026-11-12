@@ -748,7 +748,9 @@ for them. The server records every answer; it sends no announcement itself.
   unsubscribe/<token>` (one-click, RFC 8058) and
   `{FRONTEND_URL}/email/unsubscribe#<token>` (a page with a button). It needs
   no sign-in, can only turn the emails off for its own account, never expires,
-  and answers the same whether or not the link is valid. It requires `/api/*`
+  and answers the same whether or not the link is valid. A link from an older
+  email still turns the emails off, also after the person turned them on again
+  later. It requires `/api/*`
   to be routed to the API on the `FRONTEND_URL` origin, as the shipped Caddy
   configuration does. The token in the one-click path is removed from the
   application's request logs; the proxy's access log does not remove it yet,
