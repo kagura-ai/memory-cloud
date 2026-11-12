@@ -115,6 +115,7 @@ async def system_info():
     """
     from config.settings import get_settings
     from repositories.config_repository import new_search_config_defaults
+    from services.announcement_consent_service import ANNOUNCEMENT_CONSENT_WORDING_VERSION
 
     settings = get_settings()
 
@@ -140,6 +141,12 @@ async def system_info():
         # TERMS_VERSION is empty (server-side acceptance disabled). The sign-in
         # pages send it back as ``accepted_terms`` once the box is ticked.
         "terms_version": settings.terms_version or None,
+        # Issue #2761: the announcement-email consent copy version, or null
+        # when ANNOUNCEMENT_EMAILS_ENABLED is off. The sign-up pages show the
+        # opt-in checkbox only when it is set and send it back with the answer.
+        "announcement_consent_version": (
+            ANNOUNCEMENT_CONSENT_WORDING_VERSION if settings.announcement_emails_enabled else None
+        ),
         # Issue #2760: the deployment's ChatGPT app listing, or null when
         # CHATGPT_APP_URL is empty. A public listing URL (https only, checked at
         # startup); the web UI links to it next to the plugin guide.

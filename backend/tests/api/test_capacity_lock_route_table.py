@@ -39,6 +39,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "admin_referrals": NOT_APPLICABLE,
     "admin_signup_gate": NOT_APPLICABLE,
     "admin_sleep": NOT_APPLICABLE,
+    "announcement_emails": NOT_APPLICABLE,  # #2761: the caller's own consent; public unsubscribe
     "api_keys": NOT_APPLICABLE,
     "auth": NOT_APPLICABLE,
     "beta_invites": NOT_APPLICABLE,

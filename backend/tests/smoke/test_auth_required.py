@@ -23,6 +23,9 @@ AUTH_REQUIRED_ENDPOINTS = [
     ("GET", "/api/v1/auth/me"),
     ("GET", "/api/v1/users/me"),
     ("GET", "/api/v1/users/profile"),
+    # Announcement-email setting (#2761: session only)
+    ("GET", "/api/v1/me/announcement-emails"),
+    ("PUT", "/api/v1/me/announcement-emails"),
     # Workspaces
     ("GET", "/api/v1/workspaces"),
     ("POST", "/api/v1/workspaces"),

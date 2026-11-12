@@ -346,6 +346,14 @@ openapi_tags = [
         ),
     },
     {
+        "name": "announcement-emails",
+        "description": (
+            "Announcement-email consent (Issue #2761): the signed-in user's opt-in "
+            "toggle (session only) and the public unsubscribe link from announcement "
+            "emails, which answers the same for every token."
+        ),
+    },
+    {
         "name": "account-password",
         "description": (
             "Set up, change or remove the signed-in account's password (Issue #1678). "
@@ -845,6 +853,7 @@ from api.routes import (  # noqa: E402
     agent_state,  # Issue #906: REST surface for the agent session-state lane
     agents,  # Issue #1274: Agent Registry CRUD (RFC-0002 P0-1)
     analyses,  # Issue #496: Memory Analysis API endpoints
+    announcement_emails,  # Issue #2761: announcement-email consent + unsubscribe link
     api_keys,
     attachments,  # Issue #330 → deprecated by #555 (returns HTTP 410 Gone)
     auth,
@@ -922,6 +931,10 @@ app.include_router(me_oauth_grants.router, prefix="/api/v1")
 
 # Terms-of-service re-acceptance (Issue #1665)
 app.include_router(me_terms.router, prefix="/api/v1")
+
+# Announcement-email consent: settings toggle + unsubscribe link (Issue #2761)
+app.include_router(announcement_emails.me_router, prefix="/api/v1")
+app.include_router(announcement_emails.public_router, prefix="/api/v1")
 
 # Email + password sign-in: reset / set up / change / remove (Issue #1678)
 app.include_router(passkeys.router, prefix="/api/v1")

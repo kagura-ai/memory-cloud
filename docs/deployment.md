@@ -445,6 +445,12 @@ development-default or short key in `API_KEY_SECRET_PREVIOUS` only logs a
 warning, since moving the stored values off such a key is what the variable is
 for. An entry equal to `API_KEY_SECRET` is ignored with a warning.
 
+The unsubscribe links in announcement emails (Issue #2761) are signed with a
+key derived from the same ring. A link in an email sent before the rotation
+keeps working while its key is in `API_KEY_SECRET_PREVIOUS`; once that key is
+removed, the link still answers but does nothing, and the person turns the
+emails off in account settings instead.
+
 ## Frontend Environment Variables
 
 Copy `frontend/.env.example` to `frontend/.env.local` and configure:
@@ -701,6 +707,55 @@ enforcement off again; the recorded history stays in `terms_acceptances`.
 
 Adding an account from the account switcher follows the same rule: an identity
 that has no account yet is refused until it signs up from `/login`.
+
+## Announcement email consent (Issue #2761)
+
+Announcement emails (new features, product news) go only to people who asked
+for them. The server records every answer; it sends no announcement itself.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `ANNOUNCEMENT_EMAILS_ENABLED` | `false` | `true` offers announcement emails: the sign-up screens (`/login` for Google / GitHub sign-up, `/join/{token}`, the workspace invitation page) show an **unchecked** opt-in checkbox next to, never merged with, the terms checkbox, and account settings (Profile → Emails) show a toggle. `false` shows neither, `GET /api/v1/system/info` reports `announcement_consent_version: null`, and every sign-in request is exactly what it was before. |
+
+- **What is recorded.** Each answer is one row in
+  `announcement_email_consents`: the value, the version of the consent wording
+  the person saw, the source (`signup`, `settings`, `unsubscribe_link`) and the
+  time. Rows are never changed; the newest one is the current answer. A person
+  with no row never answered and gets no announcement. No IP address or user
+  agent is stored. The rows are deleted with the account.
+- **Sign-up.** The answer travels on the Google / GitHub login URL
+  (`announcement_emails`, `announcement_consent_version`), bound to the OAuth
+  `state` like the language and time zone, and is recorded only when that
+  sign-in creates the account: an unchecked box records "no", a page that did
+  not show the box records nothing, an existing account keeps its answer. An
+  answer from a link on another site (`Sec-Fetch-Site: cross-site` or `none`)
+  is ignored, so nobody can publish a sign-up link that opts people in.
+- **Turning it off always works.** With the variable `false`, nobody can turn
+  the emails on, but the settings toggle still turns them off and the
+  unsubscribe link still works.
+- **The wording version** is part of the code and changes with the consent
+  text. A "yes" given to older wording stays valid; a page loaded before a
+  wording change gets `409` and reloads.
+- **Senders.** Any code that sends announcement email must pick recipients
+  with `select_announcement_recipients` (`backend/src/services/
+  announcement_consent_service.py`) right before each batch: it returns only
+  people whose newest answer is "yes", whose address is verified and not a
+  local CLI address, and who have no erasure request pending, and each
+  recipient carries its `List-Unsubscribe` / `List-Unsubscribe-Post` headers
+  and the unsubscribe link for the body. Invitations, password and security
+  emails, capacity warnings and erasure notices never consult it.
+- **The unsubscribe link** is `{FRONTEND_URL}/api/v1/announcement-emails/
+  unsubscribe/<token>` (one-click, RFC 8058) and
+  `{FRONTEND_URL}/email/unsubscribe#<token>` (a page with a button). It needs
+  no sign-in, can only turn the emails off for its own account, never expires,
+  and answers the same whether or not the link is valid. It requires `/api/*`
+  to be routed to the API on the `FRONTEND_URL` origin, as the shipped Caddy
+  configuration does. The token in the one-click path is removed from the
+  application's request logs; the proxy's access log does not remove it yet,
+  so keep that log's retention short once you send announcements.
+- **Outside production** the development default `API_KEY_SECRET` is public,
+  so anyone could forge an unsubscribe link for a known account (it can only
+  turn announcement emails off). Production refuses that default at startup.
 
 ## Email + password sign-in (Issue #1678)
 

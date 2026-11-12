@@ -1890,6 +1890,23 @@ class Settings(BaseSettings):
             raise ValueError("TERMS_VERSION must be 1-64 characters from [A-Za-z0-9._-]")
         return v
 
+    # Announcement-email consent (Issue #2761)
+    announcement_emails_enabled: bool = Field(
+        default=False,
+        description=(
+            "Offer announcement emails (#2761). FALSE (the default): no opt-in "
+            "checkbox on the sign-up screens, no toggle offered in account "
+            "settings, /system/info announcement_consent_version is null and the "
+            "announcement recipient helper selects nobody. TRUE: new accounts can "
+            "opt in at sign-up and every user can switch it on or off in account "
+            "settings; each answer is kept in announcement_email_consents. "
+            "Turning the setting OFF in account settings and the unsubscribe link "
+            "in an announcement email work whatever this value is. Service notices "
+            "(invitations, password, security, capacity, erasure) never depend on "
+            "it."
+        ),
+    )
+
     # ChatGPT app listing (Issue #2760)
     chatgpt_app_url: str = Field(
         default="",
