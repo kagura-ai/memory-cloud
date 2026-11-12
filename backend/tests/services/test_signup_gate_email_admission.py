@@ -368,7 +368,9 @@ class TestInvitationPreviewFlag:
 
 class TestExistingUserPredicate:
     @pytest.mark.asyncio
-    async def test_case_variant_of_an_email_signup_account_counts_as_existing(self) -> None:
+    async def test_a_case_variant_holder_counts_as_existing(self) -> None:
+        """Any account holding the address in another case, not only an email
+        sign-up account: ensure_user links to it or refuses, never creates."""
         svc = _svc()
         captured = {}
 
@@ -381,7 +383,6 @@ class TestExistingUserPredicate:
         svc.db.execute = fake_execute
         await svc._is_existing_user("Person@Example.TEST", "sub-1")
         sql = captured["sql"]
-        assert "users.email = 'person@example.test'" in sql
-        assert "users.login_id IS NULL" in sql
-        assert "users.auth_method = 'password'" in sql
+        assert "lower(users.email) = 'person@example.test'" in sql
+        assert "users.user_id = 'sub-1'" in sql
         assert "LIMIT" in sql
