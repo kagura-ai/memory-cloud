@@ -26,13 +26,13 @@ Coverage gaps these tests close (per QA-Lead Gate2 review):
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
@@ -440,6 +440,116 @@ class TestAdminForceEraseHappyPath:
         # #2345: no request metadata on the row, the admin's included (the
         # request row clears both too)
         assert (new_audit.ip_address, new_audit.user_agent) == (None, None)
+
+    @pytest.mark.asyncio
+    async def test_sign_up_traces_go_with_the_erasure(
+        self, db_session: AsyncSession, erasure_scenario, patched_external_stores
+    ):
+        """#1734: the erasure run blanks the allowlist labels of the account's
+        own email row and of its linked identities, and deletes a pending
+        email sign-up for its address (stored normalized; the account's
+        address in another case); a bystander's rows stay."""
+        from models.auth import EmailSignupRequest, UserOAuthProvider
+        from models.signup_gate import SignupAllowlistEntry
+        from services.account_erasure_service import ERASED_ALLOWLIST_LABEL
+
+        target_user_id = erasure_scenario["target_user_id"]
+        local = f"Erase-{uuid4().hex[:8]}"
+        mixed = f"{local}@Example.com"
+        normalized = mixed.lower()
+        google_sub = f"g-{uuid4().hex[:10]}"
+        bystander_sub = f"g-{uuid4().hex[:10]}"
+        bystander_address = f"bystander-{uuid4().hex[:8]}@example.com"
+        await db_session.execute(
+            update(User).where(User.user_id == target_user_id).values(email=mixed)
+        )
+        db_session.add(
+            UserOAuthProvider(user_id=target_user_id, provider="google", oauth_sub=google_sub)
+        )
+
+        def _entry(provider: str, subject: str, label: str) -> SignupAllowlistEntry:
+            return SignupAllowlistEntry(
+                provider=provider,
+                subject_id=subject,
+                subject_label=label,
+                github_user_id=f"{provider}:{subject}"[:64],
+                github_username=label,
+                source="manual",
+                state="active",
+            )
+
+        db_session.add_all(
+            [
+                _entry("email", target_user_id, normalized),
+                _entry("google", google_sub, normalized),
+                _entry("google", bystander_sub, bystander_address),
+            ]
+        )
+        for address in (normalized, bystander_address):
+            db_session.add(
+                EmailSignupRequest(
+                    email=address,
+                    token_hash=sha256_hex(uuid4().hex),
+                    expires_at=to_naive_utc(utcnow()) + timedelta(minutes=30),
+                )
+            )
+        await db_session.commit()
+        try:
+            request = await AccountErasureService(db_session).admin_force_erase(
+                target_user_id=target_user_id,
+                initiator_user_id="admin-runner",
+                reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+                reason_detail="integration test (#1734)",
+                ip_address="203.0.113.9",
+                user_agent="agent",
+            )
+
+            assert request.status == STATUS_COMPLETE
+            summary = request.deleted_data_summary["postgres"]
+            assert summary["signup_allowlist_labels"] == 2
+            assert summary["email_signup_requests"] == 1
+            db_session.expire_all()
+            labels = dict(
+                (
+                    await db_session.execute(
+                        select(
+                            SignupAllowlistEntry.subject_id, SignupAllowlistEntry.subject_label
+                        ).where(
+                            SignupAllowlistEntry.subject_id.in_(
+                                [target_user_id, google_sub, bystander_sub]
+                            )
+                        )
+                    )
+                ).all()
+            )
+            assert labels == {
+                target_user_id: ERASED_ALLOWLIST_LABEL,
+                google_sub: ERASED_ALLOWLIST_LABEL,
+                bystander_sub: bystander_address,
+            }
+            pending = set(
+                (
+                    await db_session.execute(
+                        select(EmailSignupRequest.email).where(
+                            EmailSignupRequest.email.in_([normalized, bystander_address])
+                        )
+                    )
+                ).scalars()
+            )
+            assert pending == {bystander_address}
+        finally:
+            await db_session.rollback()
+            await db_session.execute(
+                delete(SignupAllowlistEntry).where(
+                    SignupAllowlistEntry.subject_id.in_([target_user_id, google_sub, bystander_sub])
+                )
+            )
+            await db_session.execute(
+                delete(EmailSignupRequest).where(
+                    EmailSignupRequest.email.in_([normalized, bystander_address])
+                )
+            )
+            await db_session.commit()
 
     @pytest.mark.asyncio
     async def test_a_self_initiated_admin_request_pseudonymizes_initiated_by(
