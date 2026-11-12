@@ -145,8 +145,13 @@ class SignupAllowlistEntry(Base):
     )
 
     __table_args__ = (
+        # #1734: ``email`` rows are written only by a beta invite redeemed
+        # through email sign-up (``subject_id`` = the new account's
+        # ``user_id``). They never admit an OAuth identity: the gate's
+        # provider literal stays github | google. Kept byte-identical to
+        # alembic f37_1734 (tests/test_schema_drift.py).
         CheckConstraint(
-            "provider IN ('github', 'google')",
+            "provider IN ('github', 'google', 'email')",
             name="valid_signup_allowlist_provider",
         ),
         # #1581: 'beta_invite' rows are written by the gate itself when a

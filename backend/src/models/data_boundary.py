@@ -180,6 +180,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # #1678: hashed, single-use email links (password reset / set-up).
         # Auth plumbing — no user content; cascades with the user on erasure.
         "email_action_tokens",
+        # #1734: pending email sign-ups — normalized address, hashed token,
+        # hashed beta invite, locale/time zone. Auth plumbing, no user content;
+        # deleted on completion, on a newer request and by the hourly cleanup.
+        "email_signup_requests",
         "config_overrides",
         "llm_call_log",
         "llm_pricing",

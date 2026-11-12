@@ -153,6 +153,11 @@ class User(Base):
     # ``auth_method`` keeps meaning "the original sign-in method"; whether a
     # user can sign in with a password is ``password_hash IS NOT NULL``.
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Issue #1734: set when the owner removed a sign-in provider, or a password
+    # reset removed one. While set, a later Google sign-in with this account's
+    # address is not linked to it automatically (``ensure_user`` refuses with
+    # ``email_in_use``); connecting a provider from Profile still works.
+    provider_auto_link_blocked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
@@ -330,6 +335,57 @@ class EmailActionToken(Base):
 
     def __repr__(self) -> str:
         return f"<EmailActionToken(user_id='{self.user_id}', purpose='{self.purpose}')>"
+
+
+class EmailSignupRequest(Base):
+    """A pending email + password sign-up (Issue #1734).
+
+    Written after the gate's non-consuming pre-check admitted the address;
+    the account itself is created only when the emailed link is followed and
+    a password is chosen. Only the SHA-256 hex digest of the token is stored.
+    The row is deleted when the sign-up completes (``DELETE ... RETURNING``,
+    so a link works once), when a newer request for the same address replaces
+    it, and by the hourly cleanup once expired. No foreign key: there is no
+    account yet. No return path is stored: the browser that started the
+    sign-up keeps it.
+
+    Attributes:
+        id: Primary key (UUID), the only identifier ever logged.
+        email: The normalized address (``lower(trim)``) the link was sent to.
+        token_hash: SHA-256 hex digest of the raw token (unique).
+        beta_invite_token_hash: SHA-256 hex digest of the closed-beta invite
+            the request carried, or NULL. Never the raw invite token.
+        locale: UI language of the sign-up page, validated; NULL = default.
+        timezone: Browser time zone, validated; NULL = default.
+        created_at: Naive UTC request time.
+        expires_at: Naive UTC expiry (``EMAIL_SIGNUP_LINK_TTL_MINUTES``).
+    """
+
+    __tablename__ = "email_signup_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    beta_invite_token_hash: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    locale: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    timezone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="email_signup_requests_token_hash_key"),
+        Index("ix_email_signup_requests_email", "email"),
+        Index("ix_email_signup_requests_expires_at", "expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<EmailSignupRequest(id='{self.id}')>"
 
 
 class IdentityLink(Base):

@@ -47,6 +47,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "config": NOT_APPLICABLE,
     "connectors_slack": NOT_APPLICABLE,
     "cost_aggregation": NOT_APPLICABLE,
+    "email_signup": NOT_APPLICABLE,
     "external_keys": NOT_APPLICABLE,
     "internal_billing": NOT_APPLICABLE,
     "invitations": NOT_APPLICABLE,

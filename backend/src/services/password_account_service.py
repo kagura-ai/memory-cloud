@@ -388,6 +388,11 @@ class PasswordAccountService:
             # No provider row remains, so the primary pointer has nothing to
             # point at (same rule as unlink with no survivor).
             user.auth_provider = None
+            # #1734: the reset removed providers on purpose (compromise
+            # recovery); a later Google sign-in with the account's address
+            # must not link one back automatically. Set only when the reset
+            # removed something: with nothing linked there is nothing to undo.
+            user.provider_auto_link_blocked_at = utcnow()
             for provider in providers:
                 stage_provider_audit(
                     self.db,

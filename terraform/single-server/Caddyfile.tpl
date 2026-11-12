@@ -53,7 +53,7 @@
 		format filter {
 			wrap json
 			fields {
-				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}${8}REDACTED${3}`
+				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+|([?&]token=)[^&#\s]+` `${1}${2}${4}${5}${6}${7}${8}${9}REDACTED${3}`
 				request>headers>Referer delete
 				request>headers>Cookie delete
 				request>headers>Next-Router-State-Tree delete
@@ -176,6 +176,10 @@ memory.kagura-ai.com {
 	# link. The isolated OIDC provider also returns a short-lived credential in
 	# a redirect's Location header. Its code/access/refresh prefixes are scrubbed
 	# in request URIs and Location/Refresh, including the default error logger.
+	# The emailed one-time links carry their token as ?token= — password reset
+	# and set-up (#1678) and email sign-up (#1734):
+	#     /password/reset?token=    /password/setup?token=    /signup/verify?token=
+	# — so any `token` query parameter is redacted too.
 	# Other requests — /api/v1/memories?..., /mcp, / — retain their diagnostics.
 	#
 	# Five request headers are dropped outright:
@@ -229,9 +233,9 @@ memory.kagura-ai.com {
 		format filter {
 			wrap json
 			fields {
-				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}${8}REDACTED${3}`
-				resp_headers>Location regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}${8}REDACTED${3}`
-				resp_headers>Refresh regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}${8}REDACTED${3}`
+				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+|([?&]token=)[^&#\s]+` `${1}${2}${4}${5}${6}${7}${8}${9}REDACTED${3}`
+				resp_headers>Location regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+|([?&]token=)[^&#\s]+` `${1}${2}${4}${5}${6}${7}${8}${9}REDACTED${3}`
+				resp_headers>Refresh regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+|(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+|([?&]token=)[^&#\s]+` `${1}${2}${4}${5}${6}${7}${8}${9}REDACTED${3}`
 				request>headers>Referer delete
 				request>headers>Cookie delete
 				request>headers>Next-Router-State-Tree delete

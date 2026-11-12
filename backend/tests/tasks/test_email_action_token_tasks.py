@@ -148,7 +148,11 @@ class TestCleanupRun:
 
         db.commit.assert_awaited_once()
         db.rollback.assert_not_awaited()
-        mock_logger.info.assert_called_once_with("email_action_token_cleanup_completed", deleted=3)
+        # #1734: the same run deletes expired email sign-up requests.
+        assert db.execute.await_count == 2
+        mock_logger.info.assert_called_once_with(
+            "email_action_token_cleanup_completed", deleted=3, signup_requests_deleted=3
+        )
 
     @pytest.mark.asyncio
     async def test_scheduled_entrypoint_rolls_back_on_error(

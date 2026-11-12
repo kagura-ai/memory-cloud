@@ -493,12 +493,23 @@ async def get_invitation_info(
         result = await db.execute(stmt)
         workspace = result.scalar_one()
 
+        email_restricted = invitation.email is not None
+        plan_blocked = not has_feature(workspace.plan_name, "team_invitations")
+        # #1734: whether the email sign-up form can work for this invitation's
+        # addressee (the sign-up controls, as for Google / GitHub). Names no
+        # address.
+        from services.signup_gate_service import SignupGateService
+
+        email_signup_available = await SignupGateService(db).email_signup_available_for_invitation(
+            email_restricted=email_restricted, plan_blocked=plan_blocked
+        )
         return {
             "workspace_name": workspace.name,
             "role": invitation.role,
             "expires_at": to_utc_iso(invitation.expires_at),
-            "email_restricted": invitation.email is not None,
-            "plan_blocked": not has_feature(workspace.plan_name, "team_invitations"),
+            "email_restricted": email_restricted,
+            "plan_blocked": plan_blocked,
+            "email_signup_available": email_signup_available,
         }
 
     except NotFoundException as e:

@@ -470,6 +470,8 @@ The admin-configurable signup gate (`backend/src/services/signup_gate_service.py
 
 **Admin API**: `POST /api/v1/admin/signup-gate/allowlist` accepts either `{github_username}` (legacy GitHub shape) or `{provider: "google", email}`. Google adds resolve the OIDC `sub` from a pre-existing `users` row — the invitee must complete Google OAuth at least once before they can be allowlisted (pre-OAuth invitation by email is a Phase 2 follow-up).
 
+**Email sign-up** (#1734, `ENABLE_EMAIL_SIGNUP`): `services/email_signup_service.py` creates a password account (`user_id` `email:<uuid>`, no login id) for a verified address under the same controls, through `SignupGateService.email_signup_admissible` (request, non-consuming) and `admit_email_signup` (completion, consuming, staged in the account-creating transaction; a beta invite writes an `email` allowlist row keyed on the new `user_id`). The `email` provider value never admits an OAuth identity. A later Google sign-in with the same address links to such an account inside `RoleManager.ensure_user` only when Google is authoritative for the mailbox (`provider_authoritative_for_address`), under the per-address advisory lock (`lock_address`) every account creation takes; otherwise `email_in_use`.
+
 ## Scalability Considerations
 
 ### Horizontal Scaling
