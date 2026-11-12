@@ -536,3 +536,25 @@ def test_service_own_account_dependency_refuses_operators_only(settings_for, ser
     allowed = probe.get("/own")  # the stand-in middleware supplies an admin cookie
     assert allowed.status_code == 200
     assert allowed.json() == {"user_id": ADMIN_SESSION["user_id"]}
+
+
+# --- startup log line ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "level"), [("session", "info"), ("off", "info"), ("service", "warning")]
+)
+def test_startup_logs_the_mode_never_the_credential(settings_for, value, level):
+    from structlog.testing import capture_logs
+
+    from api.main import _log_system_admin_mode
+
+    token = secrets.token_hex(32)
+    settings_for(value, system_admin_service_token=token)
+    with capture_logs() as logs:
+        _log_system_admin_mode()
+    [entry] = [e for e in logs if e["event"] == "system_admin_mode"]
+    assert entry["mode"] == value
+    assert entry["log_level"] == level
+    assert entry["service_token_configured"] is True
+    assert token not in repr(logs)
