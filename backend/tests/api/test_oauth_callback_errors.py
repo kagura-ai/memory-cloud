@@ -29,6 +29,7 @@ from api.routes.auth import (
     github_callback,
     google_callback,
 )
+from tests.oauth_browser_helpers import assume_bound_browser  # noqa: F401
 
 
 def _location(resp: RedirectResponse) -> str:
@@ -169,6 +170,7 @@ class TestExpiredState:
         assert "provider=github" in _location(resp)
 
 
+@pytest.mark.usefixtures("assume_bound_browser")
 class TestExchangeFailure:
     """Token-exchange / downstream failures → oauth_failed redirect, no reflection."""
 
@@ -220,6 +222,7 @@ class TestExchangeFailure:
         assert "bad_verification_code" not in loc
 
 
+@pytest.mark.usefixtures("assume_bound_browser")
 class TestDbErrorLane:
     """SQLAlchemyError no longer 503-JSONs the browser — redirect + error log."""
 

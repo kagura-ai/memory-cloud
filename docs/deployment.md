@@ -1276,12 +1276,11 @@ Operator notes:
   be connected this way; `GET /api/v1/system/info` then reports
   `features.provider_link_confirmation: false` and the login page keeps its
   usual hint.
-- **What degrades silently to `email_in_use`:** a sign-in started without a
-  browser cookie (an API client using the JSON mode of `/login` without
-  cookies, a native or device flow, a browser that blocks the cookie), and a
-  deployment whose provider redirect URI points at another host than the one
-  the browser calls for `/auth/{provider}/login` (the cookie never reaches the
-  callback). Both are the safe failure: nothing is offered.
+- **A sign-in without the browser cookie** never reaches this offer: since
+  Issue #2791 it is not finished at all (see the next section). A sign-in
+  connected from Profile (Connect, or refreshing a provider) carries no such
+  cookie and is never offered a confirmation; it ends at `email_in_use` as
+  before.
 - **Proxy logs:** the link carries its token as `?token=`; the shipped
   `Caddyfile.tpl` already redacts every `token` query parameter.
 - `ENABLE_PROVIDER_LINK_CONFIRMATION=false`: those sign-ins end at
@@ -1291,6 +1290,48 @@ Operator notes:
   `oauth_provider_link_confirmation_declined` (`user_email` `link-confirmation`,
   the provider account only as an HMAC in `user_metadata.identity_hmac`).
   Pending links live in Redis only (15 minutes); no migration.
+
+### A Google or GitHub sign-in finishes in the browser that started it (Issue #2791)
+
+`/auth/{provider}/login` gives the browser an HttpOnly cookie
+(`__Host-kagura_oauth_browser` in production, `kagura_oauth_browser` over plain
+http, 20 minutes) and binds the sign-in to it. The provider callback finishes
+the sign-in only when it arrives with that cookie; otherwise it answers
+`/login?error=oauth_other_browser` (the page asks to start again in this
+browser) before the provider is asked anything, and nothing is created: no
+account, no session, no invite spent. Signing in from the login page, `/join`,
+`/invite`, the device page, an OAuth client's consent page and "add another
+account" all set the cookie on the way. Connecting or refreshing a provider
+from Profile is bound to the signed-in browser session instead and never opens
+a new session. There is no setting to turn this off.
+
+Operator notes:
+
+- **Same host:** the host the browser calls for `/auth/{provider}/login` (the
+  web app's `NEXT_PUBLIC_API_URL`) and the host of `GOOGLE_REDIRECT_URI` /
+  `GITHUB_REDIRECT_URI` must be the same host name (`localhost` and
+  `127.0.0.1` are different hosts, so are `www.` and the bare domain).
+  `GITHUB_REDIRECT_URI` falls back to
+  `http://localhost:8080/api/v1/auth/github/callback` when unset. The shipped
+  configurations are consistent; with a mismatch every Google and GitHub
+  sign-in ends on `oauth_other_browser`.
+- **Reverse proxy:** pass `Set-Cookie` through unchanged. A proxy that adds
+  `Domain=` or rewrites the `Path` makes browsers drop the `__Host-` cookie,
+  and then every Google and GitHub sign-in is refused (before this release
+  such a setup only lost the email confirmation above).
+- **API clients** using the JSON mode of `/login` must open
+  `authorization_url` with the cookie jar that received the response's
+  `Set-Cookie`.
+- **Upgrade:** from v0.159.0 nothing is refused (it already sets the cookie on
+  every sign-in). From an older release, a sign-in started in the 5 minutes
+  before the switch ends once on "start again".
+- **What to watch:** the warning `oauth_callback_not_from_starting_browser`
+  (fields `provider`, `state_hash`, `cookie_present`, `flow_record`). A steady
+  stream with `cookie_present=false` right after a deploy means the cookie does
+  not come back (proxy or host mismatch above). Rollback is the previous image;
+  there is no data change.
+- The Google sign-in always uses the configured `GOOGLE_REDIRECT_URI`; the
+  `redirect_uri` query parameter of `/auth/google/login` is ignored.
 
 ## Which sign-in provider syncs the account's email (Issues #1811, #1875)
 
