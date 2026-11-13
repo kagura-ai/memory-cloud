@@ -1193,7 +1193,12 @@ Requirements and operator notes:
   `/password/reset?token=` and `/password/setup?token=`); recreate the proxy
   container to drop lines written before. Replicate it if you run another proxy.
 - The first account of an empty deployment is admitted like the first Google /
-  GitHub sign-in, and gets the role `new_account_role` gives it.
+  GitHub sign-in, and gets the role `new_account_role` gives it. When two first
+  sign-ups complete at the same moment, exactly one becomes the initial admin
+  (in `SYSTEM_ADMIN_MODE=session`); the other is an ordinary account, and a
+  second email completion is checked against the sign-up gate again. Create the
+  first account before sharing the deployment's address: sign-ups that arrive
+  while no account exists are admitted by the first-account rule.
 - Invite quota: an account created by email gets the same beta-invite quota as
   any other.
 - Pending requests (address, hashed token, hashed invite) are deleted when the

@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -223,21 +223,22 @@ class UserRole(BaseModel):
 
 
 async def new_account_role(db: AsyncSession) -> Role:
-    """The role of an account being created now (#2767, #1734).
+    """The role of an account being created now (#2767, #1734, #2788).
 
     The one place for the first-user rule: the first account on an empty
     users table becomes ``admin`` only while this process serves the
     system-admin surface to sessions (``SYSTEM_ADMIN_MODE=session``); in
-    ``off`` and ``service`` every new account is a ``user``. Exactly one
-    ``db.execute`` (the count), so callers' statement sequences stay stable.
+    ``off`` and ``service`` every new account is a ``user``.
+
+    The emptiness check goes through :func:`claim_first_account`, which in
+    ``session`` serialises the decision with the first-account lock, so two
+    first sign-ups completing at the same moment give one ``admin`` and one
+    ``user``. Statements: one (the count) while any account exists, in every
+    mode; on an empty table three in ``session`` (count, lock, recount) and
+    one in ``off`` / ``service`` (no role to protect, no lock).
     """
-    from sqlalchemy import select
-
-    from models.auth import User
-
-    count_result = await db.execute(select(func.count()).select_from(User))
-    user_count = count_result.scalar() or 0
-    if user_count == 0 and session_admin_enabled():
+    session = session_admin_enabled()
+    if await claim_first_account(db, serialize=session) and session:
         return Role.ADMIN
     return Role.USER
 
@@ -267,6 +268,8 @@ async def lock_address(db: AsyncSession, email: str) -> None:
     create an account for an address takes this transaction-scoped advisory
     lock first and then looks the address up case-insensitively: the email
     sign-up request and completion, and ``ensure_user``'s new-user path.
+    Where both are taken, it comes after the first-account lock of
+    :func:`claim_first_account` (#2788).
     """
     from sqlalchemy import text
 
@@ -274,6 +277,49 @@ async def lock_address(db: AsyncSession, email: str) -> None:
         text("SELECT pg_advisory_xact_lock(hashtextextended('email_signup:' || :address, 0))"),
         {"address": _normalize_address(email)},
     )
+
+
+# Key of the transaction-scoped advisory lock that serialises the creation of
+# the first account (#2788). A constant: no address or identity in the key.
+FIRST_ACCOUNT_LOCK_KEY: Final = "first_account"
+
+
+async def claim_first_account(db: AsyncSession, *, serialize: bool) -> bool:
+    """Is the users table empty, decided under the first-account lock? (#2788)
+
+    Counts the users table. While any account exists that is the only
+    statement and nothing waits. On an empty table with ``serialize`` it takes
+    the transaction-scoped first-account advisory lock and counts again in a
+    NEW statement (READ COMMITTED takes a new snapshot per statement): of two
+    transactions creating the first account the second waits here until the
+    first one ends, then sees its row and gets ``False``. The lock is released
+    when the transaction ends (the commit or rollback of the path; otherwise
+    when the session is closed).
+
+    Lock order on every account-creating path: this lock first, as the first
+    lock of its transaction, then :func:`lock_address`, then row locks. Never
+    call it inside ``begin_nested``: a savepoint that rolls back releases an
+    advisory lock taken inside it.
+
+    The email sign-up completion calls it (``serialize=True`` in every mode)
+    before its address lock; ``new_account_role`` then re-takes the same lock,
+    which is granted at once (advisory locks are re-entrant in a session).
+    """
+    from sqlalchemy import select, text
+
+    from models.auth import User
+
+    count = (await db.execute(select(func.count()).select_from(User))).scalar() or 0
+    if count or not serialize:
+        return count == 0
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": FIRST_ACCOUNT_LOCK_KEY},
+    )
+    recount = (await db.execute(select(func.count()).select_from(User))).scalar() or 0
+    if recount:
+        logger.info("first_account_lock_lost_race")
+    return recount == 0
 
 
 async def _address_held_by_another(db: AsyncSession, email: str, user_id: str) -> bool:
