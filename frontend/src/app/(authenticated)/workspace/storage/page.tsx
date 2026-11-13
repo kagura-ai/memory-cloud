@@ -241,30 +241,53 @@ function StorageContent() {
     }
   };
 
-  // #565: the scan state badge; none for a downloadable file.
-  const scanBadge = (f: FileObject) => {
+  // #565: the scan state badge and its hint; none for a downloadable file.
+  // The hint is rendered as text (not only a hover title, which touch and
+  // keyboard users cannot open) and describes the row's download button.
+  const scanState = (f: FileObject) => {
     switch (f.scan_status) {
       case "pending":
-        return (
-          <Badge variant="outline" title={t("list.scan.pendingHint")}>
-            {t("list.scan.pending")}
-          </Badge>
-        );
+        return {
+          variant: "outline" as const,
+          label: t("list.scan.pending"),
+          hint: t("list.scan.pendingHint"),
+        };
       case "infected":
-        return (
-          <Badge variant="destructive" title={t("list.scan.blockedHint")}>
-            {t("list.scan.blocked")}
-          </Badge>
-        );
+        return {
+          variant: "destructive" as const,
+          label: t("list.scan.blocked"),
+          hint: t("list.scan.blockedHint"),
+        };
       case "error":
-        return (
-          <Badge variant="destructive" title={t("list.scan.errorHint")}>
-            {t("list.scan.error")}
-          </Badge>
-        );
+        return {
+          variant: "destructive" as const,
+          label: t("list.scan.error"),
+          hint: t("list.scan.errorHint"),
+        };
       default:
         return null;
     }
+  };
+
+  const scanHintId = (f: FileObject) => `scan-hint-${f.id}`;
+
+  const scanBadge = (f: FileObject) => {
+    const scan = scanState(f);
+    return scan && <Badge variant={scan.variant}>{scan.label}</Badge>;
+  };
+
+  const scanHint = (f: FileObject) => {
+    const scan = scanState(f);
+    return (
+      scan && (
+        <p
+          id={scanHintId(f)}
+          className="mt-1 max-w-xs text-xs text-muted-foreground"
+        >
+          {scan.hint}
+        </p>
+      )
+    );
   };
 
   const handleConfirmDelete = async () => {
@@ -417,6 +440,7 @@ function StorageContent() {
                         </Badge>
                         {scanBadge(f)}
                       </div>
+                      {scanHint(f)}
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
                       {f.uploaded_at ? (
@@ -433,6 +457,9 @@ function StorageContent() {
                           onClick={() => handleDownload(f)}
                           disabled={downloadingId === f.id || isScanBlocked(f)}
                           aria-label={t("list.actions.download")}
+                          aria-describedby={
+                            scanState(f) ? scanHintId(f) : undefined
+                          }
                           title={t("list.actions.download")}
                         >
                           <Download className="h-4 w-4" aria-hidden="true" />

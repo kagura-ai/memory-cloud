@@ -569,22 +569,32 @@ describe("StoragePage", () => {
       await screen.findByText("pending.pdf");
 
       expect(row("pending.pdf")).toHaveTextContent("list.scan.pending");
-      expect(screen.getByText("list.scan.pending")).toHaveAttribute(
-        "title",
-        "list.scan.pendingHint",
-      );
       expect(row("infected.pdf")).toHaveTextContent("list.scan.blocked");
-      expect(screen.getByText("list.scan.blocked")).toHaveAttribute(
-        "title",
-        "list.scan.blockedHint",
-      );
       expect(row("error.pdf")).toHaveTextContent("list.scan.error");
-      expect(screen.getByText("list.scan.error")).toHaveAttribute(
-        "title",
-        "list.scan.errorHint",
-      );
       for (const name of ["clean.pdf", "unscanned.pdf"]) {
         expect(row(name)).not.toHaveTextContent("list.scan.");
+      }
+    });
+
+    it("shows why a file is held as text and describes its download button with it", async () => {
+      // Not only a hover title: touch and keyboard users never see that, and
+      // a disabled button is skipped by focus.
+      mockListFiles.mockResolvedValue(scanned());
+      render(<StoragePage />);
+      await screen.findByText("pending.pdf");
+
+      const download = (name: string) =>
+        within(row(name)).getByRole("button", { name: "list.actions.download" });
+      for (const [name, hint] of [
+        ["pending.pdf", "list.scan.pendingHint"],
+        ["infected.pdf", "list.scan.blockedHint"],
+        ["error.pdf", "list.scan.errorHint"],
+      ] as const) {
+        expect(within(row(name)).getByText(hint)).toBeVisible();
+        expect(download(name)).toHaveAccessibleDescription(hint);
+      }
+      for (const name of ["clean.pdf", "unscanned.pdf"]) {
+        expect(download(name)).not.toHaveAttribute("aria-describedby");
       }
     });
 
