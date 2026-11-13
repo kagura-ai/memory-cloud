@@ -9,7 +9,7 @@ frontend run):
 - PUT ``{mcp_notices, wording_version}`` -> the GET shape plus ``recorded``;
   turning it on needs ``MCP_NOTICES_ENABLED`` (409 ``MCPNOTICE-005``) and the
   current wording (409 ``MCPNOTICE-006``); turning it off always works; 20
-  changes an hour per user (429, fails open); session only (an API key or an
+  requests an hour per user, unchanged answers included (429, fails open); session only (an API key or an
   OAuth bearer is refused, 401 without a session).
 """
 
@@ -221,6 +221,29 @@ class TestSessionOnly:
                 ),
             )
             assert response.status_code in (401, 403), (method, token)
+
+    def test_the_routes_depend_on_the_session_dependency_only(self) -> None:
+        """Structural: the bearer test above gets 401 from an invalid token
+        whatever the dependency is, so pin the dependency itself. Each route
+        takes ``require_session_auth`` and nothing in its dependency tree
+        accepts an API key or an OAuth bearer."""
+        from fastapi.routing import APIRoute
+
+        from auth.dependencies import get_user_from_api_key_or_session
+
+        def calls(dependant) -> set:
+            found = set()
+            for dep in dependant.dependencies:
+                found.add(dep.call)
+                found |= calls(dep)
+            return found
+
+        routes_here = [r for r in routes.router.routes if isinstance(r, APIRoute)]
+        assert {m for r in routes_here for m in r.methods} == {"GET", "PUT"}
+        for route in routes_here:
+            direct = {d.call for d in route.dependant.dependencies}
+            assert require_session_auth in direct, route.methods
+            assert get_user_from_api_key_or_session not in calls(route.dependant)
 
     def test_no_session_is_401(self) -> None:
         client = TestClient(app, raise_server_exceptions=False)

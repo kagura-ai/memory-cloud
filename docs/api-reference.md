@@ -2180,7 +2180,7 @@ Session cookie only. Records a new answer with source `settings`; an unchanged a
 |---|---|
 | `409 MCPNOTICE-005` | turning them on while `MCP_NOTICES_ENABLED` is off; turning them off always works |
 | `409 MCPNOTICE-006` | turning them on with a `wording_version` other than the current one (the page loaded before the wording changed) |
-| `429` | more than 20 changes in an hour |
+| `429` | more than 20 `PUT` requests in an hour (an unchanged answer counts too) |
 | `401` / `403` | no session / an API key or bearer token instead of a session |
 
 ---

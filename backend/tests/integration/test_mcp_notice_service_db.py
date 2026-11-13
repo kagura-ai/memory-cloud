@@ -20,7 +20,9 @@ Delivery:
 - the claim is atomic: two concurrent claims for one person, exactly one row;
   a withdraw, an opt-out, an expiry or an erasure request between the read
   and the claim removes the notice; a claim for a deleted user raises (the
-  caller drops the field);
+  caller drops the field); a claim behind another transaction's lock (a
+  locked users row, a pending delivery row) ends at its own ``lock_timeout``
+  and ``claim_notices`` returns no block in time;
 - deliveries and consents go with the user.
 """
 
@@ -570,6 +572,98 @@ async def test_claim_for_a_deleted_user_raises_and_writes_nothing(db_session, ma
         with pytest.raises(IntegrityError):
             session.add(McpNoticeDelivery(user_id=kim.user_id, notice_id=view.id))
             await session.commit()
+
+
+# A claim blocked by a lock another transaction holds: the users row an
+# erasure has locked (the delivery row's FK check needs FOR KEY SHARE on it),
+# or the same delivery row inserted by a concurrent session start that has not
+# committed yet (ON CONFLICT waits for it). The claim's own ``lock_timeout``
+# ends the wait; without it the session start would hang for as long as the
+# other transaction runs. The outer ``wait_for`` only keeps a regression from
+# hanging the suite.
+_LOCK_NOT_AVAILABLE = "55P03"
+
+
+async def _hold_conflicting_lock(holder: AsyncSession, how: str, user: User, notice_id) -> None:
+    if how == "users_row_locked":
+        await holder.execute(
+            select(User.user_id).where(User.user_id == user.user_id).with_for_update()
+        )
+    else:
+        holder.add(McpNoticeDelivery(user_id=user.user_id, notice_id=notice_id))
+        await holder.flush()
+
+
+def _sqlstate(exc: BaseException) -> str | None:
+    orig = getattr(exc, "orig", None)
+    for candidate in (orig, getattr(orig, "__cause__", None)):
+        state = getattr(candidate, "sqlstate", None)
+        if state:
+            return state
+    return None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("how", ["users_row_locked", "delivery_row_pending"])
+async def test_a_claim_behind_a_lock_gives_up_at_the_lock_timeout(
+    db_session, make_users, how
+) -> None:
+    from sqlalchemy.exc import DBAPIError
+
+    mia = await make_users()
+    await _opt(db_session, mia, True)
+    view = await _create(db_session)
+
+    async with _maker(db_session)() as holder:
+        await _hold_conflicting_lock(holder, how, mia, view.id)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(DBAPIError) as caught:
+            await asyncio.wait_for(_claim(db_session, mia, [view.id]), timeout=10)
+        elapsed = loop.time() - started
+        await holder.rollback()
+
+    # lock_timeout (1 s), not statement_timeout (2 s), ended it.
+    assert _sqlstate(caught.value) == _LOCK_NOT_AVAILABLE
+    assert elapsed < 1.9
+    rows = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(McpNoticeDelivery)
+            .where(McpNoticeDelivery.user_id == mia.user_id)
+        )
+    ).scalar_one()
+    assert rows == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("how", ["users_row_locked", "delivery_row_pending"])
+async def test_claim_notices_behind_a_lock_returns_no_key_in_time(
+    db_session, make_users, how
+) -> None:
+    """The bootstrap step on a real database: the lock timeout is raised by
+    the INSERT that reached the server; ``claim_notices`` closes its session,
+    returns no block and the next session start can still claim."""
+    from mcp_server.tools._notices import NOTICES_PROVENANCE, claim_notices, notice_item
+
+    nina = await make_users()
+    await _opt(db_session, nina, True)
+    view = await _create(db_session)
+    (candidate,) = await svc.read_notice_candidates(db_session, nina.user_id)
+    block = {"notices": {"provenance": NOTICES_PROVENANCE, "items": [notice_item(candidate)]}}
+
+    async with _maker(db_session)() as holder:
+        await _hold_conflicting_lock(holder, how, nina, view.id)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        result = await asyncio.wait_for(claim_notices(db_session, nina.user_id, block), timeout=10)
+        elapsed = loop.time() - started
+        await holder.rollback()
+
+    assert result == {}
+    assert elapsed < 3
+    # Not used up: the lock is gone, so the next claim delivers it.
+    assert await claim_notices(db_session, nina.user_id, block) == block
 
 
 @pytest.mark.asyncio(loop_scope="session")

@@ -26,7 +26,9 @@ The handler runs with the database, the lanes and the notice service stubbed
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import contextvars
 import json
 import uuid
 from contextlib import ExitStack
@@ -40,7 +42,11 @@ import mcp_server.tools as tools_mod
 import mcp_server.tools._capacity_gate as capacity_gate
 from auth.agent_scope import AgentScope, set_agent_scope
 from config.settings import get_settings
-from mcp_server.auth import set_mcp_connector_credential, set_mcp_notice_eligible
+from mcp_server.auth import (
+    get_mcp_notice_eligible,
+    set_mcp_connector_credential,
+    set_mcp_notice_eligible,
+)
 from mcp_server.tools import _notices as notices_mod
 from mcp_server.tools import bootstrap as module
 from mcp_server.tools._helpers import _dumps, set_mcp_tool_view_query
@@ -249,6 +255,43 @@ class TestGate:
 
         assert text == _baseline()
         notices.read.assert_not_awaited()
+
+    # The autouse fixture sets the flag to False before every test, so the
+    # tests above never see the ContextVar's own default. These run in a new,
+    # empty context, where nothing (no fixture, no auth seam) has set it.
+
+    def test_the_flag_defaults_to_false_in_a_fresh_context(self):
+        assert contextvars.Context().run(get_mcp_notice_eligible) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("via", ["handler", "dispatcher"])
+    async def test_a_call_in_a_fresh_context_delivers_nothing(self, flag, via):
+        notices = Notices([_candidate()])
+
+        text, _, notices = await asyncio.get_running_loop().create_task(
+            _run(notices=notices, via=via), context=contextvars.Context()
+        )
+
+        assert text == _baseline()
+        notices.read.assert_not_awaited()
+        notices.claim.assert_not_awaited()
+        # Only the headroom read's session; no claim session was opened.
+        assert len(notices.sessions) <= 1
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_context_with_the_auth_flag_set_does_deliver(self, flag):
+        """Control for the test above: a fresh context is otherwise deliverable."""
+
+        async def signed_in_then_run():
+            set_mcp_notice_eligible(True)
+            return await _run(notices=Notices([_candidate()]))
+
+        text, _, notices = await asyncio.get_running_loop().create_task(
+            signed_in_then_run(), context=contextvars.Context()
+        )
+
+        assert "notices" in json.loads(text)
+        notices.claim.assert_awaited_once()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("via", ["handler", "dispatcher"])

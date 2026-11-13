@@ -88,7 +88,11 @@ class McpNoticesUpdateRequest(BaseModel):
 
 
 async def _over_limit(user_id: str) -> bool:
-    """Count one change; True when over the hourly limit. Fails open."""
+    """Count one ``PUT``; True when over the hourly limit. Fails open.
+
+    Every request counts, an unchanged answer included (as for the
+    announcement-email setting), so the limit is on requests, not changes.
+    """
     try:
         count = await increment_counter(f"mcp_notice_pref_user:{user_id}", ttl=_PREF_WINDOW_SECONDS)
     except RedisError as exc:
@@ -128,7 +132,8 @@ async def update_mcp_notices(
             the deployment does not offer notices.
         McpNoticeWordingStaleError: 409 ``MCPNOTICE-006``, turning it on with
             a wording version other than the current one.
-        RateLimitError: 429, too many changes in an hour.
+        RateLimitError: 429, more than 20 requests in an hour (unchanged
+            answers count too).
         NotFoundException: 404, the account is gone.
     """
     user_id = user["user_id"]
