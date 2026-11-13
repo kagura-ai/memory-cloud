@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -47,8 +48,44 @@ def test_registry_names_are_valid_unique_and_sorted() -> None:
             assert JOB_ID_RE.match(job_id), job_id
 
 
-def test_no_file_scan_entry_on_this_branch() -> None:
-    assert not [s for s in BUILTIN_BACKLOGS if s.name.startswith("files_")]
+# The upload malware scan's queues (#565) and the jobs that drain them.
+FILE_SCAN_BACKLOGS = {
+    "files_awaiting_scan": ("file_scan_sweeper",),
+    "files_scan_failed": (),
+    "files_quarantined": ("file_quarantine_expiry",),
+    "files_unscanned": ("file_scan_sweeper",),
+}
+
+
+def test_file_scan_entries_are_registered() -> None:
+    specs = {s.name: s for s in BUILTIN_BACKLOGS if s.name.startswith("files_")}
+    assert {name: spec.drained_by for name, spec in specs.items()} == FILE_SCAN_BACKLOGS
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_file_scan_entries_follow_the_scan_switch(enabled: bool) -> None:
+    """Off: only the quarantine stays (infected files stay refused after a switch-off)."""
+    settings = Settings(_env_file=None, file_scan_enabled=enabled)
+    shown = {s.name for s in BUILTIN_BACKLOGS if s.enabled(settings)}
+    assert "files_quarantined" in shown
+    for name in ("files_awaiting_scan", "files_scan_failed", "files_unscanned"):
+        assert (name in shown) is enabled, name
+
+
+async def test_disabled_file_scan_entries_are_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    readers = {name: AsyncMock(return_value=(0, None)) for name in FILE_SCAN_BACKLOGS}
+    monkeypatch.setattr(
+        backlogs,
+        "BUILTIN_BACKLOGS",
+        tuple(
+            dataclasses.replace(s, read=readers[s.name])
+            for s in BUILTIN_BACKLOGS
+            if s.name in readers
+        ),
+    )
+    readings = await read_backlogs(_fake_db(), NOW, Settings(_env_file=None))
+    assert [r.name for r in readings] == ["files_quarantined"]
+    assert [name for name, reader in readers.items() if reader.await_count] == ["files_quarantined"]
 
 
 def test_every_drainer_is_a_registered_job(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,6 +96,8 @@ def test_every_drainer_is_a_registered_job(monkeypatch: pytest.MonkeyPatch) -> N
     scheduler = AsyncIOScheduler(timezone="UTC")
     tasks.register_scheduled_jobs(scheduler)
     ids = {job.id for job in scheduler.get_jobs()}
+    # The scan jobs are registered whether or not FILE_SCAN_ENABLED is on.
+    assert {"file_scan_sweeper", "file_quarantine_expiry"} <= ids
     for spec in BUILTIN_BACKLOGS:
         assert set(spec.drained_by) <= ids, (spec.name, set(spec.drained_by) - ids)
 

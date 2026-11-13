@@ -21,6 +21,7 @@ import pytest
 from config.settings import Settings
 from models.file_objects import SCAN_ERRORS, SCAN_STATUSES, FileObject
 from services import file_scan_service as svc
+from services.clamd_client import ClamdUnavailable
 from services.file_scan_service import (
     ClaimedScan,
     ScanResult,
@@ -30,6 +31,7 @@ from services.file_scan_service import (
     scan_claimed,
     scan_eligible_at,
 )
+from tasks.job_runs import JobFailed, job_failed
 from tests.services._fake_clamd import EICAR, FakeClamd, free_port, running_fake_clamd
 from tests.storage._fakes import FakeBlobStorage
 from utils.exceptions import ExternalServiceError, FileBlockedError, FileScanPendingError
@@ -564,7 +566,7 @@ class TestSweep:
             patch.object(svc, "_reader", return_value=FakeBlobStorage()),
         ):
             counts = await svc.run_scan_sweep()
-        assert counts == {"dispatched": 0, "backfill_dispatched": 0, "clamd_unavailable": 0}
+        assert counts == {"dispatched": 0, "backfill_dispatched": 0}
         assert sessions.opened == 0
         ping.assert_not_awaited()
 
@@ -590,8 +592,11 @@ class TestSweep:
             patch.object(svc, "_reader", return_value=FakeBlobStorage()),
             patch.object(svc, "claim_scan", claim),
         ):
-            counts = await svc.run_scan_sweep()
-        assert counts["clamd_unavailable"] == 1
+            result = await svc.run_scan_sweep()
+        # The run is recorded as failed with the class name (operations status, #2768).
+        assert result == job_failed(ClamdUnavailable())
+        assert isinstance(result, JobFailed)
+        assert result.error_class == "ClamdUnavailable"
         claim.assert_not_awaited()
         assert sessions.opened == 0
 

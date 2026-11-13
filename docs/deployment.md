@@ -2261,7 +2261,8 @@ hard guarantee; turn it on once your clients send the checksum header (see
 - **clamd unreachable** (connection refused, connect timeout, `PING` not
   answered): nothing is counted against any file. The sweeper PINGs clamd once
   per tick, logs `file_scan_clamd_unavailable` once and leaves every row as it
-  is. New uploads stay `pending`, so **while clamd is down new files cannot be
+  is; the operations status shows the `file_scan_sweeper` run as `failed` with
+  `error_class: "ClamdUnavailable"` for as long as it lasts. New uploads stay `pending`, so **while clamd is down new files cannot be
   downloaded**; `clean` and `unscanned` files are not affected. Storage that
   cannot be reached before any byte was streamed is treated the same way.
 - **A scan that fails after streaming started** (connection reset, no verdict
@@ -5428,6 +5429,9 @@ drain it.
 | `force_transfer_requests_pending` | Ownership force transfers awaiting a second admin | people |
 | `storage_object_deletions_due` | Stored objects due for deletion | `storage_object_deletion_sweeper` |
 | `file_reservations_expired` / `file_soft_deleted_due` | Abandoned upload reservations / deleted files past retention | `orphan_file_sweeper` / `soft_delete_file_gc` |
+| `files_awaiting_scan` / `files_unscanned` | Uploads due for their malware scan / files never scanned (listed while `FILE_SCAN_ENABLED` is on) | `file_scan_sweeper` |
+| `files_scan_failed` | Files the scanner could not check (listed while `FILE_SCAN_ENABLED` is on) | people: rescan or delete |
+| `files_quarantined` | Infected files still listed as blocked (always listed) | `file_quarantine_expiry` |
 | `resource_indexer_due` | Resource indexers due to run | `resource_indexer` |
 | `email_action_tokens_spent`, `email_signup_requests_expired`, `device_codes_expired`, `known_devices_stale` | Rows past their retention | the matching cleanup job |
 | `referral_grants_pending` | Referral grants waiting to be credited (listed while the sweep is on) | `apply_pending_referral_grants` |

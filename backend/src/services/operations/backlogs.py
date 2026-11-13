@@ -24,6 +24,14 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select, text, union_all
 
+from services.file_scan_service import (
+    FILE_QUARANTINE_EXPIRY_JOB_ID,
+    FILE_SCAN_SWEEPER_JOB_ID,
+    files_awaiting_scan_backlog,
+    files_quarantined_backlog,
+    files_scan_failed_backlog,
+    files_unscanned_backlog,
+)
 from tasks.job_runs import sanitize_error_class
 
 if TYPE_CHECKING:
@@ -324,6 +332,11 @@ def _referral_sweep_enabled(settings: Settings) -> bool:
     return interval > 0
 
 
+def _scan_enabled(settings: Settings) -> bool:
+    """The upload malware scan is on (``FILE_SCAN_ENABLED``, #565)."""
+    return settings.file_scan_enabled
+
+
 _EMBEDDING_SWEEP = ("sweep_pending_embeddings",)
 _ERASURE_SWEEP = ("sweep_pending_erasures",)
 
@@ -358,6 +371,23 @@ BUILTIN_BACKLOGS: tuple[BacklogSpec, ...] = (
     BacklogSpec("erasure_pending", (), _erasure_reader("pending")),
     BacklogSpec("file_reservations_expired", ("orphan_file_sweeper",), _file_reservations_expired),
     BacklogSpec("file_soft_deleted_due", ("soft_delete_file_gc",), _file_soft_deleted_due),
+    # Upload malware scan (#565). Infected files stay refused after a switch-off,
+    # so the quarantine is always shown; files the scanner could not check
+    # wait for people (rescan or delete).
+    BacklogSpec(
+        "files_awaiting_scan",
+        (FILE_SCAN_SWEEPER_JOB_ID,),
+        files_awaiting_scan_backlog,
+        enabled=_scan_enabled,
+    ),
+    BacklogSpec("files_quarantined", (FILE_QUARANTINE_EXPIRY_JOB_ID,), files_quarantined_backlog),
+    BacklogSpec("files_scan_failed", (), files_scan_failed_backlog, enabled=_scan_enabled),
+    BacklogSpec(
+        "files_unscanned",
+        (FILE_SCAN_SWEEPER_JOB_ID,),
+        files_unscanned_backlog,
+        enabled=_scan_enabled,
+    ),
     # A second system admin approves or cancels a force transfer.
     BacklogSpec("force_transfer_requests_pending", (), _force_transfer_requests),
     BacklogSpec("known_devices_stale", ("cleanup_stale_known_devices",), _known_devices_stale),

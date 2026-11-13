@@ -65,6 +65,7 @@ from services.operations.status import read_operations_status
 
 NOW = datetime.now(UTC).replace(microsecond=0)
 OLD = datetime(2001, 1, 2, 3, 4, 5)  # naive UTC, older than anything else in the DB
+SEED_SIGNATURE = "Seed.Test.Signature-565"
 UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}"
 )
@@ -569,6 +570,36 @@ async def _seed_backlogs(db: AsyncSession) -> tuple[str, Workspace, Context, dic
         )
     )
     db.add(UserKnownDevice(user_id=owner, device_hash="d" * 64, last_seen=OLD))
+    # Upload malware scan (#565): one live row in every scan state, plus rows
+    # no scan backlog counts (not yet due, deleted, clean).
+    future = datetime(2999, 1, 1)
+
+    def _scanned(sha: str, scan_status: str, **values: Any) -> FileObject:
+        return FileObject(
+            workspace_id=ws.id,
+            sha256=sha * 64,
+            size_bytes=1,
+            content_type="text/plain",
+            filename="seed.txt",
+            created_by=owner,
+            status="uploaded",
+            storage_key=f"{ws.id}/seed-scan-{uuid4().hex}",
+            uploaded_at=OLD,
+            scan_status=scan_status,
+            **values,
+        )
+
+    db.add_all(
+        [
+            _scanned("c", "unscanned"),
+            _scanned("d", "pending", scan_next_attempt_at=OLD),
+            _scanned("e", "pending", scan_next_attempt_at=future),
+            _scanned("f", "clean", scanned_at=OLD, scan_etag="etag-seed"),
+            _scanned("1", "infected", scanned_at=OLD, scan_signature=SEED_SIGNATURE),
+            _scanned("2", "error", scanned_at=OLD, scan_error="scan_failed"),
+            _scanned("3", "infected", scanned_at=OLD, deleted_at=OLD),
+        ]
+    )
     await db.flush()
     expected = {
         "embedding_pending": 2,
@@ -585,17 +616,21 @@ async def _seed_backlogs(db: AsyncSession) -> tuple[str, Workspace, Context, dic
         "force_transfer_requests_pending": 1,
         "storage_object_deletions_due": 1,
         "file_reservations_expired": 1,
-        "file_soft_deleted_due": 1,
+        "file_soft_deleted_due": 2,  # the GC row and the deleted infected one
         "email_action_tokens_spent": 1,
         "email_signup_requests_expired": 1,
         "known_devices_stale": 1,
+        "files_awaiting_scan": 1,
+        "files_scan_failed": 1,
+        "files_quarantined": 1,
+        "files_unscanned": 1,
     }
     return owner, ws, ctx, expected
 
 
 class TestBacklogs:
     async def test_backlogs_match_the_tables(self, db_session) -> None:
-        settings = Settings(_env_file=None)
+        settings = Settings(_env_file=None, file_scan_enabled=True)
         before = {r.name: r for r in await read_backlogs(db_session, NOW, settings)}
         _, _, _, expected = await _seed_backlogs(db_session)
         after = {r.name: r for r in await read_backlogs(db_session, NOW, settings)}
@@ -606,6 +641,12 @@ class TestBacklogs:
             # Every seeded queue's oldest item is older than anything else.
             assert after[name].oldest_at is not None, name
             assert after[name].oldest_at <= OLD.replace(tzinfo=UTC) + timedelta(seconds=1), name
+
+    async def test_scan_off_shows_only_the_quarantine(self, db_session) -> None:
+        """With FILE_SCAN_ENABLED off the infected files are still counted (#565)."""
+        await _seed_backlogs(db_session)
+        names = {r.name for r in await read_backlogs(db_session, NOW, Settings(_env_file=None))}
+        assert {n for n in names if n.startswith("files_")} == {"files_quarantined"}
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +829,7 @@ async def test_route_end_to_end_aggregates_only(db_session, monkeypatch) -> None
         return {"user_id": "1001", "email": "admin@example.com", "role": "admin"}
 
     monkeypatch.setattr(get_settings(), "system_admin_mode", "session")
+    monkeypatch.setattr(get_settings(), "file_scan_enabled", True)
     app.dependency_overrides[get_db] = _db
     app.dependency_overrides[get_current_user_optional] = _admin
     admin_operations._single_flight.clear()
@@ -821,6 +863,18 @@ async def test_route_end_to_end_aggregates_only(db_session, monkeypatch) -> None
     backlogs = {b["name"]: b for b in body["backlogs"]}
     assert backlogs["erasure_pending"]["count"] >= 1
     assert backlogs["erasure_pending"]["oldest_age_seconds"] > 365 * 86400
+    for name in (
+        "files_awaiting_scan",
+        "files_scan_failed",
+        "files_quarantined",
+        "files_unscanned",
+    ):
+        assert backlogs[name]["count"] >= 1, name
+        assert backlogs[name]["oldest_age_seconds"] > 365 * 86400, name
+        assert backlogs[name]["error_class"] is None, name
+    assert backlogs["files_awaiting_scan"]["drained_by"] == ["file_scan_sweeper"]
+    assert backlogs["files_quarantined"]["drained_by"] == ["file_quarantine_expiry"]
+    assert backlogs["files_scan_failed"]["drained_by"] == []
 
     lanes = {lane["lane"]: lane for lane in body["llm"]}
     judge = lanes["sleep_judge"]
@@ -835,7 +889,16 @@ async def test_route_end_to_end_aggregates_only(db_session, monkeypatch) -> None
     raw = json.dumps(body)
     assert not UUID_RE.search(raw), UUID_RE.search(raw)
     assert "@" not in raw
-    for value in (owner, str(ws.id), str(ctx.id), ws.name, ctx.name, "seed.txt"):
+    for value in (
+        owner,
+        str(ws.id),
+        str(ctx.id),
+        ws.name,
+        ctx.name,
+        "seed.txt",
+        SEED_SIGNATURE,
+        "etag-seed",
+    ):
         assert value not in raw
     for job in body["jobs"]:
         assert job["error_class"] is None or re.fullmatch(

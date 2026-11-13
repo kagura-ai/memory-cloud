@@ -42,7 +42,7 @@ import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Final, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, update
@@ -66,6 +66,9 @@ from storage.protocol import BlobReaderProtocol, ObjectMetadata
 from utils.datetime import to_naive_utc, utcnow
 from utils.exceptions import ExternalServiceError, FileBlockedError, FileScanPendingError
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from tasks.job_runs import JobFailed
 
 logger = get_logger(__name__)
 
@@ -702,16 +705,18 @@ async def _drain(
         slots.release()
 
 
-async def run_scan_sweep() -> dict[str, int]:
+async def run_scan_sweep() -> dict[str, int] | JobFailed:
     """Scheduler entry (every 30 s): hand due scans to workers and return at once.
 
     Quiet no-op when scanning is off or storage is unconfigured. When clamd
-    does not answer PING it logs one warning and touches no row. Otherwise it
+    does not answer PING it logs one warning, touches no row and returns a
+    failed run (``ClamdUnavailable``, so the operations status shows the job
+    failing for the length of the outage). Otherwise it
     claims at most the free slots (new uploads first, then up to
     ``FILE_SCAN_BACKFILL_BATCH`` legacy files per tick); each claim runs in a
     worker task that keeps its slot for the next due file.
     """
-    counts = {"dispatched": 0, "backfill_dispatched": 0, "clamd_unavailable": 0}
+    counts = {"dispatched": 0, "backfill_dispatched": 0}
     settings = get_settings()
     if not settings.file_scan_enabled:
         return counts
@@ -722,7 +727,10 @@ async def run_scan_sweep() -> dict[str, int]:
         settings.clamd_host, settings.clamd_port, timeout=settings.clamd_connect_timeout_seconds
     ):
         logger.warning("file_scan_clamd_unavailable")
-        return {**counts, "clamd_unavailable": 1}
+        # Imported here: ``tasks`` imports this module through ``tasks.file_tasks``.
+        from tasks.job_runs import job_failed
+
+        return job_failed(ClamdUnavailable())
     budget = _TickBudget(backfill=settings.file_scan_backfill_batch)
     slots = _slots()
     while not slots.locked():

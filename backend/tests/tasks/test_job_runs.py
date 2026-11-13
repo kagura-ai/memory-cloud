@@ -11,7 +11,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from apscheduler.events import (
@@ -280,6 +280,8 @@ def test_every_registered_job_has_a_registration(
     assert ("sleep_maintenance" in ids) is sleep
     assert ("consolidation" in ids) is (not sleep)
     assert {"operations_lane_snapshot", "operations_probe"} <= ids
+    # #565: registered whether or not FILE_SCAN_ENABLED is on.
+    assert {"file_scan_sweeper", "file_quarantine_expiry"} <= ids
     for reg in regs:
         assert JOB_ID_RE.match(reg.job_id), reg.job_id
         assert reg.expected_interval_seconds is not None, reg.job_id
@@ -557,6 +559,64 @@ async def test_real_scheduler_records_failed_then_ok_and_the_job_runs_twice() ->
     assert [r.outcome for r in writer.runs[:2]] == ["failed", "ok"]
     assert writer.runs[0].error_class == "ValueError"
     assert writer.runs[1].counts == {"done": 1}
+
+
+async def _first_sweeper_run(monkeypatch: pytest.MonkeyPatch, ping: Any) -> JobRunUpdate:
+    """Run the real file-scan sweeper once under a real scheduler (#565 jobs, #2768 recorder)."""
+    from services import file_scan_service
+    from services.file_scan_service import FILE_SCAN_SWEEPER_JOB_ID
+    from tasks.file_tasks import schedule_file_tasks
+    from tests.storage._fakes import FakeBlobStorage
+
+    monkeypatch.setattr(
+        file_scan_service,
+        "get_settings",
+        lambda: Settings(_env_file=None, file_scan_enabled=True),
+    )
+    monkeypatch.setattr(file_scan_service, "_reader", lambda: FakeBlobStorage())
+    monkeypatch.setattr(file_scan_service, "clamd_ping", ping)
+    writer = FakeWriter()
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    schedule_file_tasks(scheduler)
+    rec = JobRunRecorder(scheduler, writer=writer)
+    scheduler.add_listener(rec, EVENT_MASK)
+    scheduler.start()
+    try:
+        scheduler.modify_job(FILE_SCAN_SWEEPER_JOB_ID, next_run_time=datetime.now(UTC))
+        for _ in range(400):
+            if writer.runs:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        scheduler.shutdown(wait=False)
+        await rec.drain(timeout=2)
+    assert ping.await_count >= 1
+    run = writer.runs[0]
+    assert run.job_id == FILE_SCAN_SWEEPER_JOB_ID
+    return run
+
+
+@pytest.mark.asyncio
+async def test_file_scan_sweeper_without_clamd_is_recorded_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """clamd not answering PING is a failed run with the class name, not an ok one."""
+    run = await _first_sweeper_run(monkeypatch, AsyncMock(return_value=False))
+    assert (run.outcome, run.error_class, run.failures_added) == (
+        "failed",
+        "ClamdUnavailable",
+        1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_scan_sweeper_that_raises_is_recorded_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = await _first_sweeper_run(
+        monkeypatch, AsyncMock(side_effect=ConnectionResetError("clamd at 10.0.0.9"))
+    )
+    assert (run.outcome, run.error_class) == ("failed", "ConnectionResetError")
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,7 @@ the columns would make those blocked files downloadable again. Delete them
 first (or rescan them) and downgrade then.
 
 Revision ID: f40_565_file_scan
-Revises: f38_2761_announcement_consents
+Revises: f39_2768_operations_status
 """
 
 import sqlalchemy as sa
@@ -27,7 +27,7 @@ from alembic import op
 from db.migration_helpers import index_is_invalid, validate_constraint
 
 revision: str = "f40_565_file_scan"
-down_revision: str | None = "f38_2761_announcement_consents"
+down_revision: str | None = "f39_2768_operations_status"
 branch_labels: str | None = None
 depends_on: str | None = None
 

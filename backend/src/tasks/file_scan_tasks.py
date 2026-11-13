@@ -15,10 +15,12 @@ scheduler records the run as failed), like the other file jobs.
 from __future__ import annotations
 
 from services.file_scan_service import expire_quarantined_files, run_scan_sweep
+from tasks.job_runs import JobFailed
 
 
-async def sweep_file_scans() -> dict[str, int]:
-    """``{"dispatched", "backfill_dispatched", "clamd_unavailable"}`` for this tick."""
+async def sweep_file_scans() -> dict[str, int] | JobFailed:
+    """``{"dispatched", "backfill_dispatched"}`` for this tick, or a failed run
+    (``ClamdUnavailable``) while clamd does not answer."""
     return await run_scan_sweep()
 
 
