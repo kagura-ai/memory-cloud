@@ -30,7 +30,7 @@
 PROJECT_DIR="$BATS_TEST_DIRNAME/../.."
 TPL="$PROJECT_DIR/Caddyfile.tpl"
 
-# The four files that DEFINE services. docker-compose.data-expose.yml is a
+# The five files that DEFINE services. docker-compose.data-expose.yml is a
 # ports-only overlay: it patches services defined in data.yml and must inherit
 # their logging through the compose merge, not repeat it.
 COMPOSE_FILES=(
@@ -38,6 +38,7 @@ COMPOSE_FILES=(
     docker-compose.prod.yml
     docker-compose.data.yml
     docker-compose.ollama.yml
+    docker-compose.clamav.yml
 )
 
 # ---------------------------------------------------------------------------
@@ -141,7 +142,7 @@ default_log_block() {   # $1 file
         [ "$output" -eq 0 ] || { echo "$f: a non-API service uses *api-logging"; return 1; }
     done
     # The other files define no API color (ollama.yml only patches them).
-    for f in docker-compose.data.yml docker-compose.ollama.yml; do
+    for f in docker-compose.data.yml docker-compose.ollama.yml docker-compose.clamav.yml; do
         run grep -c 'api-logging' "$PROJECT_DIR/$f"
         [ "$output" -eq 0 ] || { echo "$f: unexpected api-logging"; return 1; }
     done
@@ -166,6 +167,7 @@ default_log_block() {   # $1 file
         [docker-compose.prod.yml]=7
         [docker-compose.data.yml]=3
         [docker-compose.ollama.yml]=1
+        [docker-compose.clamav.yml]=1
     )
     for f in "${COMPOSE_FILES[@]}"; do
         n="$(service_logging_report "$PROJECT_DIR/$f" | grep -cv ' patch$' || true)"
@@ -210,6 +212,7 @@ render_composition() {   # $1 work dir, $2 compose -f arguments
                -u POSTGRES_HOST -u QDRANT_HOST -u REDIS_HOST \
                -u REDIS_PASSWORD -u REDIS_URL \
                -u LOG_MAX_SIZE -u LOG_MAX_FILE -u API_LOG_MAX_SIZE -u API_LOG_MAX_FILE \
+               -u CLAMAV_MEM_LIMIT \
                -u COMPOSE_PROJECT_NAME -u COMPOSE_FILE \
                DATA_BIND_ADDR=192.0.2.10 \
             docker compose -p single-server $2 --env-file .env.prod \
@@ -254,6 +257,8 @@ PYEOF
         "7|-f docker-compose.data.yml -f docker-compose.app.yml"
         "8|-f docker-compose.prod.yml -f docker-compose.ollama.yml"
         "3|-f docker-compose.data.yml -f docker-compose.data-expose.yml"
+        "8|-f docker-compose.prod.yml -f docker-compose.clamav.yml"
+        "5|-f docker-compose.app.yml -f docker-compose.clamav.yml"
     )
     failed=0
     for entry in "${compositions[@]}"; do
@@ -284,6 +289,8 @@ PYEOF
         "7|-f docker-compose.prod.yml"
         "7|-f docker-compose.data.yml -f docker-compose.app.yml"
         "8|-f docker-compose.prod.yml -f docker-compose.ollama.yml"
+        "8|-f docker-compose.prod.yml -f docker-compose.clamav.yml"
+        "5|-f docker-compose.app.yml -f docker-compose.clamav.yml"
     )
     # "<.env.prod lines>|<api max-size> <api max-file> <max-size> <max-file>":
     # each pair of knobs moves its own services and leaves the others at 50m x 3.

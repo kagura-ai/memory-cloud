@@ -98,7 +98,7 @@ that file to several GB within weeks and fill the disk; the usual first symptom
 is an image build that fails for lack of space.
 
 Every service in the single-server compose files
-(`terraform/single-server/docker-compose.{prod,app,data,ollama}.yml`) therefore
+(`terraform/single-server/docker-compose.{prod,app,data,ollama,clamav}.yml`) therefore
 declares a `json-file` logging block, so the stack is bounded on any host — not
 only on one whose Docker daemon was configured for it. With the knobs below
 left unset, every service renders these defaults:
@@ -125,7 +125,7 @@ exactly the block above.
 |---|---|---|
 | `API_LOG_MAX_SIZE` | `50m` | `api-blue` / `api-green`: size at which the log file rotates |
 | `API_LOG_MAX_FILE` | `3` | `api-blue` / `api-green`: rotated files kept |
-| `LOG_MAX_SIZE` | `50m` | every other service (`web`, `caddy`, `postgres`, `qdrant`, `redis`, `ollama`) |
+| `LOG_MAX_SIZE` | `50m` | every other service (`web`, `caddy`, `postgres`, `qdrant`, `redis`, `ollama`, `clamav`) |
 | `LOG_MAX_FILE` | `3` | the same services |
 
 Accepted formats: a size is a whole number with a lowercase `k`, `m` or `g`
@@ -2121,6 +2121,314 @@ construction in `storage/factory.py`. Today the factory builds one process-wide
 instance from the global `STORAGE_*` settings; per-workspace BYO would move
 construction behind a workspace-scoped credential lookup. Recorded here as a
 seam only — no implementation in #994.
+
+## Upload malware scanning (ClamAV) — Issue #565
+
+Files uploaded through the files API (`/api/v1/files/*`, the MCP file tools,
+the Storage page) can be scanned by a clamd you run yourself. It is **off by
+default** (`FILE_SCAN_ENABLED=false`): with it off nothing about uploads or
+downloads changes, except that file objects carry a `scan_status` field.
+
+With it on, the API streams every confirmed upload from object storage to
+clamd (the `INSTREAM` command over TCP) and **holds the file's download URL
+until the scan has finished**. The API itself never parses the bytes, and no
+file leaves the host: only freshclam talks to the outside, to download
+signatures.
+
+### What a file goes through
+
+| `scan_status` | Meaning | Download URL with scanning on | With scanning off |
+|---|---|---|---|
+| `unscanned` | Uploaded while scanning was off (or before the release that added it) | served; scanned in the background, see [Backfill](#backfill-of-older-files) | served |
+| `pending` | Waiting for its scan, or being scanned | 409 `SCAN-001` | served |
+| `clean` | clamd found nothing | served (without checksum binding, after a storage HEAD compare) | served |
+| `infected` | clamd reported a finding | 409 `SCAN-002` | 409 `SCAN-002` |
+| `error` | The scanner could not check this file (cause in `scan_error`) | 409 `SCAN-002` | served |
+
+The refusals come only after the access checks, so a caller who cannot read
+the file still gets the usual 404:
+
+| Surface | Pending | Blocked |
+|---|---|---|
+| REST `GET /api/v1/files/{file_id}/download-url` | 409 `SCAN-001` "This file is still being checked for malware. Try again shortly.", header `Retry-After: 30`, `details` `{file_id, scan_status: "pending"}` | 409 `SCAN-002` "This file cannot be downloaded: the malware scan blocked it.", `details` `{file_id, scan_status}` (`infected` or `error`) |
+| MCP `get_file_download_url` | `file_scan_pending` with `file_id`, `scan_status`, `retry_after_seconds: 30` | `file_blocked` with `file_id`, `scan_status` |
+| Storage page | "Scanning" badge; a download attempt shows a toast and refreshes the list | "Blocked" / "Could not be checked" badge, download disabled |
+
+The finding's name (the signature) is logged and stored, never returned to a
+client. Clients that download right after uploading should retry on
+`SCAN-001` / `file_scan_pending` after the advertised wait.
+
+Other changes while scanning is on:
+
+- `POST /api/v1/files/reserve` (MCP `init_file_upload`) caps the size at the
+  smaller of `FILE_OBJECT_MAX_SIZE_MB` and `CLAMD_STREAM_MAX_BYTES`, so nothing
+  is accepted that could never be scanned; the 422 message then ends with
+  "(the largest file the malware scan checks)".
+- A duplicate upload (409 `RES-002`) never hands out a blocked file as
+  `existing_file`; inside the same context the message says "an earlier upload
+  of this file was blocked by the malware scan". A `pending` file is handed
+  out (same bytes; the download gate holds it).
+- Restoring a deleted context's files puts their `clean` files back to
+  `pending` (`unscanned` while scanning is off): the stored objects may have
+  been replaced meanwhile.
+
+### How long a new upload is held
+
+A verdict has to be about the bytes that are later served. How that is
+guaranteed depends on checksum binding (`STORAGE_CHECKSUM_BINDING_ENABLED`,
+[#556](https://github.com/kagura-ai/memory-cloud/issues/556)):
+
+- **Binding on.** The storage accepts only the bytes whose SHA-256 was declared
+  at reserve, so the file is scanned as soon as the upload is confirmed (the
+  confirm starts the scan in the same process; above 16 such scans in flight
+  per process, the rest are left to the 30-second sweeper). The hold is the
+  scan time: seconds for ordinary files.
+- **Binding off (the default).** The presigned PUT URL stays valid after the
+  confirm, so the file is scanned only after that URL has expired:
+  `PRESIGN_PUT_TTL_SECONDS` (300) after the reservation, plus
+  `FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS` (30), plus up to one sweeper tick. A
+  new upload is therefore held **about five to six minutes from its
+  reservation**. The scan records the object's ETag, size and LastModified from
+  the same GetObject that fed clamd, and every download URL of a `clean` file
+  first HEADs the object and compares the three. A changed or missing object
+  goes back to `pending` (log `file_scan_object_changed`) and the request gets
+  `SCAN-001`; a HEAD that fails refuses the download (502 / MCP
+  `service_unavailable`), it never skips the check. This costs one storage
+  HEAD per download URL. The startup log says
+  `file_scan_without_checksum_binding` in this mode.
+
+Residual risk with binding off: the compare cannot see a rewrite whose body
+has the same MD5 (the ETag of a single-part upload), the same size and a
+LastModified in the same second. The margin assumes the API host's clock is
+not ahead of the storage's clock by more than
+`FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS`: keep NTP on. Checksum binding is the
+hard guarantee; turn it on once your clients send the checksum header (see
+[`docs/ops/r2-checksum-binding-rollout.md`](ops/r2-checksum-binding-rollout.md)).
+
+### When the scanner cannot answer
+
+- **clamd unreachable** (connection refused, connect timeout, `PING` not
+  answered): nothing is counted against any file. The sweeper PINGs clamd once
+  per tick, logs `file_scan_clamd_unavailable` once and leaves every row as it
+  is. New uploads stay `pending`, so **while clamd is down new files cannot be
+  downloaded**; `clean` and `unscanned` files are not affected. Storage that
+  cannot be reached before any byte was streamed is treated the same way.
+- **A scan that fails after streaming started** (connection reset, no verdict
+  within `CLAMD_SCAN_TIMEOUT_SECONDS`, a malformed or `ERROR` reply, a storage
+  read error) counts as one attempt. The file is retried after 30 s, doubling
+  up to 5 minutes; after `FILE_SCAN_MAX_ATTEMPTS` (3) counted failures it
+  becomes `error` with `scan_error` `scan_failed`.
+- **A file the scanner cannot check at all** becomes `error` at once:
+  `object_missing` (no object behind the row), `digest_mismatch` (the stored
+  bytes do not hash to the declared SHA-256), `size_limit` (larger than
+  `CLAMD_STREAM_MAX_BYTES`, or clamd refused the stream as too large) or
+  `unscannable` (clamd's own limit finding, `Heuristics.Limits.Exceeded.*` or
+  `Heuristics.ScanTimeout`: it did not scan everything).
+
+`error` files are blocked while scanning is on and are **never deleted
+automatically**: the uploader can delete them, and an operator can rescan them
+(`rescan --errors`, below). There is no manual release of a blocked file;
+a rescan is the only way back.
+
+### Infected files
+
+An `infected` file stays listed, blocked, for `FILE_QUARANTINE_RETENTION_DAYS`
+(7) after its verdict. The daily `file_quarantine_expiry` job (03:45 UTC) then
+deletes it the normal way, in batches of 50 with a commit each: the file's
+quota is released at once and the stored object is removed later by the
+storage sweeper, like any deleted file. Only `infected` files are expired.
+
+The uploader gets one email (subject "A file you uploaded was blocked by the
+malware scan") at their verified address, sent after the verdict is stored.
+It names no file, no finding and no device or IP address, and says when the
+file is removed. Like every security notice it is English only and coalesced
+per account. There is no email for `error` files, and none for files written
+by the attachment migration (no uploader account).
+
+### Backfill of older files
+
+Files that are `unscanned` (uploaded while scanning was off, also by an API
+process whose switch was still off) stay downloadable. Once the queue of new
+uploads is empty, each sweeper tick scans up to `FILE_SCAN_BACKFILL_BATCH` (20)
+of them; `0` turns the backfill off. A backfilled file is
+blocked only when it is found infected: if it cannot be checked (missing
+object, size limit, an unscannable result, or the attempt limit) it stays
+`unscanned` and downloadable with `scan_error` recorded, and drops out of the
+backfill. A digest mismatch on such a file is logged
+(`file_scan_digest_mismatch`), not blocked, since its digest was never
+verified at upload.
+
+### Running clamd
+
+**Production (single server).** The optional overlay
+`terraform/single-server/docker-compose.clamav.yml` runs the official
+`clamav/clamav` image (1.4 LTS, pinned by digest) with freshclam inside the
+container:
+
+```bash
+cd terraform/single-server
+docker compose \
+  -f docker-compose.prod.yml \
+  -f docker-compose.clamav.yml \
+  --env-file .env.prod \
+  up -d clamav
+```
+
+Start it once; `deploy.sh` never touches it and it survives deploys (a deploy
+may warn about "orphan containers" for it; that is harmless). The API reads
+`FILE_SCAN_ENABLED` and `CLAMD_*` from `.env.prod`, so the overlay patches no
+API service. On the split-host layout run it on the **app** VM, with
+`docker-compose.app.yml` in place of `docker-compose.prod.yml`. To update the
+image, pull the new pin and run the same `up -d clamav`.
+
+**Development.** The repo's `docker-compose.yml` has the same image and
+configuration behind a profile (published on `127.0.0.1:3310` only):
+
+```bash
+docker compose --profile clamav up -d clamav
+# .env.local: FILE_SCAN_ENABLED=true, CLAMD_HOST=clamav
+# (CLAMD_HOST=localhost for an API run on the host)
+```
+
+**Memory.** ClamAV documents **3 GiB of RAM as the minimum and 4 GiB as
+preferred** for clamd; loading the signatures alone takes more than 1.2 GiB, and
+a reload can briefly double that. The shipped `clamd.conf` sets
+`ConcurrentDatabaseReload no`, which keeps the peak near one signature set but
+makes scans wait while a reload runs (pending files are held that long). The
+overlay caps the container at `CLAMAV_MEM_LIMIT` (default `4g`) so the host's
+OOM killer does not pick Postgres or Qdrant. The Terraform default `e2-medium`
+(4 GB) already runs the stack and **cannot host clamd as well**: use an 8 GB
+class machine or a separate host on the private network before turning the
+scan on.
+
+**Signatures.** freshclam checks for new signatures 12 times a day and needs
+outbound HTTPS to the ClamAV mirror (`database.clamav.net`). On the first start
+the signatures shipped in the image are copied into the `kagura_clamav_data`
+volume, so clamd starts without waiting for a download; the healthcheck
+(`PING` → `PONG`) allows 10 minutes for the first load. Stale signatures do not
+fail anything: they only find less.
+
+**Network.** clamd's TCP protocol has **no encryption and no
+authentication**, and it accepts commands such as `SHUTDOWN`. The overlay
+publishes no port; `CLAMD_HOST` must be the compose service name (`clamav`) or
+an address on the same host or a private network, never a public address.
+clamd joins the compose network Redis is on, so set `REDIS_PASSWORD`
+([Redis password](#redis-password-single-server-compose--issue-1794)) before
+starting it.
+
+**Hardening.** The overlay sets `no-new-privileges` and drops every capability
+except the five the image's entrypoint needs: `CHOWN`, `DAC_OVERRIDE` and
+`FOWNER` to take ownership of the signature volume and the socket directory,
+`SETUID` and `SETGID` for freshclam and clamd to drop to the `clamav` user.
+clamd spools each stream to a temporary file inside the container and removes
+it after the scan; a clamd crash can leave that file in the container's
+filesystem until the container is recreated.
+
+**Your own clamd.** The API cannot read clamd's configuration over the socket,
+so a clamd you run elsewhere needs what
+`terraform/single-server/clamav/clamd.conf` sets:
+
+- `AlertExceedsMax yes`. Without it, clamd answers `OK` for a file past one of
+  its limits (size, nesting depth, archive member count, scan time) although
+  part of it was never scanned, and the API would record it `clean`.
+- `StreamMaxLength` and `MaxFileSize` at least `CLAMD_STREAM_MAX_BYTES`
+  (`100M` for the default 100 MiB). Raise them together with the setting.
+- `MaxScanTime` below `CLAMD_SCAN_TIMEOUT_SECONDS` (the shipped file uses
+  240000 ms), so clamd reports a file it cannot finish as a limit finding
+  instead of the API timing out and retrying it.
+- `MaxThreads` above the total scan concurrency (next paragraph).
+
+**Concurrency.** Each API process runs at most `FILE_SCAN_CONCURRENCY` (2) scans
+at once. With binding on, scans start in the process that confirmed the
+upload; the sweeper (every 30 s) runs on the scheduler leader only, where each
+scan slot keeps taking the next due file for up to four minutes per tick. The
+total number of streams clamd can see is at most
+`UVICORN_WORKERS` × 2 colors × `FILE_SCAN_CONCURRENCY`; keep it below clamd's
+`MaxThreads` (10 in the shipped file). With binding off all new uploads go
+through the leader, so its `FILE_SCAN_CONCURRENCY` sets the throughput.
+
+### Turning it on or off
+
+1. Size the machine, set `REDIS_PASSWORD`, start the overlay and wait until
+   `docker inspect -f '{{.State.Health.Status}}' kagura-clamav` says `healthy`.
+2. Set `FILE_SCAN_ENABLED=true` (and `CLAMD_HOST` if clamd is not the `clamav`
+   service) in `.env.prod`, then run `./scripts/deploy.sh`. The switch is read
+   per process: every API process must have it, which a deploy gives you (the
+   old color is stopped). Files a process with the switch still off confirmed
+   meanwhile are `unscanned`, and the backfill scans them.
+3. Watch `python -m src.cli.file_scan status` and the `file_scan_*` log lines.
+
+Turning it off makes `pending` and `error` files downloadable again; `infected`
+files stay refused. The startup and settings check refuses
+`FILE_SCAN_ENABLED=true` with an empty `CLAMD_HOST`.
+
+### Operator CLI
+
+Inside the API container (same environment as the API):
+
+```bash
+python -m src.cli.file_scan status
+python -m src.cli.file_scan rescan --file <file-id>                  # plan (read-only)
+python -m src.cli.file_scan rescan --file <file-id> --apply --yes    # scan it again
+python -m src.cli.file_scan rescan --errors --since 2026-01-01 --apply
+```
+
+- `status` prints whether scanning is on and the counts: due pending (with the
+  oldest due time), waiting pending, scan failed (`error`), quarantined
+  (`infected`) and unscanned. Counts only, no file names.
+- `rescan` puts files back to `pending`, so they are held (`SCAN-001`) until
+  the new verdict. `--file` takes any live uploaded file whatever its verdict,
+  for example a false positive after a signature update. `--errors` limits the
+  run to `error` files and needs `--since` (verdicts at or after that ISO
+  date/time, UTC unless an offset is given) or `--file`. Without `--apply` it
+  only prints the plan; `--yes` skips the confirmation prompt. It is refused
+  while `FILE_SCAN_ENABLED` is false.
+
+Without checksum binding a rescanned file still inside its upload window waits
+for that window to end.
+
+### Log events
+
+| Event | Level | Meaning |
+|---|---|---|
+| `file_scan_infected` | warning | A finding; carries the signature name and the file id |
+| `file_scan_gave_up` | warning | A file became `error`; `cause` / `reason` say why |
+| `file_scan_digest_mismatch` | warning | The stored bytes do not hash to the declared SHA-256 |
+| `file_scan_clamd_unavailable` | warning | clamd did not answer `PING`; at most once per sweeper tick |
+| `file_scan_object_changed` | warning | A `clean` file's object changed or vanished; it is pending again |
+| `file_scan_without_checksum_binding` | warning | Startup: scanning is on, binding is off (longer holds, a HEAD per download) |
+| `file_scan_retry` / `file_scan_recorded` / `file_scan_sweep` | info | Per-scan and per-tick progress |
+| `file_quarantine_expired` / `file_quarantine_purged` | info | Infected files past their retention were deleted |
+| `file_scan_requeued` | info | The CLI put files back to `pending` |
+
+### Limits
+
+- clamd is signature based: a file it does not recognise is `clean`.
+- Encrypted archives and documents are scanned only as far as clamd can read
+  them and are not blocked for being encrypted (`AlertEncrypted*` stays off,
+  since password-protected PDFs are ordinary). Turn those options on in
+  `clamd.conf` if you want them blocked; the API then records them as
+  `infected`.
+- Only files that go through the files API are scanned; memory text is not.
+
+### Settings
+
+| Variable | Default | Notes |
+|---|---|---|
+| `FILE_SCAN_ENABLED` | `false` | The switch, per API process. |
+| `CLAMD_HOST` | `clamav` | Required (non-empty) when the switch is on. Same host or private network only. |
+| `CLAMD_PORT` | `3310` | |
+| `CLAMD_CONNECT_TIMEOUT_SECONDS` | `5` | A connect that takes longer means clamd is unavailable (not counted). |
+| `CLAMD_SCAN_TIMEOUT_SECONDS` | `300` | Stream plus verdict for one file; past it the attempt counts as failed. |
+| `CLAMD_STREAM_MAX_BYTES` | `104857600` (100 MiB) | Largest file streamed to clamd, and the upload cap while scanning is on. At or below clamd's `StreamMaxLength` / `MaxFileSize`. |
+| `FILE_SCAN_CONCURRENCY` | `2` | Scans per API process at once. |
+| `FILE_SCAN_MAX_ATTEMPTS` | `3` | Counted failures before a new upload becomes `error` / `scan_failed`. |
+| `FILE_SCAN_BACKFILL_BATCH` | `20` | `unscanned` files per sweeper tick; `0` turns the backfill off. |
+| `FILE_QUARANTINE_RETENTION_DAYS` | `7` | Days an `infected` file stays listed as blocked before it is deleted. |
+| `FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS` | `30` | Without binding: wait this long past the PUT URL's expiry. |
+| `CLAMAV_MEM_LIMIT` | `4g` | Memory cap of the overlay's container (compose only; the API does not read it). |
+
+The numeric settings are checked at startup even while the switch is off.
 
 ## Qdrant dense vector quantization and on-disk storage — Issue #1990
 
