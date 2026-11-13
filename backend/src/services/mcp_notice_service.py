@@ -447,23 +447,31 @@ async def withdraw_notice(
 ) -> tuple[NoticeView, bool]:
     """End a notice now. Idempotent. Flushes; the caller commits.
 
-    Returns the notice and whether this call withdrew it (an already withdrawn
-    notice is returned unchanged and writes no audit row). Delivery stops at
-    once: the claim re-checks ``withdrawn_at``.
+    Returns the notice and whether this call withdrew it. An ended notice
+    (withdrawn, or expired on its own) is returned unchanged and writes no
+    audit row, so an expired notice keeps saying it expired. Whether it has
+    ended is decided once, on the locked row against the transaction's
+    ``now()``. Delivery stops at once: the claim re-checks ``withdrawn_at``.
 
     Raises:
         McpNoticeNotFoundError: 404 ``MCPNOTICE-004``.
     """
     row = (
         await session.execute(
-            select(McpNotice.id, McpNotice.text, McpNotice.withdrawn_at)
+            select(
+                McpNotice.id,
+                McpNotice.text,
+                (McpNotice.withdrawn_at.is_(None) & (McpNotice.expires_at > func.now())).label(
+                    "live_or_scheduled"
+                ),
+            )
             .where(McpNotice.id == notice_id)
             .with_for_update()
         )
     ).first()
     if row is None:
         raise McpNoticeNotFoundError()
-    changed = row.withdrawn_at is None
+    changed = bool(row.live_or_scheduled)
     if changed:
         await session.execute(
             update(McpNotice).where(McpNotice.id == notice_id).values(withdrawn_at=func.now())

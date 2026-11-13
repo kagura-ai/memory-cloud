@@ -2247,7 +2247,7 @@ Issue #2762. The notices delivered once per opted-in user in the MCP `bootstrap`
 |----------|---------|
 | `POST /api/v1/admin/mcp-notices` | Write a notice. Body `{"text", "expires_at", "starts_at"?}` (no other key; times with a UTC offset). `201` with the notice. |
 | `GET /api/v1/admin/mcp-notices?state=all&limit=50` | The notices, newest first: `{"notices": [...], "delivering": <MCP_NOTICES_ENABLED>}`. `state`: `active`, `scheduled`, `ended` (expired or withdrawn) or `all` (default); `limit` 1-100 (default 50). |
-| `POST /api/v1/admin/mcp-notices/{notice_id}/withdraw` | End a notice now; it is no longer delivered from that moment. Idempotent: an ended notice is returned unchanged (and no second audit row is written). |
+| `POST /api/v1/admin/mcp-notices/{notice_id}/withdraw` | End a notice now; it is no longer delivered from that moment. Idempotent: an ended notice (withdrawn, or expired on its own) is returned unchanged and no audit row is written. |
 
 A notice: `{"id", "text", "starts_at", "expires_at", "withdrawn_at", "created_at", "state", "delivered_count"}`; `delivered_count` is the number of people it was delivered to (an aggregate: no recipient is ever listed).
 

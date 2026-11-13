@@ -548,6 +548,28 @@ async def test_withdraw_is_idempotent_and_audited_once(db_session, make_users) -
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_withdrawing_an_expired_notice_returns_it_unchanged(db_session, make_users) -> None:
+    """An ended notice is returned unchanged: one that expired on its own is
+    not stamped ``withdrawn_at`` and gets no ``mcp_notice.withdrawn`` row, so
+    the list and the audit trail keep saying it expired."""
+    await make_users()
+    expired = await _raw_notice(
+        db_session, start_offset=timedelta(days=-3), end_offset=timedelta(days=-1)
+    )
+
+    view, changed = await svc.withdraw_notice(db_session, notice_id=expired, actor=ACTOR)
+    await db_session.commit()
+
+    assert changed is False
+    assert view.state == "ended" and view.withdrawn_at is None
+    stored = (
+        await db_session.execute(select(McpNotice.withdrawn_at).where(McpNotice.id == expired))
+    ).scalar_one()
+    assert stored is None
+    assert await _fresh_audits(db_session, expired) == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_list_filters_by_state_and_counts_deliveries(db_session, make_users) -> None:
     dave = await make_users()
     erin = await make_users()
