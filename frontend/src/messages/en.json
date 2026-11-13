@@ -398,6 +398,16 @@
         "sharedHint": "Files that all members of this workspace can view.",
         "contextHint": "Files belonging to the selected context. Its access permissions apply.",
         "fetchError": "Could not load contexts. Shared files are still available."
+      },
+      "scan": {
+        "pending": "Scanning",
+        "pendingHint": "Being checked for malware. You can download it when the check finishes.",
+        "blocked": "Blocked",
+        "blockedHint": "The malware scan found a threat in this file. It cannot be downloaded and will be removed automatically.",
+        "error": "Could not be checked",
+        "errorHint": "The file could not be checked for malware and cannot be downloaded. Delete it and upload it again, or contact support.",
+        "downloadPending": "This file is still being scanned. Try again in a moment.",
+        "downloadBlocked": "This file was blocked by the malware scan."
       }
     }
   },

@@ -11,6 +11,7 @@
  * - delete confirmation calls deleteFile and refetches
  * - download opens the presigned URL
  * - "Load more" bumps the limit and refetches
+ * - #565: scan badges, blocked files cannot be downloaded, scan refusals toast
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
@@ -21,10 +22,12 @@ import {
   fireEvent,
   cleanup,
   act,
+  within,
 } from "@testing-library/react";
 
 import StoragePage from "./page";
 import type { FileObject } from "@/lib/api/files";
+import { ApiError } from "@/lib/api/base";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -98,6 +101,7 @@ const file = (overrides: Partial<FileObject> = {}): FileObject => ({
   size_bytes: 2048,
   sha256: "a".repeat(64),
   status: "uploaded",
+  scan_status: "unscanned",
   created_at: "2026-03-01T00:00:00Z",
   uploaded_at: "2026-03-01T00:05:00Z",
   ...overrides,
@@ -545,6 +549,98 @@ describe("StoragePage", () => {
     });
     // Download failures use a toast, never the page-level ErrorBanner.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  describe("malware scan (#565)", () => {
+    const scanned = () => [
+      file({ id: "f-unscanned", filename: "unscanned.pdf", scan_status: "unscanned" }),
+      file({ id: "f-pending", filename: "pending.pdf", scan_status: "pending" }),
+      file({ id: "f-clean", filename: "clean.pdf", scan_status: "clean" }),
+      file({ id: "f-infected", filename: "infected.pdf", scan_status: "infected" }),
+      file({ id: "f-error", filename: "error.pdf", scan_status: "error" }),
+    ];
+
+    const row = (filename: string) =>
+      screen.getByText(filename).closest("tr") as HTMLElement;
+
+    it("badges files being scanned, blocked or not checked; none for the rest", async () => {
+      mockListFiles.mockResolvedValue(scanned());
+      render(<StoragePage />);
+      await screen.findByText("pending.pdf");
+
+      expect(row("pending.pdf")).toHaveTextContent("list.scan.pending");
+      expect(screen.getByText("list.scan.pending")).toHaveAttribute(
+        "title",
+        "list.scan.pendingHint",
+      );
+      expect(row("infected.pdf")).toHaveTextContent("list.scan.blocked");
+      expect(screen.getByText("list.scan.blocked")).toHaveAttribute(
+        "title",
+        "list.scan.blockedHint",
+      );
+      expect(row("error.pdf")).toHaveTextContent("list.scan.error");
+      expect(screen.getByText("list.scan.error")).toHaveAttribute(
+        "title",
+        "list.scan.errorHint",
+      );
+      for (const name of ["clean.pdf", "unscanned.pdf"]) {
+        expect(row(name)).not.toHaveTextContent("list.scan.");
+      }
+    });
+
+    it("disables download for blocked files but keeps delete", async () => {
+      mockListFiles.mockResolvedValue(scanned());
+      render(<StoragePage />);
+      await screen.findByText("pending.pdf");
+
+      const download = (name: string) =>
+        within(row(name)).getByRole("button", { name: "list.actions.download" });
+      expect(download("infected.pdf")).toBeDisabled();
+      expect(download("error.pdf")).toBeDisabled();
+      for (const name of ["pending.pdf", "clean.pdf", "unscanned.pdf"]) {
+        expect(download(name)).toBeEnabled();
+      }
+      expect(
+        within(row("infected.pdf")).getByRole("button", { name: "list.actions.delete" }),
+      ).toBeEnabled();
+    });
+
+    it("tells the user to wait when the scan has not finished, and refreshes", async () => {
+      mockListFiles.mockResolvedValue([file({ scan_status: "clean" })]);
+      mockGetDownloadUrl.mockRejectedValue(
+        new ApiError({ error: "SCAN-001", message: "server text", status: 409 }),
+      );
+      const fakeTab = { location: { replace: vi.fn() }, opener: {} as unknown, close: vi.fn() };
+      vi.stubGlobal("open", vi.fn().mockReturnValue(fakeTab));
+      render(<StoragePage />);
+      await screen.findByText("report.pdf");
+      fireEvent.click(screen.getByRole("button", { name: "list.actions.download" }));
+
+      await waitFor(() => {
+        expect(mockToast).toHaveBeenCalledWith({ title: "list.scan.downloadPending" });
+      });
+      expect(fakeTab.close).toHaveBeenCalled();
+      await waitFor(() => expect(mockListFiles).toHaveBeenCalledTimes(2));
+      vi.unstubAllGlobals();
+    });
+
+    it("says the scan blocked the file, without the server's text", async () => {
+      mockListFiles.mockResolvedValue([file()]);
+      mockGetDownloadUrl.mockRejectedValue(
+        new ApiError({ error: "SCAN-002", message: "server text", status: 409 }),
+      );
+      render(<StoragePage />);
+      await screen.findByText("report.pdf");
+      fireEvent.click(screen.getByRole("button", { name: "list.actions.download" }));
+
+      await waitFor(() => {
+        expect(mockToast).toHaveBeenCalledWith({
+          variant: "destructive",
+          title: "list.scan.downloadBlocked",
+        });
+      });
+      await waitFor(() => expect(mockListFiles).toHaveBeenCalledTimes(2));
+    });
   });
 
   it("closes the dialog and toasts on a successful delete", async () => {
