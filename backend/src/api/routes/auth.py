@@ -415,9 +415,6 @@ def _take_oauth_flow_binding(state: str, request: Request) -> str | None:
 # (``_maybe_link_redirect``) and ``refresh`` never opens a session
 # (``_maybe_refresh_redirect``). Every other flow must come back to the browser
 # that ran ``/login``.
-_PROFILE_INTENTS = frozenset({"link", "refresh"})
-
-
 def _starting_browser_check(
     state: str, browser_hash: str | None
 ) -> Literal["bound", "link", "refresh"] | None:

@@ -514,7 +514,6 @@ class TestKick:
             await asyncio.sleep(0)
 
     async def test_kick_scans_without_holding_a_session_while_streaming(self):
-        s = _settings(storage_checksum_binding_enabled=True)
         claim = _claim(b"hello")
         storage = await _stored(b"hello", claim)
         sessions = _Sessions()

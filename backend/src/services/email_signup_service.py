@@ -537,7 +537,7 @@ class EmailSignupService:
         # the last account were erased between this count and that decision
         # would it take the lock after the address lock; not reachable in
         # practice.)
-        _first_account = await claim_first_account(self.db, serialize=True)
+        await claim_first_account(self.db, serialize=True)
         await lock_address(self.db, email)
         consumed = cast(
             CursorResult[Any],

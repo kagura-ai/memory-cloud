@@ -44,7 +44,7 @@ LANES = [
 
 class TestSchedule:
     def test_probe_off_registers_only_the_snapshot(self, monkeypatch) -> None:
-        monkeypatch.setattr(opt, "get_settings", lambda: _settings())
+        monkeypatch.setattr(opt, "get_settings", _settings)
         scheduler = AsyncIOScheduler(timezone="UTC")
         before = datetime.now(UTC)
         opt.schedule_operations_probe_tasks(scheduler)
