@@ -5739,6 +5739,17 @@
         ],
         "type": "object"
       },
+      "InspectionError": {
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
       "JobStatusV1": {
         "properties": {
           "consecutive_failures": {},
@@ -10342,6 +10353,22 @@
         ],
         "type": "object"
       },
+      "ResourceAccess": {
+        "properties": {
+          "context_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/ResourcePermissions"
+          }
+        },
+        "required": [
+          "context_id",
+          "permissions"
+        ],
+        "type": "object"
+      },
       "ResourceEventBatchRequest": {
         "properties": {
           "events": {
@@ -10789,6 +10816,21 @@
         "required": [
           "resources",
           "total"
+        ],
+        "type": "object"
+      },
+      "ResourcePermissions": {
+        "properties": {
+          "read": {
+            "type": "boolean"
+          },
+          "sync.manage": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "read",
+          "sync.manage"
         ],
         "type": "object"
       },
@@ -13350,6 +13392,41 @@
         ],
         "type": "object"
       },
+      "WorkspaceAccess": {
+        "properties": {
+          "resource": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResourceAccess"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "subject": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "workspace_permissions": {
+            "$ref": "#/components/schemas/WorkspacePermissions"
+          },
+          "workspace_role": {
+            "$ref": "#/components/schemas/WorkspaceRole"
+          }
+        },
+        "required": [
+          "resource",
+          "subject",
+          "workspace_id",
+          "workspace_permissions",
+          "workspace_role"
+        ],
+        "type": "object"
+      },
       "WorkspaceConnectorCreateRequest": {
         "properties": {
           "app_key": {
@@ -14061,6 +14138,36 @@
         ],
         "type": "object"
       },
+      "WorkspaceList": {
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "subject": {
+            "type": "string"
+          },
+          "workspaces": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "next_cursor",
+          "subject",
+          "workspaces"
+        ],
+        "type": "object"
+      },
       "WorkspaceMemberResponse": {
         "properties": {
           "allowed_context_ids": {
@@ -14160,6 +14267,21 @@
           "is_owner",
           "sub",
           "workspace_id"
+        ],
+        "type": "object"
+      },
+      "WorkspacePermissions": {
+        "properties": {
+          "billing.manage": {
+            "type": "boolean"
+          },
+          "usage.read": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "billing.manage",
+          "usage.read"
         ],
         "type": "object"
       },
@@ -14415,6 +14537,26 @@
         ],
         "type": "object"
       },
+      "WorkspaceSummary": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "workspace_role": {
+            "$ref": "#/components/schemas/WorkspaceRole"
+          }
+        },
+        "required": [
+          "name",
+          "workspace_id",
+          "workspace_role"
+        ],
+        "type": "object"
+      },
       "WorkspaceTotals": {
         "properties": {
           "active_users_week": {
@@ -14508,6 +14650,12 @@
           "hint"
         ],
         "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "OIDCIdentity": {
+        "scheme": "bearer",
+        "type": "http"
       }
     }
   },
@@ -25543,6 +25691,236 @@
         ]
       }
     },
+    "/api/v1/me/workspaces": {
+      "get": {
+        "operationId": "list_workspaces_api_v1_me_workspaces_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceList"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "account-access"
+        ]
+      }
+    },
+    "/api/v1/me/workspaces/{workspace_id}/access": {
+      "get": {
+        "operationId": "workspace_access_api_v1_me_workspaces__workspace_id__access_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceAccess"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectionError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "account-access"
+        ]
+      }
+    },
     "/api/v1/memory-health": {
       "get": {
         "operationId": "get_memory_health_api_v1_memory_health_get",
@@ -34270,6 +34648,9 @@
     }
   },
   "tags": [
+    {
+      "name": "account-access"
+    },
     {
       "name": "account-erasure"
     },

@@ -338,6 +338,7 @@ openapi_tags = [
         "description": "Isolated OpenID Connect provider for pre-registered confidential web clients",
     },
     {"name": "users", "description": "User profile and settings"},
+    {"name": "account-access", "description": "OIDC workspace membership and effective access"},
     {
         "name": "account-erasure",
         "description": (
@@ -914,6 +915,7 @@ from api.routes import (  # noqa: E402
     me_oauth,  # Issue #515: manual IdP refresh endpoint
     me_oauth_grants,  # Issue #2129: authorized OAuth apps and their default context
     me_terms,  # Issue #1665: terms-of-service re-acceptance
+    me_workspaces,  # #2793: identity-only membership and effective access inspection
     member_credentials,
     memory,
     memory_health,  # Issue #1211 / #2764: per-context memory-health report
@@ -960,6 +962,7 @@ app.include_router(users.router, prefix="/api/v1")
 
 # Account erasure self-service routes (Issue #360 - GDPR Art.17 / APPI compliance)
 app.include_router(me_account.router, prefix="/api/v1")
+app.include_router(me_workspaces.router, prefix="/api/v1")
 
 # Manual OAuth refresh endpoint (Issue #515 - manual IdP re-sync)
 app.include_router(me_oauth.router, prefix="/api/v1")

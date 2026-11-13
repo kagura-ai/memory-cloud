@@ -34,7 +34,17 @@ async def check_oidc_rate_limit(request: Request) -> Response | None:
     body, user ID or application-supplied client ID participates in the key.
     """
     path = request.url.path
-    if path not in _PATHS:
+    if path in _PATHS:
+        operation = path.rsplit("/", 1)[-1]
+    elif path == "/api/v1/me/workspaces":
+        operation = "workspace-list"
+    elif (
+        path.startswith("/api/v1/me/workspaces/")
+        and path.endswith("/access")
+        and len(path.split("/")) == 7
+    ):
+        operation = "workspace-access"
+    else:
         return None
     try:
         limit = get_settings().oidc_rate_limit_per_minute
@@ -43,7 +53,6 @@ async def check_oidc_rate_limit(request: Request) -> Response | None:
         peer = request.client.host if request.client else "unknown"
         peer_digest = hashlib.sha256(peer.encode("utf-8")).hexdigest()
         now = int(time.time())
-        operation = path.rsplit("/", 1)[-1]
         key = f"oidc_rate_limit:{operation}:{peer_digest}:{now // 60}"
         count = await increment_counter(key, ttl=60)
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
