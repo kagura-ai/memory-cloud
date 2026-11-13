@@ -21,7 +21,12 @@ from models.auth import Workspace, WorkspaceMember
 from services.capacity_lock import CapacityPolicy, capacity_lock_state
 from services.permission_service import PermissionService
 from services.plan_seats import context_writes_suspended
-from utils.exceptions import AuthorizationError, FeatureNotAvailableError, NotFoundException
+from utils.exceptions import (
+    AuthorizationError,
+    FeatureNotAvailableError,
+    NotFoundException,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,7 +47,7 @@ class IdentityInspectionRoute(APIRoute):
                 response = JSONResponse(
                     {"error": exc.detail}, status_code=exc.status_code, headers=exc.headers
                 )
-            except RequestValidationError:
+            except (RequestValidationError, ValidationError):
                 response = JSONResponse({"error": "invalid_request"}, status_code=400)
             except (AuthorizationError, NotFoundException, FeatureNotAvailableError):
                 response = JSONResponse({"error": "not_found"}, status_code=404)
@@ -130,7 +135,7 @@ class WorkspaceAccess(BaseModel):
 def _query(request: Request, allowed: set[str]) -> dict[str, str]:
     pairs = list(request.query_params.multi_items())
     if any(key not in allowed for key, _ in pairs) or len(dict(pairs)) != len(pairs):
-        raise HTTPException(400, "invalid_request")
+        raise ValidationError("Invalid inspection request")
     return dict(pairs)
 
 
@@ -182,7 +187,7 @@ async def workspace_access(
     )
     workspace = await db.get(Workspace, wid)
     if workspace is None:
-        raise HTTPException(404, "not_found")
+        raise NotFoundException("Workspace")
     resource = None
     if context_id is not None:
         context, role = await permissions.check_context_access(
