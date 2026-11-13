@@ -9,7 +9,9 @@ application approval or payment-method setup is not a paid-rights grant.
 
 `GET /internal/workspaces/{workspace_id}/integration-entitlements` reads current
 state; revision `0`, null metadata and an empty service list mean no snapshot
-has been received. A missing or deleted workspace returns 404.
+has been received. A missing or deleted workspace returns 404. The read holds
+the same Workspace row lock as a publisher until its response snapshot is
+assembled, preventing mixed revisions across its metadata and service rows.
 
 `PUT` at the same URL accepts the **complete workspace snapshot** below. Both
 routes require the existing `BILLING_SERVICE_TOKEN` Bearer credential. Missing

@@ -72,14 +72,14 @@ async def store(async_engine, monkeypatch):
             ]
         )
         await db.flush()
-        db.add(Resource(id=rid, workspace_id=wid, resource_id="catalog", created_by=uid))
+        db.add(Resource(id=rid, workspace_id=wid, resource_id=rid.hex, created_by=uid))
         db.add(
             Context(
                 id=cid,
                 workspace_id=wid,
                 name="catalog",
                 created_by=uid,
-                resource_id="catalog",
+                resource_id=rid.hex,
                 is_private=False,
                 is_public=True,
                 display_name="Original",
@@ -92,7 +92,7 @@ async def store(async_engine, monkeypatch):
                 workspace_id=wid,
                 context_id=cid,
                 resource_pk=rid,
-                resource_id="catalog",
+                resource_id=rid.hex,
                 public_name="Catalog",
                 created_by=uid,
             )
@@ -346,6 +346,55 @@ async def wait_blocked(factory, pid):
                 return
         await asyncio.sleep(0.01)
     pytest.fail("Expected PostgreSQL row lock wait was not observed")
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+async def test_reconciliation_read_is_atomic_with_concurrent_publish(
+    store, monkeypatch, initialized
+):
+    if initialized:
+        await apply(store, snapshot())
+    loaded, finish, pids = asyncio.Event(), asyncio.Event(), asyncio.Queue()
+    original_state = service._state
+
+    async with store.factory() as reader:
+
+        async def pause_after_state(db, workspace_id):
+            state = await original_state(db, workspace_id)
+            if db is reader:
+                loaded.set()
+                await finish.wait()
+            return state
+
+        monkeypatch.setattr(service, "_state", pause_after_state)
+
+        async def publish():
+            async with store.factory() as db:
+                await pids.put(await db.scalar(text("SELECT pg_backend_pid()")))
+                body = snapshot(2, services=[]) if initialized else snapshot()
+                await service.apply_integration_entitlements(
+                    db, store.wid, IntegrationEntitlementPush.model_validate(body)
+                )
+                await db.commit()
+
+        read_task = asyncio.create_task(service.read_integration_entitlements(reader, store.wid))
+        publish_task = None
+        try:
+            await asyncio.wait_for(loaded.wait(), 5)
+            publish_task = asyncio.create_task(publish())
+            await wait_blocked(store.factory, await asyncio.wait_for(pids.get(), 5))
+            finish.set()
+            view = await asyncio.wait_for(read_task, 5)
+            assert view.revision == int(initialized)
+            assert bool(view.max_access) == initialized and bool(view.services) == initialized
+            await reader.commit()
+            await asyncio.wait_for(publish_task, 5)
+        finally:
+            finish.set()
+            for task in [read_task, publish_task]:
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_committing_writer_and_revocation_have_a_serialized_boundary(store):

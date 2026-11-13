@@ -69,8 +69,12 @@ def _max_window(state: WorkspaceIntegrationState) -> EntitlementWindow | None:
 async def read_integration_entitlements(
     db: AsyncSession, workspace_id: UUID
 ) -> IntegrationEntitlementView:
-    """Read persisted rights for reconciliation; no cache and no implicit grant."""
-    workspace = await _workspace(db, workspace_id, lock=False)
+    """Read one coherent snapshot under the publisher's workspace lock.
+
+    Keep the transaction open until the view has been assembled. Separate
+    SELECTs under READ COMMITTED otherwise mix revisions across a publish.
+    """
+    workspace = await _workspace(db, workspace_id, lock=True)
     if workspace is None or workspace.deleted_at is not None:
         raise NotFoundException("Workspace")
     state = await _state(db, workspace_id)
