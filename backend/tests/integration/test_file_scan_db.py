@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
 from models.auth import Context, Workspace, WorkspaceMember
-from models.file_objects import SCAN_STATUSES, FileObject
+from models.file_objects import SCAN_LEGACY_REQUEUED, SCAN_STATUSES, FileObject
 from services import file_scan_service as scan_svc
 from services.file_storage_service import FileStorageService
 from tests.services._fake_clamd import EICAR, running_fake_clamd
@@ -160,9 +160,18 @@ async def world(db_session: AsyncSession, async_engine):
     await db_session.commit()
 
 
-async def _file(world: dict[str, Any], scan_status: str, *, data: bytes = b"%PDF-1") -> FileObject:
-    """A committed uploaded row in the private context, its object in the fake storage."""
-    sha = uuid.uuid4().hex * 2
+async def _file(
+    world: dict[str, Any],
+    scan_status: str,
+    *,
+    data: bytes = b"%PDF-1",
+    matching_digest: bool = False,
+) -> FileObject:
+    """A committed uploaded row in the private context, its object in the fake storage.
+
+    The stored bytes do not match the row's sha256 unless ``matching_digest``.
+    """
+    sha = hashlib.sha256(data).hexdigest() if matching_digest else uuid.uuid4().hex * 2
     key = f"{world['ws']}/{sha[:2]}/{sha}"
     await world["storage"].write_object(key, data, "application/pdf", "etag-1")
     world["storage"].last_modified[key] = SCANNED_AT
@@ -453,7 +462,9 @@ async def test_restore_over_a_cancelled_reservation_brings_a_clean_row_back_pend
     assert await _via_rest(world, file_id, OWNER) == "pending"
 
 
-async def _scan_now(world: dict[str, Any], file_id: uuid.UUID) -> str | None:
+async def _scan_now(
+    world: dict[str, Any], file_id: uuid.UUID, *, backfill: bool = False
+) -> str | None:
     """Make the row due, then claim -> fake clamd -> record, as the sweeper does."""
     async with running_fake_clamd() as (_, port):
         settings = get_settings().model_copy(update={"clamd_host": "127.0.0.1", "clamd_port": port})
@@ -465,7 +476,9 @@ async def _scan_now(world: dict[str, Any], file_id: uuid.UUID) -> str | None:
                 ),
                 {"f": str(file_id)},
             )
-            claim = await scan_svc.claim_scan(s, now=utcnow(), settings=settings, file_id=file_id)
+            claim = await scan_svc.claim_scan(
+                s, now=utcnow(), settings=settings, file_id=file_id, backfill=backfill
+            )
             await s.commit()
             assert claim is not None
             result = await scan_svc.scan_claimed(claim, storage=world["storage"], settings=settings)
@@ -479,6 +492,8 @@ async def _scan_now(world: dict[str, Any], file_id: uuid.UUID) -> str | None:
 async def _delete_and_restore_context(world: dict[str, Any], *, between=None) -> int:
     """Delete the private context (its files go with it), run ``between``, restore it."""
     db: AsyncSession = world["db"]
+    # A scan wrote through another session: read the rows as committed.
+    db.expire_all()
     ctx = (await db.execute(select(Context).where(Context.id == world["ctx"]))).scalar_one()
     ctx.deleted_at = utcnow()
     await FileStorageService(db).purge_live_context_files([ctx.id], deleted_at=ctx.deleted_at)
@@ -547,8 +562,41 @@ async def test_restore_keeps_the_legacy_digest_rule_for_a_requeued_unscanned_row
 
     assert await _scan_now(world, row.id) == "clean"
     restored = await _reload(world, row.id)
-    assert (restored.scan_status, restored.scan_error) == ("clean", None)
+    # The digest still does not match: the clean verdict keeps the legacy marker.
+    assert (restored.scan_status, restored.scan_error) == ("clean", SCAN_LEGACY_REQUEUED)
     assert await _via_rest(world, row.id, OWNER) == "url"
+
+
+async def test_restore_keeps_the_legacy_digest_rule_for_a_file_the_backfill_passed(world, scanning):
+    row = await _file(world, "unscanned")
+    assert await _scan_now(world, row.id, backfill=True) == "clean"
+    scanned = await _reload(world, row.id)
+    assert (scanned.scan_status, scanned.scan_error) == ("clean", SCAN_LEGACY_REQUEUED)
+    assert await _via_rest(world, row.id, OWNER) == "url"
+
+    assert await _delete_and_restore_context(world) == 1
+    requeued = await _reload(world, row.id)
+    assert (requeued.scan_status, requeued.scan_error) == ("pending", SCAN_LEGACY_REQUEUED)
+    assert await _scan_now(world, row.id) == "clean"
+    assert await _via_rest(world, row.id, OWNER) == "url"
+
+
+async def test_a_legacy_file_whose_digest_matched_is_held_to_it_after_a_restore(world, scanning):
+    data = b"%PDF-1 legacy"
+    row = await _file(world, "unscanned", data=data, matching_digest=True)
+    assert await _scan_now(world, row.id, backfill=True) == "clean"
+    assert (await _reload(world, row.id)).scan_error is None
+
+    async def other_bytes_while_deleted() -> None:
+        await world["storage"].write_object(
+            row.storage_key, b"%PDF-1 OTHER!", "application/pdf", "e2"
+        )
+
+    assert await _delete_and_restore_context(world, between=other_bytes_while_deleted) == 1
+    requeued = await _reload(world, row.id)
+    assert (requeued.scan_status, requeued.scan_error) == ("pending", None)
+    assert await _scan_now(world, row.id) == "error"
+    assert (await _reload(world, row.id)).scan_error == "digest_mismatch"
 
 
 async def test_a_requeued_pending_row_keeps_the_legacy_digest_rule_across_a_second_restore(

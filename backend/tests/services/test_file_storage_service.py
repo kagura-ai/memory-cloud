@@ -1729,6 +1729,21 @@ class TestRestoreScanState:
             assert files[state].scan_attempts == 2
 
     @pytest.mark.asyncio
+    async def test_a_clean_legacy_row_keeps_the_legacy_digest_rule(
+        self, service, db, workspace_id, scan_settings
+    ):
+        """The backfill passed it although its digest never matched: still legacy."""
+        legacy = _make_file_object(workspace_id, status="uploaded")
+        legacy.scan_status = "clean"
+        legacy.scan_error = SCAN_LEGACY_REQUEUED
+        verified = _make_file_object(workspace_id, status="uploaded")
+        verified.scan_status = "clean"
+        verified.scan_error = None
+        await self._restore(service, db, workspace_id, [legacy, verified])
+        assert (legacy.scan_status, legacy.scan_error) == ("pending", SCAN_LEGACY_REQUEUED)
+        assert (verified.scan_status, verified.scan_error) == ("pending", None)
+
+    @pytest.mark.asyncio
     async def test_clean_rows_become_unscanned_with_scanning_off(
         self, service, db, workspace_id, scan_settings, monkeypatch
     ):

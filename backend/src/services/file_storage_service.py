@@ -1294,8 +1294,10 @@ class FileStorageService:
         While it was deleted its content key was free for another reservation,
         whose PUT may have replaced the bytes. With scanning on a ``clean``,
         ``unscanned`` or ``pending`` row is ``pending`` again (attempts reset,
-        due after a full PUT window from now); a row that was legacy
-        (``unscanned``) keeps the legacy digest rule through that scan. With
+        due after a full PUT window from now); a legacy row (``unscanned``, or
+        one carrying :data:`SCAN_LEGACY_REQUEUED`: requeued earlier, or passed by
+        the backfill although its digest does not match) keeps the legacy digest
+        rule through that scan. With
         scanning off only a ``clean`` row changes: it becomes ``unscanned``
         (the backfill takes it once scanning is on). ``infected`` and
         ``error`` rows stay as they are.
@@ -1307,9 +1309,7 @@ class FileStorageService:
         for file in files:
             file.deleted_at = None
             if file.scan_status in requeue:
-                legacy = file.scan_status == "unscanned" or (
-                    file.scan_status == "pending" and file.scan_error == SCAN_LEGACY_REQUEUED
-                )
+                legacy = file.scan_status == "unscanned" or file.scan_error == SCAN_LEGACY_REQUEUED
                 _forget_clean_verdict(file, now=now, settings=settings)
                 if legacy:
                     file.scan_error = SCAN_LEGACY_REQUEUED

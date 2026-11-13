@@ -2224,9 +2224,11 @@ Other changes while scanning is on:
   `pending` files back to `pending`, due after a full upload window from the
   restore: while the context was deleted its content key could be reserved
   again and, without checksum binding, receive other bytes. A file that was
-  `unscanned` keeps the backfill's digest rule through that scan (a digest
-  mismatch is logged, not blocked); any other cause that stops the scan makes
-  it `error`, as for a new upload. `infected` and `error` files stay as they
+  `unscanned`, or that the backfill passed although its stored bytes do not
+  match its SHA-256 (`clean` with `scan_error` `legacy_requeued`), keeps the
+  backfill's digest rule through that scan (a digest mismatch is logged, not
+  blocked); any other cause that stops the scan makes it `error`, as for a
+  new upload. `infected` and `error` files stay as they
   are. With scanning off only `clean` files change, to `unscanned`.
 
 ### How long a new upload is held
@@ -2317,7 +2319,9 @@ object, size limit, an unscannable result, or the attempt limit) it stays
 `unscanned` and downloadable with `scan_error` recorded, and drops out of the
 backfill. A digest mismatch on such a file is logged
 (`file_scan_digest_mismatch`), not blocked, since its digest was never
-verified at upload.
+verified at upload; a file that passes the scan with a mismatch keeps
+`scan_error` `legacy_requeued` (`clean`), so a later context restore scans it
+under the same rule. An operator rescan (`rescan --file`) clears it.
 
 ### Running clamd
 

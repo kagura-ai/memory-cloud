@@ -142,6 +142,8 @@ class ScanResult:
     last_modified: datetime | None = None
     #: Short reason for logs (an exception class name), never clamd text.
     reason: str | None = None
+    #: ``clean`` for a legacy row whose stored bytes do not match its sha256.
+    legacy_mismatch: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +248,9 @@ def scan_outcome(
             "scan_signature": result.signature if result.kind == "infected" else None,
             "scan_etag": result.etag,
             "scan_last_modified": result.last_modified,
-            "scan_error": None,
+            # A legacy file passed although its digest does not match: the row
+            # keeps the marker, so a later restore still scans it as legacy.
+            "scan_error": SCAN_LEGACY_REQUEUED if result.legacy_mismatch else None,
             "scan_lease_until": None,
             "scan_next_attempt_at": None,
         }
@@ -366,7 +370,8 @@ async def scan_claimed(
     A new upload whose stored bytes do not match its sha256 is
     ``digest_mismatch`` (blocked); for a legacy row (the backfill, or one a
     context restore requeued) the verdict stands and the mismatch is only
-    logged (its digest was never verified).
+    logged (its digest was never verified); a ``clean`` verdict then says so
+    (``legacy_mismatch``) and the row keeps the legacy marker.
     """
     digest = hashlib.sha256()
     opened_at_all = False
@@ -422,6 +427,7 @@ async def scan_claimed(
         )
         if not claim.digest_unverified:
             return ScanResult("digest_mismatch")
+        return ScanResult("clean", None, etag, last_modified, legacy_mismatch=True)
     return ScanResult("clean", None, etag, last_modified)
 
 
@@ -486,7 +492,8 @@ async def requeue_changed_object(
     """A ``clean`` file whose object changed goes back to ``pending``; the caller commits.
 
     Fenced on the recorded ETag so two downloads racing on the same change
-    requeue it once. The next attempt follows the PUT-window rule counted from
+    requeue it once. ``scan_error`` is left as it is: a legacy file's marker
+    goes with it into the scan. The next attempt follows the PUT-window rule counted from
     ``now`` (a PUT URL minted up to now may still be live).
     """
     written = cast(

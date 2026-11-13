@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import re
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,7 +20,7 @@ from uuid import uuid4
 import pytest
 
 from config.settings import Settings
-from models.file_objects import SCAN_ERRORS, SCAN_STATUSES, FileObject
+from models.file_objects import SCAN_ERRORS, SCAN_LEGACY_REQUEUED, SCAN_STATUSES, FileObject
 from services import file_scan_service as svc
 from services.clamd_client import ClamdUnavailable
 from services.file_scan_service import (
@@ -287,6 +288,33 @@ class TestScanClaimed:
         async with running_fake_clamd() as (_, port):
             result = await _scan(storage, claim, port)
         assert result.kind == "clean"
+
+    @pytest.mark.parametrize("legacy", ["backfill", "requeued"])
+    async def test_a_legacy_mismatch_stays_on_the_clean_verdict(self, legacy):
+        """A later restore must still see that this file's digest never matched."""
+        if legacy == "backfill":
+            claim = _claim(b"hello", status="unscanned")
+        else:
+            claim = replace(_claim(b"hello"), legacy_requeued=True)
+        storage = await _stored(b"HELLO", claim)
+        async with running_fake_clamd() as (_, port):
+            result = await _scan(storage, claim, port)
+        state, values = svc.scan_outcome(claim, result, now=NOW, settings=_settings())
+        assert state == "clean"
+        assert values["scan_error"] == SCAN_LEGACY_REQUEUED
+
+    @pytest.mark.parametrize("legacy", ["backfill", "requeued"])
+    async def test_a_legacy_file_whose_digest_matches_is_verified_from_then_on(self, legacy):
+        if legacy == "backfill":
+            claim = _claim(b"hello", status="unscanned")
+        else:
+            claim = replace(_claim(b"hello"), legacy_requeued=True)
+        storage = await _stored(b"hello", claim)
+        async with running_fake_clamd() as (_, port):
+            result = await _scan(storage, claim, port)
+        state, values = svc.scan_outcome(claim, result, now=NOW, settings=_settings())
+        assert state == "clean"
+        assert values["scan_error"] is None
 
     async def test_limit_finding_is_unscannable(self):
         claim = _claim()

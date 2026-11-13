@@ -44,10 +44,11 @@ from db.base import Base
 SCAN_STATUSES = ("unscanned", "pending", "clean", "infected", "error")
 #: Why a file is ``error`` (or why the backfill gave up on an ``unscanned`` one).
 SCAN_ERRORS = ("object_missing", "digest_mismatch", "size_limit", "unscannable", "scan_failed")
-#: ``scan_error`` of a ``pending`` row that was ``unscanned`` (legacy) before a
-#: context restore sent it back to the scan: its stored bytes were never checked
-#: against its sha256, so a digest mismatch does not block it. Cleared with the
-#: verdict.
+#: ``scan_error`` of a legacy row (confirmed while scanning was off, or before it
+#: existed) whose stored bytes were never verified against its sha256: a
+#: ``pending`` row a context restore sent back to the scan, or a ``clean`` row
+#: whose scan found the digest different. A digest mismatch does not block it.
+#: A verdict whose digest matches clears it; the operator rescan clears it too.
 SCAN_LEGACY_REQUEUED = "legacy_requeued"
 
 
