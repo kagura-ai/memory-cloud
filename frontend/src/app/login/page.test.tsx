@@ -1330,3 +1330,14 @@ describe("LoginPage waits for /system/info before signing in (#1665)", () => {
     await waitFor(() => expect(google).not.toBeDisabled());
   });
 });
+
+describe("start-again copy (#2791)", () => {
+  it("names the entry points with the catalog's own terms", () => {
+    expect(en.login.oauthOtherBrowser).toMatch(/invite link/);
+    expect(en.login.oauthOtherBrowser).toMatch(/device authorization/);
+    expect(en.login.oauthOtherBrowser).not.toMatch(/device link/);
+    expect(ja.login.oauthOtherBrowser).toMatch(/招待リンク/);
+    expect(ja.login.oauthOtherBrowser).toMatch(/デバイス認証/);
+    expect(ja.login.oauthOtherBrowser).not.toMatch(/デバイスのリンク/);
+  });
+});
