@@ -570,14 +570,15 @@ async def _seed_backlogs(db: AsyncSession) -> tuple[str, Workspace, Context, dic
         )
     )
     db.add(UserKnownDevice(user_id=owner, device_hash="d" * 64, last_seen=OLD))
-    # Upload malware scan (#565): one live row in every scan state, plus rows
-    # no scan backlog counts (not yet due, deleted, clean).
+    # Upload malware scan (#565): live rows in every scan state, a different
+    # number per state so a reader that counts the wrong state is caught, plus
+    # rows no scan backlog counts (not yet due, deleted, clean).
     future = datetime(2999, 1, 1)
 
-    def _scanned(sha: str, scan_status: str, **values: Any) -> FileObject:
+    def _scanned(scan_status: str, **values: Any) -> FileObject:
         return FileObject(
             workspace_id=ws.id,
-            sha256=sha * 64,
+            sha256=uuid4().hex + uuid4().hex,
             size_bytes=1,
             content_type="text/plain",
             filename="seed.txt",
@@ -591,13 +592,17 @@ async def _seed_backlogs(db: AsyncSession) -> tuple[str, Workspace, Context, dic
 
     db.add_all(
         [
-            _scanned("c", "unscanned"),
-            _scanned("d", "pending", scan_next_attempt_at=OLD),
-            _scanned("e", "pending", scan_next_attempt_at=future),
-            _scanned("f", "clean", scanned_at=OLD, scan_etag="etag-seed"),
-            _scanned("1", "infected", scanned_at=OLD, scan_signature=SEED_SIGNATURE),
-            _scanned("2", "error", scanned_at=OLD, scan_error="scan_failed"),
-            _scanned("3", "infected", scanned_at=OLD, deleted_at=OLD),
+            _scanned("unscanned"),
+            *(_scanned("pending", scan_next_attempt_at=OLD) for _ in range(2)),
+            _scanned("pending", scan_next_attempt_at=future),
+            _scanned("clean", scanned_at=OLD, scan_etag="etag-seed"),
+            *(_scanned("error", scanned_at=OLD, scan_error="scan_failed") for _ in range(3)),
+            *(
+                _scanned("infected", scanned_at=OLD, scan_signature=SEED_SIGNATURE)
+                for _ in range(4)
+            ),
+            _scanned("infected", scanned_at=OLD, deleted_at=OLD),
+            _scanned("error", scanned_at=OLD, scan_error="scan_failed", deleted_at=OLD),
         ]
     )
     await db.flush()
@@ -616,13 +621,13 @@ async def _seed_backlogs(db: AsyncSession) -> tuple[str, Workspace, Context, dic
         "force_transfer_requests_pending": 1,
         "storage_object_deletions_due": 1,
         "file_reservations_expired": 1,
-        "file_soft_deleted_due": 2,  # the GC row and the deleted infected one
+        "file_soft_deleted_due": 3,  # the GC row and the deleted infected and error ones
         "email_action_tokens_spent": 1,
         "email_signup_requests_expired": 1,
         "known_devices_stale": 1,
-        "files_awaiting_scan": 1,
-        "files_scan_failed": 1,
-        "files_quarantined": 1,
+        "files_awaiting_scan": 2,
+        "files_scan_failed": 3,
+        "files_quarantined": 4,
         "files_unscanned": 1,
     }
     return owner, ws, ctx, expected
