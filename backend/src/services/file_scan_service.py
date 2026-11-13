@@ -566,11 +566,19 @@ def _notify_uploader(claim: ClaimedScan) -> None:
     """Tell the uploader that a file of theirs was blocked (owner decision: email + UI).
 
     Rows the attachment migration wrote have no uploader account. The email
-    itself (its own generic text, no filename) is sent by the notification
-    service through this hook.
+    has its own generic text (no filename, finding name or link), goes to the
+    account's verified address only, and is coalesced per account by the
+    notification service. Called only after an ``infected`` result committed;
+    never raises.
     """
     if claim.created_by.startswith(_MIGRATED_ATTACHMENT_PREFIX):
         return
+    from services.security_notification_service import (
+        SecurityEvent,
+        spawn_security_notification,
+    )
+
+    spawn_security_notification(user_id=claim.created_by, event=SecurityEvent.FILE_BLOCKED)
 
 
 async def _scan_and_record(claim: ClaimedScan, storage: BlobReaderProtocol) -> ScanResult:

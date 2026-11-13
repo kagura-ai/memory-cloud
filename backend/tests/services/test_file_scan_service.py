@@ -784,3 +784,35 @@ class TestLifespanStopsScans:
             < awaited.index("close_blob_storage")
             < awaited.index("close_db")
         )
+
+
+class TestNotifyUploader:
+    """Owner decision (W1 override): the uploader of an infected file gets an email."""
+
+    def test_infected_upload_mails_its_uploader(self):
+        from services.security_notification_service import SecurityEvent
+
+        with patch("services.security_notification_service.spawn_security_notification") as spawn:
+            svc._notify_uploader(_claim(created_by="user-7"))
+        spawn.assert_called_once_with(user_id="user-7", event=SecurityEvent.FILE_BLOCKED)
+
+    def test_migrated_attachment_has_no_uploader_to_mail(self):
+        with patch("services.security_notification_service.spawn_security_notification") as spawn:
+            svc._notify_uploader(_claim(created_by="migration:attachment:user-7"))
+        spawn.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("kind", "mailed"),
+        [("infected", True), ("unscannable", False), ("object_missing", False), ("clean", False)],
+    )
+    async def test_only_an_infected_result_mails(self, kind, mailed):
+        state = {"infected": "infected", "clean": "clean"}.get(kind, "error")
+        with (
+            patch.object(svc, "get_settings", return_value=_settings()),
+            patch.object(svc, "scan_claimed", AsyncMock(return_value=ScanResult(kind))),
+            patch.object(svc, "_in_session", AsyncMock(return_value=state)),
+            patch.object(svc, "_notify_uploader") as notify,
+        ):
+            await svc._scan_and_record(_claim(), MagicMock())
+        assert notify.called is mailed

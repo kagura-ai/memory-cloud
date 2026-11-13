@@ -218,6 +218,9 @@ class SecurityEvent(StrEnum):
     RECOVERY_CODES_REPLACED = "recovery_codes_replaced"
     MFA_ENABLED = "mfa_enabled"
     MFA_DISABLED = "mfa_disabled"
+    # #565: the malware scan blocked a file the account uploaded. Not an
+    # account change: it has its own text (render_security_notification).
+    FILE_BLOCKED = "file_blocked"
 
 
 # The label of the sign-in method line, per event.
@@ -355,6 +358,11 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
         "Repeated sign-in failures, at least one of them a wrong two-factor "
         "verification code after a correct password, paused sign-in to your account "
         "for a few minutes.",
+    ),
+    # #565: generic on purpose — no filename, finding name or link.
+    SecurityEvent.FILE_BLOCKED: (
+        "A file you uploaded was blocked by the malware scan",
+        "A file you uploaded was blocked by the malware scan.",
     ),
 }
 
@@ -562,6 +570,8 @@ def render_security_notification(
     subject, description = _EVENT_TEXT[event]
     count = max(total or 0, len(occurrences))
     listed = occurrences[:_DIGEST_MAX_OCCURRENCES]
+    if event == SecurityEvent.FILE_BLOCKED:
+        return _render_file_blocked(subject, listed, count, digest, window_minutes)
 
     if event in _SIGN_IN_EVENTS:
         what = "sign-in"
@@ -685,6 +695,50 @@ def render_security_notification(
         "You receive this notice for every security-sensitive change to your",
         "account and every sign-in from an unrecognized device; it cannot be",
         "turned off.",
+    ]
+    return subject, "\n".join(lines) + "\n"
+
+
+def _render_file_blocked(
+    subject: str,
+    listed: list[SecurityOccurrence],
+    count: int,
+    digest: bool,
+    window_minutes: int,
+) -> tuple[str, str]:
+    """The notice for a file the malware scan blocked (#565).
+
+    Its own text, not the account-security one: the scan ran on the server,
+    so there is no IP address or device to show and nothing to "secure"; no
+    filename, finding name or link is included.
+    """
+    times = "time" if count == 1 else "times"
+    lines: list[str]
+    if digest:
+        subject = f"{subject} ({count} more {times})"
+        files = "file" if count == 1 else "files"
+        lines = [
+            "This is a follow-up to the notice we sent you a few minutes ago.",
+            f"Since then the malware scan blocked {count} more {files} you uploaded,",
+            f"within {window_minutes} minutes of the first:",
+        ]
+    else:
+        lines = [
+            "A file you uploaded to a workspace was blocked by the malware scan and",
+            "cannot be downloaded.",
+        ]
+    lines.append("")
+    for occurrence in listed:
+        lines.append(f"    When:        {occurrence.occurred_at}")
+    if count > len(listed):
+        lines.append(f"    ... and {count - len(listed)} more.")
+    days = get_settings().file_quarantine_retention_days
+    lines += [
+        "",
+        "Open Storage in the workspace to see it; it is removed automatically",
+        f"after {days} {'day' if days == 1 else 'days'}. You can delete it now.",
+        "",
+        "We never ask for your password or keys by email.",
     ]
     return subject, "\n".join(lines) + "\n"
 

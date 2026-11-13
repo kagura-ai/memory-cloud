@@ -108,6 +108,14 @@ class FileObjectOut(TZAwareBaseModel):
     size_bytes: int
     sha256: str
     status: str
+    scan_status: str = Field(
+        description=(
+            "Malware scan state (#565): `unscanned` (uploaded while scanning was "
+            "off; downloadable), `pending` (being scanned; the download URL answers "
+            "409 `SCAN-001` until it finishes), `clean`, `infected` or `error` "
+            "(blocked: 409 `SCAN-002`)."
+        ),
+    )
     created_at: datetime
     uploaded_at: datetime | None = None
 
@@ -177,9 +185,10 @@ async def _enforce_workspace_membership(
             "description": (
                 "The workspace already holds an active file with this sha256 "
                 "(`RES-002`). When that file is in the same context as the request "
-                "(both unbound counts as the same) and its upload has completed "
-                "(`status` `uploaded`), the body also carries it as a top-level "
-                "`existing_file` object; otherwise it is omitted."
+                "(both unbound counts as the same), its upload has completed "
+                "(`status` `uploaded`) and the malware scan has not blocked it, the "
+                "body also carries it as a top-level `existing_file` object; "
+                "otherwise it is omitted."
             ),
         },
     },
@@ -249,7 +258,22 @@ async def confirm_upload(
     return FileObjectOut.model_validate(file)
 
 
-@router.get("/{file_id}/download-url", response_model=FileDownloadUrlOut)
+@router.get(
+    "/{file_id}/download-url",
+    response_model=FileDownloadUrlOut,
+    responses={
+        409: {
+            "description": (
+                "Upload malware scanning (#565) holds the file. `SCAN-001`: the scan "
+                "has not finished; retry after the `Retry-After` header (seconds). "
+                "`SCAN-002`: the scan blocked the file (`details.scan_status` "
+                "`infected` or `error`); it cannot be downloaded. `details.file_id` "
+                "names the file. Only callers who can read the file see these; "
+                "everyone else gets 404."
+            ),
+        },
+    },
+)
 async def get_download_url(
     file_id: UUID,
     user: APIKeyOrSessionUser,

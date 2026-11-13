@@ -42,12 +42,19 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from config.settings import get_settings
+from config.settings import Settings, get_settings
 from models.auth import Context, Workspace
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from models.memory import Attachment
 from services import storage_quota_service
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
+from services.file_scan_service import (
+    ensure_downloadable,
+    kick_file_scan,
+    object_matches_scan,
+    requeue_changed_object,
+    scan_eligible_at,
+)
 from services.permission_service import PermissionService
 from services.plan_seats import ensure_context_writable
 from storage.factory import get_blob_storage
@@ -57,6 +64,8 @@ from utils.exceptions import (
     AuthorizationError,
     ConflictError,
     DuplicateFileError,
+    FileBlockedError,
+    FileScanPendingError,
     NotFoundException,
     UnsupportedMediaTypeError,
     ValidationError,
@@ -111,6 +120,36 @@ class ContextFilesRestore:
 def context_files_past_restore_window(context: Context) -> bool:
     """True when the context was deleted :data:`FILE_RESTORE_WINDOW` or longer ago."""
     return context.deleted_at is not None and context.deleted_at <= utcnow() - FILE_RESTORE_WINDOW
+
+
+def _scan_blocked(file: FileObject) -> bool:
+    """Whether the download gate refuses ``file`` for good (#565, R10 / W3).
+
+    ``pending`` is not blocked: the scan is still running.
+    """
+    try:
+        ensure_downloadable(file, get_settings())
+    except FileBlockedError:
+        return True
+    except FileScanPendingError:
+        return False
+    return False
+
+
+def _forget_clean_verdict(file: FileObject, *, now: datetime, settings: Settings) -> None:
+    """Drop a ``clean`` verdict whose bytes may have changed (#565, R5 restore)."""
+    file.scan_attempts = 0
+    file.scan_lease_until = None
+    file.scanned_at = None
+    file.scan_error = None
+    if settings.file_scan_enabled:
+        file.scan_status = "pending"
+        file.scan_next_attempt_at = scan_eligible_at(
+            now=now, reservation_expires_at=None, server_written=False, settings=settings
+        )
+    else:
+        file.scan_status = "unscanned"
+        file.scan_next_attempt_at = None
 
 
 @dataclass(frozen=True)
@@ -263,7 +302,8 @@ class FileStorageService:
                 ``ConflictError``; carries that row as ``existing`` only when
                 it is in the same context as this upload (#1136) and is
                 ``uploaded`` — an unconfirmed ``reserved`` row is never
-                handed out as a file (#1693).
+                handed out as a file (#1693), nor one the malware scan
+                blocked (#565).
             NotFoundException: workspace (or a given ``context_id``) missing.
         """
         # Issue #1136 (authz-first): a context-bound upload requires WRITE access
@@ -297,8 +337,15 @@ class FileStorageService:
             raise ValidationError(msg)
         settings = get_settings()
         max_bytes = settings.file_object_max_size_mb * 1024 * 1024
+        # #565: with scanning on, nothing larger than clamd scans is accepted
+        # (a larger file could never become downloadable).
+        scan_capped = settings.file_scan_enabled and settings.clamd_stream_max_bytes < max_bytes
+        if scan_capped:
+            max_bytes = settings.clamd_stream_max_bytes
         if size_bytes <= 0 or size_bytes > max_bytes:
             msg = f"size_bytes must be in (0, {max_bytes}], got {size_bytes}"
+            if scan_capped:
+                msg += " (the largest file the malware scan checks)"
             raise ValidationError(msg)
         if len(sha256) != 64:
             msg = f"sha256 must be 64 hex chars, got {len(sha256)}"
@@ -471,7 +518,12 @@ class FileStorageService:
                     # checking its status, and a ``reserved`` row has no bytes
                     # behind it yet (an earlier PUT / confirm failed or is still
                     # running) — list_files does not show it either (#1693).
-                    if same_context_row.status == "uploaded":
+                    # #565: nor a file the malware scan blocked (a pending one
+                    # is: same bytes, and the download gate holds it). The
+                    # verdict is named only here, inside the caller's context.
+                    if same_context_row.status == "uploaded" and _scan_blocked(same_context_row):
+                        msg += "; an earlier upload of this file was blocked by the malware scan"
+                    elif same_context_row.status == "uploaded":
                         existing_row = same_context_row
                         msg += f"; reuse file_id={existing_row.id}"
                     else:
@@ -598,6 +650,18 @@ class FileStorageService:
 
         file.status = "uploaded"
         file.uploaded_at = utcnow()
+        settings = get_settings()
+        if settings.file_scan_enabled:
+            # #565: held until scanned. Eligibility is read from the
+            # reservation's PUT window before ``expires_at`` is cleared.
+            file.scan_status = "pending"
+            file.scan_attempts = 0
+            file.scan_next_attempt_at = scan_eligible_at(
+                now=file.uploaded_at,
+                reservation_expires_at=file.expires_at,
+                server_written=False,
+                settings=settings,
+            )
         file.expires_at = None  # uploaded rows are durable; expires_at is sweeper-only
 
         await self._upsert_workspace_usage(workspace_id, delta_bytes=file.size_bytes, delta_files=1)
@@ -610,6 +674,9 @@ class FileStorageService:
                 workspace_id=workspace_id,
                 size_bytes=truncation_refund,
             )
+        if settings.file_scan_enabled:
+            # After the commit; never raises, a no-op unless the file is due now.
+            kick_file_scan(file.id)
 
         logger.info(
             "file_upload_confirmed",
@@ -697,6 +764,12 @@ class FileStorageService:
         Raises ``NotFoundException`` for missing / deleted / not-yet-uploaded
         files (cross-workspace identity is not leaked).
 
+        #565: a file the malware scan holds raises ``FileScanPendingError``
+        (409 ``SCAN-001``) or ``FileBlockedError`` (409 ``SCAN-002``), only
+        after the access checks. With checksum binding off a ``clean`` file is
+        HEAD-compared with the scanned version first; a changed object goes
+        back to ``pending`` (committed here) and is refused.
+
         Issue #1136: a context-bound file requires **read** access to its
         context (VIEWER+ via the context ACL) — so a workspace viewer can no
         longer download files scoped to a context they cannot see. A NULL
@@ -724,6 +797,23 @@ class FileStorageService:
             raise NotFoundException("file", str(file_id))
 
         settings = get_settings()
+        # #565: after the access checks, so a caller who cannot read the file
+        # still gets the uniform 404 above. Allow-list: 409 SCAN-001 while the
+        # scan is pending, 409 SCAN-002 once the file is blocked.
+        ensure_downloadable(file, settings)
+        if (
+            settings.file_scan_enabled
+            and not settings.storage_checksum_binding_enabled
+            and file.scan_status == "clean"
+        ):
+            # Binding off: the verdict holds only for the version that was
+            # scanned. A HEAD failure propagates (502 / service_unavailable);
+            # no URL is minted for an unchecked object.
+            meta = await self._storage.head_object(file.storage_key or "")
+            if meta is None or not object_matches_scan(file, meta):
+                await requeue_changed_object(self.db, file, now=utcnow(), settings=settings)
+                await self.db.commit()
+                raise FileScanPendingError(str(file.id))
         return await self._storage.generate_presigned_get(
             key=file.storage_key or "",
             filename=file.filename,
@@ -852,6 +942,15 @@ class FileStorageService:
             created_at=now,
             uploaded_at=now,
         )
+        settings = get_settings()
+        if settings.file_scan_enabled:
+            # #565: the server wrote these bytes itself, so the file is due at
+            # once; the sweeper scans it (this runs in a migration script).
+            file.scan_status = "pending"
+            file.scan_attempts = 0
+            file.scan_next_attempt_at = scan_eligible_at(
+                now=now, reservation_expires_at=None, server_written=True, settings=settings
+            )
         self.db.add(file)
         await self.db.flush()
         await self._upsert_workspace_usage(workspace_id, delta_bytes=size_bytes, delta_files=1)
@@ -1190,10 +1289,20 @@ class FileStorageService:
         cleared and their bytes added back to ``workspace_storage_usage``.
         Does not commit; the caller bumps the Redis counter after its commit
         (``storage_quota_service.bump_committed_storage_bytes``).
+
+        #565 (R5): a restored ``clean`` row does not keep its verdict. While it
+        was deleted its content key was free for another reservation, whose
+        PUT may have replaced the bytes. With scanning on it is ``pending``
+        again (due after a full PUT window from now); with scanning off it is
+        ``unscanned`` (the backfill takes it once scanning is on).
         """
         files, outcome = await self._restorable_context_files(context, lock=True)
+        settings = get_settings()
+        now = utcnow()
         for file in files:
             file.deleted_at = None
+            if file.scan_status == "clean":
+                _forget_clean_verdict(file, now=now, settings=settings)
         if files:
             await self._upsert_workspace_usage(
                 context.workspace_id, delta_bytes=outcome.bytes_restored, delta_files=len(files)
