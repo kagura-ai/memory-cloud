@@ -59,6 +59,8 @@ Session-based authentication for the web management interface.
 
 The OAuth sign-in endpoints (`GET /api/v1/auth/{google,github}/login`) also take `locale` (`en` or `ja`, the sign-in page's language) and `timezone` (an IANA name such as `Asia/Tokyo`, the browser's time zone). Both are bound to the OAuth state like `accepted_terms`, and an account created by that sign-in starts with them instead of `en` / `UTC`. An existing account keeps its own settings, and an unsupported value is ignored. With `ANNOUNCEMENT_EMAILS_ENABLED` on they also take `announcement_emails` (`true` / `false`) and `announcement_consent_version`, the answer to the sign-up opt-in for announcement emails (Issue #2761) — see [Announcement-email consent](#announcement-email-consent).
 
+Both modes of these endpoints (a `303` to the provider with `return_to`, JSON `{authorization_url, state}` without) set an HttpOnly sign-in cookie, and the sign-in finishes only in the browser that holds it: the provider callback answers `/login?error=oauth_other_browser&provider=<p>` otherwise and creates nothing. A client of the JSON mode must open `authorization_url` with the cookie jar that received the response's `Set-Cookie`. The `redirect_uri` parameter of the Google endpoint is ignored; the configured `GOOGLE_REDIRECT_URI` is always used. See [deployment](deployment.md#a-google-or-github-sign-in-finishes-in-the-browser-that-started-it-issue-2791).
+
 ---
 
 ### Passkeys
@@ -142,8 +144,9 @@ the feature switched off records nothing). The request body never carries it.
 Public, `404` when `ENABLE_PROVIDER_LINK_CONFIRMATION=false` (see
 [deployment](deployment.md#connecting-github-to-an-email-account-by-email-issue-2786)).
 The emailed token and the browser nonce cookie set by
-`GET /api/v1/auth/{google,github}/login` are the credentials; send requests
-with cookies (`credentials: "include"`).
+`GET /api/v1/auth/{google,github}/login` (the same cookie every Google / GitHub
+sign-in needs to finish) are the credentials; send requests with cookies
+(`credentials: "include"`).
 
 | Method / path | Body | Answers |
 |---|---|---|
