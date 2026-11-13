@@ -190,9 +190,13 @@ async def record_mcp_notice_consent(
     """Record an answer (source ``settings``). Flushes; the caller commits.
 
     Serialised per user by a row lock on the ``users`` row, so two concurrent
-    changes cannot both read the same newest row. Appends only when the answer
-    changes ("the same": the same value and, for a "yes", the same wording
-    version). A withdrawal stores no wording version.
+    changes cannot both read the same newest row. The lock is ``FOR NO KEY
+    UPDATE``, the repository's lock for a ``users`` row before inserting rows
+    that reference it: it serialises two changes and waits on an erasure's
+    ``FOR UPDATE``, but not on the ``FOR KEY SHARE`` that any open insert of a
+    row referencing the user holds (a delivery claim, say). Appends only when
+    the answer changes ("the same": the same value and, for a "yes", the same
+    wording version). A withdrawal stores no wording version.
 
     Raises:
         ValueError: ``value`` is true without a ``wording_version``.
@@ -201,7 +205,7 @@ async def record_mcp_notice_consent(
     if value and not wording_version:
         raise ValueError("an opt-in must name the wording version the person saw")
     locked = await session.scalar(
-        select(User.user_id).where(User.user_id == user_id).with_for_update()
+        select(User.user_id).where(User.user_id == user_id).with_for_update(key_share=True)
     )
     if locked is None:
         raise NotFoundException("User", user_id)
@@ -451,7 +455,9 @@ async def withdraw_notice(
     (withdrawn, or expired on its own) is returned unchanged and writes no
     audit row, so an expired notice keeps saying it expired. Whether it has
     ended is decided once, on the locked row against the transaction's
-    ``now()``. Delivery stops at once: the claim re-checks ``withdrawn_at``.
+    ``now()``. Every claim that starts after the withdrawal commits skips the
+    notice (the claim re-checks ``withdrawn_at``); a claim already running
+    may still deliver it once, as may a reply already on its way.
 
     Raises:
         McpNoticeNotFoundError: 404 ``MCPNOTICE-004``.

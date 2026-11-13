@@ -293,6 +293,36 @@ async def test_consent_parallel_writers_append_one_row(db_session, make_users) -
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_consent_change_does_not_wait_on_a_row_that_references_the_user(
+    db_session, make_users
+) -> None:
+    """Recording an answer locks the ``users`` row FOR NO KEY UPDATE, the
+    repository's lock for a users row before inserting rows that reference
+    it: an open transaction holding FOR KEY SHARE on that row (what any insert
+    of a row with a foreign key to it holds, such as a delivery claim) does
+    not make the change wait, while two changes still serialise."""
+    nora = await make_users()
+
+    async with _maker(db_session)() as holder:
+        await holder.execute(
+            select(User.user_id)
+            .where(User.user_id == nora.user_id)
+            .with_for_update(read=True, key_share=True)
+        )
+        async with _maker(db_session)() as writer:
+            await writer.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            result = await svc.record_mcp_notice_consent(
+                writer, user_id=nora.user_id, value=True, wording_version=V
+            )
+            await writer.commit()
+        await holder.rollback()
+
+    assert result.recorded is True
+    current = await svc.current_mcp_notice_consent(db_session, nora.user_id)
+    assert current is not None and current.value is True
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_consents_never_cross_purposes(db_session, make_users) -> None:
     """A "yes" to notices is no announcement answer, and the other way round."""
     notices_only = await make_users()
