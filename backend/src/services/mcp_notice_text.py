@@ -31,16 +31,17 @@ d. Refused (``markup_char``): ``< > [ ] ` " \\ { } @`` (HTML, autolinks,
    digit or ``x``, ``&name;``, and ``&lt`` ``&gt`` ``&quot`` without the
    semicolon). A plain ``&`` (``Q&A``) passes.
 e. Refused (``link``), with U+3002, U+FF0E and U+FF61 read as ``.``: a
-   ``scheme:`` followed by ``//``; the schemes
-   ``mailto javascript data vbscript file tel sms``; ``www.``; host names
-   (``label.label`` ending in two or more ASCII letters, the labels in any
-   script: ``例え.jp``, ``пример.com``); a label in any script followed by an
+   ``scheme:`` followed by ``//``; ``//`` directly followed by anything but a
+   space (a protocol-relative link such as ``//localhost``, whatever the
+   host); the schemes ``mailto javascript data vbscript file tel sms``;
+   ``www.``; host names (``label.label`` ending in two or more ASCII letters,
+   the labels in any script: ``例え.jp``, ``пример.com``); a label in any script followed by an
    ASCII ``.`` and a top-level label of two or more letters in any script
    (``пример.рф``, ``例え.みんな``); any ``xn--`` label; IPv4 and IPv6
    literals. There is no exception for this server's own host: a notice
    carries no link at all. Accepted false positives such as ``README.md``,
-   ``Node.js``, ``Ver.アップ`` or a sentence that runs straight from ``。``
-   into Latin letters (「…しました。Kagura」): the writer rewords or puts a
+   ``Node.js``, ``Ver.アップ``, ``a//b`` or a sentence that runs straight from
+   ``。`` into Latin letters (「…しました。Kagura」): the writer rewords or puts a
    space after ``。``.
 f. 1 to 300 characters (``empty`` / ``too_long``) and at most 900 UTF-8 bytes
    (``too_many_bytes``) after normalisation.
@@ -149,6 +150,11 @@ _DOTS: Final = str.maketrans({"。": ".", "．": ".", "｡": "."})
 _LINK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     # scheme followed by // (spaces between tolerated)
     re.compile(r"[a-z][a-z0-9+.-]*: *//", re.ASCII),
+    # a protocol-relative start: "//" directly followed by anything but a
+    # space ("//localhost", "//a.b", "//例え"); renderers link these whatever
+    # the host, so no host rule below has to recognise it (rule a leaves
+    # U+0020 as the only space)
+    re.compile(r"//[^ ]"),
     # schemes that need no //
     re.compile(r"\b(?:mailto|javascript|data|vbscript|file|tel|sms):", re.ASCII),
     re.compile(r"www\.", re.ASCII),

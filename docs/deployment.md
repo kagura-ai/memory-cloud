@@ -998,8 +998,9 @@ curl -X POST https://example.com/api/v1/admin/mcp-notices/<notice-id>/withdraw \
   formatting character, an invisible character, one of
   `<` `>` `[` `]` `` ` `` `"` `\` `{` `}` `@`, an HTML character reference
   (`&#64;`, `&lt;`; a plain `&` as in `Q&A` passes), or anything a client
-  could show as a link: a URL, `mailto:` and the like, `www.`, a host name
-  in any script (including this server's own; `例え.jp` and `пример.рф`
+  could show as a link: a URL, `//` followed by anything but a space (a
+  protocol-relative link such as `//localhost`), `mailto:` and the like,
+  `www.`, a host name in any script (including this server's own; `例え.jp` and `пример.рф`
   too), an e-mail or IP address. The check also reads fullwidth forms and
   ignores combining marks placed inside a word. Names that look like host
   names are refused too — `README.md`, `Node.js`, `Ver.アップ`: reword them

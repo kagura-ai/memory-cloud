@@ -11,8 +11,8 @@ c. the Default_Ignorable_Code_Point set and U+2800 are refused; U+FE0F only
    more than two combining marks;
 d. ``< > [ ] ` " \\ { } @`` and HTML character references are refused (also
    their fullwidth forms);
-e. link schemes, ``www.``, host names in any script, ``xn--``, IPv4 and IPv6
-   literals;
+e. link schemes, a protocol-relative ``//`` start, ``www.``, host names in
+   any script, ``xn--``, IPv4 and IPv6 literals;
 
 d and e read the NFKC + casefold copy with every combining mark removed.
 f. 1-300 characters and at most 900 UTF-8 bytes.
@@ -273,6 +273,47 @@ class TestLinks:
 
         monkeypatch.setattr(get_settings(), "frontend_url", "https://example.com")
         assert _reason("go to example.com") == "link"
+
+
+class TestProtocolRelativeLinks:
+    """``//`` directly followed by anything but a space starts a
+    protocol-relative link (linkify-it's ``//`` schema), whatever the host:
+    ``localhost`` and single-letter or numeric top-level labels have no TLD
+    of two letters for the host rules to catch."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "see //localhost:8080/admin now",
+            "see //LOCALHOST:8080/x now",
+            "\uff0f\uff0f\uff4c\uff4f\uff43\uff41\uff4c\uff48\uff4f\uff53\uff54",
+            "//localhost",
+            "(//localhost)",
+            "see //intranet/page",
+            "see //a.b now",
+            "see //host.1 now",
+            "see //例え now",
+            "see //\u2603.x now",
+            "see ///localhost now",
+            "a//b",
+            "see /\u0332/localhost now",  # a mark between the slashes
+        ],
+    )
+    def test_refused(self, text: str) -> None:
+        assert _reason(text) == "link"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "and/or",
+            "read a / b",
+            "x // y",
+            "ends with //",
+            "2026/11/14",
+        ],
+    )
+    def test_slashes_without_a_host_pass(self, text: str) -> None:
+        assert normalize_notice_text(text) == text
 
 
 class TestMarkedLinks:
