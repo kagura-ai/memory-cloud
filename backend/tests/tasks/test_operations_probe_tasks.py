@@ -156,6 +156,27 @@ class TestProbeTask:
         counts = await opt.operations_probe_task()
         assert counts["record_failed"] == 3
 
+    async def test_a_failing_lane_leaves_the_health_check_ok(self, monkeypatch, wired) -> None:
+        """The probe's findings show on the operations page only: /health stays ok."""
+        import httpx
+
+        from api.main import app
+
+        async def _run(target, clients, settings, *, timeout):
+            return ProbeResult(target, False, 3, "APIConnectionError", datetime.now(UTC))
+
+        monkeypatch.setattr(probe, "run_probe", _run)
+        counts = await opt.operations_probe_task()
+        assert counts["failed"] == counts["targets"] == 3
+        assert all(not r.ok for r in wired)
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            for path in ("/health", "/api/v1/system/health"):
+                response = await client.get(path)
+                assert response.status_code == 200, path
+                assert response.json() == {"status": "ok"}, path
+
     async def test_top_level_failure_is_a_failed_run(self, monkeypatch) -> None:
         monkeypatch.setattr(llm_lanes, "read_platform_lanes", AsyncMock(side_effect=TimeoutError()))
         result = await opt.operations_probe_task()
