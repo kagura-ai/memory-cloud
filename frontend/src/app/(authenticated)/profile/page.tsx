@@ -48,6 +48,7 @@ import PasswordSettings from "@/components/auth/PasswordSettings";
 import { MfaSettings } from "@/components/auth/MfaSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
 import { AnnouncementEmailSettings } from "@/components/account/AnnouncementEmailSettings";
+import { McpNoticeSettings } from "@/components/account/McpNoticeSettings";
 import {
   getSignInMethodLabel,
   getProviderName,
@@ -61,6 +62,7 @@ const sections = [
   ["profile-password", "password"],
   ["profile-appearance", "appearance"],
   ["profile-emails", "emails"],
+  ["profile-mcp-notices", "mcpNotices"],
   ["profile-deletion", "deletion"],
 ] as const;
 
@@ -81,6 +83,8 @@ export default function ProfilePage() {
   // announcement emails (and the setting is off); its link and its section
   // landmark go with it, and nothing shows before the card is known to show.
   const [showEmails, setShowEmails] = useState(false);
+  // #2762: the same for the Notices in AI tools card (its own offer flag).
+  const [showMcpNotices, setShowMcpNotices] = useState(false);
   const [providersVersion, setProvidersVersion] = useState(0);
   // #1751: the linked OAuth providers, for the Sign-in method field and the
   // refresh-from-IdP block, tagged with the user they were read for. Until
@@ -310,6 +314,7 @@ export default function ProfilePage() {
         label={t("sections.label")}
         sections={sections
           .filter(([id]) => id !== "profile-emails" || showEmails)
+          .filter(([id]) => id !== "profile-mcp-notices" || showMcpNotices)
           .map(([id, key]) => ({ id, label: t(`sections.${key}`) }))}
       />
 
@@ -560,6 +565,10 @@ export default function ProfilePage() {
           hidden until it does: no empty landmark or skeleton on deployments
           that do not offer the emails. */}
       <section id="profile-emails" tabIndex={-1} aria-label={t("sections.emails")} hidden={!showEmails} className="scroll-mt-24"><AnnouncementEmailSettings key={`emails-${user?.id}`} onVisibilityChange={setShowEmails} /></section>
+
+      {/* Service notices in AI tools (Issue #2762): the person's own opt-in,
+          off by default. Mounted and hidden like the Emails card above. */}
+      <section id="profile-mcp-notices" tabIndex={-1} aria-label={t("sections.mcpNotices")} hidden={!showMcpNotices} className="scroll-mt-24"><McpNoticeSettings key={`mcp-notices-${user?.id}`} onVisibilityChange={setShowMcpNotices} /></section>
 
       {/* Danger zone: self-serve account & data deletion (Issue #953) */}
       <section id="profile-deletion" tabIndex={-1} aria-label={t("sections.deletion")} className="scroll-mt-24"><DeleteAccountSection /></section>
