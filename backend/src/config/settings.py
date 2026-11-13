@@ -2683,6 +2683,95 @@ class Settings(BaseSettings):
             )
         return self
 
+    # --- Upload malware scan (Issue #565) -----------------------------------
+    # Default off: with FILE_SCAN_ENABLED=false nothing about uploads or
+    # downloads changes. On: every confirmed upload is streamed to clamd and
+    # its download URL is refused until the scan says clean.
+    file_scan_enabled: bool = Field(
+        default=False,
+        description=(
+            "Scan uploaded files with clamd and hold their downloads until the "
+            "scan is done (Issue #565). Per process: enable it on every API "
+            "process (both colors) at once; the backfill scans what a process "
+            "with the switch still off confirmed meanwhile."
+        ),
+    )
+    clamd_host: str = Field(
+        default="clamav",
+        description=(
+            "clamd host. clamd's TCP protocol has no encryption or "
+            "authentication: same host or a private network only. clamd must "
+            "run with 'AlertExceedsMax yes', otherwise content past its limits "
+            "is reported clean without being scanned."
+        ),
+    )
+    clamd_port: int = Field(default=3310, ge=1, le=65535, description="clamd TCP port")
+    clamd_connect_timeout_seconds: float = Field(
+        default=5.0, gt=0, description="Seconds to wait for a connection to clamd"
+    )
+    clamd_scan_timeout_seconds: float = Field(
+        default=300.0, gt=0, description="Seconds one scan (stream + verdict) may take"
+    )
+    clamd_stream_max_bytes: int = Field(
+        default=100 * 1024 * 1024,
+        gt=0,
+        description=(
+            "Largest file streamed to clamd; keep it at or below clamd's "
+            "StreamMaxLength. With scanning on, uploads are capped at the "
+            "smaller of this and FILE_OBJECT_MAX_SIZE_MB."
+        ),
+    )
+    file_scan_concurrency: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Scans one API process runs at once. Total = processes x colors x "
+            "this; keep it below clamd's MaxThreads."
+        ),
+    )
+    file_scan_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Scans of one file that may fail after streaming started before the "
+            "file is marked 'error' (blocked, never deleted automatically). "
+            "Failures to reach clamd at all do not count."
+        ),
+    )
+    file_scan_backfill_batch: int = Field(
+        default=20,
+        ge=0,
+        description=(
+            "Files uploaded before scanning was on that one sweep tick may scan "
+            "after the queue of new uploads is empty; 0 turns the backfill off."
+        ),
+    )
+    file_quarantine_retention_days: int = Field(
+        default=7,
+        ge=1,
+        description=(
+            "Days an infected file stays listed as blocked before it takes the "
+            "normal deletion path. Files the scanner could not check are never "
+            "deleted automatically."
+        ),
+    )
+    file_scan_put_expiry_margin_seconds: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Without checksum binding a file is scanned only after its presigned "
+            "PUT URL has expired plus this margin. A host clock ahead of the "
+            "storage clock by more than this reopens the window: keep NTP."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_file_scan(self) -> "Settings":
+        """With scanning on, clamd must be named (Issue #565)."""
+        if self.file_scan_enabled and not self.clamd_host.strip():
+            raise ValueError("FILE_SCAN_ENABLED=true needs CLAMD_HOST")
+        return self
+
     @field_validator("resend_dpa_accepted_at", mode="before")
     @classmethod
     def _coerce_blank_dpa_to_none(cls, v: Any) -> Any:

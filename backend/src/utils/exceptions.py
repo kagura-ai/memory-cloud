@@ -625,6 +625,47 @@ class UnsupportedMediaTypeError(MemoryCloudException):
         )
 
 
+class FileScanPendingError(MemoryCloudException):
+    """The file has not been scanned for malware yet (409 ``SCAN-001``, #565).
+
+    Raised for a download URL while scanning is on and the file's scan is
+    still pending. ``Retry-After: 30``: the same request succeeds once the
+    scan says clean. Raised only after the access checks, so a caller who
+    cannot read the file still gets the uniform 404.
+    """
+
+    log_level = "warning"
+
+    def __init__(self, file_id: str) -> None:
+        super().__init__(
+            "This file is still being checked for malware. Try again shortly.",
+            status_code=409,
+            error_code="SCAN-001",
+            file_id=file_id,
+            scan_status="pending",
+        )
+        self.response_headers = {"Retry-After": "30"}
+
+
+class FileBlockedError(MemoryCloudException):
+    """The malware scan blocked the file; it is not downloadable (409 ``SCAN-002``, #565).
+
+    ``scan_status`` is ``infected`` (a finding) or ``error`` (the scanner could
+    not check the file). The finding's name is never part of the response.
+    """
+
+    log_level = "warning"
+
+    def __init__(self, file_id: str, scan_status: str) -> None:
+        super().__init__(
+            "This file cannot be downloaded: the malware scan blocked it.",
+            status_code=409,
+            error_code="SCAN-002",
+            file_id=file_id,
+            scan_status=scan_status,
+        )
+
+
 # Workspace Slot Bonus Errors (Issue #676 — admin slot bonus UI)
 
 

@@ -14,6 +14,7 @@ need not branch on backend.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import NotRequired, Protocol, TypedDict, runtime_checkable
 
@@ -117,3 +118,37 @@ class BlobInventoryProtocol(BlobStorageProtocol, Protocol):
     """Optional inventory surface for the operator orphan sweeper."""
 
     def iter_objects(self) -> AsyncIterator[StoredObject]: ...
+
+
+class OpenedObject(Protocol):
+    """One GetObject response being read (Issue #565).
+
+    ``etag``, ``size_bytes`` and ``last_modified`` describe the object version
+    whose bytes ``iter_chunks`` yields (the same response), so a verdict on
+    those bytes can be compared with a later ``head_object``.
+    ``last_modified`` is naive UTC, ``None`` when the backend sent none.
+    """
+
+    @property
+    def etag(self) -> str: ...
+
+    @property
+    def size_bytes(self) -> int: ...
+
+    @property
+    def last_modified(self) -> datetime | None: ...
+
+    def iter_chunks(self, chunk_size: int) -> AsyncIterator[bytes]: ...
+
+
+@runtime_checkable
+class BlobReaderProtocol(BlobStorageProtocol, Protocol):
+    """Optional read surface for the upload malware scan (Issue #565).
+
+    The scan is the first server-side reader of uploaded bytes. The context
+    manager yields ``None`` for a missing object and raises
+    ``ExternalServiceError`` for any other storage failure; the body is
+    released when the block exits. Implementations never log the key.
+    """
+
+    def open_object(self, key: str) -> AbstractAsyncContextManager[OpenedObject | None]: ...

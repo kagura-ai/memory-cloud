@@ -9,7 +9,26 @@ instead of the test file demonstrating the contract).
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime
+
 from storage.protocol import ObjectMetadata
+
+
+@dataclass(frozen=True)
+class FakeOpenedObject:
+    """``OpenedObject`` over bytes held in memory (#565)."""
+
+    data: bytes
+    etag: str
+    size_bytes: int
+    last_modified: datetime | None
+
+    async def iter_chunks(self, chunk_size: int) -> AsyncIterator[bytes]:
+        for start in range(0, len(self.data), chunk_size):
+            yield self.data[start : start + chunk_size]
 
 
 class FakeBlobStorage:
@@ -27,6 +46,26 @@ class FakeBlobStorage:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, str, str]] = {}
         self.head_size_override: int | None = None
+        #: #565: per-key LastModified reported by head/open (naive UTC).
+        self.last_modified: dict[str, datetime] = {}
+
+    @asynccontextmanager
+    async def open_object(self, key: str) -> AsyncIterator[FakeOpenedObject | None]:
+        """#565 reader surface: one consistent snapshot of the object.
+
+        The ETag is the one ``head_object`` reports (the ``sha256`` given to
+        ``write_object``), so a test can replace the bytes under the same ETag.
+        """
+        if key not in self.objects:
+            yield None
+            return
+        data, _, etag = self.objects[key]
+        yield FakeOpenedObject(
+            data=data,
+            etag=etag,
+            size_bytes=len(data),
+            last_modified=self.last_modified.get(key),
+        )
 
     async def write_object(self, key: str, data: bytes, content_type: str, sha256: str) -> None:
         self.objects[key] = (data, content_type, sha256)
@@ -37,7 +76,10 @@ class FakeBlobStorage:
         size = self.head_size_override
         if size is None:
             size = len(self.objects[key][0])
-        return {"size_bytes": size, "etag": self.objects[key][2]}
+        meta: ObjectMetadata = {"size_bytes": size, "etag": self.objects[key][2]}
+        if key in self.last_modified:
+            meta["last_modified"] = self.last_modified[key]
+        return meta
 
     async def delete_object(self, key: str) -> None:
         self.objects.pop(key, None)

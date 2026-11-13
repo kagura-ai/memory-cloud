@@ -1101,6 +1101,25 @@ class FileStorageService:
             context_count=len(set(context_ids)),
         )
 
+    async def purge_quarantined_files(self, *, cutoff: datetime, limit: int) -> FilesPurged:
+        """Soft-delete ``infected`` files whose verdict is older than ``cutoff`` (#565).
+
+        The malware-scan quarantine expiry: same per-status accounting as the
+        other purges (usage decremented here, Redis bytes returned for the
+        caller to release after its commit). ``error`` files (the scanner could
+        not check them) are never selected. At most ``limit`` rows, oldest id
+        first. Does not commit.
+        """
+        return await self._purge_live_rows(
+            (FileObject.scan_status == "infected")
+            & (FileObject.status == "uploaded")
+            & (FileObject.scanned_at <= cutoff),
+            None,
+            context_count=0,
+            limit=limit,
+            log_event="file_quarantine_purged",
+        )
+
     async def _purge_live_rows(
         self,
         where: ColumnElement[bool],
@@ -1108,6 +1127,7 @@ class FileStorageService:
         *,
         context_count: int,
         limit: int | None = None,
+        log_event: str = "context_bound_files_purged",
     ) -> FilesPurged:
         """Soft-delete the live rows matching ``where`` (see :meth:`purge_files_for_contexts`)."""
         # FOR UPDATE locks the rows we are about to cancel so a concurrent
@@ -1151,7 +1171,7 @@ class FileStorageService:
             )
         if files:
             logger.info(
-                "context_bound_files_purged",
+                log_event,
                 context_count=context_count,
                 file_count=len(files),
                 workspace_count=len(released),
