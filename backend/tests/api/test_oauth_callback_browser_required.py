@@ -16,7 +16,9 @@ its digest to the flow's state (#2786). Pinned here, for both providers:
   refused before any account check, gate or session;
 - a ``refresh`` flow whose identity owns nothing here or belongs to another
   account ends in the refresh mismatch answer before the terms gate, the
-  sign-up gate and ``ensure_user``; the starting account's own refresh works;
+  sign-up gate and ``ensure_user``, decided from the keys the flow held
+  before the identity was looked up (one that runs out during the lookup
+  changes nothing); the starting account's own refresh works;
 - the refusal is logged without the nonce, the state or the code;
 - the Google sign-in always uses the configured redirect URI.
 """
@@ -527,6 +529,82 @@ async def test_a_refresh_intent_gone_during_the_exchange_creates_nothing(
     signed_in_path.terms.assert_not_awaited()
     _assert_nothing_happened(signed_in_path)
     assert not any("st1" in key for key in redis.store)
+
+
+def _drop_during_the_owner_lookup(path: SimpleNamespace, key: str, owner) -> None:
+    """A refresh key runs out while the returning identity's owner is read."""
+
+    async def lookup(*_args, **_kwargs):
+        path.redis.store.pop(key, None)
+        return owner
+
+    path.owning.side_effect = lookup
+
+
+@pytest.mark.parametrize("dropped", ["oauth2_state_intent:st1", "oauth2_state_user:st1"])
+@pytest.mark.parametrize("returning", ["unknown_identity", "another_account"])
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.asyncio
+async def test_a_refresh_key_gone_during_the_owner_lookup_creates_nothing(
+    redis,  # noqa: F811
+    terms_off,  # noqa: F811
+    github_idp,  # noqa: F811
+    google_idp,  # noqa: F811
+    signed_in_path,
+    provider,
+    returning,
+    dropped,
+) -> None:
+    """The answer is decided from what the flow held before the lookup: a key
+    that runs out meanwhile never turns a refresh into a sign-in."""
+    redis.store["oauth2_state:st1"] = "pending"
+    redis.store["oauth2_state_intent:st1"] = "refresh"
+    redis.store["oauth2_state_user:st1"] = OWNER_ID
+    _with_carriers(redis, "st1")
+    owner = (
+        None
+        if returning == "unknown_identity"
+        else SessionOwner("someone-else", "e@example.test", "E", None)
+    )
+    _drop_during_the_owner_lookup(signed_in_path, dropped, owner)
+
+    response = await _callback(provider, "st1", None)
+
+    assert response.status_code == 303
+    location = urlparse(response.headers["location"])
+    assert (location.path, location.query) == ("/profile", "error=refresh_user_mismatch")
+    assert _set_cookies(response) == []
+    signed_in_path.owning.assert_awaited_once()
+    signed_in_path.terms.assert_not_awaited()
+    _assert_nothing_happened(signed_in_path)
+    assert not any("st1" in key for key in redis.store)
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.asyncio
+async def test_the_starting_account_goes_on_when_its_intent_runs_out_during_the_lookup(
+    redis,  # noqa: F811
+    terms_off,  # noqa: F811
+    github_idp,  # noqa: F811
+    google_idp,  # noqa: F811
+    signed_in_path,
+    provider,
+) -> None:
+    """The starting account's own identity goes on (its profile is synced), and
+    no session is opened when the refresh can no longer answer."""
+    redis.store["oauth2_state:st1"] = "pending"
+    redis.store["oauth2_state_intent:st1"] = "refresh"
+    redis.store["oauth2_state_user:st1"] = OWNER_ID
+    _drop_during_the_owner_lookup(
+        signed_in_path, "oauth2_state_intent:st1", signed_in_path.owning.return_value
+    )
+
+    response = await _callback(provider, "st1", None)
+
+    _assert_refused(response, provider)
+    signed_in_path.ensure_user.assert_awaited_once()
+    signed_in_path.manager.create_session.assert_not_called()
+    signed_in_path.manager.add_account.assert_not_called()
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)

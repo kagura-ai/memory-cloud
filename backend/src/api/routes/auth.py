@@ -535,6 +535,23 @@ def _offer_link_confirmation(
     return _email_in_use_redirect()
 
 
+def _refresh_expired_answer() -> RedirectResponse:
+    """A refresh whose starting account record is gone (``refresh_state_expired``)."""
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(f"{frontend_url}/profile?error=refresh_state_expired", status_code=303)
+
+
+def _refresh_mismatch_answer(*, expected_user_id: str, user_id: str) -> RedirectResponse:
+    """A refresh that came back with another identity (``refresh_user_mismatch``).
+
+    The expected/returned ids are opaque account ids (not PII); ``user_id`` is
+    empty when the identity owns nothing here.
+    """
+    logger.warning("refresh_user_mismatch", expected_user_id=expected_user_id, user_id=user_id)
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(f"{frontend_url}/profile?error=refresh_user_mismatch", status_code=303)
+
+
 async def _maybe_refresh_redirect(
     *,
     state: str,
@@ -591,28 +608,13 @@ async def _maybe_refresh_redirect(
         # The originating user_id record expired (TTL ran out between
         # POST /me/refresh-oauth and the IdP round-trip). Without it we
         # cannot enforce the same-user check; safest is to refuse.
-        return RedirectResponse(
-            f"{frontend_url}/profile?error=refresh_state_expired",
-            status_code=303,
-        )
+        return _refresh_expired_answer()
 
     if user_id != expected_user_id:
-        # The IdP returned a different account. ``ensure_user`` has
-        # already been called by the caller for that other account —
-        # which is fine, that account's row is now up to date — but we
-        # must NOT redirect the originating session to a place that
-        # implies the refresh succeeded for them. Surface the mismatch.
-        # The expected/returned ids are not PII (opaque account ids), but
-        # stay terse for log volume.
-        logger.warning(
-            "refresh_user_mismatch",
-            expected_user_id=expected_user_id,
-            user_id=user_id,
-        )
-        return RedirectResponse(
-            f"{frontend_url}/profile?error=refresh_user_mismatch",
-            status_code=303,
-        )
+        # The IdP returned a different account. We must NOT redirect the
+        # originating session to a place that implies the refresh succeeded
+        # for them. Surface the mismatch.
+        return _refresh_mismatch_answer(expected_user_id=expected_user_id, user_id=user_id)
 
     # Happy path: same user. Honour return_to (already read above).
     # POST /me/refresh-oauth persists return_to as a same-origin
@@ -641,36 +643,48 @@ async def _refresh_identity_mismatch(
     """End a Profile refresh whose identity is not the account that started it.
 
     Runs before the terms gate, the sign-up gate and ``ensure_user``, so a
-    refresh never creates an account or records a sign-up admission. The
-    returning identity is resolved without writing (its link row): one that
-    owns nothing here or belongs to another account gets the refresh mismatch
-    answer, an expired record the expired answer, and every key bound to the
-    state is dropped. A callback that went on as a refresh
-    (``browser_check == "refresh"``) whose intent is gone by now ends with
-    ``_other_browser_refusal``: it has no binding and may not become a
-    sign-in. None: not a refresh, or the starting account's own identity (the
-    callback goes on; ``ensure_user`` syncs the profile and
-    ``_maybe_refresh_redirect`` answers).
+    refresh never creates an account or records a sign-up admission. Every
+    Redis key the decision needs is read once, up front, before the returning
+    identity is resolved (without writing, from its link row); nothing read
+    afterwards can change the answer. A refresh flow (``browser_check ==
+    "refresh"``, or a flow whose intent is ``refresh``) has exactly these
+    outcomes:
+
+    - its intent is gone by now: ``_other_browser_refusal`` (it has no
+      binding and may not become a sign-in);
+    - the starting account's record is gone: the expired answer;
+    - the identity owns nothing here or belongs to another account: the
+      refresh mismatch answer;
+    - the identity is the starting account's own: None, the callback goes on
+      (``ensure_user`` syncs the profile, ``_maybe_refresh_redirect``
+      answers, and no session is opened without a browser binding).
+
+    Every answer drops the keys bound to the state. None also for a flow
+    that is not a refresh.
     """
     if not _session_manager:
-        return None
-    redis = _session_manager._redis
-    if redis.get(f"oauth2_state_intent:{state}") != "refresh":
         if browser_check == "refresh":
             return _other_browser_refusal(provider, state, request, flow_record=flow_record)
         return None
+    redis = _session_manager._redis
+    intent = redis.get(f"oauth2_state_intent:{state}")
     expected_user_id = redis.get(f"oauth2_state_user:{state}")
+    if intent != "refresh":
+        if browser_check == "refresh":
+            return _other_browser_refusal(provider, state, request, flow_record=flow_record)
+        return None
+    if not expected_user_id:
+        _drop_state_bound_keys(state)
+        return _refresh_expired_answer()
     owner_id = ""
-    if expected_user_id:
-        async for db in get_db():
-            owner = await _owning_user(db, provider, idp_sub)
-            owner_id = owner.user_id if owner is not None else ""
-            break
-        if owner_id == expected_user_id:
-            return None
-    redirect = await _maybe_refresh_redirect(state=state, user_id=owner_id)
+    async for db in get_db():
+        owner = await _owning_user(db, provider, idp_sub)
+        owner_id = owner.user_id if owner is not None else ""
+        break
+    if owner_id == expected_user_id:
+        return None
     _drop_state_bound_keys(state)
-    return redirect
+    return _refresh_mismatch_answer(expected_user_id=expected_user_id, user_id=owner_id)
 
 
 async def _maybe_link_redirect(
