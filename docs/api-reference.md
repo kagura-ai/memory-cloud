@@ -2128,7 +2128,7 @@ Session cookie only. Records a new answer with source `settings`; an unchanged a
 | Status | When |
 |---|---|
 | `409` | turning them on while `ANNOUNCEMENT_EMAILS_ENABLED` is off, or with a `wording_version` other than the current one (the page loaded before the wording changed); turning them off always works |
-| `429` | more than 20 changes in an hour |
+| `429` | more than 20 `PUT` requests that turn them on in an hour (an unchanged answer counts too); a request that turns them off is not counted and never refused |
 | `401` / `403` | no session / an API key or bearer token instead of a session |
 
 ### POST /api/v1/announcement-emails/unsubscribe/{token}

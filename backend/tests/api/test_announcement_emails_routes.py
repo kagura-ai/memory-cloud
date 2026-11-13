@@ -4,7 +4,8 @@ Settings (session only):
 - GET reports the answer and whether the deployment offers the emails;
 - PUT on needs the feature and the current wording (409 otherwise); PUT off
   always works, even with the feature off; every change is recorded with source
-  ``settings``; per-user 429; API keys are refused.
+  ``settings``; per-user 429 for requests that turn it on (a request that
+  turns it off is neither counted nor refused); API keys are refused.
 
 Unsubscribe (no auth):
 - the one-click POST answers the same 200 for every token, never 429, and does
@@ -34,6 +35,7 @@ from auth.announcement_unsubscribe import (
     issue_unsubscribe_token,
     read_unsubscribe_token,
 )
+from auth.dependencies import require_session_auth
 from config.settings import get_settings
 from db.base import get_db
 from services.announcement_consent_service import (
@@ -191,7 +193,7 @@ class TestPut:
 
         with pytest.raises(RateLimitError):
             await routes.update_announcement_emails(
-                routes.AnnouncementEmailsUpdateRequest(announcement_emails=False),
+                routes.AnnouncementEmailsUpdateRequest(announcement_emails=True, wording_version=V),
                 USER,
                 db=_db(),
             )
@@ -200,11 +202,91 @@ class TestPut:
         record.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_turning_it_off_is_never_refused_by_the_limit(
+        self, enabled, record, monkeypatch
+    ) -> None:
+        """Withdrawing consent must always work, however many requests came first."""
+        hits: dict[str, int] = {}
+
+        async def _counter(key, ttl):
+            hits[key] = hits.get(key, 0) + 1
+            return hits[key]
+
+        monkeypatch.setattr(routes, "increment_counter", AsyncMock(side_effect=_counter))
+        on = routes.AnnouncementEmailsUpdateRequest(announcement_emails=True, wording_version=V)
+        for _ in range(20):
+            await routes.update_announcement_emails(on, USER, db=_db())
+        for _ in range(5):
+            with pytest.raises(RateLimitError):
+                await routes.update_announcement_emails(on, USER, db=_db())
+
+        body = await routes.update_announcement_emails(
+            routes.AnnouncementEmailsUpdateRequest(announcement_emails=False),
+            USER,
+            db=_db(),
+        )
+
+        assert body.announcement_emails is False and body.recorded is True
+        assert record.await_args.kwargs["value"] is False
+        # Turning it off is not counted, so it cannot use up the allowance either.
+        assert hits == {"announce_pref_user:u1": 25}
+
+    @pytest.mark.asyncio
+    async def test_off_never_touches_the_counter(self, enabled, record, monkeypatch) -> None:
+        stub = AsyncMock(return_value=10_000)
+        monkeypatch.setattr(routes, "increment_counter", stub)
+
+        body = await routes.update_announcement_emails(
+            routes.AnnouncementEmailsUpdateRequest(announcement_emails=False),
+            USER,
+            db=_db(),
+        )
+
+        assert body.recorded is True
+        stub.assert_not_awaited()
+
+    def test_turning_it_off_after_the_limit_is_200_over_http(
+        self, enabled, record, monkeypatch
+    ) -> None:
+        """The same through the route: 20 on-requests, the 21st is 429, off is 200."""
+        hits: dict[str, int] = {}
+
+        async def _counter(key, ttl):
+            hits[key] = hits.get(key, 0) + 1
+            return hits[key]
+
+        monkeypatch.setattr(routes, "increment_counter", AsyncMock(side_effect=_counter))
+        db = _db()
+
+        async def _get_db():
+            yield db
+
+        async def _user():
+            return dict(USER)
+
+        app.dependency_overrides[get_db] = _get_db
+        app.dependency_overrides[require_session_auth] = _user
+        try:
+            client = TestClient(app, raise_server_exceptions=False)
+            url = "/api/v1/me/announcement-emails"
+            on = {"announcement_emails": True, "wording_version": V}
+            statuses = [client.put(url, json=on).status_code for _ in range(21)]
+            response = client.put(url, json={"announcement_emails": False})
+        finally:
+            app.dependency_overrides.pop(get_db, None)
+            app.dependency_overrides.pop(require_session_auth, None)
+
+        assert statuses == [200] * 20 + [429]
+        assert response.status_code == 200, response.text
+        assert response.json()["announcement_emails"] is False
+        assert hits == {"announce_pref_user:u1": 21}
+
+    @pytest.mark.asyncio
     async def test_redis_outage_fails_open(self, enabled, record, monkeypatch) -> None:
         monkeypatch.setattr(routes, "increment_counter", AsyncMock(side_effect=RedisError("x")))
 
         body = await routes.update_announcement_emails(
-            routes.AnnouncementEmailsUpdateRequest(announcement_emails=False),
+            routes.AnnouncementEmailsUpdateRequest(announcement_emails=True, wording_version=V),
             USER,
             db=_db(),
         )

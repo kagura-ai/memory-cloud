@@ -11,7 +11,9 @@ and the session cookie is ``SameSite=Lax``.
 - ``PUT`` — record a new answer (source ``settings``). Turning it ON needs
   ``ANNOUNCEMENT_EMAILS_ENABLED`` and the current wording version (409
   otherwise, the page reloads); turning it OFF always works. An unchanged
-  answer writes nothing. Limited per user (429).
+  answer writes nothing. Requests that turn it on are limited per user
+  (429); a request that turns it off is neither counted nor refused, so
+  withdrawing consent always works.
 
 ``public_router`` (``/announcement-emails``) — no authentication: the token is
 the only authority, and a session cookie that rides along is ignored. Every
@@ -70,7 +72,9 @@ logger = get_logger(__name__)
 me_router = APIRouter(prefix="/me/announcement-emails", tags=["announcement-emails"])
 public_router = APIRouter(prefix="/announcement-emails", tags=["announcement-emails"])
 
-# Settings toggle: bounds the append-only history a script could grow.
+# Settings toggle: bounds the append-only history a script could grow. Only
+# requests that turn it on are counted (an off answer appends at most once per
+# on before it), so withdrawing consent never meets the limit.
 _PREF_WINDOW_SECONDS = 60 * 60
 _PREF_CHANGES_PER_USER = 20
 # Unsubscribe page: invalid tokens per client address.
@@ -209,7 +213,9 @@ async def update_announcement_emails(
     Raises:
         HTTPException(409): Turning it on while the deployment does not offer
             them, or with a wording version other than the current one.
-        RateLimitError(429): Too many changes in an hour.
+        RateLimitError(429): More than 20 requests that turn it on in an hour
+            (unchanged answers count too). A request that turns it off is not
+            counted and never refused.
         NotFoundException(404): The account is gone.
     """
     user_id = user["user_id"]
@@ -221,7 +227,8 @@ async def update_announcement_emails(
         if payload.wording_version != version:
             raise HTTPException(status_code=409, detail=_STALE_WORDING)
 
-    if await _over_limit(
+    # Withdrawing consent is never refused, and an off request is not counted.
+    if value and await _over_limit(
         f"announce_pref_user:{user_id}", _PREF_CHANGES_PER_USER, _PREF_WINDOW_SECONDS
     ):
         raise RateLimitError(
