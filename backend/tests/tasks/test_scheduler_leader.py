@@ -515,3 +515,38 @@ async def test_stop_drains_the_run_recorder_between_shutdown_and_release(sched):
 
     assert order == ["shutdown", "drain", "close"]
     drain.assert_awaited_once_with(timeout=sl.RECORDER_DRAIN_TIMEOUT_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_leadership_drains_the_run_recorder_after_the_shutdown(sched):
+    """The runs the shutdown cancelled are written after a leadership loss too (#2768)."""
+    order: list[str] = []
+    conn = _conn(True, OperationalError("SELECT 1", {}, Exception("terminated")))
+    conn.invalidate = AsyncMock(side_effect=lambda: order.append("discard"))
+    sched.shutdown.side_effect = lambda: order.append("shutdown")
+    drain = AsyncMock(side_effect=lambda **_k: order.append("drain"))
+    leader = _leader(MagicMock())
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "drain_job_run_recorders", drain),
+    ):
+        await leader.tick()
+        await leader.tick()  # liveness probe fails
+
+    assert leader.is_leader is False
+    assert order == ["shutdown", "drain", "discard"]
+    drain.assert_awaited_once_with(timeout=sl.RECORDER_DRAIN_TIMEOUT_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_the_run_recorder_without_the_lock_connection(sched):
+    """A process that is not (or no longer) leader still flushes what its recorder holds."""
+    drain = AsyncMock()
+    leader = _leader(MagicMock())
+
+    with patch.object(sl, "drain_job_run_recorders", drain):
+        await leader.stop()
+
+    drain.assert_awaited_once_with(timeout=sl.RECORDER_DRAIN_TIMEOUT_SECONDS)
+    sched.shutdown.assert_not_called()

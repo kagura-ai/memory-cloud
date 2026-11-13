@@ -163,13 +163,15 @@ class SchedulerLeader:
                 await task
             except asyncio.CancelledError:
                 pass  # expected: we cancelled it ourselves
-        if self._conn is not None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
             shutdown_scheduler()
-            # The runs the shutdown cancelled report CancelledError a few loop
-            # iterations later: let the run recorder write them, bounded,
-            # while the database is still open and the lock still held (#2768).
-            await drain_job_run_recorders(timeout=RECORDER_DRAIN_TIMEOUT_SECONDS)
-            conn, self._conn = self._conn, None
+        # The runs the shutdown cancelled report CancelledError a few loop
+        # iterations later: let the run recorder write them, bounded, while the
+        # database is still open and the lock still held (#2768). Also without
+        # the lock: what a lost leadership left behind is flushed here.
+        await drain_job_run_recorders(timeout=RECORDER_DRAIN_TIMEOUT_SECONDS)
+        if conn is not None:
             await _release_and_close(conn)
             logger.info("scheduler_leader_released", pid=os.getpid())
 
@@ -257,6 +259,8 @@ class SchedulerLeader:
             )
         self._conn = None
         shutdown_scheduler()
+        # The runs the shutdown cancelled are written as at stop (#2768).
+        await drain_job_run_recorders(timeout=RECORDER_DRAIN_TIMEOUT_SECONDS)
         await _discard(conn)
 
     @staticmethod
