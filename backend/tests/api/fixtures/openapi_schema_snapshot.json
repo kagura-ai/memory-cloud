@@ -4200,6 +4200,43 @@
         ],
         "type": "object"
       },
+      "EntitlementWindow-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ref": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "valid_from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "valid_until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_ref",
+          "valid_from",
+          "valid_until"
+        ],
+        "type": "object"
+      },
+      "EntitlementWindow-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ref": {},
+          "valid_from": {},
+          "valid_until": {}
+        },
+        "required": [
+          "evidence_ref",
+          "valid_from",
+          "valid_until"
+        ],
+        "type": "object"
+      },
       "ErasureConfirmRequest": {
         "properties": {
           "password": {
@@ -5747,6 +5784,103 @@
         },
         "required": [
           "error"
+        ],
+        "type": "object"
+      },
+      "IntegrationEntitlementPush": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "max_access": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EntitlementWindow-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 9.223372036854776e+18,
+            "type": "integer"
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceEntitlement-Input"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "source_ref": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "max_access",
+          "revision",
+          "services",
+          "source_ref"
+        ],
+        "type": "object"
+      },
+      "IntegrationEntitlementResult": {
+        "properties": {
+          "applied": {},
+          "event_id": {},
+          "max_access": {},
+          "outcome": {},
+          "plan_name": {},
+          "revision": {},
+          "services": {},
+          "source": {},
+          "source_ref": {},
+          "updated_at": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "applied",
+          "event_id",
+          "max_access",
+          "outcome",
+          "plan_name",
+          "revision",
+          "services",
+          "source",
+          "source_ref",
+          "updated_at",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "IntegrationEntitlementView": {
+        "properties": {
+          "event_id": {},
+          "max_access": {},
+          "plan_name": {},
+          "revision": {},
+          "services": {},
+          "source": {},
+          "source_ref": {},
+          "updated_at": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "event_id",
+          "max_access",
+          "plan_name",
+          "revision",
+          "services",
+          "source",
+          "source_ref",
+          "updated_at",
+          "workspace_id"
         ],
         "type": "object"
       },
@@ -11401,6 +11535,50 @@
         ],
         "type": "object"
       },
+      "ServiceEntitlement-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ref": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "service_id": {
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+            "type": "string"
+          },
+          "valid_from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "valid_until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence_ref",
+          "service_id",
+          "valid_from",
+          "valid_until"
+        ],
+        "type": "object"
+      },
+      "ServiceEntitlement-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_ref": {},
+          "service_id": {},
+          "valid_from": {},
+          "valid_until": {}
+        },
+        "required": [
+          "evidence_ref",
+          "service_id",
+          "valid_from",
+          "valid_until"
+        ],
+        "type": "object"
+      },
       "ServiceStatus": {
         "properties": {
           "details": {
@@ -14778,6 +14956,10 @@
       }
     },
     "securitySchemes": {
+      "BillingPublisher": {
+        "scheme": "bearer",
+        "type": "http"
+      },
       "OIDCIdentity": {
         "scheme": "bearer",
         "type": "http"
@@ -34684,6 +34866,102 @@
             }
           }
         },
+        "tags": [
+          "internal-billing"
+        ]
+      }
+    },
+    "/internal/workspaces/{workspace_id}/integration-entitlements": {
+      "get": {
+        "operationId": "get_integration_entitlements_internal_workspaces__workspace_id__integration_entitlements_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationEntitlementView"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BillingPublisher": []
+          }
+        ],
+        "tags": [
+          "internal-billing"
+        ]
+      },
+      "put": {
+        "operationId": "put_integration_entitlements_internal_workspaces__workspace_id__integration_entitlements_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationEntitlementPush"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationEntitlementResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BillingPublisher": []
+          }
+        ],
         "tags": [
           "internal-billing"
         ]

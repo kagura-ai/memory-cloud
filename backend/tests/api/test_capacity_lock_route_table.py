@@ -53,6 +53,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "email_signup": NOT_APPLICABLE,
     "external_keys": NOT_APPLICABLE,
     "internal_billing": NOT_APPLICABLE,
+    "internal_integrations": NOT_APPLICABLE,  # #2798: billing authority, no content operations
     "invitations": NOT_APPLICABLE,
     "mcp": NOT_APPLICABLE,
     "mcp_notices": NOT_APPLICABLE,  # #2762: the caller's own opt-in, no memory content

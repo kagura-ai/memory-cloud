@@ -51,6 +51,7 @@ from models.worker_app import WorkerAppIdentity
 
 # Register identity tables for standalone metadata consumers as well as the API.
 importlib.import_module("models.oidc")
+importlib.import_module("models.integration_entitlement")
 
 __all__ = [
     "NeuralConfig",
