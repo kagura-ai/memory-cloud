@@ -2230,14 +2230,19 @@ Other changes while scanning is on:
   under the legacy digest rule is one that was `unscanned`, or that the
   backfill passed although its stored bytes do not match its SHA-256 (`clean`
   with `scan_error` `legacy_requeued`): it is not bound to its SHA-256, so
-  checksum binding guarantees nothing for it. It keeps the backfill's digest
-  rule through that scan (a digest mismatch is logged, not blocked); any other
-  cause that stops the scan makes it `error`, as for a new upload. Once it is
-  `clean` again, every download URL first HEAD-compares its object with the
-  scanned version in both binding modes, as described below for binding off;
-  a changed object sends it back to the scan. `infected` and `error` files
-  stay as they are. With scanning off only `clean` files change, to
-  `unscanned`; the backfill takes them after a full upload window.
+  checksum binding guarantees nothing for it. The restore marks it
+  `legacy_requeued`, and it keeps the backfill's digest rule through that scan
+  (a digest mismatch is logged, not blocked); any other cause that stops the
+  scan makes it `error`, as for a new upload. A scan that finds the declared
+  bytes clears the marker: from then on the file is held to its SHA-256 like a
+  new upload. Once it is `clean` and still carries `legacy_requeued` (the scan
+  passed it although its stored bytes still do not match its SHA-256), every
+  download URL first HEAD-compares its object with the scanned version in both
+  binding modes, as described below for binding off; a changed object sends it
+  back to the scan. A `clean` file without the marker is compared only with
+  binding off, like any other. `infected` and `error` files stay as they are.
+  With scanning off only `clean` files change, to `unscanned`; the backfill
+  takes them after a full upload window.
 
 ### How long a new upload is held
 
@@ -2272,8 +2277,15 @@ not ahead of the storage's clock by more than
 download URL is issued, not while the URL is used: an upload started before
 its PUT URL expired that completes after a download URL was handed out is
 served through that URL for the URL's lifetime. Checksum binding closes both
-gaps and is the hard guarantee; turn it on once your clients send the checksum header (see
+gaps for a file bound to its SHA-256 and is the hard guarantee; turn it on
+once your clients send the checksum header (see
 [`docs/ops/r2-checksum-binding-rollout.md`](ops/r2-checksum-binding-rollout.md)).
+A file that keeps `scan_error` `legacy_requeued` is not bound to its SHA-256
+and is compared at issue in both modes (see the restore bullet above), so the
+compare-at-issue gap applies to it with binding on as well: an upload that
+completes after a download URL was handed out is served through that URL for
+the URL's lifetime (with binding, that upload can only carry the file's
+declared content).
 
 ### When the scanner cannot answer
 
