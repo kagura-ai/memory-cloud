@@ -34,6 +34,8 @@ import { INVITE_HANDOFF_TEST_IDS as T } from "@/components/auth/invite-handoff.t
 test.use({ trace: "off" });
 
 const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
+// The mock IdP's port, from the same source as playwright.config.ts.
+const MOCK_IDP_PORT = process.env.MOCK_IDP_PORT ?? 9100;
 
 interface GateConfig {
   enabled: boolean;
@@ -323,7 +325,7 @@ test.describe("a sign-in finishes only in the browser that started it (#2791)", 
       // and the navigation aborted, so the sign-in is still open.
       let callbackUrl = "";
       await starter.route(
-        "http://localhost:9100/github/login/oauth/authorize**",
+        `http://localhost:${MOCK_IDP_PORT}/github/login/oauth/authorize**`,
         async (route) => {
           const answer = await route.fetch({ maxRedirects: 0 });
           callbackUrl = answer.headers()["location"] ?? "";
