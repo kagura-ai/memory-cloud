@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from models.file_objects import SCAN_LEGACY_REQUEUED
 from services.file_storage_service import FilesPurged, FileStorageService, ReserveResult
 from tests.storage._fakes import FakeBlobStorage
 from utils.exceptions import (
@@ -1672,7 +1673,7 @@ class TestStatusUploadedWriters:
 
 
 class TestRestoreScanState:
-    """R5: a restored clean row does not keep its verdict."""
+    """#565: a restored row is not served on an earlier verdict, or on none."""
 
     @staticmethod
     def _context(workspace_id):
@@ -1705,19 +1706,25 @@ class TestRestoreScanState:
             f.scan_status = state
             f.scan_attempts = 2
             f.scan_next_attempt_at = None
+            f.scan_error = None
         before = utcnow()
         outcome = await self._restore(service, db, workspace_id, list(files.values()))
 
         assert outcome.restored == 5
-        clean = files["clean"]
-        assert clean.scan_status == "pending"
-        assert clean.scan_attempts == 0
-        assert clean.scanned_at is None
         window = timedelta(seconds=scan_settings.presign_put_ttl_seconds) + timedelta(
             seconds=scan_settings.file_scan_put_expiry_margin_seconds
         )
-        assert before + window <= clean.scan_next_attempt_at <= utcnow() + window
-        for state in ("infected", "error", "pending", "unscanned"):
+        for state in ("clean", "pending", "unscanned"):
+            row = files[state]
+            assert row.scan_status == "pending", state
+            assert row.scan_attempts == 0
+            assert row.scanned_at is None
+            assert before + window <= row.scan_next_attempt_at <= utcnow() + window
+        # Only the legacy row carries the legacy digest rule into the scan.
+        assert files["unscanned"].scan_error == SCAN_LEGACY_REQUEUED
+        assert files["clean"].scan_error is None
+        assert files["pending"].scan_error is None
+        for state in ("infected", "error"):
             assert files[state].scan_status == state
             assert files[state].scan_attempts == 2
 

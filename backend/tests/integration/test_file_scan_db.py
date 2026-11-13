@@ -13,7 +13,8 @@ On real rows with the real ``PermissionService``:
 - confirm makes the row ``pending`` only when scanning is on; list / confirm
   report ``scan_status``;
 - a context restore over a reservation that may have replaced the bytes
-  brings the row back ``pending`` (R5);
+  brings a ``clean`` or ``unscanned`` row back ``pending`` (scanning on), and a
+  restored legacy row keeps the legacy digest rule through that scan;
 - the dedup 409 never hands out a blocked row (R10 / W3).
 
 Blob storage is the in-memory fake; Redis quota calls are stubbed. Not executed
@@ -40,7 +41,9 @@ from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
 from models.auth import Context, Workspace, WorkspaceMember
 from models.file_objects import SCAN_STATUSES, FileObject
+from services import file_scan_service as scan_svc
 from services.file_storage_service import FileStorageService
+from tests.services._fake_clamd import EICAR, running_fake_clamd
 from tests.storage._fakes import FakeBlobStorage
 from utils.datetime import utcnow
 from utils.exceptions import (
@@ -448,6 +451,128 @@ async def test_restore_over_a_cancelled_reservation_brings_a_clean_row_back_pend
     assert row.scan_status == "pending"
     assert row.scan_attempts == 0
     assert await _via_rest(world, file_id, OWNER) == "pending"
+
+
+async def _scan_now(world: dict[str, Any], file_id: uuid.UUID) -> str | None:
+    """Make the row due, then claim -> fake clamd -> record, as the sweeper does."""
+    async with running_fake_clamd() as (_, port):
+        settings = get_settings().model_copy(update={"clamd_host": "127.0.0.1", "clamd_port": port})
+        async with world["factory"]() as s:
+            await s.execute(
+                text(
+                    "UPDATE file_objects SET scan_next_attempt_at = now() - interval '1 minute' "
+                    "WHERE id = :f"
+                ),
+                {"f": str(file_id)},
+            )
+            claim = await scan_svc.claim_scan(s, now=utcnow(), settings=settings, file_id=file_id)
+            await s.commit()
+            assert claim is not None
+            result = await scan_svc.scan_claimed(claim, storage=world["storage"], settings=settings)
+            state = await scan_svc.record_scan_result(
+                s, claim, result, now=utcnow(), settings=settings
+            )
+            await s.commit()
+    return state
+
+
+async def _delete_and_restore_context(world: dict[str, Any], *, between=None) -> int:
+    """Delete the private context (its files go with it), run ``between``, restore it."""
+    db: AsyncSession = world["db"]
+    ctx = (await db.execute(select(Context).where(Context.id == world["ctx"]))).scalar_one()
+    ctx.deleted_at = utcnow()
+    await FileStorageService(db).purge_live_context_files([ctx.id], deleted_at=ctx.deleted_at)
+    await db.commit()
+    if between is not None:
+        await between()
+    ctx = (await db.execute(select(Context).where(Context.id == world["ctx"]))).scalar_one()
+    outcome = await FileStorageService(db).restore_context_files(ctx)
+    ctx.deleted_at = None
+    await db.commit()
+    return outcome.restored
+
+
+@pytest.mark.parametrize(
+    ("replacement", "verdict", "answer"),
+    # Same length as the original 16 bytes: the download-time compare also checks the size.
+    [(b"sixteen bytes ok", "clean", "url"), (EICAR, "infected", "blocked")],
+    ids=["clean", "infected"],
+)
+async def test_restore_sends_an_unscanned_row_to_the_scan_before_it_is_served(
+    world, scanning, replacement, verdict, answer
+):
+    data = uuid.uuid4().bytes
+    sha = hashlib.sha256(data).hexdigest()
+    scanning(False)
+    file_id = await _reserve_and_put(world, data, context_id=world["ctx"])
+    async with world["factory"]() as s:
+        await FileStorageService(s).confirm_upload(
+            workspace_id=world["ws"], file_id=file_id, sha256=sha, actor_user_id=OWNER
+        )
+    assert (await _reload(world, file_id)).scan_status == "unscanned"
+    scanning(True)
+
+    async def second_reservation_replaces_the_bytes() -> None:
+        # The content key is free while the context is deleted: a second
+        # reservation of the same sha256 writes other bytes and is abandoned.
+        second = await _reserve_and_put(world, data)
+        await world["storage"].write_object(
+            f"{world['ws']}/{sha[:2]}/{sha}", replacement, "application/pdf", "etag-2"
+        )
+        async with world["factory"]() as s:
+            await FileStorageService(s).delete_file(
+                workspace_id=world["ws"], file_id=second, actor_user_id=OWNER
+            )
+
+    assert (
+        await _delete_and_restore_context(world, between=second_reservation_replaces_the_bytes) == 1
+    )
+
+    row = await _reload(world, file_id)
+    assert row.scan_status == "pending"
+    assert row.scan_attempts == 0
+    assert row.scan_next_attempt_at > utcnow()
+    assert await _via_rest(world, file_id, OWNER) == "pending"
+
+    assert await _scan_now(world, file_id) == verdict
+    assert await _via_rest(world, file_id, OWNER) == answer
+
+
+async def test_restore_keeps_the_legacy_digest_rule_for_a_requeued_unscanned_row(world, scanning):
+    # ``_file`` stores bytes that do not match the row's sha256: a legacy file
+    # whose digest was never verified.
+    row = await _file(world, "unscanned")
+    assert await _delete_and_restore_context(world) == 1
+    assert (await _reload(world, row.id)).scan_status == "pending"
+
+    assert await _scan_now(world, row.id) == "clean"
+    restored = await _reload(world, row.id)
+    assert (restored.scan_status, restored.scan_error) == ("clean", None)
+    assert await _via_rest(world, row.id, OWNER) == "url"
+
+
+async def test_a_requeued_pending_row_keeps_the_legacy_digest_rule_across_a_second_restore(
+    world, scanning
+):
+    row = await _file(world, "unscanned")
+    assert await _delete_and_restore_context(world) == 1
+    assert await _delete_and_restore_context(world) == 1
+    assert (await _reload(world, row.id)).scan_status == "pending"
+    assert await _scan_now(world, row.id) == "clean"
+
+
+@pytest.mark.parametrize("state", ["unscanned", "pending"])
+async def test_restore_with_scanning_off_leaves_unscanned_and_pending_rows_as_they_are(
+    world, scanning, state
+):
+    scanning(False)
+    row = await _file(world, state)
+    before = await _reload(world, row.id)
+    assert await _delete_and_restore_context(world) == 1
+    after = await _reload(world, row.id)
+    assert after.deleted_at is None
+    for column in ("scan_status", "scan_attempts", "scan_next_attempt_at", "scan_error"):
+        assert getattr(after, column) == getattr(before, column), column
 
 
 @pytest.mark.parametrize("state", ["infected", "error"])

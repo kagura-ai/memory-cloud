@@ -84,7 +84,8 @@ def upgrade() -> None:
     op.execute(
         "ALTER TABLE file_objects ADD CONSTRAINT valid_file_scan_error "
         "CHECK (scan_error IS NULL OR scan_error IN "
-        "('object_missing', 'digest_mismatch', 'size_limit', 'unscannable', 'scan_failed')) "
+        "('object_missing', 'digest_mismatch', 'size_limit', 'unscannable', 'scan_failed', "
+        "'legacy_requeued')) "
         "NOT VALID"
     )
     validate_constraint(_TABLE, "valid_file_scan_status")

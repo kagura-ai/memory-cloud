@@ -51,7 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import Settings, get_settings
 from db.base import get_db
-from models.file_objects import FileObject
+from models.file_objects import SCAN_LEGACY_REQUEUED, FileObject
 from services import storage_quota_service
 from services.clamd_client import (
     CHUNK_BYTES,
@@ -119,10 +119,17 @@ class ClaimedScan:
     claimed_status: str
     attempts: int
     lease_until: datetime
+    #: A legacy row a context restore sent back to the scan (``pending``).
+    legacy_requeued: bool = False
 
     @property
     def backfill(self) -> bool:
         return self.claimed_status == "unscanned"
+
+    @property
+    def digest_unverified(self) -> bool:
+        """A legacy row: its stored bytes were never checked against its sha256."""
+        return self.backfill or self.legacy_requeued
 
 
 @dataclass(frozen=True)
@@ -329,6 +336,7 @@ async def claim_scan(
                 FileObject.scan_status,
                 FileObject.scan_attempts,
                 FileObject.scan_lease_until,
+                FileObject.scan_error,
             )
             .execution_options(synchronize_session=False)
         )
@@ -345,6 +353,7 @@ async def claim_scan(
         claimed_status=row.scan_status,
         attempts=row.scan_attempts,
         lease_until=row.scan_lease_until,
+        legacy_requeued=row.scan_error == SCAN_LEGACY_REQUEUED,
     )
 
 
@@ -355,8 +364,9 @@ async def scan_claimed(
 
     Precedence (R6): a finding beats a digest mismatch, which beats ``OK``.
     A new upload whose stored bytes do not match its sha256 is
-    ``digest_mismatch`` (blocked); for a legacy row the verdict stands and the
-    mismatch is only logged (its digest was never verified).
+    ``digest_mismatch`` (blocked); for a legacy row (the backfill, or one a
+    context restore requeued) the verdict stands and the mismatch is only
+    logged (its digest was never verified).
     """
     digest = hashlib.sha256()
     opened_at_all = False
@@ -410,7 +420,7 @@ async def scan_claimed(
             workspace_id=str(claim.workspace_id),
             backfill=claim.backfill,
         )
-        if not claim.backfill:
+        if not claim.digest_unverified:
             return ScanResult("digest_mismatch")
     return ScanResult("clean", None, etag, last_modified)
 

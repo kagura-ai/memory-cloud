@@ -44,6 +44,11 @@ from db.base import Base
 SCAN_STATUSES = ("unscanned", "pending", "clean", "infected", "error")
 #: Why a file is ``error`` (or why the backfill gave up on an ``unscanned`` one).
 SCAN_ERRORS = ("object_missing", "digest_mismatch", "size_limit", "unscannable", "scan_failed")
+#: ``scan_error`` of a ``pending`` row that was ``unscanned`` (legacy) before a
+#: context restore sent it back to the scan: its stored bytes were never checked
+#: against its sha256, so a digest mismatch does not block it. Cleared with the
+#: verdict.
+SCAN_LEGACY_REQUEUED = "legacy_requeued"
 
 
 class FileObject(Base):
@@ -171,7 +176,8 @@ class FileObject(Base):
         ),
         CheckConstraint(
             "scan_error IS NULL OR scan_error IN "
-            "('object_missing', 'digest_mismatch', 'size_limit', 'unscannable', 'scan_failed')",
+            "('object_missing', 'digest_mismatch', 'size_limit', 'unscannable', 'scan_failed', "
+            "'legacy_requeued')",
             name="valid_file_scan_error",
         ),
         Index("ix_file_objects_storage_key", "storage_key"),

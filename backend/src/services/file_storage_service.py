@@ -44,7 +44,7 @@ from sqlalchemy.orm import aliased
 
 from config.settings import Settings, get_settings
 from models.auth import Context, Workspace
-from models.file_objects import FileObject, WorkspaceStorageUsage
+from models.file_objects import SCAN_LEGACY_REQUEUED, FileObject, WorkspaceStorageUsage
 from models.memory import Attachment
 from services import storage_quota_service
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
@@ -137,7 +137,7 @@ def _scan_blocked(file: FileObject) -> bool:
 
 
 def _forget_clean_verdict(file: FileObject, *, now: datetime, settings: Settings) -> None:
-    """Drop a ``clean`` verdict whose bytes may have changed (#565, R5 restore)."""
+    """Drop a verdict (or the lack of one) whose bytes may have changed (#565 restore)."""
     file.scan_attempts = 0
     file.scan_lease_until = None
     file.scanned_at = None
@@ -1290,19 +1290,29 @@ class FileStorageService:
         Does not commit; the caller bumps the Redis counter after its commit
         (``storage_quota_service.bump_committed_storage_bytes``).
 
-        #565 (R5): a restored ``clean`` row does not keep its verdict. While it
-        was deleted its content key was free for another reservation, whose
-        PUT may have replaced the bytes. With scanning on it is ``pending``
-        again (due after a full PUT window from now); with scanning off it is
-        ``unscanned`` (the backfill takes it once scanning is on).
+        #565: a restored row is not served on an earlier verdict, or on none.
+        While it was deleted its content key was free for another reservation,
+        whose PUT may have replaced the bytes. With scanning on a ``clean``,
+        ``unscanned`` or ``pending`` row is ``pending`` again (attempts reset,
+        due after a full PUT window from now); a row that was legacy
+        (``unscanned``) keeps the legacy digest rule through that scan. With
+        scanning off only a ``clean`` row changes: it becomes ``unscanned``
+        (the backfill takes it once scanning is on). ``infected`` and
+        ``error`` rows stay as they are.
         """
         files, outcome = await self._restorable_context_files(context, lock=True)
         settings = get_settings()
         now = utcnow()
+        requeue = ("clean", "unscanned", "pending") if settings.file_scan_enabled else ("clean",)
         for file in files:
             file.deleted_at = None
-            if file.scan_status == "clean":
+            if file.scan_status in requeue:
+                legacy = file.scan_status == "unscanned" or (
+                    file.scan_status == "pending" and file.scan_error == SCAN_LEGACY_REQUEUED
+                )
                 _forget_clean_verdict(file, now=now, settings=settings)
+                if legacy:
+                    file.scan_error = SCAN_LEGACY_REQUEUED
         if files:
             await self._upsert_workspace_usage(
                 context.workspace_id, delta_bytes=outcome.bytes_restored, delta_files=len(files)
