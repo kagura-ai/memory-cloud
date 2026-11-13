@@ -4792,6 +4792,7 @@
           "created_at": {},
           "filename": {},
           "id": {},
+          "scan_status": {},
           "sha256": {},
           "size_bytes": {},
           "status": {},
@@ -4803,6 +4804,7 @@
           "created_at",
           "filename",
           "id",
+          "scan_status",
           "sha256",
           "size_bytes",
           "status",
@@ -24075,6 +24077,7 @@
               }
             }
           },
+          "409": {},
           "422": {
             "content": {
               "application/json": {

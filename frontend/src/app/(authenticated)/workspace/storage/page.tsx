@@ -7,7 +7,8 @@
  * with download (viewer+) and delete (member+) actions. Wires the frontend
  * to the existing backend REST API (`backend/src/api/routes/files.py`).
  *
- * Issue #955
+ * Issue #955. #565: malware scan state per file (badge), no download for a
+ * blocked file, and the download refusals while a scan holds a file.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -47,8 +48,12 @@ import {
   getDownloadUrl,
   deleteContextFiles,
   deleteFile,
+  isScanBlocked,
+  SCAN_BLOCKED_ERROR,
+  SCAN_PENDING_ERROR,
   type FileObject,
 } from "@/lib/api/files";
+import { ApiError } from "@/lib/api/base";
 import { getContexts } from "@/lib/api/contexts";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useToast } from "@/hooks/use-toast";
@@ -214,6 +219,18 @@ function StorageContent() {
       }
     } catch (e) {
       tab?.close();
+      const code = e instanceof ApiError ? e.error : undefined;
+      if (code === SCAN_PENDING_ERROR || code === SCAN_BLOCKED_ERROR) {
+        // #565: the scan holds the file. Our own text (not the server's), and
+        // a refresh so the row shows its current scan state.
+        toast(
+          code === SCAN_PENDING_ERROR
+            ? { title: t("list.scan.downloadPending") }
+            : { variant: "destructive", title: t("list.scan.downloadBlocked") },
+        );
+        void loadFiles(limit, "refresh");
+        return;
+      }
       toast({
         variant: "destructive",
         title: t("list.actions.downloadFailed"),
@@ -221,6 +238,32 @@ function StorageContent() {
       });
     } finally {
       setDownloadingId(null);
+    }
+  };
+
+  // #565: the scan state badge; none for a downloadable file.
+  const scanBadge = (f: FileObject) => {
+    switch (f.scan_status) {
+      case "pending":
+        return (
+          <Badge variant="outline" title={t("list.scan.pendingHint")}>
+            {t("list.scan.pending")}
+          </Badge>
+        );
+      case "infected":
+        return (
+          <Badge variant="destructive" title={t("list.scan.blockedHint")}>
+            {t("list.scan.blocked")}
+          </Badge>
+        );
+      case "error":
+        return (
+          <Badge variant="destructive" title={t("list.scan.errorHint")}>
+            {t("list.scan.error")}
+          </Badge>
+        );
+      default:
+        return null;
     }
   };
 
@@ -364,13 +407,16 @@ function StorageContent() {
                       {formatBytes(f.size_bytes)}
                     </TableCell>
                     <TableCell>
-                      <Badge
-                        variant={
-                          f.status === "uploaded" ? "secondary" : "outline"
-                        }
-                      >
-                        {f.status}
-                      </Badge>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge
+                          variant={
+                            f.status === "uploaded" ? "secondary" : "outline"
+                          }
+                        >
+                          {f.status}
+                        </Badge>
+                        {scanBadge(f)}
+                      </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
                       {f.uploaded_at ? (
@@ -385,7 +431,7 @@ function StorageContent() {
                           variant="ghost"
                           size="sm"
                           onClick={() => handleDownload(f)}
-                          disabled={downloadingId === f.id}
+                          disabled={downloadingId === f.id || isScanBlocked(f)}
                           aria-label={t("list.actions.download")}
                           title={t("list.actions.download")}
                         >

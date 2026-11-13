@@ -9,7 +9,7 @@ integration suite gated on ``make test-integration``.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -63,6 +63,8 @@ def _make_file_object(
     file.deleted_at = deleted_at
     file.expires_at = None
     file.uploaded_at = None
+    # #565: legacy default; a MagicMock attribute would be an unknown scan state.
+    file.scan_status = "unscanned"
     return file
 
 
@@ -1170,3 +1172,567 @@ class TestReserveUploadDuplicate:
 
         assert exc_info.value.existing is None
         assert "reuse file_id" not in exc_info.value.message
+
+
+# ---------------------------------------------------------------------------
+# #565 malware scan: the surfaces of the scan state on this service
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scan_settings(monkeypatch):
+    """Scanning on, checksum binding off (the default binding); tests flip fields."""
+    from config.settings import get_settings
+
+    s = get_settings()
+    monkeypatch.setattr(s, "file_scan_enabled", True)
+    monkeypatch.setattr(s, "storage_checksum_binding_enabled", False)
+    monkeypatch.setattr(s, "allowed_file_content_types", "application/pdf")
+    return s
+
+
+def _loaded(db, file):
+    load_result = MagicMock()
+    load_result.scalar_one_or_none = MagicMock(return_value=file)
+    db.execute.return_value = load_result
+
+
+class TestReserveScanCap:
+    """With scanning on, nothing larger than clamd scans may be reserved."""
+
+    async def _reserve(self, service, workspace_id, size_bytes):
+        with _patch_quota_reserve(succeed=True):
+            return await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.pdf",
+                content_type="application/pdf",
+                size_bytes=size_bytes,
+                sha256=VALID_SHA,
+            )
+
+    @pytest.mark.asyncio
+    async def test_scan_on_caps_at_the_stream_limit(
+        self, service, workspace_id, scan_settings, monkeypatch
+    ):
+        monkeypatch.setattr(scan_settings, "clamd_stream_max_bytes", 1024 * 1024)
+        with pytest.raises(ValidationError, match="malware scan") as exc_info:
+            await self._reserve(service, workspace_id, 1024 * 1024 + 1)
+        assert "(0, 1048576]" in exc_info.value.message
+
+    @pytest.mark.asyncio
+    async def test_scan_on_allows_the_stream_limit(
+        self, service, db, workspace_id, scan_settings, monkeypatch
+    ):
+        monkeypatch.setattr(scan_settings, "clamd_stream_max_bytes", 1024 * 1024)
+        _loaded(db, _make_workspace(workspace_id))
+        out = await self._reserve(service, workspace_id, 1024 * 1024)
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_scan_off_keeps_the_file_cap(
+        self, service, db, workspace_id, scan_settings, monkeypatch
+    ):
+        monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
+        monkeypatch.setattr(scan_settings, "clamd_stream_max_bytes", 1024 * 1024)
+        _loaded(db, _make_workspace(workspace_id))
+        out = await self._reserve(service, workspace_id, 2 * 1024 * 1024)
+        assert isinstance(out, ReserveResult)
+
+    @pytest.mark.asyncio
+    async def test_a_larger_stream_limit_does_not_raise_the_file_cap(
+        self, service, workspace_id, scan_settings, monkeypatch
+    ):
+        monkeypatch.setattr(scan_settings, "clamd_stream_max_bytes", 10**12)
+        too_big = scan_settings.file_object_max_size_mb * 1024 * 1024 + 1
+        with pytest.raises(ValidationError, match="size_bytes") as exc_info:
+            await self._reserve(service, workspace_id, too_big)
+        assert "malware scan" not in exc_info.value.message
+
+
+class TestReserveDuplicateScanState(TestReserveUploadDuplicate):
+    """R10 / W3: a blocked row is never handed out; the verdict stays in its context."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["infected", "error"])
+    async def test_blocked_same_context_row_is_not_handed_out(
+        self, service, db, workspace_id, scan_settings, state
+    ):
+        existing = _make_file_object(workspace_id, status="uploaded")
+        existing.scan_status = state
+        self._arrange(db, workspace_id, existing)
+
+        with pytest.raises(DuplicateFileError) as exc_info:
+            await self._reserve(service, workspace_id)
+
+        err = exc_info.value
+        assert err.existing is None
+        assert err.message == (
+            f"file with sha256={VALID_SHA} already exists in workspace; "
+            "an earlier upload of this file was blocked by the malware scan"
+        )
+        assert str(existing.id) not in err.message
+
+    @pytest.mark.asyncio
+    async def test_infected_row_is_blocked_with_scanning_off(
+        self, service, db, workspace_id, scan_settings, monkeypatch
+    ):
+        monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
+        existing = _make_file_object(workspace_id, status="uploaded")
+        existing.scan_status = "infected"
+        self._arrange(db, workspace_id, existing)
+
+        with pytest.raises(DuplicateFileError) as exc_info:
+            await self._reserve(service, workspace_id)
+        assert exc_info.value.existing is None
+
+    @pytest.mark.asyncio
+    async def test_error_row_is_handed_out_with_scanning_off(
+        self, service, db, workspace_id, scan_settings, monkeypatch
+    ):
+        # Scanning off: only ``infected`` is refused by the gate, so an
+        # ``error`` row is a normal downloadable file again.
+        monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
+        existing = _make_file_object(workspace_id, status="uploaded")
+        existing.scan_status = "error"
+        self._arrange(db, workspace_id, existing)
+
+        with pytest.raises(DuplicateFileError) as exc_info:
+            await self._reserve(service, workspace_id)
+        assert exc_info.value.existing is existing
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["pending", "clean", "unscanned"])
+    async def test_pending_and_clean_rows_are_handed_out(
+        self, service, db, workspace_id, scan_settings, state
+    ):
+        # A pending row holds the same bytes; the download gate holds it.
+        existing = _make_file_object(workspace_id, status="uploaded")
+        existing.scan_status = state
+        self._arrange(db, workspace_id, existing)
+
+        with pytest.raises(DuplicateFileError) as exc_info:
+            await self._reserve(service, workspace_id)
+        assert exc_info.value.existing is existing
+
+    @pytest.mark.asyncio
+    async def test_cross_context_blocked_row_discloses_no_verdict(
+        self, service, db, workspace_id, scan_settings
+    ):
+        ctx_id = uuid4()
+        existing = _make_file_object(workspace_id, status="uploaded")
+        existing.context_id = uuid4()
+        existing.scan_status = "infected"
+        self._arrange(db, workspace_id, existing)
+
+        perm = MagicMock()
+        perm.check_context_write = AsyncMock(return_value=MagicMock(workspace_id=workspace_id))
+        with patch("services.file_storage_service.PermissionService", return_value=perm):
+            with pytest.raises(DuplicateFileError) as exc_info:
+                await self._reserve(service, workspace_id, context_id=ctx_id)
+
+        assert exc_info.value.message == f"file with sha256={VALID_SHA} already exists in workspace"
+
+
+class TestConfirmUploadScan:
+    """R1 a/b + R7: confirm makes the row pending (when on) and kicks a bound scan."""
+
+    async def _confirm(self, service, db, fake_storage, workspace_id, *, expires_at):
+        file = _make_file_object(workspace_id, status="reserved")
+        file.expires_at = expires_at
+        await fake_storage.write_object(
+            file.storage_key, b"x" * file.size_bytes, file.content_type, file.sha256
+        )
+        _loaded(db, file)
+        with patch("services.file_storage_service.kick_file_scan") as kick:
+            out = await service.confirm_upload(
+                workspace_id=workspace_id, file_id=file.id, sha256=file.sha256
+            )
+        return out, kick
+
+    @pytest.mark.asyncio
+    async def test_binding_off_waits_past_the_put_window(
+        self, service, db, fake_storage, workspace_id, scan_settings
+    ):
+        from utils.datetime import utcnow
+
+        expires_at = utcnow() + timedelta(seconds=240)
+        out, kick = await self._confirm(
+            service, db, fake_storage, workspace_id, expires_at=expires_at
+        )
+
+        assert out.status == "uploaded"
+        assert out.scan_status == "pending"
+        assert out.scan_attempts == 0
+        margin = timedelta(seconds=scan_settings.file_scan_put_expiry_margin_seconds)
+        assert out.scan_next_attempt_at == expires_at + margin
+        assert out.expires_at is None
+        # The kick runs after the commit (it is a no-op with binding off).
+        kick.assert_called_once_with(out.id)
+
+    @pytest.mark.asyncio
+    async def test_binding_on_is_eligible_at_once(
+        self, service, db, fake_storage, workspace_id, scan_settings, monkeypatch
+    ):
+        from utils.datetime import utcnow
+
+        monkeypatch.setattr(scan_settings, "storage_checksum_binding_enabled", True)
+        before = utcnow()
+        out, kick = await self._confirm(
+            service, db, fake_storage, workspace_id, expires_at=before + timedelta(seconds=240)
+        )
+        assert out.scan_status == "pending"
+        assert before <= out.scan_next_attempt_at <= utcnow()
+        kick.assert_called_once_with(out.id)
+
+    @pytest.mark.asyncio
+    async def test_scan_off_leaves_the_row_unscanned(
+        self, service, db, fake_storage, workspace_id, scan_settings, monkeypatch
+    ):
+        from utils.datetime import utcnow
+
+        monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
+        out, kick = await self._confirm(
+            service, db, fake_storage, workspace_id, expires_at=utcnow() + timedelta(seconds=240)
+        )
+        assert out.status == "uploaded"
+        assert out.scan_status == "unscanned"
+        kick.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_kick_happens_after_the_commit(
+        self, service, db, fake_storage, workspace_id, scan_settings
+    ):
+        from utils.datetime import utcnow
+
+        order: list[str] = []
+        db.commit.side_effect = lambda: order.append("commit")
+        file = _make_file_object(workspace_id, status="reserved")
+        file.expires_at = utcnow()
+        await fake_storage.write_object(
+            file.storage_key, b"x" * file.size_bytes, file.content_type, file.sha256
+        )
+        _loaded(db, file)
+        with patch(
+            "services.file_storage_service.kick_file_scan",
+            side_effect=lambda _id: order.append("kick"),
+        ):
+            await service.confirm_upload(
+                workspace_id=workspace_id, file_id=file.id, sha256=file.sha256
+            )
+        assert order == ["commit", "kick"]
+
+    @pytest.mark.asyncio
+    async def test_idempotent_retry_does_not_requeue(
+        self, service, db, workspace_id, scan_settings
+    ):
+        file = _make_file_object(workspace_id, status="uploaded")
+        file.scan_status = "clean"
+        _loaded(db, file)
+        with patch("services.file_storage_service.kick_file_scan") as kick:
+            out = await service.confirm_upload(
+                workspace_id=workspace_id, file_id=file.id, sha256=file.sha256
+            )
+        assert out.scan_status == "clean"
+        kick.assert_not_called()
+
+
+class TestDownloadGate:
+    """Every download URL passes ``ensure_downloadable`` after the access checks."""
+
+    async def _download(self, service, workspace_id, file_id):
+        return await service.get_presigned_download(workspace_id=workspace_id, file_id=file_id)
+
+    @pytest.mark.asyncio
+    async def test_pending_is_refused_with_retry_after(
+        self, service, db, workspace_id, scan_settings
+    ):
+        from utils.exceptions import FileScanPendingError
+
+        file = _make_file_object(workspace_id, status="uploaded")
+        file.scan_status = "pending"
+        _loaded(db, file)
+        with pytest.raises(FileScanPendingError) as exc_info:
+            await self._download(service, workspace_id, file.id)
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.error_code == "SCAN-001"
+        assert exc_info.value.response_headers == {"Retry-After": "30"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["infected", "error"])
+    async def test_blocked_is_refused(self, service, db, workspace_id, scan_settings, state):
+        from utils.exceptions import FileBlockedError
+
+        file = _make_file_object(workspace_id, status="uploaded")
+        file.scan_status = state
+        _loaded(db, file)
+        with pytest.raises(FileBlockedError) as exc_info:
+            await self._download(service, workspace_id, file.id)
+        assert exc_info.value.error_code == "SCAN-002"
+        assert exc_info.value.details["scan_status"] == state
+
+    @pytest.mark.asyncio
+    async def test_infected_is_refused_with_scanning_off(
+        self, service, db, workspace_id, scan_settings, monkeypatch
+    ):
+        from utils.exceptions import FileBlockedError
+
+        monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
+        file = _make_file_object(workspace_id, status="uploaded")
+        file.scan_status = "infected"
+        _loaded(db, file)
+        with pytest.raises(FileBlockedError):
+            await self._download(service, workspace_id, file.id)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["unscanned", "pending", "clean", "error"])
+    async def test_scanning_off_serves_everything_else(
+        self, service, db, fake_storage, workspace_id, scan_settings, monkeypatch, state
+    ):
+        monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
+        file = _make_file_object(workspace_id, status="uploaded")
+        file.scan_status = state
+        _loaded(db, file)
+        with patch.object(fake_storage, "head_object", AsyncMock()) as head:
+            url = await self._download(service, workspace_id, file.id)
+        assert url.startswith("https://test.local/get/")
+        head.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_access_denial_stays_404_for_a_blocked_file(
+        self, service, db, workspace_id, scan_settings
+    ):
+        from utils.exceptions import AuthorizationError
+
+        file = _make_file_object(workspace_id, status="uploaded")
+        file.context_id = uuid4()
+        file.scan_status = "infected"
+        _loaded(db, file)
+        perm = MagicMock()
+        perm.check_context_access = AsyncMock(side_effect=AuthorizationError("no"))
+        with patch("services.file_storage_service.PermissionService", return_value=perm):
+            with pytest.raises(NotFoundException):
+                await service.get_presigned_download(
+                    workspace_id=workspace_id, file_id=file.id, actor_user_id="other"
+                )
+
+    @pytest.mark.asyncio
+    async def test_unscanned_legacy_file_is_served_without_a_compare(
+        self, service, db, fake_storage, workspace_id, scan_settings
+    ):
+        file = _make_file_object(workspace_id, status="uploaded")
+        file.scan_status = "unscanned"
+        _loaded(db, file)
+        with patch.object(fake_storage, "head_object", AsyncMock()) as head:
+            url = await self._download(service, workspace_id, file.id)
+        assert url.startswith("https://test.local/get/")
+        head.assert_not_awaited()
+
+
+class TestDownloadCompare:
+    """R1 c: with binding off a clean file is served only while it is the scanned version."""
+
+    @staticmethod
+    async def _clean_file(fake_storage, workspace_id):
+        from datetime import datetime as dt
+
+        file = _make_file_object(workspace_id, status="uploaded")
+        file.scan_status = "clean"
+        await fake_storage.write_object(
+            file.storage_key, b"x" * file.size_bytes, file.content_type, "etag-1"
+        )
+        fake_storage.last_modified[file.storage_key] = dt(2026, 11, 13, 1, 2, 3)
+        file.scan_etag = "etag-1"
+        file.scan_last_modified = dt(2026, 11, 13, 1, 2, 3)
+        return file
+
+    @pytest.mark.asyncio
+    async def test_same_version_is_served(
+        self, service, db, fake_storage, workspace_id, scan_settings
+    ):
+        file = await self._clean_file(fake_storage, workspace_id)
+        _loaded(db, file)
+        with patch("services.file_storage_service.requeue_changed_object", AsyncMock()) as rq:
+            url = await service.get_presigned_download(workspace_id=workspace_id, file_id=file.id)
+        assert url.startswith("https://test.local/get/")
+        rq.assert_not_awaited()
+        db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("change", ["etag", "size", "last_modified", "missing"])
+    async def test_changed_object_is_requeued_and_refused(
+        self, service, db, fake_storage, workspace_id, scan_settings, change
+    ):
+        from datetime import datetime as dt
+
+        from utils.exceptions import FileScanPendingError
+
+        file = await self._clean_file(fake_storage, workspace_id)
+        key = file.storage_key
+        if change == "etag":
+            await fake_storage.write_object(
+                key, b"x" * file.size_bytes, file.content_type, "etag-2"
+            )
+        elif change == "size":
+            await fake_storage.write_object(
+                key, b"x" * (file.size_bytes - 1), file.content_type, "etag-1"
+            )
+        elif change == "last_modified":
+            # Same ETag, other bytes: only LastModified shows the rewrite.
+            fake_storage.last_modified[key] = dt(2026, 11, 13, 1, 2, 4)
+        else:
+            await fake_storage.delete_object(key)
+        _loaded(db, file)
+        with patch(
+            "services.file_storage_service.requeue_changed_object", AsyncMock(return_value=True)
+        ) as rq:
+            with pytest.raises(FileScanPendingError):
+                await service.get_presigned_download(workspace_id=workspace_id, file_id=file.id)
+        rq.assert_awaited_once()
+        assert rq.await_args.args == (db, file)
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_head_failure_refuses_without_a_url(
+        self, service, db, fake_storage, workspace_id, scan_settings
+    ):
+        from utils.exceptions import ExternalServiceError
+
+        file = await self._clean_file(fake_storage, workspace_id)
+        _loaded(db, file)
+        with patch.object(
+            fake_storage, "head_object", AsyncMock(side_effect=ExternalServiceError("r2", "down"))
+        ):
+            with patch.object(fake_storage, "generate_presigned_get", AsyncMock()) as presign:
+                with pytest.raises(ExternalServiceError):
+                    await service.get_presigned_download(workspace_id=workspace_id, file_id=file.id)
+        presign.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_binding_on_skips_the_compare(
+        self, service, db, fake_storage, workspace_id, scan_settings, monkeypatch
+    ):
+        monkeypatch.setattr(scan_settings, "storage_checksum_binding_enabled", True)
+        file = await self._clean_file(fake_storage, workspace_id)
+        _loaded(db, file)
+        with patch.object(fake_storage, "head_object", AsyncMock()) as head:
+            url = await service.get_presigned_download(workspace_id=workspace_id, file_id=file.id)
+        assert url.startswith("https://test.local/get/")
+        head.assert_not_awaited()
+
+
+class TestStatusUploadedWriters:
+    """R7: both writers of ``status='uploaded'`` set ``scan_status`` when scanning is on."""
+
+    async def _migrate(self, service, db, workspace_id):
+        found = MagicMock()
+        found.scalar_one_or_none = MagicMock(return_value=None)
+        db.execute.return_value = found
+        db.scalar = AsyncMock(side_effect=[workspace_id, uuid4()])
+        with (
+            patch("services.storage_cleanup.lock_storage_key", AsyncMock()),
+            patch(
+                "services.file_storage_service.storage_quota_service.bump_committed_storage_bytes",
+                AsyncMock(),
+            ),
+        ):
+            await service.migrate_attachment(
+                workspace_id=workspace_id,
+                attachment_id=uuid4(),
+                filename="a.pdf",
+                content_type="application/pdf",
+                size_bytes=3,
+                data=b"abc",
+                created_by="migration:attachment:u",
+                context_id=None,
+            )
+        return db.add.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_migrated_attachment_is_pending_and_due_now(
+        self, service, db, workspace_id, scan_settings
+    ):
+        from utils.datetime import utcnow
+
+        before = utcnow()
+        row = await self._migrate(service, db, workspace_id)
+        assert row.status == "uploaded"
+        assert row.scan_status == "pending"
+        assert row.scan_attempts == 0
+        assert before <= row.scan_next_attempt_at <= utcnow()
+
+    @pytest.mark.asyncio
+    async def test_migrated_attachment_keeps_the_default_with_scanning_off(
+        self, service, db, workspace_id, scan_settings, monkeypatch
+    ):
+        monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
+        row = await self._migrate(service, db, workspace_id)
+        assert row.scan_status is None  # server default 'unscanned'
+        assert row.scan_next_attempt_at is None
+
+
+class TestRestoreScanState:
+    """R5: a restored clean row does not keep its verdict."""
+
+    @staticmethod
+    def _context(workspace_id):
+        from datetime import datetime as dt
+
+        ctx = MagicMock()
+        ctx.id = uuid4()
+        ctx.workspace_id = workspace_id
+        ctx.deleted_at = dt.now().replace(tzinfo=None)
+        return ctx
+
+    async def _restore(self, service, db, workspace_id, files):
+        rows = MagicMock()
+        rows.all = MagicMock(return_value=[(f, False) for f in files])
+        db.execute.return_value = rows
+        with patch(
+            "services.file_storage_service.context_files_past_restore_window", return_value=False
+        ):
+            return await service.restore_context_files(self._context(workspace_id))
+
+    @pytest.mark.asyncio
+    async def test_clean_rows_go_back_to_pending(self, service, db, workspace_id, scan_settings):
+        from utils.datetime import utcnow
+
+        files = {
+            s: _make_file_object(workspace_id, status="uploaded")
+            for s in ("clean", "infected", "error", "pending", "unscanned")
+        }
+        for state, f in files.items():
+            f.scan_status = state
+            f.scan_attempts = 2
+            f.scan_next_attempt_at = None
+        before = utcnow()
+        outcome = await self._restore(service, db, workspace_id, list(files.values()))
+
+        assert outcome.restored == 5
+        clean = files["clean"]
+        assert clean.scan_status == "pending"
+        assert clean.scan_attempts == 0
+        assert clean.scanned_at is None
+        window = timedelta(seconds=scan_settings.presign_put_ttl_seconds) + timedelta(
+            seconds=scan_settings.file_scan_put_expiry_margin_seconds
+        )
+        assert before + window <= clean.scan_next_attempt_at <= utcnow() + window
+        for state in ("infected", "error", "pending", "unscanned"):
+            assert files[state].scan_status == state
+            assert files[state].scan_attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_clean_rows_become_unscanned_with_scanning_off(
+        self, service, db, workspace_id, scan_settings, monkeypatch
+    ):
+        monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
+        clean = _make_file_object(workspace_id, status="uploaded")
+        clean.scan_status = "clean"
+        clean.scan_attempts = 1
+        infected = _make_file_object(workspace_id, status="uploaded")
+        infected.scan_status = "infected"
+        await self._restore(service, db, workspace_id, [clean, infected])
+        assert clean.scan_status == "unscanned"
+        assert clean.scan_attempts == 0
+        assert clean.scan_next_attempt_at is None
+        assert infected.scan_status == "infected"

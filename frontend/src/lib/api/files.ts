@@ -34,8 +34,26 @@ export interface FileObject {
   size_bytes: number;
   sha256: string;
   status: string;
+  /**
+   * Malware scan state (#565). `unscanned`: uploaded while scanning was off
+   * (downloadable); `pending`: being scanned, the download URL is refused
+   * (`SCAN-001`) until it finishes; `clean`; `infected` / `error`: blocked
+   * (`SCAN-002`).
+   */
+  scan_status: ScanStatus;
   created_at: string;
   uploaded_at: string | null;
+}
+
+export type ScanStatus = "unscanned" | "pending" | "clean" | "infected" | "error";
+
+/** Backend codes of the download-URL refusals while scanning holds a file (#565). */
+export const SCAN_PENDING_ERROR = "SCAN-001";
+export const SCAN_BLOCKED_ERROR = "SCAN-002";
+
+/** Whether the malware scan blocked the file for good (no download). */
+export function isScanBlocked(file: Pick<FileObject, "scan_status">): boolean {
+  return file.scan_status === "infected" || file.scan_status === "error";
 }
 
 interface FileDownloadUrlOut {

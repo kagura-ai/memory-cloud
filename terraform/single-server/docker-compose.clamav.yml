@@ -1,0 +1,81 @@
+# =============================================================================
+# ClamAV override — clamd for the optional upload malware scan (Issue #565)
+# =============================================================================
+# Usage (start it once; deploy.sh never touches it and it survives deploys):
+#   docker compose \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.clamav.yml \
+#     --env-file .env.prod \
+#     up -d clamav
+# Split-host layout: run it on the APP host with docker-compose.app.yml in
+# place of docker-compose.prod.yml (the API must reach it on its network).
+#
+# This file only runs clamd. The API reads FILE_SCAN_ENABLED / CLAMD_HOST /
+# CLAMD_* from .env.prod (env_file), so deploy.sh's recreates keep them; turn
+# scanning on there once this container is healthy. See docs/deployment.md
+# "Upload malware scanning (ClamAV)".
+#
+# Sizing: ClamAV documents 3 GiB RAM minimum, 4 GiB preferred, for clamd. The
+# default e2-medium VM (4 GB) already runs the stack and CANNOT host it as
+# well: use an 8 GB-class machine_type or a separate private host first.
+# freshclam (inside the container) needs outbound HTTPS to the ClamAV mirror.
+#
+# No `ports:` — clamd's TCP protocol has no encryption or authentication and
+# accepts commands such as SHUTDOWN; 3310 stays on the compose network. That
+# network also carries Redis: set REDIS_PASSWORD before starting this.
+# =============================================================================
+
+# Container log rotation (#1591) — json-file capped at 50m x 3 (configurable
+# since #2025: LOG_MAX_SIZE / LOG_MAX_FILE). YAML anchors are per-file, hence
+# the repeat; log_hygiene_static.bats pins it.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${LOG_MAX_SIZE:-50m}"
+    max-file: "${LOG_MAX_FILE:-3}"
+
+services:
+  clamav:
+    # 1.4 is ClamAV's LTS line. Pinned by multi-arch manifest-list digest; the
+    # image carries a signature set, copied into the empty volume on first
+    # start, and freshclam keeps it current from there.
+    image: clamav/clamav:1.4.6-debian@sha256:aedee9daad6b069b26adad61af7ec50a41efe33fd8eff7f985c1f31e3a6ae9de
+    container_name: kagura-clamav
+    restart: always
+    logging: *default-logging
+    # A cap, so a signature reload or a hostile file cannot push the host's
+    # OOM killer onto Postgres or Qdrant. Below 3g clamd may not load at all.
+    mem_limit: ${CLAMAV_MEM_LIMIT:-4g}
+    security_opt:
+      - no-new-privileges:true
+    # The entrypoint runs as root to chown the signature volume and the socket
+    # directory (CHOWN, FOWNER, DAC_OVERRIDE: the volume is 0700 clamav), then
+    # freshclam and clamd drop to the clamav user (SETUID, SETGID). Nothing
+    # else is kept.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    environment:
+      # Signature checks per day (the image's default is 1; freshclam's own
+      # default is 12, every two hours).
+      FRESHCLAM_CHECKS: "12"
+    volumes:
+      - clamav_data:/var/lib/clamav
+      - ./clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+    healthcheck:
+      # The image's own check: PING on 3310 answered with PONG.
+      test: ["CMD-SHELL", "clamdcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      # Loading the signatures takes a while, longer on a small machine.
+      start_period: 10m
+
+volumes:
+  clamav_data:
+    name: kagura_clamav_data

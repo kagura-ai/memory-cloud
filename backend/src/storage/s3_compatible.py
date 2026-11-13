@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import base64
 from collections.abc import AsyncIterator
-from datetime import UTC
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import aioboto3
@@ -30,6 +32,19 @@ from storage.protocol import ObjectMetadata, StoredObject
 from utils.exceptions import ExternalServiceError
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _S3OpenedObject:
+    """``OpenedObject`` over one aiobotocore ``StreamingBody`` (Issue #565)."""
+
+    body: Any
+    etag: str
+    size_bytes: int
+    last_modified: datetime | None
+
+    def iter_chunks(self, chunk_size: int) -> AsyncIterator[bytes]:
+        return self.body.iter_chunks(chunk_size)
 
 
 class S3CompatibleStorage:
@@ -127,6 +142,37 @@ class S3CompatibleStorage:
                     resp["LastModified"].astimezone(UTC).replace(tzinfo=None)
                 )
             return metadata
+
+    @asynccontextmanager
+    async def open_object(self, key: str) -> AsyncIterator[_S3OpenedObject | None]:
+        """Stream one object for the malware scan (Issue #565).
+
+        Yields ``None`` when the object is missing; other storage errors become
+        ``ExternalServiceError``. The body is released when the block exits.
+        The key is never logged (it names the workspace and the content hash).
+        """
+        async with self._client() as client:
+            try:
+                resp = await client.get_object(Bucket=self._bucket, Key=key)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code")
+                if code in ("404", "NoSuchKey"):
+                    yield None
+                    return
+                logger.warning("storage_get_object_error", code=code)
+                raise ExternalServiceError("storage", f"get_object failed: {code}") from exc
+            last_modified = resp.get("LastModified")
+            async with resp["Body"] as body:
+                yield _S3OpenedObject(
+                    body=body,
+                    etag=str(resp.get("ETag", "")).strip('"'),
+                    size_bytes=int(resp["ContentLength"]),
+                    last_modified=(
+                        last_modified.astimezone(UTC).replace(tzinfo=None)
+                        if last_modified is not None
+                        else None
+                    ),
+                )
 
     async def delete_object(self, key: str) -> None:
         async with self._client() as client:

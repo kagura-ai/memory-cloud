@@ -2,7 +2,8 @@
 # =============================================================================
 # Port-publishing guard (#1626): no compose file in the repo may publish a
 # data-store port — PostgreSQL 5432, Qdrant 6333/6334, Redis 6379, MinIO
-# 9000/9001 — on every interface.
+# 9000/9001 — or clamd's 3310 (#565: no auth, accepts SHUTDOWN) on every
+# interface.
 #
 # A two-part "HOST:CONTAINER" entry makes Docker bind 0.0.0.0 and [::], and on
 # Linux the nat rules Docker inserts run before the chains ufw filters, so a
@@ -21,7 +22,7 @@
 # =============================================================================
 
 REPO_ROOT="$BATS_TEST_DIRNAME/../../../.."
-DATA_PORTS='5432|6333|6334|6379|9000|9001'
+DATA_PORTS='5432|6333|6334|6379|9000|9001|3310'
 
 # Tracked compose files, relative to the repo root (git pathspec `*` crosses
 # directory separators, so this finds terraform/single-server/*.yml too).
@@ -135,14 +136,14 @@ scan() {
 }
 
 @test "the data-store entries are present (guard not vacuous)" {
-    # 6 dev entries (5432, 6333, 6334, 6379, 9000, 9001) + 3 in the split-host
-    # data-expose overlay. If an entry is added or dropped, move this floor
-    # deliberately.
+    # 7 dev entries (5432, 6333, 6334, 6379, 9000, 9001, 3310) + 3 in the
+    # split-host data-expose overlay. If an entry is added or dropped, move this
+    # floor deliberately.
     cd "$REPO_ROOT"
     mapfile -t files < <(compose_files)
     run scan "${files[@]}"
     [ "$status" -eq 0 ]
-    [ "$(printf '%s\n' "$output" | grep -c '^OK')" -ge 9 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^OK')" -ge 10 ]
 }
 
 @test "the scanner rejects every all-interfaces shape (self-check)" {
@@ -233,12 +234,13 @@ setup_file() {
     cp "$REPO_ROOT/docker-compose.yml" "$WORK/"
     : > "$WORK/.env.local"
 
-    # --profile minio so the opt-in 9000/9001 entries are rendered too. The
-    # first argument list is extra `VAR=value` pairs for the escape-hatch check.
+    # --profile minio / clamav so the opt-in 9000/9001 and 3310 entries are
+    # rendered too. The first argument list is extra `VAR=value` pairs for the
+    # escape-hatch check.
     render() {
         (cd "$WORK" \
             && env -u COMPOSE_BIND_HOST -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME "$@" \
-                docker compose -p portbind --profile minio config --format json)
+                docker compose -p portbind --profile minio --profile clamav config --format json)
     }
     render                          > "$WORK/default.json"  2>/dev/null
     render COMPOSE_BIND_HOST=0.0.0.0 > "$WORK/override.json" 2>/dev/null
@@ -260,7 +262,7 @@ host_ips() {
     python3 - "$1" <<'PYEOF'
 import json, sys
 doc = json.load(open(sys.argv[1]))
-for svc in ("postgres", "qdrant", "redis", "minio", "api", "web"):
+for svc in ("postgres", "qdrant", "redis", "minio", "clamav", "api", "web"):
     for p in doc["services"][svc]["ports"]:
         print(svc, p["target"], p.get("host_ip", "-"))
 PYEOF
@@ -277,6 +279,7 @@ qdrant 6334 127.0.0.1
 redis 6379 127.0.0.1
 minio 9000 127.0.0.1
 minio 9001 127.0.0.1
+clamav 3310 127.0.0.1
 api 8080 -
 web 3000 -
 EOF
@@ -287,6 +290,6 @@ EOF
     require_compose
     run host_ips "$WORK/override.json"
     [ "$status" -eq 0 ]
-    [ "$(printf '%s\n' "$output" | grep -c ' 0.0.0.0$')" -eq 6 ]
+    [ "$(printf '%s\n' "$output" | grep -c ' 0.0.0.0$')" -eq 7 ]
     [[ "$output" == *"api 8080 -"* ]]
 }

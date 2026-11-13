@@ -308,6 +308,12 @@ async def lifespan(app: FastAPI):
     # Qdrant), before close_db(). A later caller builds a new client (#2241).
     await _close_qdrant_on_shutdown()
 
+    # Cancel this process's malware scans and give their claims back, while
+    # blob storage and the DB are still open (#565).
+    from services.file_scan_service import stop_file_scans
+
+    await stop_file_scans(timeout=5.0)
+
     # Release blob storage (Issue #485)
     from storage.factory import close_blob_storage
 

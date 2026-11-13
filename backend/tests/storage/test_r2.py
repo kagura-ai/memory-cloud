@@ -174,3 +174,101 @@ class TestGeneratePresignedPutChecksumBinding:
 
         params = fake_client.generate_presigned_url.call_args.kwargs["Params"]
         assert "ChecksumSHA256" not in params
+
+
+class _FakeBody:
+    """Stands in for aiobotocore's ``StreamingBody`` (async context manager + iter_chunks)."""
+
+    def __init__(self, data: bytes, *, fail_after: int | None = None) -> None:
+        self._data = data
+        self._fail_after = fail_after
+        self.closed = False
+        self.chunk_sizes: list[int] = []
+
+    async def __aenter__(self) -> _FakeBody:
+        return self
+
+    async def __aexit__(self, *_: object) -> bool:
+        self.closed = True
+        return False
+
+    async def iter_chunks(self, chunk_size: int):
+        self.chunk_sizes.append(chunk_size)
+        for start in range(0, len(self._data), chunk_size):
+            if self._fail_after is not None and start >= self._fail_after:
+                raise OSError("connection lost")
+            yield self._data[start : start + chunk_size]
+
+
+class TestOpenObject:
+    """#565: ``open_object`` streams one GetObject response for the malware scan."""
+
+    @pytest.mark.asyncio
+    async def test_streams_body_with_etag_size_and_last_modified(self) -> None:
+        from datetime import UTC, datetime, timedelta, timezone
+
+        storage, fake_client = _make_storage_with_fake_client()
+        body = _FakeBody(b"0123456789")
+        modified = datetime(2026, 11, 13, 9, 0, 0, tzinfo=timezone(timedelta(hours=9)))
+        fake_client.get_object = AsyncMock(
+            return_value={
+                "Body": body,
+                "ETag": '"abc123"',
+                "ContentLength": 10,
+                "LastModified": modified,
+            }
+        )
+        async with storage.open_object("ws/ab/key") as opened:
+            assert opened is not None
+            assert opened.etag == "abc123"
+            assert opened.size_bytes == 10
+            assert opened.last_modified == modified.astimezone(UTC).replace(tzinfo=None)
+            data = b"".join([chunk async for chunk in opened.iter_chunks(4)])
+        assert data == b"0123456789"
+        assert body.closed is True
+        assert body.chunk_sizes == [4]
+        fake_client.get_object.assert_awaited_once_with(Bucket="kagura-files-test", Key="ws/ab/key")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", ["NoSuchKey", "404"])
+    async def test_missing_object_yields_none(self, code) -> None:
+        from botocore.exceptions import ClientError
+
+        storage, fake_client = _make_storage_with_fake_client()
+        fake_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": code}}, "GetObject")
+        )
+        async with storage.open_object("ws/ab/key") as opened:
+            assert opened is None
+
+    @pytest.mark.asyncio
+    async def test_other_client_error_is_external_service_error_without_the_key(self) -> None:
+        from botocore.exceptions import ClientError
+        from structlog.testing import capture_logs
+
+        from utils.exceptions import ExternalServiceError
+
+        storage, fake_client = _make_storage_with_fake_client()
+        fake_client.get_object = AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "AccessDenied"}}, "GetObject")
+        )
+        with capture_logs() as logs, pytest.raises(ExternalServiceError) as exc_info:
+            async with storage.open_object("ws/ab/secret-key"):
+                pass
+        assert "secret-key" not in str(exc_info.value)
+        assert "secret-key" not in repr(logs)
+
+    @pytest.mark.asyncio
+    async def test_body_is_closed_when_the_reader_fails(self) -> None:
+        storage, fake_client = _make_storage_with_fake_client()
+        body = _FakeBody(b"0123456789", fail_after=4)
+        fake_client.get_object = AsyncMock(
+            return_value={"Body": body, "ETag": '"e"', "ContentLength": 10}
+        )
+        with pytest.raises(OSError, match="connection lost"):
+            async with storage.open_object("k") as opened:
+                assert opened is not None
+                assert opened.last_modified is None
+                async for _ in opened.iter_chunks(4):
+                    pass
+        assert body.closed is True

@@ -9,9 +9,10 @@
 #   MCP:      http://localhost:8080/mcp
 #
 # Data-store ports (postgres 5432, qdrant 6333/6334, redis 6379, minio
-# 9000/9001) are published on 127.0.0.1 only (#1626): Redis and Qdrant run
-# without auth here, Postgres uses the .env.example default password, and a
-# port Docker publishes bypasses host firewalls such as ufw. The localhost URLs
+# 9000/9001, clamav 3310) are published on 127.0.0.1 only (#1626): Redis and
+# Qdrant run without auth here, Postgres uses the .env.example default
+# password, clamd's protocol has no auth at all, and a port Docker publishes
+# bypasses host firewalls such as ufw. The localhost URLs
 # in .env.example are unaffected. To let another machine reach them, prefer an
 # SSH port-forward to this host's loopback; otherwise set COMPOSE_BIND_HOST
 # (shell or the project `.env` — Compose interpolation does not read
@@ -211,9 +212,35 @@ services:
       retries: 5
       start_period: 10s
 
+  # ClamAV (clamd + freshclam) for the upload malware scan (Issue #565). Opt-in
+  # via the `clamav` profile, like minio:
+  #   docker compose --profile clamav up -d clamav
+  # It needs about 3-4 GiB of RAM (ClamAV's documented minimum / preferred)
+  # and outbound HTTPS for signature updates. Then set FILE_SCAN_ENABLED=true
+  # and CLAMD_HOST=clamav in .env.local (CLAMD_HOST=localhost for an API run
+  # on the host). Same image and clamd.conf as the production overlay
+  # (terraform/single-server/docker-compose.clamav.yml); see
+  # docs/deployment.md "Upload malware scanning (ClamAV)".
+  clamav:
+    image: clamav/clamav:1.4.6-debian@sha256:aedee9daad6b069b26adad61af7ec50a41efe33fd8eff7f985c1f31e3a6ae9de
+    container_name: kagura-clamav
+    profiles: ["clamav"]
+    ports:
+      - "${COMPOSE_BIND_HOST:-127.0.0.1}:3310:3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+      - ./terraform/single-server/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10m
+
 volumes:
   postgres_data_18:
   qdrant_data:
   redis_data:
   frontend_node_modules:
   minio_data:
+  clamav_data:
