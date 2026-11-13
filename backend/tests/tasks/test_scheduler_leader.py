@@ -474,3 +474,44 @@ def test_scheduler_leader_enabled_setting(monkeypatch):
     assert settings_module.Settings().scheduler_leader_enabled is True
     monkeypatch.setenv("SCHEDULER_LEADER_ENABLED", "false")
     assert settings_module.Settings().scheduler_leader_enabled is False
+
+
+def test_register_scheduled_jobs_attaches_the_run_recorder():
+    """The run recorder (#2768) is attached once, after every ``schedule_*`` call."""
+    import tasks
+    from tasks.job_runs import EVENT_MASK, JobRunRecorder
+
+    order: list[str] = []
+    names = [n for n in tasks.__all__ if n.startswith("schedule_")]
+    scheduler = MagicMock(name="scheduler")
+    scheduler.add_listener.side_effect = lambda *_a, **_k: order.append("attach")
+    mocks = {n: MagicMock(name=n, side_effect=lambda _s, n=n: order.append(n)) for n in names}
+    with patch.multiple(tasks, **mocks):
+        tasks.register_scheduled_jobs(scheduler)
+    scheduler.add_listener.assert_called_once()
+    listener, mask = scheduler.add_listener.call_args.args
+    assert isinstance(listener, JobRunRecorder)
+    assert mask == EVENT_MASK
+    assert order[-1] == "attach" and len(order) == len(names) + 1
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_the_run_recorder_between_shutdown_and_release(sched):
+    """S1 (#2768): cancelled runs are written while the lock and the database are open."""
+    order: list[str] = []
+    conn = _conn(True, True)  # try-lock True, unlock True
+    conn.close = AsyncMock(side_effect=lambda: order.append("close"))
+    sched.shutdown.side_effect = lambda: order.append("shutdown")
+    drain = AsyncMock(side_effect=lambda **_k: order.append("drain"))
+    leader = _leader(MagicMock())
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "drain_job_run_recorders", drain),
+    ):
+        await leader.tick()
+        assert leader.is_leader is True
+        await leader.stop()
+
+    assert order == ["shutdown", "drain", "close"]
+    drain.assert_awaited_once_with(timeout=sl.RECORDER_DRAIN_TIMEOUT_SECONDS)

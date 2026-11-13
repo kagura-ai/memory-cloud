@@ -30,6 +30,7 @@ from config.retention import (
 from db.base import get_db
 from models.auth import Workspace
 from models.operation_history import OperationHistory as Event
+from tasks.job_runs import JobResult, job_failed
 from tasks.single_flight import single_flight
 from utils.logger import get_logger
 
@@ -112,19 +113,21 @@ async def purge_operation_history(
     return counts
 
 
-async def purge_operation_history_task() -> None:
+async def purge_operation_history_task() -> JobResult:
     """APScheduler entry point: owns its session, one process at a time."""
     async with single_flight(_LOCK_KEY) as acquired:
         if not acquired:
             logger.info("operation_history_purge_skipped", reason="single_flight")
-            return
+            return {"skipped": 1}
         async for db in get_db():
             try:
-                await purge_operation_history(db)
-            except Exception:
+                counts = await purge_operation_history(db)
+            except Exception as exc:
                 logger.exception("operation_history_purge_failed")
                 await db.rollback()
-            return
+                return job_failed(exc)
+            return counts
+    return None
 
 
 def schedule_operation_history_tasks(scheduler: AsyncIOScheduler) -> None:
