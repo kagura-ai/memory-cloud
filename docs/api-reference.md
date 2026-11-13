@@ -2237,7 +2237,7 @@ The response (`schema_version: 1`) has `as_of`, `overdue_grace_seconds`, `schedu
 | `backlogs` | `name`, `drained_by` (job ids; empty = people), `count`, `oldest_at`, `oldest_age_seconds`, `error_class` (set when the count could not be read; `DeadlineExceeded` when the request ran out of time) |
 | `llm` | `lane` (`embedding`, `sleep_judge`, `supersede_verify`, `recall_selector`, `analysis`, `rerank`), `provider`, `model`, `credential_present`, `snapshot_at`, `usage_recorded`, `usage_attribution` (`platform` / `includes_workspace_keys`), `last_success_at`, `calls_last_hour`, `calls_last_day`, `error_class`, `probe` (`null` unless the opt-in probe ran: `last_probe_at`, `last_outcome`, `last_latency_ms`, `error_class`, `consecutive_failures`, `last_success_at`) |
 
-No user, workspace or context identifier, email address, memory text or exception message is part of the response.
+No user, workspace or context identifier, email address, memory text or exception message is part of the response. See [Operations status](deployment.md#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768) for the meaning of each field, the probe setting and what to alert on.
 
 ### Service notices over MCP
 
@@ -2257,7 +2257,7 @@ The rules, checked on create:
 - **Window** (`422 MCPNOTICE-002`, `details.reason`): `expires_at` after `starts_at` (`ends_before_start`) and in the future (`already_expired`); at most 30 days long (`too_long`); `starts_at` (default now) at most 90 days ahead (`starts_too_far_ahead`) and not more than 60 seconds in the past (`starts_in_the_past`).
 - **Caps**: at most 3 notices live or scheduled at a time (`409 MCPNOTICE-003`); at most 5 created in any 24 hours, withdrawn ones included (`409 MCPNOTICE-007`).
 
-`POST .../withdraw` with an unknown id: `404 MCPNOTICE-004`. See [Operations status](deployment.md#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768) for the meaning of each field, the probe setting and what to alert on.
+`POST .../withdraw` with an unknown id: `404 MCPNOTICE-004`.
 
 ### Sleep Maintenance
 
