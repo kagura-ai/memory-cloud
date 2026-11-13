@@ -22,6 +22,8 @@ The reason never carries the text.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from services.mcp_notice_text import (
@@ -370,9 +372,7 @@ class TestUnicodeHosts:
             "see \u0435\u0445\u0430m\u0440l\u0435.\u0441\u043em now",
             "ログインし直してください: 認証.jp",
             "see a例え.jp",
-            # NFKC + the U+3002 mapping give exactly 例え.jp
-            "例え。ｊｐ",
-            "例え｡jp",
+            # the fullwidth full stop U+FF0E is a real dot after NFKC
             "例え．jp",
         ],
     )
@@ -385,18 +385,55 @@ class TestUnicodeHosts:
             "確認しました。次へ進んでください。",
             "例え。みんなで確認します。",
             "保存が止まります。 Kagura Memory は再開後に戻ります。",
+            "メンテナンスを行います。MCP の接続が切れます。",
+            "メンテナンスは終了しました。Kagura を再開します。",
+            "11月20日にメンテナンスを行います｡MCP の接続が切れます｡",
+            # a label in another script before 。 is prose, not a host name
+            "例え。jp",
+            "例え｡ｊｐ",
         ],
     )
     def test_japanese_prose_with_the_ideographic_full_stop_passes(self, text: str) -> None:
         assert normalize_notice_text(text) == text
 
-    def test_latin_letters_straight_after_the_ideographic_full_stop_are_refused(
-        self,
-    ) -> None:
-        """A documented false positive: ``。`` reads as ``.`` (as a browser
-        reads it), so 「…しました。Kagura」 is a host name; the writer puts a
-        space after ``。``."""
-        assert _reason("メンテナンスは終了しました。Kagura を再開します。") == "link"
+
+class TestIdeographicFullStop:
+    """U+3002 and U+FF61 (which NFKC maps to U+3002) read as a dot only
+    right after an ASCII letter, digit or hyphen, where a browser would read
+    ``example。com`` as a host name; after any other character they end a
+    Japanese sentence."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "example。com",
+            "example｡com",
+            "ｅｘａｍｐｌｅ。ｃｏｍ",
+            "sign in at kagura-login。com",
+            "www。example",
+            "address 10。0。0。1",
+            # the character right before 。 decides, not the whole word
+            "see 例えa。jp",
+            "café。com",
+            # a documented false positive: an ASCII word straight before 。
+            "詳しくは Kagura。Kagura を再開します。",
+        ],
+    )
+    def test_after_an_ascii_label_it_is_a_dot(self, text: str) -> None:
+        assert _reason(text) == "link"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "メンテナンスを行います。MCP の接続が切れます。",
+            "…しました。Kagura を再開します。",
+            "保存は1時間止まります。v0.161.0 で直りました。",
+            "バージョン 2。次は 3 です。",
+            "対象は MCP。保存は止まりません。",
+        ],
+    )
+    def test_after_anything_else_it_ends_a_sentence(self, text: str) -> None:
+        assert normalize_notice_text(text) == text
 
 
 class TestCharacterReferences:
@@ -428,6 +465,69 @@ class TestCharacterReferences:
     )
     def test_a_plain_ampersand_passes(self, text: str) -> None:
         assert normalize_notice_text(text) == text
+
+
+class TestRawInputBound:
+    """Anything longer than 1,200 raw characters is refused before any
+    normalisation work, so one request costs a bounded amount of CPU."""
+
+    def test_the_bound_is_1200_raw_characters(self) -> None:
+        from services import mcp_notice_text
+
+        assert mcp_notice_text._RAW_INPUT_LIMIT == 1_200
+
+    def test_at_the_bound_spaces_still_collapse(self) -> None:
+        raw = "a" + " " * 1_198 + "b"
+        assert len(raw) == 1_200
+        assert normalize_notice_text(raw) == "a b"
+
+    def test_over_the_bound_is_too_long_whatever_it_normalises_to(self) -> None:
+        raw = "a" + " " * 1_199 + "b"
+        assert _reason(raw) == "too_long"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "a" * 1_200,
+            "a." * 600,
+            "1:" * 600,
+            "a1+" * 400,
+            "ab_-" * 300,
+            "a。" * 600,
+            "&a" * 600,
+            ("a." + "b" * 70) * 16,
+            # NFKC expands these: 1. / a.m. / a six-letter word / 18 characters
+            "\u2488" * 1_200,
+            "\u33c2" * 1_200,
+            "\u3316" * 1_200,
+            "\ufdfa" * 1_200,
+        ],
+        ids=[
+            "letters",
+            "dotted-labels",
+            "colons",
+            "scheme-chars",
+            "word-chars",
+            "ideographic-stops",
+            "ampersands",
+            "long-tlds",
+            "nfkc-digit-dot",
+            "nfkc-am",
+            "nfkc-word",
+            "nfkc-18",
+        ],
+    )
+    def test_worst_case_input_is_cheap(self, raw: str) -> None:
+        """Every pattern is linear in the folded text (see the module), so a
+        pathological input at the bound takes a few milliseconds; the limit
+        here is generous so a loaded CI machine cannot fail it."""
+        assert len(raw) <= 1_200
+        started = time.perf_counter()
+        try:
+            normalize_notice_text(raw)
+        except NoticeTextError:
+            pass
+        assert time.perf_counter() - started < 0.5
 
 
 class TestOrder:

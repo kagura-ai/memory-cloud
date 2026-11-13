@@ -30,8 +30,10 @@ d. Refused (``markup_char``): ``< > [ ] ` " \\ { } @`` (HTML, autolinks,
    HTML character references, which markdown renderers decode (``&#`` with a
    digit or ``x``, ``&name;``, and ``&lt`` ``&gt`` ``&quot`` without the
    semicolon). A plain ``&`` (``Q&A``) passes.
-e. Refused (``link``), with U+3002, U+FF0E and U+FF61 read as ``.``: a
-   ``scheme:`` followed by ``//``; ``//`` directly followed by anything but a
+e. Refused (``link``), with U+FF0E read as ``.`` (NFKC maps it), and U+3002
+   and U+FF61 read as ``.`` only directly after an ASCII letter, digit or
+   hyphen (``example。com``; after any other character they end a Japanese
+   sentence, as in 「…しました。Kagura」): a ``scheme:`` followed by ``//``; ``//`` directly followed by anything but a
    space (a protocol-relative link such as ``//localhost``, whatever the
    host); the schemes ``mailto javascript data vbscript file tel sms``;
    ``www.``; host names (``label.label`` ending in two or more ASCII letters,
@@ -40,14 +42,22 @@ e. Refused (``link``), with U+3002, U+FF0E and U+FF61 read as ``.``: a
    (``пример.рф``, ``例え.みんな``); any ``xn--`` label; IPv4 and IPv6
    literals. There is no exception for this server's own host: a notice
    carries no link at all. Accepted false positives such as ``README.md``,
-   ``Node.js``, ``Ver.アップ``, ``a//b`` or a sentence that runs straight from
-   ``。`` into Latin letters (「…しました。Kagura」): the writer rewords or puts a
-   space after ``。``.
+   ``Node.js``, ``Ver.アップ``, ``a//b`` or an ASCII word directly before
+   ``。`` followed by Latin letters (「…Kagura。Kagura…」): the writer rewords or
+   puts a space before ``。``.
 f. 1 to 300 characters (``empty`` / ``too_long``) and at most 900 UTF-8 bytes
    (``too_many_bytes``) after normalisation.
 
 The stored text is the NFC result of rule a. The reason never carries the
 text.
+
+Cost: a raw input longer than 1,200 characters is refused (``too_long``)
+before any work. Every pattern below is linear in the folded text: none has a
+repeated group or an unbounded run that is retried from every position of
+the run (runs start only at the beginning of a run and are possessive), so a
+pathological input at the bound, NFKC expansion included (one character can
+become 18), costs a few milliseconds; ``tests/services/test_mcp_notice_text.py``
+measures it.
 """
 
 from __future__ import annotations
@@ -68,8 +78,10 @@ __all__ = [
 MCP_NOTICE_MAX_CHARS: Final = 300
 # 300 Japanese characters are 900 bytes in UTF-8.
 MCP_NOTICE_MAX_BYTES: Final = 900
-# Anything this long is refused before any normalisation work.
-_RAW_INPUT_LIMIT: Final = 10_000
+# Anything this long is refused (too_long) before any normalisation work:
+# four times the 300-character cap leaves room for spaces that collapse and
+# marks that compose, and keeps one request's CPU in the milliseconds.
+_RAW_INPUT_LIMIT: Final = 1_200
 
 NoticeTextReason = Literal[
     "empty",
@@ -146,10 +158,18 @@ _CHARACTER_REFERENCE: Final = re.compile(
 
 # --- rule e -------------------------------------------------------------------
 
-_DOTS: Final = str.maketrans({"。": ".", "．": ".", "｡": "."})
+# U+3002 (and U+FF61, which NFKC maps to it) read as a dot only directly
+# after an ASCII label character, where a browser would read the token as a
+# host name; after anything else they end a Japanese sentence. U+FF0E is a
+# dot already (NFKC maps it to U+002E).
+_ASCII_LABEL_FULL_STOP: Final = re.compile(r"(?<=[a-z0-9-])[。｡]", re.ASCII)
+# Every pattern is linear: an unbounded run is only entered at the start of
+# the run (a lookbehind) and is possessive, so it is never rescanned from each
+# of its positions; bounded runs ({1,4}, {2,63}) cost a constant per position.
 _LINK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
-    # scheme followed by // (spaces between tolerated)
-    re.compile(r"[a-z][a-z0-9+.-]*: *//", re.ASCII),
+    # scheme followed by // (spaces between tolerated): the run of scheme
+    # characters before ":" holds a letter (where a scheme can start)
+    re.compile(r"(?<![a-z0-9+.-])[0-9+.-]*+[a-z][a-z0-9+.-]*+: *//", re.ASCII),
     # a protocol-relative start: "//" directly followed by anything but a
     # space ("//localhost", "//a.b", "//例え"); renderers link these whatever
     # the host, so no host rule below has to recognise it (rule a leaves
@@ -158,11 +178,14 @@ _LINK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     # schemes that need no //
     re.compile(r"\b(?:mailto|javascript|data|vbscript|file|tel|sms):", re.ASCII),
     re.compile(r"www\.", re.ASCII),
-    # host-like tokens; ASCII word boundaries so "example.comへ" still ends
-    re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b", re.ASCII),
-    # the same with labels in any script before an ASCII top-level label
-    # (U+3002 included: 例え。ｊｐ folds to 例え.jp)
-    re.compile(r"[^\W_][\w-]*\.[a-z]{2,63}(?![a-z0-9])"),
+    # host-like tokens ``(?:label\.)+tld``; ASCII word boundaries so
+    # "example.comへ" still ends. Any such match ends in one label character
+    # right before the last dot, so that is all the pattern needs to find (no
+    # repeated group to backtrack through).
+    re.compile(r"[a-z0-9]\.[a-z]{2,63}\b", re.ASCII),
+    # the same with labels in any script before an ASCII top-level label: the
+    # run of word characters and hyphens before the dot holds a letter or digit
+    re.compile(r"(?<![\w-])[_-]*+[^\W_][\w-]*+\.[a-z]{2,63}(?![a-z0-9])"),
     re.compile(r"xn--", re.ASCII),
     # IPv4
     re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", re.ASCII),
@@ -216,8 +239,9 @@ def _check_invisible(text: str) -> None:
 
 # A top-level label in any script, only after a real ``.`` (U+002E or the
 # fullwidth U+FF0E, which NFKC maps to it): after ``。`` it would refuse
-# ordinary Japanese prose (「確認しました。次へ」).
-_ANY_SCRIPT_HOST: Final = re.compile(r"[^\W_][\w-]*\.[^\W\d_]{2,63}")
+# ordinary Japanese prose (「確認しました。次へ」, 「対象は MCP。次へ」).
+# Linear like the patterns above.
+_ANY_SCRIPT_HOST: Final = re.compile(r"(?<![\w-])[_-]*+[^\W_][\w-]*+\.[^\W\d_]{2,63}")
 
 
 def _skeleton(text: str) -> str:
@@ -244,7 +268,7 @@ def normalize_notice_text(raw: str) -> str:
     skeleton = _skeleton(text)
     if any(ch in _MARKUP_CHARS for ch in skeleton) or _CHARACTER_REFERENCE.search(skeleton):
         raise NoticeTextError("markup_char")
-    folded = skeleton.translate(_DOTS)
+    folded = _ASCII_LABEL_FULL_STOP.sub(".", skeleton)
     if any(pattern.search(folded) for pattern in _LINK_PATTERNS) or _ANY_SCRIPT_HOST.search(
         skeleton
     ):
