@@ -13,7 +13,7 @@ its digest to the flow's state (#2786). Pinned here, for both providers:
   plain and ``__Host-`` cookie, two flows in two tabs);
 - flows started from Profile (``refresh`` / ``link`` intents, which never ran
   ``/login``) still reach their own branch; one whose intent is gone by then is
-  refused before an account check (``link``) or before any session (both);
+  refused before any account check, gate or session;
 - a ``refresh`` flow whose identity owns nothing here or belongs to another
   account ends in the refresh mismatch answer before the terms gate, the
   sign-up gate and ``ensure_user``; the starting account's own refresh works;
@@ -498,27 +498,34 @@ def _drop_intent_during_the_exchange(provider: str, redis) -> None:  # noqa: F81
     _exchange(provider).side_effect = drop
 
 
+@pytest.mark.parametrize("returning", ["starting_account", "unknown_identity"])
 @pytest.mark.parametrize("provider", PROVIDERS)
 @pytest.mark.asyncio
-async def test_a_refresh_intent_gone_during_the_exchange_opens_no_session(
+async def test_a_refresh_intent_gone_during_the_exchange_creates_nothing(
     redis,  # noqa: F811
     terms_off,  # noqa: F811
     github_idp,  # noqa: F811
     google_idp,  # noqa: F811
     signed_in_path,
     provider,
+    returning,
 ) -> None:
+    """The flow went on as a refresh, so it ends as one even when the intent is
+    gone after the exchange: no terms gate, no sign-up gate, no account, no
+    session, whoever signed in at the provider."""
     redis.store["oauth2_state:st1"] = "pending"
     redis.store["oauth2_state_intent:st1"] = "refresh"
     redis.store["oauth2_state_user:st1"] = OWNER_ID
+    if returning == "unknown_identity":
+        signed_in_path.owning.return_value = None
     _drop_intent_during_the_exchange(provider, redis)
 
     response = await _callback(provider, "st1", None)
 
     _assert_refused(response, provider)
-    signed_in_path.manager.create_session.assert_not_called()
-    signed_in_path.manager.add_account.assert_not_called()
-    signed_in_path.manager.delete_user_sessions.assert_not_called()
+    signed_in_path.owning.assert_not_awaited()
+    signed_in_path.terms.assert_not_awaited()
+    _assert_nothing_happened(signed_in_path)
     assert not any("st1" in key for key in redis.store)
 
 

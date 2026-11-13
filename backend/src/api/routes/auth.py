@@ -630,7 +630,13 @@ async def _maybe_refresh_redirect(
 
 
 async def _refresh_identity_mismatch(
-    provider: Literal["google", "github"], state: str, idp_sub: str
+    provider: Literal["google", "github"],
+    state: str,
+    idp_sub: str,
+    *,
+    browser_check: Literal["bound", "link", "refresh"],
+    request: Request,
+    flow_record: bool,
 ) -> RedirectResponse | None:
     """End a Profile refresh whose identity is not the account that started it.
 
@@ -639,14 +645,19 @@ async def _refresh_identity_mismatch(
     returning identity is resolved without writing (its link row): one that
     owns nothing here or belongs to another account gets the refresh mismatch
     answer, an expired record the expired answer, and every key bound to the
-    state is dropped. None: not a refresh, or the starting account's own
-    identity (the callback goes on; ``ensure_user`` syncs the profile and
+    state is dropped. A callback that went on as a refresh
+    (``browser_check == "refresh"``) whose intent is gone by now ends with
+    ``_other_browser_refusal``: it has no binding and may not become a
+    sign-in. None: not a refresh, or the starting account's own identity (the
+    callback goes on; ``ensure_user`` syncs the profile and
     ``_maybe_refresh_redirect`` answers).
     """
     if not _session_manager:
         return None
     redis = _session_manager._redis
     if redis.get(f"oauth2_state_intent:{state}") != "refresh":
+        if browser_check == "refresh":
+            return _other_browser_refusal(provider, state, request, flow_record=flow_record)
         return None
     expected_user_id = redis.get(f"oauth2_state_user:{state}")
     owner_id = ""
@@ -1288,7 +1299,14 @@ async def google_callback(
         if browser_check == "link":
             return _other_browser_refusal("google", state, request, flow_record=flow.record)
         # A Profile refresh goes on only for the account that started it.
-        refresh_mismatch = await _refresh_identity_mismatch("google", state, user_info["sub"])
+        refresh_mismatch = await _refresh_identity_mismatch(
+            "google",
+            state,
+            user_info["sub"],
+            browser_check=browser_check,
+            request=request,
+            flow_record=flow.record,
+        )
         if refresh_mismatch is not None:
             return refresh_mismatch
 
@@ -3007,7 +3025,14 @@ async def github_callback(
         if browser_check == "link":
             return _other_browser_refusal("github", state, request, flow_record=flow.record)
         # A Profile refresh goes on only for the account that started it.
-        refresh_mismatch = await _refresh_identity_mismatch("github", state, user_info["sub"])
+        refresh_mismatch = await _refresh_identity_mismatch(
+            "github",
+            state,
+            user_info["sub"],
+            browser_check=browser_check,
+            request=request,
+            flow_record=flow.record,
+        )
         if refresh_mismatch is not None:
             return refresh_mismatch
 
