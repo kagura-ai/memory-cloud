@@ -505,9 +505,9 @@ def _offer_link_confirmation(
     by a detached task after it (``spawn_link_offer``), so the request ends
     at the same moment whatever happens next. No offer is made when the
     sign-in was not started by this browser's ``/login`` (no binding: since
-    #2791 only a Profile ``refresh`` flow gets this far), or when it carries an add-account intent or an identity-link proof: an
-    intent that cannot be honoured is refused, never turned into another
-    sign-in. Never raises.
+    #2791 only a Profile ``refresh`` flow gets this far), or when it carries
+    an add-account intent or an identity-link proof: an intent that cannot be
+    honoured is refused, never turned into another sign-in. Never raises.
     """
     try:
         redis = _session_manager._redis if _session_manager else None
