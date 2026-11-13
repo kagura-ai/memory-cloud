@@ -996,12 +996,17 @@ curl -X POST https://example.com/api/v1/admin/mcp-notices/<notice-id>/withdraw \
   bytes: 300 Japanese characters fit). It is refused (`422 MCPNOTICE-001`
   with `details.reason`) when it holds a line break or another control or
   formatting character, an invisible character, one of
-  `<` `>` `[` `]` `` ` `` `"` `\` `{` `}` `@`, or anything a client could show
-  as a link: a URL, `mailto:` and the like, `www.`, a host name (including
-  this server's own), an e-mail or IP address. The check also reads
-  fullwidth forms. Names that look like host names are refused too —
-  `README.md`, `Node.js`: reword them ("the README file"). Version numbers
-  such as `v0.161.0` pass. Use 「」 or ' ' instead of `"`.
+  `<` `>` `[` `]` `` ` `` `"` `\` `{` `}` `@`, an HTML character reference
+  (`&#64;`, `&lt;`; a plain `&` as in `Q&A` passes), or anything a client
+  could show as a link: a URL, `mailto:` and the like, `www.`, a host name
+  in any script (including this server's own; `例え.jp` and `пример.рф`
+  too), an e-mail or IP address. The check also reads fullwidth forms and
+  ignores combining marks placed inside a word. Names that look like host
+  names are refused too — `README.md`, `Node.js`, `Ver.アップ`: reword them
+  ("the README file"). `。` counts as a dot, so a sentence that runs straight
+  from `。` into Latin letters (「…しました。Kagura」) needs a space after
+  `。`. Version numbers such as `v0.161.0` pass. Use 「」 or ' ' instead of
+  `"`.
 - **No edit, no delete.** A correction is withdraw + create, so everyone who
   saw a notice saw the same text. Withdrawing stops delivery at once.
 - **Audit.** Every create and withdraw writes an `audit_logs` row

@@ -20,16 +20,28 @@ c. Refused (``invisible_char``): the Unicode ``Default_Ignorable_Code_Point``
    (braille blank). U+FE0F is allowed only directly after an emoji base, once;
    U+FE00-FE0E and U+E0100-E01EF are always refused; a run of more than two
    combining marks (``Mn`` / ``Me``) is refused.
+Rules d and e read a *skeleton* of the text: ``NFKC(text).casefold()`` with
+every combining mark removed (NFKD, then every ``M*`` character dropped), so
+fullwidth forms count and a mark inside a token (U+0332 after ``https``, the
+``é`` of ``loginé.com``) does not split it. The stored text keeps its marks.
+
 d. Refused (``markup_char``): ``< > [ ] ` " \\ { } @`` (HTML, autolinks,
-   markdown links, code spans, a forged JSON frame, e-mail addresses), checked
-   on the folded copy of rule e so fullwidth forms count too.
-e. Refused (``link``), checked on ``NFKC(text).casefold()`` with U+3002, U+FF0E
-   and U+FF61 read as ``.``: a ``scheme:`` followed by ``//``; the schemes
+   markdown links, code spans, a forged JSON frame, e-mail addresses), and
+   HTML character references, which markdown renderers decode (``&#`` with a
+   digit or ``x``, ``&name;``, and ``&lt`` ``&gt`` ``&quot`` without the
+   semicolon). A plain ``&`` (``Q&A``) passes.
+e. Refused (``link``), with U+3002, U+FF0E and U+FF61 read as ``.``: a
+   ``scheme:`` followed by ``//``; the schemes
    ``mailto javascript data vbscript file tel sms``; ``www.``; host names
-   (``label.label`` ending in two or more letters); any ``xn--`` label; IPv4
-   and IPv6 literals. There is no exception for this server's own host: a
-   notice carries no link at all. Accepted false positives such as
-   ``README.md`` or ``Node.js``: the writer rewords.
+   (``label.label`` ending in two or more ASCII letters, the labels in any
+   script: ``例え.jp``, ``пример.com``); a label in any script followed by an
+   ASCII ``.`` and a top-level label of two or more letters in any script
+   (``пример.рф``, ``例え.みんな``); any ``xn--`` label; IPv4 and IPv6
+   literals. There is no exception for this server's own host: a notice
+   carries no link at all. Accepted false positives such as ``README.md``,
+   ``Node.js``, ``Ver.アップ`` or a sentence that runs straight from ``。``
+   into Latin letters (「…しました。Kagura」): the writer rewords or puts a
+   space after ``。``.
 f. 1 to 300 characters (``empty`` / ``too_long``) and at most 900 UTF-8 bytes
    (``too_many_bytes``) after normalisation.
 
@@ -125,6 +137,11 @@ _EMOJI_BASE_EXTRA: Final = frozenset("#*0123456789‼⁉〰〽")
 # --- rule d -------------------------------------------------------------------
 
 _MARKUP_CHARS: Final = frozenset('<>[]`"\\{}@')
+# HTML character references: numeric (decoded even without the semicolon),
+# named, and the legacy names an HTML parser decodes without one.
+_CHARACTER_REFERENCE: Final = re.compile(
+    r"&(?:#(?:\d|x[0-9a-f])|[a-z][a-z0-9]*;|lt|gt|quot)", re.ASCII
+)
 
 # --- rule e -------------------------------------------------------------------
 
@@ -137,6 +154,9 @@ _LINK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"www\.", re.ASCII),
     # host-like tokens; ASCII word boundaries so "example.comへ" still ends
     re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b", re.ASCII),
+    # the same with labels in any script before an ASCII top-level label
+    # (U+3002 included: 例え。ｊｐ folds to 例え.jp)
+    re.compile(r"[^\W_][\w-]*\.[a-z]{2,63}(?![a-z0-9])"),
     re.compile(r"xn--", re.ASCII),
     # IPv4
     re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", re.ASCII),
@@ -188,8 +208,17 @@ def _check_invisible(text: str) -> None:
         previous = ch
 
 
-def _folded(text: str) -> str:
-    return unicodedata.normalize("NFKC", text).casefold().translate(_DOTS)
+# A top-level label in any script, only after a real ``.`` (U+002E or the
+# fullwidth U+FF0E, which NFKC maps to it): after ``。`` it would refuse
+# ordinary Japanese prose (「確認しました。次へ」).
+_ANY_SCRIPT_HOST: Final = re.compile(r"[^\W_][\w-]*\.[^\W\d_]{2,63}")
+
+
+def _skeleton(text: str) -> str:
+    """``NFKC(text).casefold()`` with every combining mark removed."""
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    decomposed = unicodedata.normalize("NFKD", folded)
+    return "".join(ch for ch in decomposed if not unicodedata.category(ch).startswith("M"))
 
 
 def normalize_notice_text(raw: str) -> str:
@@ -206,10 +235,13 @@ def normalize_notice_text(raw: str) -> str:
     text = _normalise(raw)
     _check_categories(text)
     _check_invisible(text)
-    folded = _folded(text)
-    if any(ch in _MARKUP_CHARS for ch in folded):
+    skeleton = _skeleton(text)
+    if any(ch in _MARKUP_CHARS for ch in skeleton) or _CHARACTER_REFERENCE.search(skeleton):
         raise NoticeTextError("markup_char")
-    if any(pattern.search(folded) for pattern in _LINK_PATTERNS):
+    folded = skeleton.translate(_DOTS)
+    if any(pattern.search(folded) for pattern in _LINK_PATTERNS) or _ANY_SCRIPT_HOST.search(
+        skeleton
+    ):
         raise NoticeTextError("link")
     if not text:
         raise NoticeTextError("empty")

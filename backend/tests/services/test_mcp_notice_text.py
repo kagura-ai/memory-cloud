@@ -9,9 +9,12 @@ b. categories Cc / Cf / Zl / Zp / Co / Cs / Cn and every Zs other than U+0020
 c. the Default_Ignorable_Code_Point set and U+2800 are refused; U+FE0F only
    once, right after an emoji base; other variation selectors always; runs of
    more than two combining marks;
-d. ``< > [ ] ` " \\ { } @`` are refused (also their fullwidth forms);
-e. on the NFKC + casefold copy: link schemes, ``www.``, host names, ``xn--``,
-   IPv4 and IPv6 literals;
+d. ``< > [ ] ` " \\ { } @`` and HTML character references are refused (also
+   their fullwidth forms);
+e. link schemes, ``www.``, host names in any script, ``xn--``, IPv4 and IPv6
+   literals;
+
+d and e read the NFKC + casefold copy with every combining mark removed.
 f. 1-300 characters and at most 900 UTF-8 bytes.
 
 The reason never carries the text.
@@ -270,6 +273,120 @@ class TestLinks:
 
         monkeypatch.setattr(get_settings(), "frontend_url", "https://example.com")
         assert _reason("go to example.com") == "link"
+
+
+class TestMarkedLinks:
+    """Rules d and e run on a skeleton with every combining mark removed, so a
+    mark inside a link token does not split it (one U+0332 under ``https``
+    reads as an underline, not as a different word)."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "https\u0332://x",  # inside the scheme
+            "mailto\u0332:x",
+            "w\u0332ww.x",  # inside www.
+            "10\u0332.0.0.1",  # inside an IPv4 literal
+            "x\u0332n--p1ai",  # inside xn--
+            "sign in at kagura-login\u0332.com",  # right before the dot
+            "kagura-login.c\u0332om",  # inside the TLD
+            "kagura-login\u0323.com",  # dot below, right before the dot
+            "kagura-logine\u0301.com",  # NFC composes it into a non-ASCII letter
+            "ex\u20dcample.com",  # an enclosing-class mark (Mn)
+        ],
+    )
+    def test_a_mark_inside_a_link_token_is_still_a_link(self, text: str) -> None:
+        assert _reason(text) == "link"
+
+    @pytest.mark.parametrize("text", ["a <\u0338 b", "a \u226e b", "x @\u0332 y"])
+    def test_a_mark_does_not_hide_a_markup_character(self, text: str) -> None:
+        assert _reason(text) == "markup_char"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Tiếng Việt: bảo trì vào thứ Bảy.",
+            "Café maintenance, naïve fix.",
+            "ご確認ください。ガイドを参照してください。",
+        ],
+    )
+    def test_prose_with_marks_passes(self, text: str) -> None:
+        assert normalize_notice_text(text) == text
+
+
+class TestUnicodeHosts:
+    """A host name is a link whatever script its labels are written in."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "詳しくは 例え.jp へ",
+            "例え.jpへ",
+            "例え.みんな",
+            "see пример.com now",
+            "see пример.рф now",
+            # Cyrillic look-alikes of example.com
+            "see \u0435\u0445\u0430m\u0440l\u0435.\u0441\u043em now",
+            "ログインし直してください: 認証.jp",
+            "see a例え.jp",
+            # NFKC + the U+3002 mapping give exactly 例え.jp
+            "例え。ｊｐ",
+            "例え｡jp",
+            "例え．jp",
+        ],
+    )
+    def test_refused(self, text: str) -> None:
+        assert _reason(text) == "link"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "確認しました。次へ進んでください。",
+            "例え。みんなで確認します。",
+            "保存が止まります。 Kagura Memory は再開後に戻ります。",
+        ],
+    )
+    def test_japanese_prose_with_the_ideographic_full_stop_passes(self, text: str) -> None:
+        assert normalize_notice_text(text) == text
+
+    def test_latin_letters_straight_after_the_ideographic_full_stop_are_refused(
+        self,
+    ) -> None:
+        """A documented false positive: ``。`` reads as ``.`` (as a browser
+        reads it), so 「…しました。Kagura」 is a host name; the writer puts a
+        space after ``。``."""
+        assert _reason("メンテナンスは終了しました。Kagura を再開します。") == "link"
+
+
+class TestCharacterReferences:
+    """An HTML character reference is decoded by every markdown renderer, so
+    it would carry a link, an address or a refused character past rules d
+    and e."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "go h&#116;tps&#58;&#47;&#47;evil&#46;example now",
+            "&#x68;ttps&#x3a;//",
+            "x &#X40; y",
+            "help&#64;kagura-login&#46;example",
+            "x &#64 y",  # no semicolon: an HTML parser still decodes it
+            "&lt;script&gt;",
+            "a &commat; b",
+            "&ltscript",  # legacy names decode without a semicolon
+            "say &quot hi",
+            "x &#\u0332116; y",  # a mark does not split it
+        ],
+    )
+    def test_refused(self, text: str) -> None:
+        assert _reason(text) == "markup_char"
+
+    @pytest.mark.parametrize(
+        "text",
+        ["Q&A on Friday", "R&D update", "AT&T and B & C", "Tom & Jerry; then #1"],
+    )
+    def test_a_plain_ampersand_passes(self, text: str) -> None:
+        assert normalize_notice_text(text) == text
 
 
 class TestOrder:
