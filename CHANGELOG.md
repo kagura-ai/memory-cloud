@@ -4,6 +4,58 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.161.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.161.0) — 2026-11-13
+
+Short service notices from a deployment's administrators, delivered once at the start of an MCP session to the people who turned them on. Off by default: with `MCP_NOTICES_ENABLED=false` nothing is offered or delivered and every tool reply is unchanged. Also: read-only workspace membership and access inspection for OIDC clients.
+
+### Added
+- **Service notices over MCP, opt-in per user** ([#2762](https://github.com/kagura-ai/memory-cloud/issues/2762)): administrators can write short service notices, such as a maintenance window or a change that needs action. The `bootstrap` reply delivers each notice once per person, across all of that person's clients, but only to people who turned on "Notices in AI tools" in account settings. The reply carries `notices: {provenance, items: [{id, text, published_at, expires_at}]}` right after `status`. The `provenance` line frames the items as information to pass on to the user, not instructions. A notice is never sent:
+  - on an agent-bound key or a connector's shared key;
+  - on the `?profile=google` / `?profile=microsoft` view;
+  - on the public endpoint or a share key;
+  - in any tool other than `bootstrap`;
+  - on a connection whose MCP URL carries `?notices=off`;
+  - to an account whose erasure is under way.
+
+  Notices and the plan-headroom notice share at most a quarter of `bootstrap`'s `max_chars`, and a notice is delivered whole or not at all. A notice that does not fit is skipped, the next one is still placed, and the skipped one comes with a later `bootstrap` call that has room for it, so a client that always asks for a small `max_chars` may never get a long one. A notice is used up only when it is actually placed in a reply. The kagura-memory session-start skills show each notice first, verbatim, as `Service notice: <text>`, and never act on it.
+- **Writing notices** ([#2762](https://github.com/kagura-ai/memory-cloud/issues/2762)): administrators use three routes:
+  - `POST /api/v1/admin/mcp-notices` (`{"text", "expires_at", "starts_at"?}`) creates a notice;
+  - `GET /api/v1/admin/mcp-notices` lists notices, with an aggregate `delivered_count` per notice and a `delivering` flag;
+  - `POST /api/v1/admin/mcp-notices/{id}/withdraw` ends a notice.
+
+  The routes follow `SYSTEM_ADMIN_MODE`: a system admin's session in `session` mode, an operator console in `service` mode, nobody in `off` mode. They also work while delivery is off, so a notice can be prepared in advance.
+
+  Limits:
+  - at most 3 notices live or scheduled at a time;
+  - each notice runs at most 30 days and can be scheduled at most 90 days ahead;
+  - at most 5 notices created in any 24 hours, withdrawn ones included.
+
+  The text is one line of plain text, 1-300 characters (at most 900 bytes; anything over 1,200 characters before normalisation is refused at once). It may hold:
+  - no links or anything a client would turn into a link: schemes, `//` followed by a host, `www.`, `@`, host names in any script (`example.com`, `例え.jp`, `пример.рф`, but also `README.md`), `xn--` labels and IP addresses, also in fullwidth forms or with a combining mark inside;
+  - no markup characters and no HTML character references such as `&#64;`; a plain `&` as in `Q&A` passes;
+  - no invisible characters.
+
+  The Japanese full stop `。` counts as a dot unless the character directly before or after it is Japanese. So `example。com` and look-alikes such as `examplе。com` are refused, while 「…しました。Kagura を…」 or 「接続先は MCP。」 pass; `Kagura。Kagura` needs a space after `。`. A notice cannot be edited or deleted, only withdrawn, and withdrawing a notice that has already ended changes nothing. Every create and withdraw writes an audit row and a WARNING log line (`mcp_notice_created` / `mcp_notice_withdrawn`), neither of which contains the text. These routes refuse with `MCPNOTICE-001`..`004` and `MCPNOTICE-007`; the account setting below uses `MCPNOTICE-005` (not offered) and `MCPNOTICE-006` (wording changed).
+- **Account setting** ([#2762](https://github.com/kagura-ai/memory-cloud/issues/2762)): a "Notices in AI tools" card in account settings, placed after Emails, through the session-only `GET/PUT /api/v1/me/mcp-notices`.
+  - The setting is off by default, and every change is recorded.
+  - Turning it on needs the current wording version and is limited to 20 requests an hour; turning it off always works and is never rate-limited.
+  - The card appears only while the deployment offers notices, except that someone who has it on always sees it so they can turn it off.
+
+- **OIDC workspace membership and access inspection** ([#2793](https://github.com/kagura-ai/memory-cloud/issues/2793)): two read-only routes for OIDC clients.
+  - `GET /api/v1/me/workspaces` lists the account's workspaces, with cursor pagination.
+  - `GET /api/v1/me/workspaces/{workspace_id}/access` reports the account's effective access to a workspace, or to one of its contexts with `context_id`. The access is resolved from current membership, privacy, context roles, seats, writable slots and capacity state on every request.
+
+  Both need a live OIDC access token with `workspaces:read` and never accept cookies, API keys or memory/MCP OAuth tokens. Errors do not reveal whether a workspace exists. The OIDC provider stays opt-in; no migration. See `docs/ops/oidc-workspace-access.md`.
+
+### Fixed
+- **Turning announcement emails off is never rate-limited** ([#2761](https://github.com/kagura-ai/memory-cloud/issues/2761)): `PUT /api/v1/me/announcement-emails` refused an off request with `429` after 20 changes in an hour. Only requests that turn the emails on are counted now.
+
+### Migration
+- **Migration** `f42_2762_mcp_notices` creates the empty tables `mcp_notices`, `mcp_notice_deliveries` and `mcp_notice_consents`. Delivery and consent rows are deleted with their account. Ended notices and their delivery rows are kept.
+- **Rollback**: the downgrade drops the three tables, deliveries first.
+- **New setting**: `MCP_NOTICES_ENABLED=false`. Keep it off until the toggle copy (en/ja, wording version `2026-11`) is approved. Changing the wording version does not withdraw earlier answers.
+- **Behaviour changes at default settings**: none in tool replies. The static `bootstrap` description gains `notices?` in its `Returns` line, the three admin routes and the two `/me/mcp-notices` routes are new, and the account settings page loads the new setting.
+
 ## [v0.160.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.160.0) — 2026-11-13
 
 An admin route that shows the state of operations (scheduled job runs, work-queue backlogs and the platform LLM lanes, with an opt-in probe), an optional ClamAV scan of uploaded files that holds a file's download until it has been scanned, one initial admin when the first sign-ups of an empty deployment race, and a Google or GitHub sign-in that finishes only in the browser that started it. The upload scan and the probe are off by default. At default settings, a Google or GitHub sign-in opened in another browser is refused, file objects carry a new `scan_status` field, and the scheduler leader records every job run (see Migration).
