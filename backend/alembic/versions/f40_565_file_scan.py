@@ -15,8 +15,10 @@ is dropped and built again).
 
 Downgrade is refused while a row is ``infected`` or ``error``, a soft-deleted
 one included (a context restore can bring it back): dropping the columns would
-make those blocked files downloadable again. Delete them for good first (or
-rescan them) and downgrade then.
+make those blocked files downloadable again. Clear them first: a live file can
+be rescanned (the ``file_scan`` CLI) or deleted for good; a soft-deleted one is
+skipped by the rescan, so delete it for good or leave it to the soft-deleted
+file garbage collection after its retention window. Downgrade then.
 
 Revision ID: f40_565_file_scan
 Revises: f39_2768_operations_status
@@ -109,8 +111,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Refused while ``infected`` / ``error`` rows exist, soft-deleted ones
-    included (they would become downloadable, after a context restore too). The check runs under ``ACCESS EXCLUSIVE`` on ``file_objects``
-    before anything is dropped, in the transaction that drops the CHECKs and
+    included (they would become downloadable, after a context restore too).
+    The check runs under ``ACCESS EXCLUSIVE`` on ``file_objects`` before
+    anything is dropped, in the transaction that drops the CHECKs and
     the columns: no blocked row can arrive between the check and the drop, and
     a refusal rolls it all back. The indexes go first, only after the check
     passed, in that same locked transaction (a plain ``DROP INDEX``, not
@@ -133,8 +136,10 @@ def downgrade() -> None:
                 "f40_565_file_scan downgrade refused: file_objects holds rows the "
                 "malware scan blocked (scan_status 'infected' or 'error', soft-deleted "
                 "ones included: a context restore can bring them back); dropping the "
-                "scan columns would make them downloadable again. Delete those rows "
-                "for good (or rescan them) first (#565)"
+                "scan columns would make them downloadable again. Rescan the live "
+                "ones or delete them for good; the rescan skips soft-deleted ones, "
+                "so delete those for good or let the soft-deleted file garbage "
+                "collection remove them after their retention window (#565)"
             )
     op.execute("ALTER TABLE file_objects DROP CONSTRAINT IF EXISTS valid_file_scan_error")
     op.execute("ALTER TABLE file_objects DROP CONSTRAINT IF EXISTS valid_file_scan_status")
