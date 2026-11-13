@@ -29,6 +29,7 @@ from cli import (  # noqa: E402
     backfill_deleted_context_files,
     beta_invite_batches,
     cleanup_erased_vectors,
+    file_scan,
     observed_at_backfill,
     rekey_encrypted_secrets,
     rekey_erasure_pseudonyms,
@@ -162,6 +163,7 @@ _CLI_ARGV = [
         ],
     ),
     (beta_invite_batches, ["revoke", "--inviter", "admin-id", "--label", "waitlist"]),
+    (file_scan, ["rescan", "--file", "00000000-0000-0000-0000-000000000004"]),
 ]
 
 # These CLIs intentionally reject --log-level; their adapters can handle

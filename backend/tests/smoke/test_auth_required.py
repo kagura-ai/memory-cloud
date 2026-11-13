@@ -52,6 +52,7 @@ AUTH_REQUIRED_ENDPOINTS = [
     ("GET", "/api/v1/admin/users"),
     ("GET", "/api/v1/admin/plans/workspaces"),
     ("GET", "/api/v1/admin/system-admins"),
+    ("GET", "/api/v1/admin/operations/status"),
     # MCP tools
     ("GET", "/api/v1/mcp/tools"),
     ("GET", "/api/v1/mcp/status"),

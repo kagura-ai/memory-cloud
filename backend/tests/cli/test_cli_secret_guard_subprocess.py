@@ -23,6 +23,7 @@ _UUID = "00000000-0000-0000-0000-000000000001"
 _COMMANDS = {
     "apply_rerank_defaults": ["--all"],
     "backfill_deleted_context_files": [],
+    "file_scan": ["status"],
     "restore_context": [_UUID],
     "sweep_orphan_vectors": [],
     "transfer_context_creator": ["--from", "local:x", "--to", _UUID, "--workspace", _UUID],

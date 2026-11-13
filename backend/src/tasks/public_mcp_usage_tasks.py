@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from db.base import get_db
+from tasks.job_runs import JobResult, job_failed
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -104,15 +105,17 @@ async def purge_public_mcp_usage_events(
     return total
 
 
-async def purge_public_mcp_usage_events_task() -> None:
+async def purge_public_mcp_usage_events_task() -> JobResult:
     """APScheduler entry point — owns its own session via ``get_db()``."""
     async for db in get_db():
         try:
-            await purge_public_mcp_usage_events(db)
-        except Exception:
+            deleted = await purge_public_mcp_usage_events(db)
+        except Exception as exc:
             logger.exception("public_mcp_usage_purge_failed")
             await db.rollback()
-        return
+            return job_failed(exc)
+        return {"deleted": deleted}
+    return None
 
 
 def schedule_public_mcp_usage_tasks(scheduler: AsyncIOScheduler) -> None:

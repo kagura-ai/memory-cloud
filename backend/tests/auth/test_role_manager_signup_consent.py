@@ -22,6 +22,7 @@ from models.announcement_consent import AnnouncementEmailConsent
 from models.auth import User, UserOAuthProvider
 from services.announcement_consent_service import SignupAnnouncementConsent
 from tests.auth.test_role_manager_postgres import (
+    _FIRST_ACCOUNT,
     _LOCK,
     _NO_HOLDERS,
     _execute_returns,
@@ -105,7 +106,9 @@ async def test_user_id_race_retry_adds_no_second_row(role_manager) -> None:  # n
     row a concurrent first sign-in created and adds nothing."""
     race_existing = _user_row(email="alice@example.com", name="Alice")
     db = _make_db_mock(
-        _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, _oauth_link_row())
+        _execute_returns(
+            None, *_FIRST_ACCOUNT, _LOCK, _NO_HOLDERS, race_existing, _oauth_link_row()
+        )
     )
     db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 

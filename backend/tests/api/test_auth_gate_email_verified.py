@@ -19,6 +19,7 @@ from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_routes
 from tests.api.test_auth_beta_invite_plumbing import FakeRedis, FakeRequest
+from tests.oauth_browser_helpers import bind_browser, from_bound_browser
 
 _MISSING = object()
 
@@ -56,9 +57,14 @@ async def test_google_callback_passes_the_strict_verified_claim(
     monkeypatch.setattr(auth_routes, "_oauth2_manager", manager)
     monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/cb")
     redis.store["oauth2_state:st1"] = "pending"
+    bind_browser(redis, "st1")
 
     await auth_routes.google_callback(
-        FakeRequest(), code="c", state="st1", error=None, error_description=None
+        from_bound_browser(FakeRequest()),
+        code="c",
+        state="st1",
+        error=None,
+        error_description=None,
     )
 
     assert gate.await_args.kwargs["provider"] == "google"
@@ -84,9 +90,14 @@ async def test_github_callback_passes_the_verified_primary_address(
         ),
     )
     redis.store["oauth2_state:st2"] = "pending"
+    bind_browser(redis, "st2")
 
     await auth_routes.github_callback(
-        FakeRequest(), code="c", state="st2", error=None, error_description=None
+        from_bound_browser(FakeRequest()),
+        code="c",
+        state="st2",
+        error=None,
+        error_description=None,
     )
 
     assert gate.await_args.kwargs["provider"] == "github"

@@ -198,7 +198,12 @@ async def points_free_of_writers(
     return [entry for entry in entries if entry[1] not in owned], queued
 
 
-async def _backlog(db: AsyncSession) -> tuple[int, float | None]:
+async def deferred_backlog(db: AsyncSession) -> tuple[int, float | None]:
+    """Queued deferred point deletes: ``(count, age in seconds of the oldest)``.
+
+    Read by the drain's log line and by the operations status route (#2768).
+    The table is normally tiny; no index serves ``min(queued_at)``.
+    """
     count, oldest = (
         await db.execute(
             select(
@@ -208,6 +213,10 @@ async def _backlog(db: AsyncSession) -> tuple[int, float | None]:
         )
     ).one()
     return int(count or 0), (float(oldest) if oldest is not None else None)
+
+
+# The pre-#2768 private name, kept for existing callers.
+_backlog = deferred_backlog
 
 
 async def _existing_collections() -> set[str] | None:

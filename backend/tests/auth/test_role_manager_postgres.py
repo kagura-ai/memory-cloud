@@ -82,6 +82,9 @@ def _user_id_unique_violation() -> IntegrityError:
 # the accounts holding the address (``scalars().all()``) before the insert.
 _LOCK = object()
 _NO_HOLDERS: dict = {"holders": []}
+# #2788: on an empty users table (session mode) new_account_role counts, takes
+# the first-account lock and counts again before the address lock.
+_FIRST_ACCOUNT: tuple = ({"scalar": 0}, _LOCK, {"scalar": 0})
 
 
 def _execute_returns(*results):
@@ -325,7 +328,7 @@ class TestLinkedProviderSkipsSync:
         race_existing = _user_row(email="alice@old.com", name="Alice", auth_provider=None)
         db = _make_db_mock(
             _execute_returns(
-                None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, _oauth_link_row()
+                None, *_FIRST_ACCOUNT, _LOCK, _NO_HOLDERS, race_existing, _oauth_link_row()
             )
         )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
@@ -466,7 +469,7 @@ class TestAdoptsAPrimaryProvider:
         race_existing = self._account()
         link = self._link(oauth_sub="u1", linked=linked)
         db = _make_db_mock(
-            _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, link)
+            _execute_returns(None, *_FIRST_ACCOUNT, _LOCK, _NO_HOLDERS, race_existing, link)
         )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
@@ -484,7 +487,7 @@ class TestAdoptsAPrimaryProvider:
         race_existing = self._account()
         link_row = None if link is None else self._link(user_id=link, linked=timedelta(days=30))
         db = _make_db_mock(
-            _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, link_row)
+            _execute_returns(None, *_FIRST_ACCOUNT, _LOCK, _NO_HOLDERS, race_existing, link_row)
         )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
@@ -651,8 +654,9 @@ class TestCreatePath:
     @pytest.mark.asyncio
     async def test_first_user_gets_admin(self, role_manager):
         # Sequence (#517 NEW path, #938 no legacy fallback): link lookup miss →
-        # count=0 → commit succeeds.
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS))
+        # count=0 → first-account lock → recount=0 (#2788) → address lock →
+        # no holders → commit succeeds.
+        db = _make_db_mock(_execute_returns(None, *_FIRST_ACCOUNT, _LOCK, _NO_HOLDERS))
 
         with _patch_get_db(db):
             role = await role_manager.ensure_user(
@@ -702,13 +706,13 @@ class TestCreatePath:
         # the email helper) → re-lookup hits → sync_existing_user commits
         # the update
         # #517 NEW path (#938 legacy fallback removed): link lookup MISS → count →
-        # race re-lookup HIT → this identity's link row, written by the racing
+        # first-account lock → recount (#2788) → race re-lookup HIT → this identity's link row, written by the racing
         # request together with the user, HIT (without it the retry refuses).
         # Known provider also inserts a UserOAuthProvider row in the create
         # unit of work (rolled back with the user on the race).
         link = _oauth_link_row()
         db = _make_db_mock(
-            _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, link)
+            _execute_returns(None, *_FIRST_ACCOUNT, _LOCK, _NO_HOLDERS, race_existing, link)
         )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
@@ -788,7 +792,7 @@ class TestCreatePath:
         race_existing.timezone = "America/New_York"
         link = _oauth_link_row()
         db = _make_db_mock(
-            _execute_returns(None, {"scalar": 0}, _LOCK, _NO_HOLDERS, race_existing, link)
+            _execute_returns(None, *_FIRST_ACCOUNT, _LOCK, _NO_HOLDERS, race_existing, link)
         )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 

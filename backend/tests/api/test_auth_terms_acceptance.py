@@ -28,6 +28,7 @@ from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_routes
 from config.settings import get_settings
+from tests.oauth_browser_helpers import bind_browser, from_bound_browser
 from tests.redis_fake_ops import SessionFakeOps
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
@@ -162,8 +163,18 @@ class TestLoginRoutes:
         assert not any(k.startswith("oauth2_accepted_terms:") for k in redis.store)
 
 
-def _pending(redis: FakeRedis, state: str, *, terms: str | None, return_to: str | None = None):
+def _pending(
+    redis: FakeRedis,
+    state: str,
+    *,
+    terms: str | None,
+    return_to: str | None = None,
+    bound: bool = True,
+):
+    """A flow after ``/login``; ``bound`` (default) as the browser of ``_*_callback``."""
     redis.store[f"oauth2_state:{state}"] = "pending"
+    if bound:
+        bind_browser(redis, state)
     if terms is not None:
         redis.store[KEY.format(state=state)] = terms
     if return_to is not None:
@@ -217,14 +228,16 @@ def _set_identity_exists(monkeypatch, exists: bool) -> AsyncMock:
 
 
 async def _github_callback(state: str):
+    """The callback from the browser that ``_pending`` bound."""
     return await auth_routes.github_callback(
-        FakeRequest(), code="c", state=state, error=None, error_description=None
+        from_bound_browser(FakeRequest()), code="c", state=state, error=None, error_description=None
     )
 
 
 async def _google_callback(state: str):
+    """The callback from the browser that ``_pending`` bound."""
     return await auth_routes.google_callback(
-        FakeRequest(), code="c", state=state, error=None, error_description=None
+        from_bound_browser(FakeRequest()), code="c", state=state, error=None, error_description=None
     )
 
 

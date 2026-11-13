@@ -21,6 +21,7 @@ import pytest
 from api.routes import auth as auth_routes
 from api.routes.auth import SessionOwner
 from auth.session import SessionManager
+from tests.oauth_browser_helpers import bind_browser, from_bound_browser
 from utils.datetime import utcnow
 from utils.exceptions import UnlinkedProviderSignInError
 
@@ -61,6 +62,7 @@ def manager(monkeypatch) -> MagicMock:
     m = MagicMock()
     m._redis = FakeRedis()
     m._redis.store["oauth2_state:st1"] = "pending"
+    bind_browser(m._redis, "st1")
     m.delete_user_sessions.return_value = 0
     m.create_session.return_value = "sess-1"
     monkeypatch.setattr(auth_routes, "_session_manager", m)
@@ -156,7 +158,9 @@ def github_idp(monkeypatch) -> None:
 
 async def _callback(provider: str):
     handler = auth_routes.google_callback if provider == "google" else auth_routes.github_callback
-    return await handler(FakeRequest(), code="c", state="st1", error=None, error_description=None)
+    return await handler(
+        from_bound_browser(FakeRequest()), code="c", state="st1", error=None, error_description=None
+    )
 
 
 PROVIDERS = [("google", GOOGLE_SUB, "google_idp"), ("github", GITHUB_SUB, "github_idp")]
@@ -454,6 +458,7 @@ def real_manager(monkeypatch) -> SessionManager:
     )
     m = SessionManager(redis_url="redis://fake:6379")
     fake.setex("oauth2_state:st1", 300, "pending")
+    bind_browser(fake, "st1")
     monkeypatch.setattr(auth_routes, "_session_manager", m)
     return m
 

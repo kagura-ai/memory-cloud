@@ -57,6 +57,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from db.base import _get_engine
+from tasks.job_runs import drain_job_run_recorders
 from tasks.scheduler import get_scheduler, shutdown_scheduler, start_scheduler
 from tasks.single_flight import TRY_LOCK_SQL, release_session_lock
 from utils.logger import get_logger
@@ -71,6 +72,9 @@ _PING_SQL = text("SELECT 1")
 # ping, so an unreachable or hung Postgres cannot stall the loop for asyncpg's
 # 60s connect timeout or forever on a dead TCP peer.
 _ATTEMPT_TIMEOUT_SECONDS = 15.0
+
+# Upper bound on flushing the job run recorder at stop (#2768).
+RECORDER_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 async def _discard(conn: AsyncConnection) -> None:
@@ -151,7 +155,7 @@ class SchedulerLeader:
         self.retry_task = asyncio.create_task(self._loop(), name="scheduler_leader_loop")
 
     async def stop(self) -> None:
-        """Stop the loop and the scheduler, then release the lock."""
+        """Stop the loop and the scheduler, flush the run recorder, then release the lock."""
         task, self.retry_task = self.retry_task, None
         if task is not None and not task.done():
             task.cancel()
@@ -159,9 +163,15 @@ class SchedulerLeader:
                 await task
             except asyncio.CancelledError:
                 pass  # expected: we cancelled it ourselves
-        if self._conn is not None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
             shutdown_scheduler()
-            conn, self._conn = self._conn, None
+        # The runs the shutdown cancelled report CancelledError a few loop
+        # iterations later: let the run recorder write them, bounded, while the
+        # database is still open and the lock still held (#2768). Also without
+        # the lock: what a lost leadership left behind is flushed here.
+        await drain_job_run_recorders(timeout=RECORDER_DRAIN_TIMEOUT_SECONDS)
+        if conn is not None:
             await _release_and_close(conn)
             logger.info("scheduler_leader_released", pid=os.getpid())
 
@@ -249,7 +259,14 @@ class SchedulerLeader:
             )
         self._conn = None
         shutdown_scheduler()
-        await _discard(conn)
+        try:
+            # The runs the shutdown cancelled are written as at stop (#2768).
+            await drain_job_run_recorders(timeout=RECORDER_DRAIN_TIMEOUT_SECONDS)
+        finally:
+            # ``stop()`` no longer sees this connection (``_conn`` is cleared), so
+            # a drain cut short by its cancel or by an error must not leave it
+            # checked out.
+            await _discard(conn)
 
     @staticmethod
     async def _ping(conn: AsyncConnection) -> None:

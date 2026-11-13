@@ -33,6 +33,7 @@ from repositories.graph import GraphRepository
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from tasks.env import env_interval_seconds, env_seconds
+from tasks.job_runs import JobResult, job_failed
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
@@ -80,7 +81,7 @@ async def _graph_pages(graph_repo: GraphRepository) -> AsyncIterator[list[GraphM
         skip += len(page)
 
 
-async def weight_decay_task():
+async def weight_decay_task() -> JobResult:
     """Apply weight decay to all users' graphs.
 
     Runs every hour to decay unused edge weights and prune weak edges.
@@ -158,13 +159,15 @@ async def weight_decay_task():
                 total_graphs=total_graphs,
                 updated_graphs=total_updated,
             )
-            return
+            return {"graphs": total_graphs, "updated_graphs": total_updated}
 
     except Exception as e:
         logger.error("weight_decay_task_failed", error=str(e), exc_info=True)
+        return job_failed(e)
+    return None
 
 
-async def consolidation_task():
+async def consolidation_task() -> JobResult:
     """Consolidate working memories to persistent.
 
     Runs daily at 3 AM UTC to promote frequently used working memories
@@ -324,10 +327,12 @@ async def consolidation_task():
                 promoted=total_promoted,
                 deleted=total_deleted,
             )
-            return
+            return {"users": total_users, "promoted": total_promoted, "deleted": total_deleted}
 
     except Exception as e:
         logger.error("consolidation_task_failed", error=str(e), exc_info=True)
+        return job_failed(e)
+    return None
 
 
 def _sleep_enabled() -> bool:
@@ -359,7 +364,7 @@ def _cleanup_retention_days() -> int:
     return days
 
 
-async def cleanup_deleted_memories_task():
+async def cleanup_deleted_memories_task() -> JobResult:
     """Permanently delete every soft-deleted memory older than the sweep window.
 
     Runs daily at 4 AM UTC. Qdrant points are already removed at soft-delete
@@ -413,10 +418,12 @@ async def cleanup_deleted_memories_task():
                 retention_days=retention_days,
                 cutoff=to_utc_iso(cutoff),
             )
-            return
+            return {"purged": purged}
 
     except Exception as e:
         logger.error("cleanup_deleted_memories_task_failed", error=str(e), exc_info=True)
+        return job_failed(e)
+    return None
 
 
 def _orphan_sweep_enabled() -> bool:
@@ -429,7 +436,7 @@ def _orphan_sweep_enabled() -> bool:
     return value not in ("false", "0", "no", "off")
 
 
-async def sweep_orphan_vectors_task() -> None:
+async def sweep_orphan_vectors_task() -> JobResult:
     """Delete vector-store points that no live row points at (#1798).
 
     Runs daily at 4:30 AM UTC, after the tombstone purge. Postgres commits
@@ -444,9 +451,10 @@ async def sweep_orphan_vectors_task() -> None:
     """
     if not _orphan_sweep_enabled():
         logger.info("orphan_vector_sweep_disabled")
-        return
+        return None
 
     logger.info("orphan_vector_sweep_task_started")
+    counts: dict[str, int] | None = None
     try:
         from services.orphan_vector_sweep import (
             SCHEDULED_MAX_ORPHAN_RATIO,
@@ -459,7 +467,7 @@ async def sweep_orphan_vectors_task() -> None:
         async with single_flight("orphan_vector_sweep") as acquired:
             if not acquired:
                 logger.info("orphan_vector_sweep_task_skipped", reason="another_process_running")
-                return
+                return {"skipped": 1}
             async for db in get_db():
                 result = await sweep_orphan_points(
                     db, dry_run=False, max_orphan_ratio=SCHEDULED_MAX_ORPHAN_RATIO
@@ -473,9 +481,17 @@ async def sweep_orphan_vectors_task() -> None:
                     refused=result.refused,
                     live_embedded_memories=result.live_embedded_memories,
                 )
+                counts = {
+                    "scanned": result.scanned,
+                    "orphans": result.orphans,
+                    "deleted": result.deleted,
+                    "refused": int(result.refused is not None),
+                }
                 break
     except Exception as e:
         logger.error("orphan_vector_sweep_task_failed", error=str(e), exc_info=True)
+        return job_failed(e)
+    return counts
 
 
 def _deferred_point_drain_interval() -> int:
@@ -494,7 +510,7 @@ def _deferred_point_drain_wait() -> float:
     )
 
 
-async def drain_deferred_point_deletes_task() -> None:
+async def drain_deferred_point_deletes_task() -> JobResult:
     """Delete the points ``forget`` queued because a point writer held the lock (#2476).
 
     Runs every ``DEFERRED_POINT_DRAIN_INTERVAL_SECONDS`` (default 300) and
@@ -508,6 +524,7 @@ async def drain_deferred_point_deletes_task() -> None:
     No single_flight: the scheduler leader runs one copy, and a second run in
     another process only waits on the same lock and finds the rows gone.
     """
+    counts: dict[str, int] | None = None
     try:
         from services.deferred_point_deletes import drain_deferred_point_deletes
 
@@ -530,11 +547,23 @@ async def drain_deferred_point_deletes_task() -> None:
                 and result.oldest_age_seconds > DEFERRED_POINT_BACKLOG_WARN_SECONDS
             ):
                 logger.warning("deferred_point_deletes_backlog_old", **fields)
+            # The drain catches a delete the vector store refused or that timed
+            # out and returns normally (the run stays "ok"); ``failed`` shows
+            # it in the counts, as the other sweeps' counts do.
+            counts = {
+                "drained": result.drained,
+                "kept": result.kept,
+                "pending": result.pending,
+                "busy": int(result.busy),
+                "failed": int(result.failed is not None),
+            }
             break
     except Exception as e:
         logger.error(
             "deferred_point_deletes_task_failed", error_class=type(e).__name__, exc_info=True
         )
+        return job_failed(e)
+    return counts
 
 
 def schedule_neural_tasks(scheduler: AsyncIOScheduler) -> None:

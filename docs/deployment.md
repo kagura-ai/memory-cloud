@@ -98,7 +98,7 @@ that file to several GB within weeks and fill the disk; the usual first symptom
 is an image build that fails for lack of space.
 
 Every service in the single-server compose files
-(`terraform/single-server/docker-compose.{prod,app,data,ollama}.yml`) therefore
+(`terraform/single-server/docker-compose.{prod,app,data,ollama,clamav}.yml`) therefore
 declares a `json-file` logging block, so the stack is bounded on any host — not
 only on one whose Docker daemon was configured for it. With the knobs below
 left unset, every service renders these defaults:
@@ -125,7 +125,7 @@ exactly the block above.
 |---|---|---|
 | `API_LOG_MAX_SIZE` | `50m` | `api-blue` / `api-green`: size at which the log file rotates |
 | `API_LOG_MAX_FILE` | `3` | `api-blue` / `api-green`: rotated files kept |
-| `LOG_MAX_SIZE` | `50m` | every other service (`web`, `caddy`, `postgres`, `qdrant`, `redis`, `ollama`) |
+| `LOG_MAX_SIZE` | `50m` | every other service (`web`, `caddy`, `postgres`, `qdrant`, `redis`, `ollama`, `clamav`) |
 | `LOG_MAX_FILE` | `3` | the same services |
 
 Accepted formats: a size is a whole number with a lowercase `k`, `m` or `g`
@@ -497,6 +497,11 @@ internet: run it on an internal network only, never behind the public proxy,
 and set `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS` to the console's addresses. Run it
 with `SCHEDULER_LEADER_ENABLED=false` so scheduled jobs stay on the public
 processes. The public processes run `off`.
+
+The console reads job runs, work queue backlogs and LLM lane health from
+`GET /api/v1/admin/operations/status` (stored rows only; the `service` process
+needs no LLM key for it): see
+[Operations status](#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768).
 
 Each request of the console carries the credential and `X-Operator-Email`, the
 address of the person acting (exactly one header value; lower-cased; ASCII; at
@@ -1193,7 +1198,12 @@ Requirements and operator notes:
   `/password/reset?token=` and `/password/setup?token=`); recreate the proxy
   container to drop lines written before. Replicate it if you run another proxy.
 - The first account of an empty deployment is admitted like the first Google /
-  GitHub sign-in, and gets the role `new_account_role` gives it.
+  GitHub sign-in, and gets the role `new_account_role` gives it. When two first
+  sign-ups complete at the same moment, exactly one becomes the initial admin
+  (in `SYSTEM_ADMIN_MODE=session`); the other is an ordinary account, and a
+  second email completion is checked against the sign-up gate again. Create the
+  first account before sharing the deployment's address: sign-ups that arrive
+  while no account exists are admitted by the first-account rule.
 - Invite quota: an account created by email gets the same beta-invite quota as
   any other.
 - Pending requests (address, hashed token, hashed invite) are deleted when the
@@ -1271,12 +1281,11 @@ Operator notes:
   be connected this way; `GET /api/v1/system/info` then reports
   `features.provider_link_confirmation: false` and the login page keeps its
   usual hint.
-- **What degrades silently to `email_in_use`:** a sign-in started without a
-  browser cookie (an API client using the JSON mode of `/login` without
-  cookies, a native or device flow, a browser that blocks the cookie), and a
-  deployment whose provider redirect URI points at another host than the one
-  the browser calls for `/auth/{provider}/login` (the cookie never reaches the
-  callback). Both are the safe failure: nothing is offered.
+- **A sign-in without the browser cookie** never reaches this offer: since
+  Issue #2791 it is not finished at all (see the next section). A sign-in
+  connected from Profile (Connect, or refreshing a provider) carries no such
+  cookie and is never offered a confirmation; it ends at `email_in_use` as
+  before.
 - **Proxy logs:** the link carries its token as `?token=`; the shipped
   `Caddyfile.tpl` already redacts every `token` query parameter.
 - `ENABLE_PROVIDER_LINK_CONFIRMATION=false`: those sign-ins end at
@@ -1286,6 +1295,48 @@ Operator notes:
   `oauth_provider_link_confirmation_declined` (`user_email` `link-confirmation`,
   the provider account only as an HMAC in `user_metadata.identity_hmac`).
   Pending links live in Redis only (15 minutes); no migration.
+
+### A Google or GitHub sign-in finishes in the browser that started it (Issue #2791)
+
+`/auth/{provider}/login` gives the browser an HttpOnly cookie
+(`__Host-kagura_oauth_browser` in production, `kagura_oauth_browser` over plain
+http, 20 minutes) and binds the sign-in to it. The provider callback finishes
+the sign-in only when it arrives with that cookie; otherwise it answers
+`/login?error=oauth_other_browser` (the page asks to start again in this
+browser) before the provider is asked anything, and nothing is created: no
+account, no session, no invite spent. Signing in from the login page, `/join`,
+`/invite`, the device page, an OAuth client's consent page and "add another
+account" all set the cookie on the way. Connecting or refreshing a provider
+from Profile is bound to the signed-in browser session instead and never opens
+a new session. There is no setting to turn this off.
+
+Operator notes:
+
+- **Same host:** the host the browser calls for `/auth/{provider}/login` (the
+  web app's `NEXT_PUBLIC_API_URL`) and the host of `GOOGLE_REDIRECT_URI` /
+  `GITHUB_REDIRECT_URI` must be the same host name (`localhost` and
+  `127.0.0.1` are different hosts, so are `www.` and the bare domain).
+  `GITHUB_REDIRECT_URI` falls back to
+  `http://localhost:8080/api/v1/auth/github/callback` when unset. The shipped
+  configurations are consistent; with a mismatch every Google and GitHub
+  sign-in ends on `oauth_other_browser`.
+- **Reverse proxy:** pass `Set-Cookie` through unchanged. A proxy that adds
+  `Domain=` or rewrites the `Path` makes browsers drop the `__Host-` cookie,
+  and then every Google and GitHub sign-in is refused (before this release
+  such a setup only lost the email confirmation above).
+- **API clients** using the JSON mode of `/login` must open
+  `authorization_url` with the cookie jar that received the response's
+  `Set-Cookie`.
+- **Upgrade:** from v0.159.0 nothing is refused (it already sets the cookie on
+  every sign-in). From an older release, a sign-in started in the 5 minutes
+  before the switch ends once on "start again".
+- **What to watch:** the warning `oauth_callback_not_from_starting_browser`
+  (fields `provider`, `state_hash`, `cookie_present`, `flow_record`). A steady
+  stream with `cookie_present=false` right after a deploy means the cookie does
+  not come back (proxy or host mismatch above). Rollback is the previous image;
+  there is no data change.
+- The Google sign-in always uses the configured `GOOGLE_REDIRECT_URI`; the
+  `redirect_uri` query parameter of `/auth/google/login` is ignored.
 
 ## Which sign-in provider syncs the account's email (Issues #1811, #1875)
 
@@ -2121,6 +2172,353 @@ construction in `storage/factory.py`. Today the factory builds one process-wide
 instance from the global `STORAGE_*` settings; per-workspace BYO would move
 construction behind a workspace-scoped credential lookup. Recorded here as a
 seam only — no implementation in #994.
+
+## Upload malware scanning (ClamAV) — Issue #565
+
+Files uploaded through the files API (`/api/v1/files/*`, the MCP file tools,
+the Storage page) can be scanned by a clamd you run yourself. It is **off by
+default** (`FILE_SCAN_ENABLED=false`): with it off uploads and downloads work
+as before, except that file objects carry a `scan_status` field and a file
+already marked `infected` (while scanning was on) stays refused.
+
+With it on, the API streams every confirmed upload from object storage to
+clamd (the `INSTREAM` command over TCP) and **holds the file's download URL
+until the scan has finished**. The API itself never parses the bytes, and no
+file leaves the host: only freshclam talks to the outside, to download
+signatures.
+
+### What a file goes through
+
+| `scan_status` | Meaning | Download URL with scanning on | With scanning off |
+|---|---|---|---|
+| `unscanned` | Uploaded while scanning was off (or before the release that added it) | served; scanned in the background, see [Backfill](#backfill-of-older-files) | served |
+| `pending` | Waiting for its scan, or being scanned | 409 `SCAN-001` | served |
+| `clean` | clamd found nothing | served (without checksum binding, or for a file under the legacy digest rule, after a storage HEAD compare) | served |
+| `infected` | clamd reported a finding | 409 `SCAN-002` | 409 `SCAN-002` |
+| `error` | The scanner could not check this file (cause in `scan_error`) | 409 `SCAN-002` | served |
+
+The refusals come only after the access checks, so a caller who cannot read
+the file still gets the usual 404:
+
+| Surface | Pending | Blocked |
+|---|---|---|
+| REST `GET /api/v1/files/{file_id}/download-url` | 409 `SCAN-001` "This file is still being checked for malware. Try again shortly.", header `Retry-After: 30`, `details` `{file_id, scan_status: "pending"}` | 409 `SCAN-002` "This file cannot be downloaded: the malware scan blocked it.", `details` `{file_id, scan_status}` (`infected` or `error`) |
+| MCP `get_file_download_url` | `file_scan_pending` with `file_id`, `scan_status`, `retry_after_seconds: 30` | `file_blocked` with `file_id`, `scan_status` |
+| Storage page | "Scanning" badge; a download attempt shows a toast and refreshes the list | "Blocked" / "Could not be checked" badge, download disabled |
+
+The finding's name (the signature) is logged and stored, never returned to a
+client. Clients that download right after uploading should retry on
+`SCAN-001` / `file_scan_pending` after the advertised wait.
+
+Other changes while scanning is on:
+
+- `POST /api/v1/files/reserve` (MCP `init_file_upload`) caps the size at the
+  smaller of `FILE_OBJECT_MAX_SIZE_MB` and `CLAMD_STREAM_MAX_BYTES`, so nothing
+  is accepted that could never be scanned; the 422 message then ends with
+  "(the largest file the malware scan checks)".
+- A duplicate upload (409 `RES-002`) never hands out a blocked file as
+  `existing_file`; inside the same context the message says "an earlier upload
+  of this file was blocked by the malware scan". A `pending` file is handed
+  out (same bytes; the download gate holds it).
+- Restoring a deleted context's files puts their `clean`, `unscanned` and
+  `pending` files back to `pending`: while the context was deleted its content
+  key could be reserved again and receive other bytes. With checksum binding
+  (`STORAGE_CHECKSUM_BINDING_ENABLED=true`) they are due at once, except a
+  file under the legacy digest rule; without binding, and for such a file in
+  both modes, after a full upload window from the restore
+  (`PRESIGN_PUT_TTL_SECONDS` + `FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS`). A file
+  under the legacy digest rule is one that was `unscanned`, or that the
+  backfill passed although its stored bytes do not match its SHA-256 (`clean`
+  with `scan_error` `legacy_requeued`): it is not bound to its SHA-256, so
+  checksum binding guarantees nothing for it. The restore marks it
+  `legacy_requeued`, and it keeps the backfill's digest rule through that scan
+  (a digest mismatch is logged, not blocked); any other cause that stops the
+  scan makes it `error`, as for a new upload. A scan that finds the declared
+  bytes clears the marker: from then on the file is held to its SHA-256 like a
+  new upload. Once it is `clean` and still carries `legacy_requeued` (the scan
+  passed it although its stored bytes still do not match its SHA-256), every
+  download URL first HEAD-compares its object with the scanned version in both
+  binding modes, as described below for binding off; a changed object sends it
+  back to the scan. A `clean` file without the marker is compared only with
+  binding off, like any other. `infected` and `error` files stay as they are.
+  With scanning off only `clean` files change, to `unscanned`; the backfill
+  takes them after a full upload window.
+
+### How long a new upload is held
+
+A verdict has to be about the bytes that are later served. How that is
+guaranteed depends on checksum binding (`STORAGE_CHECKSUM_BINDING_ENABLED`,
+[#556](https://github.com/kagura-ai/memory-cloud/issues/556)):
+
+- **Binding on.** The storage accepts only the bytes whose SHA-256 was declared
+  at reserve, so the file is scanned as soon as the upload is confirmed (the
+  confirm starts the scan in the same process; above 16 such scans in flight
+  per process, the rest are left to the 30-second sweeper). The hold is the
+  scan time: seconds for ordinary files.
+- **Binding off (the default).** The presigned PUT URL stays valid after the
+  confirm, so the file is scanned only after that URL has expired:
+  `PRESIGN_PUT_TTL_SECONDS` (300) after the reservation, plus
+  `FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS` (30), plus up to one sweeper tick. A
+  new upload is therefore held **about five to six minutes from its
+  reservation**. The scan records the object's ETag, size and LastModified from
+  the same GetObject that fed clamd, and every download URL of a `clean` file
+  first HEADs the object and compares the three. A changed or missing object
+  goes back to `pending` (log `file_scan_object_changed`) and the request gets
+  `SCAN-001`; a HEAD that fails refuses the download (502 / MCP
+  `service_unavailable`), it never skips the check. This costs one storage
+  HEAD per download URL. The startup log says
+  `file_scan_without_checksum_binding` in this mode.
+
+Residual risk with binding off: the compare cannot see a rewrite whose body
+has the same MD5 (the ETag of a single-part upload), the same size and a
+LastModified in the same second. The margin assumes the API host's clock is
+not ahead of the storage's clock by more than
+`FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS`: keep NTP on. The compare runs when a
+download URL is issued, not while the URL is used: an upload started before
+its PUT URL expired that completes after a download URL was handed out is
+served through that URL for the URL's lifetime. Checksum binding closes both
+gaps for a file bound to its SHA-256 and is the hard guarantee; turn it on
+once your clients send the checksum header (see
+[`docs/ops/r2-checksum-binding-rollout.md`](ops/r2-checksum-binding-rollout.md)).
+A file that keeps `scan_error` `legacy_requeued` is not bound to its SHA-256
+and is compared at issue in both modes (see the restore bullet above), so the
+compare-at-issue gap applies to it with binding on as well: an upload that
+completes after a download URL was handed out is served through that URL for
+the URL's lifetime (with binding, that upload can only carry the file's
+declared content).
+
+### When the scanner cannot answer
+
+- **clamd unreachable** (connection refused, connect timeout, `PING` not
+  answered): nothing is counted against any file. The sweeper PINGs clamd once
+  per tick, logs `file_scan_clamd_unavailable` once and leaves every row as it
+  is; the operations status shows the `file_scan_sweeper` run as `failed` with
+  `error_class: "ClamdUnavailable"` for as long as it lasts. New uploads stay `pending`, so **while clamd is down new files cannot be
+  downloaded**; `clean` and `unscanned` files are not affected. Storage that
+  cannot be reached before any byte was streamed is treated the same way.
+- **A scan that fails after streaming started** (connection reset, no verdict
+  within `CLAMD_SCAN_TIMEOUT_SECONDS`, a malformed or `ERROR` reply, a storage
+  read error) counts as one attempt. The file is retried after 30 s, doubling
+  up to 5 minutes; after `FILE_SCAN_MAX_ATTEMPTS` (3) counted failures it
+  becomes `error` with `scan_error` `scan_failed`.
+- **A file the scanner cannot check at all** becomes `error` at once:
+  `object_missing` (no object behind the row), `digest_mismatch` (the stored
+  bytes do not hash to the declared SHA-256), `size_limit` (larger than
+  `CLAMD_STREAM_MAX_BYTES`, or clamd refused the stream as too large) or
+  `unscannable` (clamd's own limit finding, `Heuristics.Limits.Exceeded.*` or
+  `Heuristics.ScanTimeout`: it did not scan everything).
+
+`error` files are blocked while scanning is on and are **never deleted
+automatically**: the uploader can delete them, and an operator can rescan them
+(`rescan --errors`, below). There is no manual release of a blocked file;
+a rescan is the only way back.
+
+### Infected files
+
+An `infected` file stays listed, blocked, for `FILE_QUARANTINE_RETENTION_DAYS`
+(7) after its verdict. The daily `file_quarantine_expiry` job (03:45 UTC) then
+deletes it the normal way, in batches of 50 with a commit each: the file's
+quota is released at once and the stored object is removed later by the
+storage sweeper, like any deleted file. Only `infected` files are expired.
+
+The uploader gets one email (subject "A file you uploaded was blocked by the
+malware scan") at their verified address, sent after the verdict is stored.
+It names no file, no finding and no device or IP address, and says when the
+file is removed. Like every security notice it is English only and coalesced
+per account. There is no email for `error` files, and none for files written
+by the attachment migration (no uploader account).
+
+### Backfill of older files
+
+Files that are `unscanned` (uploaded while scanning was off, also by an API
+process whose switch was still off) stay downloadable. Once the queue of new
+uploads is empty, each sweeper tick scans up to `FILE_SCAN_BACKFILL_BATCH` (20)
+of them; `0` turns the backfill off. A backfilled file is
+blocked only when it is found infected: if it cannot be checked (missing
+object, size limit, an unscannable result, or the attempt limit) it stays
+`unscanned` and downloadable with `scan_error` recorded, and drops out of the
+backfill. A digest mismatch on such a file is logged
+(`file_scan_digest_mismatch`), not blocked, since its digest was never
+verified at upload; a file that passes the scan with a mismatch keeps
+`scan_error` `legacy_requeued` (`clean`), so a later context restore scans it
+under the same rule, and its download URLs are issued only after the storage
+HEAD compare even with checksum binding (a changed object goes back to the
+scan). An operator rescan (`rescan --file`) clears the marker: the file is
+then held to its SHA-256 like a new upload, and a mismatch blocks it
+(`error`, `digest_mismatch`). The same holds for `rescan --file` on an
+`unscanned` file.
+
+### Running clamd
+
+**Production (single server).** The optional overlay
+`terraform/single-server/docker-compose.clamav.yml` runs the official
+`clamav/clamav` image (1.4 LTS, pinned by digest) with freshclam inside the
+container:
+
+```bash
+cd terraform/single-server
+docker compose \
+  -f docker-compose.prod.yml \
+  -f docker-compose.clamav.yml \
+  --env-file .env.prod \
+  up -d clamav
+```
+
+Start it once; `deploy.sh` never touches it and it survives deploys (a deploy
+may warn about "orphan containers" for it; that is harmless). The API reads
+`FILE_SCAN_ENABLED` and `CLAMD_*` from `.env.prod`, so the overlay patches no
+API service. On the split-host layout run it on the **app** VM, with
+`docker-compose.app.yml` in place of `docker-compose.prod.yml`. To update the
+image, pull the new pin and run the same `up -d clamav`.
+
+**Development.** The repo's `docker-compose.yml` has the same image and
+configuration behind a profile (published on `127.0.0.1:3310` only):
+
+```bash
+docker compose --profile clamav up -d clamav
+# .env.local: FILE_SCAN_ENABLED=true, CLAMD_HOST=clamav
+# (CLAMD_HOST=localhost for an API run on the host)
+```
+
+**Memory.** ClamAV documents **3 GiB of RAM as the minimum and 4 GiB as
+preferred** for clamd; loading the signatures alone takes more than 1.2 GiB, and
+a reload can briefly double that. The shipped `clamd.conf` sets
+`ConcurrentDatabaseReload no`, which keeps the peak near one signature set but
+makes scans wait while a reload runs (pending files are held that long). The
+overlay caps the container at `CLAMAV_MEM_LIMIT` (default `4g`) so the host's
+OOM killer does not pick Postgres or Qdrant. The Terraform default `e2-medium`
+(4 GB) already runs the stack and **cannot host clamd as well**: use an 8 GB
+class machine or a separate host on the private network before turning the
+scan on.
+
+**Signatures.** freshclam checks for new signatures 12 times a day and needs
+outbound HTTPS to the ClamAV mirror (`database.clamav.net`). On the first start
+the signatures shipped in the image are copied into the `kagura_clamav_data`
+volume, so clamd starts without waiting for a download; the healthcheck
+(`PING` → `PONG`) allows 10 minutes for the first load. Stale signatures do not
+fail anything: they only find less.
+
+**Network.** clamd's TCP protocol has **no encryption and no
+authentication**, and it accepts commands such as `SHUTDOWN`. The overlay
+publishes no port; `CLAMD_HOST` must be the compose service name (`clamav`) or
+an address on the same host or a private network, never a public address.
+clamd joins the compose network Redis is on, so set `REDIS_PASSWORD`
+([Redis password](#redis-password-single-server-compose--issue-1794)) before
+starting it.
+
+**Hardening.** The overlay sets `no-new-privileges` and drops every capability
+except the five the image's entrypoint needs: `CHOWN`, `DAC_OVERRIDE` and
+`FOWNER` to take ownership of the signature volume and the socket directory,
+`SETUID` and `SETGID` for freshclam and clamd to drop to the `clamav` user.
+clamd spools each stream to a temporary file inside the container and removes
+it after the scan; a clamd crash can leave that file in the container's
+filesystem until the container is recreated.
+
+**Your own clamd.** The API cannot read clamd's configuration over the socket,
+so a clamd you run elsewhere needs what
+`terraform/single-server/clamav/clamd.conf` sets:
+
+- `AlertExceedsMax yes`. Without it, clamd answers `OK` for a file past one of
+  its limits (size, nesting depth, archive member count, scan time) although
+  part of it was never scanned, and the API would record it `clean`.
+- `StreamMaxLength` and `MaxFileSize` at least `CLAMD_STREAM_MAX_BYTES`
+  (`100M` for the default 100 MiB). Raise them together with the setting.
+- `MaxScanTime` below `CLAMD_SCAN_TIMEOUT_SECONDS` (the shipped file uses
+  240000 ms), so clamd reports a file it cannot finish as a limit finding
+  instead of the API timing out and retrying it.
+- `MaxThreads` above the total scan concurrency (next paragraph).
+
+**Concurrency.** Each API process runs at most `FILE_SCAN_CONCURRENCY` (2) scans
+at once. With binding on, scans start in the process that confirmed the
+upload; the sweeper (every 30 s) runs on the scheduler leader only, where each
+scan slot keeps taking the next due file for up to four minutes per tick. The
+total number of streams clamd can see is at most
+`UVICORN_WORKERS` × 2 colors × `FILE_SCAN_CONCURRENCY`; keep it below clamd's
+`MaxThreads` (10 in the shipped file). With binding off all new uploads go
+through the leader, so its `FILE_SCAN_CONCURRENCY` sets the throughput.
+
+### Turning it on or off
+
+1. Size the machine, set `REDIS_PASSWORD`, start the overlay and wait until
+   `docker inspect -f '{{.State.Health.Status}}' kagura-clamav` says `healthy`.
+2. Set `FILE_SCAN_ENABLED=true` (and `CLAMD_HOST` if clamd is not the `clamav`
+   service) in `.env.prod`, then run `./scripts/deploy.sh`. The switch is read
+   per process: every API process must have it, which a deploy gives you (the
+   old color is stopped). Files a process with the switch still off confirmed
+   meanwhile are `unscanned`, and the backfill scans them.
+3. Watch `python -m src.cli.file_scan status` and the `file_scan_*` log lines.
+
+Turning it off makes `pending` and `error` files downloadable again; `infected`
+files stay refused. The startup and settings check refuses
+`FILE_SCAN_ENABLED=true` with an empty `CLAMD_HOST`.
+
+### Operator CLI
+
+Inside the API container (same environment as the API):
+
+```bash
+python -m src.cli.file_scan status
+python -m src.cli.file_scan rescan --file <file-id>                  # plan (read-only)
+python -m src.cli.file_scan rescan --file <file-id> --apply --yes    # scan it again
+python -m src.cli.file_scan rescan --errors --since 2026-01-01 --apply
+```
+
+- `status` prints whether scanning is on and the counts: due pending (with the
+  oldest due time), waiting pending, scan failed (`error`), quarantined
+  (`infected`) and unscanned. Counts only, no file names.
+- `rescan` puts files back to `pending`, so they are held (`SCAN-001`) until
+  the new verdict. `--file` takes any live uploaded file whatever its verdict,
+  for example a false positive after a signature update. `--errors` limits the
+  run to `error` files and needs `--since` (verdicts at or after that ISO
+  date/time, UTC unless an offset is given) or `--file`. Without `--apply` it
+  only prints the plan; `--yes` skips the confirmation prompt. It is refused
+  while `FILE_SCAN_ENABLED` is false.
+
+Without checksum binding a rescanned file still inside its upload window waits
+for that window to end.
+
+### Log events
+
+| Event | Level | Meaning |
+|---|---|---|
+| `file_scan_infected` | warning | A finding; carries the signature name and the file id |
+| `file_scan_gave_up` | warning | A file became `error`; `cause` / `reason` say why |
+| `file_scan_digest_mismatch` | warning | The stored bytes do not hash to the declared SHA-256 |
+| `file_scan_clamd_unavailable` | warning | clamd did not answer `PING`; at most once per sweeper tick |
+| `file_scan_object_changed` | warning | A `clean` file's object changed or vanished; it is pending again |
+| `file_scan_without_checksum_binding` | warning | Startup: scanning is on, binding is off (longer holds, a HEAD per download) |
+| `file_scan_retry` / `file_scan_recorded` / `file_scan_sweep` | info | Per-scan and per-tick progress |
+| `file_quarantine_expired` / `file_quarantine_purged` | info | Infected files past their retention were deleted |
+| `file_scan_requeued` | info | The CLI put files back to `pending` |
+
+### Limits
+
+- clamd is signature based: a file it does not recognise is `clean`.
+- Encrypted archives and documents are scanned only as far as clamd can read
+  them and are not blocked for being encrypted (`AlertEncrypted*` stays off,
+  since password-protected PDFs are ordinary). Turn those options on in
+  `clamd.conf` if you want them blocked; the API then records them as
+  `infected`.
+- Only files that go through the files API are scanned; memory text is not.
+
+### Settings
+
+| Variable | Default | Notes |
+|---|---|---|
+| `FILE_SCAN_ENABLED` | `false` | The switch, per API process. |
+| `CLAMD_HOST` | `clamav` | Required (non-empty) when the switch is on. Same host or private network only. |
+| `CLAMD_PORT` | `3310` | |
+| `CLAMD_CONNECT_TIMEOUT_SECONDS` | `5` | A connect that takes longer means clamd is unavailable (not counted). |
+| `CLAMD_SCAN_TIMEOUT_SECONDS` | `300` | Stream plus verdict for one file; past it the attempt counts as failed. |
+| `CLAMD_STREAM_MAX_BYTES` | `104857600` (100 MiB) | Largest file streamed to clamd, and the upload cap while scanning is on. At or below clamd's `StreamMaxLength` / `MaxFileSize`. |
+| `FILE_SCAN_CONCURRENCY` | `2` | Scans per API process at once. |
+| `FILE_SCAN_MAX_ATTEMPTS` | `3` | Counted failures before a new upload becomes `error` / `scan_failed`. |
+| `FILE_SCAN_BACKFILL_BATCH` | `20` | `unscanned` files per sweeper tick; `0` turns the backfill off. |
+| `FILE_QUARANTINE_RETENTION_DAYS` | `7` | Days an `infected` file stays listed as blocked before it is deleted. |
+| `FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS` | `30` | Without binding: wait this long past the PUT URL's expiry. |
+| `CLAMAV_MEM_LIMIT` | `4g` | Memory cap of the overlay's container (compose only; the API does not read it). |
+
+The numeric settings are checked at startup even while the switch is off.
 
 ## Qdrant dense vector quantization and on-disk storage — Issue #1990
 
@@ -4984,6 +5382,188 @@ On a split host the Postgres service is defined in `docker-compose.data.yml`
 on the data host. That host does not `git fetch` this repository, so the
 `command:` line for `max_connections` has to be carried over to its copy of
 the file by hand — follow your ops runbook for changing the data host.
+
+## Operations status (scheduled jobs, backlogs, LLM lanes) — Issue #2768
+
+`GET /api/v1/admin/operations/status` reports the state of operations in
+aggregates only, so an operator sees a job that stopped or keeps failing
+without reading container logs. It sits behind the system-admin gate and follows
+`SYSTEM_ADMIN_MODE` like every admin route: a system admin's session in
+`session` mode, the operator console in `service` mode, `404` (and absent from
+`/openapi.json`) in `off`. It reads stored rows only: the scheduler leader
+writes them, and any API process answers, the `service` process included. That
+process needs no LLM key and no scheduler for this route.
+
+The response carries no user, workspace or context identifier, no email
+address, no memory text and no exception message: job ids and names, queue and
+lane names, provider and model names, times, integers and exception **class**
+names only. It is safe to show on a status screen or hand to a tool. The read
+runs in a read-only transaction with a 5 s statement timeout and a 10 s budget
+for the whole request; entries the budget did not reach carry
+`error_class: "DeadlineExceeded"`. Concurrent polls of one process share one
+read, reused for 5 s. The response is sent with `Cache-Control: no-store`.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OPERATIONS_STATUS_OVERDUE_GRACE_SECONDS` | `900` | Slack added to a job's expected interval before it is reported `overdue`. |
+| `OPERATIONS_PROBE_INTERVAL_SECONDS` | `0` (off) | The opt-in LLM lane probe (below). `0` turns it off; otherwise at least `300` (a smaller value stops startup). |
+
+### `jobs`
+
+Every job the scheduler leader registers is recorded in `scheduled_job_status`,
+one row per job updated in place (not a history). A job added later is covered
+without further work. Fields per job:
+
+- `trigger` (`interval` / `cron`) and `expected_interval_seconds`: the
+  longest gap between two fires.
+- `registered`: the job is part of the leader's latest registration. A job the
+  current configuration no longer schedules keeps its row with
+  `registered: false` and is never overdue.
+- `last_started_at`, `last_finished_at`, `last_duration_ms`, and `running`: a
+  run was started after the latest outcome.
+- `last_outcome`: `ok`, `failed` (the job raised, or caught its own error and
+  reported it) or `missed` (the run was skipped past its misfire grace).
+  `last_outcome_at`, `last_success_at`, `consecutive_failures`, and
+  `error_class`: the exception class name of the latest failed run.
+- `counts`: the integer counts the latest finished run returned (for example
+  `deleted`, `processed` / `failed`, `executed`). A run that was skipped because
+  another process held its lock returns `{"skipped": 1}`. That run does not
+  count as a success.
+- `overdue`: registered, and no run started within the expected interval plus
+  the grace. Interval jobs count from the later of their last start and the
+  latest registration, so a deploy does not flag them. Cron jobs count
+  from the later of their last start and the time the job joined the
+  registration (kept while every registration since has included it, reset
+  when one left it out), so a run skipped by downtime or across a deploy is
+  flagged, and a newly added or re-enabled cron job is not flagged before one
+  interval has passed. A run that hangs is flagged at its start plus the
+  interval plus the grace.
+
+Two things to know when reading it:
+
+- **The outcome is job-level.** A run that returns normally is `ok` even when
+  some of its items failed. The per-item failures are in `counts`. Watch
+  `counts.failed` (the embedding sweep) and `counts.errors` (Sleep, the BM25
+  drift run), and the `embedding_failed_*` backlogs.
+- **A run interrupted by a restart or a leader change** shows as `failed` with
+  `error_class: "CancelledError"` until its next run.
+
+`scheduler_registered_at` is when the current leader registered its jobs. The
+always-on `operations_lane_snapshot` job (every 5 minutes, no external call)
+doubles as a heartbeat. If it is overdue, the leader is not running jobs.
+
+### `backlogs`
+
+Count and oldest item per work queue, read with the draining job's own
+predicate. `drained_by` names the jobs that drain it. An empty list means people
+drain it.
+
+| Name | Queue | Drained by |
+|---|---|---|
+| `embedding_pending` / `embedding_processing` | Memories waiting for, or in, their embedding | `sweep_pending_embeddings` |
+| `embedding_failed_retryable` | Failed embeddings with retries left | `sweep_pending_embeddings` |
+| `embedding_failed_stalled` | Failed embeddings with no retries left (not searchable) | people: `POST /api/v1/admin/embedding/retry-failed` |
+| `deferred_point_deletes` | Vector deletes waiting for their drain | `drain_deferred_point_deletes` |
+| `erasure_pending` | Account erasures awaiting the user's confirmation | people |
+| `erasure_cooling_off` / `erasure_cooling_off_due` | Erasures in their cooling-off period / past it | `sweep_pending_erasures` |
+| `erasure_in_progress` / `erasure_failed` | Erasures running / failed | `sweep_pending_erasures` / people |
+| `vector_erasure_jobs` | Vector payload erasures not yet complete | `sweep_pending_erasures` |
+| `force_transfer_requests_pending` | Ownership force transfers awaiting a second admin | people |
+| `storage_object_deletions_due` | Stored objects due for deletion | `storage_object_deletion_sweeper` |
+| `file_reservations_expired` / `file_soft_deleted_due` | Abandoned upload reservations / deleted files past retention | `orphan_file_sweeper` / `soft_delete_file_gc` |
+| `files_awaiting_scan` / `files_unscanned` | Uploads due for their malware scan / files never scanned (listed while `FILE_SCAN_ENABLED` is on) | `file_scan_sweeper` |
+| `files_scan_failed` | Files the scanner could not check (listed while `FILE_SCAN_ENABLED` is on) | people: rescan or delete |
+| `files_quarantined` | Infected files still listed as blocked (always listed) | `file_quarantine_expiry` |
+| `resource_indexer_due` | Resource indexers due to run | `resource_indexer` |
+| `email_action_tokens_spent`, `email_signup_requests_expired`, `device_codes_expired`, `known_devices_stale` | Rows past their retention | the matching cleanup job |
+| `referral_grants_pending` | Referral grants waiting to be credited (listed while the sweep is on) | `apply_pending_referral_grants` |
+
+Each entry has `count`, `oldest_at`, `oldest_age_seconds`, and `error_class`
+when the count could not be read.
+
+### `llm`
+
+One entry per platform-paid LLM lane the deployment configures: `embedding`
+(the default embedding model), `sleep_judge`, `supersede_verify` (with
+`SUPERSEDE_VERIFY_MODE=llm`), `recall_selector`, `analysis` (with
+`MANAGED_LLM_PROVIDER`), and `rerank` (a self-hosted reranker: `RERANK_BASE_URL`,
+or `DEFAULT_RERANKER_PROVIDER=self_hosted`). Lanes served by a workspace's own
+key are out of scope.
+
+The leader writes the lane set at scheduler start and every 5 minutes:
+provider, model and `credential_present` (whether the leader holds the platform
+credential, never the credential itself). The usage comes from what is already
+recorded, platform-paid calls of the lane's provider and model only:
+
+- `last_success_at` (within 30 days);
+- `calls_last_hour` and `calls_last_day`.
+
+Notes on the sources:
+
+- **`embedding`** counts recall query embeddings only (writes and cache hits
+  are not ledgered), and only for contexts on the default embedding model. A
+  provider that reports no token usage writes no ledger row, so with such a
+  provider the lane's usage stays empty and only the probe shows its health.
+- **`rerank`** is not ledgered (`usage_recorded: false`): only the probe shows
+  its health.
+- **`sleep_judge` and `analysis`** read the Sleep and Analysis reports' usage
+  rows. A success is a row with calls and tokens under a report that did not
+  fail.
+- **`usage_attribution: "includes_workspace_keys"`** is set on `sleep_judge`
+  while `RESOLVE_STORED_BYOK_KEYS=true`. Sleep records every run as
+  platform-paid, even when a workspace's own key served it. Every other lane is
+  `platform`.
+
+### The probe (opt-in)
+
+With `OPERATIONS_PROBE_INTERVAL_SECONDS` set, the leader makes one minimal call
+per distinct provider and model of the configured lanes:
+
+- a one-token completion (`max_tokens=16`, the answer is discarded);
+- a short fixed text to embed (sent straight to the provider, not the
+  embedding cache);
+- a one-document rerank.
+
+Each lane then shows `probe` with:
+
+- `last_probe_at` and `last_outcome` (`ok` / `failed`);
+- `last_latency_ms` and `error_class`;
+- `consecutive_failures` and `last_success_at`.
+
+A provider that fails shows as failed within one interval.
+
+- **The calls are paid.** Leave it off unless you want the signal. `900`
+  (15 minutes) is a reasonable value.
+- **Platform credentials only.** It uses the deployment's own credentials
+  (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `OLLAMA_API_KEY`,
+  `SELF_HOSTED_BASE_URL`, `RERANK_BASE_URL`), never a workspace's own key or a
+  workspace-stored self-hosted URL. Self-hosted lanes are probed too: no
+  provider bill, but load on your inference server.
+- **Ledgered as admin calls.** Completion and embedding probes are entered in
+  the cost ledger (`llm_call_log`: `caller = 'admin'`, `paid_by = 'platform'`,
+  `call_metadata.stage = 'operations_probe'`, no user, workspace or context).
+  They stay out of the cost dashboards and out of the lane usage counts.
+  Rerank probes are not ledgered.
+- **Bounded.** Each call has a 20 s timeout and SDK retries off. One run has a
+  budget of `min(interval / 2, 120 s)`. Targets past the budget are counted in
+  the job's `counts.budget_skipped`.
+- **`GET /health` does not change.** A provider outage never takes the API out
+  of rotation.
+
+### Polling for a stalled or failing job
+
+Poll every 1-5 minutes with the operator console (`service` mode) or an admin
+session, and alert on:
+
+- any job with `overdue: true` (a stalled job or a dead leader);
+- `consecutive_failures >= 3` (or `last_outcome == "failed"` for a daily job), with `error_class`
+  as the first clue;
+- a backlog whose `oldest_age_seconds` keeps growing, especially
+  `erasure_cooling_off_due`, `embedding_failed_stalled` and
+  `deferred_point_deletes`;
+- `counts.failed` / `counts.errors` above zero over several runs;
+- an LLM lane whose `probe.consecutive_failures` grows, or whose
+  `credential_present` is `false`.
 
 ## Redis Connection Pool (rate limits and daily quotas) — Issue #1556
 

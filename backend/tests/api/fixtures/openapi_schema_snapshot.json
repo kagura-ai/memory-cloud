@@ -1276,6 +1276,25 @@
         ],
         "type": "object"
       },
+      "BacklogStatusV1": {
+        "properties": {
+          "count": {},
+          "drained_by": {},
+          "error_class": {},
+          "name": {},
+          "oldest_age_seconds": {},
+          "oldest_at": {}
+        },
+        "required": [
+          "count",
+          "drained_by",
+          "error_class",
+          "name",
+          "oldest_age_seconds",
+          "oldest_at"
+        ],
+        "type": "object"
+      },
       "BetaInviteCreateRequest": {
         "properties": {
           "label": {
@@ -4773,6 +4792,7 @@
           "created_at": {},
           "filename": {},
           "id": {},
+          "scan_status": {},
           "sha256": {},
           "size_bytes": {},
           "status": {},
@@ -4784,6 +4804,7 @@
           "created_at",
           "filename",
           "id",
+          "scan_status",
           "sha256",
           "size_bytes",
           "status",
@@ -5729,6 +5750,45 @@
         ],
         "type": "object"
       },
+      "JobStatusV1": {
+        "properties": {
+          "consecutive_failures": {},
+          "counts": {},
+          "error_class": {},
+          "expected_interval_seconds": {},
+          "job_id": {},
+          "last_duration_ms": {},
+          "last_finished_at": {},
+          "last_outcome": {},
+          "last_outcome_at": {},
+          "last_started_at": {},
+          "last_success_at": {},
+          "name": {},
+          "overdue": {},
+          "registered": {},
+          "running": {},
+          "trigger": {}
+        },
+        "required": [
+          "consecutive_failures",
+          "counts",
+          "error_class",
+          "expected_interval_seconds",
+          "job_id",
+          "last_duration_ms",
+          "last_finished_at",
+          "last_outcome",
+          "last_outcome_at",
+          "last_started_at",
+          "last_success_at",
+          "name",
+          "overdue",
+          "registered",
+          "running",
+          "trigger"
+        ],
+        "type": "object"
+      },
       "KeyInfo": {
         "properties": {
           "created_at": {
@@ -5777,6 +5837,25 @@
         "required": [
           "keys",
           "limit"
+        ],
+        "type": "object"
+      },
+      "LaneProbeV1": {
+        "properties": {
+          "consecutive_failures": {},
+          "error_class": {},
+          "last_latency_ms": {},
+          "last_outcome": {},
+          "last_probe_at": {},
+          "last_success_at": {}
+        },
+        "required": [
+          "consecutive_failures",
+          "error_class",
+          "last_latency_ms",
+          "last_outcome",
+          "last_probe_at",
+          "last_success_at"
         ],
         "type": "object"
       },
@@ -5972,6 +6051,37 @@
         },
         "required": [
           "provider"
+        ],
+        "type": "object"
+      },
+      "LlmLaneV1": {
+        "properties": {
+          "calls_last_day": {},
+          "calls_last_hour": {},
+          "credential_present": {},
+          "error_class": {},
+          "lane": {},
+          "last_success_at": {},
+          "model": {},
+          "probe": {},
+          "provider": {},
+          "snapshot_at": {},
+          "usage_attribution": {},
+          "usage_recorded": {}
+        },
+        "required": [
+          "calls_last_day",
+          "calls_last_hour",
+          "credential_present",
+          "error_class",
+          "lane",
+          "last_success_at",
+          "model",
+          "probe",
+          "provider",
+          "snapshot_at",
+          "usage_attribution",
+          "usage_recorded"
         ],
         "type": "object"
       },
@@ -7786,6 +7896,28 @@
           "next_cursor",
           "retention_days",
           "total"
+        ],
+        "type": "object"
+      },
+      "OperationsStatusV1": {
+        "properties": {
+          "as_of": {},
+          "backlogs": {},
+          "jobs": {},
+          "llm": {},
+          "overdue_grace_seconds": {},
+          "probe_enabled": {},
+          "scheduler_registered_at": {},
+          "schema_version": {}
+        },
+        "required": [
+          "as_of",
+          "backlogs",
+          "jobs",
+          "llm",
+          "overdue_grace_seconds",
+          "probe_enabled",
+          "scheduler_registered_at"
         ],
         "type": "object"
       },
@@ -15492,6 +15624,25 @@
         },
         "tags": [
           "admin-neural"
+        ]
+      }
+    },
+    "/api/v1/admin/operations/status": {
+      "get": {
+        "operationId": "get_operations_status_api_v1_admin_operations_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationsStatusV1"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-operations"
         ]
       }
     },
@@ -24074,6 +24225,7 @@
               }
             }
           },
+          "409": {},
           "422": {
             "content": {
               "application/json": {
@@ -34516,6 +34668,9 @@
     },
     {
       "name": "admin-neural"
+    },
+    {
+      "name": "admin-operations"
     },
     {
       "name": "admin-plans"

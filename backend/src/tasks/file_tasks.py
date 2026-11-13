@@ -34,9 +34,15 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import get_settings
 from db.base import get_db
 from models.file_objects import FileObject
 from services import storage_quota_service
+from services.file_scan_service import (
+    FILE_QUARANTINE_EXPIRY_JOB_ID,
+    FILE_SCAN_SWEEPER_JOB_ID,
+    log_scan_configuration,
+)
 from services.file_storage_service import FILE_SOFT_DELETE_RETENTION
 from services.storage_cleanup import (
     drain_storage_deletions,
@@ -44,6 +50,7 @@ from services.storage_cleanup import (
     purge_deleted_workspace_files,
 )
 from storage.factory import get_blob_storage
+from tasks.file_scan_tasks import expire_quarantine, sweep_file_scans
 from utils.datetime import utcnow
 from utils.exceptions import ExternalServiceError
 from utils.logger import get_logger
@@ -397,7 +404,8 @@ async def sweep_storage_deletions() -> dict[str, int]:
 
 
 def schedule_file_tasks(scheduler: AsyncIOScheduler) -> None:
-    """Register the orphan file sweeper and the nightly soft-delete GC."""
+    """Register the orphan file sweeper, the nightly soft-delete GC, the durable
+    object deletion and the upload malware scan jobs (#565)."""
     scheduler.add_job(
         sweep_orphan_files,
         trigger=IntervalTrigger(minutes=15),
@@ -426,8 +434,34 @@ def schedule_file_tasks(scheduler: AsyncIOScheduler) -> None:
         name="Durable Object Deletion (Issue #2395)",
         replace_existing=True,
     )
+    # Upload malware scan (#565). Registered whether or not scanning is on: the
+    # sweeper returns at once while FILE_SCAN_ENABLED is false, and the expiry
+    # must keep removing findings after the switch is turned off. The sweeper
+    # hands scans to worker tasks and returns within about a second, so the
+    # 30 s ticks never overlap; max_instances/coalesce say so explicitly.
+    scheduler.add_job(
+        sweep_file_scans,
+        trigger=IntervalTrigger(seconds=30),
+        id=FILE_SCAN_SWEEPER_JOB_ID,
+        name="Upload Malware Scan Sweeper (Issue #565)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        expire_quarantine,
+        trigger=CronTrigger(hour=3, minute=45, timezone="UTC"),
+        id=FILE_QUARANTINE_EXPIRY_JOB_ID,
+        name="Infected File Quarantine Expiry (Issue #565)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    log_scan_configuration(get_settings())
     logger.info(
         "scheduled_file_tasks",
         orphan_interval_minutes=15,
         gc_cron_utc="03:15",
+        file_scan_interval_seconds=30,
+        quarantine_expiry_cron_utc="03:45",
     )

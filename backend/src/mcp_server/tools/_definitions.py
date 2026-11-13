@@ -1867,7 +1867,7 @@ Returns: {status, file_id, upload_url, expires_at}. Next: PUT the bytes to uploa
             "name": "complete_file_upload",
             "description": """Finalize an upload after the bytes were PUT to the init_file_upload URL: the server verifies the stored object against the declared sha256 and size, then marks the file uploaded. Idempotent for an already-uploaded file with the same sha256.
 
-Returns: {status, file_id, size_bytes, sha256}.""",
+Returns: {status, file_id, scan_status, size_bytes, sha256}. scan_status "pending": the file is being scanned for malware and cannot be downloaded yet.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["file_id", "sha256"],
@@ -1891,7 +1891,7 @@ Returns: {status, file_id, size_bytes, sha256}.""",
             "name": "get_file_download_url",
             "description": """Get a short-lived presigned GET URL for an uploaded file; the original filename is kept on save (Content-Disposition).
 
-Returns: {status, download_url}.""",
+Returns: {status, download_url}. Refusals: file_scan_pending (the malware scan has not finished; retry after retry_after_seconds), file_blocked (the scan blocked the file).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["file_id"],
@@ -1932,7 +1932,7 @@ Returns: {status, file_id, deleted}.""",
             "name": "list_files",
             "description": """List uploaded, non-deleted files you can access in the workspace, newest first.
 
-Returns: {status, files: [{id, context_id, filename, content_type, size_bytes, sha256, status, created_at, uploaded_at}], count, has_more, next_cursor}. has_more: pass next_cursor as cursor for the next page.""",
+Returns: {status, files: [{id, context_id, filename, content_type, size_bytes, sha256, status, scan_status, created_at, uploaded_at}], count, has_more, next_cursor}. scan_status: unscanned | pending | clean | infected | error (infected and error are blocked). has_more: pass next_cursor as cursor for the next page.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {

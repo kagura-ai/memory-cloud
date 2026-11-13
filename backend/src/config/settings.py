@@ -69,6 +69,9 @@ MANAGED_LLM_PLATFORM_KEY_ENV: dict[str, str] = {
     "gemini": "GOOGLE_API_KEY",
 }
 
+# Issue #2768: the shortest interval the opt-in operations probe accepts.
+OPERATIONS_PROBE_MIN_INTERVAL_SECONDS = 300
+
 
 # Issue #2225: the server secrets whose shipped values are public. Under
 # ENVIRONMENT=production ``Settings`` refuses any of them while it is still a
@@ -378,6 +381,42 @@ class Settings(BaseSettings):
             "may already hold the lock."
         ),
     )
+    # Operations status (#2768): the admin status route and its opt-in probe.
+    operations_probe_interval_seconds: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How often the scheduler leader makes one minimal call per platform "
+            "LLM lane (a one-token completion, a short text to embed, a one-"
+            "document rerank) and records the outcome for "
+            "GET /api/v1/admin/operations/status (#2768). The calls are paid and "
+            "use the platform credentials only, never a workspace's own key. "
+            "0 (the default) turns the probe off; otherwise at least 300."
+        ),
+    )
+    operations_status_overdue_grace_seconds: int = Field(
+        default=900,
+        ge=0,
+        description=(
+            "Slack added to a scheduled job's expected interval before the "
+            "operations status route reports it overdue (#2768)."
+        ),
+    )
+
+    @field_validator("operations_probe_interval_seconds")
+    @classmethod
+    def _validate_operations_probe_interval(cls, v: int) -> int:
+        """0 disables the probe; an enabled probe runs at most every 300 s (#2768).
+
+        One run probes up to four targets with a 20 s timeout each, so a
+        shorter interval would overlap its own previous run.
+        """
+        if 0 < v < OPERATIONS_PROBE_MIN_INTERVAL_SECONDS:
+            raise ValueError(
+                "OPERATIONS_PROBE_INTERVAL_SECONDS must be 0 (off) or at least "
+                f"{OPERATIONS_PROBE_MIN_INTERVAL_SECONDS}"
+            )
+        return v
 
     # OAuth2 - Google
     google_client_id: str = Field(default="", description="Google OAuth2 Client ID")
@@ -2681,6 +2720,95 @@ class Settings(BaseSettings):
                 "ALLOWED_FILE_CONTENT_TYPES has malformed entries "
                 f"(must be 'type/subtype'): {invalid!r}"
             )
+        return self
+
+    # --- Upload malware scan (Issue #565) -----------------------------------
+    # Default off: with FILE_SCAN_ENABLED=false nothing about uploads or
+    # downloads changes. On: every confirmed upload is streamed to clamd and
+    # its download URL is refused until the scan says clean.
+    file_scan_enabled: bool = Field(
+        default=False,
+        description=(
+            "Scan uploaded files with clamd and hold their downloads until the "
+            "scan is done (Issue #565). Per process: enable it on every API "
+            "process (both colors) at once; the backfill scans what a process "
+            "with the switch still off confirmed meanwhile."
+        ),
+    )
+    clamd_host: str = Field(
+        default="clamav",
+        description=(
+            "clamd host. clamd's TCP protocol has no encryption or "
+            "authentication: same host or a private network only. clamd must "
+            "run with 'AlertExceedsMax yes', otherwise content past its limits "
+            "is reported clean without being scanned."
+        ),
+    )
+    clamd_port: int = Field(default=3310, ge=1, le=65535, description="clamd TCP port")
+    clamd_connect_timeout_seconds: float = Field(
+        default=5.0, gt=0, description="Seconds to wait for a connection to clamd"
+    )
+    clamd_scan_timeout_seconds: float = Field(
+        default=300.0, gt=0, description="Seconds one scan (stream + verdict) may take"
+    )
+    clamd_stream_max_bytes: int = Field(
+        default=100 * 1024 * 1024,
+        gt=0,
+        description=(
+            "Largest file streamed to clamd; keep it at or below clamd's "
+            "StreamMaxLength. With scanning on, uploads are capped at the "
+            "smaller of this and FILE_OBJECT_MAX_SIZE_MB."
+        ),
+    )
+    file_scan_concurrency: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Scans one API process runs at once. Total = processes x colors x "
+            "this; keep it below clamd's MaxThreads."
+        ),
+    )
+    file_scan_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Scans of one file that may fail after streaming started before the "
+            "file is marked 'error' (blocked, never deleted automatically). "
+            "Failures to reach clamd at all do not count."
+        ),
+    )
+    file_scan_backfill_batch: int = Field(
+        default=20,
+        ge=0,
+        description=(
+            "Files uploaded before scanning was on that one sweep tick may scan "
+            "after the queue of new uploads is empty; 0 turns the backfill off."
+        ),
+    )
+    file_quarantine_retention_days: int = Field(
+        default=7,
+        ge=1,
+        description=(
+            "Days an infected file stays listed as blocked before it takes the "
+            "normal deletion path. Files the scanner could not check are never "
+            "deleted automatically."
+        ),
+    )
+    file_scan_put_expiry_margin_seconds: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Without checksum binding a file is scanned only after its presigned "
+            "PUT URL has expired plus this margin. A host clock ahead of the "
+            "storage clock by more than this reopens the window: keep NTP."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_file_scan(self) -> "Settings":
+        """With scanning on, clamd must be named (Issue #565)."""
+        if self.file_scan_enabled and not self.clamd_host.strip():
+            raise ValueError("FILE_SCAN_ENABLED=true needs CLAMD_HOST")
         return self
 
     @field_validator("resend_dpa_accepted_at", mode="before")

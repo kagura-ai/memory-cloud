@@ -617,8 +617,10 @@ class TestRender:
         base.update(kwargs)
         return SecurityOccurrence(**base)
 
-    @pytest.mark.parametrize("event", list(SecurityEvent))
-    def test_every_event_renders(self, event) -> None:
+    @pytest.mark.parametrize(
+        "event", [e for e in SecurityEvent if e is not SecurityEvent.FILE_BLOCKED]
+    )
+    def test_every_account_event_renders(self, event) -> None:
         subject, text = render_security_notification(
             event,
             [self._occurrence()],
@@ -634,6 +636,58 @@ class TestRender:
         assert "Forgot password?" in text
         assert "token" not in text.lower()
         assert "?" not in text.split("https://app.example/profile")[1].split("\n")[0]
+
+    def _file_blocked(self, *, digest: bool = False, count: int = 1):
+        return render_security_notification(
+            SecurityEvent.FILE_BLOCKED,
+            [self._occurrence() for _ in range(count)],
+            digest=digest,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+
+    def test_file_blocked_has_its_own_text(self) -> None:
+        # #565: not an account-security notice. No IP / device lines (the scan
+        # ran on the server), no "Wasn't you?", no "cannot be turned off"
+        # footer, no filename, finding name or link.
+        subject, text = self._file_blocked()
+        assert subject == "A file you uploaded was blocked by the malware scan"
+        assert text.startswith(
+            "A file you uploaded to a workspace was blocked by the malware scan and\n"
+            "cannot be downloaded.\n"
+        )
+        assert "    When:        2026-09-30T10:00:00 UTC\n" in text
+        for absent in (
+            "IP address",
+            "Device",
+            "192.0.2.1",
+            "UA/1",
+            "Wasn't you?",
+            "security-sensitive",
+            "cannot be\nturned off",
+            "turned off",
+            "https://",
+            "profile",
+            "Forgot password",
+        ):
+            assert absent not in text, absent
+        flat = " ".join(text.split())
+        assert "Open Storage in the workspace to see it" in flat
+        assert "You can delete it now." in flat
+
+    def test_file_blocked_names_the_retention(self, monkeypatch) -> None:
+        from config.settings import get_settings
+
+        monkeypatch.setattr(get_settings(), "file_quarantine_retention_days", 3)
+        _, text = self._file_blocked()
+        assert "removed automatically after 3 days" in " ".join(text.split())
+
+    def test_file_blocked_digest_counts_files(self) -> None:
+        subject, text = self._file_blocked(digest=True, count=2)
+        assert subject == "A file you uploaded was blocked by the malware scan (2 more times)"
+        assert "the malware scan blocked 2 more files you uploaded" in " ".join(text.split())
+        assert "security notices" not in text
+        assert "Wasn't you?" not in text and "IP address" not in text
 
     def test_names_client_key_method_and_admin(self) -> None:
         _, text = render_security_notification(

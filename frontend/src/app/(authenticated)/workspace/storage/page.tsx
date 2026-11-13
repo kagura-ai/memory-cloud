@@ -7,7 +7,8 @@
  * with download (viewer+) and delete (member+) actions. Wires the frontend
  * to the existing backend REST API (`backend/src/api/routes/files.py`).
  *
- * Issue #955
+ * Issue #955. #565: malware scan state per file (badge), no download for a
+ * blocked file, and the download refusals while a scan holds a file.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -47,8 +48,12 @@ import {
   getDownloadUrl,
   deleteContextFiles,
   deleteFile,
+  isScanBlocked,
+  SCAN_BLOCKED_ERROR,
+  SCAN_PENDING_ERROR,
   type FileObject,
 } from "@/lib/api/files";
+import { ApiError } from "@/lib/api/base";
 import { getContexts } from "@/lib/api/contexts";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useToast } from "@/hooks/use-toast";
@@ -214,6 +219,18 @@ function StorageContent() {
       }
     } catch (e) {
       tab?.close();
+      const code = e instanceof ApiError ? e.error : undefined;
+      if (code === SCAN_PENDING_ERROR || code === SCAN_BLOCKED_ERROR) {
+        // #565: the scan holds the file. Our own text (not the server's), and
+        // a refresh so the row shows its current scan state.
+        toast(
+          code === SCAN_PENDING_ERROR
+            ? { title: t("list.scan.downloadPending") }
+            : { variant: "destructive", title: t("list.scan.downloadBlocked") },
+        );
+        void loadFiles(limit, "refresh");
+        return;
+      }
       toast({
         variant: "destructive",
         title: t("list.actions.downloadFailed"),
@@ -222,6 +239,55 @@ function StorageContent() {
     } finally {
       setDownloadingId(null);
     }
+  };
+
+  // #565: the scan state badge and its hint; none for a downloadable file.
+  // The hint is rendered as text (not only a hover title, which touch and
+  // keyboard users cannot open) and describes the row's download button.
+  const scanState = (f: FileObject) => {
+    switch (f.scan_status) {
+      case "pending":
+        return {
+          variant: "outline" as const,
+          label: t("list.scan.pending"),
+          hint: t("list.scan.pendingHint"),
+        };
+      case "infected":
+        return {
+          variant: "destructive" as const,
+          label: t("list.scan.blocked"),
+          hint: t("list.scan.blockedHint"),
+        };
+      case "error":
+        return {
+          variant: "destructive" as const,
+          label: t("list.scan.error"),
+          hint: t("list.scan.errorHint"),
+        };
+      default:
+        return null;
+    }
+  };
+
+  const scanHintId = (f: FileObject) => `scan-hint-${f.id}`;
+
+  const scanBadge = (f: FileObject) => {
+    const scan = scanState(f);
+    return scan && <Badge variant={scan.variant}>{scan.label}</Badge>;
+  };
+
+  const scanHint = (f: FileObject) => {
+    const scan = scanState(f);
+    return (
+      scan && (
+        <p
+          id={scanHintId(f)}
+          className="mt-1 max-w-xs text-xs text-muted-foreground"
+        >
+          {scan.hint}
+        </p>
+      )
+    );
   };
 
   const handleConfirmDelete = async () => {
@@ -364,13 +430,17 @@ function StorageContent() {
                       {formatBytes(f.size_bytes)}
                     </TableCell>
                     <TableCell>
-                      <Badge
-                        variant={
-                          f.status === "uploaded" ? "secondary" : "outline"
-                        }
-                      >
-                        {f.status}
-                      </Badge>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge
+                          variant={
+                            f.status === "uploaded" ? "secondary" : "outline"
+                          }
+                        >
+                          {f.status}
+                        </Badge>
+                        {scanBadge(f)}
+                      </div>
+                      {scanHint(f)}
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
                       {f.uploaded_at ? (
@@ -385,8 +455,11 @@ function StorageContent() {
                           variant="ghost"
                           size="sm"
                           onClick={() => handleDownload(f)}
-                          disabled={downloadingId === f.id}
+                          disabled={downloadingId === f.id || isScanBlocked(f)}
                           aria-label={t("list.actions.download")}
+                          aria-describedby={
+                            scanState(f) ? scanHintId(f) : undefined
+                          }
                           title={t("list.actions.download")}
                         >
                           <Download className="h-4 w-4" aria-hidden="true" />

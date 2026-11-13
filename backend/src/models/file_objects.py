@@ -37,6 +37,22 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 
+#: Malware scan states (Issue #565). ``unscanned``: confirmed while scanning
+#: was off (or before it existed); ``pending``: waiting for a verdict;
+#: ``clean``; ``infected``: a finding (quarantined); ``error``: the scanner
+#: could not check this file (blocked, never deleted automatically).
+SCAN_STATUSES = ("unscanned", "pending", "clean", "infected", "error")
+#: Why a file is ``error`` (or why the backfill gave up on an ``unscanned`` one).
+SCAN_ERRORS = ("object_missing", "digest_mismatch", "size_limit", "unscannable", "scan_failed")
+#: ``scan_error`` of a legacy row (confirmed while scanning was off, or before it
+#: existed) whose stored bytes were never verified against its sha256: a
+#: ``pending`` row a context restore sent back to the scan, or a ``clean`` row
+#: whose scan found the digest different, or an ``unscanned`` row a context
+#: restore with scanning off made of such a ``clean`` one. A digest mismatch does
+#: not block it. A verdict whose digest matches clears it; the operator rescan
+#: clears it too (the row is then held to its sha256 like a new upload).
+SCAN_LEGACY_REQUEUED = "legacy_requeued"
+
 
 class FileObject(Base):
     """One row per uploaded file (Issue #485).
@@ -51,6 +67,11 @@ class FileObject(Base):
     4. If the client never confirms, the orphan sweeper transitions
        ``reserved → failed`` after the TTL grace and releases the
        reserved quota bytes.
+
+    The malware scan (Issue #565) keeps its own state in ``scan_status`` and
+    the ``scan_*`` columns; ``status`` (and so quota, purge, restore, GC and
+    the dedup index) is unchanged by it. The download URL is refused while a
+    file is not downloadable by ``services.file_scan_service.ensure_downloadable``.
     """
 
     __tablename__ = "file_objects"
@@ -114,6 +135,28 @@ class FileObject(Base):
     uploaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # --- Malware scan (Issue #565) ---
+    scan_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="unscanned",
+        comment="'unscanned' | 'pending' | 'clean' | 'infected' | 'error'",
+    )
+    #: Claims made (a claim whose scan never reached clamd is given back).
+    scan_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    #: Earliest next claim; a claim moves it to the lease end.
+    scan_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: End of the current claim's lease (part of the result fence).
+    scan_lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    scanned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: clamd's finding name (sanitized); never sent to clients.
+    scan_signature: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: ETag / LastModified of the object version that was scanned, from the
+    #: same GetObject that fed the scan (download-time compare, binding off).
+    scan_etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scan_last_modified: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    scan_error: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     __table_args__ = (
         CheckConstraint(
             "storage_backend IN ('r2')",
@@ -129,6 +172,16 @@ class FileObject(Base):
         CheckConstraint(
             "(status = 'reserved') OR (storage_backend = 'r2' AND storage_key IS NOT NULL)",
             name="valid_file_storage_shape",
+        ),
+        CheckConstraint(
+            "scan_status IN ('unscanned', 'pending', 'clean', 'infected', 'error')",
+            name="valid_file_scan_status",
+        ),
+        CheckConstraint(
+            "scan_error IS NULL OR scan_error IN "
+            "('object_missing', 'digest_mismatch', 'size_limit', 'unscannable', 'scan_failed', "
+            "'legacy_requeued')",
+            name="valid_file_scan_error",
         ),
         Index("ix_file_objects_storage_key", "storage_key"),
         # Active dedup: a workspace can hold one row per sha256 at a time;
@@ -176,6 +229,29 @@ class FileObject(Base):
             "idx_file_objects_failed_pending_softdelete",
             "id",
             postgresql_where="status = 'failed' AND deleted_at IS NULL",
+        ),
+        # #565 scan queue: due pending scans (a claim moves scan_next_attempt_at
+        # to its lease end, so in-flight rows drop out without a lease predicate).
+        Index(
+            "idx_file_objects_scan_queue",
+            "scan_next_attempt_at",
+            postgresql_where=(
+                "scan_status = 'pending' AND status = 'uploaded' AND deleted_at IS NULL"
+            ),
+        ),
+        # #565 backfill of files uploaded before scanning was on.
+        Index(
+            "idx_file_objects_scan_backfill",
+            "id",
+            postgresql_where=(
+                "scan_status = 'unscanned' AND status = 'uploaded' AND deleted_at IS NULL"
+            ),
+        ),
+        # #565 quarantine expiry and the blocked-file counts.
+        Index(
+            "idx_file_objects_quarantine",
+            "scanned_at",
+            postgresql_where="scan_status IN ('infected', 'error') AND deleted_at IS NULL",
         ),
     )
 

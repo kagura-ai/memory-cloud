@@ -15,17 +15,20 @@ from auth.roles import Role, RoleManager
 from config.settings import get_settings
 
 
-def _db(user_count: int) -> AsyncMock:
+def _db(user_count: int, *, first_lock: bool = False) -> AsyncMock:
     link_miss = MagicMock()
     link_miss.scalar_one_or_none = MagicMock(return_value=None)
     count = MagicMock()
     count.scalar = MagicMock(return_value=user_count)
+    # #2788: on an empty table in session mode, the first-account lock and
+    # the recount follow the count.
+    first_account = [MagicMock(), count] if first_lock else []
     # #1734: the address lock, then the (empty) lookup of accounts holding it.
     lock = MagicMock()
     no_holders = MagicMock()
     no_holders.scalars.return_value.all.return_value = []
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=[link_miss, count, lock, no_holders])
+    db.execute = AsyncMock(side_effect=[link_miss, count, *first_account, lock, no_holders])
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
     db.add = MagicMock()
@@ -47,7 +50,8 @@ def _patch_get_db(db):
 @pytest.mark.parametrize("provider", ["google", "github"])
 async def test_first_oauth_account(monkeypatch, mode, role, initial_admin, provider):
     monkeypatch.setattr(get_settings(), "system_admin_mode", mode)
-    db = _db(0)
+    session = mode == "session"
+    db = _db(0, first_lock=session)
     with _patch_get_db(db):
         got = await RoleManager(use_postgres=True).ensure_user(
             email="first@example.com",
@@ -59,7 +63,18 @@ async def test_first_oauth_account(monkeypatch, mode, role, initial_admin, provi
     added = db.add.call_args_list[0].args[0]
     assert added.role == role.value
     assert added.is_initial_admin is initial_admin
-    assert db.execute.await_count == 4  # link lookup, the one count, address lock, holders
+    # link lookup, count, [first-account lock, recount: session only], address lock, holders
+    assert db.execute.await_count == (6 if session else 4)
+    sql = [str(c.args[0]) for c in db.execute.await_args_list]
+    first_lock = [i for i, q in enumerate(sql) if "hashtextextended(:key" in q]
+    address_lock = [i for i, q in enumerate(sql) if "'email_signup:'" in q]
+    assert len(address_lock) == 1
+    if session:
+        # #2788: the first-account lock comes before the address lock.
+        assert len(first_lock) == 1
+        assert first_lock[0] < address_lock[0]
+    else:
+        assert first_lock == []
 
 
 @pytest.mark.asyncio
