@@ -37,12 +37,21 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, func, select, text
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from models.announcement_consent import AnnouncementEmailConsent
 from models.auth import AuditLog, User
-from models.erasure import ErasureRequest
+from models.erasure import (
+    STATUS_CANCELLED,
+    STATUS_COMPLETE,
+    STATUS_COOLING_OFF,
+    STATUS_FAILED,
+    STATUS_IN_PROGRESS,
+    STATUS_PENDING,
+    ErasureRequest,
+)
 from models.mcp_notice import McpNotice, McpNoticeConsent, McpNoticeDelivery
 from services import announcement_consent_service as announcements
 from services import mcp_notice_service as svc
@@ -282,7 +291,9 @@ async def test_create_writes_one_audit_row_without_the_text(db_session, make_use
     assert audit.new_value_hash == sha256_hex(body)
     assert audit.ip_address == "192.0.2.10" and audit.user_agent == "console/1.0"
     assert audit.user_metadata is not None and audit.user_metadata["text_chars"] == len(body)
-    assert body not in str(audit.user_metadata)
+    # The text is in no column of the audit row (only its hash and length are).
+    for attr in sa_inspect(AuditLog).column_attrs:
+        assert body not in str(getattr(audit, attr.key)), attr.key
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -490,27 +501,48 @@ async def test_candidates_follow_consent_window_and_delivery(db_session, make_us
     assert await svc.read_notice_candidates(db_session, frank.user_id) == []
 
 
+def _erasure_request(user: User, status: str) -> ErasureRequest:
+    return ErasureRequest(
+        user_id=user.user_id,
+        user_email_hash=sha256_hex(user.email),
+        initiated_by=user.user_id,
+        is_self_service=True,
+        reason_code="self_service",
+        status=status,
+    )
+
+
+@pytest.mark.parametrize("status", [STATUS_PENDING, STATUS_COOLING_OFF, STATUS_IN_PROGRESS])
 @pytest.mark.asyncio(loop_scope="session")
-async def test_erasure_under_way_gets_no_notice(db_session, make_users) -> None:
+async def test_erasure_under_way_gets_no_notice(db_session, make_users, status: str) -> None:
+    """R12: every erasure status that is still under way blocks the read and the claim."""
     gina = await make_users()
     await _opt(db_session, gina, True)
     view = await _create(db_session)
     assert len(await svc.read_notice_candidates(db_session, gina.user_id)) == 1
 
-    db_session.add(
-        ErasureRequest(
-            user_id=gina.user_id,
-            user_email_hash=sha256_hex(gina.email),
-            initiated_by=gina.user_id,
-            is_self_service=True,
-            reason_code="self_service",
-            status="cooling_off",
-        )
-    )
+    db_session.add(_erasure_request(gina, status))
     await db_session.commit()
 
     assert await svc.read_notice_candidates(db_session, gina.user_id) == []
     assert await _claim(db_session, gina, [view.id]) == set()
+
+
+@pytest.mark.parametrize("status", [STATUS_COMPLETE, STATUS_FAILED, STATUS_CANCELLED])
+@pytest.mark.asyncio(loop_scope="session")
+async def test_ended_erasure_request_does_not_block_notices(
+    db_session, make_users, status: str
+) -> None:
+    """Control for R12: a finished request (the account is still here) does not block."""
+    gina = await make_users()
+    await _opt(db_session, gina, True)
+    view = await _create(db_session)
+
+    db_session.add(_erasure_request(gina, status))
+    await db_session.commit()
+
+    assert [c.id for c in await svc.read_notice_candidates(db_session, gina.user_id)] == [view.id]
+    assert await _claim(db_session, gina, [view.id]) == {view.id}
 
 
 @pytest.mark.asyncio(loop_scope="session")

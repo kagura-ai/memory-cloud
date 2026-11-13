@@ -150,7 +150,12 @@ def _isolated(notices: Notices):
 
 
 def _stub_bootstrap(
-    stack: ExitStack, notices: Notices, *, headroom: dict | None = None, build=None
+    stack: ExitStack,
+    notices: Notices,
+    *,
+    headroom: dict | None = None,
+    build=None,
+    log_usage: AsyncMock | None = None,
 ) -> MagicMock:
     """Stub everything bootstrap touches but the notice code; returns the build stub."""
     db = AsyncMock()
@@ -174,7 +179,7 @@ def _stub_bootstrap(
             new=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4(), workspace_id=WS)),
         )
     )
-    stack.enter_context(patch.object(module, "_log_tool_usage", new=AsyncMock()))
+    stack.enter_context(patch.object(module, "_log_tool_usage", new=log_usage or AsyncMock()))
     stack.enter_context(
         patch.object(module, "_context_response_fields", return_value=dict(CONTEXT_FIELDS))
     )
@@ -205,12 +210,15 @@ async def _run(
     via: str = "handler",
     headroom: dict | None = None,
     build=None,
+    log_usage: AsyncMock | None = None,
 ) -> tuple[str, MagicMock, Notices]:
     """Run bootstrap; returns the reply text, the build stub and the notice stubs."""
     notices = notices or Notices()
     call_args = {"context_id": CONTEXT_FIELDS["context_id"], **(args or {})}
     with ExitStack() as stack:
-        build_stub = _stub_bootstrap(stack, notices, headroom=headroom, build=build)
+        build_stub = _stub_bootstrap(
+            stack, notices, headroom=headroom, build=build, log_usage=log_usage
+        )
         if via == "dispatcher":
             (block,) = await tools_mod.execute_tool_call("bootstrap", call_args, user_id, WS)
         else:
@@ -453,14 +461,41 @@ class TestDelivery:
             claim.session = session
             return set(notice_ids)
 
-        notices = Notices([_candidate()], claim=AsyncMock(side_effect=claim))
-        _, _, notices = await _run(notices=notices, build=build)
+        async def log(*_args, **_kwargs):
+            order.append("log")
 
-        assert order == ["build", "claim"]
+        notices = Notices([_candidate()], claim=AsyncMock(side_effect=claim))
+        _, _, notices = await _run(
+            notices=notices, build=build, log_usage=AsyncMock(side_effect=log)
+        )
+
+        # R7: the claim is the last fallible step, after the build AND the
+        # usage log.
+        assert order == ["build", "log", "claim"]
         # The read shared the headroom session; the claim got the second one.
         assert len(notices.sessions) == 2
         assert notices.read.await_args.args[0] is notices.sessions[0]
         assert claim.session is notices.sessions[1]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failing", ["build", "log"])
+    async def test_nothing_is_claimed_when_an_earlier_step_is_cancelled(
+        self, flag, signed_in, failing
+    ):
+        """A cancellation before the reply is serialised must not use a notice up."""
+
+        async def cancelled(*_args, **_kwargs):
+            raise asyncio.CancelledError
+
+        build = cancelled if failing == "build" else None
+        log_usage = AsyncMock(side_effect=cancelled) if failing == "log" else None
+        notices = Notices([_candidate()])
+
+        with pytest.raises(asyncio.CancelledError):
+            await _run(notices=notices, build=build, log_usage=log_usage)
+
+        notices.read.assert_awaited_once()
+        notices.claim.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_claim_session_when_nothing_fits(self, flag, signed_in):
