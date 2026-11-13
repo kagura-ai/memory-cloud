@@ -402,14 +402,6 @@ def _take_oauth_flow(state: str, request: Request) -> OAuthFlowBinding:
     return OAuthFlowBinding(record=True, digest=stored)
 
 
-def _take_oauth_flow_binding(state: str, request: Request) -> str | None:
-    """Read-and-delete ``oauth2_flow:{state}``; the nonce digest when it matches.
-
-    Same as ``_take_oauth_flow(...).digest``.
-    """
-    return _take_oauth_flow(state, request).digest
-
-
 # Flows started from Profile write their own state without ``/login``, so they
 # carry no browser binding: ``link`` is bound to the browser by its session
 # (``_maybe_link_redirect``) and ``refresh`` never opens a session
@@ -635,6 +627,39 @@ async def _maybe_refresh_redirect(
 
     logger.info("refresh_oauth_success", user_id=user_id)
     return RedirectResponse(url=redirect_url, status_code=303)
+
+
+async def _refresh_identity_mismatch(
+    provider: Literal["google", "github"], state: str, idp_sub: str
+) -> RedirectResponse | None:
+    """End a Profile refresh whose identity is not the account that started it.
+
+    Runs before the terms gate, the sign-up gate and ``ensure_user``, so a
+    refresh never creates an account or records a sign-up admission. The
+    returning identity is resolved without writing (its link row): one that
+    owns nothing here or belongs to another account gets the refresh mismatch
+    answer, an expired record the expired answer, and every key bound to the
+    state is dropped. None: not a refresh, or the starting account's own
+    identity (the callback goes on; ``ensure_user`` syncs the profile and
+    ``_maybe_refresh_redirect`` answers).
+    """
+    if not _session_manager:
+        return None
+    redis = _session_manager._redis
+    if redis.get(f"oauth2_state_intent:{state}") != "refresh":
+        return None
+    expected_user_id = redis.get(f"oauth2_state_user:{state}")
+    owner_id = ""
+    if expected_user_id:
+        async for db in get_db():
+            owner = await _owning_user(db, provider, idp_sub)
+            owner_id = owner.user_id if owner is not None else ""
+            break
+        if owner_id == expected_user_id:
+            return None
+    redirect = await _maybe_refresh_redirect(state=state, user_id=owner_id)
+    _drop_state_bound_keys(state)
+    return redirect
 
 
 async def _maybe_link_redirect(
@@ -1262,6 +1287,10 @@ async def google_callback(
         # account is looked at or created.
         if browser_check == "link":
             return _other_browser_refusal("google", state, request, flow_record=flow.record)
+        # A Profile refresh goes on only for the account that started it.
+        refresh_mismatch = await _refresh_identity_mismatch("google", state, user_info["sub"])
+        if refresh_mismatch is not None:
+            return refresh_mismatch
 
         # 3.45. Terms gate (#1665). Runs BEFORE the signup gate: that gate may
         # redeem a beta invite, which must not be spent on a sign-up that is
@@ -2977,6 +3006,10 @@ async def github_callback(
         # #2791: an unbound Profile link flow ends in the link branch only.
         if browser_check == "link":
             return _other_browser_refusal("github", state, request, flow_record=flow.record)
+        # A Profile refresh goes on only for the account that started it.
+        refresh_mismatch = await _refresh_identity_mismatch("github", state, user_info["sub"])
+        if refresh_mismatch is not None:
+            return refresh_mismatch
 
         # 3.45. Terms gate (#1665) — see google_callback.
         terms_refusal = await _terms_refusal(

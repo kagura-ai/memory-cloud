@@ -8,7 +8,7 @@ Pinned here:
   plus a server-side marker; the nonce itself is never stored;
 - a presented nonce is reused only while its marker exists; an unknown or
   malformed value is replaced;
-- the callbacks' ``_take_oauth_flow_binding`` returns the digest only for the
+- the callbacks' ``_take_oauth_flow`` returns the digest only for the
   browser that presents the bound nonce, and always consumes the key.
 """
 
@@ -187,7 +187,7 @@ class TestTakeBinding:
         request = FakeRequest()
         request.cookies[PLAIN] = nonce
 
-        assert auth_routes._take_oauth_flow_binding("st1", request) == sha256_hex(nonce)
+        assert auth_routes._take_oauth_flow("st1", request).digest == sha256_hex(nonce)
         assert "oauth2_flow:st1" not in redis.store
 
     @pytest.mark.parametrize("cookie", [None, "M" * 43, "bad"])
@@ -201,24 +201,24 @@ class TestTakeBinding:
         if cookie is not None:
             request.cookies[PLAIN] = cookie
 
-        assert auth_routes._take_oauth_flow_binding("st1", request) is None
+        assert auth_routes._take_oauth_flow("st1", request).digest is None
         assert "oauth2_flow:st1" not in redis.store
 
     def test_a_flow_without_a_binding_gets_nothing(self, redis) -> None:  # noqa: F811
         request = FakeRequest()
         request.cookies[PLAIN] = "N" * 43
-        assert auth_routes._take_oauth_flow_binding("st1", request) is None
+        assert auth_routes._take_oauth_flow("st1", request).digest is None
 
     def test_the_cookie_name_follows_secure(self, redis, secure_cookies) -> None:  # noqa: F811
         nonce = self._bound(redis)
         plain = FakeRequest()
         plain.cookies[PLAIN] = nonce
-        assert auth_routes._take_oauth_flow_binding("st1", plain) is None
+        assert auth_routes._take_oauth_flow("st1", plain).digest is None
 
         self._bound(redis)
         prefixed = FakeRequest()
         prefixed.cookies[HOST] = nonce
-        assert auth_routes._take_oauth_flow_binding("st1", prefixed) == sha256_hex(nonce)
+        assert auth_routes._take_oauth_flow("st1", prefixed).digest == sha256_hex(nonce)
 
     def test_only_the_login_routes_write_the_binding(self) -> None:
         """No callback binds a flow: the binding belongs to the browser that started it."""

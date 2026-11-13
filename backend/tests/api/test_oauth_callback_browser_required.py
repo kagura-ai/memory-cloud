@@ -14,6 +14,9 @@ its digest to the flow's state (#2786). Pinned here, for both providers:
 - flows started from Profile (``refresh`` / ``link`` intents, which never ran
   ``/login``) still reach their own branch; one whose intent is gone by then is
   refused before an account check (``link``) or before any session (both);
+- a ``refresh`` flow whose identity owns nothing here or belongs to another
+  account ends in the refresh mismatch answer before the terms gate, the
+  sign-up gate and ``ensure_user``; the starting account's own refresh works;
 - the refusal is logged without the nonce, the state or the code;
 - the Google sign-in always uses the configured redirect URI.
 """
@@ -88,6 +91,9 @@ def signed_in_path(monkeypatch, redis) -> SimpleNamespace:  # noqa: F811
         account_created_at=utcnow() - timedelta(days=30),
     )
     monkeypatch.setattr(auth_routes, "_session_owner", AsyncMock(return_value=owner))
+    # The returning identity's owner as the link row tells it (read before any write).
+    owning = AsyncMock(return_value=owner)
+    monkeypatch.setattr(auth_routes, "_owning_user", owning)
     monkeypatch.setattr(auth_routes, "_account_exists", AsyncMock(return_value=False))
 
     async def _fake_db():
@@ -105,7 +111,12 @@ def signed_in_path(monkeypatch, redis) -> SimpleNamespace:  # noqa: F811
     if isinstance(google, MagicMock):
         google.get_authorization_url_web.return_value = "https://idp.example.test/auth"
     return SimpleNamespace(
-        manager=manager, gate=gate, terms=terms, ensure_user=ensure_user, redis=redis
+        manager=manager,
+        gate=gate,
+        terms=terms,
+        ensure_user=ensure_user,
+        redis=redis,
+        owning=owning,
     )
 
 
@@ -343,7 +354,7 @@ def test_the_test_helper_binds_like_login(redis) -> None:  # noqa: F811
 
     request = from_bound_browser(FakeRequest())
 
-    assert auth_routes._take_oauth_flow_binding("st1", request) == digest
+    assert auth_routes._take_oauth_flow("st1", request).digest == digest
 
 
 # --- flows started from Profile ---------------------------------------------------
@@ -393,6 +404,88 @@ async def test_a_profile_link_still_reaches_its_branch(
     assert response is linked
     link_branch.assert_awaited_once()
     _assert_nothing_happened(signed_in_path)
+
+
+@pytest.mark.parametrize("returning", ["unknown_identity", "another_account"])
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.asyncio
+async def test_a_profile_refresh_with_another_identity_creates_nothing(
+    redis,  # noqa: F811
+    terms_off,  # noqa: F811
+    github_idp,  # noqa: F811
+    google_idp,  # noqa: F811
+    signed_in_path,
+    provider,
+    returning,
+) -> None:
+    """A refresh never creates an account or passes a sign-up gate: an identity
+    that owns nothing here, or belongs to another account, ends in the refresh
+    mismatch answer before the terms gate, the sign-up gate and ``ensure_user``."""
+    redis.store["oauth2_state:st1"] = "pending"
+    redis.store["oauth2_state_intent:st1"] = "refresh"
+    redis.store["oauth2_state_user:st1"] = OWNER_ID
+    redis.store["oauth2_return_to:st1"] = "/profile?refreshed=1"
+    _with_carriers(redis, "st1")
+    signed_in_path.owning.return_value = (
+        None
+        if returning == "unknown_identity"
+        else SessionOwner("someone-else", "e@example.test", "E", None)
+    )
+
+    response = await _callback(provider, "st1", None)
+
+    assert response.status_code == 303
+    location = urlparse(response.headers["location"])
+    assert (location.path, location.query) == ("/profile", "error=refresh_user_mismatch")
+    assert _set_cookies(response) == []
+    signed_in_path.owning.assert_awaited_once()
+    signed_in_path.terms.assert_not_awaited()
+    _assert_nothing_happened(signed_in_path)
+    assert not any("st1" in key for key in redis.store)
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.asyncio
+async def test_a_profile_refresh_with_the_starting_account_still_syncs_it(
+    redis,  # noqa: F811
+    terms_off,  # noqa: F811
+    github_idp,  # noqa: F811
+    google_idp,  # noqa: F811
+    signed_in_path,
+    provider,
+) -> None:
+    redis.store["oauth2_state:st1"] = "pending"
+    redis.store["oauth2_state_intent:st1"] = "refresh"
+    redis.store["oauth2_state_user:st1"] = OWNER_ID
+
+    response = await _callback(provider, "st1", None)
+
+    location = urlparse(response.headers["location"])
+    assert (location.path, location.query) == ("/profile", "refreshed=1")
+    signed_in_path.ensure_user.assert_awaited_once()
+    signed_in_path.manager.create_session.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.asyncio
+async def test_a_profile_refresh_whose_record_expired_creates_nothing(
+    redis,  # noqa: F811
+    terms_off,  # noqa: F811
+    github_idp,  # noqa: F811
+    google_idp,  # noqa: F811
+    signed_in_path,
+    provider,
+) -> None:
+    redis.store["oauth2_state:st1"] = "pending"
+    redis.store["oauth2_state_intent:st1"] = "refresh"
+
+    response = await _callback(provider, "st1", None)
+
+    location = urlparse(response.headers["location"])
+    assert (location.path, location.query) == ("/profile", "error=refresh_state_expired")
+    signed_in_path.terms.assert_not_awaited()
+    _assert_nothing_happened(signed_in_path)
+    assert not any("st1" in key for key in redis.store)
 
 
 def _drop_intent_during_the_exchange(provider: str, redis) -> None:  # noqa: F811
@@ -558,6 +651,14 @@ def test_the_browser_is_checked_before_the_provider_and_the_account(fn_name, exc
     for name in ("_terms_refusal", "check_signup_access", "ensure_user"):
         assert early_guard < min(calls[name]), (fn_name, name)
         assert after_link_branch < link_guard < min(calls[name]), (fn_name, name)
+
+
+@pytest.mark.parametrize("fn_name", ["google_callback", "github_callback"])
+def test_a_refresh_is_matched_to_its_account_before_any_gate_or_write(fn_name) -> None:
+    calls = _calls(getattr(auth_routes, fn_name))
+    (check,) = calls["_refresh_identity_mismatch"]
+    for name in ("_terms_refusal", "check_signup_access", "ensure_user"):
+        assert check < min(calls[name]), (fn_name, name)
 
 
 @pytest.mark.parametrize("fn_name", ["google_callback", "github_callback"])

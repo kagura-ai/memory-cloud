@@ -154,10 +154,13 @@ async def test_a_flow_that_never_ran_login_offers_nothing(
     terms_off,  # noqa: F811
     github_idp,  # noqa: F811
     confirmable,
+    monkeypatch,
 ) -> None:
     """A refresh or link flow writes its own state without a binding."""
     redis.store["oauth2_state:st1"] = "pending"
     redis.store["oauth2_state_intent:st1"] = "refresh"
+    # The starting account's own identity: the refresh goes on to ensure_user.
+    monkeypatch.setattr(auth_routes, "_refresh_identity_mismatch", AsyncMock(return_value=None))
 
     response = await _callback("github", "st1", "N" * 43)
 
