@@ -316,14 +316,17 @@ def _email_in_use_redirect() -> RedirectResponse:
     )
 
 
-# --- Browser binding of a sign-in (#2786) ------------------------------------
+# --- Browser binding of a sign-in (#2786, #2791) -----------------------------
 #
 # ``google_login`` / ``github_login`` are the only writers: they give the
 # browser a nonce cookie (``auth.oauth_browser``) and store its digest under
 # ``oauth2_flow:{state}``. The callbacks take the binding with the other
-# state-bound carriers, after the state check, on every path. A provider link
-# confirmed by email is offered only for a sign-in that has one, and completes
-# only in the browser that presents the nonce.
+# state-bound carriers, after the state check, on every path. A Google or
+# GitHub sign-in finishes only in the browser that started it (#2791): a
+# callback without the binding is refused before the provider is asked
+# anything (``_starting_browser_check``), and no session is ever opened
+# without it. A provider link confirmed by email is offered only for a sign-in
+# that has one, and completes only in the browser that presents the nonce.
 
 
 def _bind_oauth_flow(request: Request, state: str) -> str | None:
@@ -365,26 +368,113 @@ def _set_oauth_browser_cookie(response: Response, nonce: str | None) -> None:
     )
 
 
-def _take_oauth_flow_binding(state: str, request: Request) -> str | None:
-    """Read-and-delete ``oauth2_flow:{state}``; the nonce digest when it matches.
+class OAuthFlowBinding(NamedTuple):
+    """What a callback learned from ``oauth2_flow:{state}``.
+
+    ``digest`` is the nonce digest when the request's cookie matches the
+    binding (the browser that ran ``/login``), else None. ``record`` says
+    whether the flow had a binding at all (for the refusal log only).
+    """
+
+    record: bool
+    digest: str | None
+
+
+def _take_oauth_flow(state: str, request: Request) -> OAuthFlowBinding:
+    """Read-and-delete ``oauth2_flow:{state}`` and compare it with the cookie.
 
     Call only AFTER the CSRF state check has passed. Consumes the key on every
-    path. Returns None when the flow has no binding or the request's cookie
-    is missing or is another nonce.
+    path. ``digest`` is None when the flow has no binding or the request's
+    cookie is missing or is another nonce.
     """
     if not _session_manager:
-        return None
+        return OAuthFlowBinding(record=False, digest=None)
     key = oauth_browser.OAUTH_FLOW_KEY.format(state=state)
     stored = _session_manager._redis.get(key)
     if stored is None:
-        return None
+        return OAuthFlowBinding(record=False, digest=None)
     _session_manager._redis.delete(key)
     if not isinstance(stored, str):
-        return None
+        return OAuthFlowBinding(record=True, digest=None)
     nonce = oauth_browser.presented_nonce(getattr(request, "cookies", None))
     if not oauth_browser.matches(nonce, stored):
-        return None
-    return stored
+        return OAuthFlowBinding(record=True, digest=None)
+    return OAuthFlowBinding(record=True, digest=stored)
+
+
+# Flows started from Profile write their own state without ``/login``, so they
+# carry no browser binding: ``link`` is bound to the browser by its session
+# (``_maybe_link_redirect``) and ``refresh`` never opens a session
+# (``_maybe_refresh_redirect``). Every other flow must come back to the browser
+# that ran ``/login``.
+def _starting_browser_check(
+    state: str, browser_hash: str | None
+) -> Literal["bound", "link", "refresh"] | None:
+    """How a callback may go on, given its browser binding (#2791).
+
+    ``"bound"``: the browser that ran ``/login`` (``browser_hash`` set).
+    ``"link"`` / ``"refresh"``: no binding, but the flow was started from
+    Profile with that intent; it may go on only to its own branch, and the
+    callback checks again (``browser_hash is None`` refuses) before any
+    session is opened. None: refuse with ``_other_browser_refusal``.
+
+    One Redis read at most. Callers guarantee a session manager.
+    """
+    if browser_hash is not None:
+        return "bound"
+    redis = _session_manager._redis if _session_manager else None
+    intent = redis.get(f"oauth2_state_intent:{state}") if redis is not None else None
+    if intent == "link":
+        return "link"
+    if intent == "refresh":
+        return "refresh"
+    return None
+
+
+def _drop_state_bound_keys(state: str) -> None:
+    """Delete every key still bound to a flow that ends here.
+
+    The carriers the callbacks take after the state check (invite, terms,
+    sign-up preferences, link proof, the browser binding) are already gone;
+    this drops the rest so nothing lingers for the TTL.
+    """
+    if not _session_manager:
+        return
+    _session_manager._redis.delete(
+        f"oauth2_return_to:{state}",
+        _ADD_ACCOUNT_KEY.format(state=state),
+        _LINK_PROOF_KEY.format(state=state),
+        f"oauth2_state_intent:{state}",
+        f"oauth2_state_user:{state}",
+        f"oauth2_state_session:{state}",
+        oauth_browser.OAUTH_FLOW_KEY.format(state=state),
+    )
+
+
+def _other_browser_refusal(
+    provider: Literal["google", "github"],
+    state: str,
+    request: Request,
+    *,
+    flow_record: bool,
+) -> RedirectResponse:
+    """End a sign-in that this browser did not start (#2791).
+
+    Nothing is created and no cookie is set: every key bound to the state is
+    dropped and the browser goes to ``/login?error=oauth_other_browser``,
+    the same answer for both providers and every identity. No ``return_to``
+    rides along (it was chosen by whoever started the flow). The log carries
+    the state's HMAC and two booleans, never the nonce, the state or the code.
+    """
+    logger.warning(
+        "oauth_callback_not_from_starting_browser",
+        provider=provider,
+        state_hash=_state_hash(state),
+        cookie_present=oauth_browser.presented_nonce(getattr(request, "cookies", None)) is not None,
+        flow_record=flow_record,
+    )
+    _drop_state_bound_keys(state)
+    return _oauth_error_redirect(provider, "oauth_other_browser")
 
 
 def _offer_link_confirmation(
@@ -403,10 +493,10 @@ def _offer_link_confirmation(
     cookie, same status and location. The record and the mail are produced
     by a detached task after it (``spawn_link_offer``), so the request ends
     at the same moment whatever happens next. No offer is made when the
-    sign-in was not started by this browser's ``/login`` (no binding), or
-    when it carries an add-account intent or an identity-link proof: an
-    intent that cannot be honoured is refused, never turned into another
-    sign-in. Never raises.
+    sign-in was not started by this browser's ``/login`` (no binding: since
+    #2791 only a Profile ``refresh`` flow gets this far), or when it carries
+    an add-account intent or an identity-link proof: an intent that cannot be
+    honoured is refused, never turned into another sign-in. Never raises.
     """
     try:
         redis = _session_manager._redis if _session_manager else None
@@ -443,6 +533,23 @@ def _offer_link_confirmation(
     except Exception as e:
         logger.error("provider_link_confirmation_offer_failed", error_type=type(e).__name__)
     return _email_in_use_redirect()
+
+
+def _refresh_expired_answer() -> RedirectResponse:
+    """A refresh whose starting account record is gone (``refresh_state_expired``)."""
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(f"{frontend_url}/profile?error=refresh_state_expired", status_code=303)
+
+
+def _refresh_mismatch_answer(*, expected_user_id: str, user_id: str) -> RedirectResponse:
+    """A refresh that came back with another identity (``refresh_user_mismatch``).
+
+    The expected/returned ids are opaque account ids (not PII); ``user_id`` is
+    empty when the identity owns nothing here.
+    """
+    logger.warning("refresh_user_mismatch", expected_user_id=expected_user_id, user_id=user_id)
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(f"{frontend_url}/profile?error=refresh_user_mismatch", status_code=303)
 
 
 async def _maybe_refresh_redirect(
@@ -501,28 +608,13 @@ async def _maybe_refresh_redirect(
         # The originating user_id record expired (TTL ran out between
         # POST /me/refresh-oauth and the IdP round-trip). Without it we
         # cannot enforce the same-user check; safest is to refuse.
-        return RedirectResponse(
-            f"{frontend_url}/profile?error=refresh_state_expired",
-            status_code=303,
-        )
+        return _refresh_expired_answer()
 
     if user_id != expected_user_id:
-        # The IdP returned a different account. ``ensure_user`` has
-        # already been called by the caller for that other account —
-        # which is fine, that account's row is now up to date — but we
-        # must NOT redirect the originating session to a place that
-        # implies the refresh succeeded for them. Surface the mismatch.
-        # The expected/returned ids are not PII (opaque account ids), but
-        # stay terse for log volume.
-        logger.warning(
-            "refresh_user_mismatch",
-            expected_user_id=expected_user_id,
-            user_id=user_id,
-        )
-        return RedirectResponse(
-            f"{frontend_url}/profile?error=refresh_user_mismatch",
-            status_code=303,
-        )
+        # The IdP returned a different account. We must NOT redirect the
+        # originating session to a place that implies the refresh succeeded
+        # for them. Surface the mismatch.
+        return _refresh_mismatch_answer(expected_user_id=expected_user_id, user_id=user_id)
 
     # Happy path: same user. Honour return_to (already read above).
     # POST /me/refresh-oauth persists return_to as a same-origin
@@ -537,6 +629,62 @@ async def _maybe_refresh_redirect(
 
     logger.info("refresh_oauth_success", user_id=user_id)
     return RedirectResponse(url=redirect_url, status_code=303)
+
+
+async def _refresh_identity_mismatch(
+    provider: Literal["google", "github"],
+    state: str,
+    idp_sub: str,
+    *,
+    browser_check: Literal["bound", "link", "refresh"],
+    request: Request,
+    flow_record: bool,
+) -> RedirectResponse | None:
+    """End a Profile refresh whose identity is not the account that started it.
+
+    Runs before the terms gate, the sign-up gate and ``ensure_user``, so a
+    refresh never creates an account or records a sign-up admission. Every
+    Redis key the decision needs is read once, up front, before the returning
+    identity is resolved (without writing, from its link row); nothing read
+    afterwards can change the answer. A refresh flow (``browser_check ==
+    "refresh"``, or a flow whose intent is ``refresh``) has exactly these
+    outcomes:
+
+    - its intent is gone by now: ``_other_browser_refusal`` (it has no
+      binding and may not become a sign-in);
+    - the starting account's record is gone: the expired answer;
+    - the identity owns nothing here or belongs to another account: the
+      refresh mismatch answer;
+    - the identity is the starting account's own: None, the callback goes on
+      (``ensure_user`` syncs the profile, ``_maybe_refresh_redirect``
+      answers, and no session is opened without a browser binding).
+
+    Every answer drops the keys bound to the state. None also for a flow
+    that is not a refresh.
+    """
+    if not _session_manager:
+        if browser_check == "refresh":
+            return _other_browser_refusal(provider, state, request, flow_record=flow_record)
+        return None
+    redis = _session_manager._redis
+    intent = redis.get(f"oauth2_state_intent:{state}")
+    expected_user_id = redis.get(f"oauth2_state_user:{state}")
+    if intent != "refresh":
+        if browser_check == "refresh":
+            return _other_browser_refusal(provider, state, request, flow_record=flow_record)
+        return None
+    if not expected_user_id:
+        _drop_state_bound_keys(state)
+        return _refresh_expired_answer()
+    owner_id = ""
+    async for db in get_db():
+        owner = await _owning_user(db, provider, idp_sub)
+        owner_id = owner.user_id if owner is not None else ""
+        break
+    if owner_id == expected_user_id:
+        return None
+    _drop_state_bound_keys(state)
+    return _refresh_mismatch_answer(expected_user_id=expected_user_id, user_id=owner_id)
 
 
 async def _maybe_link_redirect(
@@ -805,7 +953,9 @@ async def google_login(
     Generates OAuth2 authorization URL with CSRF state token.
 
     Args:
-        redirect_uri: Optional custom redirect URI (defaults to configured URI)
+        redirect_uri: Ignored; the configured ``GOOGLE_REDIRECT_URI`` is always
+            used (the callback exchanges the code with it, so no other value
+            can finish a sign-in).
         return_to: If provided, auto-redirects browser to Google (for iOS/browser users)
         invite: Optional closed-beta invite token (#1581). Its hash is bound to
             this flow's state for the signup gate; malformed values are ignored.
@@ -827,6 +977,13 @@ async def google_login(
             Bound to this flow's state; recorded only when this sign-in
             creates the account. Ignored while ANNOUNCEMENT_EMAILS_ENABLED is
             off, with a stale version, or from a cross-site navigation.
+
+    Both modes set the sign-in cookie (``kagura_oauth_browser``, or
+    ``__Host-kagura_oauth_browser`` over https) and bind the flow to it: the
+    sign-in finishes only in the browser that holds it. A client of the JSON
+    mode must open ``authorization_url`` with the cookie jar that received
+    this response; otherwise the callback answers
+    ``/login?error=oauth_other_browser`` and nothing is created.
 
     Returns:
         If return_to: RedirectResponse to Google OAuth (browser user)
@@ -898,8 +1055,10 @@ async def google_login(
         if link_proof:
             _remember_link_proof_intent(state)
 
-    # Get authorization URL
-    redirect = redirect_uri or os.getenv("GOOGLE_REDIRECT_URI")
+    # Get authorization URL. The Google sign-in always uses the configured
+    # redirect URI: the callback exchanges the code with it, and a caller's
+    # ``redirect_uri`` must not shape the request sent to Google.
+    redirect = os.getenv("GOOGLE_REDIRECT_URI")
     if not redirect:
         raise HTTPException(status_code=500, detail="GOOGLE_REDIRECT_URI not configured")
 
@@ -935,7 +1094,11 @@ def _state_hash(state: str | None) -> str | None:
 # literals chosen by call sites — IdP-supplied text never reaches the URL.
 # ``provider_unlinked``: the identity has no link row any more (its account
 # removed this sign-in method), so no session is opened for it.
-_OAUTH_ERROR_REASONS = frozenset({"oauth_failed", "oauth_expired", "provider_unlinked"})
+# ``oauth_other_browser``: the callback was opened in a browser that did not
+# start the sign-in (#2791); nothing was created.
+_OAUTH_ERROR_REASONS = frozenset(
+    {"oauth_failed", "oauth_expired", "provider_unlinked", "oauth_other_browser"}
+)
 
 
 def _oauth_error_redirect(provider: str, reason: str) -> RedirectResponse:
@@ -944,7 +1107,8 @@ def _oauth_error_redirect(provider: str, reason: str) -> RedirectResponse:
     Counterpart to ``_oauth_cancel_redirect`` for real failures: missing
     params, expired/replayed state, exchange failure, DB trouble. The login
     page maps the well-known ``error`` tokens (``oauth_failed`` /
-    ``oauth_expired`` / ``provider_unlinked``) to i18n'd banners — the same
+    ``oauth_expired`` / ``provider_unlinked`` / ``oauth_other_browser``) to
+    i18n'd banners — the same
     channel already used by ``registration_disabled`` / ``email_in_use``.
 
     ``reason`` is an internal literal (never IdP-derived); an unknown value
@@ -1032,6 +1196,12 @@ async def google_callback(
         code: OAuth2 authorization code from Google.
         state: CSRF state token (must match stored state).
 
+    The sign-in finishes only in the browser that started it: a callback
+    without the cookie ``/auth/google/login`` set for this state goes to
+    ``/login?error=oauth_other_browser`` before Google is asked anything, and
+    nothing is created. Flows started from Profile (refresh, link) carry no
+    such cookie and go on to their own branch, which never opens a session.
+
     Returns:
         Redirect to dashboard with session cookie set. Every failure class on
         this browser-facing route 303-redirects to ``/login`` with a
@@ -1094,11 +1264,19 @@ async def google_callback(
     signup_prefs = _take_signup_bundle(state)
     signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
     # #2786: likewise; the browser binding written by google_login.
-    browser_hash = _take_oauth_flow_binding(state, request)
+    flow = _take_oauth_flow(state, request)
+    browser_hash = flow.digest
     # #2761: a "yes" counts only from the browser that ran /login.
     signup_announcement = _announcement_for_browser(signup_prefs.announcement, browser_hash)
     # #1818: likewise.
     link_proof = _take_link_proof_intent(state)
+
+    # #2791: a sign-in finishes only in the browser that started it. Decided
+    # before Google is asked anything, so the answer never depends on who
+    # signed in there.
+    browser_check = _starting_browser_check(state, browser_hash)
+    if browser_check is None:
+        return _other_browser_refusal("google", state, request, flow_record=flow.record)
 
     try:
         # 2. Exchange code for token
@@ -1129,6 +1307,22 @@ async def google_callback(
         )
         if link_redirect is not None:
             return link_redirect
+        # #2791: a Profile link flow without the browser binding may only end
+        # in the link branch above; its intent is gone, so stop before any
+        # account is looked at or created.
+        if browser_check == "link":
+            return _other_browser_refusal("google", state, request, flow_record=flow.record)
+        # A Profile refresh goes on only for the account that started it.
+        refresh_mismatch = await _refresh_identity_mismatch(
+            "google",
+            state,
+            user_info["sub"],
+            browser_check=browser_check,
+            request=request,
+            flow_record=flow.record,
+        )
+        if refresh_mismatch is not None:
+            return refresh_mismatch
 
         # 3.45. Terms gate (#1665). Runs BEFORE the signup gate: that gate may
         # redeem a beta invite, which must not be spent on a sign-up that is
@@ -1218,6 +1412,11 @@ async def google_callback(
         refresh_redirect = await _maybe_refresh_redirect(state=state, user_id=owner_id)
         if refresh_redirect is not None:
             return refresh_redirect
+
+        # #2791: no session is opened without the browser that started the
+        # sign-in, whatever happened to a Profile intent since the first check.
+        if browser_hash is None:
+            return _other_browser_refusal("google", state, request, flow_record=flow.record)
 
         # 5. Create session
         # Note on key naming:
@@ -2110,17 +2309,8 @@ async def _terms_refusal(
     # delete-on-read: this flow ends here, so nothing bound to its state may
     # linger for the TTL.
     redis = _session_manager._redis if _session_manager else None
-    return_to = None
-    if redis is not None:
-        return_to = redis.get(f"oauth2_return_to:{state}")
-        redis.delete(
-            f"oauth2_return_to:{state}",
-            _ADD_ACCOUNT_KEY.format(state=state),
-            _LINK_PROOF_KEY.format(state=state),
-            f"oauth2_state_intent:{state}",
-            f"oauth2_state_user:{state}",
-            f"oauth2_state_session:{state}",
-        )
+    return_to = redis.get(f"oauth2_return_to:{state}") if redis is not None else None
+    _drop_state_bound_keys(state)
     return _terms_required_redirect(provider, return_to)
 
 
@@ -2772,8 +2962,11 @@ async def github_callback(
 ):
     """Handle GitHub OAuth2 callback.
 
-    Same flow as Google callback: CSRF validation → token exchange →
-    user info → session creation → cookie → redirect.
+    Same flow as Google callback: state check → browser check → token
+    exchange → user info → session creation → cookie → redirect. The sign-in
+    finishes only in the browser that started it: without the cookie
+    ``/auth/github/login`` set for this state the callback goes to
+    ``/login?error=oauth_other_browser`` before GitHub is asked anything.
     """
     # Issue #727: cancelled/errored callback (?error=access_denied&state=...,
     # no code) → friendly /login?cancelled=1 instead of a raw pydantic 422.
@@ -2809,9 +3002,16 @@ async def github_callback(
     signup_prefs = _take_signup_bundle(state)
     signup_locale, signup_timezone = signup_prefs.locale, signup_prefs.timezone
     # #2786: the browser binding written by github_login — see google_callback.
-    browser_hash = _take_oauth_flow_binding(state, request)
+    flow = _take_oauth_flow(state, request)
+    browser_hash = flow.digest
     # #2761: a "yes" counts only from the browser that ran /login.
     signup_announcement = _announcement_for_browser(signup_prefs.announcement, browser_hash)
+
+    # #2791: a sign-in finishes only in the browser that started it — see
+    # google_callback.
+    browser_check = _starting_browser_check(state, browser_hash)
+    if browser_check is None:
+        return _other_browser_refusal("github", state, request, flow_record=flow.record)
 
     try:
         # 2. Exchange code for token
@@ -2835,6 +3035,20 @@ async def github_callback(
         )
         if link_redirect is not None:
             return link_redirect
+        # #2791: an unbound Profile link flow ends in the link branch only.
+        if browser_check == "link":
+            return _other_browser_refusal("github", state, request, flow_record=flow.record)
+        # A Profile refresh goes on only for the account that started it.
+        refresh_mismatch = await _refresh_identity_mismatch(
+            "github",
+            state,
+            user_info["sub"],
+            browser_check=browser_check,
+            request=request,
+            flow_record=flow.record,
+        )
+        if refresh_mismatch is not None:
+            return refresh_mismatch
 
         # 3.45. Terms gate (#1665) — see google_callback.
         terms_refusal = await _terms_refusal(
@@ -2917,6 +3131,10 @@ async def github_callback(
         refresh_redirect = await _maybe_refresh_redirect(state=state, user_id=db_user_id)
         if refresh_redirect is not None:
             return refresh_redirect
+
+        # #2791: no session without the browser that started the sign-in.
+        if browser_hash is None:
+            return _other_browser_refusal("github", state, request, flow_record=flow.record)
 
         # #1488: append when this flow was started as "add another account";
         # otherwise mint a fresh one. See the Google callback for why the intent

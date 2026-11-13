@@ -115,3 +115,44 @@ class TestInMemoryStorageRoundtrip:
         assert "ws/abc/y.pdf" in get_url
         assert "file=report.pdf" in get_url
         assert "ttl=60" in get_url
+
+
+class TestBlobReaderProtocol:
+    """#565: the optional reader surface the malware scan streams through."""
+
+    def test_storage_without_open_object_is_not_a_reader(self):
+        from storage.protocol import BlobReaderProtocol
+
+        assert not isinstance(_InMemoryStorage(), BlobReaderProtocol)
+
+    def test_s3_compatible_storage_is_a_reader(self):
+        from storage.protocol import BlobReaderProtocol
+        from storage.s3_compatible import S3CompatibleStorage
+
+        storage = S3CompatibleStorage(
+            account_id="acct",
+            access_key_id="key",
+            secret_access_key="secret",
+            bucket="bucket",
+            endpoint_url="https://storage.example.com",
+        )
+        assert isinstance(storage, BlobReaderProtocol)
+
+    def test_shared_fake_is_a_reader(self):
+        from storage.protocol import BlobReaderProtocol
+        from tests.storage._fakes import FakeBlobStorage
+
+        assert isinstance(FakeBlobStorage(), BlobReaderProtocol)
+
+    async def test_shared_fake_streams_and_reports_missing(self):
+        from tests.storage._fakes import FakeBlobStorage
+
+        storage = FakeBlobStorage()
+        await storage.write_object("ws/aa/x", b"abcdef", "text/plain", "sha")
+        async with storage.open_object("ws/aa/x") as opened:
+            assert opened is not None
+            assert opened.size_bytes == 6
+            assert opened.etag
+            assert b"".join([c async for c in opened.iter_chunks(4)]) == b"abcdef"
+        async with storage.open_object("ws/aa/missing") as missing:
+            assert missing is None

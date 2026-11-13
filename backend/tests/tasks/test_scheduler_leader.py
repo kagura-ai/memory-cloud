@@ -474,3 +474,131 @@ def test_scheduler_leader_enabled_setting(monkeypatch):
     assert settings_module.Settings().scheduler_leader_enabled is True
     monkeypatch.setenv("SCHEDULER_LEADER_ENABLED", "false")
     assert settings_module.Settings().scheduler_leader_enabled is False
+
+
+def test_register_scheduled_jobs_attaches_the_run_recorder():
+    """The run recorder (#2768) is attached once, after every ``schedule_*`` call."""
+    import tasks
+    from tasks.job_runs import EVENT_MASK, JobRunRecorder
+
+    order: list[str] = []
+    names = [n for n in tasks.__all__ if n.startswith("schedule_")]
+    scheduler = MagicMock(name="scheduler")
+    scheduler.add_listener.side_effect = lambda *_a, **_k: order.append("attach")
+    mocks = {n: MagicMock(name=n, side_effect=lambda _s, n=n: order.append(n)) for n in names}
+    with patch.multiple(tasks, **mocks):
+        tasks.register_scheduled_jobs(scheduler)
+    scheduler.add_listener.assert_called_once()
+    listener, mask = scheduler.add_listener.call_args.args
+    assert isinstance(listener, JobRunRecorder)
+    assert mask == EVENT_MASK
+    assert order[-1] == "attach" and len(order) == len(names) + 1
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_the_run_recorder_between_shutdown_and_release(sched):
+    """Cancelled runs are written (#2768) while the lock and the database are open."""
+    order: list[str] = []
+    conn = _conn(True, True)  # try-lock True, unlock True
+    conn.close = AsyncMock(side_effect=lambda: order.append("close"))
+    sched.shutdown.side_effect = lambda: order.append("shutdown")
+    drain = AsyncMock(side_effect=lambda **_k: order.append("drain"))
+    leader = _leader(MagicMock())
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "drain_job_run_recorders", drain),
+    ):
+        await leader.tick()
+        assert leader.is_leader is True
+        await leader.stop()
+
+    assert order == ["shutdown", "drain", "close"]
+    drain.assert_awaited_once_with(timeout=sl.RECORDER_DRAIN_TIMEOUT_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_leadership_drains_the_run_recorder_after_the_shutdown(sched):
+    """The runs the shutdown cancelled are written after a leadership loss too (#2768)."""
+    order: list[str] = []
+    conn = _conn(True, OperationalError("SELECT 1", {}, Exception("terminated")))
+    conn.invalidate = AsyncMock(side_effect=lambda: order.append("discard"))
+    sched.shutdown.side_effect = lambda: order.append("shutdown")
+    drain = AsyncMock(side_effect=lambda **_k: order.append("drain"))
+    leader = _leader(MagicMock())
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "drain_job_run_recorders", drain),
+    ):
+        await leader.tick()
+        await leader.tick()  # liveness probe fails
+
+    assert leader.is_leader is False
+    assert order == ["shutdown", "drain", "discard"]
+    drain.assert_awaited_once_with(timeout=sl.RECORDER_DRAIN_TIMEOUT_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_the_run_recorder_without_the_lock_connection(sched):
+    """A process that is not (or no longer) leader still flushes what its recorder holds."""
+    drain = AsyncMock()
+    leader = _leader(MagicMock())
+
+    with patch.object(sl, "drain_job_run_recorders", drain):
+        await leader.stop()
+
+    drain.assert_awaited_once_with(timeout=sl.RECORDER_DRAIN_TIMEOUT_SECONDS)
+    sched.shutdown.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error", [asyncio.CancelledError(), RuntimeError("recorder failed")], ids=["cancel", "error"]
+)
+async def test_a_lost_leadership_discards_the_connection_when_the_drain_fails(sched, error):
+    """A drain cut short by a cancel or an error still discards the dead lock connection."""
+    conn = _conn(True, OperationalError("SELECT 1", {}, Exception("terminated")))
+    leader = _leader(MagicMock())
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "drain_job_run_recorders", AsyncMock(side_effect=error)),
+    ):
+        await leader.tick()
+        with pytest.raises(type(error)):
+            await leader.tick()  # liveness probe fails, then the drain fails
+
+    assert leader.is_leader is False
+    sched.shutdown.assert_called_once()
+    conn.invalidate.assert_awaited_once()
+    conn.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_during_the_drain_of_a_lost_leadership_still_discards_the_connection(sched):
+    """``stop()`` cancelling the loop mid-drain leaves no lock connection checked out."""
+    conn = _conn(True, OperationalError("SELECT 1", {}, Exception("terminated")))
+    draining = asyncio.Event()
+    calls = 0
+
+    async def drain(**_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # the drain after the lost leadership hangs until cancelled
+            draining.set()
+            await asyncio.Event().wait()
+
+    leader = _leader(MagicMock(), ping_seconds=0.01)
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "drain_job_run_recorders", drain),
+    ):
+        await leader.start()
+        await asyncio.wait_for(draining.wait(), timeout=2)
+        await leader.stop()
+
+    assert leader.is_leader is False
+    conn.invalidate.assert_awaited_once()
+    conn.close.assert_awaited_once()

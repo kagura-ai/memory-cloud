@@ -96,7 +96,8 @@ class TestNewAccountRole:
         mode(value)
         db = _db_with_user_count(0)
         assert await new_account_role(db) == expected
-        assert db.execute.await_count == 1
+        # #2788: session counts, takes the first-account lock and recounts.
+        assert db.execute.await_count == (3 if value == "session" else 1)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("value", MODES)

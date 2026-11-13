@@ -259,6 +259,7 @@ class TestCompleteFileUpload:
         finalised.status = "uploaded"
         finalised.size_bytes = 1024
         finalised.sha256 = VALID_SHA
+        finalised.scan_status = "pending"
 
         get_db_patch, _ = _patch_get_db()
         with (
@@ -278,6 +279,8 @@ class TestCompleteFileUpload:
         body = _payload(out)
         assert body["status"] == "uploaded"
         assert body["file_id"] == str(file_id)
+        # #565: a confirmed upload may be held until the malware scan is done.
+        assert body["scan_status"] == "pending"
 
     @pytest.mark.asyncio
     async def test_invalid_file_id_returns_validation_error(self):
@@ -355,6 +358,61 @@ class TestGetFileDownloadUrl:
             )
         body = _payload(out)
         assert body["error"] == "not_found"
+
+    async def _refused(self, exc):
+        get_db_patch, _ = _patch_get_db()
+        with (
+            get_db_patch,
+            _patch_viewer_check_pass(),
+            patch(
+                "mcp_server.tools.files.FileStorageService.get_presigned_download",
+                AsyncMock(side_effect=exc),
+            ),
+        ):
+            out = await handle_get_file_download_url(
+                {"file_id": str(uuid4())}, user_id=USER_ID, workspace_id=uuid4()
+            )
+        assert getattr(out, "is_error", True)
+        return _payload(out)
+
+    @pytest.mark.asyncio
+    async def test_pending_scan_has_its_own_envelope(self):
+        # #565: not folded into ``conflict``; tells the agent when to retry.
+        from utils.exceptions import FileScanPendingError
+
+        file_id = str(uuid4())
+        body = await self._refused(FileScanPendingError(file_id))
+        assert body == {
+            "status": "error",
+            "error": "file_scan_pending",
+            "message": "This file is still being checked for malware. Try again shortly.",
+            "file_id": file_id,
+            "scan_status": "pending",
+            "retry_after_seconds": 30,
+            "help": (
+                "The file is still being scanned for malware. Wait retry_after_seconds and "
+                "call get_file_download_url again."
+            ),
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["infected", "error"])
+    async def test_blocked_file_has_its_own_envelope(self, state):
+        from utils.exceptions import FileBlockedError
+
+        file_id = str(uuid4())
+        body = await self._refused(FileBlockedError(file_id, state))
+        assert body == {
+            "status": "error",
+            "error": "file_blocked",
+            "message": "This file cannot be downloaded: the malware scan blocked it.",
+            "file_id": file_id,
+            "scan_status": state,
+            "help": (
+                "The malware scan blocked this file; it cannot be downloaded. "
+                "delete_file removes it."
+            ),
+        }
 
     @pytest.mark.asyncio
     async def test_workspace_id_override_requires_membership(self):
@@ -444,6 +502,7 @@ class TestListFiles:
             size_bytes=100,
             sha256=VALID_SHA,
             status="uploaded",
+            scan_status="clean",
             created_at=datetime.now(UTC),
             uploaded_at=datetime.now(UTC),
         )
@@ -454,6 +513,7 @@ class TestListFiles:
             size_bytes=200,
             sha256="b" * 64,
             status="uploaded",
+            scan_status="infected",
             created_at=datetime.now(UTC),
             uploaded_at=datetime.now(UTC),
         )
@@ -480,6 +540,7 @@ class TestListFiles:
         body = _payload(out)
         assert body["count"] == 2
         assert len(body["files"]) == 2
+        assert [f["scan_status"] for f in body["files"]] == ["clean", "infected"]
         assert body["has_more"] is False
         assert body["next_cursor"] is None
 
@@ -497,6 +558,7 @@ class TestListFiles:
                 size_bytes=1,
                 sha256=VALID_SHA,
                 status="uploaded",
+                scan_status="unscanned",
                 created_at=datetime.now(UTC),
                 uploaded_at=datetime.now(UTC),
             )

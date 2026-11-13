@@ -388,6 +388,49 @@ docker compose \
 docker compose exec ollama ollama pull nomic-embed-text
 ```
 
+## Optional: ClamAV upload malware scan
+
+Uploaded files can be scanned by a clamd you run next to the stack
+(`FILE_SCAN_ENABLED`, off by default; with it off nothing changes). While it
+is on, a file's download URL is held until clamd has checked the stored bytes,
+and a file clamd flags is blocked. The full behaviour, the settings and the
+failure policy are in [docs/deployment.md, "Upload malware scanning
+(ClamAV)"](../../docs/deployment.md#upload-malware-scanning-clamav--issue-565).
+
+clamd needs memory: ClamAV documents **3 GiB minimum, 4 GiB preferred**. The
+default `e2-medium` (4 GB) already runs the stack and cannot host it as well,
+so bump the VM first (or run clamd on a separate host on the private network):
+
+```hcl
+# terraform.tfvars
+machine_type = "e2-standard-2"   # 2 vCPU / 8 GB
+```
+
+Set `REDIS_PASSWORD` in `.env.prod` first (clamd joins the compose network
+Redis is on), then start clamd once; `deploy.sh` never touches it, and it
+survives deploys (a deploy may print an "orphan containers" warning for it,
+which is harmless):
+
+```bash
+docker compose \
+  -f docker-compose.prod.yml \
+  -f docker-compose.clamav.yml \
+  --env-file .env.prod \
+  up -d clamav
+
+# Healthy once the signatures are loaded (a few minutes on the first start)
+docker inspect -f '{{.State.Health.Status}}' kagura-clamav
+```
+
+Then set `FILE_SCAN_ENABLED=true` in `.env.prod` and run `./scripts/deploy.sh`.
+On the split-host layout run the overlay on the **app** VM with
+`docker-compose.app.yml` in place of `docker-compose.prod.yml`. The overlay
+publishes no port (clamd's protocol has no authentication), caps the container
+at `CLAMAV_MEM_LIMIT` (default `4g`), and mounts `clamav/clamd.conf`, which
+sets the limits the scan relies on (`AlertExceedsMax yes`,
+`StreamMaxLength 100M`). freshclam runs inside the container and needs
+outbound HTTPS to the ClamAV mirror.
+
 ## Optional: split-host layout (app VM + data VM)
 
 The compose stack can also run as two tiers on two hosts — one VM for the

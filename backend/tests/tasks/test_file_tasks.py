@@ -476,7 +476,7 @@ class TestScheduling:
         scheduler.add_job = MagicMock()
         file_tasks.schedule_file_tasks(scheduler)
 
-        assert scheduler.add_job.call_count == 3
+        assert scheduler.add_job.call_count == 5
 
         calls_by_id = {call.kwargs["id"]: call.kwargs for call in scheduler.add_job.call_args_list}
 
@@ -493,3 +493,16 @@ class TestScheduling:
         gc_repr = str(gc["trigger"])
         assert "hour='3'" in gc_repr
         assert "minute='15'" in gc_repr
+
+        # #565: the scan sweeper every 30 s and the quarantine expiry nightly,
+        # both explicitly single-instance and coalescing.
+        sweeper = calls_by_id["file_scan_sweeper"]
+        assert isinstance(sweeper["trigger"], IntervalTrigger)
+        assert sweeper["trigger"].interval == timedelta(seconds=30)
+        expiry = calls_by_id["file_quarantine_expiry"]
+        assert isinstance(expiry["trigger"], CronTrigger)
+        expiry_repr = str(expiry["trigger"])
+        assert "hour='3'" in expiry_repr and "minute='45'" in expiry_repr
+        for job in (sweeper, expiry):
+            assert job["max_instances"] == 1
+            assert job["coalesce"] is True

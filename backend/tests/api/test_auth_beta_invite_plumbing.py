@@ -22,6 +22,7 @@ from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_routes
 from config.settings import get_settings
+from tests.oauth_browser_helpers import bind_browser, from_bound_browser
 from utils.hashing import sha256_hex
 
 TOKEN = "Zk3v_9Qw-" + "a" * 34  # 43 chars, token_urlsafe alphabet
@@ -190,6 +191,7 @@ class TestCallbacksDeliverTheHashToTheGate:
 
     def _pending(self, redis: FakeRedis, state: str, *, with_invite: bool) -> None:
         redis.store[f"oauth2_state:{state}"] = "pending"
+        bind_browser(redis, state)
         if with_invite:
             redis.store[KEY.format(state=state)] = sha256_hex(TOKEN)
 
@@ -202,7 +204,11 @@ class TestCallbacksDeliverTheHashToTheGate:
         self._pending(redis, "st1", with_invite=True)
 
         await auth_routes.google_callback(
-            FakeRequest(), code="c", state="st1", error=None, error_description=None
+            from_bound_browser(FakeRequest()),
+            code="c",
+            state="st1",
+            error=None,
+            error_description=None,
         )
 
         assert gate.await_args.kwargs["beta_invite_token_hash"] == sha256_hex(TOKEN)
@@ -221,7 +227,11 @@ class TestCallbacksDeliverTheHashToTheGate:
         self._pending(redis, "st2", with_invite=True)
 
         await auth_routes.github_callback(
-            FakeRequest(), code="c", state="st2", error=None, error_description=None
+            from_bound_browser(FakeRequest()),
+            code="c",
+            state="st2",
+            error=None,
+            error_description=None,
         )
 
         assert gate.await_args.kwargs["beta_invite_token_hash"] == sha256_hex(TOKEN)
@@ -242,7 +252,11 @@ class TestCallbacksDeliverTheHashToTheGate:
         self._pending(redis, "st3", with_invite=False)
 
         await auth_routes.github_callback(
-            FakeRequest(), code="c", state="st3", error=None, error_description=None
+            from_bound_browser(FakeRequest()),
+            code="c",
+            state="st3",
+            error=None,
+            error_description=None,
         )
 
         assert gate.await_args.kwargs["beta_invite_token_hash"] is None

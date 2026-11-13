@@ -409,6 +409,17 @@ describe("LoginPage OAuth failure banners (#1381)", () => {
     expect(screen.queryByText("oauth_expired")).toBeNull();
   });
 
+  it("shows the start-again banner for ?error=oauth_other_browser", async () => {
+    // #2791: the sign-in was finished in another browser than the one that
+    // started it; the backend created nothing and sent this browser here.
+    mockSearchParams.set("error", "oauth_other_browser");
+    mockSearchParams.set("provider", "github");
+    renderLogin();
+
+    expect(await screen.findByText("oauthOtherBrowser")).toBeTruthy();
+    expect(screen.queryByText("oauth_other_browser")).toBeNull();
+  });
+
   it("shows the removed-method banner for ?error=provider_unlinked", async () => {
     // The identity is no longer a sign-in method of its account; the backend
     // opened no session and sent the browser here.
@@ -1317,5 +1328,16 @@ describe("LoginPage waits for /system/info before signing in (#1665)", () => {
       </AuthProvider>,
     );
     await waitFor(() => expect(google).not.toBeDisabled());
+  });
+});
+
+describe("start-again copy (#2791)", () => {
+  it("names the entry points with the catalog's own terms", () => {
+    expect(en.login.oauthOtherBrowser).toMatch(/invite link/);
+    expect(en.login.oauthOtherBrowser).toMatch(/device authorization/);
+    expect(en.login.oauthOtherBrowser).not.toMatch(/device link/);
+    expect(ja.login.oauthOtherBrowser).toMatch(/招待リンク/);
+    expect(ja.login.oauthOtherBrowser).toMatch(/デバイス認証/);
+    expect(ja.login.oauthOtherBrowser).not.toMatch(/デバイスのリンク/);
   });
 });

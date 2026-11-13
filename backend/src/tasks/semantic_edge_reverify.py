@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import get_db
 from repositories.neural_edge import NeuralEdgeRepository
+from tasks.job_runs import JobResult, job_failed
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -35,7 +36,7 @@ async def semantic_edge_reverify_run(db: AsyncSession) -> dict[str, int]:
     return {"semantic_edges_deleted": deleted}
 
 
-async def _scheduled_entrypoint() -> None:
+async def _scheduled_entrypoint() -> JobResult:
     """APScheduler entry point — owns its own session via get_db()."""
     try:
         async for db in get_db():
@@ -46,15 +47,17 @@ async def _scheduled_entrypoint() -> None:
                     "semantic_edge_reverify_completed",
                     semantic_edges_deleted=result["semantic_edges_deleted"],
                 )
-                return  # exiting the async-for here sends GeneratorExit into get_db at the yield,
-                # so get_db's post-yield commit() never runs — our explicit commit above is
-                # the only one that executes.
-            except Exception:
+                return result  # exiting the async-for here sends GeneratorExit into get_db at
+                # the yield, so get_db's post-yield commit() never runs — our explicit commit
+                # above is the only one that executes.
+            except Exception as exc:
                 logger.exception("semantic_edge_reverify_failed")
                 await db.rollback()
-                return
-    except Exception:
+                return job_failed(exc)
+    except Exception as exc:
         logger.exception("semantic_edge_reverify_session_error")
+        return job_failed(exc)
+    return None
 
 
 def schedule_semantic_edge_reverify_tasks(scheduler: AsyncIOScheduler) -> None:

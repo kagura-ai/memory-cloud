@@ -33,6 +33,8 @@ from utils.datetime import to_utc_iso
 from utils.exceptions import (
     AuthorizationError,
     ConflictError,
+    FileBlockedError,
+    FileScanPendingError,
     NotFoundException,
     QuotaExceededError,
     UnsupportedMediaTypeError,
@@ -62,6 +64,32 @@ def _exc_to_error_response(exc: Exception) -> list[TextContent]:
             str(exc),
             content_type=exc.details.get("content_type"),
             allowed=exc.details.get("allowed", []),
+        )
+    if isinstance(exc, FileScanPendingError):
+        # #565: the download waits for the malware scan (REST 409 SCAN-001).
+        return _error_response(
+            "file_scan_pending",
+            str(exc),
+            file_id=exc.details.get("file_id"),
+            scan_status="pending",
+            # The REST refusal's Retry-After, so both surfaces say the same.
+            retry_after_seconds=int(exc.response_headers["Retry-After"]),
+            help=(
+                "The file is still being scanned for malware. Wait retry_after_seconds and "
+                "call get_file_download_url again."
+            ),
+        )
+    if isinstance(exc, FileBlockedError):
+        # #565: the malware scan blocked the file (REST 409 SCAN-002).
+        return _error_response(
+            "file_blocked",
+            str(exc),
+            file_id=exc.details.get("file_id"),
+            scan_status=exc.details.get("scan_status"),
+            help=(
+                "The malware scan blocked this file; it cannot be downloaded. "
+                "delete_file removes it."
+            ),
         )
     if isinstance(exc, ValidationError):
         return _error_response("validation_error", str(exc))
@@ -241,6 +269,7 @@ async def handle_complete_file_upload(
     return _success_response(
         file_id=str(file.id),
         status=file.status,
+        scan_status=file.scan_status,
         size_bytes=file.size_bytes,
         sha256=file.sha256,
     )
@@ -298,6 +327,8 @@ async def handle_get_file_download_url(
             ValidationError,
             AuthorizationError,
             NotFoundException,
+            FileScanPendingError,
+            FileBlockedError,
         ) as exc:
             return _exc_to_error_response(exc)
     return _success_response(download_url=url)
@@ -415,6 +446,7 @@ async def handle_list_files(
                 "size_bytes": f.size_bytes,
                 "sha256": f.sha256,
                 "status": f.status,
+                "scan_status": f.scan_status,
                 "created_at": to_utc_iso(f.created_at) if f.created_at else None,
                 "uploaded_at": to_utc_iso(f.uploaded_at) if f.uploaded_at else None,
             }

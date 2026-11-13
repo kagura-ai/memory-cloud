@@ -494,9 +494,9 @@ When you can see no context at all, the envelope also carries `hint`: one line s
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `init_file_upload` | Reserve quota + return presigned PUT URL (R2, ≤100 MiB) | Member+ |
-| `complete_file_upload` | Finalize upload after R2 PUT, verify sha256, mark as uploaded | Member+ |
-| `list_files` | List uploaded, non-deleted files in the workspace (newest first) | Viewer+ |
-| `get_file_download_url` | Issue presigned GET URL for a file | Viewer+ |
+| `complete_file_upload` | Finalize upload after R2 PUT, verify sha256, mark as uploaded; the reply carries the file's `scan_status` | Member+ |
+| `list_files` | List uploaded, non-deleted files in the workspace (newest first), each with its `scan_status` | Viewer+ |
+| `get_file_download_url` | Issue presigned GET URL for a file; refused while its malware scan is pending (`file_scan_pending`) or after the scan blocked it (`file_blocked`) | Viewer+ |
 | `delete_file` | Soft-delete a file object | Member+ |
 
 ## Analyses — Memory Analysis (5)
@@ -605,6 +605,8 @@ Branch on `error`; it is stable. `message` is written for people and may change.
 | `no_writes_in_window` | `rollback_session(since, until)` found no write of yours (same user, same credential) in the context in that window (`retryable: false`); says nothing about other principals | `changes_since(context_id, since, by_me=true)` to see what you wrote and when |
 | `already_rolled_back` | The session's (or window's) rollback in this context is complete and nothing new was written since (`retryable: false`); also when every event in the window was already handled by another rollback (then without `rollback_id`) | None; `changes_since` shows what happened |
 | `unknown_tool` | No tool has that name | `tools/list` |
+| `file_scan_pending` | `get_file_download_url`: the file's malware scan has not finished (`file_id`, `scan_status: "pending"`, `retry_after_seconds: 30`). Unlike the other refusals, the same call succeeds once the scan says clean | Wait `retry_after_seconds`, then call `get_file_download_url` again |
+| `file_blocked` | `get_file_download_url`: the malware scan blocked the file (`file_id`, `scan_status`: `infected`, or `error` when the scanner could not check it) | None for the download; `delete_file` removes it |
 
 A call that relied on the URL's [default context](#default-context--context) and was refused for it carries `context_source` (`"url"`, `"credential"` or `"binding"`): `context_not_found` keeps the explicit-path `message` and adds `context_source` with a `help` that points at the default, `feature_not_available` adds `context_source`, and a `?context=` that is not a UUID is `invalid_context_id_format` with `context_source: "url"`.
 
@@ -1049,6 +1051,8 @@ One call handles at most 500 events (a memory's events are never split) and rest
 ### Files
 
 Uploads go to platform-managed object storage (Cloudflare R2) in three steps: `init_file_upload` reserves quota atomically and returns a presigned PUT URL; the client PUTs the bytes; `complete_file_upload` verifies the stored object against the declared sha256 and size and moves the file from `reserved` to `uploaded`. The per-file cap is 100 MiB. Sending the same sha256 twice in one workspace returns a `conflict`; its message names the existing `file_id` (`reuse file_id=<id>`) when that file is in the same context as the upload (both unbound counts as the same) and its upload has completed, says `an earlier upload of this file has not completed yet` when it is in the same context but still `reserved`, and names no file when it is bound to another context. Over REST, the 409 that names the file also carries it as a top-level `existing_file` object. `delete_file` releases the quota immediately; the binary lingers for 7 days before the nightly sweeper removes it, with no client-visible effect.
+
+When the deployment scans uploads for malware (`FILE_SCAN_ENABLED`, off by default; see [Upload malware scanning](deployment.md#upload-malware-scanning-clamav--issue-565)), every file carries a `scan_status` in `complete_file_upload` and `list_files`: `unscanned` (uploaded while scanning was off; downloadable), `pending`, `clean`, `infected` or `error` (the scanner could not check it). `get_file_download_url` answers `file_scan_pending` with `retry_after_seconds` while the scan runs (seconds with checksum binding, about five to six minutes from `init_file_upload` without it), and `file_blocked` once the file is `infected` or `error`; the access checks run first, so a caller who cannot read the file is refused as before and learns nothing about its scan. An agent that uploads and then downloads waits and retries on `file_scan_pending`. A duplicate the scan blocked is never offered for reuse: the `conflict` message then says `an earlier upload of this file was blocked by the malware scan`. While scanning is on, the per-file cap is also the scanner's limit (100 MiB by default).
 
 ### Resources and connectors
 

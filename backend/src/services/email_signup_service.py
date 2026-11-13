@@ -60,6 +60,7 @@ from auth.password_policy import PasswordPolicyError, validate_password_policy
 from auth.roles import (
     Role,
     _is_email_unique_violation,
+    claim_first_account,
     lock_address,
     stage_email_account,
 )
@@ -526,6 +527,17 @@ class EmailSignupService:
         user_agent: str | None,
     ) -> CreatedEmailAccount:
         email_hmac = hmac_sha256_hex(email, get_settings().audit_hmac_key)
+        # #2788: while no account exists, take the first-account lock BEFORE
+        # the address lock, in every SYSTEM_ADMIN_MODE. The gate's first-user
+        # admission below and the insert share this transaction, so this
+        # serialises email completions with each other and with every
+        # session-mode creator, and keeps the lock order of the OAuth path
+        # (first-account, then address, then rows). The role is decided later
+        # by new_account_role, which re-takes the same lock at once. (Only if
+        # the last account were erased between this count and that decision
+        # would it take the lock after the address lock; not reachable in
+        # practice.)
+        await claim_first_account(self.db, serialize=True)
         await lock_address(self.db, email)
         consumed = cast(
             CursorResult[Any],

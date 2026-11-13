@@ -41,6 +41,7 @@ from config.constants import (
 from db.base import get_db
 from services.referral_service import ReferralService
 from tasks.env import env_interval_seconds
+from tasks.job_runs import JobResult, job_failed
 from utils.exceptions import ConflictError
 from utils.logger import get_logger
 
@@ -117,17 +118,21 @@ async def sweep_pending_referral_grants(
     )
 
 
-async def apply_pending_referral_grants_task() -> None:
+async def apply_pending_referral_grants_task() -> JobResult:
     """The scheduled job: one sweep, logged when it found anyone. Never raises."""
+    counts: dict[str, int] | None = None
     try:
         async for db in get_db():
             result = await sweep_pending_referral_grants(db)
+            counts = asdict(result)
             if result.candidates:
-                logger.info("referral_pending_grant_sweep_done", **asdict(result))
+                logger.info("referral_pending_grant_sweep_done", **counts)
     except Exception as exc:
         logger.error(
             "referral_pending_grant_sweep_failed", error_class=type(exc).__name__, exc_info=True
         )
+        return job_failed(exc)
+    return counts
 
 
 def schedule_referral_tasks(scheduler: AsyncIOScheduler) -> None:

@@ -43,6 +43,7 @@ from models.signup_gate import SignupGateConfig
 from services.beta_invite_service import BetaInviteService
 from services.email_signup_service import EmailSignupService, SignupConsents
 from services.signup_gate_service import SignupGateService
+from tests.oauth_browser_helpers import bind_browser, from_bound_browser
 from utils.datetime import utcnow
 from utils.exceptions import SignupAccountExistsError
 from utils.hashing import sha256_hex
@@ -235,6 +236,7 @@ class TestOAuthRecordCommitFailure:
         # between the gate and the database.
         manager = MagicMock()
         manager._redis = _FakeRedis()
+        bind_browser(manager._redis, "st1")
         monkeypatch.setattr(auth_routes, "_session_manager", manager)
         idp = MagicMock()
         idp.get_user_info_web.return_value = {
@@ -268,7 +270,11 @@ class TestOAuthRecordCommitFailure:
 
         with patch("services.signup_gate_service.get_db", new=_fresh_get_db):
             response = await auth_routes.google_callback(
-                _FakeRequest(), code="c", state="st1", error=None, error_description=None
+                from_bound_browser(_FakeRequest()),
+                code="c",
+                state="st1",
+                error=None,
+                error_description=None,
             )
 
         assert response.status_code == 303

@@ -55,6 +55,12 @@ describe("listFiles", () => {
     mockGet.mockResolvedValue(files);
     await expect(listFiles("ws-1")).resolves.toBe(files);
   });
+
+  it("passes the malware scan state through (#565)", async () => {
+    mockGet.mockResolvedValue([{ id: "f1", filename: "a.txt", scan_status: "pending" }]);
+    const [f] = await listFiles("ws-1");
+    expect(f.scan_status).toBe("pending");
+  });
 });
 
 describe("getDownloadUrl", () => {

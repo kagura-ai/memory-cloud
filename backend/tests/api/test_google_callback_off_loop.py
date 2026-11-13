@@ -22,10 +22,12 @@ from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_module
 from api.routes.auth import _run_google_sync, google_callback
+from tests.oauth_browser_helpers import assume_bound_browser  # noqa: F401
 
 POOL_PREFIX = "google-oauth"
 
 
+@pytest.mark.usefixtures("assume_bound_browser")
 async def test_google_exchange_and_userinfo_run_in_the_google_pool() -> None:
     threads: dict[str, str] = {}
     credentials = object()

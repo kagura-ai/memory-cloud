@@ -10,6 +10,7 @@
 > Re-frozen after #1813: the remaining integer user / OAuth-client PKs are dropped outright, since each resource already carries the string id clients address it by: `OAuth2ClientResponse.id` (and `OAuth2ClientWithSecretResponse`, which inherits it — including the DCR `/register` response) → use `client_id`. Outside this enumeration's scope (`models/schemas.py`): `UserProfileResponse.id` (`/users/profile`, which gains the string `user_id` it lacked) and `UserWithAdminFlag.id` (`/admin/system-admins`) → use `user_id`; `SystemAdminListResponse.initial_admin_id` is dropped (each entry's `is_initial_admin` marks the protected initial admin). #1882 closes the last gap: `UserStats.user` (`/admin/users/{user_id}/stats`) was an untyped `dict` that still carried the integer `id`; it is now the typed `UserStatsUser` (`user_id`, `email`, `name`, `role`) → use `user_id`.
 > Changed by #1678: new `password.py` models (email + password recovery and settings); `PasswordLoginRequest.login_id` now also accepts a verified email address (field name unchanged); `/auth/me` gains `has_password` (defined in `models/schemas.py`, outside this enumeration's scope).
 > Changed by #1868: `FailedMemoryInfo` gains the optional `embedding_attempted_at` (the time the embedding last failed); `updated_at` there is the last edit and is null for a never-edited memory. `failed_memories` is ordered latest failure first.
+> Changed by #565: `FileObjectOut` gains the required `scan_status` (`unscanned` | `pending` | `clean` | `infected` | `error`, the file's malware-scan state), returned by the file list, the upload confirm and the dedup 409's `existing_file`. It is the only response change while `FILE_SCAN_ENABLED` is off; the download-url refusals it explains (409 `SCAN-001` / `SCAN-002`) are in `error-responses.md`. The field list below also gains `context_id`, which the model already had.
 
 Notes:
 
@@ -776,11 +777,13 @@ Notes:
 > Subset of ``FileObject`` exposed to clients.
 - `id: UUID` — required
 - `workspace_id: UUID` — required
+- `context_id: UUID | None` — optional
 - `filename: str` — required
 - `content_type: str` — required
 - `size_bytes: int` — required
 - `sha256: str` — required
 - `status: str` — required
+- `scan_status: str` — required (#565: `unscanned` uploaded while scanning was off, downloadable; `pending` being scanned, the download URL answers 409 `SCAN-001`; `clean`; `infected` or `error` blocked, 409 `SCAN-002`)
 - `created_at: datetime` — required
 - `uploaded_at: datetime | None` — optional
 

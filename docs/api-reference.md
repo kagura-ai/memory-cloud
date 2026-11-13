@@ -59,6 +59,8 @@ Session-based authentication for the web management interface.
 
 The OAuth sign-in endpoints (`GET /api/v1/auth/{google,github}/login`) also take `locale` (`en` or `ja`, the sign-in page's language) and `timezone` (an IANA name such as `Asia/Tokyo`, the browser's time zone). Both are bound to the OAuth state like `accepted_terms`, and an account created by that sign-in starts with them instead of `en` / `UTC`. An existing account keeps its own settings, and an unsupported value is ignored. With `ANNOUNCEMENT_EMAILS_ENABLED` on they also take `announcement_emails` (`true` / `false`) and `announcement_consent_version`, the answer to the sign-up opt-in for announcement emails (Issue #2761) — see [Announcement-email consent](#announcement-email-consent).
 
+Both modes of these endpoints (a `303` to the provider with `return_to`, JSON `{authorization_url, state}` without) set an HttpOnly sign-in cookie, and the sign-in finishes only in the browser that holds it: the provider callback answers `/login?error=oauth_other_browser&provider=<p>` otherwise and creates nothing. A client of the JSON mode must open `authorization_url` with the cookie jar that received the response's `Set-Cookie`. The `redirect_uri` parameter of the Google endpoint is ignored; the configured `GOOGLE_REDIRECT_URI` is always used. See [deployment](deployment.md#a-google-or-github-sign-in-finishes-in-the-browser-that-started-it-issue-2791).
+
 ---
 
 ### Passkeys
@@ -142,8 +144,9 @@ the feature switched off records nothing). The request body never carries it.
 Public, `404` when `ENABLE_PROVIDER_LINK_CONFIRMATION=false` (see
 [deployment](deployment.md#connecting-github-to-an-email-account-by-email-issue-2786)).
 The emailed token and the browser nonce cookie set by
-`GET /api/v1/auth/{google,github}/login` are the credentials; send requests
-with cookies (`credentials: "include"`).
+`GET /api/v1/auth/{google,github}/login` (the same cookie every Google / GitHub
+sign-in needs to finish) are the credentials; send requests with cookies
+(`credentials: "include"`).
 
 | Method / path | Body | Answers |
 |---|---|---|
@@ -2179,6 +2182,22 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 - `service`: only an operator console. Send `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` and `X-Operator-Email: <address of the person acting>`; a session cookie is ignored. Errors, in this order: `404` outside `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS`, `503 SYSADMIN-001` (credential not configured), `401 SYSADMIN-002` (credential missing, another scheme, or wrong; `WWW-Authenticate: Bearer`), `400 SYSADMIN-003` (`X-Operator-Email` missing, repeated or not a plain address), `403 SYSADMIN-004` (a route that acts on the caller's own account: `POST /admin/sleep/run`, `POST /admin/sleep/actions/{action_id}/undo-merge`, `GET /admin/memory-health`, and `POST /admin/contexts/recover` with `dry_run=false`). Writes record the actor as `operator:<address>`.
 
 `PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
+
+### Operations status
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/operations/status` | The state of operations in aggregates only (#2768): every scheduled job's last run, every work queue's size and oldest item, every platform LLM lane's recorded usage and latest probe. Any process answers (stored rows only). A service operator gets `200`. `Cache-Control: no-store`; concurrent polls of one process share one read for 5 s. |
+
+The response (`schema_version: 1`) has `as_of`, `overdue_grace_seconds`, `scheduler_registered_at`, `probe_enabled`, and three lists:
+
+| Field | Entry fields |
+|-------|--------------|
+| `jobs` | `job_id`, `name`, `trigger` (`interval` / `cron` / `other`), `expected_interval_seconds`, `registered`, `running`, `overdue`, `last_started_at`, `last_finished_at`, `last_outcome` (`ok` / `failed` / `missed`), `last_outcome_at`, `last_success_at`, `consecutive_failures`, `error_class` (exception class name, never the message), `last_duration_ms`, `counts` (integer counts the run returned) |
+| `backlogs` | `name`, `drained_by` (job ids; empty = people), `count`, `oldest_at`, `oldest_age_seconds`, `error_class` (set when the count could not be read; `DeadlineExceeded` when the request ran out of time) |
+| `llm` | `lane` (`embedding`, `sleep_judge`, `supersede_verify`, `recall_selector`, `analysis`, `rerank`), `provider`, `model`, `credential_present`, `snapshot_at`, `usage_recorded`, `usage_attribution` (`platform` / `includes_workspace_keys`), `last_success_at`, `calls_last_hour`, `calls_last_day`, `error_class`, `probe` (`null` unless the opt-in probe ran: `last_probe_at`, `last_outcome`, `last_latency_ms`, `error_class`, `consecutive_failures`, `last_success_at`) |
+
+No user, workspace or context identifier, email address, memory text or exception message is part of the response. See [Operations status](deployment.md#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768) for the meaning of each field, the probe setting and what to alert on.
 
 ### Sleep Maintenance
 

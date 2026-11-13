@@ -41,6 +41,7 @@ from tests.api.test_linked_provider_session import (  # noqa: F401
     real_manager,
     signed_in_path,
 )
+from tests.oauth_browser_helpers import bind_browser, from_bound_browser
 from utils.datetime import utcnow
 
 PROOF_KEY = "oauth2_link_proof:{state}"
@@ -199,7 +200,9 @@ class TestVerifiedAuthTime:
 
 async def _callback(provider: str):
     handler = auth_routes.google_callback if provider == "google" else auth_routes.github_callback
-    return await handler(FakeRequest(), code="c", state="st1", error=None, error_description=None)
+    return await handler(
+        from_bound_browser(FakeRequest()), code="c", state="st1", error=None, error_description=None
+    )
 
 
 def _proof(manager: MagicMock):
@@ -356,6 +359,7 @@ class TestGoogleCallback:
         assert self._result(response) is None
 
         manager._redis.store["oauth2_state:st1"] = "pending"
+        bind_browser(manager._redis, "st1")
         manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
         manager._redis.store["oauth2_return_to:st1"] = "https://evil.example/profile"
         response = await _callback("google")

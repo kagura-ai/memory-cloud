@@ -70,6 +70,7 @@ def _file_object_mock(**overrides):
     file.context_id = overrides.get("context_id", None)
     file.created_at = overrides.get("created_at", datetime(2026, 5, 5, tzinfo=UTC))
     file.uploaded_at = overrides.get("uploaded_at", datetime(2026, 5, 5, tzinfo=UTC))
+    file.scan_status = overrides.get("scan_status", "unscanned")
     return file
 
 
@@ -292,6 +293,24 @@ class TestConfirmUpload:
         body = r.json()
         assert body["id"] == str(file_id)
         assert body["status"] == "uploaded"
+        assert body["scan_status"] == "unscanned"
+
+    def test_scan_status_is_reported(self, client):
+        # #565: with scanning on a confirmed upload is ``pending`` until scanned.
+        ws = uuid4()
+        file_id = uuid4()
+        with patch(
+            "api.routes.files.FileStorageService.confirm_upload",
+            AsyncMock(
+                return_value=_file_object_mock(id=file_id, workspace_id=ws, scan_status="pending")
+            ),
+        ):
+            r = client.post(
+                f"/api/v1/files/{file_id}/confirm?workspace_id={ws}",
+                json={"sha256": VALID_SHA},
+            )
+        assert r.status_code == 200, r.text
+        assert r.json()["scan_status"] == "pending"
 
     def test_sha256_mismatch_validation_error_returns_422(self, client):
         """``ValidationError`` is mapped to HTTP 422 by the global
@@ -340,6 +359,51 @@ class TestDownloadUrl:
         ):
             r = client.get(f"/api/v1/files/{file_id}/download-url?workspace_id={ws}")
         assert r.status_code == 404
+
+    def test_pending_scan_is_409_with_retry_after(self, client):
+        # #565: typed refusal, retry hint in the header and the body.
+        from utils.exceptions import FileScanPendingError
+
+        ws = uuid4()
+        file_id = uuid4()
+        with patch(
+            "api.routes.files.FileStorageService.get_presigned_download",
+            AsyncMock(side_effect=FileScanPendingError(str(file_id))),
+        ):
+            r = client.get(f"/api/v1/files/{file_id}/download-url?workspace_id={ws}")
+        assert r.status_code == 409
+        assert r.headers["Retry-After"] == "30"
+        assert r.json() == {
+            "error": "SCAN-001",
+            "message": "This file is still being checked for malware. Try again shortly.",
+            "details": {"file_id": str(file_id), "scan_status": "pending"},
+        }
+
+    @pytest.mark.parametrize("state", ["infected", "error"])
+    def test_blocked_file_is_409_without_retry_after(self, client, state):
+        from utils.exceptions import FileBlockedError
+
+        ws = uuid4()
+        file_id = uuid4()
+        with patch(
+            "api.routes.files.FileStorageService.get_presigned_download",
+            AsyncMock(side_effect=FileBlockedError(str(file_id), state)),
+        ):
+            r = client.get(f"/api/v1/files/{file_id}/download-url?workspace_id={ws}")
+        assert r.status_code == 409
+        assert "Retry-After" not in r.headers
+        assert r.json() == {
+            "error": "SCAN-002",
+            "message": "This file cannot be downloaded: the malware scan blocked it.",
+            "details": {"file_id": str(file_id), "scan_status": state},
+        }
+
+    def test_download_url_documents_the_scan_refusals(self):
+        responses = app.openapi()["paths"]["/api/v1/files/{file_id}/download-url"]["get"][
+            "responses"
+        ]
+        assert "SCAN-001" in responses["409"]["description"]
+        assert "SCAN-002" in responses["409"]["description"]
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +509,7 @@ class TestListFiles:
             r = client.get(f"/api/v1/files?workspace_id={ws}&limit=10")
         assert r.status_code == 200
         assert len(r.json()) == 2
+        assert [f["scan_status"] for f in r.json()] == ["unscanned", "unscanned"]
 
     def test_invalid_limit_rejected_by_pydantic(self, client):
         ws = uuid4()

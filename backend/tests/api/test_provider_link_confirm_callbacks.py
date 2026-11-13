@@ -7,9 +7,10 @@ sign-up account. Pinned here:
 - the response is byte-identical to today's ``email_in_use`` redirect (status,
   location, headers, no cookie) in every case;
 - an offer is started (detached) only for the browser whose ``/login`` bound
-  the flow: a callback opened in another browser, a flow that never ran
-  ``/login`` (refresh, link) and an add-account or link-proof flow get the
-  plain answer and nothing is recorded or mailed;
+  the flow: a flow that never ran ``/login`` (refresh, link) and an
+  add-account or link-proof flow get the plain answer and nothing is recorded
+  or mailed; a callback opened in another browser never gets that far (#2791:
+  it is refused before the provider is asked, so no offer either);
 - the flow's ``return_to`` travels with the offer only when it is safe;
 - a plain ``ConflictError`` starts nothing.
 """
@@ -82,6 +83,10 @@ async def _callback(provider: str, state: str, cookie: str | None):
     return await callback(request, code="c", state=state, error=None, error_description=None)
 
 
+def _set_cookies_of(response) -> list[bytes]:
+    return [v for k, v in response.raw_headers if k.lower() == b"set-cookie"]
+
+
 def _same_as_email_in_use(response) -> None:
     plain = auth_routes._email_in_use_redirect()
     assert response.status_code == plain.status_code == 303
@@ -135,7 +140,9 @@ async def test_a_callback_opened_in_another_browser_offers_nothing(
 
     response = await _callback(provider, state, cookie)
 
-    _same_as_email_in_use(response)
+    # #2791: refused before the provider is asked, so no account check runs.
+    assert "error=oauth_other_browser" in response.headers["location"]
+    assert _set_cookies_of(response) == []
     confirmable.assert_not_called()
     assert f"oauth2_flow:{state}" not in redis.store
     assert f"oauth2_state:{state}" not in redis.store
@@ -147,10 +154,13 @@ async def test_a_flow_that_never_ran_login_offers_nothing(
     terms_off,  # noqa: F811
     github_idp,  # noqa: F811
     confirmable,
+    monkeypatch,
 ) -> None:
     """A refresh or link flow writes its own state without a binding."""
     redis.store["oauth2_state:st1"] = "pending"
     redis.store["oauth2_state_intent:st1"] = "refresh"
+    # The starting account's own identity: the refresh goes on to ensure_user.
+    monkeypatch.setattr(auth_routes, "_refresh_identity_mismatch", AsyncMock(return_value=None))
 
     response = await _callback("github", "st1", "N" * 43)
 

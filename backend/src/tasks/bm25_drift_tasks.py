@@ -15,12 +15,13 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config.settings import get_settings
 from db.base import get_db
+from tasks.job_runs import JobResult, job_failed
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-async def bm25_drift_maintenance_task() -> None:
+async def bm25_drift_maintenance_task() -> JobResult:
     """Run BM25 IDF drift measurement for every active context.
 
     Iterates over distinct context_id rows from `memories` and calls
@@ -81,10 +82,12 @@ async def bm25_drift_maintenance_task() -> None:
                 runs=total_runs,
                 errors=total_errors,
             )
-            return
+            return {"contexts": len(context_ids), "runs": total_runs, "errors": total_errors}
 
     except Exception as e:
         logger.error("bm25_drift_task_failed", error=str(e), exc_info=True)
+        return job_failed(e)
+    return None
 
 
 def schedule_bm25_drift_tasks(scheduler: AsyncIOScheduler) -> None:
