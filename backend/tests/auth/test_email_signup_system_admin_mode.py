@@ -54,7 +54,9 @@ async def test_first_email_account(monkeypatch, mode, role, initial_admin) -> No
     added = db.add.call_args.args[0]
     assert (added.role, added.is_initial_admin) == (role.value, initial_admin)
     assert added.email == "first@example.test"
-    assert db.execute.await_count == 1  # the one count of new_account_role
+    # new_account_role: one count; in session on an empty table the
+    # first-account lock and a recount follow (#2788).
+    assert db.execute.await_count == (3 if mode == "session" else 1)
 
 
 @pytest.mark.asyncio
