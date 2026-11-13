@@ -97,6 +97,10 @@ export interface AuthResponse {
  * `return_to` flow goes through direct browser navigation instead — see the
  * `if (returnTo)` branch in `handleGoogleLogin` / `handleGitHubLogin` of
  * `/app/login/page.tsx` for the canonical pattern.
+ *
+ * The request must carry credentials (`apiClient` sends them): the response
+ * sets the sign-in cookie, and the sign-in finishes only in the browser that
+ * holds it (#2791).
  */
 export async function getAuthUrl(
   acceptedTerms?: string,

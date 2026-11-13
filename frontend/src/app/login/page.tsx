@@ -224,6 +224,11 @@ function LoginContent() {
     } else if (errorParam === "oauth_expired") {
       // #1381: expired/replayed sign-in link — retryable, so say so.
       setError(t("oauthExpired"));
+    } else if (errorParam === "oauth_other_browser") {
+      // #2791: a Google/GitHub sign-in finishes only in the browser that
+      // started it; this one did not (or did not keep its cookie). Nothing
+      // was created.
+      setError(t("oauthOtherBrowser"));
     } else if (errorParam === "provider_unlinked") {
       // The identity used is no longer a sign-in method of its account
       // (removed from Settings), so no session was opened for it.
