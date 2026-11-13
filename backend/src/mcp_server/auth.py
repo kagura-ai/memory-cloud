@@ -91,6 +91,26 @@ def set_mcp_connector_credential(value: bool) -> None:
     _mcp_connector_credential.set(value)
 
 
+# #2762: whether the current request's credential speaks for the person who
+# reads the session, so a service notice they opted into may be delivered to
+# it. A positive allow: ``False`` by default (a direct handler call, any
+# caller outside the MCP auth seam) and reset on every request; only
+# ``authenticate_mcp_request`` sets it, for a session cookie, an OAuth access
+# token, or an API key that is neither agent-bound nor a connector's shared
+# key.
+_mcp_notice_eligible: ContextVar[bool] = ContextVar("mcp_notice_eligible", default=False)
+
+
+def get_mcp_notice_eligible() -> bool:
+    """``True`` when the request's credential may receive the person's service notices."""
+    return _mcp_notice_eligible.get()
+
+
+def set_mcp_notice_eligible(value: bool) -> None:
+    """Record notice eligibility (tests and the auth seam only)."""
+    _mcp_notice_eligible.set(value)
+
+
 _SCOPE_SEPARATORS = re.compile(r"[\s,]+")
 
 
@@ -205,6 +225,7 @@ async def authenticate_mcp_request(
     set_history_principal()
     _mcp_oauth_scopes.set(None)
     _mcp_connector_credential.set(False)
+    _mcp_notice_eligible.set(False)
     # #2129: only a user API key or an OAuth grant carries one (set below).
     set_mcp_credential_default_context(None)
 
@@ -217,6 +238,7 @@ async def authenticate_mcp_request(
             # so it does not dominate the log volume. Failures stay at WARNING.
             logger.debug("MCP auth success: method=session_cookie, user=%s", user_id)
             set_history_principal("session")
+            _mcp_notice_eligible.set(True)
             return (user_id, None, None)  # Session auth doesn't have context/workspace scope
 
     # No auth header and no session → authentication required
@@ -269,6 +291,7 @@ async def authenticate_mcp_request(
             )
             set_mcp_credential_default_context(grant.default_context_id)
             set_history_principal("oauth", client_id=grant.client_id)
+            _mcp_notice_eligible.set(True)
             logger.debug("MCP auth success: method=oauth2, user=%s", grant.user_id)
             # Issue #245: context_id is now required in tool args, not from auth
             return (grant.user_id, None, None)
@@ -336,6 +359,9 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         workspace_id = result.workspace_id
         context_id = None  # Issue #245: context_id is now in tool args
         _mcp_connector_credential.set(result.is_connector_key)
+        # #2762: an agent-bound key has no person reading at session start,
+        # and a connector key's owner is not the person on the other end.
+        _mcp_notice_eligible.set(not result.is_connector_key and result.agent_id is None)
         # #2129: the key's default context, read from the row verify already
         # loaded. A connector's shared key never carries one: its owner is not
         # the person on the other end.

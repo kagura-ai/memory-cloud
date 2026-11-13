@@ -382,6 +382,14 @@ openapi_tags = [
         ),
     },
     {
+        "name": "mcp-notices",
+        "description": (
+            "Service notices over MCP (Issue #2762): the signed-in user's opt-in "
+            "toggle (session only). Off by default; offered only while "
+            "MCP_NOTICES_ENABLED is on, turning it off always works."
+        ),
+    },
+    {
         "name": "account-password",
         "description": (
             "Set up, change or remove the signed-in account's password (Issue #1678). "
@@ -524,6 +532,13 @@ openapi_tags = [
         "description": (
             "Admin: scheduled job runs, work queue backlogs and platform LLM lane "
             "health (aggregates only, Issue #2768)"
+        ),
+    },
+    {
+        "name": "admin-mcp-notices",
+        "description": (
+            "Admin: write, list and withdraw service notices delivered once per "
+            "opted-in user in the MCP bootstrap reply (Issue #2762)"
         ),
     },
     {
@@ -880,6 +895,7 @@ for _exc_cls in (
 
 from api.routes import (  # noqa: E402
     admin,
+    admin_mcp_notices,  # Issue #2762: service notices over MCP (create/list/withdraw)
     admin_memory_health,  # Issue #2764: deprecated alias of memory_health
     admin_neural,  # Issue #406: Manual kNN calibration recalibrate trigger
     admin_operations,  # Issue #2768: operations status (jobs, backlogs, LLM lanes)
@@ -911,6 +927,7 @@ from api.routes import (  # noqa: E402
     invitations,
     management_grants,
     mcp,
+    mcp_notices,  # Issue #2762: the per-user opt-in for service notices over MCP
     me_account,  # Issue #360: GDPR right-to-erasure self-service endpoints
     me_oauth,  # Issue #515: manual IdP refresh endpoint
     me_oauth_grants,  # Issue #2129: authorized OAuth apps and their default context
@@ -976,6 +993,8 @@ app.include_router(me_terms.router, prefix="/api/v1")
 # Announcement-email consent: settings toggle + unsubscribe link (Issue #2761)
 app.include_router(announcement_emails.me_router, prefix="/api/v1")
 app.include_router(announcement_emails.public_router, prefix="/api/v1")
+# Service notices over MCP: the per-user opt-in (Issue #2762, session only)
+app.include_router(mcp_notices.router, prefix="/api/v1")
 
 # Email + password sign-in: reset / set up / change / remove (Issue #1678)
 app.include_router(passkeys.router, prefix="/api/v1")
@@ -1055,6 +1074,9 @@ app.include_router(admin_memory_health.router, prefix="/api/v1")
 
 # Operations status: scheduled jobs, work queue backlogs, LLM lanes (Issue #2768)
 app.include_router(admin_operations.router, prefix="/api/v1")
+
+# Service notices over MCP: create / list / withdraw (Issue #2762)
+app.include_router(admin_mcp_notices.router, prefix="/api/v1")
 
 # Admin Neural calibrate trigger (Issue #406 Phase B - Manual kNN recalibration)
 app.include_router(admin_neural.router, prefix="/api/v1")

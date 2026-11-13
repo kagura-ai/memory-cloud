@@ -28,6 +28,7 @@ Everything below applies only to a request whose URL selects `profile=google` wi
 | Other annotations | `TOOL_ANNOTATIONS` | The same |
 | Server instructions | Base text naming the entry calls, plus a guardrail digest when selected | A short base text that names no tool, and never a guardrail digest (the digest lists rules for when to call tools) |
 | Replies | Caller errors carry `Manual: guide([...])`; `unknown_tool` names `describe_tools`; `get_context_info` / `bootstrap` carry the quick reference `instructions` | No manual pointer, a neutral `unknown_tool` help, no quick reference; sentences of a reply's `help`, `hint` and `message`, of write lint hints and of `persistence.detail` that point at another tool are dropped, and `plan_headroom[].help` names no tool |
+| Service notices (#2762) | `bootstrap` carries the notices a person opted into when `MCP_NOTICES_ENABLED` is on | Never: the view carries no service notice, runs no notice query and uses none up |
 
 Stored data is never rewritten: memory text, context summaries and usage guides, and the guardrail memories `bootstrap` and `get_context_info` return pass through unchanged, and a context name quoted in a reply (`Context 'list_tags' created successfully.`) is kept even when it spells a tool name. A success reply is never turned into a failure message.
 

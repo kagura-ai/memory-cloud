@@ -2128,7 +2128,7 @@ Session cookie only. Records a new answer with source `settings`; an unchanged a
 | Status | When |
 |---|---|
 | `409` | turning them on while `ANNOUNCEMENT_EMAILS_ENABLED` is off, or with a `wording_version` other than the current one (the page loaded before the wording changed); turning them off always works |
-| `429` | more than 20 changes in an hour |
+| `429` | more than 20 `PUT` requests that turn them on in an hour (an unchanged answer counts too); a request that turns them off is not counted and never refused |
 | `401` / `403` | no session / an API key or bearer token instead of a session |
 
 ### POST /api/v1/announcement-emails/unsubscribe/{token}
@@ -2142,6 +2142,46 @@ No authentication. Changes nothing: `303` to `{FRONTEND_URL}/email/unsubscribe`,
 ### POST /api/v1/announcement-emails/unsubscribe
 
 No authentication. What the unsubscribe page posts: `{"token": "<token>"}`. Same behaviour and answer as the one-click route, except that invalid tokens are counted per client address and answered `429` past 30 in 15 minutes. A valid token is never refused.
+
+---
+
+## Service notices over MCP
+
+Issue #2762. Whether the person wants short service notices from this deployment's operator (a maintenance window, a change that needs action) in the MCP `bootstrap` reply of their AI tools. Off by default; kept in its own history, apart from the announcement-email answers. See [Service notices over MCP](deployment.md#service-notices-over-mcp-issue-2762) for the operator view and [`bootstrap` → `notices`](mcp-tools.md#service-notices--notices) for what the tools receive.
+
+### GET /api/v1/me/mcp-notices
+
+Session cookie only.
+
+**Response (200):**
+
+```json
+{
+  "offered": true,
+  "mcp_notices": false,
+  "answered": false,
+  "source": null,
+  "recorded_at": null,
+  "wording_version": "2026-11"
+}
+```
+
+`offered` is `false` while `MCP_NOTICES_ENABLED` is off. `answered` is `false` (and `source` / `recorded_at` `null`) when the user never answered; `source` is otherwise `settings`. `wording_version` is the current consent wording to send back when turning notices on (`null` while not offered).
+
+### PUT /api/v1/me/mcp-notices
+
+Session cookie only. Records a new answer with source `settings`; an unchanged answer writes nothing.
+
+**Request:** `{"mcp_notices": true, "wording_version": "2026-11"}` (`wording_version` is needed only to turn them on; no other key is accepted)
+
+**Response (200):** the body of `GET` plus `"recorded": true|false`.
+
+| Status | When |
+|---|---|
+| `409 MCPNOTICE-005` | turning them on while `MCP_NOTICES_ENABLED` is off; turning them off always works |
+| `409 MCPNOTICE-006` | turning them on with a `wording_version` other than the current one (the page loaded before the wording changed) |
+| `429` | more than 20 `PUT` requests that turn them on in an hour (an unchanged answer counts too); a request that turns them off is not counted and never refused |
+| `401` / `403` | no session / an API key or bearer token instead of a session |
 
 ---
 
@@ -2198,6 +2238,26 @@ The response (`schema_version: 1`) has `as_of`, `overdue_grace_seconds`, `schedu
 | `llm` | `lane` (`embedding`, `sleep_judge`, `supersede_verify`, `recall_selector`, `analysis`, `rerank`), `provider`, `model`, `credential_present`, `snapshot_at`, `usage_recorded`, `usage_attribution` (`platform` / `includes_workspace_keys`), `last_success_at`, `calls_last_hour`, `calls_last_day`, `error_class`, `probe` (`null` unless the opt-in probe ran: `last_probe_at`, `last_outcome`, `last_latency_ms`, `error_class`, `consecutive_failures`, `last_success_at`) |
 
 No user, workspace or context identifier, email address, memory text or exception message is part of the response. See [Operations status](deployment.md#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768) for the meaning of each field, the probe setting and what to alert on.
+
+### Service notices over MCP
+
+Issue #2762. The notices delivered once per opted-in user in the MCP `bootstrap` reply ([Service notices over MCP](#service-notices-over-mcp)). The routes follow `SYSTEM_ADMIN_MODE` like every system-admin route (a service operator may call them) and work while `MCP_NOTICES_ENABLED` is off, so a notice can be prepared first. There is no edit and no delete: a correction is withdraw + create. Every create and withdraw writes an audit row (`mcp_notice.created` / `mcp_notice.withdrawn`, the actor, the SHA-256 of the text, never the text) and a WARNING log line `mcp_notice_created` / `mcp_notice_withdrawn` with the actor, the id and the character count.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/v1/admin/mcp-notices` | Write a notice. Body `{"text", "expires_at", "starts_at"?}` (no other key; times with a UTC offset). `201` with the notice. |
+| `GET /api/v1/admin/mcp-notices?state=all&limit=50` | The notices, newest first: `{"notices": [...], "delivering": <MCP_NOTICES_ENABLED>}`. `state`: `active`, `scheduled`, `ended` (expired or withdrawn) or `all` (default); `limit` 1-100 (default 50). |
+| `POST /api/v1/admin/mcp-notices/{notice_id}/withdraw` | End a notice now: every `bootstrap` that claims notices after the withdrawal commits skips it, while one already claiming at that moment may still deliver it once. Idempotent: an ended notice (withdrawn, or expired on its own) is returned unchanged and no audit row is written. |
+
+A notice: `{"id", "text", "starts_at", "expires_at", "withdrawn_at", "created_at", "state", "delivered_count"}`; `delivered_count` is the number of people it was delivered to (an aggregate: no recipient is ever listed).
+
+The rules, checked on create:
+
+- **Text** (`422 MCPNOTICE-001`, `details.reason`): one line of plain text, 1-300 characters and at most 900 UTF-8 bytes after normalisation (Unicode NFC, the ideographic space read as a space, spaces trimmed and collapsed). Refused: control and formatting characters, line breaks, every space but U+0020 (`control_or_format_char`); invisible characters such as zero-width or variation selectors (`invisible_char`); `<` `>` `[` `]` `` ` `` `"` `\` `{` `}` `@` and HTML character references such as `&#64;` or `&lt;` (`markup_char`; a plain `&` as in `Q&A` passes); and anything a client could render as a link (`link`): a scheme with `//`, `//` followed by anything but a space (a protocol-relative link such as `//localhost`; also `a//b`), `mailto:` / `javascript:` / `data:` / `vbscript:` / `file:` / `tel:` / `sms:`, `www.`, a host name in any script such as `example.com`, `例え.jp` or `пример.рф` (also `README.md`, `Node.js`, `Ver.アップ`, or `。` with ASCII on both sides such as `Kagura。Kagura` or `MCP。Kagura`: reword them or put a space after `。`; `。` and `｡` count as a dot unless the character directly before or directly after them is Japanese — kanji, kana including `ー`, CJK punctuation, fullwidth and halfwidth forms — so `example。com`, `examplе。com` with a Cyrillic `е`, `test_。com`, `例えa。jp` and `пример。рф` are refused while 「…しました。Kagura」, 「対象は MCP。保存は…」 and 「接続先は MCP。」 pass; accepted residual: a label whose character next to `。` is Japanese, such as `例え。jp` or `exa例。com`, is read as prose, although a browser still resolves such a host; the ideographic numerals `〇` and `〡` do not count as Japanese, so `hell〇。com` is refused), an `xn--` label, an IPv4 or IPv6 address — also in their fullwidth forms and with combining marks inside them. Other reasons: `empty`, `too_long` (also any text over 1,200 characters before normalisation), `too_many_bytes`. The text is never echoed in an error.
+- **Window** (`422 MCPNOTICE-002`, `details.reason`): `expires_at` after `starts_at` (`ends_before_start`) and in the future (`already_expired`); at most 30 days long (`too_long`); `starts_at` (default now) at most 90 days ahead (`starts_too_far_ahead`) and not more than 60 seconds in the past (`starts_in_the_past`).
+- **Caps**: at most 3 notices live or scheduled at a time (`409 MCPNOTICE-003`); at most 5 created in any 24 hours, withdrawn ones included (`409 MCPNOTICE-007`).
+
+`POST .../withdraw` with an unknown id: `404 MCPNOTICE-004`.
 
 ### Sleep Maintenance
 

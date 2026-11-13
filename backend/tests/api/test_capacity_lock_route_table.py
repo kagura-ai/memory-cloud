@@ -33,6 +33,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "api.main": NOT_APPLICABLE,
     "fastapi.applications": NOT_APPLICABLE,  # /docs, /redoc
     "admin": NOT_APPLICABLE,
+    "admin_mcp_notices": NOT_APPLICABLE,  # #2762: deployment-wide notices, no workspace data
     "admin_memory_health": NOT_APPLICABLE,
     "admin_neural": NOT_APPLICABLE,
     "admin_operations": NOT_APPLICABLE,  # #2768: aggregates only, no workspace data
@@ -54,6 +55,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "internal_billing": NOT_APPLICABLE,
     "invitations": NOT_APPLICABLE,
     "mcp": NOT_APPLICABLE,
+    "mcp_notices": NOT_APPLICABLE,  # #2762: the caller's own opt-in, no memory content
     "me_account": NOT_APPLICABLE,
     "me_oauth": NOT_APPLICABLE,
     "me_oauth_grants": NOT_APPLICABLE,  # #2129: grant settings; names a context only

@@ -6450,6 +6450,131 @@
         ],
         "type": "object"
       },
+      "McpNoticeCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expires_at",
+          "text"
+        ],
+        "type": "object"
+      },
+      "McpNoticeListResponse": {
+        "properties": {
+          "delivering": {
+            "type": "boolean"
+          },
+          "notices": {
+            "items": {
+              "$ref": "#/components/schemas/McpNoticeResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "delivering",
+          "notices"
+        ],
+        "type": "object"
+      },
+      "McpNoticeResponse": {
+        "properties": {
+          "created_at": {},
+          "delivered_count": {},
+          "expires_at": {},
+          "id": {},
+          "starts_at": {},
+          "state": {},
+          "text": {},
+          "withdrawn_at": {}
+        },
+        "required": [
+          "created_at",
+          "delivered_count",
+          "expires_at",
+          "id",
+          "starts_at",
+          "state",
+          "text"
+        ],
+        "type": "object"
+      },
+      "McpNoticesResponse": {
+        "properties": {
+          "answered": {},
+          "mcp_notices": {},
+          "offered": {},
+          "recorded_at": {},
+          "source": {},
+          "wording_version": {}
+        },
+        "required": [
+          "answered",
+          "mcp_notices",
+          "offered"
+        ],
+        "type": "object"
+      },
+      "McpNoticesUpdateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "mcp_notices": {
+            "type": "boolean"
+          },
+          "wording_version": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "mcp_notices"
+        ],
+        "type": "object"
+      },
+      "McpNoticesUpdateResponse": {
+        "properties": {
+          "answered": {},
+          "mcp_notices": {},
+          "offered": {},
+          "recorded": {},
+          "recorded_at": {},
+          "source": {},
+          "wording_version": {}
+        },
+        "required": [
+          "answered",
+          "mcp_notices",
+          "offered",
+          "recorded"
+        ],
+        "type": "object"
+      },
       "MemberAPIKeyResponse": {
         "properties": {
           "agent_id": {
@@ -15368,6 +15493,137 @@
         },
         "tags": [
           "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/mcp-notices": {
+      "get": {
+        "operationId": "list_mcp_notices_api_v1_admin_mcp_notices_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "active",
+                "scheduled",
+                "ended",
+                "all"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpNoticeListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-mcp-notices"
+        ]
+      },
+      "post": {
+        "operationId": "create_mcp_notice_api_v1_admin_mcp_notices_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpNoticeCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpNoticeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-mcp-notices"
+        ]
+      }
+    },
+    "/api/v1/admin/mcp-notices/{notice_id}/withdraw": {
+      "post": {
+        "operationId": "withdraw_mcp_notice_api_v1_admin_mcp_notices__notice_id__withdraw_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "notice_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpNoticeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-mcp-notices"
         ]
       }
     },
@@ -25288,6 +25544,104 @@
         ]
       }
     },
+    "/api/v1/me/mcp-notices": {
+      "get": {
+        "operationId": "get_mcp_notices_api_v1_me_mcp_notices_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpNoticesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "mcp-notices"
+        ]
+      },
+      "put": {
+        "operationId": "update_mcp_notices_api_v1_me_mcp_notices_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpNoticesUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpNoticesUpdateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "mcp-notices"
+        ]
+      }
+    },
     "/api/v1/me/oauth/grants": {
       "get": {
         "operationId": "list_oauth_grants_api_v1_me_oauth_grants_get",
@@ -34664,6 +35018,9 @@
       "name": "admin"
     },
     {
+      "name": "admin-mcp-notices"
+    },
+    {
       "name": "admin-memory-health"
     },
     {
@@ -34755,6 +35112,9 @@
     },
     {
       "name": "mcp-api"
+    },
+    {
+      "name": "mcp-notices"
     },
     {
       "name": "me-oauth"

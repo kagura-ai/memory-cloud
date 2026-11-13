@@ -2142,7 +2142,7 @@ Manual: guide(["changes_since"]).""",
             "readOnly": True,
             "description": """Start an interactive session on one context in ONE call: the context block, guardrails, pinned memories, upcoming Time Memories and what changed since a time; fail-soft per component (degraded: true when one failed). Deterministic (no recall).
 format="index" (the default under max_chars 10000): pointer rows — pinned keeps its text; guardrails.items, upcoming.results and changes.changes carry {memory_id, summary (at most 80 chars), summary_cut?, …}; no instructions.
-Returns: {status, format?, degraded, context, instructions?, guardrails?, components: {pinned, upcoming, changes}, since, generated_at, context_summary_omitted?, plan_headroom?, context_{id, name, display_name, is_private, is_locked}}.
+Returns: {status, notices?, format?, degraded, context, instructions?, guardrails?, components: {pinned, upcoming, changes}, since, generated_at, context_summary_omitted?, plan_headroom?, context_{id, name, display_name, is_private, is_locked}}.
 Manual: guide(["bootstrap"]).""",
             "inputSchema": {
                 "type": "object",

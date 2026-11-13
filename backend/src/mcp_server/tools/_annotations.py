@@ -14,7 +14,9 @@ graph updates and working → persistent promotions a ``recall`` makes, or a
 ``feedback`` row the ranking reads. Usage and audit logging, access bookkeeping
 (``access_count``, ``reference_count``, ``last_used_at``) and sweeping
 already-expired state do not count, although re-ranking and consolidation read
-those counters later: the call changes nothing a user stored or can see.
+those counters later: the call changes nothing a user stored or can see. The
+once-only delivery row ``bootstrap`` writes for a service notice (#2762) is
+delivery bookkeeping of the same kind, so ``bootstrap`` stays read-only.
 ``destructiveHint`` is true when a call can remove or overwrite existing data —
 soft delete, a value overwritten, a grant revoked, an edge reweighted or pruned
 by ``recall``'s Hebbian learning — including branches picked by arguments

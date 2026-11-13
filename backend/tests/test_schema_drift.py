@@ -96,6 +96,7 @@ _MODEL_MODULES: tuple[str, ...] = (
     "models.file_objects",
     "models.hub_tag",
     "models.llm_pricing",
+    "models.mcp_notice",
     "models.memory",
     "models.neural",
     "models.oidc",

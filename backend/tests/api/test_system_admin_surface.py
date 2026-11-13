@@ -36,7 +36,7 @@ from config.settings import get_settings
 from db.base import get_db
 from utils.exceptions import MemoryCloudException
 
-# Every (method, path) behind require_admin today (55). A new admin route must
+# Every (method, path) behind require_admin today (58). A new admin route must
 # be added here on purpose: it then follows SYSTEM_ADMIN_MODE automatically.
 ADMIN_SURFACE = frozenset(
     {
@@ -47,6 +47,7 @@ ADMIN_SURFACE = frozenset(
         ("GET", "/api/v1/admin/bm25-drift/{row_id}"),
         ("GET", "/api/v1/admin/cost-aggregation"),
         ("GET", "/api/v1/admin/force-transfer-requests/{request_id}"),
+        ("GET", "/api/v1/admin/mcp-notices"),
         ("GET", "/api/v1/admin/memory-health"),
         ("GET", "/api/v1/admin/neural-config"),
         ("GET", "/api/v1/admin/neural-config/{key}"),
@@ -76,6 +77,8 @@ ADMIN_SURFACE = frozenset(
         ("POST", "/api/v1/admin/embedding/retry-failed"),
         ("POST", "/api/v1/admin/force-transfer-requests/{request_id}/approve"),
         ("POST", "/api/v1/admin/force-transfer-requests/{request_id}/cancel"),
+        ("POST", "/api/v1/admin/mcp-notices"),
+        ("POST", "/api/v1/admin/mcp-notices/{notice_id}/withdraw"),
         ("POST", "/api/v1/admin/neural-config/reset"),
         ("POST", "/api/v1/admin/neural/recalibrate"),
         ("POST", "/api/v1/admin/referrals/{grant_id}/revoke"),

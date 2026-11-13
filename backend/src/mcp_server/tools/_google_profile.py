@@ -426,7 +426,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     },
     "bootstrap": {
         _D: (
-            "28ccd9810b3344d9",
+            "bcf1b6ba42cb4ebd",
             "Open a session on one context in ONE call: the context block, guardrails, pinned "
             "memories, upcoming Time Memories and what changed since a time; fail-soft per "
             "component (degraded: true when one failed). Deterministic, not a search.\n"

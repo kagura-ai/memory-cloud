@@ -8,6 +8,9 @@ credential and a ``context_id``.
 ``format="index"`` (#2126) returns pointer rows instead of the full shape; it
 is the default under ``max_chars`` 10,000, so every call that was valid before
 (``max_chars`` ≥ 10,000) keeps the full shape.
+
+Service notices (#2762) travel only in this reply, for the people who turned
+them on: see ``mcp_server.tools._notices``.
 """
 
 from __future__ import annotations
@@ -175,6 +178,13 @@ async def handle_bootstrap(
 ) -> list[TextContent]:
     """Rehydrate an interactive session on one context in one call (#1851)."""
     from db.base import get_db, isolated_session
+    from mcp_server.tools._notices import (
+        claim_notices,
+        fit_notices,
+        notice_delivery_allowed,
+        place_notices,
+        read_notice_items,
+    )
     from mcp_server.tools.context import _guardrails_field
     from services.session_bootstrap_service import SessionBootstrapService
 
@@ -210,14 +220,27 @@ async def handle_bootstrap(
             # budget like the context fields'. That session is closed, never
             # committed: a read the timeout cancelled invalidates its
             # connection, and a commit there would raise past the helper.
+            # #2762: the service notices are read in the same read-only
+            # session when the gate allows it (no query otherwise), and fitted
+            # whole into what the headroom leaves of its quarter, so the two
+            # server notices together never take more than a quarter.
+            deliver_notices = notice_delivery_allowed(user_id)
             async with isolated_session(db) as headroom_db:
                 headroom = await _plan_headroom_field(
                     headroom_db, context, workspace_id, throttle=False
                 )
+                notice_items = (
+                    await read_notice_items(headroom_db, user_id) if deliver_notices else []
+                )
             headroom = fit_headroom(headroom, max_chars)
+            notices = fit_notices(
+                notice_items, max_chars, reserved=json_chars(headroom) if headroom else 0
+            )
             budget = envelope_budget(max_chars, reply_format, context_fields)
             if headroom:
                 budget -= json_chars(headroom)
+            if notices:
+                budget -= json_chars(notices)
             envelope = await execute_with_timeout(
                 SessionBootstrapService(db).build(
                     user_id=user_id,
@@ -232,6 +255,10 @@ async def handle_bootstrap(
                 operation_name="bootstrap",
             )
             await _log_tool_usage(db, user_id, "bootstrap", start, 200, context_id, workspace_id)
+            # #2762: the claim is the last fallible step; only what it returns
+            # is placed (right after ``status``), and a failure places nothing.
+            notices = await claim_notices(db, user_id, notices)
+            envelope = place_notices(envelope, notices)
             envelope.update(context_fields)
             envelope.update(headroom)
             return [TextContent(type="text", text=_dumps(envelope))]
