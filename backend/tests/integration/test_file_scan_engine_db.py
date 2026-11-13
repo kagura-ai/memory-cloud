@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from datetime import timedelta
+from datetime import UTC, timedelta
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -424,6 +424,10 @@ class TestBacklogAndRescan:
         assert (await svc.files_unscanned_backlog(db_session, now))[0] >= 0
         backlog = await svc.file_scan_backlog(db_session, now)
         assert backlog.waiting_pending >= 1
+        # The operations status passes an aware time; the columns are naive UTC.
+        aware = now.replace(tzinfo=UTC)
+        assert await svc.files_awaiting_scan_backlog(db_session, aware) == (due, oldest)
+        assert await svc.file_scan_backlog(db_session, aware) == backlog
 
     async def test_rescan_selects_and_requeues(self, db_session, ws):
         s = _settings()

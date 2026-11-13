@@ -63,7 +63,7 @@ from services.clamd_client import (
 )
 from storage.factory import get_blob_storage
 from storage.protocol import BlobReaderProtocol, ObjectMetadata
-from utils.datetime import utcnow
+from utils.datetime import to_naive_utc, utcnow
 from utils.exceptions import ExternalServiceError, FileBlockedError, FileScanPendingError
 from utils.logger import get_logger
 
@@ -814,14 +814,17 @@ async def _count_and_oldest(
 async def files_awaiting_scan_backlog(
     db: AsyncSession, now: datetime
 ) -> tuple[int, datetime | None]:
-    """Due pending scans: count and the oldest due time (naive UTC)."""
+    """Due pending scans: count and the oldest due time (naive UTC).
+
+    ``now`` may be aware (the operations status passes one): the column is naive UTC.
+    """
     return await _count_and_oldest(
         db,
         FileObject.scan_next_attempt_at,
         FileObject.scan_status == "pending",
         FileObject.status == "uploaded",
         FileObject.deleted_at.is_(None),
-        FileObject.scan_next_attempt_at <= now,
+        FileObject.scan_next_attempt_at <= to_naive_utc(now),
     )
 
 
@@ -876,7 +879,10 @@ async def file_scan_backlog(db: AsyncSession, now: datetime) -> FileScanBacklog:
             FileObject.scan_status == "pending",
             FileObject.status == "uploaded",
             FileObject.deleted_at.is_(None),
-            or_(FileObject.scan_next_attempt_at.is_(None), FileObject.scan_next_attempt_at > now),
+            or_(
+                FileObject.scan_next_attempt_at.is_(None),
+                FileObject.scan_next_attempt_at > to_naive_utc(now),
+            ),
         )
     )
     errored, _ = await files_scan_failed_backlog(db, now)
