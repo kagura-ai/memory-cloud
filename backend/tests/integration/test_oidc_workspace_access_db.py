@@ -18,10 +18,21 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.routes import me_workspaces
 from auth import oidc_limits
+from auth.oauth2_bearer import find_active_oauth_token
+from auth.oauth_token_storage import hash_oauth_token
 from auth.oidc_server import credential_hash
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
+from models.auth import (
+    Context,
+    ContextMember,
+    IdentityLink,
+    OAuth2Client,
+    OAuth2Token,
+    User,
+    Workspace,
+    WorkspaceMember,
+)
 from models.oidc import OIDCClient, OIDCGrant, OIDCToken
 from tests.api.test_me_workspaces import assert_private
 from utils.datetime import utcnow
@@ -281,8 +292,6 @@ async def test_resource_privacy_explicit_workspace_and_deletion(store):
 
 async def test_context_role_reach_and_membership_changes_take_effect_on_next_request(store):
     async with store.factory() as db:
-        from sqlalchemy import select
-
         cm = (
             await db.execute(select(ContextMember).where(ContextMember.context_id == store.shared))
         ).scalar_one()
@@ -398,3 +407,61 @@ async def test_capacity_lock_suppresses_content_permissions_but_preserves_inspec
     assert_private(response, 200)
     assert response.json()["resource"]["permissions"] == {"read": False, "sync.manage": False}
     assert response.json()["workspace_permissions"]["billing.manage"] is True
+
+
+async def test_memory_credential_with_same_client_id_never_becomes_an_identity(store):
+    # Even a credential with the correct wire shape must exist in the OIDC
+    # token table; a valid Memory OAuth row cannot authenticate this API.
+    legacy = "kmc_oidc_at_" + secrets.token_urlsafe(32)
+    async with store.factory() as db:
+        db.add(
+            OAuth2Client(
+                client_id=store.client_id,
+                client_name="Separate memory client",
+                client_secret_hash="unused",
+                redirect_uris=["https://client.example.test/callback"],
+                grant_types=["authorization_code"],
+                response_types=["code"],
+                scope="memory:read",
+                provider="custom",
+            )
+        )
+        await db.flush()
+        db.add(
+            OAuth2Token(
+                client_id=store.client_id,
+                user_id=store.users["owner"],
+                access_token=hash_oauth_token(legacy),
+                scope="memory:read",
+                issued_at=utcnow(),
+                expires_in=3600,
+            )
+        )
+        await db.commit()
+    try:
+        async with store.factory() as db:
+            assert await find_active_oauth_token(legacy, db) is not None
+            assert await find_active_oauth_token(store.tokens["owner"], db) is None
+        store.tokens["legacy"] = legacy
+        assert_private(await request(store, "legacy"), 401)
+        assert_private(await request(store, "owner"), 200)
+    finally:
+        async with store.factory() as db:
+            await db.execute(delete(OAuth2Client).where(OAuth2Client.client_id == store.client_id))
+            await db.commit()
+
+
+async def test_linked_ownership_preserves_account_membership_and_viewer_role(store):
+    group = uuid4()
+    async with store.factory() as db:
+        db.add_all([IdentityLink(group_id=group, user_id=uid) for uid in store.users.values()])
+        await db.commit()
+    assert_private(await request(store, "owner", context=store.private), 200)
+    viewer = await request(store, "viewer", context=store.private)
+    assert_private(viewer, 200)
+    assert viewer.json()["resource"]["permissions"] == {"read": True, "sync.manage": False}
+    assert_private(await request(store, "outsider", context=store.private), 404)
+    async with store.factory() as db:
+        await db.execute(delete(IdentityLink).where(IdentityLink.user_id == store.users["owner"]))
+        await db.commit()
+    assert_private(await request(store, "owner", context=store.private), 404)
