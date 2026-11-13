@@ -50,8 +50,11 @@ e. Refused (``link``), with U+FF0E read as ``.`` (NFKC maps it), and U+3002
    ``Node.js``, ``Ver.アップ``, ``a//b`` or ``。`` with ASCII on both sides
    (``Kagura。Kagura``, ``MCP。Kagura``): the writer rewords or puts a space
    after ``。``. Known residuals, accepted: a label whose character next to
-   ``。`` is Japanese (``例え。jp``, ``exa例。com``) is read as prose; such a
-   host needs an IDN-aware client to resolve and is never an ASCII look-alike.
+   ``。`` is Japanese (``例え。jp``, ``exa例。com``) is read as prose. Such a
+   host always keeps a non-ASCII character, but a browser still resolves it,
+   and a few Han or kana characters resemble Latin ones; the ideographic
+   numerals ``〇`` and ``〡`` do not count as Japanese here, so
+   ``hell〇。com`` is refused.
 f. 1 to 300 characters (``empty`` / ``too_long``) and at most 900 UTF-8 bytes
    (``too_many_bytes``) after normalisation.
 
@@ -172,10 +175,15 @@ _CHARACTER_REFERENCE: Final = re.compile(
 # punctuation U+3000-303F (brackets, 々, 〆), the CJK vertical and
 # compatibility forms, and the fullwidth / halfwidth forms U+FF00-FFEF (NFKC
 # maps most of them, halfwidth katakana included, to the ranges above; the
-# range is kept for any that survive). Hangul is not in it.
+# range is kept for any that survive). Hangul is not in it, and neither are
+# the ideographic numerals U+3007 and U+3021-3029 / U+3038-303A (〇 and 〡
+# look like Latin letters), so ``hell〇。com`` stays a host name.
 _JAPANESE_NEIGHBOUR: Final = (
     "\u2e80-\u2fdf"
-    "\u3000-\u30ff"
+    "\u3000-\u3006"
+    "\u3008-\u3020"
+    "\u302a-\u3037"
+    "\u303b-\u30ff"
     "\u31c0-\u31ff"
     "\u3400-\u4dbf"
     "\u4e00-\u9fff"

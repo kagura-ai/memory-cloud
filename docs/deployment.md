@@ -1016,7 +1016,9 @@ curl -X POST https://example.com/api/v1/admin/mcp-notices/<notice-id>/withdraw \
   「対象は MCP。保存は…」 or 「接続先は MCP。」 passes. `。` with ASCII on both
   sides (`Kagura。Kagura`, `MCP。Kagura`) is refused too: put a space after
   `。` or reword. Accepted residual: a label whose character next to `。` is
-  Japanese (`例え。jp`, `exa例。com`) is read as prose. Version numbers such as
+  Japanese (`例え。jp`, `exa例。com`) is read as prose; such a host keeps a
+  non-ASCII character but a browser still resolves it. The ideographic numerals
+  `〇` and `〡` do not count as Japanese, so `hell〇。com` is refused. Version numbers such as
   `v0.161.0` pass. Use 「」 or ' ' instead of `"`. A text longer than 1,200
   characters before normalisation is refused (`too_long`) at once.
 - **No edit, no delete.** A correction is withdraw + create, so everyone who

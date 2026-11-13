@@ -425,6 +425,10 @@ class TestIdeographicFullStop:
             "a_。com",
             "café。com",
             "café。com",  # a combining accent before 。
+            # ideographic numerals look like Latin letters: not Japanese here
+            "hell〇。com",
+            "yah〇〇。com",
+            "app〡。com",
             # the character right before 。 decides, not the whole word
             "例えa。jp",
             "see 例えa。jp",
@@ -472,6 +476,8 @@ class TestIdeographicFullStop:
             "例え。jp",
             "例え｡ｊｐ",
             "exa例。com",
+            # an ideographic numeral before 。 and Japanese after it is prose
+            "評価は〇。次へ進みます。",
         ],
     )
     def test_with_a_japanese_neighbour_it_ends_a_sentence(self, text: str) -> None:
