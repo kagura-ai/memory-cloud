@@ -35,6 +35,7 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "admin": NOT_APPLICABLE,
     "admin_memory_health": NOT_APPLICABLE,
     "admin_neural": NOT_APPLICABLE,
+    "admin_operations": NOT_APPLICABLE,  # #2768: aggregates only, no workspace data
     "admin_plans": NOT_APPLICABLE,
     "admin_referrals": NOT_APPLICABLE,
     "admin_signup_gate": NOT_APPLICABLE,

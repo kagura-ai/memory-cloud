@@ -69,6 +69,9 @@ MANAGED_LLM_PLATFORM_KEY_ENV: dict[str, str] = {
     "gemini": "GOOGLE_API_KEY",
 }
 
+# Issue #2768: the shortest interval the opt-in operations probe accepts.
+OPERATIONS_PROBE_MIN_INTERVAL_SECONDS = 300
+
 
 # Issue #2225: the server secrets whose shipped values are public. Under
 # ENVIRONMENT=production ``Settings`` refuses any of them while it is still a
@@ -378,6 +381,42 @@ class Settings(BaseSettings):
             "may already hold the lock."
         ),
     )
+    # Operations status (#2768): the admin status route and its opt-in probe.
+    operations_probe_interval_seconds: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How often the scheduler leader makes one minimal call per platform "
+            "LLM lane (a one-token completion, a short text to embed, a one-"
+            "document rerank) and records the outcome for "
+            "GET /api/v1/admin/operations/status (#2768). The calls are paid and "
+            "use the platform credentials only, never a workspace's own key. "
+            "0 (the default) turns the probe off; otherwise at least 300."
+        ),
+    )
+    operations_status_overdue_grace_seconds: int = Field(
+        default=900,
+        ge=0,
+        description=(
+            "Slack added to a scheduled job's expected interval before the "
+            "operations status route reports it overdue (#2768)."
+        ),
+    )
+
+    @field_validator("operations_probe_interval_seconds")
+    @classmethod
+    def _validate_operations_probe_interval(cls, v: int) -> int:
+        """0 disables the probe; an enabled probe runs at most every 300 s (#2768).
+
+        One run probes up to four targets with a 20 s timeout each, so a
+        shorter interval would overlap its own previous run.
+        """
+        if 0 < v < OPERATIONS_PROBE_MIN_INTERVAL_SECONDS:
+            raise ValueError(
+                "OPERATIONS_PROBE_INTERVAL_SECONDS must be 0 (off) or at least "
+                f"{OPERATIONS_PROBE_MIN_INTERVAL_SECONDS}"
+            )
+        return v
 
     # OAuth2 - Google
     google_client_id: str = Field(default="", description="Google OAuth2 Client ID")

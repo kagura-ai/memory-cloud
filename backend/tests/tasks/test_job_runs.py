@@ -252,6 +252,10 @@ def _enable_every_conditional_job(monkeypatch: pytest.MonkeyPatch, *, sleep: boo
         "tasks.bm25_drift_tasks.get_settings",
         lambda: Settings(_env_file=None, bm25_drift_cron_enabled=True),
     )
+    monkeypatch.setattr(
+        "tasks.operations_probe_tasks.get_settings",
+        lambda: Settings(_env_file=None, operations_probe_interval_seconds=300),
+    )
 
 
 @pytest.mark.parametrize("sleep", [True, False])
@@ -275,6 +279,7 @@ def test_every_registered_job_has_a_registration(
     assert len(ids) >= 20
     assert ("sleep_maintenance" in ids) is sleep
     assert ("consolidation" in ids) is (not sleep)
+    assert {"operations_lane_snapshot", "operations_probe"} <= ids
     for reg in regs:
         assert JOB_ID_RE.match(reg.job_id), reg.job_id
         assert reg.expected_interval_seconds is not None, reg.job_id
