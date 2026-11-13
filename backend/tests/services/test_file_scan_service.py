@@ -475,8 +475,10 @@ class _Sessions:
 
 
 class TestKick:
-    def test_disabled_is_a_no_op(self):
-        with patch.object(svc, "get_settings", return_value=_settings(file_scan_enabled=False)):
+    async def test_disabled_is_a_no_op(self):
+        # A running loop and binding on, so only the switch keeps the kick off.
+        s = _settings(file_scan_enabled=False, storage_checksum_binding_enabled=True)
+        with patch.object(svc, "get_settings", return_value=s):
             svc.kick_file_scan(uuid4())
         assert svc._running == set()
 
@@ -558,6 +560,8 @@ class TestSweep:
             patch.object(svc, "get_settings", return_value=_settings(file_scan_enabled=False)),
             patch.object(svc, "get_db", sessions),
             patch.object(svc, "clamd_ping", ping),
+            # Storage is readable, so only the switch keeps the sweep off.
+            patch.object(svc, "_reader", return_value=FakeBlobStorage()),
         ):
             counts = await svc.run_scan_sweep()
         assert counts == {"dispatched": 0, "backfill_dispatched": 0, "clamd_unavailable": 0}

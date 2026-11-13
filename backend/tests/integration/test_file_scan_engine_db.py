@@ -31,6 +31,11 @@ from models.auth import User, Workspace
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from services import file_scan_service as svc
 from services.file_scan_service import ScanResult
+from services.security_notification_service import (
+    SecurityEvent,
+    SecurityOccurrence,
+    render_security_notification,
+)
 from tests.services._fake_clamd import EICAR, running_fake_clamd
 from tests.storage._fakes import FakeBlobStorage
 from utils.datetime import utcnow
@@ -316,6 +321,13 @@ class TestEndToEnd:
             )
             await storage.write_object(row.storage_key, data, "text/plain", f"etag-{name}")
             rows[name] = row
+        # Another uploader for the clean file, so a mail for it would show.
+        await db_session.execute(
+            update(FileObject)
+            .where(FileObject.id == rows["clean"].id)
+            .values(created_by="clean-uploader")
+        )
+        await db_session.commit()
 
         async def get_db():
             async with sessions() as session:
@@ -327,6 +339,7 @@ class TestEndToEnd:
                 patch.object(svc, "get_settings", return_value=s),
                 patch.object(svc, "get_db", get_db),
                 patch.object(svc, "_reader", return_value=storage),
+                patch("services.security_notification_service.spawn_security_notification") as mail,
             ):
                 svc._reset_runtime_for_tests()
                 for row in rows.values():
@@ -340,6 +353,20 @@ class TestEndToEnd:
             "infected",
             "Eicar-Test-Signature",
         )
+        # Owner decision (email + UI): the uploader of the infected file, and
+        # only that file, gets the FILE_BLOCKED notice. The notice carries no
+        # file detail (the call has none to pass), and its text names neither
+        # the file nor the finding.
+        mail.assert_called_once_with(user_id=ws[1], event=SecurityEvent.FILE_BLOCKED)
+        subject, text = render_security_notification(
+            SecurityEvent.FILE_BLOCKED,
+            [SecurityOccurrence(occurred_at="2026-11-13T00:00:00 UTC")],
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        for absent in (infected.filename, infected.scan_signature, str(infected.id), "Eicar"):
+            assert absent not in subject and absent not in text, absent
         backlog = await svc.file_scan_backlog(db_session, utcnow())
         assert backlog.quarantined >= 1
 
