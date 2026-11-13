@@ -713,6 +713,29 @@ async def test_route_end_to_end_aggregates_only(db_session, monkeypatch) -> None
                 last_registered_at=generation,
                 registered_since=generation,
             ),
+            # A stored row carrying data where only labels and class names
+            # belong (a writer that bypassed the recorder's sanitisers): the
+            # route sanitises again on the way out.
+            ScheduledJobStatus(
+                job_id="leaky_job",
+                job_name="Leaky job",
+                trigger_kind="interval",
+                expected_interval_seconds=60,
+                last_registered_at=generation,
+                registered_since=generation,
+                last_started_at=NOW - timedelta(seconds=20),
+                last_finished_at=NOW - timedelta(seconds=19),
+                last_outcome="failed",
+                last_outcome_at=NOW - timedelta(seconds=19),
+                consecutive_failures=1,
+                last_error_class=f"ValueError: {ws.id} {owner}@example.com",
+                last_counts={
+                    "deleted": 2,
+                    "workspace": str(ws.id),
+                    f"ctx_{ctx.id.hex}": 1,
+                    "note": f"{owner}@example.com",
+                },
+            ),
             # Left over from an older registration: not registered, never overdue.
             ScheduledJobStatus(
                 job_id="retired_job",
@@ -740,6 +763,18 @@ async def test_route_end_to_end_aggregates_only(db_session, monkeypatch) -> None
                 model="rr",
                 credential_present=True,
                 snapshot_at=NOW - timedelta(minutes=1),
+            ),
+            OperationsLlmLane(
+                lane="analysis",
+                provider="openai",
+                model="analysis-route-model",
+                credential_present=True,
+                snapshot_at=NOW - timedelta(minutes=1),
+                last_probe_at=NOW - timedelta(minutes=2),
+                last_probe_outcome="failed",
+                last_probe_latency_ms=5,
+                last_probe_error_class=f"APIError: {ctx.id} {owner}@example.com",
+                probe_consecutive_failures=1,
             ),
         ]
     )
@@ -777,6 +812,8 @@ async def test_route_end_to_end_aggregates_only(db_session, monkeypatch) -> None
         3,
     )
     assert failing["overdue"] is False
+    leaky = jobs["leaky_job"]
+    assert (leaky["counts"], leaky["error_class"]) == ({"deleted": 2}, "Exception")
     assert jobs["retired_job"]["registered"] is False
     assert jobs["retired_job"]["overdue"] is False
     assert body["probe_enabled"] is True
@@ -792,6 +829,7 @@ async def test_route_end_to_end_aggregates_only(db_session, monkeypatch) -> None
     assert judge["probe"]["consecutive_failures"] == 2
     assert lanes["rerank"]["usage_recorded"] is False
     assert lanes["rerank"]["probe"] is None
+    assert lanes["analysis"]["probe"]["error_class"] == "Exception"
 
     # Aggregates only: no identifier, no address, no message.
     raw = json.dumps(body)
