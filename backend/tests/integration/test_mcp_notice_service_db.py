@@ -170,12 +170,48 @@ async def _raw_audit_rows(db: AsyncSession, notice_id: uuid.UUID) -> list[dict]:
         return [dict(row) for row in result.mappings().all()]
 
 
+async def _fresh_audits(db: AsyncSession, notice_id: uuid.UUID) -> list[AuditLog]:
+    """The notice's audit rows through the ORM, read in a fresh session (so
+    ``user_metadata`` is what the database holds, not the identity map)."""
+    async with _maker(db)() as session:
+        result = await session.execute(
+            select(AuditLog)
+            .where(AuditLog.resource == f"mcp_notice:{notice_id}")
+            .order_by(AuditLog.id)
+        )
+        return list(result.scalars().all())
+
+
+# Values the audit row legitimately holds next to the text's hash. A body
+# window that occurred in one of them would make the window check below fail
+# for a reason that is not a leak, so the check refuses such a body first.
+_AUDIT_NON_TEXT_VALUES = (
+    ACTOR.email,
+    ACTOR.user_id,
+    ACTOR.ip_address or "",
+    ACTOR.user_agent or "",
+    "mcp_notice.created",
+    "mcp_notice.withdrawn",
+)
+
+_WINDOW = 8
+
+
 def _assert_text_in_no_column(rows: list[dict], body: str) -> None:
+    """No 8-character window of the body is in any stringified column, so a
+    prefix, a slice or a preview of the text is caught, not only the whole."""
     assert rows
+    assert len(body) >= _WINDOW
+    windows = {body[i : i + _WINDOW] for i in range(len(body) - _WINDOW + 1)}
+    for value in _AUDIT_NON_TEXT_VALUES:
+        assert not [w for w in windows if w in value], (body, value)
     for row in rows:
         assert len(row) >= len(sa_inspect(AuditLog).column_attrs)
         for column, value in row.items():
-            assert body not in str(value), column
+            if column == "resource":
+                assert value.startswith("mcp_notice:"), value
+            leaked = sorted(w for w in windows if w in str(value))
+            assert not leaked, (column, leaked)
 
 
 async def _claim(db: AsyncSession, user: User, ids: list[uuid.UUID]) -> set[uuid.UUID]:
@@ -301,16 +337,20 @@ async def test_create_writes_one_audit_row_without_the_text(db_session, make_use
 
     assert view.state == "active" and view.delivered_count == 0
     assert view.text == body
-    audit = (
-        await db_session.execute(
-            select(AuditLog).where(AuditLog.resource == f"mcp_notice:{view.id}")
-        )
-    ).scalar_one()
+    audits = await _fresh_audits(db_session, view.id)
+    assert len(audits) == 1
+    audit = audits[0]
     assert audit.action == "mcp_notice.created"
     assert audit.user_email == ACTOR.email and audit.user_id == ACTOR.user_id
+    assert audit.old_value_hash is None
     assert audit.new_value_hash == sha256_hex(body)
     assert audit.ip_address == "192.0.2.10" and audit.user_agent == "console/1.0"
-    assert audit.user_metadata is not None and audit.user_metadata["text_chars"] == len(body)
+    # Exactly what the code writes: the length and the window, nothing else.
+    assert audit.user_metadata == {
+        "text_chars": len(body),
+        "starts_at": view.starts_at.isoformat(),
+        "expires_at": view.expires_at.isoformat(),
+    }
     # The text is in no column of the audit row (only its hash and length are),
     # read back from the table itself, every column, stringified.
     rows = await _raw_audit_rows(db_session, view.id)
@@ -494,6 +534,12 @@ async def test_withdraw_is_idempotent_and_audited_once(db_session, make_users) -
         .all()
     )
     assert actions == ["mcp_notice.created", "mcp_notice.withdrawn"]
+    withdrawn = (await _fresh_audits(db_session, view.id))[1]
+    assert withdrawn.user_email == ACTOR.email and withdrawn.user_id == ACTOR.user_id
+    assert withdrawn.old_value_hash is None
+    assert withdrawn.new_value_hash == sha256_hex(view.text)
+    assert withdrawn.ip_address == "192.0.2.10" and withdrawn.user_agent == "console/1.0"
+    assert withdrawn.user_metadata == {"text_chars": len(view.text)}
     _assert_text_in_no_column(await _raw_audit_rows(db_session, view.id), view.text)
 
     with pytest.raises(McpNoticeNotFoundError):
