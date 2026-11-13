@@ -51,9 +51,11 @@ from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.file_scan_service import (
     ensure_downloadable,
     kick_file_scan,
+    needs_object_compare,
     object_matches_scan,
     requeue_changed_object,
     scan_eligible_at,
+    under_legacy_digest_rule,
 )
 from services.permission_service import PermissionService
 from services.plan_seats import ensure_context_writable
@@ -137,19 +139,28 @@ def _scan_blocked(file: FileObject) -> bool:
 
 
 def _forget_clean_verdict(file: FileObject, *, now: datetime, settings: Settings) -> None:
-    """Drop a verdict (or the lack of one) whose bytes may have changed (#565 restore)."""
+    """Drop a verdict (or the lack of one) whose bytes may have changed (#565 restore).
+
+    A row under the legacy digest rule keeps it (the marker) and, like the
+    ``unscanned`` row the backfill takes with scanning off, is due only after
+    a full upload window whatever the binding setting: it is not bound to its
+    SHA-256, so a PUT URL minted while its key was free may still write it.
+    """
+    legacy = under_legacy_digest_rule(file)
     file.scan_attempts = 0
     file.scan_lease_until = None
     file.scanned_at = None
-    file.scan_error = None
-    if settings.file_scan_enabled:
-        file.scan_status = "pending"
-        file.scan_next_attempt_at = scan_eligible_at(
-            now=now, reservation_expires_at=None, server_written=False, settings=settings
-        )
-    else:
-        file.scan_status = "unscanned"
-        file.scan_next_attempt_at = None
+    file.scan_error = SCAN_LEGACY_REQUEUED if legacy else None
+    file.scan_status = "pending" if settings.file_scan_enabled else "unscanned"
+    file.scan_next_attempt_at = scan_eligible_at(
+        now=now,
+        reservation_expires_at=None,
+        server_written=False,
+        # With scanning off the row becomes ``unscanned``: the backfill scans it
+        # under the legacy digest rule.
+        legacy_digest=legacy or not settings.file_scan_enabled,
+        settings=settings,
+    )
 
 
 @dataclass(frozen=True)
@@ -660,6 +671,8 @@ class FileStorageService:
                 now=file.uploaded_at,
                 reservation_expires_at=file.expires_at,
                 server_written=False,
+                # A new upload: its row is held to its SHA-256.
+                legacy_digest=False,
                 settings=settings,
             )
         file.expires_at = None  # uploaded rows are durable; expires_at is sweeper-only
@@ -766,7 +779,8 @@ class FileStorageService:
 
         #565: a file the malware scan holds raises ``FileScanPendingError``
         (409 ``SCAN-001``) or ``FileBlockedError`` (409 ``SCAN-002``), only
-        after the access checks. With checksum binding off a ``clean`` file is
+        after the access checks. With checksum binding off, and for a row
+        under the legacy digest rule in both modes, a ``clean`` file is
         HEAD-compared with the scanned version first; a changed object goes
         back to ``pending`` (committed here) and is refused.
 
@@ -801,14 +815,11 @@ class FileStorageService:
         # still gets the uniform 404 above. Allow-list: 409 SCAN-001 while the
         # scan is pending, 409 SCAN-002 once the file is blocked.
         ensure_downloadable(file, settings)
-        if (
-            settings.file_scan_enabled
-            and not settings.storage_checksum_binding_enabled
-            and file.scan_status == "clean"
-        ):
-            # Binding off: the verdict holds only for the version that was
-            # scanned. A HEAD failure propagates (502 / service_unavailable);
-            # no URL is minted for an unchecked object.
+        if needs_object_compare(file, settings):
+            # Binding off, or a row under the legacy digest rule (not bound to
+            # its SHA-256 in either mode): the verdict holds only for the
+            # version that was scanned. A HEAD failure propagates (502 /
+            # service_unavailable); no URL is minted for an unchecked object.
             meta = await self._storage.head_object(file.storage_key or "")
             if meta is None or not object_matches_scan(file, meta):
                 await requeue_changed_object(self.db, file, now=utcnow(), settings=settings)
@@ -949,7 +960,11 @@ class FileStorageService:
             file.scan_status = "pending"
             file.scan_attempts = 0
             file.scan_next_attempt_at = scan_eligible_at(
-                now=now, reservation_expires_at=None, server_written=True, settings=settings
+                now=now,
+                reservation_expires_at=None,
+                server_written=True,
+                legacy_digest=False,
+                settings=settings,
             )
         self.db.add(file)
         await self.db.flush()
@@ -1293,15 +1308,19 @@ class FileStorageService:
         #565: a restored row is not served on an earlier verdict, or on none.
         While it was deleted its content key was free for another reservation,
         whose PUT may have replaced the bytes. With scanning on a ``clean``,
-        ``unscanned`` or ``pending`` row is ``pending`` again (attempts reset,
-        due at once with checksum binding, otherwise after a full PUT window
-        from now); a legacy row (``unscanned``, or
-        one carrying :data:`SCAN_LEGACY_REQUEUED`: requeued earlier, or passed by
-        the backfill although its digest does not match) keeps the legacy digest
-        rule through that scan. With
-        scanning off only a ``clean`` row changes: it becomes ``unscanned``
-        (the backfill takes it once scanning is on). ``infected`` and
-        ``error`` rows stay as they are.
+        ``unscanned`` or ``pending`` row is ``pending`` again (attempts reset).
+        It is due at once with checksum binding, except a row under the legacy
+        digest rule (``unscanned``, or one carrying
+        :data:`SCAN_LEGACY_REQUEUED`: requeued earlier, or passed by the
+        backfill although its digest does not match); without binding, and for
+        such a row in both modes, after a full PUT window from now (it is not
+        bound to its SHA-256, so binding guarantees nothing for it). A legacy
+        row keeps the legacy digest rule (the marker) through that scan, and
+        its later ``clean`` verdict is served only after the download-time
+        object compare. With scanning off only a ``clean`` row changes: it
+        becomes ``unscanned`` and the backfill takes it once scanning is on,
+        after a full PUT window. ``infected`` and ``error`` rows stay as they
+        are.
         """
         files, outcome = await self._restorable_context_files(context, lock=True)
         settings = get_settings()
@@ -1310,10 +1329,7 @@ class FileStorageService:
         for file in files:
             file.deleted_at = None
             if file.scan_status in requeue:
-                legacy = file.scan_status == "unscanned" or file.scan_error == SCAN_LEGACY_REQUEUED
                 _forget_clean_verdict(file, now=now, settings=settings)
-                if legacy:
-                    file.scan_error = SCAN_LEGACY_REQUEUED
         if files:
             await self._upsert_workspace_usage(
                 context.workspace_id, delta_bytes=outcome.bytes_restored, delta_files=len(files)

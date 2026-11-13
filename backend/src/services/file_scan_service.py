@@ -17,7 +17,11 @@ How a verdict is bound to the bytes that are served:
   it. The ETag, LastModified and size of the scanned version come from the
   same GetObject that fed clamd, and every download URL of a ``clean`` file
   HEADs the object and compares them (:func:`object_matches_scan`); a change
-  puts the file back to ``pending`` (:func:`requeue_changed_object`).
+  puts the file back to ``pending`` (:func:`requeue_changed_object`);
+- a row under the legacy digest rule (:func:`under_legacy_digest_rule`) is
+  not bound to its declared SHA-256, so it gets the binding-off treatment in
+  both modes: a full upload window before a restored or changed row is
+  scanned, and the download-time compare of its ``clean`` verdict.
 
 Concurrency: a DB lease claims a row (``FOR UPDATE SKIP LOCKED``; the claim
 moves ``scan_next_attempt_at`` to the lease end), the result UPDATE is fenced
@@ -151,23 +155,55 @@ class ScanResult:
 # ---------------------------------------------------------------------------
 
 
+def under_legacy_digest_rule(file: Any) -> bool:
+    """Whether ``file`` is held to the legacy digest rule.
+
+    An ``unscanned`` row, or one carrying :data:`SCAN_LEGACY_REQUEUED`: its
+    stored bytes were never checked against its declared SHA-256 (or did not
+    match it), so checksum binding guarantees nothing about them. Such a row
+    gets the treatment of binding off in both binding modes: its scan waits a
+    full upload window, and a ``clean`` verdict is served only after the
+    download-time object compare (:func:`needs_object_compare`).
+    """
+    return file.scan_status == "unscanned" or file.scan_error == SCAN_LEGACY_REQUEUED
+
+
+def needs_object_compare(file: Any, settings: Settings) -> bool:
+    """Whether a download must HEAD-compare ``file``'s object with the scanned version.
+
+    Scanning on and a ``clean`` row, when checksum binding is off or the row
+    is under the legacy digest rule (binding does not bind it to its digest).
+    """
+    return (
+        settings.file_scan_enabled
+        and file.scan_status == "clean"
+        and (not settings.storage_checksum_binding_enabled or under_legacy_digest_rule(file))
+    )
+
+
 def scan_eligible_at(
     *,
     now: datetime,
     reservation_expires_at: datetime | None,
     server_written: bool,
+    legacy_digest: bool,
     settings: Settings,
 ) -> datetime:
     """When a file may be scanned.
 
-    Checksum binding on, or bytes the server wrote itself: now. Binding off:
-    after the reservation's presigned PUT URL expired plus
+    Bytes the server wrote itself: now. Checksum binding on and a row held to
+    its SHA-256: now (a late PUT can only write the declared content again).
+    Binding off, or a row under the legacy digest rule (``legacy_digest``,
+    see :func:`under_legacy_digest_rule`) in either binding mode: after the
+    reservation's presigned PUT URL expired plus
     ``FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS``, so the scanned bytes are the final
     ones. Pass ``reservation_expires_at=None`` when the last PUT URL for the
     key is unknown (a restore, a changed object): a full PUT TTL is counted
     from ``now``. Naive UTC in, naive UTC out.
     """
-    if server_written or settings.storage_checksum_binding_enabled:
+    if server_written:
+        return now
+    if settings.storage_checksum_binding_enabled and not legacy_digest:
         return now
     margin = timedelta(seconds=settings.file_scan_put_expiry_margin_seconds)
     if reservation_expires_at is None:
@@ -491,10 +527,12 @@ async def requeue_changed_object(
 ) -> bool:
     """A ``clean`` file whose object changed goes back to ``pending``; the caller commits.
 
-    Fenced on the recorded ETag so two downloads racing on the same change
-    requeue it once. ``scan_error`` is left as it is: a legacy file's marker
-    goes with it into the scan. The next attempt follows the PUT-window rule counted from
-    ``now`` (a PUT URL minted up to now may still be live).
+    Fenced on the recorded ETag (and the marker) so two downloads racing on
+    the same change requeue it once. ``scan_error`` is left as it is: a legacy
+    file's marker goes with it into the scan. The next attempt follows the
+    PUT-window rule counted from ``now`` (a PUT URL minted up to now may still
+    be live); a row under the legacy digest rule waits the full window in both
+    binding modes.
     """
     written = cast(
         CursorResult[Any],
@@ -504,6 +542,7 @@ async def requeue_changed_object(
                 FileObject.id == file.id,
                 FileObject.scan_status == "clean",
                 FileObject.scan_etag.is_not_distinct_from(file.scan_etag),
+                FileObject.scan_error.is_not_distinct_from(file.scan_error),
                 FileObject.deleted_at.is_(None),
             )
             .values(
@@ -512,7 +551,11 @@ async def requeue_changed_object(
                 scan_lease_until=None,
                 scanned_at=None,
                 scan_next_attempt_at=scan_eligible_at(
-                    now=now, reservation_expires_at=None, server_written=False, settings=settings
+                    now=now,
+                    reservation_expires_at=None,
+                    server_written=False,
+                    legacy_digest=under_legacy_digest_rule(file),
+                    settings=settings,
                 ),
             )
             .execution_options(synchronize_session=False)

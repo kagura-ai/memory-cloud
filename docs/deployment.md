@@ -2193,7 +2193,7 @@ signatures.
 |---|---|---|---|
 | `unscanned` | Uploaded while scanning was off (or before the release that added it) | served; scanned in the background, see [Backfill](#backfill-of-older-files) | served |
 | `pending` | Waiting for its scan, or being scanned | 409 `SCAN-001` | served |
-| `clean` | clamd found nothing | served (without checksum binding, after a storage HEAD compare) | served |
+| `clean` | clamd found nothing | served (without checksum binding, or for a file under the legacy digest rule, after a storage HEAD compare) | served |
 | `infected` | clamd reported a finding | 409 `SCAN-002` | 409 `SCAN-002` |
 | `error` | The scanner could not check this file (cause in `scan_error`) | 409 `SCAN-002` | served |
 
@@ -2221,16 +2221,23 @@ Other changes while scanning is on:
   of this file was blocked by the malware scan". A `pending` file is handed
   out (same bytes; the download gate holds it).
 - Restoring a deleted context's files puts their `clean`, `unscanned` and
-  `pending` files back to `pending`. With checksum binding
-  (`STORAGE_CHECKSUM_BINDING_ENABLED=true`) they are due at once; without it,
-  after a full upload window from the restore: while the context was deleted
-  its content key could be reserved again and receive other bytes. A file that was
-  `unscanned`, or that the backfill passed although its stored bytes do not
-  match its SHA-256 (`clean` with `scan_error` `legacy_requeued`), keeps the
-  backfill's digest rule through that scan (a digest mismatch is logged, not
-  blocked); any other cause that stops the scan makes it `error`, as for a
-  new upload. `infected` and `error` files stay as they
-  are. With scanning off only `clean` files change, to `unscanned`.
+  `pending` files back to `pending`: while the context was deleted its content
+  key could be reserved again and receive other bytes. With checksum binding
+  (`STORAGE_CHECKSUM_BINDING_ENABLED=true`) they are due at once, except a
+  file under the legacy digest rule; without binding, and for such a file in
+  both modes, after a full upload window from the restore
+  (`PRESIGN_PUT_TTL_SECONDS` + `FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS`). A file
+  under the legacy digest rule is one that was `unscanned`, or that the
+  backfill passed although its stored bytes do not match its SHA-256 (`clean`
+  with `scan_error` `legacy_requeued`): it is not bound to its SHA-256, so
+  checksum binding guarantees nothing for it. It keeps the backfill's digest
+  rule through that scan (a digest mismatch is logged, not blocked); any other
+  cause that stops the scan makes it `error`, as for a new upload. Once it is
+  `clean` again, every download URL first HEAD-compares its object with the
+  scanned version in both binding modes, as described below for binding off;
+  a changed object sends it back to the scan. `infected` and `error` files
+  stay as they are. With scanning off only `clean` files change, to
+  `unscanned`; the backfill takes them after a full upload window.
 
 ### How long a new upload is held
 
@@ -2322,7 +2329,12 @@ backfill. A digest mismatch on such a file is logged
 (`file_scan_digest_mismatch`), not blocked, since its digest was never
 verified at upload; a file that passes the scan with a mismatch keeps
 `scan_error` `legacy_requeued` (`clean`), so a later context restore scans it
-under the same rule. An operator rescan (`rescan --file`) clears it.
+under the same rule, and its download URLs are issued only after the storage
+HEAD compare even with checksum binding (a changed object goes back to the
+scan). An operator rescan (`rescan --file`) clears the marker: the file is
+then held to its SHA-256 like a new upload, and a mismatch blocks it
+(`error`, `digest_mismatch`). The same holds for `rescan --file` on an
+`unscanned` file.
 
 ### Running clamd
 

@@ -609,6 +609,87 @@ async def test_a_requeued_pending_row_keeps_the_legacy_digest_rule_across_a_seco
     assert await _scan_now(world, row.id) == "clean"
 
 
+# --- the legacy digest rule with checksum binding on ----------------------------------------
+
+
+def _upload_window() -> timedelta:
+    s = get_settings()
+    return timedelta(seconds=s.presign_put_ttl_seconds + s.file_scan_put_expiry_margin_seconds)
+
+
+@pytest.fixture
+def binding_on(scanning, monkeypatch):
+    monkeypatch.setattr(get_settings(), "storage_checksum_binding_enabled", True)
+
+
+async def _marked_clean(world: dict[str, Any]) -> FileObject:
+    """A legacy file the backfill passed although its digest does not match."""
+    row = await _file(world, "unscanned")
+    assert await _scan_now(world, row.id, backfill=True) == "clean"
+    scanned = await _reload(world, row.id)
+    assert (scanned.scan_status, scanned.scan_error) == ("clean", SCAN_LEGACY_REQUEUED)
+    return scanned
+
+
+@pytest.mark.parametrize("legacy", ["unscanned", "marked_clean"])
+async def test_binding_on_a_restored_legacy_row_waits_a_full_upload_window(
+    world, binding_on, legacy
+):
+    row = await _file(world, "unscanned") if legacy == "unscanned" else await _marked_clean(world)
+    before = utcnow()
+    assert await _delete_and_restore_context(world) == 1
+
+    restored = await _reload(world, row.id)
+    assert (restored.scan_status, restored.scan_error) == ("pending", SCAN_LEGACY_REQUEUED)
+    assert restored.scan_next_attempt_at >= before + _upload_window()
+    async with world["factory"]() as s:
+        claim = await scan_svc.claim_scan(s, now=utcnow(), settings=get_settings(), file_id=row.id)
+        assert claim is None
+        await s.rollback()
+    assert await _via_rest(world, row.id, OWNER) == "pending"
+
+
+async def test_binding_on_a_restored_verified_row_is_due_at_once(world, binding_on):
+    row = await _file(world, "clean")
+    assert row.scan_error is None
+    assert await _delete_and_restore_context(world) == 1
+
+    restored = await _reload(world, row.id)
+    assert (restored.scan_status, restored.scan_error) == ("pending", None)
+    assert restored.scan_next_attempt_at <= utcnow()
+
+
+@pytest.mark.parametrize("binding", [True, False], ids=["binding_on", "binding_off"])
+async def test_a_marked_clean_row_whose_object_changed_is_rescanned_not_served(
+    world, scanning, monkeypatch, binding
+):
+    monkeypatch.setattr(get_settings(), "storage_checksum_binding_enabled", binding)
+    row = await _marked_clean(world)
+    # The object is replaced after the scan.
+    await world["storage"].write_object(row.storage_key, EICAR, "application/pdf", "etag-2")
+    before = utcnow()
+
+    assert await _via_rest(world, row.id, OWNER) == "pending"
+
+    requeued = await _reload(world, row.id)
+    assert (requeued.scan_status, requeued.scan_error) == ("pending", SCAN_LEGACY_REQUEUED)
+    assert requeued.scan_next_attempt_at >= before + _upload_window()
+    assert await _scan_now(world, row.id) == "infected"
+    assert await _via_rest(world, row.id, OWNER) == "blocked"
+
+
+async def test_an_operator_rescan_of_a_marked_clean_row_clears_the_marker(world, scanning):
+    row = await _marked_clean(world)
+    async with world["factory"]() as s:
+        selection = await scan_svc.requeue_for_rescan(
+            s, now=utcnow(), settings=get_settings(), dry_run=False, file_id=row.id
+        )
+        await s.commit()
+    assert selection.count == 1
+    rescanned = await _reload(world, row.id)
+    assert (rescanned.scan_status, rescanned.scan_error) == ("pending", None)
+
+
 @pytest.mark.parametrize("state", ["unscanned", "pending"])
 async def test_restore_with_scanning_off_leaves_unscanned_and_pending_rows_as_they_are(
     world, scanning, state

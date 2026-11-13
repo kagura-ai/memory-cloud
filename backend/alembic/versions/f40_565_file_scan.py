@@ -137,7 +137,8 @@ def downgrade() -> None:
                 "malware scan blocked (scan_status 'infected' or 'error', soft-deleted "
                 "ones included: a context restore can bring them back); dropping the "
                 "scan columns would make them downloadable again. Rescan the live "
-                "ones or delete them for good; the rescan skips soft-deleted ones, "
+                "ones (the rescan needs FILE_SCAN_ENABLED=true) or delete them for "
+                "good; the rescan skips soft-deleted ones, "
                 "so delete those for good or let the soft-deleted file garbage "
                 "collection remove them after their retention window (#565)"
             )

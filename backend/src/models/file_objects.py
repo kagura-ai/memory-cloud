@@ -47,8 +47,10 @@ SCAN_ERRORS = ("object_missing", "digest_mismatch", "size_limit", "unscannable",
 #: ``scan_error`` of a legacy row (confirmed while scanning was off, or before it
 #: existed) whose stored bytes were never verified against its sha256: a
 #: ``pending`` row a context restore sent back to the scan, or a ``clean`` row
-#: whose scan found the digest different. A digest mismatch does not block it.
-#: A verdict whose digest matches clears it; the operator rescan clears it too.
+#: whose scan found the digest different, or an ``unscanned`` row a context
+#: restore with scanning off made of such a ``clean`` one. A digest mismatch does
+#: not block it. A verdict whose digest matches clears it; the operator rescan
+#: clears it too (the row is then held to its sha256 like a new upload).
 SCAN_LEGACY_REQUEUED = "legacy_requeued"
 
 

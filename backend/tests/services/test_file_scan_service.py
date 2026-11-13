@@ -84,6 +84,7 @@ class TestEligibility:
                 now=NOW,
                 reservation_expires_at=NOW + timedelta(minutes=4),
                 server_written=False,
+                legacy_digest=False,
                 settings=s,
             )
             == NOW
@@ -92,7 +93,13 @@ class TestEligibility:
     def test_server_written_is_eligible_at_once(self):
         s = _settings()
         assert (
-            scan_eligible_at(now=NOW, reservation_expires_at=None, server_written=True, settings=s)
+            scan_eligible_at(
+                now=NOW,
+                reservation_expires_at=None,
+                server_written=True,
+                legacy_digest=False,
+                settings=s,
+            )
             == NOW
         )
 
@@ -100,7 +107,11 @@ class TestEligibility:
         s = _settings()
         expires = NOW + timedelta(seconds=200)
         assert scan_eligible_at(
-            now=NOW, reservation_expires_at=expires, server_written=False, settings=s
+            now=NOW,
+            reservation_expires_at=expires,
+            server_written=False,
+            legacy_digest=False,
+            settings=s,
         ) == expires + timedelta(seconds=30)
 
     def test_binding_off_after_the_window_is_now(self):
@@ -108,7 +119,11 @@ class TestEligibility:
         expires = NOW - timedelta(hours=1)
         assert (
             scan_eligible_at(
-                now=NOW, reservation_expires_at=expires, server_written=False, settings=s
+                now=NOW,
+                reservation_expires_at=expires,
+                server_written=False,
+                legacy_digest=False,
+                settings=s,
             )
             == NOW
         )
@@ -117,7 +132,23 @@ class TestEligibility:
         """Restore / changed object: a PUT URL minted up to now may still be live."""
         s = _settings()
         assert scan_eligible_at(
-            now=NOW, reservation_expires_at=None, server_written=False, settings=s
+            now=NOW,
+            reservation_expires_at=None,
+            server_written=False,
+            legacy_digest=False,
+            settings=s,
+        ) == NOW + timedelta(seconds=330)
+
+    @pytest.mark.parametrize("binding", [True, False], ids=["binding_on", "binding_off"])
+    def test_a_legacy_digest_row_always_waits_a_full_upload_window(self, binding):
+        """Not bound to its SHA-256: checksum binding guarantees nothing for it."""
+        s = _settings(storage_checksum_binding_enabled=binding)
+        assert scan_eligible_at(
+            now=NOW,
+            reservation_expires_at=None,
+            server_written=False,
+            legacy_digest=True,
+            settings=s,
         ) == NOW + timedelta(seconds=330)
 
     def test_backoff_is_capped(self):

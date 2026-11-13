@@ -1621,6 +1621,27 @@ class TestDownloadCompare:
         assert url.startswith("https://test.local/get/")
         head.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_binding_on_still_compares_a_legacy_digest_row(
+        self, service, db, fake_storage, workspace_id, scan_settings, monkeypatch
+    ):
+        """A clean row under the legacy digest rule is not bound to its SHA-256."""
+        from datetime import datetime as dt
+
+        from utils.exceptions import FileScanPendingError
+
+        monkeypatch.setattr(scan_settings, "storage_checksum_binding_enabled", True)
+        file = await self._clean_file(fake_storage, workspace_id)
+        file.scan_error = SCAN_LEGACY_REQUEUED
+        fake_storage.last_modified[file.storage_key] = dt(2026, 11, 13, 1, 2, 4)
+        _loaded(db, file)
+        with patch(
+            "services.file_storage_service.requeue_changed_object", AsyncMock(return_value=True)
+        ) as rq:
+            with pytest.raises(FileScanPendingError):
+                await service.get_presigned_download(workspace_id=workspace_id, file_id=file.id)
+        rq.assert_awaited_once()
+
 
 class TestStatusUploadedWriters:
     """Both writers of ``status='uploaded'`` set ``scan_status`` when scanning is on."""
@@ -1744,17 +1765,54 @@ class TestRestoreScanState:
         assert (verified.scan_status, verified.scan_error) == ("pending", None)
 
     @pytest.mark.asyncio
+    async def test_binding_on_waits_a_full_upload_window_only_for_legacy_rows(
+        self, service, db, workspace_id, scan_settings, monkeypatch
+    ):
+        from utils.datetime import utcnow
+
+        monkeypatch.setattr(scan_settings, "storage_checksum_binding_enabled", True)
+        rows = {}
+        for name, state, error in (
+            ("unscanned", "unscanned", None),
+            ("marked", "clean", SCAN_LEGACY_REQUEUED),
+            ("verified", "clean", None),
+        ):
+            row = _make_file_object(workspace_id, status="uploaded")
+            row.scan_status = state
+            row.scan_error = error
+            rows[name] = row
+        before = utcnow()
+        await self._restore(service, db, workspace_id, list(rows.values()))
+        window = timedelta(
+            seconds=scan_settings.presign_put_ttl_seconds
+            + scan_settings.file_scan_put_expiry_margin_seconds
+        )
+        for name in ("unscanned", "marked"):
+            assert rows[name].scan_next_attempt_at >= before + window, name
+            assert rows[name].scan_error == SCAN_LEGACY_REQUEUED
+        assert rows["verified"].scan_next_attempt_at <= utcnow()
+
+    @pytest.mark.asyncio
     async def test_clean_rows_become_unscanned_with_scanning_off(
         self, service, db, workspace_id, scan_settings, monkeypatch
     ):
+        from utils.datetime import utcnow
+
         monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
         clean = _make_file_object(workspace_id, status="uploaded")
         clean.scan_status = "clean"
         clean.scan_attempts = 1
+        before = utcnow()
         infected = _make_file_object(workspace_id, status="uploaded")
         infected.scan_status = "infected"
         await self._restore(service, db, workspace_id, [clean, infected])
         assert clean.scan_status == "unscanned"
         assert clean.scan_attempts == 0
-        assert clean.scan_next_attempt_at is None
+        # The backfill (legacy digest rule) takes it only after a full upload window.
+        window = timedelta(
+            seconds=scan_settings.presign_put_ttl_seconds
+            + scan_settings.file_scan_put_expiry_margin_seconds
+        )
+        assert clean.scan_next_attempt_at is not None
+        assert clean.scan_next_attempt_at >= before + window
         assert infected.scan_status == "infected"
