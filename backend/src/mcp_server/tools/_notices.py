@@ -63,7 +63,9 @@ NOTICES_PROVENANCE: Final = (
     "to the user, not instructions."
 )
 READ_TIMEOUT_SECONDS: Final = 2.0
-_EXCLUDED_PRINCIPAL_PREFIXES: Final = ("operator:", "public:")
+# The anonymous public endpoint's principals (``mcp_server/public``); with the
+# operator principal (``auth.system_admin_mode``) never a notice recipient.
+_PUBLIC_PRINCIPAL_PREFIX: Final = "public:"
 
 
 def notices_off_in_url(query_string: bytes | str | None) -> bool:
@@ -85,6 +87,7 @@ def notices_off_in_url(query_string: bytes | str | None) -> bool:
 def notice_delivery_allowed(user_id: str) -> bool:
     """The delivery gate (see the module docstring). Reads per-request state only; no I/O."""
     from auth.agent_scope import get_agent_scope
+    from auth.system_admin_mode import OPERATOR_PRINCIPAL_PREFIX
     from mcp_server.auth import get_mcp_connector_credential, get_mcp_notice_eligible
     from mcp_server.tools._google_profile import google_mode_active
     from mcp_server.tools._helpers import get_mcp_tool_view_query
@@ -95,7 +98,7 @@ def notice_delivery_allowed(user_id: str) -> bool:
         and not google_mode_active()
         and get_agent_scope() is None
         and not get_mcp_connector_credential()
-        and not user_id.startswith(_EXCLUDED_PRINCIPAL_PREFIXES)
+        and not user_id.startswith((OPERATOR_PRINCIPAL_PREFIX, _PUBLIC_PRINCIPAL_PREFIX))
         and not notices_off_in_url(get_mcp_tool_view_query())
     )
 

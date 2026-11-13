@@ -595,3 +595,35 @@ async def test_deliveries_and_consents_go_with_the_user(db_session, make_users) 
         )
     ).scalar_one()
     assert still_there == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_account_erasure_removes_consents_and_deliveries(
+    db_session, make_users, connector_world
+) -> None:
+    """The erasure deletes the users row last; the FK cascade takes the
+    person's notice answers and delivery rows with it, and the notice stays."""
+    target = await connector_world.user("noticed")
+    await db_session.commit()
+    user = (await db_session.execute(select(User).where(User.user_id == target))).scalar_one()
+    await _opt(db_session, user, True)
+    view = await _create(db_session)
+    assert await _claim(db_session, user, [view.id]) == {view.id}
+
+    from unittest.mock import AsyncMock, patch
+
+    with (
+        patch("services.account_erasure_service.delete_user_points", AsyncMock(return_value=0)),
+        patch("db.qdrant.list_memory_collections", AsyncMock(return_value=["kagura_memories"])),
+        patch("db.qdrant.delete_context_points_everywhere", AsyncMock(return_value={})),
+    ):
+        await connector_world.erase(target)
+
+    for model in (McpNoticeConsent, McpNoticeDelivery):
+        left = (
+            await db_session.execute(
+                select(func.count()).select_from(model).where(model.user_id == target)
+            )
+        ).scalar_one()
+        assert left == 0
+    assert [n.id for n in await svc.list_notices(db_session)] == [view.id]

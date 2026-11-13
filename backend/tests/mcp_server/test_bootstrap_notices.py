@@ -291,7 +291,7 @@ class TestGate:
         assert "notices" not in json.loads(text)
         notices.read.assert_not_awaited()
         notices.claim.assert_not_awaited()
-        if surface not in ("google_view", "microsoft_view") and via == "handler":
+        if surface not in ("google_view", "microsoft_view"):
             assert text == _baseline()
 
     @pytest.mark.asyncio
