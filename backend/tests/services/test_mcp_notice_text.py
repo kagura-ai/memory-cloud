@@ -398,10 +398,13 @@ class TestUnicodeHosts:
 
 
 class TestIdeographicFullStop:
-    """U+3002 and U+FF61 (which NFKC maps to U+3002) read as a dot only
-    right after an ASCII letter, digit or hyphen, where a browser would read
-    ``example。com`` as a host name; after any other character they end a
-    Japanese sentence."""
+    """U+3002 and U+FF61 (which NFKC maps to U+3002) read as a dot unless the
+    character directly before OR directly after it is Japanese (Han,
+    Hiragana, Katakana including the prolonged sound mark, CJK symbols and
+    punctuation, fullwidth and halfwidth forms). Between two non-Japanese
+    characters a browser reads ``example。com`` as a host name, whatever the
+    script of the label (a Cyrillic look-alike, an underscore, an accent); a
+    Japanese neighbour on either side makes it the end of a sentence."""
 
     @pytest.mark.parametrize(
         "text",
@@ -409,30 +412,69 @@ class TestIdeographicFullStop:
             "example。com",
             "example｡com",
             "ｅｘａｍｐｌｅ。ｃｏｍ",
+            "kagura-login。com",
             "sign in at kagura-login。com",
             "www。example",
+            "10。0。0。1",
             "address 10。0。0。1",
-            # the character right before 。 decides, not the whole word
-            "see 例えa。jp",
+            # homograph labels: the last character before 。 is not ASCII
+            "examplе。com",  # Cyrillic е last
+            "аррlе。com",  # аррlе
+            "аррӏе。com",  # аррӏе (palochka)
+            "test_。com",
+            "a_。com",
             "café。com",
-            # a documented false positive: an ASCII word straight before 。
+            "café。com",  # a combining accent before 。
+            # the character right before 。 decides, not the whole word
+            "例えa。jp",
+            "see 例えa。jp",
+            # Cyrillic on both sides
+            "пример。рф",  # пример。рф
+            "see пример｡рф now",
+            # documented false positives: ASCII on both sides
+            "Kagura。Kagura",
+            "MCP。Kagura",
             "詳しくは Kagura。Kagura を再開します。",
         ],
     )
-    def test_after_an_ascii_label_it_is_a_dot(self, text: str) -> None:
+    def test_between_non_japanese_characters_it_is_a_dot(self, text: str) -> None:
+        assert _reason(text) == "link"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "例え.jp",
+            "пример.рф",  # пример.рф
+            "例え．jp",
+        ],
+    )
+    def test_a_real_dot_is_refused_whatever_its_neighbours(self, text: str) -> None:
         assert _reason(text) == "link"
 
     @pytest.mark.parametrize(
         "text",
         [
             "メンテナンスを行います。MCP の接続が切れます。",
+            "…しました。Kagura を…",
             "…しました。Kagura を再開します。",
+            "対象は MCP。保存は止まりません。",
+            "接続先は MCP。",
+            "確認しました。次へ",
             "保存は1時間止まります。v0.161.0 で直りました。",
             "バージョン 2。次は 3 です。",
-            "対象は MCP。保存は止まりません。",
+            # the prolonged sound mark, fullwidth and halfwidth katakana
+            "サーバー。Kagura を再開します。",
+            "ｻｰﾊﾞｰ｡Kagura を再開します｡",
+            # CJK brackets and punctuation on either side
+            "「MCP」。Kagura を再開します。",
+            "対象は MCP。「保存」は止まりません。",
+            # documented residuals: a Japanese label before 。 is prose
+            "例え。jp",
+            "例え｡ｊｐ",
+            "exa例。com",
         ],
     )
-    def test_after_anything_else_it_ends_a_sentence(self, text: str) -> None:
+    def test_with_a_japanese_neighbour_it_ends_a_sentence(self, text: str) -> None:
         assert normalize_notice_text(text) == text
 
 
@@ -494,6 +536,8 @@ class TestRawInputBound:
             "a1+" * 400,
             "ab_-" * 300,
             "a。" * 600,
+            "例。" * 600,
+            "\u044f。" * 600,
             "&a" * 600,
             ("a." + "b" * 70) * 16,
             # NFKC expands these: 1. / a.m. / a six-letter word / 18 characters
@@ -509,6 +553,8 @@ class TestRawInputBound:
             "scheme-chars",
             "word-chars",
             "ideographic-stops",
+            "ideographic-stops-han",
+            "ideographic-stops-cyrillic",
             "ampersands",
             "long-tlds",
             "nfkc-digit-dot",

@@ -1006,11 +1006,17 @@ curl -X POST https://example.com/api/v1/admin/mcp-notices/<notice-id>/withdraw \
   too), an e-mail or IP address. The check also reads fullwidth forms and
   ignores combining marks placed inside a word. Names that look like host
   names are refused too — `README.md`, `Node.js`, `Ver.アップ`: reword them
-  ("the README file"). `。` counts as a dot only directly after an ASCII
-  letter, digit or hyphen (`example。com` is refused), so ordinary Japanese
-  such as 「…しました。Kagura を…」 or 「…行います。MCP の…」 passes; an ASCII word
-  directly before `。` and Latin letters after it (「…Kagura。Kagura…」) is
-  refused: put a space before `。` or reword. Version numbers such as
+  ("the README file"). `。` (and the halfwidth `｡`) counts as a dot unless
+  the character directly before or directly after it is Japanese (kanji,
+  hiragana, katakana including `ー`, CJK punctuation such as 「」, fullwidth
+  and halfwidth forms): `example。com`, `www。example`, `10。0。0。1`, a
+  look-alike such as `examplе。com` with a Cyrillic `е`, `test_。com`,
+  `café。com`, `例えa。jp` and `пример。рф` are refused, while ordinary
+  Japanese such as 「…しました。Kagura を…」, 「…行います。MCP の…」,
+  「対象は MCP。保存は…」 or 「接続先は MCP。」 passes. `。` with ASCII on both
+  sides (`Kagura。Kagura`, `MCP。Kagura`) is refused too: put a space after
+  `。` or reword. Accepted residual: a label whose character next to `。` is
+  Japanese (`例え。jp`, `exa例。com`) is read as prose. Version numbers such as
   `v0.161.0` pass. Use 「」 or ' ' instead of `"`. A text longer than 1,200
   characters before normalisation is refused (`too_long`) at once.
 - **No edit, no delete.** A correction is withdraw + create, so everyone who

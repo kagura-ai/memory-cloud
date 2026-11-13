@@ -31,20 +31,27 @@ d. Refused (``markup_char``): ``< > [ ] ` " \\ { } @`` (HTML, autolinks,
    digit or ``x``, ``&name;``, and ``&lt`` ``&gt`` ``&quot`` without the
    semicolon). A plain ``&`` (``Q&A``) passes.
 e. Refused (``link``), with U+FF0E read as ``.`` (NFKC maps it), and U+3002
-   and U+FF61 read as ``.`` only directly after an ASCII letter, digit or
-   hyphen (``example。com``; after any other character they end a Japanese
-   sentence, as in 「…しました。Kagura」): a ``scheme:`` followed by ``//``;
+   and U+FF61 read as ``.`` unless the character directly before or directly
+   after it is Japanese (Han, Hiragana, Katakana with the prolonged sound
+   mark, CJK symbols and punctuation, fullwidth and halfwidth forms): between
+   two other characters a browser reads it as a dot (``example。com``,
+   ``examplе。com`` with a Cyrillic ``е``, ``test_。com``, ``пример。рф``);
+   next to a Japanese character it ends a sentence (「…しました。Kagura」,
+   「対象は MCP。保存は…」, 「接続先は MCP。」): a ``scheme:`` followed by ``//``;
    ``//`` directly followed by anything but a space (a protocol-relative
    link such as ``//localhost``, whatever the host); the schemes ``mailto javascript data vbscript file tel sms``;
    ``www.``; host names (``label.label`` ending in two or more ASCII letters,
-   the labels in any script: ``例え.jp``, ``пример.com``); a label in any script followed by an
-   ASCII ``.`` and a top-level label of two or more letters in any script
-   (``пример.рф``, ``例え.みんな``); any ``xn--`` label; IPv4 and IPv6
+   the labels in any script: ``例え.jp``, ``пример.com``); a label in any
+   script followed by a dot (as read above) and a top-level label of two or
+   more letters in any script (``пример.рф``, ``пример。рф``, ``例え.みんな``);
+   any ``xn--`` label; IPv4 and IPv6
    literals. There is no exception for this server's own host: a notice
    carries no link at all. Accepted false positives such as ``README.md``,
-   ``Node.js``, ``Ver.アップ``, ``a//b`` or an ASCII word directly before
-   ``。`` followed by Latin letters (「…Kagura。Kagura…」): the writer rewords or
-   puts a space before ``。``.
+   ``Node.js``, ``Ver.アップ``, ``a//b`` or ``。`` with ASCII on both sides
+   (``Kagura。Kagura``, ``MCP。Kagura``): the writer rewords or puts a space
+   after ``。``. Known residuals, accepted: a label whose character next to
+   ``。`` is Japanese (``例え。jp``, ``exa例。com``) is read as prose; such a
+   host needs an IDN-aware client to resolve and is never an ASCII look-alike.
 f. 1 to 300 characters (``empty`` / ``too_long``) and at most 900 UTF-8 bytes
    (``too_many_bytes``) after normalisation.
 
@@ -158,11 +165,37 @@ _CHARACTER_REFERENCE: Final = re.compile(
 
 # --- rule e -------------------------------------------------------------------
 
-# U+3002 (and U+FF61, which NFKC maps to it) read as a dot only directly
-# after an ASCII label character, where a browser would read the token as a
-# host name; after anything else they end a Japanese sentence. U+FF0E is a
-# dot already (NFKC maps it to U+002E).
-_ASCII_LABEL_FULL_STOP: Final = re.compile(r"(?<=[a-z0-9-])[。｡]", re.ASCII)
+# Characters that make an adjacent U+3002 the end of a Japanese sentence:
+# Han (radicals, strokes, unified ideographs and their extensions,
+# compatibility ideographs), Hiragana, Katakana (with its phonetic extensions,
+# the prolonged sound mark U+30FC and the kana supplements), CJK symbols and
+# punctuation U+3000-303F (brackets, 々, 〆), the CJK vertical and
+# compatibility forms, and the fullwidth / halfwidth forms U+FF00-FFEF (NFKC
+# maps most of them, halfwidth katakana included, to the ranges above; the
+# range is kept for any that survive). Hangul is not in it.
+_JAPANESE_NEIGHBOUR: Final = (
+    "\u2e80-\u2fdf"
+    "\u3000-\u30ff"
+    "\u31c0-\u31ff"
+    "\u3400-\u4dbf"
+    "\u4e00-\u9fff"
+    "\uf900-\ufaff"
+    "\ufe10-\ufe1f"
+    "\ufe30-\ufe4f"
+    "\uff00-\uffef"
+    "\U0001b000-\U0001b16f"
+    "\U00020000-\U0003ffff"
+)
+# U+3002 (and U+FF61, which NFKC maps to it) read as a dot unless the
+# character directly before OR directly after it is Japanese: only then is
+# it the end of a sentence; between two other characters (ASCII, Cyrillic
+# look-alikes, an underscore, start or end of the text) a browser may read
+# the token as a host name. Symmetric, so the last character of a label
+# cannot carry a look-alike host through. One character of look-behind and
+# look-ahead each: linear. U+FF0E is a dot already (NFKC maps it to U+002E).
+_NON_JAPANESE_FULL_STOP: Final = re.compile(
+    f"(?<![{_JAPANESE_NEIGHBOUR}])[。｡](?![{_JAPANESE_NEIGHBOUR}])"
+)
 # Every pattern is linear: an unbounded run is only entered at the start of
 # the run (a lookbehind) and is possessive, so it is never rescanned from each
 # of its positions; bounded runs ({1,4}, {2,63}) cost a constant per position.
@@ -237,10 +270,11 @@ def _check_invisible(text: str) -> None:
         previous = ch
 
 
-# A top-level label in any script, only after a real ``.`` (U+002E or the
-# fullwidth U+FF0E, which NFKC maps to it): after ``。`` it would refuse
-# ordinary Japanese prose (「確認しました。次へ」, 「対象は MCP。次へ」).
-# Linear like the patterns above.
+# A top-level label in any script after a ``.``: U+002E, the fullwidth
+# U+FF0E (NFKC maps it), or a ``。`` between two non-Japanese characters
+# (``пример。рф``). A ``。`` with a Japanese neighbour stays ``。``, so
+# ordinary prose (「確認しました。次へ」, 「対象は MCP。次へ」) is not read as a
+# host. Linear like the patterns above.
 _ANY_SCRIPT_HOST: Final = re.compile(r"(?<![\w-])[_-]*+[^\W_][\w-]*+\.[^\W\d_]{2,63}")
 
 
@@ -268,10 +302,8 @@ def normalize_notice_text(raw: str) -> str:
     skeleton = _skeleton(text)
     if any(ch in _MARKUP_CHARS for ch in skeleton) or _CHARACTER_REFERENCE.search(skeleton):
         raise NoticeTextError("markup_char")
-    folded = _ASCII_LABEL_FULL_STOP.sub(".", skeleton)
-    if any(pattern.search(folded) for pattern in _LINK_PATTERNS) or _ANY_SCRIPT_HOST.search(
-        skeleton
-    ):
+    folded = _NON_JAPANESE_FULL_STOP.sub(".", skeleton)
+    if any(pattern.search(folded) for pattern in _LINK_PATTERNS) or _ANY_SCRIPT_HOST.search(folded):
         raise NoticeTextError("link")
     if not text:
         raise NoticeTextError("empty")
