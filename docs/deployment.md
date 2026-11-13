@@ -1014,7 +1014,9 @@ curl -X POST https://example.com/api/v1/admin/mcp-notices/<notice-id>/withdraw \
   `v0.161.0` pass. Use 「」 or ' ' instead of `"`. A text longer than 1,200
   characters before normalisation is refused (`too_long`) at once.
 - **No edit, no delete.** A correction is withdraw + create, so everyone who
-  saw a notice saw the same text. Withdrawing stops delivery at once.
+  saw a notice saw the same text. Withdrawing stops delivery for every
+  session start after it; one already claiming the notice at that moment may
+  still deliver it once.
 - **Audit.** Every create and withdraw writes an `audit_logs` row
   (`mcp_notice.created` / `mcp_notice.withdrawn`, the actor — the admin's
   email, or `operator:<address>` — the client address, and the SHA-256 of

@@ -139,23 +139,25 @@ describe("McpNoticeSettings", () => {
     expect(mockToast).toHaveBeenCalledWith({ title: "savedOff" });
   });
 
-  it.each([["MCPNOTICE-006"], ["MCPNOTICE-005"]])(
-    "reloads on 409 %s and says why",
-    async (code) => {
-      mockGet.mockResolvedValue(OFF);
-      mockSet.mockRejectedValue(new FakeApiError(409, code));
-      render(<McpNoticeSettings />);
-      fireEvent.click(await screen.findByRole("switch", { name: "toggle" }));
+  it.each([
+    ["MCPNOTICE-006", "stale"],
+    // The card disappears after the reload, so the toast does not ask the
+    // person to review it and try again.
+    ["MCPNOTICE-005", "notOfferedNow"],
+  ])("reloads on 409 %s and says why", async (code, message) => {
+    mockGet.mockResolvedValue(OFF);
+    mockSet.mockRejectedValue(new FakeApiError(409, code));
+    render(<McpNoticeSettings />);
+    fireEvent.click(await screen.findByRole("switch", { name: "toggle" }));
 
-      await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
-      expect(mockToast).toHaveBeenCalledWith(
-        expect.objectContaining({
-          description: "stale",
-          variant: "destructive",
-        }),
-      );
-    },
-  );
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: message,
+        variant: "destructive",
+      }),
+    );
+  });
 
   it("hides the card when the reload after a 409 says it is no longer offered", async () => {
     mockGet.mockResolvedValueOnce(OFF).mockResolvedValueOnce({

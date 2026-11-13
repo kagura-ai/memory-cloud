@@ -100,11 +100,13 @@ export function McpNoticeSettings({
       if (error instanceof ApiError && error.status === 409) {
         // The wording changed (MCPNOTICE-006) or the deployment stopped
         // offering the notices (MCPNOTICE-005): show the current state
-        // before the person tries again.
+        // before the person tries again. After MCPNOTICE-005 the reload hides
+        // the card, so the toast says why instead of asking for a retry.
         await load();
         toast({
           title: tCommon("error"),
-          description: t("stale"),
+          description:
+            error.error === "MCPNOTICE-005" ? t("notOfferedNow") : t("stale"),
           variant: "destructive",
         });
       } else {

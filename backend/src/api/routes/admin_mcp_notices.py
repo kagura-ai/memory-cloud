@@ -13,7 +13,9 @@ console in ``service`` mode, nobody in ``off`` mode (the routes then answer
 - ``GET``: the notices, newest first, each with an aggregate
   ``delivered_count`` (no recipient is ever listed), and ``delivering``
   (``MCP_NOTICES_ENABLED``).
-- ``POST /{notice_id}/withdraw``: end a notice now; idempotent.
+- ``POST /{notice_id}/withdraw``: end a notice now; idempotent. Claims that
+  start after it commits skip the notice; one already running may still
+  deliver it once.
 
 The text cannot be edited and there is no delete: a correction is withdraw +
 create, so everyone who saw a notice saw the same text. Every create and
