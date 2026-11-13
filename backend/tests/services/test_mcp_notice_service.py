@@ -12,6 +12,19 @@ from services import mcp_notice_service as svc
 from services import mcp_notice_text as text_rules
 
 
+class _NoDb:
+    """A session stand-in that records every attribute asked of it. A missing
+    attribute is an ``AttributeError`` (the protocol ``getattr`` and
+    ``hasattr`` expect); the test asserts nothing was asked for."""
+
+    def __init__(self) -> None:
+        self.used: list[str] = []
+
+    def __getattr__(self, name: str):
+        self.used.append(name)
+        raise AttributeError(name)
+
+
 def test_documented_contract() -> None:
     assert text_rules.MCP_NOTICE_MAX_CHARS == 300
     assert text_rules.MCP_NOTICE_MAX_BYTES == 900
@@ -43,29 +56,25 @@ def test_the_version_has_the_url_safe_shape() -> None:
 
 @pytest.mark.asyncio
 async def test_an_opt_in_without_a_version_is_refused_before_any_query() -> None:
-    class _NoDb:
-        def __getattr__(self, name):  # pragma: no cover - only on a regression
-            raise AssertionError(f"database used: {name}")
-
+    db = _NoDb()
     with pytest.raises(ValueError):
         await svc.record_mcp_notice_consent(
-            _NoDb(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
             user_id="u1",
             value=True,
             wording_version=None,
         )
+    assert db.used == []
 
 
 @pytest.mark.asyncio
 async def test_claiming_nothing_runs_no_statement() -> None:
-    class _NoDb:
-        def __getattr__(self, name):  # pragma: no cover - only on a regression
-            raise AssertionError(f"database used: {name}")
-
+    db = _NoDb()
     assert (
-        await svc.claim_notice_deliveries(_NoDb(), user_id="u1", notice_ids=[])  # type: ignore[arg-type]
+        await svc.claim_notice_deliveries(db, user_id="u1", notice_ids=[])  # type: ignore[arg-type]
         == set()
     )
+    assert db.used == []
 
 
 @pytest.mark.asyncio
