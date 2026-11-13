@@ -28,6 +28,8 @@ import {
 import StoragePage from "./page";
 import type { FileObject } from "@/lib/api/files";
 import { ApiError } from "@/lib/api/base";
+import en from "@/messages/en.json";
+import ja from "@/messages/ja.json";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -711,5 +713,22 @@ describe("StoragePage", () => {
     expect(
       screen.getByRole("button", { name: "list.deleteDialog.confirm" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("scan copy (#565)", () => {
+  it("says a held file can take a few minutes, in both languages", () => {
+    // Without checksum binding a new upload is held for several minutes.
+    expect(en.storage.list.scan.downloadPending).toMatch(/a few minutes/);
+    expect(ja.storage.list.scan.downloadPending).toMatch(/数分/);
+    expect(en.storage.list.scan.pendingHint).toMatch(/a few minutes/);
+    expect(ja.storage.list.scan.pendingHint).toMatch(/数分/);
+    expect(Object.values(en.storage.list.scan).join(" ")).not.toMatch(/in a moment/);
+  });
+
+  it("uses one Japanese term for the scan", () => {
+    const text = Object.values(ja.storage.list.scan).join("");
+    expect(text).toMatch(/検査/);
+    expect(text).not.toMatch(/スキャン/);
   });
 });

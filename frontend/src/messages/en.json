@@ -401,12 +401,12 @@
       },
       "scan": {
         "pending": "Scanning",
-        "pendingHint": "Being checked for malware. You can download it when the check finishes.",
+        "pendingHint": "Being checked for malware. This can take a few minutes; you can download it when the check finishes.",
         "blocked": "Blocked",
         "blockedHint": "The malware scan found a threat in this file. It cannot be downloaded and will be removed automatically.",
         "error": "Could not be checked",
         "errorHint": "The file could not be checked for malware and cannot be downloaded. Delete it and upload it again, or contact support.",
-        "downloadPending": "This file is still being scanned. Try again in a moment.",
+        "downloadPending": "This file is still being scanned. This can take a few minutes; try again later.",
         "downloadBlocked": "This file was blocked by the malware scan."
       }
     }
@@ -473,7 +473,7 @@
     "linkHintConfirmation": "If this sign-in can be connected to that account, we emailed a confirmation link to its address — open it in this browser within 15 minutes. Otherwise sign in with your email address and password (or the way you signed in before) and connect this sign-in method in Profile.",
     "oauthFailed": "Sign-in failed. Please try again.",
     "oauthExpired": "The sign-in link has expired. Please try again.",
-    "oauthOtherBrowser": "This sign-in can only finish in the browser where it was started. Start it again in this browser — from your invitation or device link if you used one. If this keeps happening, allow cookies for this site.",
+    "oauthOtherBrowser": "This sign-in can only finish in the browser where it was started. Start it again in this browser — from your invite link or the device authorization page if you started there. If this keeps happening, allow cookies for this site.",
     "providerUnlinked": "This sign-in method was removed from its account. Sign in with another method of that account.",
     "termsRequired": "No account was created: please agree to the Terms of Service and Privacy Policy below, then sign in again.",
     "loginId": "Login ID or email",
