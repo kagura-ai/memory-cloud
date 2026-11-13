@@ -13,9 +13,10 @@ before. ``status`` and the dedup index are unchanged. Re-runnable end to end
 (``IF NOT EXISTS`` everywhere, an index left INVALID by an interrupted build
 is dropped and built again).
 
-Downgrade is refused while a live row is ``infected`` or ``error``: dropping
-the columns would make those blocked files downloadable again. Delete them
-first (or rescan them) and downgrade then.
+Downgrade is refused while a row is ``infected`` or ``error``, a soft-deleted
+one included (a context restore can bring it back): dropping the columns would
+make those blocked files downloadable again. Delete them for good first (or
+rescan them) and downgrade then.
 
 Revision ID: f40_565_file_scan
 Revises: f39_2768_operations_status
@@ -107,8 +108,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Refused while live ``infected`` / ``error`` rows exist (they would become
-    downloadable). The check runs under ``ACCESS EXCLUSIVE`` on ``file_objects``
+    """Refused while ``infected`` / ``error`` rows exist, soft-deleted ones
+    included (they would become downloadable, after a context restore too). The check runs under ``ACCESS EXCLUSIVE`` on ``file_objects``
     before anything is dropped, in the transaction that drops the CHECKs and
     the columns: no blocked row can arrive between the check and the drop, and
     a refusal rolls it all back. The indexes go first, only after the check
@@ -125,17 +126,15 @@ def downgrade() -> None:
     ).first()
     if has_column is not None:
         blocked = bind.execute(
-            sa.text(
-                "SELECT 1 FROM file_objects WHERE scan_status IN ('infected', 'error') "
-                "AND deleted_at IS NULL LIMIT 1"
-            )
+            sa.text("SELECT 1 FROM file_objects WHERE scan_status IN ('infected', 'error') LIMIT 1")
         ).first()
         if blocked is not None:
             raise RuntimeError(
-                "f40_565_file_scan downgrade refused: file_objects holds live rows the "
-                "malware scan blocked (scan_status 'infected' or 'error'); dropping the "
-                "scan columns would make them downloadable again. Delete those files "
-                "(or rescan them) first (#565)"
+                "f40_565_file_scan downgrade refused: file_objects holds rows the "
+                "malware scan blocked (scan_status 'infected' or 'error', soft-deleted "
+                "ones included: a context restore can bring them back); dropping the "
+                "scan columns would make them downloadable again. Delete those rows "
+                "for good (or rescan them) first (#565)"
             )
     op.execute("ALTER TABLE file_objects DROP CONSTRAINT IF EXISTS valid_file_scan_error")
     op.execute("ALTER TABLE file_objects DROP CONSTRAINT IF EXISTS valid_file_scan_status")

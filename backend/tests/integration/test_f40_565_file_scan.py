@@ -6,8 +6,9 @@
 - the three partial indexes exist and are valid;
 - an interrupted upgrade (an index left INVALID, another missing, columns
   already there) is completed by running it again;
-- downgrade is refused while a live row is ``infected`` or ``error`` and
-  drops everything once there is none; the round trip is repeatable.
+- downgrade is refused while a row is ``infected`` or ``error`` (a
+  soft-deleted one too) and drops everything once there is none; the round
+  trip is repeatable.
 
 The revision before f40 is read from the migration module itself, so
 re-chaining f40 onto another parent changes one line in the migration and
@@ -203,8 +204,9 @@ class TestF40FileScan:
             with engine.begin() as conn:
                 assert _index_validity(conn) == dict.fromkeys(_INDEXES, True)
 
-            # A live blocked row refuses the downgrade (it would become
-            # downloadable); a soft-deleted one does not count.
+            # A blocked row refuses the downgrade (it would become
+            # downloadable); a soft-deleted one too (a context restore can
+            # bring it back).
             with engine.begin() as conn:
                 infected = _insert_file(conn, ws, scan_status="infected")
                 error = _insert_file(conn, ws, scan_status="error", scan_error="scan_failed")
@@ -213,7 +215,7 @@ class TestF40FileScan:
                     text("UPDATE file_objects SET deleted_at = now() WHERE id = :id"),
                     {"id": gone},
                 )
-            for blocked in (infected, error):
+            for blocked in (infected, error, gone):
                 with pytest.raises(RuntimeError, match="downgrade refused"):
                     _downgrade(PRIOR_REV)
                 with engine.begin() as conn:
