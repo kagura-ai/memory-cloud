@@ -588,7 +588,7 @@ def _block(*items: dict) -> dict:
 
 
 class TestBudget:
-    def test_fit_takes_a_prefix_within_a_quarter(self):
+    def test_fit_takes_whole_items_within_a_quarter(self):
         items = [notices_mod.notice_item(_candidate("a" * 300)) for _ in range(3)]
         for max_chars in (2_000, 3_000, 5_000, 20_000):
             fitted = notices_mod.fit_notices(items, max_chars)
@@ -605,13 +605,33 @@ class TestBudget:
         item = notices_mod.notice_item(_candidate("お" * 300))
         assert notices_mod.fit_notices([item], 5_000) == _block(item)
 
-    def test_an_item_that_does_not_fit_stops_the_prefix(self):
+    def test_an_item_that_does_not_fit_is_skipped_and_the_next_one_tried(self):
         long, short = (
             notices_mod.notice_item(_candidate("a" * 300)),
             notices_mod.notice_item(_candidate("b")),
         )
-        assert notices_mod.fit_notices([long, short], 2_400) == {}
+        assert notices_mod.fit_notices([long, short], 2_400) == _block(short)
         assert notices_mod.fit_notices([short, long], 2_400) == _block(short)
+
+    def test_the_order_is_kept_among_the_items_placed(self):
+        first, long, last = (
+            notices_mod.notice_item(_candidate("First.")),
+            notices_mod.notice_item(_candidate("a" * 300)),
+            notices_mod.notice_item(_candidate("Last.")),
+        )
+        assert notices_mod.fit_notices([first, long, last], 2_400) == _block(first, last)
+
+    @pytest.mark.asyncio
+    async def test_a_long_notice_first_does_not_hold_back_a_short_one(self, flag, signed_in):
+        long, short = _candidate("a" * 300), _candidate("Short notice.")
+
+        text, _, notices = await _run({"max_chars": 2_000}, notices=Notices([long, short]))
+
+        reply = json.loads(text)
+        assert len(text) <= 2_000
+        assert [i["id"] for i in reply["notices"]["items"]] == [str(short.id)]
+        # Only the placed one is claimed: the long one stays for a reply with room.
+        assert notices.claim.await_args.kwargs["notice_ids"] == [short.id]
 
     @pytest.mark.asyncio
     async def test_the_block_comes_off_the_lane_budget(self, flag, signed_in):

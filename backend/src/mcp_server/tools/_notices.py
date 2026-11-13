@@ -17,10 +17,12 @@
    without its text. Advisory: a failure or a read slower than 2 s gives none.
 3. :func:`fit_notices` — whole items, in order, within what the
    ``plan_headroom`` field leaves of ``max_chars // 4`` (the two server
-   notices share one quarter, so the lanes keep three quarters); the first
-   item that does not fit ends the list and waits, unclaimed, for a later
-   session start. The block's size comes off the lane budget before the
-   build.
+   notices share one quarter, so the lanes keep three quarters); an item that
+   does not fit is skipped, stays unclaimed and the next one is tried, so a
+   long notice never holds back a short one. A skipped item comes with a
+   later ``bootstrap`` call that has room for it (a larger ``max_chars``);
+   a client that always asks for the same small budget never gets it. The
+   block's size comes off the lane budget before the build.
 4. :func:`claim_notices` — after the reply is otherwise built, the fitted ids
    are claimed in one statement in a session of their own; only the ids it
    returns are placed. Any failure leaves the key out; the call succeeds.
@@ -145,14 +147,18 @@ def _block(items: list[dict[str, Any]]) -> dict[str, Any]:
 def fit_notices(
     items: list[dict[str, Any]], max_chars: int, *, reserved: int = 0
 ) -> dict[str, Any]:
-    """``{"notices": {...}}`` holding the longest prefix of whole items that fits
-    ``max_chars // 4`` less ``reserved`` (the fitted ``plan_headroom`` field's
-    size) of compact JSON, or ``{}`` when not even the first fits."""
+    """``{"notices": {...}}`` holding the whole items that fit ``max_chars // 4``
+    less ``reserved`` (the fitted ``plan_headroom`` field's size) of compact
+    JSON, or ``{}`` when none fits.
+
+    Greedy in delivery order: an item that would overflow is skipped and the
+    next one tried, so the order is kept among the items placed.
+    """
     cap = max_chars // MCP_NOTICE_BUDGET_SHARE - reserved
     fitted: list[dict[str, Any]] = []
     for item in items:
         if json_chars(_block([*fitted, item])) > cap:
-            break
+            continue
         fitted.append(item)
     return _block(fitted) if fitted else {}
 

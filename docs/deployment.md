@@ -944,9 +944,11 @@ still goes by email as a service notice.
 - **Once per user.** A notice is delivered at most once per person across all
   their clients: the server records the delivery when it places the notice in
   a reply, in the same statement that checks the notice is still live and the
-  person still opted in. A notice the reply has no room for is not recorded
-  and comes at a later session start. A reply lost on the way to the client
-  still counts as delivered.
+  person still opted in. A notice the reply has no room for is skipped (the
+  next one is still tried) and not recorded; it comes with a later
+  `bootstrap` call that has room for it, so a client that always asks for a
+  small `max_chars` may never get a long notice. A reply lost on the way to
+  the client still counts as delivered.
 - **Budget.** The notices and the plan-headroom notice together take at most a
   quarter of `bootstrap`'s `max_chars`; a notice is whole or absent, never
   cut.
@@ -1004,10 +1006,13 @@ curl -X POST https://example.com/api/v1/admin/mcp-notices/<notice-id>/withdraw \
   too), an e-mail or IP address. The check also reads fullwidth forms and
   ignores combining marks placed inside a word. Names that look like host
   names are refused too — `README.md`, `Node.js`, `Ver.アップ`: reword them
-  ("the README file"). `。` counts as a dot, so a sentence that runs straight
-  from `。` into Latin letters (「…しました。Kagura」) needs a space after
-  `。`. Version numbers such as `v0.161.0` pass. Use 「」 or ' ' instead of
-  `"`.
+  ("the README file"). `。` counts as a dot only directly after an ASCII
+  letter, digit or hyphen (`example。com` is refused), so ordinary Japanese
+  such as 「…しました。Kagura を…」 or 「…行います。MCP の…」 passes; an ASCII word
+  directly before `。` and Latin letters after it (「…Kagura。Kagura…」) is
+  refused: put a space before `。` or reword. Version numbers such as
+  `v0.161.0` pass. Use 「」 or ' ' instead of `"`. A text longer than 1,200
+  characters before normalisation is refused (`too_long`) at once.
 - **No edit, no delete.** A correction is withdraw + create, so everyone who
   saw a notice saw the same text. Withdrawing stops delivery at once.
 - **Audit.** Every create and withdraw writes an `audit_logs` row
