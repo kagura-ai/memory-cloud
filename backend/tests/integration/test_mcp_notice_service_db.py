@@ -158,6 +158,26 @@ async def _raw_notice(db: AsyncSession, *, start_offset: timedelta, end_offset: 
     return notice.id
 
 
+async def _raw_audit_rows(db: AsyncSession, notice_id: uuid.UUID) -> list[dict]:
+    """Every column of the notice's audit rows, read in a fresh session (not
+    the identity map) with ``SELECT *`` so a column the ORM does not map is
+    covered too."""
+    async with _maker(db)() as session:
+        result = await session.execute(
+            text("SELECT * FROM audit_logs WHERE resource = :resource ORDER BY id"),
+            {"resource": f"mcp_notice:{notice_id}"},
+        )
+        return [dict(row) for row in result.mappings().all()]
+
+
+def _assert_text_in_no_column(rows: list[dict], body: str) -> None:
+    assert rows
+    for row in rows:
+        assert len(row) >= len(sa_inspect(AuditLog).column_attrs)
+        for column, value in row.items():
+            assert body not in str(value), column
+
+
 async def _claim(db: AsyncSession, user: User, ids: list[uuid.UUID]) -> set[uuid.UUID]:
     async with _maker(db)() as session:
         return await svc.claim_notice_deliveries(session, user_id=user.user_id, notice_ids=ids)
@@ -291,9 +311,11 @@ async def test_create_writes_one_audit_row_without_the_text(db_session, make_use
     assert audit.new_value_hash == sha256_hex(body)
     assert audit.ip_address == "192.0.2.10" and audit.user_agent == "console/1.0"
     assert audit.user_metadata is not None and audit.user_metadata["text_chars"] == len(body)
-    # The text is in no column of the audit row (only its hash and length are).
-    for attr in sa_inspect(AuditLog).column_attrs:
-        assert body not in str(getattr(audit, attr.key)), attr.key
+    # The text is in no column of the audit row (only its hash and length are),
+    # read back from the table itself, every column, stringified.
+    rows = await _raw_audit_rows(db_session, view.id)
+    assert len(rows) == 1
+    _assert_text_in_no_column(rows, body)
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -372,6 +394,47 @@ async def test_withdrawn_notices_count_against_the_daily_cap(db_session, make_us
 
 
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize(
+    ("age", "refused"),
+    [
+        pytest.param(timedelta(hours=23), True, id="23h_ago_counts"),
+        pytest.param(timedelta(hours=25), False, id="25h_ago_does_not"),
+    ],
+)
+async def test_daily_cap_is_a_rolling_24_hour_window(
+    db_session, make_users, age: timedelta, refused: bool
+) -> None:
+    """Owner decision 3: at most 5 CREATED per rolling 24 hours. Rows written
+    straight to the table (withdrawn, so the active cap stays out of the way)
+    with ``created_at`` 23 h ago fill the cap; the same rows 25 h ago do not.
+    A 1-hour window passes the 25 h case but not the 23 h one; a 48-hour
+    window the other way round."""
+    await make_users()
+    now = await _now(db_session)
+    created_at = now - age
+    for _ in range(svc.MCP_NOTICE_MAX_CREATED_PER_DAY):
+        db_session.add(
+            McpNotice(
+                id=uuid.uuid4(),
+                text="Earlier notice.",
+                starts_at=created_at,
+                expires_at=created_at + timedelta(days=1),
+                withdrawn_at=created_at + timedelta(minutes=1),
+                created_at=created_at,
+            )
+        )
+    await db_session.commit()
+
+    if refused:
+        with pytest.raises(McpNoticeDailyLimitError):
+            await _create(db_session)
+        await db_session.rollback()
+    else:
+        view = await _create(db_session)
+        assert view.state == "active"
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_concurrent_creates_respect_the_active_cap(db_session, make_users) -> None:
     await make_users()
     await _create(db_session)
@@ -431,6 +494,7 @@ async def test_withdraw_is_idempotent_and_audited_once(db_session, make_users) -
         .all()
     )
     assert actions == ["mcp_notice.created", "mcp_notice.withdrawn"]
+    _assert_text_in_no_column(await _raw_audit_rows(db_session, view.id), view.text)
 
     with pytest.raises(McpNoticeNotFoundError):
         await svc.withdraw_notice(db_session, notice_id=uuid.uuid4(), actor=ACTOR)

@@ -19,11 +19,14 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.main import app
 from api.routes import mcp_notices as routes
-from auth.dependencies import require_session_auth
+from auth import dependencies as deps
+from auth.api_keys import APIKeyManager, VerifiedKey
+from auth.dependencies import APIKeyOrSessionUser, require_session_auth
 from config.settings import get_settings
 from db.base import get_db
 from services.mcp_notice_service import (
@@ -221,6 +224,75 @@ class TestSessionOnly:
                 ),
             )
             assert response.status_code in (401, 403), (method, token)
+
+    @pytest.mark.parametrize(
+        "token",
+        ["kagura_valid_key_for_the_test", "oauth-access-token-value"],
+        ids=["api_key", "oauth"],
+    )
+    def test_a_valid_bearer_credential_is_still_refused(
+        self, token, db, enabled, counter, record, monkeypatch
+    ) -> None:
+        """The test above sends tokens that fail verification, which a route on
+        ``APIKeyOrSessionUser`` refuses too. Here the credential VERIFIES: the
+        key and OAuth verifiers are patched to return a real principal (the
+        probe route on ``APIKeyOrSessionUser`` accepts it), and both
+        ``/me/mcp-notices`` routes still refuse it and record nothing."""
+        _current(monkeypatch, None)
+        monkeypatch.setattr(
+            APIKeyManager,
+            "verify_key",
+            AsyncMock(
+                return_value=VerifiedKey(
+                    id=1,
+                    user_id="u1",
+                    workspace_id=None,
+                    bound_context_id=None,
+                    key_prefix="kagura_valid",
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            deps,
+            "verify_oauth_bearer_token",
+            AsyncMock(return_value=("u1", "memory:read memory:write")),
+        )
+        monkeypatch.setattr(deps, "_build_api_key_user_dict", AsyncMock(return_value=dict(USER)))
+        monkeypatch.setattr(deps, "_build_oauth_user_dict", AsyncMock(return_value=dict(USER)))
+        monkeypatch.setattr(deps, "_get_user_workspace_id", AsyncMock(return_value=None))
+        headers = {"Authorization": f"Bearer {token}"}
+        put_body = {"mcp_notices": True, "wording_version": V}
+
+        async def _db():
+            yield db
+
+        probe = FastAPI()
+
+        @probe.get("/probe")
+        async def _probe_get(user: APIKeyOrSessionUser) -> dict:
+            return {"user_id": user["user_id"]}
+
+        @probe.put("/probe")
+        async def _probe_put(user: APIKeyOrSessionUser) -> dict:
+            return {"user_id": user["user_id"]}
+
+        probe.dependency_overrides[get_db] = _db
+        probe_client = TestClient(probe)
+        assert probe_client.get("/probe", headers=headers).json() == {"user_id": "u1"}
+        assert probe_client.put("/probe", headers=headers).json() == {"user_id": "u1"}
+
+        app.dependency_overrides[get_db] = _db
+        try:
+            client = TestClient(app, raise_server_exceptions=False)
+            got = client.get(URL, headers=headers)
+            put = client.put(URL, headers=headers, json=put_body)
+        finally:
+            app.dependency_overrides.pop(get_db, None)
+
+        assert got.status_code in (401, 403), got.text
+        assert put.status_code in (401, 403), put.text
+        record.assert_not_awaited()
+        db.commit.assert_not_awaited()
 
     def test_the_routes_depend_on_the_session_dependency_only(self) -> None:
         """Structural: the bearer test above gets 401 from an invalid token
