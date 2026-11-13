@@ -296,6 +296,18 @@ class LLMCallLog(Base):
             "workspace_id",
             "occurred_at",
         ),
+        # #2768: the operations status route's per-lane lookups (latest
+        # success over 30 days, calls in the last hour / day) of platform-paid
+        # calls. Without it a lane with no recent call walks every ledger row
+        # of the period (f41).
+        Index(
+            "idx_llm_call_log_platform_lane",
+            "caller",
+            "provider",
+            "model",
+            "occurred_at",
+            postgresql_where=text("paid_by = 'platform'"),
+        ),
     )
 
     def __repr__(self) -> str:

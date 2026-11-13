@@ -308,28 +308,45 @@ def _ledger_lane(lane: str) -> tuple[list[Any], Any] | None:
     return None
 
 
-async def _ledger_usage(
-    db: AsyncSession, lane: str, provider: str, model: str, now: datetime
-) -> LaneUsage:
+def _ledger_base(lane: str, provider: str, model: str) -> tuple[list[Any], Any]:
+    """A ledger lane's row predicates (platform-paid, its provider and model)
+    and its success predicate.
+
+    ``caller``, ``provider``, ``model`` and ``paid_by = 'platform'`` are the
+    leading columns and the predicate of ``idx_llm_call_log_platform_lane``,
+    so a lane's rows are found without reading the rest of the ledger.
+    """
     spec = _ledger_lane(lane)
     assert spec is not None
     predicates, success = spec
-    naive_now = _naive_utc(now)
-    base = [
+    return [
         *predicates,
         LLMCallLog.paid_by == "platform",
         LLMCallLog.provider == provider,
         LLMCallLog.model == model,
-    ]
-    last_success_q = (
+    ], success
+
+
+def _last_success_query(lane: str, provider: str, model: str, now: datetime) -> Any:
+    """The latest successful platform-paid call of a ledger lane (30 days)."""
+    base, success = _ledger_base(lane, provider, model)
+    query = (
         select(LLMCallLog.occurred_at)
-        .where(*base, LLMCallLog.occurred_at >= naive_now - USAGE_LOOKBACK)
+        .where(*base, LLMCallLog.occurred_at >= _naive_utc(now) - USAGE_LOOKBACK)
         .order_by(LLMCallLog.occurred_at.desc())
         .limit(1)
     )
-    if success is not None:
-        last_success_q = last_success_q.where(success)
-    last_success = (await db.execute(last_success_q)).scalar_one_or_none()
+    return query if success is None else query.where(success)
+
+
+async def _ledger_usage(
+    db: AsyncSession, lane: str, provider: str, model: str, now: datetime
+) -> LaneUsage:
+    base, _ = _ledger_base(lane, provider, model)
+    naive_now = _naive_utc(now)
+    last_success = (
+        await db.execute(_last_success_query(lane, provider, model, now))
+    ).scalar_one_or_none()
     hour, day = (
         await db.execute(
             select(

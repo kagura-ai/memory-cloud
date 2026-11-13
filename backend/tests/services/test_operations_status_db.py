@@ -21,7 +21,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from config.settings import Settings
@@ -49,6 +50,7 @@ from services.operations import job_status
 from services.operations.backlogs import read_backlogs
 from services.operations.llm_lanes import (
     LaneSnapshot,
+    _last_success_query,
     configured_platform_lanes,
     lane_usage,
     write_lane_snapshot,
@@ -403,6 +405,41 @@ class TestLaneUsage:
             resolve_stored_byok_keys=False,
         )
         assert plain.attribution == "platform"
+
+    async def test_a_quiet_lane_finds_its_last_success_without_reading_the_ledger(
+        self, db_session
+    ) -> None:
+        """A lane with no call in 30 days (an opt-in selector nobody uses)
+        next to a busy embedding lane: the last-success lookup must reach the
+        lane's own rows through an index on the lane's columns, not walk the
+        whole 30-day ledger backwards on ``occurred_at`` and filter each row.
+        """
+        naive = NOW.replace(tzinfo=None)
+        workspace_id, context_id = uuid4(), uuid4()
+        await db_session.execute(
+            insert(LLMCallLog),
+            [
+                {
+                    "occurred_at": naive - timedelta(minutes=i * 8),
+                    "caller": "recall",
+                    "call_type": "embedding",
+                    "provider": "openai",
+                    "model": "emb-busy-model",
+                    "paid_by": "platform",
+                    "user_id": "u-busy",
+                    "workspace_id": workspace_id,
+                    "context_id": context_id,
+                }
+                for i in range(5000)
+            ],
+        )
+        await db_session.execute(text("ANALYZE llm_call_log"))
+        sql = _last_success_query("recall_selector", "openai", "sel-quiet-model", NOW).compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+        conn = await db_session.connection()
+        plan = "\n".join((await conn.exec_driver_sql(f"EXPLAIN {sql}")).scalars())
+        assert "idx_llm_call_log_platform_lane" in plan, plan
 
     async def test_rerank_is_not_ledgered(self, db_session) -> None:
         usage = await lane_usage(

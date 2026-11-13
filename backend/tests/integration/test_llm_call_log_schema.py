@@ -198,6 +198,8 @@ async def test_required_indexes_exist(db_session):
     index_names = {r.indexname for r in rows}
     assert "idx_llm_call_log_occurred_at" in index_names
     assert "idx_llm_call_log_workspace_period" in index_names
+    # #2768: the operations status route's per-lane lookups.
+    assert "idx_llm_call_log_platform_lane" in index_names
 
 
 @pytest.mark.asyncio
