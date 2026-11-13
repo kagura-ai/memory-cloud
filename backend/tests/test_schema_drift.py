@@ -100,6 +100,7 @@ _MODEL_MODULES: tuple[str, ...] = (
     "models.neural",
     "models.oidc",
     "models.operation_history",
+    "models.operations_status",
     "models.public_mcp_usage",
     "models.referral",
     "models.resource",

@@ -165,6 +165,13 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # #2476: vector point deletes forget deferred behind a point writer;
         # opaque memory/point UUIDs and a collection name, no content.
         "deferred_point_deletes",
+        # #2768: operations status — the latest run of each scheduled job
+        # (code-defined job ids, times, integer counts, exception class names)
+        # and the platform LLM lanes as the scheduler leader sees them
+        # (provider/model names, credential presence, probe results). No user,
+        # workspace or context identifier, no content, nothing learned.
+        "scheduled_job_status",
+        "operations_llm_lanes",
         "signup_allowlist",
         "signup_gate_config",
         # Closed-beta invite links (#1581) — signup-gate plumbing like the two

@@ -18,6 +18,7 @@ from db.base import get_db
 from db.redis import get_redis_client, increment_counter
 from models.resource import IndexerState
 from services.resource_indexer import ResourceIndexer, recorded_failed_events
+from tasks.job_runs import JobResult, job_failed
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -122,7 +123,7 @@ async def record_indexer_run(resource_id: str, context_id: UUID) -> None:
         # Don't raise - recording failure shouldn't block indexing
 
 
-async def run_queued_indexers() -> None:
+async def run_queued_indexers() -> JobResult:
     """Process all queued indexers (APScheduler job).
 
     Runs every 5 minutes, processes up to 10 queued indexers per cycle.
@@ -148,9 +149,10 @@ async def run_queued_indexers() -> None:
 
             if not states:
                 logger.debug("indexer_no_queued_jobs")
-                return
+                return {"picked": 0, "failed": 0, "rate_limited": 0}
 
             logger.info("indexer_processing_queued_jobs", count=len(states))
+            failed = rate_limited = 0
 
             for state in states:
                 # The row was read at the pick: an operator rewind may have
@@ -170,6 +172,7 @@ async def run_queued_indexers() -> None:
                     )
                     state.next_run_at = utcnow() + RATE_LIMITED_RETRY
                     await db.commit()
+                    rate_limited += 1
                     continue
 
                 # Mark as running
@@ -235,6 +238,7 @@ async def run_queued_indexers() -> None:
                         context_id=state.context_id,
                         error=str(e),
                     )
+                    failed += 1
                     state.job_status = "failed"
                     error_metrics: dict[str, Any] = {"error": str(e)}
                     if failed_events:
@@ -242,11 +246,13 @@ async def run_queued_indexers() -> None:
                     state.metrics = error_metrics
                     await db.commit()
 
-            return  # Exit async for loop
+            # Exit async for loop
+            return {"picked": len(states), "failed": failed, "rate_limited": rate_limited}
 
         except Exception as e:
             logger.error("indexer_job_failed", error=str(e))
-            return
+            return job_failed(e)
+    return None
 
 
 def schedule_resource_indexer_jobs(scheduler: AsyncIOScheduler) -> None:

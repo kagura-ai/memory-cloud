@@ -513,6 +513,13 @@ openapi_tags = [
     {"name": "admin", "description": "Admin: user management and system stats"},
     {"name": "admin-plans", "description": "Admin: plan tier and quota management"},
     {
+        "name": "admin-operations",
+        "description": (
+            "Admin: scheduled job runs, work queue backlogs and platform LLM lane "
+            "health (aggregates only, Issue #2768)"
+        ),
+    },
+    {
         "name": "admin-worker-apps",
         "description": "Admin: worker app identity and signing-secret lifecycle",
     },
@@ -868,6 +875,7 @@ from api.routes import (  # noqa: E402
     admin,
     admin_memory_health,  # Issue #2764: deprecated alias of memory_health
     admin_neural,  # Issue #406: Manual kNN calibration recalibrate trigger
+    admin_operations,  # Issue #2768: operations status (jobs, backlogs, LLM lanes)
     admin_plans,
     admin_referrals,  # Issue #1470: referral ledger + per-grant revoke
     admin_signup_gate,  # Issue #358: admin-configurable signup gate
@@ -1035,6 +1043,9 @@ app.include_router(admin_sleep.router, prefix="/api/v1")
 # the admin path is a deprecated alias for one release.
 app.include_router(memory_health.router, prefix="/api/v1")
 app.include_router(admin_memory_health.router, prefix="/api/v1")
+
+# Operations status: scheduled jobs, work queue backlogs, LLM lanes (Issue #2768)
+app.include_router(admin_operations.router, prefix="/api/v1")
 
 # Admin Neural calibrate trigger (Issue #406 Phase B - Manual kNN recalibration)
 app.include_router(admin_neural.router, prefix="/api/v1")

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from db.base import get_db
 from models.auth import OAuth2DeviceCode
+from tasks.job_runs import JobResult, job_failed
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -57,17 +58,19 @@ async def cleanup_expired_device_codes(db: AsyncSession, now: datetime | None = 
     return int(cast(CursorResult[Any], result).rowcount or 0)
 
 
-async def cleanup_expired_device_codes_task() -> None:
+async def cleanup_expired_device_codes_task() -> JobResult:
     """APScheduler entry point — owns its own session via ``get_db()``."""
     async for db in get_db():
         try:
             deleted = await cleanup_expired_device_codes(db)
             await db.commit()
             logger.info("device_code_cleanup_completed", deleted=deleted)
-        except Exception:
+        except Exception as exc:
             logger.exception("device_code_cleanup_failed")
             await db.rollback()
-        return
+            return job_failed(exc)
+        return {"deleted": deleted}
+    return None
 
 
 def schedule_device_code_tasks(scheduler: AsyncIOScheduler) -> None:

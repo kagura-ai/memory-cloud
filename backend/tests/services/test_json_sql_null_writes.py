@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,6 +30,7 @@ from models.llm_call_log import LLMCallLog
 from models.measurement import Measurement
 from models.memory import Memory, NeuralMemoryEdge
 from models.memory_access_event import MemoryAccessEvent
+from models.operations_status import ScheduledJobStatus
 from models.public_mcp_usage import PublicMcpUsageEvent
 from models.resource import IndexerState, Resource, ResourceEvent, WorkspaceConnector
 from models.schemas import RememberRequest
@@ -281,16 +283,39 @@ CASES: list[tuple[str, str, str, Factory, bool]] = [
         ),
         False,
     ),
+    # #2768: the latest counts of a scheduled job (keyed by job_id).
+    (
+        "scheduled_job_status",
+        "last_counts",
+        "last_counts",
+        lambda s, c: ScheduledJobStatus(
+            job_id=f"jn_{uuid4().hex[:12]}",
+            job_name="json null case",
+            trigger_kind="interval",
+            last_registered_at=datetime.now(UTC),
+            registered_since=datetime.now(UTC),
+            **c,
+        ),
+        True,
+    ),
 ]
+
+# Tables whose primary key is not ``id``.
+_PRIMARY_KEY = {"scheduled_job_status": "job_id"}
+
+
+def _row_id(table: str, row: Any) -> Any:
+    return getattr(row, _PRIMARY_KEY.get(table, "id"))
 
 
 async def _stored(db, table: str, column: str, row_id: Any) -> tuple[bool, str | None]:
     """(``IS NULL``, ``::text``) of the stored column, bypassing the ORM."""
+    key = _PRIMARY_KEY.get(table, "id")
     row = (
         await db.execute(
             text(
                 f'SELECT "{column}" IS NULL AS sql_null, "{column}"::text AS raw '
-                f"FROM {table} WHERE id = :id"
+                f"FROM {table} WHERE {key} = :id"
             ),
             {"id": row_id},
         )
@@ -312,20 +337,20 @@ async def test_none_is_stored_as_sql_null(db_session, table, column, attr, facto
     db_session.add_all([explicit, omitted])
     await db_session.flush()
 
-    assert await _stored(db_session, table, column, explicit.id) == (True, None)
-    assert await _stored(db_session, table, column, omitted.id) == (True, None)
+    assert await _stored(db_session, table, column, _row_id(table, explicit)) == (True, None)
+    assert await _stored(db_session, table, column, _row_id(table, omitted)) == (True, None)
 
     if not updatable:
         await db_session.rollback()
         return
     setattr(explicit, attr, {"k": 1})
     await db_session.flush()
-    sql_null, raw = await _stored(db_session, table, column, explicit.id)
+    sql_null, raw = await _stored(db_session, table, column, _row_id(table, explicit))
     assert sql_null is False and raw is not None and '"k"' in raw
 
     setattr(explicit, attr, None)
     await db_session.flush()
-    assert await _stored(db_session, table, column, explicit.id) == (True, None)
+    assert await _stored(db_session, table, column, _row_id(table, explicit)) == (True, None)
     await db_session.rollback()
 
 

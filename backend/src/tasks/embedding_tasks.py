@@ -4,6 +4,7 @@ Issue #76: Crash recovery for memories whose embedding processing was
 interrupted (server restart, error, or create_task failure).
 """
 
+from dataclasses import asdict
 from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -11,6 +12,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tasks.job_runs import JobResult, job_failed
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -127,7 +129,7 @@ async def _fail_exhausted_reclaims(db: AsyncSession, stale_cutoff: datetime, now
         )
 
 
-async def sweep_pending_embeddings() -> None:
+async def sweep_pending_embeddings() -> JobResult:
     """Find and process memories stuck in pending/processing/failed status.
 
     - pending older than 10s: create_task likely failed or never fired
@@ -152,6 +154,7 @@ async def sweep_pending_embeddings() -> None:
     )
     from utils.datetime import utcnow
 
+    outcome: JobResult = None
     async for db in get_db():
         try:
             now = utcnow()
@@ -202,7 +205,7 @@ async def sweep_pending_embeddings() -> None:
             pending_ids = [row[0] for row in result.all()]
 
             if not pending_ids:
-                return
+                return {"processed": 0, "failed": 0}
 
             logger.info("sweep_pending_embeddings", count=len(pending_ids))
 
@@ -228,9 +231,12 @@ async def sweep_pending_embeddings() -> None:
                 processed=len(pending_ids) - failed,
                 failed=failed,
             )
+            outcome = {"processed": len(pending_ids) - failed, "failed": failed}
 
         except Exception as e:
             logger.error("sweep_pending_embeddings_failed", error=str(e), exc_info=True)
+            outcome = job_failed(e)
+    return outcome
 
 
 class _SeedState:
@@ -244,7 +250,7 @@ class _SeedState:
     done = False
 
 
-async def reconcile_content_chunk_gaps() -> None:
+async def reconcile_content_chunk_gaps() -> JobResult:
     """Re-queue the memories a context's inactive chunks left without them (#2107).
 
     First, until it has completed once in this process, the one-time seed of
@@ -260,6 +266,7 @@ async def reconcile_content_chunk_gaps() -> None:
     from services.content_chunk_gaps import reconcile_content_chunk_gaps as reconcile
     from services.content_chunk_gaps import seed_content_chunk_gaps as seed
 
+    outcome: JobResult = None
     async for db in get_db():
         if not _SeedState.done:
             try:
@@ -281,9 +288,12 @@ async def reconcile_content_chunk_gaps() -> None:
                     deferred=result.deferred,
                     failed=result.failed,
                 )
+            outcome = asdict(result)
         except Exception as e:
             await db.rollback()
             logger.error("content_chunks_gap_reconcile_tick_failed", error=str(e), exc_info=True)
+            outcome = job_failed(e)
+    return outcome
 
 
 def schedule_embedding_tasks(scheduler: AsyncIOScheduler) -> None:

@@ -10,12 +10,13 @@ period and the GDPR 1-month SLA.
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from tasks.job_runs import JobResult, job_failed
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-async def sweep_pending_erasures() -> None:
+async def sweep_pending_erasures() -> JobResult:
     """Find cooling_off requests whose scheduled_for has passed and execute.
 
     Each request runs in its own service-level transaction; failures are
@@ -25,6 +26,7 @@ async def sweep_pending_erasures() -> None:
     from db.base import get_db
     from services.account_erasure_service import AccountErasureService
 
+    outcome: JobResult = None
     async for db in get_db():
         try:
             service = AccountErasureService(db)
@@ -40,6 +42,10 @@ async def sweep_pending_erasures() -> None:
                 error=str(exc),
                 exc_info=True,
             )
+            outcome = job_failed(exc)
+        else:
+            outcome = {"executed": int(executed or 0)}
+    return outcome
 
 
 def schedule_erasure_tasks(scheduler: AsyncIOScheduler) -> None:

@@ -2183,6 +2183,22 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 
 `PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
 
+### Operations status
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/operations/status` | The state of operations in aggregates only (#2768): every scheduled job's last run, every work queue's size and oldest item, every platform LLM lane's recorded usage and latest probe. Any process answers (stored rows only). A service operator gets `200`. `Cache-Control: no-store`; concurrent polls of one process share one read for 5 s. |
+
+The response (`schema_version: 1`) has `as_of`, `overdue_grace_seconds`, `scheduler_registered_at`, `probe_enabled`, and three lists:
+
+| Field | Entry fields |
+|-------|--------------|
+| `jobs` | `job_id`, `name`, `trigger` (`interval` / `cron` / `other`), `expected_interval_seconds`, `registered`, `running`, `overdue`, `last_started_at`, `last_finished_at`, `last_outcome` (`ok` / `failed` / `missed`), `last_outcome_at`, `last_success_at`, `consecutive_failures`, `error_class` (exception class name, never the message), `last_duration_ms`, `counts` (integer counts the run returned) |
+| `backlogs` | `name`, `drained_by` (job ids; empty = people), `count`, `oldest_at`, `oldest_age_seconds`, `error_class` (set when the count could not be read; `DeadlineExceeded` when the request ran out of time) |
+| `llm` | `lane` (`embedding`, `sleep_judge`, `supersede_verify`, `recall_selector`, `analysis`, `rerank`), `provider`, `model`, `credential_present`, `snapshot_at`, `usage_recorded`, `usage_attribution` (`platform` / `includes_workspace_keys`), `last_success_at`, `calls_last_hour`, `calls_last_day`, `error_class`, `probe` (`null` unless the opt-in probe ran: `last_probe_at`, `last_outcome`, `last_latency_ms`, `error_class`, `consecutive_failures`, `last_success_at`) |
+
+No user, workspace or context identifier, email address, memory text or exception message is part of the response. See [Operations status](deployment.md#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768) for the meaning of each field, the probe setting and what to alert on.
+
 ### Sleep Maintenance
 
 | Endpoint                                         | Purpose                                                       |

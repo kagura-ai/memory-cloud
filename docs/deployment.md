@@ -498,6 +498,11 @@ and set `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS` to the console's addresses. Run it
 with `SCHEDULER_LEADER_ENABLED=false` so scheduled jobs stay on the public
 processes. The public processes run `off`.
 
+The console reads job runs, work queue backlogs and LLM lane health from
+`GET /api/v1/admin/operations/status` (stored rows only; the `service` process
+needs no LLM key for it): see
+[Operations status](#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768).
+
 Each request of the console carries the credential and `X-Operator-Email`, the
 address of the person acting (exactly one header value; lower-cased; ASCII; at
 most 246 characters; local part `[a-z0-9._+-]`). memory-cloud trusts the
@@ -5030,6 +5035,179 @@ On a split host the Postgres service is defined in `docker-compose.data.yml`
 on the data host. That host does not `git fetch` this repository, so the
 `command:` line for `max_connections` has to be carried over to its copy of
 the file by hand — follow your ops runbook for changing the data host.
+
+## Operations status (scheduled jobs, backlogs, LLM lanes) — Issue #2768
+
+`GET /api/v1/admin/operations/status` reports the state of operations in
+aggregates only, so an operator sees a job that stopped or keeps failing
+without reading container logs. It sits behind the system-admin gate and follows
+`SYSTEM_ADMIN_MODE` like every admin route: a system admin's session in
+`session` mode, the operator console in `service` mode, `404` (and absent from
+`/openapi.json`) in `off`. It reads stored rows only: the scheduler leader
+writes them, and any API process answers, the `service` process included. That
+process needs no LLM key and no scheduler for this route.
+
+The response carries no user, workspace or context identifier, no email
+address, no memory text and no exception message: job ids and names, queue and
+lane names, provider and model names, times, integers and exception **class**
+names only. It is safe to show on a status screen or hand to a tool. The read
+runs in a read-only transaction with a 5 s statement timeout and a 10 s budget
+for the whole request; entries the budget did not reach carry
+`error_class: "DeadlineExceeded"`. Concurrent polls of one process share one
+read, reused for 5 s. The response is sent with `Cache-Control: no-store`.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OPERATIONS_STATUS_OVERDUE_GRACE_SECONDS` | `900` | Slack added to a job's expected interval before it is reported `overdue`. |
+| `OPERATIONS_PROBE_INTERVAL_SECONDS` | `0` (off) | The opt-in LLM lane probe (below). `0` turns it off; otherwise at least `300` (a smaller value stops startup). |
+
+### `jobs`
+
+Every job the scheduler leader registers is recorded in `scheduled_job_status`,
+one row per job updated in place (not a history). A job added later is covered
+without further work. Fields per job:
+
+- `trigger` (`interval` / `cron`) and `expected_interval_seconds`: the
+  longest gap between two fires.
+- `registered`: the job is part of the leader's latest registration. A job the
+  current configuration no longer schedules keeps its row with
+  `registered: false` and is never overdue.
+- `last_started_at`, `last_finished_at`, `last_duration_ms`, and `running`: a
+  run was started after the latest outcome.
+- `last_outcome`: `ok`, `failed` (the job raised, or caught its own error and
+  reported it) or `missed` (the run was skipped past its misfire grace).
+  `last_outcome_at`, `last_success_at`, `consecutive_failures`, and
+  `error_class`: the exception class name of the latest failed run.
+- `counts`: the integer counts the latest finished run returned (for example
+  `deleted`, `processed` / `failed`, `executed`). A run that was skipped because
+  another process held its lock returns `{"skipped": 1}`. That run does not
+  count as a success.
+- `overdue`: registered, and no run started within the expected interval plus
+  the grace. Interval jobs count from the later of their last start and the
+  latest registration, so a deploy does not flag them. Cron jobs count from
+  their last start, so a run skipped by downtime is flagged. A run that hangs
+  is flagged at its start plus the interval plus the grace.
+
+Two things to know when reading it:
+
+- **The outcome is job-level.** A run that returns normally is `ok` even when
+  some of its items failed. The per-item failures are in `counts`. Watch
+  `counts.failed` (the embedding sweep) and `counts.errors` (Sleep, the BM25
+  drift run), and the `embedding_failed_*` backlogs.
+- **A run interrupted by a restart or a leader change** shows as `failed` with
+  `error_class: "CancelledError"` until its next run.
+
+`scheduler_registered_at` is when the current leader registered its jobs. The
+always-on `operations_lane_snapshot` job (every 5 minutes, no external call)
+doubles as a heartbeat. If it is overdue, the leader is not running jobs.
+
+### `backlogs`
+
+Count and oldest item per work queue, read with the draining job's own
+predicate. `drained_by` names the jobs that drain it. An empty list means people
+drain it.
+
+| Name | Queue | Drained by |
+|---|---|---|
+| `embedding_pending` / `embedding_processing` | Memories waiting for, or in, their embedding | `sweep_pending_embeddings` |
+| `embedding_failed_retryable` | Failed embeddings with retries left | `sweep_pending_embeddings` |
+| `embedding_failed_stalled` | Failed embeddings with no retries left (not searchable) | people: `POST /api/v1/admin/embedding/retry-failed` |
+| `deferred_point_deletes` | Vector deletes waiting for their drain | `drain_deferred_point_deletes` |
+| `erasure_pending` | Account erasures awaiting the user's confirmation | people |
+| `erasure_cooling_off` / `erasure_cooling_off_due` | Erasures in their cooling-off period / past it | `sweep_pending_erasures` |
+| `erasure_in_progress` / `erasure_failed` | Erasures running / failed | `sweep_pending_erasures` / people |
+| `vector_erasure_jobs` | Vector payload erasures not yet complete | `sweep_pending_erasures` |
+| `force_transfer_requests_pending` | Ownership force transfers awaiting a second admin | people |
+| `storage_object_deletions_due` | Stored objects due for deletion | `storage_object_deletion_sweeper` |
+| `file_reservations_expired` / `file_soft_deleted_due` | Abandoned upload reservations / deleted files past retention | `orphan_file_sweeper` / `soft_delete_file_gc` |
+| `resource_indexer_due` | Resource indexers due to run | `resource_indexer` |
+| `email_action_tokens_spent`, `email_signup_requests_expired`, `device_codes_expired`, `known_devices_stale` | Rows past their retention | the matching cleanup job |
+| `referral_grants_pending` | Referral grants waiting to be credited (listed while the sweep is on) | `apply_pending_referral_grants` |
+
+Each entry has `count`, `oldest_at`, `oldest_age_seconds`, and `error_class`
+when the count could not be read.
+
+### `llm`
+
+One entry per platform-paid LLM lane the deployment configures: `embedding`
+(the default embedding model), `sleep_judge`, `supersede_verify` (with
+`SUPERSEDE_VERIFY_MODE=llm`), `recall_selector`, `analysis` (with
+`MANAGED_LLM_PROVIDER`), and `rerank` (a self-hosted reranker: `RERANK_BASE_URL`,
+or `DEFAULT_RERANKER_PROVIDER=self_hosted`). Lanes served by a workspace's own
+key are out of scope.
+
+The leader writes the lane set at scheduler start and every 5 minutes:
+provider, model and `credential_present` (whether the leader holds the platform
+credential, never the credential itself). The usage comes from what is already
+recorded, platform-paid calls of the lane's provider and model only:
+
+- `last_success_at` (within 30 days);
+- `calls_last_hour` and `calls_last_day`.
+
+Notes on the sources:
+
+- **`embedding`** counts recall query embeddings only (writes and cache hits
+  are not ledgered).
+- **`rerank`** is not ledgered (`usage_recorded: false`): only the probe shows
+  its health.
+- **`sleep_judge` and `analysis`** read the Sleep and Analysis reports' usage
+  rows. A success is a row with calls and tokens under a report that did not
+  fail.
+- **`usage_attribution: "includes_workspace_keys"`** is set on `sleep_judge`
+  while `RESOLVE_STORED_BYOK_KEYS=true`. Sleep records every run as
+  platform-paid, even when a workspace's own key served it. Every other lane is
+  `platform`.
+
+### The probe (opt-in)
+
+With `OPERATIONS_PROBE_INTERVAL_SECONDS` set, the leader makes one minimal call
+per distinct provider and model of the configured lanes:
+
+- a one-token completion (`max_tokens=16`, the answer is discarded);
+- a short fixed text to embed (sent straight to the provider, not the
+  embedding cache);
+- a one-document rerank.
+
+Each lane then shows `probe` with:
+
+- `last_probe_at` and `last_outcome` (`ok` / `failed`);
+- `last_latency_ms` and `error_class`;
+- `consecutive_failures` and `last_success_at`.
+
+A provider that fails shows as failed within one interval.
+
+- **The calls are paid.** Leave it off unless you want the signal. `900`
+  (15 minutes) is a reasonable value.
+- **Platform credentials only.** It uses the deployment's own credentials
+  (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `OLLAMA_API_KEY`,
+  `SELF_HOSTED_BASE_URL`, `RERANK_BASE_URL`), never a workspace's own key or a
+  workspace-stored self-hosted URL. Self-hosted lanes are probed too: no
+  provider bill, but load on your inference server.
+- **Ledgered as admin calls.** Completion and embedding probes are entered in
+  the cost ledger (`llm_call_log`: `caller = 'admin'`, `paid_by = 'platform'`,
+  `call_metadata.stage = 'operations_probe'`, no user, workspace or context).
+  They stay out of the cost dashboards and out of the lane usage counts.
+  Rerank probes are not ledgered.
+- **Bounded.** Each call has a 20 s timeout and SDK retries off. One run has a
+  budget of `min(interval / 2, 120 s)`. Targets past the budget are counted in
+  the job's `counts.budget_skipped`.
+- **`GET /health` does not change.** A provider outage never takes the API out
+  of rotation.
+
+### Polling for a stalled or failing job
+
+Poll every 1-5 minutes with the operator console (`service` mode) or an admin
+session, and alert on:
+
+- any job with `overdue: true` (a stalled job or a dead leader);
+- `consecutive_failures >= 3` (or `last_outcome == "failed"` for a daily job), with `error_class`
+  as the first clue;
+- a backlog whose `oldest_age_seconds` keeps growing, especially
+  `erasure_cooling_off_due`, `embedding_failed_stalled` and
+  `deferred_point_deletes`;
+- `counts.failed` / `counts.errors` above zero over several runs;
+- an LLM lane whose `probe.consecutive_failures` grows, or whose
+  `credential_present` is `false`.
 
 ## Redis Connection Pool (rate limits and daily quotas) — Issue #1556
 

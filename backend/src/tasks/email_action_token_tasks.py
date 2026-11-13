@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from db.base import get_db
 from models.auth import EmailActionToken, EmailSignupRequest
+from tasks.job_runs import JobResult, job_failed
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -83,7 +84,7 @@ async def cleanup_email_action_tokens(db: AsyncSession, now: datetime | None = N
     return int(cast(CursorResult[Any], result).rowcount or 0)
 
 
-async def cleanup_email_action_tokens_task() -> None:
+async def cleanup_email_action_tokens_task() -> JobResult:
     """APScheduler entry point — owns its own session via ``get_db()``."""
     async for db in get_db():
         try:
@@ -95,10 +96,12 @@ async def cleanup_email_action_tokens_task() -> None:
                 deleted=deleted,
                 signup_requests_deleted=signup_requests_deleted,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("email_action_token_cleanup_failed")
             await db.rollback()
-        return
+            return job_failed(exc)
+        return {"deleted": deleted, "signup_requests_deleted": signup_requests_deleted}
+    return None
 
 
 def schedule_email_action_token_tasks(scheduler: AsyncIOScheduler) -> None:

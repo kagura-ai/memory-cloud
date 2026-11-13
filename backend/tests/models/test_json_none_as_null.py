@@ -81,6 +81,7 @@ def test_the_inventory_is_the_expected_one() -> None:
         "neural_memory_edges.metadata",
         "public_mcp_usage_events.documents",
         "resource_events.payload",
+        "scheduled_job_status.last_counts",
         "secret_access_log.req_meta",
         "sleep_actions.details",
         "sleep_reports.consolidation_result",

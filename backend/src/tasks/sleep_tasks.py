@@ -12,6 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import get_db
+from tasks.job_runs import JobResult, job_failed
 from tasks.single_flight import single_flight
 from utils.logger import get_logger
 
@@ -170,7 +171,7 @@ async def _refresh_hub_tag_cache(
     return len(hub_tags)
 
 
-async def sleep_maintenance_task():
+async def sleep_maintenance_task() -> JobResult:
     """Run sleep maintenance for all active users/contexts.
 
     Iterates over distinct (user_id, workspace_id, context_id) tuples
@@ -200,8 +201,8 @@ async def sleep_maintenance_task():
                     "sleep_maintenance_task_skipped",
                     reason="lock_held_by_other_process",
                 )
-                return
-            await _sleep_maintenance_run()
+                return {"skipped": 1}
+            return await _sleep_maintenance_run()
     except Exception as e:
         # Lock-acquisition / infra failures (e.g. Postgres unreachable when the
         # cron fires) occur outside _sleep_maintenance_run's own handler. Use a
@@ -210,9 +211,10 @@ async def sleep_maintenance_task():
         # start the sweep" (DB connectivity — wide blast radius), the inner one
         # means "the sweep itself failed".
         logger.error("sleep_maintenance_lock_acquire_failed", error=str(e), exc_info=True)
+        return job_failed(e)
 
 
-async def _sleep_maintenance_run() -> None:
+async def _sleep_maintenance_run() -> JobResult:
     """Run the Sleep Maintenance sweep across all active (user, workspace, context) tuples.
 
     Extracted from ``sleep_maintenance_task`` (Issue #933) so the cross-process
@@ -330,10 +332,12 @@ async def _sleep_maintenance_run() -> None:
                 runs=total_runs,
                 errors=total_errors,
             )
-            return
+            return {"contexts": len(contexts), "runs": total_runs, "errors": total_errors}
 
     except Exception as e:
         logger.error("sleep_maintenance_task_failed", error=str(e), exc_info=True)
+        return job_failed(e)
+    return None
 
 
 def schedule_sleep_tasks(scheduler: AsyncIOScheduler) -> None:
