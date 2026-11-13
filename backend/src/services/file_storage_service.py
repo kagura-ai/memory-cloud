@@ -1294,7 +1294,8 @@ class FileStorageService:
         While it was deleted its content key was free for another reservation,
         whose PUT may have replaced the bytes. With scanning on a ``clean``,
         ``unscanned`` or ``pending`` row is ``pending`` again (attempts reset,
-        due after a full PUT window from now); a legacy row (``unscanned``, or
+        due at once with checksum binding, otherwise after a full PUT window
+        from now); a legacy row (``unscanned``, or
         one carrying :data:`SCAN_LEGACY_REQUEUED`: requeued earlier, or passed by
         the backfill although its digest does not match) keeps the legacy digest
         rule through that scan. With

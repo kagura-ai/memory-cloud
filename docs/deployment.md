@@ -2221,9 +2221,10 @@ Other changes while scanning is on:
   of this file was blocked by the malware scan". A `pending` file is handed
   out (same bytes; the download gate holds it).
 - Restoring a deleted context's files puts their `clean`, `unscanned` and
-  `pending` files back to `pending`, due after a full upload window from the
-  restore: while the context was deleted its content key could be reserved
-  again and, without checksum binding, receive other bytes. A file that was
+  `pending` files back to `pending`. With checksum binding
+  (`STORAGE_CHECKSUM_BINDING_ENABLED=true`) they are due at once; without it,
+  after a full upload window from the restore: while the context was deleted
+  its content key could be reserved again and receive other bytes. A file that was
   `unscanned`, or that the backfill passed although its stored bytes do not
   match its SHA-256 (`clean` with `scan_error` `legacy_requeued`), keeps the
   backfill's digest rule through that scan (a digest mismatch is logged, not
