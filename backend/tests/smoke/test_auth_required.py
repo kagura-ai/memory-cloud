@@ -26,6 +26,9 @@ AUTH_REQUIRED_ENDPOINTS = [
     # Announcement-email setting (#2761: session only)
     ("GET", "/api/v1/me/announcement-emails"),
     ("PUT", "/api/v1/me/announcement-emails"),
+    # Service-notice opt-in (#2762: session only)
+    ("GET", "/api/v1/me/mcp-notices"),
+    ("PUT", "/api/v1/me/mcp-notices"),
     # Workspaces
     ("GET", "/api/v1/workspaces"),
     ("POST", "/api/v1/workspaces"),
