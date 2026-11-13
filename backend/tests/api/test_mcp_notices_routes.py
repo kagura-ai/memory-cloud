@@ -8,9 +8,10 @@ frontend run):
   turning it on, null while not offered;
 - PUT ``{mcp_notices, wording_version}`` -> the GET shape plus ``recorded``;
   turning it on needs ``MCP_NOTICES_ENABLED`` (409 ``MCPNOTICE-005``) and the
-  current wording (409 ``MCPNOTICE-006``); turning it off always works; 20
-  requests an hour per user, unchanged answers included (429, fails open); session only (an API key or an
-  OAuth bearer is refused, 401 without a session).
+  current wording (409 ``MCPNOTICE-006``); turning it off always works and is
+  never refused by the rate limit; 20 requests that turn it on an hour per
+  user, unchanged answers included (429, fails open); session only (an API
+  key or an OAuth bearer is refused, 401 without a session).
 """
 
 from __future__ import annotations
@@ -183,15 +184,49 @@ class TestPut:
     def test_per_user_limit(self, client, enabled, record, monkeypatch) -> None:
         monkeypatch.setattr(routes, "increment_counter", AsyncMock(return_value=21))
 
-        response = client.put(URL, json={"mcp_notices": False, "wording_version": None})
+        response = client.put(URL, json={"mcp_notices": True, "wording_version": V})
 
         assert response.status_code == 429
         record.assert_not_awaited()
 
+    def test_turning_it_off_is_never_refused_by_the_limit(
+        self, client, enabled, record, monkeypatch
+    ) -> None:
+        """Withdrawing consent must always work, however many requests came first."""
+        hits: dict[str, int] = {}
+
+        async def _counter(key, ttl):
+            hits[key] = hits.get(key, 0) + 1
+            return hits[key]
+
+        monkeypatch.setattr(routes, "increment_counter", AsyncMock(side_effect=_counter))
+        statuses = [
+            client.put(URL, json={"mcp_notices": True, "wording_version": V}).status_code
+            for _ in range(25)
+        ]
+        assert statuses[:20] == [200] * 20
+        assert statuses[20:] == [429] * 5
+
+        response = client.put(URL, json={"mcp_notices": False, "wording_version": None})
+
+        assert response.status_code == 200, response.text
+        assert record.await_args.kwargs["value"] is False
+        # Turning it off is not counted, so it cannot use up the allowance either.
+        assert hits == {"mcp_notice_pref_user:u1": 25}
+
+    def test_off_never_touches_the_counter(self, client, enabled, record, monkeypatch) -> None:
+        stub = AsyncMock(return_value=10_000)
+        monkeypatch.setattr(routes, "increment_counter", stub)
+
+        response = client.put(URL, json={"mcp_notices": False, "wording_version": None})
+
+        assert response.status_code == 200
+        stub.assert_not_awaited()
+
     def test_redis_outage_fails_open(self, client, enabled, record, monkeypatch) -> None:
         monkeypatch.setattr(routes, "increment_counter", AsyncMock(side_effect=RedisError("x")))
 
-        response = client.put(URL, json={"mcp_notices": False, "wording_version": None})
+        response = client.put(URL, json={"mcp_notices": True, "wording_version": V})
 
         assert response.status_code == 200
         assert response.json()["recorded"] is True

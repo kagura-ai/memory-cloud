@@ -5,7 +5,8 @@
  *   PUT  /api/v1/me/mcp-notices   (session only)
  *        { mcp_notices, wording_version } → 409 MCPNOTICE-005 when turning it
  *        on is not offered, 409 MCPNOTICE-006 when the wording changed, 429
- *        when changed too often. Turning it off always works.
+ *        when turned on too often. Turning it off always works (never counted
+ *        or refused by the limit).
  */
 
 import { apiClient } from "./base";

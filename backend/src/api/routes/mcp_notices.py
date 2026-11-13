@@ -9,7 +9,9 @@ cookie is ``SameSite=Lax``.
 - ``PUT`` — record a new answer (source ``settings``). Turning it ON needs
   ``MCP_NOTICES_ENABLED`` (409 ``MCPNOTICE-005``) and the current wording
   version (409 ``MCPNOTICE-006``; the page reloads); turning it OFF always
-  works. An unchanged answer writes nothing. Limited per user (429).
+  works. An unchanged answer writes nothing. Requests that turn it ON are
+  limited per user (429); a request that turns it OFF is neither counted nor
+  ever refused, so withdrawing consent cannot be blocked by the limit.
 
 The answer is kept in ``mcp_notice_consents``, apart from the announcement
 email answers (#2761).
@@ -44,7 +46,9 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/me/mcp-notices", tags=["mcp-notices"])
 
-# Bounds the append-only history a script could grow.
+# Bounds the append-only history a script could grow. Only requests that turn
+# the setting on are counted: an OFF answer appends a row only right after an
+# ON one, so the history stays bounded without ever refusing a withdrawal.
 _PREF_WINDOW_SECONDS = 60 * 60
 _PREF_CHANGES_PER_USER = 20
 
@@ -88,10 +92,11 @@ class McpNoticesUpdateRequest(BaseModel):
 
 
 async def _over_limit(user_id: str) -> bool:
-    """Count one ``PUT``; True when over the hourly limit. Fails open.
+    """Count one ``PUT`` that turns it on; True when over the hourly limit.
 
-    Every request counts, an unchanged answer included (as for the
-    announcement-email setting), so the limit is on requests, not changes.
+    Every such request counts, an unchanged answer included, so the limit is
+    on requests, not changes. Never called for a request that turns it off.
+    Fails open.
     """
     try:
         count = await increment_counter(f"mcp_notice_pref_user:{user_id}", ttl=_PREF_WINDOW_SECONDS)
@@ -132,8 +137,9 @@ async def update_mcp_notices(
             the deployment does not offer notices.
         McpNoticeWordingStaleError: 409 ``MCPNOTICE-006``, turning it on with
             a wording version other than the current one.
-        RateLimitError: 429, more than 20 requests in an hour (unchanged
-            answers count too).
+        RateLimitError: 429, more than 20 requests that turn it on in an
+            hour (unchanged answers count too). A request that turns it off
+            is not counted and never refused.
         NotFoundException: 404, the account is gone.
     """
     user_id = user["user_id"]
@@ -145,7 +151,7 @@ async def update_mcp_notices(
         if payload.wording_version != version:
             raise McpNoticeWordingStaleError()
 
-    if await _over_limit(user_id):
+    if value and await _over_limit(user_id):
         raise RateLimitError(
             "Too many changes to this setting. Please try again later.",
             retry_after=_PREF_WINDOW_SECONDS,
