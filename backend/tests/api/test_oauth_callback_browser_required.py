@@ -18,7 +18,8 @@ its digest to the flow's state (#2786). Pinned here, for both providers:
   account ends in the refresh mismatch answer before the terms gate, the
   sign-up gate and ``ensure_user``, decided from the keys the flow held
   before the identity was looked up (one that runs out during the lookup
-  changes nothing); the starting account's own refresh works;
+  changes nothing, and a lookup without a database session is a mismatch);
+  the starting account's own refresh works;
 - the refusal is logged without the nonce, the state or the code;
 - the Google sign-in always uses the configured redirect URI.
 """
@@ -575,6 +576,45 @@ async def test_a_refresh_key_gone_during_the_owner_lookup_creates_nothing(
     assert (location.path, location.query) == ("/profile", "error=refresh_user_mismatch")
     assert _set_cookies(response) == []
     signed_in_path.owning.assert_awaited_once()
+    signed_in_path.terms.assert_not_awaited()
+    _assert_nothing_happened(signed_in_path)
+    assert not any("st1" in key for key in redis.store)
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.asyncio
+async def test_a_refresh_whose_owner_lookup_gets_no_database_session_creates_nothing(
+    redis,  # noqa: F811
+    terms_off,  # noqa: F811
+    github_idp,  # noqa: F811
+    google_idp,  # noqa: F811
+    signed_in_path,
+    monkeypatch,
+    provider,
+) -> None:
+    """An owner lookup that cannot run never means "go on": with no database
+    session the refresh ends in the mismatch answer before the terms gate, the
+    sign-up gate and ``ensure_user``, the starting account's own identity
+    included."""
+    redis.store["oauth2_state:st1"] = "pending"
+    redis.store["oauth2_state_intent:st1"] = "refresh"
+    redis.store["oauth2_state_user:st1"] = OWNER_ID
+    redis.store["oauth2_return_to:st1"] = "/profile?refreshed=1"
+    _with_carriers(redis, "st1")
+
+    async def _no_session():
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(auth_routes, "get_db", _no_session)
+
+    response = await _callback(provider, "st1", None)
+
+    assert response.status_code == 303
+    location = urlparse(response.headers["location"])
+    assert (location.path, location.query) == ("/profile", "error=refresh_user_mismatch")
+    assert _set_cookies(response) == []
+    signed_in_path.owning.assert_not_awaited()
     signed_in_path.terms.assert_not_awaited()
     _assert_nothing_happened(signed_in_path)
     assert not any("st1" in key for key in redis.store)

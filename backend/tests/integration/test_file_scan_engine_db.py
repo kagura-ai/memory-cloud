@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from config.settings import Settings
 from models.auth import User, Workspace
-from models.file_objects import FileObject, WorkspaceStorageUsage
+from models.file_objects import SCAN_LEGACY_REQUEUED, FileObject, WorkspaceStorageUsage
 from services import file_scan_service as svc
 from services.file_scan_service import ScanResult
 from services.security_notification_service import (
@@ -479,3 +479,25 @@ class TestBacklogAndRescan:
         reloaded = await _reload(db_session, row)
         assert reloaded.scan_status == "pending"
         assert reloaded.scan_next_attempt_at > utcnow() + timedelta(minutes=4)
+
+    async def test_changed_object_with_a_stale_marker_is_left_alone(self, db_session, ws):
+        """Fenced on ``scan_error`` too: a row whose marker changed since it was
+        read (a later scan cleared it) is not requeued from the stale copy."""
+        s = _settings()
+        row = await _add(
+            db_session, ws, scan_status="clean", scan_etag="e1", scan_error=SCAN_LEGACY_REQUEUED
+        )
+        await db_session.execute(
+            update(FileObject)
+            .where(FileObject.id == row.id)
+            .values(scan_error=None)
+            .execution_options(synchronize_session=False)
+        )
+        await db_session.commit()
+        assert row.scan_error == SCAN_LEGACY_REQUEUED  # the caller's copy is stale
+
+        assert not await svc.requeue_changed_object(db_session, row, now=utcnow(), settings=s)
+        await db_session.commit()
+        reloaded = await _reload(db_session, row)
+        assert (reloaded.scan_status, reloaded.scan_error) == ("clean", None)
+        assert reloaded.scan_next_attempt_at is None

@@ -1816,3 +1816,29 @@ class TestRestoreScanState:
         assert clean.scan_next_attempt_at is not None
         assert clean.scan_next_attempt_at >= before + window
         assert infected.scan_status == "infected"
+
+    @pytest.mark.asyncio
+    async def test_scanning_off_waits_a_full_upload_window_with_binding_on(
+        self, service, db, workspace_id, scan_settings, monkeypatch
+    ):
+        """A verified ``clean`` row restored with scanning off becomes ``unscanned``:
+        the backfill scans it under the legacy digest rule, so it waits a full
+        upload window whatever the binding setting says."""
+        from utils.datetime import utcnow
+
+        monkeypatch.setattr(scan_settings, "file_scan_enabled", False)
+        monkeypatch.setattr(scan_settings, "storage_checksum_binding_enabled", True)
+        verified = _make_file_object(workspace_id, status="uploaded")
+        verified.scan_status = "clean"
+        verified.scan_error = None
+        verified.scan_attempts = 1
+        before = utcnow()
+        await self._restore(service, db, workspace_id, [verified])
+        window = timedelta(
+            seconds=scan_settings.presign_put_ttl_seconds
+            + scan_settings.file_scan_put_expiry_margin_seconds
+        )
+        assert (verified.scan_status, verified.scan_error) == ("unscanned", None)
+        assert verified.scan_attempts == 0
+        assert verified.scanned_at is None
+        assert before + window <= verified.scan_next_attempt_at <= utcnow() + window
