@@ -1182,6 +1182,7 @@
       "password": "Password",
       "appearance": "Appearance",
       "emails": "Emails",
+      "mcpNotices": "Notices in AI tools",
       "deletion": "Account deletion"
     },
     "title": "Account settings",
@@ -1239,6 +1240,18 @@
       "failed": "The setting could not be saved. Please try again.",
       "stale": "This setting has changed since the page was loaded. Review it and try again.",
       "loadFailed": "Could not load your email settings."
+    },
+    "mcpNotices": {
+      "title": "Notices in AI tools",
+      "description": "Short notices from the operator of this service, such as a maintenance window, shown once at the start of a session in AI tools connected over MCP. Account and security notices are still sent by email.",
+      "toggle": "Show operator notices in my AI tools",
+      "notOffered": "Notices in AI tools are not shown at the moment. You can still turn this off.",
+      "lastChanged": "Last changed {date}",
+      "saved": "Operator notices will be shown in your AI tools.",
+      "savedOff": "Operator notices will no longer be shown in your AI tools.",
+      "failed": "The setting could not be saved. Please try again.",
+      "stale": "This setting has changed since the page was loaded. Review it and try again.",
+      "loadFailed": "Could not load your notice settings."
     },
     "passwordSecurity": "Password & Security",
     "passwordSecurityDesc": "Update your password and security settings",

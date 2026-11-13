@@ -78,6 +78,23 @@ vi.mock("@/components/account/AnnouncementEmailSettings", async () => {
     },
   };
 });
+// #2762: the Notices in AI tools card likewise (its own suite and fetch).
+let mockMcpNoticesVisible = true;
+vi.mock("@/components/account/McpNoticeSettings", async () => {
+  const { useEffect } = await vi.importActual<typeof import("react")>("react");
+  return {
+    McpNoticeSettings: ({
+      onVisibilityChange,
+    }: {
+      onVisibilityChange?: (visible: boolean) => void;
+    }) => {
+      useEffect(() => {
+        onVisibilityChange?.(mockMcpNoticesVisible);
+      }, [onVisibilityChange]);
+      return null;
+    },
+  };
+});
 vi.mock("@/components/auth/ConnectedAccounts", () => ({
   default: ({ onProvidersChanged }: { onProvidersChanged?: () => void }) => (
     <button type="button" onClick={() => onProvidersChanged?.()}>
@@ -171,7 +188,7 @@ describe("ProfilePage section links", () => {
     render(<ProfilePage />);
     const navigation = screen.getByRole("navigation", { name: "sections.label" });
     const links = navigation.querySelectorAll("a");
-    expect(links).toHaveLength(7);
+    expect(links).toHaveLength(8);
     for (const link of links) {
       const id = link.getAttribute("href")!.slice(1);
       expect(document.getElementById(id)).not.toBeNull();
@@ -215,8 +232,52 @@ describe("ProfilePage Emails section (#2761)", () => {
     mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
     render(<ProfilePage />);
     const navigation = screen.getByRole("navigation", { name: "sections.label" });
-    expect(navigation.querySelectorAll("a")).toHaveLength(6);
+    expect(navigation.querySelectorAll("a")).toHaveLength(7);
     expect(screen.queryByRole("link", { name: "sections.emails" })).toBeNull();
+  });
+});
+
+describe("ProfilePage Notices in AI tools section (#2762)", () => {
+  afterEach(() => {
+    mockMcpNoticesVisible = true;
+    mockEmailsVisible = true;
+  });
+
+  it("lists the section right after Emails while the card shows", async () => {
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    expect(await screen.findByRole("link", { name: "sections.mcpNotices" })).toHaveAttribute(
+      "href",
+      "#profile-mcp-notices",
+    );
+    expect(screen.getByRole("region", { name: "sections.mcpNotices" })).toBeVisible();
+    const navigation = screen.getByRole("navigation", { name: "sections.label" });
+    const hrefs = Array.from(navigation.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+    expect(hrefs.indexOf("#profile-mcp-notices")).toBe(hrefs.indexOf("#profile-emails") + 1);
+    const ids = Array.from(document.querySelectorAll("section[id], [id^='profile-']")).map((el) => el.id);
+    expect(ids.indexOf("profile-mcp-notices")).toBe(ids.indexOf("profile-emails") + 1);
+  });
+
+  it("renders no landmark and no link while the card hides itself", () => {
+    mockMcpNoticesVisible = false;
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    expect(screen.queryByRole("region", { name: "sections.mcpNotices" })).toBeNull();
+    // Mounted (it still asks the server), but nothing of it is shown.
+    expect(document.getElementById("profile-mcp-notices")).not.toBeVisible();
+    const navigation = screen.getByRole("navigation", { name: "sections.label" });
+    expect(navigation.querySelectorAll("a")).toHaveLength(7);
+    expect(screen.queryByRole("link", { name: "sections.mcpNotices" })).toBeNull();
+    // Its own flag: the Emails link stays.
+    expect(screen.getByRole("link", { name: "sections.emails" })).toBeInTheDocument();
+  });
+
+  it("keeps it listed while only the Emails card hides itself", () => {
+    mockEmailsVisible = false;
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    expect(screen.queryByRole("link", { name: "sections.emails" })).toBeNull();
+    expect(screen.getByRole("link", { name: "sections.mcpNotices" })).toBeInTheDocument();
   });
 });
 
