@@ -37,6 +37,11 @@ BANNED_MODULES = frozenset(
         "services.memory_service",
         "services.usage_stats",
         "services.graph_service",
+        # #2762: service notices are a bootstrap-only lane of the
+        # authenticated surface; the anonymous endpoint never carries them.
+        "services.mcp_notice_service",
+        "services.mcp_notice_text",
+        "mcp_server.tools._notices",
     }
 )
 # Handlers of the authenticated tools live in these modules; only the named

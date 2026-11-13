@@ -666,6 +666,111 @@ class FileBlockedError(MemoryCloudException):
         )
 
 
+# Service notices over MCP (Issue #2762). Expected refusals: logged as warnings.
+# No message or detail ever carries the notice text.
+
+
+class McpNoticeTextRejectedError(MemoryCloudException):
+    """The notice text breaks a rule of the sanitiser (422 ``MCPNOTICE-001``).
+
+    ``details.reason``: ``empty``, ``too_long``, ``too_many_bytes``,
+    ``control_or_format_char``, ``invisible_char``, ``markup_char`` or ``link``.
+    """
+
+    log_level = "warning"
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(
+            "The notice text is not accepted: it must be one line of plain text "
+            "with no links, markup or hidden characters, 1-300 characters.",
+            status_code=422,
+            error_code="MCPNOTICE-001",
+            reason=reason,
+        )
+
+
+class McpNoticeWindowInvalidError(MemoryCloudException):
+    """The notice's ``starts_at`` / ``expires_at`` are refused (422 ``MCPNOTICE-002``).
+
+    ``details.reason``: ``ends_before_start``, ``already_expired``,
+    ``too_long`` (more than the maximum days), ``starts_too_far_ahead`` or
+    ``starts_in_the_past``.
+    """
+
+    log_level = "warning"
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message, status_code=422, error_code="MCPNOTICE-002", reason=reason)
+
+
+class McpNoticeActiveLimitError(MemoryCloudException):
+    """Too many notices are live or scheduled (409 ``MCPNOTICE-003``)."""
+
+    log_level = "warning"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} notices can be active or scheduled at a time. "
+            "Withdraw one or wait until one expires.",
+            status_code=409,
+            error_code="MCPNOTICE-003",
+            limit=limit,
+        )
+
+
+class McpNoticeNotFoundError(MemoryCloudException):
+    """No notice has this id (404 ``MCPNOTICE-004``)."""
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__("Notice not found.", status_code=404, error_code="MCPNOTICE-004")
+
+
+class McpNoticesNotOfferedError(MemoryCloudException):
+    """Turning notices on while the deployment does not offer them (409 ``MCPNOTICE-005``)."""
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Service notices in AI tools are not offered on this deployment.",
+            status_code=409,
+            error_code="MCPNOTICE-005",
+        )
+
+
+class McpNoticeWordingStaleError(MemoryCloudException):
+    """Turning notices on with a wording version other than the current one (409 ``MCPNOTICE-006``)."""
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The wording of this setting has changed since the page was loaded. "
+            "Reload to see the current wording.",
+            status_code=409,
+            error_code="MCPNOTICE-006",
+        )
+
+
+class McpNoticeDailyLimitError(MemoryCloudException):
+    """Too many notices were created in the last 24 hours (409 ``MCPNOTICE-007``).
+
+    Withdrawn notices count: withdrawing does not free this budget.
+    """
+
+    log_level = "warning"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"At most {limit} notices can be created in 24 hours, withdrawn ones included.",
+            status_code=409,
+            error_code="MCPNOTICE-007",
+            limit=limit,
+        )
+
+
 # Workspace Slot Bonus Errors (Issue #676 — admin slot bonus UI)
 
 

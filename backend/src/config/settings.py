@@ -2124,6 +2124,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Service notices over MCP (Issue #2762)
+    mcp_notices_enabled: bool = Field(
+        default=False,
+        description=(
+            "Deliver service notices in the MCP bootstrap reply (#2762). FALSE "
+            "(the default): no toggle offered in account settings, no notice "
+            "query runs and every tool reply is unchanged. TRUE: each user can "
+            "turn notices on in account settings (session only); a notice an "
+            "administrator wrote through /api/v1/admin/mcp-notices is then "
+            "placed once per user in bootstrap, never on agent-bound or "
+            "connector keys or the google/microsoft view. Turning the setting "
+            "OFF in account settings and the admin routes work whatever this "
+            "value is."
+        ),
+    )
+
     # ChatGPT app listing (Issue #2760)
     chatgpt_app_url: str = Field(
         default="",
