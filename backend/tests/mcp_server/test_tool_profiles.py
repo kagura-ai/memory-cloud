@@ -46,6 +46,7 @@ from mcp_server.tools._profiles import (
 # update_memory's text): 41,486 (14 chars spare).
 # #2615 (plan_headroom? in four Returns lines, paid for by trimming bootstrap,
 # remember_batch and remember): 41,485 (15 chars spare).
+# #2762 (notices? in bootstrap's Returns line, nothing else): 41,472 (28 chars spare).
 CORE_CHAR_BUDGET = 41_500  # (#2470) 21 core tools
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]

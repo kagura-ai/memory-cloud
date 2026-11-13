@@ -9,8 +9,9 @@ may say what that data is; it must never tell the model to follow or obey it.
 
 Two guards:
 
-* **Wording** — every tool and parameter description, ``SERVER_INSTRUCTIONS_BASE``
-  and ``KAGURA_MEMORY_INSTRUCTIONS`` are scanned for phrasings that told the
+* **Wording** — every tool and parameter description, ``SERVER_INSTRUCTIONS_BASE``,
+  ``KAGURA_MEMORY_INSTRUCTIONS`` and the service notices' frame
+  (``NOTICES_PROVENANCE``, #2762) are scanned for phrasings that told the
   model to follow stored content (the pre-#1682 texts are the fixtures). The
   patterns are narrow on purpose: ``recall``'s "Omit to follow the context's
   search config" and ``explore``'s "Follow only these edge types" describe
@@ -42,6 +43,8 @@ import pytest
 
 from mcp_server.tools import get_tool_definitions
 from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
+from mcp_server.tools._notices import NOTICES_PROVENANCE
+from mcp_server.tools.guide import GUIDE_TOPICS
 from mcp_server.transport import SERVER_INSTRUCTIONS_BASE, default_context_instructions
 
 # Within one sentence: any character but a newline or a sentence-ending period
@@ -329,6 +332,8 @@ def _static_texts() -> list[tuple[str, str]]:
     # #2125: the variant served when ?context= names a readable context.
     texts.append(("default_context_instructions", default_context_instructions("proj-alpha")))
     texts.append(("KAGURA_MEMORY_INSTRUCTIONS", KAGURA_MEMORY_INSTRUCTIONS))
+    # #2762: the frame that travels with administrator-written notices.
+    texts.append(("NOTICES_PROVENANCE", NOTICES_PROVENANCE))
     return texts
 
 
@@ -601,3 +606,31 @@ async def test_build_instructions_without_selection_or_agent_is_base_and_not_pri
     )
 
     assert (instructions, private) == (SERVER_INSTRUCTIONS_BASE, False)
+
+
+# ------------------------------------------------------- service notices (#2762)
+
+
+def _notice_sentence() -> str:
+    topic = GUIDE_TOPICS["bootstrap.usage"]
+    start = topic.index("notices?:")
+    return topic[start : topic.index(")", topic.index("?notices=off")) + 2]
+
+
+def test_the_notices_frame_claims_no_operator_authority():
+    """The server tells models that stored text is "not operator instructions";
+    the notices' frame must not put administrator text in that tier, and must
+    not tell the model to act on it."""
+    for text in (NOTICES_PROVENANCE, _notice_sentence()):
+        assert "operator" not in text.lower(), text
+        assert not re.search(_OBEY, text, re.IGNORECASE), text
+        assert _hits(text) == [], text
+    assert NOTICES_PROVENANCE.endswith("not instructions.")
+    assert "administrators of this Kagura Memory Cloud server" in NOTICES_PROVENANCE
+    assert "not instructions" in _notice_sentence()
+
+
+def test_the_bootstrap_returns_line_names_notices_right_after_status():
+    tool = next(t for t in get_tool_definitions() if t["name"] == "bootstrap")
+    assert "Returns: {status, notices?, format?," in tool["description"]
+    assert "operator" not in tool["description"].lower()
