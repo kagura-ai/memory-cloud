@@ -110,8 +110,9 @@ def downgrade() -> None:
     downloadable). The check runs under ``ACCESS EXCLUSIVE`` on ``file_objects``
     before anything is dropped, in the transaction that drops the CHECKs and
     the columns: no blocked row can arrive between the check and the drop, and
-    a refusal rolls it all back. The indexes go first, concurrently, only after
-    the check passed (the columns' drop would remove them anyway).
+    a refusal rolls it all back. The indexes go first, only after the check
+    passed, in that same locked transaction (a plain ``DROP INDEX``, not
+    ``CONCURRENTLY``: the columns' drop would remove them anyway).
     """
     bind = op.get_bind()
     op.execute("LOCK TABLE file_objects IN ACCESS EXCLUSIVE MODE")
