@@ -67,7 +67,7 @@ class TestOverdue:
         )
 
     def test_interval_job_after_re_registration_is_not_overdue(self) -> None:
-        """R2: an interval trigger restarts its period at every registration."""
+        """An interval trigger restarts its period at every registration."""
         last_run = T0
         deploy = T0 + timedelta(minutes=55)
         row = Row(

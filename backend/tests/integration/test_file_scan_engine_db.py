@@ -401,7 +401,7 @@ class TestQuarantineExpiry:
         release.assert_awaited_once_with(workspace_id=workspace_id, size_bytes=5)
         assert (await _reload(db_session, expired)).deleted_at is not None
         assert (await _reload(db_session, young)).deleted_at is None
-        assert (await _reload(db_session, failed)).deleted_at is None  # R3
+        assert (await _reload(db_session, failed)).deleted_at is None  # never deleted
         usage = await db_session.get(WorkspaceStorageUsage, workspace_id, populate_existing=True)
         assert (usage.used_bytes, usage.file_count) == (4, 2)
 

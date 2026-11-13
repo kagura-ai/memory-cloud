@@ -483,7 +483,7 @@ async def test_a_failed_write_is_logged_by_class_and_does_not_stop_the_queue(
 
 @pytest.mark.asyncio
 async def test_registration_is_retried_before_the_next_write() -> None:
-    """S4: a lost registration write is retried until it succeeded once."""
+    """A lost registration write is retried until it succeeded once."""
     writer = FakeWriter(fail_registrations=1)
     rec = JobRunRecorder(_scheduler_with("alpha_job"), writer=writer)
     try:
@@ -621,7 +621,7 @@ async def test_file_scan_sweeper_that_raises_is_recorded_failed(
 
 @pytest.mark.asyncio
 async def test_a_run_cancelled_at_shutdown_is_failed_cancelled_error() -> None:
-    """S1: ``shutdown(wait=False)`` cancels a running job; drain records it."""
+    """``shutdown(wait=False)`` cancels a running job; drain records it."""
     entered = asyncio.Event()
 
     async def swallowing_job() -> None:

@@ -497,7 +497,7 @@ def test_register_scheduled_jobs_attaches_the_run_recorder():
 
 @pytest.mark.asyncio
 async def test_stop_drains_the_run_recorder_between_shutdown_and_release(sched):
-    """S1 (#2768): cancelled runs are written while the lock and the database are open."""
+    """Cancelled runs are written (#2768) while the lock and the database are open."""
     order: list[str] = []
     conn = _conn(True, True)  # try-lock True, unlock True
     conn.close = AsyncMock(side_effect=lambda: order.append("close"))

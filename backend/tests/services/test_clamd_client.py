@@ -118,7 +118,7 @@ class TestInstream:
                 await _scan(port, *([b"x" * CHUNK_BYTES] * 256))
 
     async def test_short_source_never_sends_the_terminator(self):
-        """A truncated storage read must not be scanned as a prefix (R6)."""
+        """A truncated storage read must not be scanned as a prefix."""
         async with running_fake_clamd() as (fake, port):
             with pytest.raises(ClamdScanFailed, match="ended after 5 of 10 bytes"):
                 await _scan(port, b"12345", expected=10)

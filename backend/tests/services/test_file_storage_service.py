@@ -1252,7 +1252,7 @@ class TestReserveScanCap:
 
 
 class TestReserveDuplicateScanState(TestReserveUploadDuplicate):
-    """R10 / W3: a blocked row is never handed out; the verdict stays in its context."""
+    """A blocked row is never handed out; the verdict stays in its context."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("state", ["infected", "error"])
@@ -1336,7 +1336,7 @@ class TestReserveDuplicateScanState(TestReserveUploadDuplicate):
 
 
 class TestConfirmUploadScan:
-    """R1 a/b + R7: confirm makes the row pending (when on) and kicks a bound scan."""
+    """Confirm makes the row pending (when on) and kicks a bound scan."""
 
     async def _confirm(self, service, db, fake_storage, workspace_id, *, expires_at):
         file = _make_file_object(workspace_id, status="reserved")
@@ -1531,7 +1531,7 @@ class TestDownloadGate:
 
 
 class TestDownloadCompare:
-    """R1 c: with binding off a clean file is served only while it is the scanned version."""
+    """With binding off a clean file is served only while it is the scanned version."""
 
     @staticmethod
     async def _clean_file(fake_storage, workspace_id):
@@ -1623,7 +1623,7 @@ class TestDownloadCompare:
 
 
 class TestStatusUploadedWriters:
-    """R7: both writers of ``status='uploaded'`` set ``scan_status`` when scanning is on."""
+    """Both writers of ``status='uploaded'`` set ``scan_status`` when scanning is on."""
 
     async def _migrate(self, service, db, workspace_id):
         found = MagicMock()

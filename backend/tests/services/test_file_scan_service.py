@@ -71,7 +71,7 @@ def _claim(data: bytes = b"hello", *, status: str = "pending", attempts: int = 1
 
 
 # ---------------------------------------------------------------------------
-# Eligibility (R1 a/b) and backoff (R4)
+# Eligibility and backoff
 # ---------------------------------------------------------------------------
 
 
@@ -128,7 +128,7 @@ class TestEligibility:
 
 
 # ---------------------------------------------------------------------------
-# The download gate (R7): an allow-list
+# The download gate: an allow-list
 # ---------------------------------------------------------------------------
 
 _TRUTH_TABLE = {
@@ -223,7 +223,7 @@ class TestObjectMatchesScan:
 
 
 # ---------------------------------------------------------------------------
-# One scan: storage -> clamd, no database (R2, R6)
+# One scan: storage -> clamd, no database
 # ---------------------------------------------------------------------------
 
 
@@ -281,7 +281,7 @@ class TestScanClaimed:
         assert result.kind == "infected"
 
     async def test_backfill_mismatch_keeps_the_verdict(self):
-        """Legacy rows' digests were never verified: the verdict stands (R6)."""
+        """Legacy rows' digests were never verified: the verdict stands."""
         claim = _claim(b"hello", status="unscanned")
         storage = await _stored(b"HELLO", claim)
         async with running_fake_clamd() as (_, port):
@@ -447,7 +447,7 @@ class TestOutcome:
 
 
 # ---------------------------------------------------------------------------
-# Kick, sweep, sessions, shutdown (R8, W2, W4)
+# Kick, sweep, sessions, shutdown
 # ---------------------------------------------------------------------------
 
 
@@ -600,7 +600,7 @@ class TestSweep:
         assert sessions.opened == 0
 
     async def test_sweep_dispatches_free_slots_and_returns_before_the_scan_ends(self):
-        """W2: the 30 s job never runs a scan inline."""
+        """The 30 s job never runs a scan inline."""
         claims = [_claim(), _claim(), _claim()]
         gate = asyncio.Event()
 
@@ -698,7 +698,7 @@ class TestStop:
 
 
 # ---------------------------------------------------------------------------
-# Quarantine expiry (R3, R13)
+# Quarantine expiry
 # ---------------------------------------------------------------------------
 
 
@@ -738,7 +738,7 @@ class TestExpiry:
 
 
 # ---------------------------------------------------------------------------
-# Startup warning (R1 d)
+# Startup warning
 # ---------------------------------------------------------------------------
 
 
@@ -795,7 +795,7 @@ class TestLifespanStopsScans:
 
 
 class TestNotifyUploader:
-    """Owner decision (W1 override): the uploader of an infected file gets an email."""
+    """The uploader of an infected file gets an email."""
 
     def test_infected_upload_mails_its_uploader(self):
         from services.security_notification_service import SecurityEvent

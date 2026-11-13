@@ -15,7 +15,7 @@ On real rows with the real ``PermissionService``:
 - a context restore over a reservation that may have replaced the bytes
   brings a ``clean`` or ``unscanned`` row back ``pending`` (scanning on), and a
   restored legacy row keeps the legacy digest rule through that scan;
-- the dedup 409 never hands out a blocked row (R10 / W3).
+- the dedup 409 never hands out a blocked row.
 
 Blob storage is the in-memory fake; Redis quota calls are stubbed. Not executed
 in the local unit run — needs the DB container.
@@ -403,7 +403,7 @@ async def test_list_reports_scan_status(world, scanning):
     assert {str(row.id): row.scan_status for row in rows}.items() <= listed.items()
 
 
-# --- restore (R5) and dedup (R10 / W3) -------------------------------------------------------
+# --- restore and dedup -----------------------------------------------------------------------
 
 
 async def test_restore_over_a_cancelled_reservation_brings_a_clean_row_back_pending(

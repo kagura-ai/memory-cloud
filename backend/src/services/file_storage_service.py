@@ -123,7 +123,7 @@ def context_files_past_restore_window(context: Context) -> bool:
 
 
 def _scan_blocked(file: FileObject) -> bool:
-    """Whether the download gate refuses ``file`` for good (#565, R10 / W3).
+    """Whether the download gate refuses ``file`` for good (#565).
 
     ``pending`` is not blocked: the scan is still running.
     """

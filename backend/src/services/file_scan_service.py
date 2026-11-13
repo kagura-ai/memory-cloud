@@ -156,7 +156,7 @@ def scan_eligible_at(
     server_written: bool,
     settings: Settings,
 ) -> datetime:
-    """When a file may be scanned (R1 a/b).
+    """When a file may be scanned.
 
     Checksum binding on, or bytes the server wrote itself: now. Binding off:
     after the reservation's presigned PUT URL expired plus
@@ -181,7 +181,7 @@ def scan_backoff(attempts: int) -> timedelta:
 
 
 def ensure_downloadable(file: FileObject, settings: Settings) -> None:
-    """The download gate (R7): an allow-list, raised after the access checks.
+    """The download gate: an allow-list, raised after the access checks.
 
     Scanning on: only ``clean`` and ``unscanned`` pass; ``pending`` raises
     :class:`FileScanPendingError` (409 ``SCAN-001``); anything else, a future
@@ -201,7 +201,7 @@ def ensure_downloadable(file: FileObject, settings: Settings) -> None:
 
 
 def object_matches_scan(file: Any, meta: ObjectMetadata) -> bool:
-    """Whether the stored object is still the version that was scanned (R1 c).
+    """Whether the stored object is still the version that was scanned.
 
     Compares ETag, size and LastModified of a fresh ``head_object`` with what
     the scan's own GetObject reported. Any difference (also a same-ETag
@@ -362,7 +362,7 @@ async def scan_claimed(
 ) -> ScanResult:
     """Stream the claimed object to clamd and classify (no DB session involved).
 
-    Precedence (R6): a finding beats a digest mismatch, which beats ``OK``.
+    Precedence: a finding beats a digest mismatch, which beats ``OK``.
     A new upload whose stored bytes do not match its sha256 is
     ``digest_mismatch`` (blocked); for a legacy row (the backfill, or one a
     context restore requeued) the verdict stands and the mismatch is only
@@ -483,7 +483,7 @@ async def release_claim(db: AsyncSession, claim: ClaimedScan, *, now: datetime) 
 async def requeue_changed_object(
     db: AsyncSession, file: FileObject, *, now: datetime, settings: Settings
 ) -> bool:
-    """A ``clean`` file whose object changed goes back to ``pending`` (R1 c); the caller commits.
+    """A ``clean`` file whose object changed goes back to ``pending``; the caller commits.
 
     Fenced on the recorded ETag so two downloads racing on the same change
     requeue it once. The next attempt follows the PUT-window rule counted from
@@ -786,7 +786,7 @@ async def expire_quarantined_files() -> dict[str, int]:
     """Scheduler entry (daily): soft-delete ``infected`` files past the retention.
 
     Runs whether or not scanning is on (findings stay after a switch-off).
-    ``error`` files are never touched (R3). Batches of :data:`EXPIRY_BATCH`
+    ``error`` files are never touched. Batches of :data:`EXPIRY_BATCH`
     rows, each committed before its Redis bytes are released (Redis follows
     the DB). The nightly file GC removes the objects after the usual
     soft-delete retention.
@@ -998,7 +998,7 @@ async def requeue_for_rescan(
 
 
 def log_scan_configuration(settings: Settings) -> None:
-    """Startup warning (R1 d): scanning without checksum binding holds new uploads longer.
+    """Startup warning: scanning without checksum binding holds new uploads longer.
 
     Without binding a new upload is held until its PUT URL expired (about
     ``PRESIGN_PUT_TTL_SECONDS`` + margin from the reservation), and every
