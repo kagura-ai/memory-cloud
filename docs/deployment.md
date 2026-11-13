@@ -2177,8 +2177,9 @@ seam only — no implementation in #994.
 
 Files uploaded through the files API (`/api/v1/files/*`, the MCP file tools,
 the Storage page) can be scanned by a clamd you run yourself. It is **off by
-default** (`FILE_SCAN_ENABLED=false`): with it off nothing about uploads or
-downloads changes, except that file objects carry a `scan_status` field.
+default** (`FILE_SCAN_ENABLED=false`): with it off uploads and downloads work
+as before, except that file objects carry a `scan_status` field and a file
+already marked `infected` (while scanning was on) stays refused.
 
 With it on, the API streams every confirmed upload from object storage to
 clamd (the `INSTREAM` command over TCP) and **holds the file's download URL
@@ -2219,9 +2220,14 @@ Other changes while scanning is on:
   `existing_file`; inside the same context the message says "an earlier upload
   of this file was blocked by the malware scan". A `pending` file is handed
   out (same bytes; the download gate holds it).
-- Restoring a deleted context's files puts their `clean` files back to
-  `pending` (`unscanned` while scanning is off): the stored objects may have
-  been replaced meanwhile.
+- Restoring a deleted context's files puts their `clean`, `unscanned` and
+  `pending` files back to `pending`, due after a full upload window from the
+  restore: while the context was deleted its content key could be reserved
+  again and, without checksum binding, receive other bytes. A file that was
+  `unscanned` keeps the backfill's digest rule through that scan (a digest
+  mismatch is logged, not blocked); any other cause that stops the scan makes
+  it `error`, as for a new upload. `infected` and `error` files stay as they
+  are. With scanning off only `clean` files change, to `unscanned`.
 
 ### How long a new upload is held
 
@@ -2252,8 +2258,11 @@ Residual risk with binding off: the compare cannot see a rewrite whose body
 has the same MD5 (the ETag of a single-part upload), the same size and a
 LastModified in the same second. The margin assumes the API host's clock is
 not ahead of the storage's clock by more than
-`FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS`: keep NTP on. Checksum binding is the
-hard guarantee; turn it on once your clients send the checksum header (see
+`FILE_SCAN_PUT_EXPIRY_MARGIN_SECONDS`: keep NTP on. The compare runs when a
+download URL is issued, not while the URL is used: an upload started before
+its PUT URL expired that completes after a download URL was handed out is
+served through that URL for the URL's lifetime. Checksum binding closes both
+gaps and is the hard guarantee; turn it on once your clients send the checksum header (see
 [`docs/ops/r2-checksum-binding-rollout.md`](ops/r2-checksum-binding-rollout.md)).
 
 ### When the scanner cannot answer
@@ -5393,9 +5402,13 @@ without further work. Fields per job:
   count as a success.
 - `overdue`: registered, and no run started within the expected interval plus
   the grace. Interval jobs count from the later of their last start and the
-  latest registration, so a deploy does not flag them. Cron jobs count from
-  their last start, so a run skipped by downtime is flagged. A run that hangs
-  is flagged at its start plus the interval plus the grace.
+  latest registration, so a deploy does not flag them. Cron jobs count
+  from the later of their last start and the time the job joined the
+  registration (kept while every registration since has included it, reset
+  when one left it out), so a run skipped by downtime or across a deploy is
+  flagged, and a newly added or re-enabled cron job is not flagged before one
+  interval has passed. A run that hangs is flagged at its start plus the
+  interval plus the grace.
 
 Two things to know when reading it:
 
@@ -5459,7 +5472,9 @@ recorded, platform-paid calls of the lane's provider and model only:
 Notes on the sources:
 
 - **`embedding`** counts recall query embeddings only (writes and cache hits
-  are not ledgered).
+  are not ledgered), and only for contexts on the default embedding model. A
+  provider that reports no token usage writes no ledger row, so with such a
+  provider the lane's usage stays empty and only the probe shows its health.
 - **`rerank`** is not ledgered (`usage_recorded: false`): only the probe shows
   its health.
 - **`sleep_judge` and `analysis`** read the Sleep and Analysis reports' usage
