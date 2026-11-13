@@ -550,3 +550,55 @@ async def test_stop_drains_the_run_recorder_without_the_lock_connection(sched):
 
     drain.assert_awaited_once_with(timeout=sl.RECORDER_DRAIN_TIMEOUT_SECONDS)
     sched.shutdown.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error", [asyncio.CancelledError(), RuntimeError("recorder failed")], ids=["cancel", "error"]
+)
+async def test_a_lost_leadership_discards_the_connection_when_the_drain_fails(sched, error):
+    """A drain cut short by a cancel or an error still discards the dead lock connection."""
+    conn = _conn(True, OperationalError("SELECT 1", {}, Exception("terminated")))
+    leader = _leader(MagicMock())
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "drain_job_run_recorders", AsyncMock(side_effect=error)),
+    ):
+        await leader.tick()
+        with pytest.raises(type(error)):
+            await leader.tick()  # liveness probe fails, then the drain fails
+
+    assert leader.is_leader is False
+    sched.shutdown.assert_called_once()
+    conn.invalidate.assert_awaited_once()
+    conn.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_during_the_drain_of_a_lost_leadership_still_discards_the_connection(sched):
+    """``stop()`` cancelling the loop mid-drain leaves no lock connection checked out."""
+    conn = _conn(True, OperationalError("SELECT 1", {}, Exception("terminated")))
+    draining = asyncio.Event()
+    calls = 0
+
+    async def drain(**_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # the drain after the lost leadership hangs until cancelled
+            draining.set()
+            await asyncio.Event().wait()
+
+    leader = _leader(MagicMock(), ping_seconds=0.01)
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "drain_job_run_recorders", drain),
+    ):
+        await leader.start()
+        await asyncio.wait_for(draining.wait(), timeout=2)
+        await leader.stop()
+
+    assert leader.is_leader is False
+    conn.invalidate.assert_awaited_once()
+    conn.close.assert_awaited_once()

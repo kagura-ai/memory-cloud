@@ -259,9 +259,14 @@ class SchedulerLeader:
             )
         self._conn = None
         shutdown_scheduler()
-        # The runs the shutdown cancelled are written as at stop (#2768).
-        await drain_job_run_recorders(timeout=RECORDER_DRAIN_TIMEOUT_SECONDS)
-        await _discard(conn)
+        try:
+            # The runs the shutdown cancelled are written as at stop (#2768).
+            await drain_job_run_recorders(timeout=RECORDER_DRAIN_TIMEOUT_SECONDS)
+        finally:
+            # ``stop()`` no longer sees this connection (``_conn`` is cleared), so
+            # a drain cut short by its cancel or by an error must not leave it
+            # checked out.
+            await _discard(conn)
 
     @staticmethod
     async def _ping(conn: AsyncConnection) -> None:
