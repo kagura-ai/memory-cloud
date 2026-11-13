@@ -246,6 +246,13 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `BETA-INVITE-001` | `BetaInviteQuotaExceededError` — exceptions.py:552 | 409 | #1581: `POST /beta-invites` at the per-user cap. Since #1595 also `POST /beta-invites/{id}/reissue` of an `expired` invite at the cap (the invite is left untouched). `details.reason` = `"quota_exceeded"` (stable discriminator), `details.quota` = the cap. |
 | `BETA-INVITE-002` | `BetaInviteAlreadyRedeemedError` — exceptions.py:565 | 409 | #1581: `DELETE /beta-invites/{id}` — and since #1595 `POST /beta-invites/{id}/reissue` — on an invite that was already used. `details.reason` = `"already_redeemed"`. |
 | `BETA-INVITE-003` | `BetaInviteAlreadyRevokedError` — exceptions.py:579 | 409 | #1595: `POST /beta-invites/{id}/reissue` on an invite that was already revoked (including the second request of a double-click — nothing is minted). `DELETE` stays idempotent and never emits it. `details.reason` = `"already_revoked"`. |
+| `MCPNOTICE-001` | `McpNoticeTextRejectedError` — exceptions.py | 422 | #2762: `POST /admin/mcp-notices` with a text the notice sanitiser refuses. `details.reason`: `empty`, `too_long`, `too_many_bytes`, `control_or_format_char`, `invisible_char`, `markup_char` or `link`. The text is never echoed. |
+| `MCPNOTICE-002` | `McpNoticeWindowInvalidError` — exceptions.py | 422 | #2762: the notice's window is refused. `details.reason`: `ends_before_start`, `already_expired`, `too_long` (more than 30 days), `starts_too_far_ahead` (more than 90 days) or `starts_in_the_past` (more than 60 seconds back). |
+| `MCPNOTICE-003` | `McpNoticeActiveLimitError` — exceptions.py | 409 | #2762: 3 notices are already live or scheduled. `details.limit`. |
+| `MCPNOTICE-004` | `McpNoticeNotFoundError` — exceptions.py | 404 | #2762: `POST /admin/mcp-notices/{notice_id}/withdraw` with an unknown id. |
+| `MCPNOTICE-005` | `McpNoticesNotOfferedError` — exceptions.py | 409 | #2762: `PUT /me/mcp-notices` turning notices on while `MCP_NOTICES_ENABLED` is off. Turning them off always works. |
+| `MCPNOTICE-006` | `McpNoticeWordingStaleError` — exceptions.py | 409 | #2762: `PUT /me/mcp-notices` turning notices on with a `wording_version` other than the current one; reload the page. |
+| `MCPNOTICE-007` | `McpNoticeDailyLimitError` — exceptions.py | 409 | #2762: 5 notices were already created in the last 24 hours (withdrawn ones count). `details.limit`. |
 
 ### B. Service/route-level codes (raised as `MemoryCloudException`/subclass with overridden code)
 
