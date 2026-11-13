@@ -33,9 +33,9 @@ d. Refused (``markup_char``): ``< > [ ] ` " \\ { } @`` (HTML, autolinks,
 e. Refused (``link``), with U+FF0E read as ``.`` (NFKC maps it), and U+3002
    and U+FF61 read as ``.`` only directly after an ASCII letter, digit or
    hyphen (``example。com``; after any other character they end a Japanese
-   sentence, as in 「…しました。Kagura」): a ``scheme:`` followed by ``//``; ``//`` directly followed by anything but a
-   space (a protocol-relative link such as ``//localhost``, whatever the
-   host); the schemes ``mailto javascript data vbscript file tel sms``;
+   sentence, as in 「…しました。Kagura」): a ``scheme:`` followed by ``//``;
+   ``//`` directly followed by anything but a space (a protocol-relative
+   link such as ``//localhost``, whatever the host); the schemes ``mailto javascript data vbscript file tel sms``;
    ``www.``; host names (``label.label`` ending in two or more ASCII letters,
    the labels in any script: ``例え.jp``, ``пример.com``); a label in any script followed by an
    ASCII ``.`` and a top-level label of two or more letters in any script
