@@ -99,3 +99,18 @@ async def test_invalid_counter_result_fails_closed(limiter):
     limiter.return_value = None
     response = await check_oidc_rate_limit(_request())
     assert response.status_code == 503
+
+
+async def test_workspace_operations_have_bounded_keys_independent_of_identifiers(limiter):
+    for workspace in ("11111111-1111-1111-1111-111111111111", "other-untrusted-path"):
+        assert (
+            await check_oidc_rate_limit(_request(f"/api/v1/me/workspaces/{workspace}/access"))
+            is None
+        )
+    keys = [call.args[0] for call in limiter.call_args_list]
+    assert keys[0] == keys[1]
+    assert ":workspace-access:" in keys[0]
+    assert "untrusted" not in keys[0]
+    await check_oidc_rate_limit(_request("/api/v1/me/workspaces"))
+    assert ":workspace-list:" in limiter.call_args.args[0]
+    assert limiter.call_args.args[0] != keys[0]

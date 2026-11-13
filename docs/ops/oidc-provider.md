@@ -5,6 +5,10 @@ applications. It is separate from the MCP OAuth server, dynamic client
 registration, memory API keys, resource tokens and billing handoff credentials.
 It does not grant a workspace role simply because someone has signed in.
 
+Clients with `workspaces:read` can use the separate
+[workspace access inspection API](oidc-workspace-access.md) to resolve current
+membership and effective permissions after login.
+
 ## Enable and configure
 
 The default is `OIDC_ENABLED=false`. Configure all of the following before
