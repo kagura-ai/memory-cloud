@@ -547,7 +547,16 @@ async def drain_deferred_point_deletes_task() -> JobResult:
                 and result.oldest_age_seconds > DEFERRED_POINT_BACKLOG_WARN_SECONDS
             ):
                 logger.warning("deferred_point_deletes_backlog_old", **fields)
-            counts = {"drained": result.drained, "kept": result.kept, "pending": result.pending}
+            # The drain catches a delete the vector store refused or that timed
+            # out and returns normally (the run stays "ok"); ``failed`` shows
+            # it in the counts, as the other sweeps' counts do.
+            counts = {
+                "drained": result.drained,
+                "kept": result.kept,
+                "pending": result.pending,
+                "busy": int(result.busy),
+                "failed": int(result.failed is not None),
+            }
             break
     except Exception as e:
         logger.error(

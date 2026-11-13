@@ -456,6 +456,36 @@ class TestNeuralJobs:
                 "drained": 2,
                 "kept": 1,
                 "pending": 3,
+                "busy": 0,
+                "failed": 0,
+            }
+        # A delete the vector store refused (or that timed out) is caught by
+        # the drain, which returns normally: the run stays "ok" (job-level
+        # outcome) but its counts must show the failure, as the other sweeps'
+        # counts do.
+        refused = DrainResult(kept=0, pending=4, failed="OSError")
+        with patch(
+            "services.deferred_point_deletes.drain_deferred_point_deletes",
+            AsyncMock(return_value=refused),
+        ):
+            assert await mod.drain_deferred_point_deletes_task() == {
+                "drained": 0,
+                "kept": 0,
+                "pending": 4,
+                "busy": 0,
+                "failed": 1,
+            }
+        busy = DrainResult(pending=2, busy=True)
+        with patch(
+            "services.deferred_point_deletes.drain_deferred_point_deletes",
+            AsyncMock(return_value=busy),
+        ):
+            assert await mod.drain_deferred_point_deletes_task() == {
+                "drained": 0,
+                "kept": 0,
+                "pending": 2,
+                "busy": 1,
+                "failed": 0,
             }
         with patch(
             "services.deferred_point_deletes.drain_deferred_point_deletes",
