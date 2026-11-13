@@ -236,3 +236,119 @@ test.describe("beta invite through a device sign-in (#1655)", () => {
     }
   });
 });
+
+/**
+ * A GitHub sign-in finishes only in the browser that started it (#2791).
+ *
+ * The login page without `return_to` starts the sign-in with a credentialed
+ * JSON call to `/auth/github/login` (cross-origin here: :3000 → :8080), whose
+ * response sets the sign-in cookie; the callback finishes the sign-in only in
+ * the browser that holds it. The positive case proves that cookie round trip
+ * in a real browser; the negative one opens the provider's answer in another
+ * browser.
+ */
+test.describe("a sign-in finishes only in the browser that started it (#2791)", () => {
+  /** Click GitHub on /login (no `return_to`): the JSON-mode start. */
+  async function startFromLoginPage(context: BrowserContext) {
+    const page = await context.newPage();
+    await page.goto("/login");
+    await page.getByRole("checkbox").first().check({ timeout: 30_000 });
+    await page.getByRole("button", { name: /GitHub/ }).click();
+    return page;
+  }
+
+  async function signedIn(context: BrowserContext): Promise<number> {
+    const me = await context.request.get(`${API_URL}/api/v1/auth/me`);
+    return me.status();
+  }
+
+  test("the browser that started a sign-in from /login finishes it", async ({
+    browser,
+    context,
+  }) => {
+    const api = context.request;
+    const restoreGate = await gateOn(api);
+    try {
+      // A first sign-up through an invite makes the identity a returning user.
+      const created = await api.post(`${API_URL}/api/v1/beta-invites`, {
+        data: { label: "e2e same-browser sign-in" },
+      });
+      expect(created.status(), "POST /beta-invites").toBe(201);
+      const invite = (await created.json()) as { url: string };
+      const token = new URL(invite.url).pathname.split("/").pop() ?? "";
+      const identity = freshIdentity("samebrowser");
+
+      const first = await invitee(browser, identity);
+      try {
+        const page = await first.newPage();
+        await page.goto(`/join/${token}`);
+        const github = page.getByTestId(T.joinProvider("github"));
+        await expect(github).toBeDisabled({ timeout: 30_000 });
+        await page.getByTestId(T.joinTerms).check();
+        await github.click();
+        await expect.poll(() => signedIn(first), { timeout: 30_000 }).toBe(200);
+      } finally {
+        await first.close();
+      }
+
+      // A new browser with no session signs the same person in from /login.
+      const second = await invitee(browser, identity);
+      try {
+        expect(await signedIn(second)).toBe(401);
+        const page = await startFromLoginPage(second);
+        await page.waitForURL(
+          (url) => url.port === "3000" && url.pathname !== "/login",
+          { timeout: 30_000 },
+        );
+        expect(page.url()).not.toContain("error=");
+        expect(await signedIn(second)).toBe(200);
+      } finally {
+        await second.close();
+      }
+    } finally {
+      await restoreGate();
+    }
+  });
+
+  test("the provider's answer opened in another browser signs nobody in", async ({
+    browser,
+  }) => {
+    const starter = await invitee(browser, freshIdentity("starter"));
+    const other = await browser.newContext({
+      storageState: { cookies: [], origins: [] },
+    });
+    try {
+      // Browser A starts the sign-in; its trip back to the callback is held:
+      // the mock IdP's answer (the callback URL with code and state) is read
+      // and the navigation aborted, so the sign-in is still open.
+      let callbackUrl = "";
+      await starter.route(
+        "http://localhost:9100/github/login/oauth/authorize**",
+        async (route) => {
+          const answer = await route.fetch({ maxRedirects: 0 });
+          callbackUrl = answer.headers()["location"] ?? "";
+          await route.abort();
+        },
+      );
+      await startFromLoginPage(starter);
+      await expect.poll(() => callbackUrl, { timeout: 30_000 }).not.toBe("");
+      expect(new URL(callbackUrl).pathname).toBe(
+        "/api/v1/auth/github/callback",
+      );
+
+      // Browser B opens it.
+      const page = await other.newPage();
+      await page.goto(callbackUrl);
+      await page.waitForURL((url) => url.pathname === "/login", {
+        timeout: 30_000,
+      });
+      const landed = new URL(page.url());
+      expect(landed.searchParams.get("error")).toBe("oauth_other_browser");
+      expect(landed.searchParams.get("provider")).toBe("github");
+      expect(await signedIn(other)).toBe(401);
+    } finally {
+      await other.close();
+      await starter.close();
+    }
+  });
+});
