@@ -469,7 +469,7 @@ class TestDelivery:
             notices=notices, build=build, log_usage=AsyncMock(side_effect=log)
         )
 
-        # R7: the claim is the last fallible step, after the build AND the
+        # The claim is the last fallible step, after the build AND the
         # usage log.
         assert order == ["build", "log", "claim"]
         # The read shared the headroom session; the claim got the second one.

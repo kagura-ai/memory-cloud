@@ -444,7 +444,7 @@ async def test_withdrawn_notices_count_against_the_daily_cap(db_session, make_us
 async def test_daily_cap_is_a_rolling_24_hour_window(
     db_session, make_users, age: timedelta, refused: bool
 ) -> None:
-    """Owner decision 3: at most 5 CREATED per rolling 24 hours. Rows written
+    """At most 5 notices are CREATED per rolling 24 hours. Rows written
     straight to the table (withdrawn, so the active cap stays out of the way)
     with ``created_at`` 23 h ago fill the cap; the same rows 25 h ago do not.
     A 1-hour window passes the 25 h case but not the 23 h one; a 48-hour
@@ -647,7 +647,7 @@ def _erasure_request(user: User, status: str) -> ErasureRequest:
 @pytest.mark.parametrize("status", [STATUS_PENDING, STATUS_COOLING_OFF, STATUS_IN_PROGRESS])
 @pytest.mark.asyncio(loop_scope="session")
 async def test_erasure_under_way_gets_no_notice(db_session, make_users, status: str) -> None:
-    """R12: every erasure status that is still under way blocks the read and the claim."""
+    """Every erasure status that is still under way blocks the read and the claim."""
     gina = await make_users()
     await _opt(db_session, gina, True)
     view = await _create(db_session)
@@ -665,7 +665,7 @@ async def test_erasure_under_way_gets_no_notice(db_session, make_users, status: 
 async def test_ended_erasure_request_does_not_block_notices(
     db_session, make_users, status: str
 ) -> None:
-    """Control for R12: a finished request (the account is still here) does not block."""
+    """A finished erasure request (the account is still here) does not block."""
     gina = await make_users()
     await _opt(db_session, gina, True)
     view = await _create(db_session)
@@ -780,16 +780,15 @@ async def test_a_claim_behind_a_lock_gives_up_at_the_lock_timeout(
 
     async with _maker(db_session)() as holder:
         await _hold_conflicting_lock(holder, how, mia, view.id)
-        loop = asyncio.get_running_loop()
-        started = loop.time()
         with pytest.raises(DBAPIError) as caught:
+            # The 10 s bound only stops a hang; no wall-clock assertion, so a
+            # loaded CI machine cannot fail the test.
             await asyncio.wait_for(_claim(db_session, mia, [view.id]), timeout=10)
-        elapsed = loop.time() - started
         await holder.rollback()
 
-    # lock_timeout (1 s), not statement_timeout (2 s), ended it.
+    # lock_timeout (1 s), not statement_timeout (2 s), ended it: the SQLSTATE
+    # is 55P03 lock_not_available, not 57014 query_canceled.
     assert _sqlstate(caught.value) == _LOCK_NOT_AVAILABLE
-    assert elapsed < 1.9
     rows = (
         await db_session.execute(
             select(func.count())

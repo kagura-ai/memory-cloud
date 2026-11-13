@@ -915,9 +915,9 @@ async def _session_start_with_a_notice(db_session, monkeypatch, headroom: dict):
 async def test_session_start_at_5000_with_three_headroom_entries_and_a_notice(
     db_session, monkeypatch
 ):
-    """#2762 (R6): three full plan_headroom entries fill the server-notice
-    quarter, so the 300-character notice waits (unclaimed: it arrives at a
-    later session start) and the lanes keep their room: the reply holds
+    """#2762: three full plan_headroom entries fill the server-notice
+    quarter, so the 300-character notice waits (unclaimed: it comes with a
+    later call that has room for it) and the lanes keep their room: the reply holds
     max_chars and at least one changes row survives on the guardrail-heavy
     context."""
     headroom = {
@@ -936,7 +936,7 @@ async def test_session_start_at_5000_with_three_headroom_entries_and_a_notice(
 
 @pytest.mark.asyncio
 async def test_session_start_at_5000_with_one_headroom_entry_and_a_notice(db_session, monkeypatch):
-    """#2762 (R6): with one headroom entry the notice fits what is left of the
+    """#2762: with one headroom entry the notice fits what is left of the
     quarter and arrives whole, claimed once; the reply holds max_chars and at
     least one changes row survives."""
     headroom = {"plan_headroom": [_headroom_entry("memories", "critical")]}
