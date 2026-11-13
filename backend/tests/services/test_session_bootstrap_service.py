@@ -831,3 +831,118 @@ async def test_index_passes_absent_and_null_guardrails_through(db_session, seede
 
     env = await _build(db_session, owner, ws, ctx, format="index", guardrails_provider=failed)
     assert env["guardrails"] is None
+
+
+def _headroom_entry(dimension: str, level: str) -> dict:
+    return {
+        "dimension": dimension,
+        "level": level,
+        "used": 9,
+        "limit": 10,
+        "percentage": 90.0,
+        "plan": "free",
+        "remedies": ["wait", "upgrade"],
+        "help": "x" * 250,
+    }
+
+
+async def _session_start_with_a_notice(db_session, monkeypatch, headroom: dict):
+    """bootstrap(index, 5,000) through the handler on the #2485-sized context,
+    with ``headroom`` as the plan_headroom field and one live 300-character
+    Japanese service notice the owner opted into. Returns (reply text, the
+    delivery rows written)."""
+    import json
+    from contextlib import ExitStack
+    from datetime import UTC
+    from unittest.mock import AsyncMock
+
+    from config.settings import get_settings
+    from mcp_server.auth import set_mcp_notice_eligible
+    from mcp_server.tools import bootstrap as module
+    from models.mcp_notice import McpNotice
+    from services import mcp_notice_service as notices
+
+    owner, ws, ctx = await _live_like_context(db_session)
+    await notices.record_mcp_notice_consent(
+        db_session, user_id=owner, value=True, wording_version=notices.MCP_NOTICES_WORDING_VERSION
+    )
+    notice_id = uuid4()
+    live_from = datetime.now(UTC) - timedelta(hours=1)
+    db_session.add(
+        McpNotice(
+            id=notice_id,
+            text="お" * 300,
+            starts_at=live_from,
+            expires_at=live_from + timedelta(days=1),
+        )
+    )
+    await db_session.commit()
+    context_id = str(ctx.id)
+    workspace_id = ws.id
+
+    async def gen():
+        yield db_session
+
+    monkeypatch.setattr(get_settings(), "mcp_notices_enabled", True)
+    set_mcp_notice_eligible(True)
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(patch("db.base.get_db", new=gen))
+            stack.enter_context(patch.object(module, "_log_tool_usage", new=AsyncMock()))
+            stack.enter_context(
+                patch.object(module, "_plan_headroom_field", new=AsyncMock(return_value=headroom))
+            )
+            (block,) = await module.handle_bootstrap(
+                {"context_id": context_id, "format": "index", "max_chars": 5_000},
+                owner,
+                workspace_id,
+            )
+        delivered = (
+            await db_session.execute(
+                text("SELECT count(*) FROM mcp_notice_deliveries WHERE notice_id = :id"),
+                {"id": notice_id},
+            )
+        ).scalar_one()
+    finally:
+        set_mcp_notice_eligible(False)
+        await db_session.rollback()
+        await db_session.execute(text("DELETE FROM mcp_notices WHERE id = :id"), {"id": notice_id})
+        await db_session.commit()
+    return json.loads(block.text), len(block.text), delivered
+
+
+@pytest.mark.asyncio
+async def test_session_start_at_5000_with_three_headroom_entries_and_a_notice(
+    db_session, monkeypatch
+):
+    """#2762 (R6): three full plan_headroom entries fill the server-notice
+    quarter, so the 300-character notice waits (unclaimed: it arrives at a
+    later session start) and the lanes keep their room: the reply holds
+    max_chars and at least one changes row survives on the guardrail-heavy
+    context."""
+    headroom = {
+        "plan_headroom": [
+            _headroom_entry("memories", "warning"),
+            _headroom_entry("memories_per_day", "critical"),
+            _headroom_entry("mcp_calls_per_day", "warning"),
+        ]
+    }
+    reply, length, delivered = await _session_start_with_a_notice(db_session, monkeypatch, headroom)
+    assert length <= 5_000 and json_chars(reply) <= 5_000
+    assert len(reply["plan_headroom"]) == 3
+    assert "notices" not in reply and delivered == 0
+    assert len(reply["components"]["changes"]["changes"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_session_start_at_5000_with_one_headroom_entry_and_a_notice(db_session, monkeypatch):
+    """#2762 (R6): with one headroom entry the notice fits what is left of the
+    quarter and arrives whole, claimed once; the reply holds max_chars and at
+    least one changes row survives."""
+    headroom = {"plan_headroom": [_headroom_entry("memories", "critical")]}
+    reply, length, delivered = await _session_start_with_a_notice(db_session, monkeypatch, headroom)
+    assert length <= 5_000 and json_chars(reply) <= 5_000
+    assert list(reply)[:2] == ["status", "notices"]
+    assert [i["text"] for i in reply["notices"]["items"]] == ["お" * 300]
+    assert delivered == 1
+    assert len(reply["components"]["changes"]["changes"]) >= 1

@@ -52,16 +52,16 @@ SECRET_TEXT = "Maintenance window on Saturday."
 
 
 def _view(**overrides) -> NoticeView:
-    values = dict(
-        id=NOTICE_ID,
-        text=SECRET_TEXT,
-        starts_at=T0,
-        expires_at=T1,
-        withdrawn_at=None,
-        created_at=T0,
-        state="active",
-        delivered_count=0,
-    )
+    values = {
+        "id": NOTICE_ID,
+        "text": SECRET_TEXT,
+        "starts_at": T0,
+        "expires_at": T1,
+        "withdrawn_at": None,
+        "created_at": T0,
+        "state": "active",
+        "delivered_count": 0,
+    }
     values.update(overrides)
     return NoticeView(**values)  # type: ignore[arg-type]
 
