@@ -174,6 +174,9 @@ class Settings(BaseSettings):
 
     # Separate identity provider; existing MCP OAuth remains unchanged (#2781).
     oidc_enabled: bool = False
+    # Workspace-owned synchronization controls; credentials/data APIs remain separate.
+    sync_integrations_enabled: bool = False
+    sync_authorization_ttl_seconds: int = Field(default=604800, ge=60, le=2592000)
     oidc_issuer: str = ""
     oidc_signing_keys_file: str = ""
     oidc_active_signing_kid: str = ""
