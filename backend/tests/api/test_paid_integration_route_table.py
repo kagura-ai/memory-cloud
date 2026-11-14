@@ -100,6 +100,9 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "graph": NONE,
     "internal_billing": NONE,
     "internal_integrations": NONE,  # publisher, consumes no rights
+    # Trusted billing activation (#2802): activate_installation enters
+    # paid_integration_write; the consent pre-check is a plain read.
+    "internal_sync_installations": Guarded(services=("services.sync_installations",)),
     "invitations": NONE,
     "management_grants": NONE,
     "mcp": NONE,
@@ -136,6 +139,7 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "share_keys": NONE,
     "sleep_reports": NONE,
     "system": NONE,
+    "sync_installations": Guarded(services=("services.sync_installations",)),  # #2802
     "system_admins": NONE,
     "users": NONE,
     "well_known": NONE,
@@ -241,6 +245,9 @@ PAID_INTEGRATION_SYMBOLS: dict[str, str] = {
     "api.routes.internal_integrations": PUBLISHER,
     "models": REGISTRY,  # importlib.import_module("models.integration_entitlement")
     "models.data_boundary": DATA_BOUNDARY,
+    # #2802: activate_installation creates the sync target inside
+    # paid_integration_write, entered before any write or row lock.
+    "services.sync_installations": GUARDED,
 }
 
 # Kinds of use the scan reports.

@@ -10,7 +10,7 @@ first.
 
 The routes are discovered from ``api.main.app`` and pinned, so a new route on
 these gates shows up here; the requests go to a minimal app built from the
-three routers, with ``get_db`` replaced by a recorder.
+four routers, with ``get_db`` replaced by a recorder.
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ from fastapi.testclient import TestClient
 
 from api.main import app as main_app
 from api.main import memory_cloud_exception_handler
-from api.routes import internal_billing, internal_integrations, workers
+from api.routes import internal_billing, internal_integrations, internal_sync_installations, workers
+from api.routes.sync_installations import SyncControlRoute
 from auth.single_authorization import sole_authorization
 from config.settings import get_settings
 from db.base import get_db
@@ -47,6 +48,9 @@ EXPECTED = {
     ("POST", "/internal/workspaces/{workspace_id}/capacity-lock-notice"): BILLING_TOKEN,
     ("GET", "/internal/workspaces/{workspace_id}/integration-entitlements"): BILLING_TOKEN,
     ("PUT", "/internal/workspaces/{workspace_id}/integration-entitlements"): BILLING_TOKEN,
+    # #2802: trusted paid activation, behind SYNC_INTEGRATIONS_ENABLED.
+    ("POST", "/internal/workspaces/{workspace_id}/sync-authorizations/validate"): BILLING_TOKEN,
+    ("POST", "/internal/workspaces/{workspace_id}/sync-installations/activate"): BILLING_TOKEN,
     ("GET", "/api/v1/workers/apps"): WORKER_TOKEN,
     ("GET", "/api/v1/workers/config"): WORKER_TOKEN,
     ("GET", "/api/v1/workers/active-color"): WORKER_TOKEN,
@@ -76,11 +80,31 @@ ROUTES = sorted(EXPECTED)
 ROUTE_IDS = [f"{method} {path}" for method, path in ROUTES]
 
 
-def test_the_service_token_routes_are_exactly_the_pinned_ten():
+def test_the_service_token_routes_are_exactly_the_pinned_twelve():
     discovered = _discovered()
     assert discovered == EXPECTED
     tokens = list(discovered.values())
-    assert (tokens.count(BILLING_TOKEN), tokens.count(WORKER_TOKEN)) == (7, 3)
+    assert (tokens.count(BILLING_TOKEN), tokens.count(WORKER_TOKEN)) == (9, 3)
+
+
+def _sync_control_routes() -> set[tuple[str, str]]:
+    """Routes whose route class answers every unexpected error with a fixed 503."""
+    found: set[tuple[str, str]] = set()
+    for route in internal_sync_installations.router.routes:
+        assert isinstance(route, SyncControlRoute), route
+        for method in route.methods - {"HEAD", "OPTIONS"}:
+            found.add((method, route.path))
+    return found
+
+
+SYNC_CONTROL = _sync_control_routes()
+
+
+def test_the_sync_control_routes_are_the_two_internal_sync_routes():
+    assert SYNC_CONTROL == {
+        ("POST", "/internal/workspaces/{workspace_id}/sync-authorizations/validate"),
+        ("POST", "/internal/workspaces/{workspace_id}/sync-installations/activate"),
+    }
 
 
 class _Reached(Exception):
@@ -92,6 +116,9 @@ def client(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "billing_service_token", BILLING_TOKEN)
     monkeypatch.setattr(settings, "worker_service_token", WORKER_TOKEN)
+    # Past the credential, the sync routes check the feature flag before the
+    # database; enabled here so a valid header reaches the recorder.
+    monkeypatch.setattr(settings, "sync_integrations_enabled", True)
     opened: list[str] = []
 
     async def recording_db():
@@ -108,6 +135,7 @@ def client(monkeypatch):
     app.include_router(workers.router, prefix="/api/v1")
     app.include_router(internal_billing.router)
     app.include_router(internal_integrations.router)
+    app.include_router(internal_sync_installations.router)
     app.add_exception_handler(MemoryCloudException, memory_cloud_exception_handler)
 
     @app.exception_handler(_Reached)
@@ -149,8 +177,13 @@ def test_two_authorization_headers_are_401_before_the_database(client, method, p
 def test_one_valid_header_gets_past_the_credential(client, method, path):
     token = EXPECTED[(method, path)]
     response = _call(client, method, path, {"Authorization": f"Bearer {token}"})
-    assert response.status_code == 418, response.text
-    assert len(client.opened) == 1
+    assert len(client.opened) == 1, response.text
+    if (method, path) in SYNC_CONTROL:
+        # SyncControlRoute turns the recorder's exception into its fixed 503.
+        assert response.status_code == 503, response.text
+        assert response.json() == {"error": "temporarily_unavailable"}
+    else:
+        assert response.status_code == 418, response.text
 
 
 @pytest.mark.parametrize(("method", "path"), ROUTES, ids=ROUTE_IDS)

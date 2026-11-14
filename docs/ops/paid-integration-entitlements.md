@@ -169,8 +169,16 @@ time after all awaits, not PostgreSQL transaction-start `now()`; its security
 boundary is the final authorization immediately before commit, not the later
 network acknowledgement. No background job or cached token claim grants time.
 
-Concrete installation, token and sync HTTP consumers are added by their later
-implementation tasks; this change adds no placeholder privileged endpoints.
+The first consumer is workspace sync-installation activation (#2802,
+[workspace-sync-installations.md](workspace-sync-installations.md)):
+`POST /api/v1/workspaces/{workspace_id}/sync-installations` (owner, OIDC
+`integrations:manage`) and
+`POST /internal/workspaces/{workspace_id}/sync-installations/activate`
+(billing service token) both reach `activate_installation`, which reads the
+approval and any existing installation with plain reads and then enters
+`paid_integration_write` before any write or row lock. Both routes are off
+unless `SYNC_INTEGRATIONS_ENABLED=true`. Token issuance and sync commit
+consumers are added by their later implementation tasks.
 
 `backend/tests/api/test_paid_integration_route_table.py` enforces the boundary:
 
