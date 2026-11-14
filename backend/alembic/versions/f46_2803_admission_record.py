@@ -55,8 +55,8 @@ Operator timing: deploy before pruning manual allowlist rows at the end of
 the closed beta. A beta-invite admission survives the pruning through its
 audit row; a manual-allowlist admission does not.
 
-Revision ID: f45_2803_admission_record
-Revises: f44_2800_mcp_notice_plans
+Revision ID: f46_2803_admission_record
+Revises: f45_2800_mcp_notice_plans
 
 Note: revision IDs must stay <= 32 chars — ``alembic_version.version_num``
 is varchar(32).
@@ -72,8 +72,8 @@ from sqlalchemy.engine import CursorResult
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "f45_2803_admission_record"
-down_revision: str | None = "f44_2800_mcp_notice_plans"
+revision: str = "f46_2803_admission_record"
+down_revision: str | None = "f45_2800_mcp_notice_plans"
 branch_labels: str | None = None
 depends_on: str | None = None
 
@@ -234,7 +234,7 @@ def upgrade() -> None:
     op.create_index(_INDEX_NAME, "users", ["admitted_by_user_id"])
 
     # Counts only: no user id, address, invite id or label.
-    log.info("f45_2803 admission backfill counts: %s", json.dumps(counts, sort_keys=True))
+    log.info("f46_2803 admission backfill counts: %s", json.dumps(counts, sort_keys=True))
 
 
 def downgrade() -> None:

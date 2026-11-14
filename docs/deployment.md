@@ -674,7 +674,7 @@ channel or per inviter.
   sign-ups at once: one `first_user`, one `unknown`), and any row written by an
   instance from before v0.162.0 during a rolling deploy.
 
-The migration (`f45_2803_admission_record`) fills existing accounts from the
+The migration (`f46_2803_admission_record`) fills existing accounts from the
 evidence there is, in this order (the first match wins):
 
 1. `admin_cli`: a `local:` account with a login id;
@@ -1150,7 +1150,7 @@ curl -X POST https://example.com/api/v1/admin/mcp-notices/<notice-id>/withdraw \
 Code from before #2800 does not know `plans`: it delivers a live or
 scheduled targeted notice to **everyone** who opted in.
 
-- **Database downgrade.** The `f44_2800_mcp_notice_plans` downgrade refuses to
+- **Database downgrade.** The `f45_2800_mcp_notice_plans` downgrade refuses to
   run (`RuntimeError` with the count) while a notice with `plans` is live or
   scheduled. It takes the same lock as a notice create before it counts, so
   a create in flight is counted. Withdraw those notices first through

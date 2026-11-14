@@ -1,7 +1,7 @@
-"""DB contract for the admission-record migration f45 (#2803).
+"""DB contract for the admission-record migration f46 (#2803).
 
-Upgrades a clean database to f45's parent, seeds raw rows for every kind of evidence
-and every conflict, then upgrades to f45 and checks what each account reads:
+Upgrades a clean database to f46's parent, seeds raw rows for every kind of evidence
+and every conflict, then upgrades to f46 and checks what each account reads:
 
 - ``admin_cli``: a CLI-created local admin (even with ``is_initial_admin``);
 - the ``user.signed_up`` audit row of an e-mail account, for each admission;
@@ -20,9 +20,9 @@ The log carries counts only (no id, address, invite id or label), no row's
 ``updated_at`` moves, the downgrade removes the columns and constraints, and
 a re-upgrade rebuilds the record from the evidence.
 
-PRE_REV is read from the module (its ``down_revision``), so re-chaining f45
+PRE_REV is read from the module (its ``down_revision``), so re-chaining f46
 onto another parent changes the migration only, and the seed always runs at
-f45's own parent. The test ends on an empty schema at head: the rows it
+f46's own parent. The test ends on an empty schema at head: the rows it
 seeds (a CLI password admin among them) must not reach later DB tests.
 """
 
@@ -52,9 +52,9 @@ from tests.migration_ast import ALEMBIC_VERSIONS
 if str(ALEMBIC_VERSIONS) not in sys.path:
     sys.path.insert(0, str(ALEMBIC_VERSIONS))
 
-REV = "f45_2803_admission_record"
+REV = "f46_2803_admission_record"
 PRE_REV: str = importlib.import_module(REV).down_revision
-LABEL = "SENTINEL-LABEL-f45-do-not-log"
+LABEL = "SENTINEL-LABEL-f46-do-not-log"
 
 _CHECKS = (
     "valid_admitted_via",
@@ -80,7 +80,7 @@ def _user(
             "VALUES (:email, :uid, :role, 'UTC', 'en', :initial, :login, :method)"
         ),
         {
-            "email": f"{user_id.replace(':', '-')}@f45.example",
+            "email": f"{user_id.replace(':', '-')}@f46.example",
             "uid": user_id,
             "role": role,
             "initial": is_initial_admin,
@@ -195,7 +195,7 @@ def _captured_logs() -> Iterator[list[logging.LogRecord]]:
         yield records
 
 
-class TestF45AdmissionBackfill:
+class TestF46AdmissionBackfill:
     def test_every_kind_and_conflict_counts_only_and_round_trip(self) -> None:
         _reset_alembic_state()
         try:
@@ -334,7 +334,7 @@ class TestF45AdmissionBackfill:
                 "unknown": 6,
                 "workspace_invitation": 2,
             }
-            secrets = [*ids.values(), *(str(i) for i in invites.values()), LABEL, "f45.example"]
+            secrets = [*ids.values(), *(str(i) for i in invites.values()), LABEL, "f46.example"]
             for record in records:
                 message = record.getMessage()
                 assert not any(secret in message for secret in secrets), message

@@ -2,7 +2,7 @@
 
 The database behaviour is in tests/integration/test_mcp_notice_service_db.py.
 #2800: the plan list's normalisation, the plan predicate's place in the one
-claim statement, and the create lock key the f44 downgrade shares.
+claim statement, and the create lock key the f45 downgrade shares.
 """
 
 from __future__ import annotations
@@ -232,17 +232,17 @@ async def test_create_notice_refuses_text_before_any_statement() -> None:
     assert db.used == []
 
 
-def test_the_f44_downgrade_takes_the_create_lock() -> None:
-    """The f44 downgrade serialises with ``create_notice`` through the same
+def test_the_f45_downgrade_takes_the_create_lock() -> None:
+    """The f45 downgrade serialises with ``create_notice`` through the same
     advisory lock; a rename of one key without the other would silently
     break the downgrade guard."""
     path = (
         Path(__file__).resolve().parents[2]
         / "alembic"
         / "versions"
-        / "f44_2800_mcp_notice_plans.py"
+        / "f45_2800_mcp_notice_plans.py"
     )
-    spec = importlib.util.spec_from_file_location("_f44_2800_lock_pin", path)
+    spec = importlib.util.spec_from_file_location("_f45_2800_lock_pin", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

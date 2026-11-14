@@ -89,7 +89,7 @@ class McpNotice(Base):
             name="ck_mcp_notices_text_size",
         ),
         CheckConstraint("expires_at > starts_at", name="ck_mcp_notices_window"),
-        # #2800: byte-identical to the f44 migration (schema drift test).
+        # #2800: byte-identical to the f45 migration (schema drift test).
         CheckConstraint(
             "plans IS NULL OR cardinality(plans) >= 1", name="ck_mcp_notices_plans_nonempty"
         ),

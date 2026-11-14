@@ -30,8 +30,8 @@ scheduled targeted notice to everyone who opted in. Before such a rollback,
 set ``MCP_NOTICES_ENABLED=false`` on the colour that comes back, or withdraw
 those notices (docs/deployment.md, "Service notices over MCP").
 
-Revision ID: f44_2800_mcp_notice_plans
-Revises: f43_2798_paid_integrations
+Revision ID: f45_2800_mcp_notice_plans
+Revises: f44_2802_sync_installations
 
 Note: revision IDs must stay <= 32 chars — ``alembic_version.version_num``
 is varchar(32).
@@ -43,8 +43,8 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "f44_2800_mcp_notice_plans"
-down_revision: str | None = "f43_2798_paid_integrations"
+revision: str = "f45_2800_mcp_notice_plans"
+down_revision: str | None = "f44_2802_sync_installations"
 branch_labels: str | None = None
 depends_on: str | None = None
 
@@ -80,7 +80,7 @@ def downgrade() -> None:
     if live > 0:
         raise RuntimeError(
             f"{live} live or scheduled service notice(s) are targeted by plan; downgrading "
-            "f44_2800_mcp_notice_plans would deliver them to everyone who opted in. Withdraw "
+            "f45_2800_mcp_notice_plans would deliver them to everyone who opted in. Withdraw "
             "them first through POST /api/v1/admin/mcp-notices/<id>/withdraw, then rerun."
         )
     op.drop_constraint("ck_mcp_notices_plans_nonempty", "mcp_notices", type_="check")

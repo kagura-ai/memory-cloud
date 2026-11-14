@@ -1,4 +1,4 @@
-"""DB contract for f44 (#2800): ``mcp_notices.plans``.
+"""DB contract for f45 (#2800): ``mcp_notices.plans``.
 
 - upgrade adds a nullable ``varchar(50)[]`` column and the CHECK
   ``ck_mcp_notices_plans_nonempty``; an existing notice reads ``NULL`` (it
@@ -38,12 +38,12 @@ from tests.integration.test_alembic_migrations import (
 )
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "f44_2800_mcp_notice_plans.py"
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "f45_2800_mcp_notice_plans.py"
 )
 
 
 def _migration_module():
-    spec = importlib.util.spec_from_file_location("_f44_2800_migration", _MIGRATION_PATH)
+    spec = importlib.util.spec_from_file_location("_f45_2800_migration", _MIGRATION_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -51,7 +51,7 @@ def _migration_module():
 
 
 _MODULE = _migration_module()
-F44_REV = _MODULE.revision
+F45_REV = _MODULE.revision
 PRIOR_REV = _MODULE.down_revision
 
 
@@ -116,11 +116,11 @@ def _clear(conn: Connection) -> None:
     conn.execute(text("DELETE FROM mcp_notices"))
 
 
-class TestF44McpNoticePlans:
+class TestF45McpNoticePlans:
     def test_revision_ids(self) -> None:
-        assert F44_REV == "f44_2800_mcp_notice_plans"
-        assert len(F44_REV) <= 32
-        assert PRIOR_REV == "f43_2798_paid_integrations"
+        assert F45_REV == "f45_2800_mcp_notice_plans"
+        assert len(F45_REV) <= 32
+        assert PRIOR_REV == "f44_2802_sync_installations"
         assert len(PRIOR_REV) <= 32
 
     def test_upgrade_adds_the_nullable_column_and_the_check(self) -> None:
@@ -131,7 +131,7 @@ class TestF44McpNoticePlans:
                 assert not _has_column(conn)
                 old = _untargeted(conn)
 
-            _to(F44_REV)
+            _to(F45_REV)
 
             with engine.begin() as conn:
                 column_type, not_null = conn.execute(
@@ -182,7 +182,7 @@ class TestF44McpNoticePlans:
         engine = _sync_engine()
         try:
             _start_at_prior()
-            _to(F44_REV)
+            _to(F45_REV)
             for when in ("live", "scheduled"):
                 with engine.begin() as conn:
                     _clear(conn)
@@ -229,7 +229,7 @@ class TestF44McpNoticePlans:
                 assert conn.execute(text("SELECT count(*) FROM mcp_notices")).scalar_one() == 3
 
             # Expired: the downgrade runs too.
-            _to(F44_REV)
+            _to(F45_REV)
             with engine.begin() as conn:
                 _clear(conn)
                 _targeted(
@@ -256,7 +256,7 @@ class TestF44McpNoticePlans:
         outcome: dict[str, BaseException | None] = {}
         try:
             _start_at_prior()
-            _to(F44_REV)
+            _to(F45_REV)
             with engine.begin() as conn:
                 _clear(conn)
 
@@ -306,11 +306,11 @@ class TestF44McpNoticePlans:
         engine = _sync_engine()
         try:
             _start_at_prior()
-            _to(F44_REV)
+            _to(F45_REV)
             _down()
             with engine.begin() as conn:
                 assert not _has_column(conn)
-            _to(F44_REV)
+            _to(F45_REV)
             with engine.begin() as conn:
                 assert _has_column(conn)
                 _targeted(conn)

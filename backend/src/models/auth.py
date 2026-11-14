@@ -104,7 +104,7 @@ class User(Base):
             admission spent. No foreign key: it survives the invite row.
         admitted_invite_issuer: ``admin`` or ``user``, from the inviter's
             ``users.role`` when the account was created (``beta_invite`` only).
-            For an account created before v0.162.0 the f45 backfill took the
+            For an account created before v0.162.0 the f46 backfill took the
             inviter's role at upgrade time, and left the invite id, issuer and
             inviter NULL when no live invite remained (docs/deployment.md).
         admitted_by_user_id: The inviter of a user-minted invite. A
@@ -246,7 +246,7 @@ class User(Base):
         # ``lower(email)``. Non-unique (case variants may coexist; the lookup
         # fails closed). Mirrors alembic e86_1678_email_password.
         Index("ix_users_email_lower", text("lower(email)")),
-        # Issue #2803: byte-identical to alembic f45_2803_admission_record.
+        # Issue #2803: byte-identical to alembic f46_2803_admission_record.
         CheckConstraint(
             "admitted_via IN ('admin_cli', 'allowlist', 'beta_invite', 'first_user', "
             "'open_registration', 'unknown', 'workspace_invitation')",
