@@ -313,7 +313,7 @@ async def test_foreign_tombstone_cannot_be_retired_by_sync_upsert(feeds):
 async def test_late_details_move_never_overwrites_or_deletes_foreign_memory(
     feeds, monkeypatch, collision
 ):
-    row = await committed(feeds, [product()])
+    await committed(feeds, [product()])
     if collision == "delete":
         row = await staged(feeds, [])
         body = {"diff_hash": row["diff_hash"]}
