@@ -924,6 +924,7 @@ from api.routes import (  # noqa: E402
     files,  # Issue #485: platform-managed R2 file storage
     graph,
     internal_billing,  # Issue #954: billing-service entitlement push (/internal)
+    internal_integrations,  # #2798: finite paid-integration rights (/internal)
     invitations,
     management_grants,
     mcp,
@@ -1169,6 +1170,7 @@ app.include_router(worker_apps.router, prefix="/api/v1")
 # deploy by deploy.sh `verify_internal_blocked`); reachable only over the
 # internal Docker network, with BILLING_SERVICE_TOKEN as the in-app control.
 app.include_router(internal_billing.router)
+app.include_router(internal_integrations.router)
 # Issue #1093: owner-only billing handoff token. Public surface (/api/v1/billing),
 # session-auth + owner-only, Stripe-agnostic — always mounted (unlike the
 # BILLING_ENABLED-gated Stripe plugin); fail-closed (503) when the signing key is unset.

@@ -64,6 +64,12 @@ DERIVED_MOAT_TABLES: frozenset[str] = frozenset(
 
 OPERATIONAL_TABLES: frozenset[str] = frozenset(
     {
+        # Billing-owned finite integration authority and immutable delivery
+        # receipts. Opaque references only; no user content or payment PII.
+        # Workspace cascade covers erasure; ownership transfer preserves rights.
+        "workspace_integration_states",
+        "workspace_integration_licenses",
+        "workspace_integration_events",
         # Agent Registry (#1274, RFC-0002 P0-1) — control-plane metadata about
         # agent deployments (kill switch, enforcement mode); no user knowledge
         # content, no learned structure. Governed by the auth/security regime +

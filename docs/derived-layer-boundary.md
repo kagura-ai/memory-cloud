@@ -92,6 +92,14 @@ rule applies — serving-only, never exported.
 
 ## Export surface vs serving surface
 
+Paid-integration state (`workspace_integration_states`), service licenses
+(`workspace_integration_licenses`) and applied-delivery receipts
+(`workspace_integration_events`) are operational billing/authorization data.
+They contain bounded access intervals, revisions and opaque billing references,
+never memory content, learned signals, payment details or personal identifiers.
+They are excluded from raw-memory export, cascade with workspace deletion and
+survive ownership transfer. Expiring or replacing rights never deletes content.
+
 Derived signal is *supposed* to act on every query — that is its value. The
 ban is on **bulk portability**, not on serving:
 
