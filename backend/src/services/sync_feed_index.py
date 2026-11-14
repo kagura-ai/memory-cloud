@@ -1,6 +1,7 @@
 """Durable index wakeups and conservative, separately observable search progress."""
 
 from datetime import timedelta
+from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -123,7 +124,7 @@ async def maintain_sync_runs(db: AsyncSession) -> None:
     await db.commit()
 
 
-async def hold_sync_index_receipt(db: AsyncSession, resource_pk, context_id) -> None:
+async def hold_sync_index_receipt(db: AsyncSession, resource_pk: UUID, context_id: UUID) -> None:
     """A live batch holds the newest receipt; stale recovery skips its locked target."""
     if get_settings().sync_runs_enabled:
         await db.scalar(

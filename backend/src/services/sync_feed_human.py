@@ -25,7 +25,7 @@ from models.sync_feed_schemas import (
 from models.sync_installation import SyncService
 from services.sync_feed_authority import current_schema, human_feed_boundary, locked
 from services.sync_feed_runs import run_view
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, NotFoundException
 
 
@@ -137,7 +137,7 @@ async def approve_diff(
         return {
             "approval_id": str(row.approval_id),
             "diff_hash": row.diff_hash,
-            "expires_at": row.prepared_until.isoformat() + "Z",
+            "expires_at": to_utc_iso(row.prepared_until),
         }
 
 

@@ -19,7 +19,7 @@ from models.sync_feed_schemas import (
 )
 from services.sync_credentials import CredentialAuthority
 from services.sync_feed_authority import FeedFence, current_schema, locked
-from utils.datetime import utcnow
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, NotFoundException
 
 
@@ -306,6 +306,6 @@ def run_view(row: SyncRun) -> dict:
         "diff_hash": row.diff_hash,
         "changes": len(row.diff or []),
         "requires_approval": row.requires_approval,
-        "expires_at": row.expires_at.isoformat() + "Z",
-        "prepared_until": row.prepared_until.isoformat() + "Z" if row.prepared_until else None,
+        "expires_at": to_utc_iso(row.expires_at),
+        "prepared_until": to_utc_iso(row.prepared_until),
     }

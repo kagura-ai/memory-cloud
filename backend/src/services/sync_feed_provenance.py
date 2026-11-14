@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy import Select, Uuid, case, cast, exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
+from sqlalchemy.sql.elements import ColumnElement
 
 from db.point_writer_lock import hold_point_writer_lock
 from models.auth import Context
@@ -54,7 +55,7 @@ def sync_candidate_lock(query: Select, event: ResourceEvent) -> Select:
     return query
 
 
-def enrolled_event():
+def enrolled_event() -> ColumnElement[bool]:
     """Correlated proof that the event was committed by the feed transaction."""
     run_text = ResourceEvent.event_metadata["sync_run_id"].as_string()
     run_uuid = cast(

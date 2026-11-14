@@ -3,7 +3,7 @@
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, TypeVar
+from typing import Annotated, Any, TypeVar
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
@@ -49,7 +49,7 @@ def json_body(model: type[BaseModel]) -> dict:
     schema = model.model_json_schema()
     definitions = schema.pop("$defs", {})
 
-    def inline(value):
+    def inline(value: Any) -> Any:
         if isinstance(value, dict):
             if "$ref" in value:
                 return inline(definitions[value["$ref"].rsplit("/", 1)[-1]])
