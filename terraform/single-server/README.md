@@ -20,8 +20,10 @@ Google Compute Engine VM behind Cloudflare.
 
 ## Not included (deliberately)
 
-- No automatic TLS via Let's Encrypt. Cloudflare Origin CA cert is the
-  authoritative TLS material (15 year validity, no renewal hassle).
+- No automatic TLS for the main site. The Cloudflare Origin CA cert is its
+  authoritative TLS material (15 year validity, no renewal hassle). The proxy
+  obtains certificates from a public CA only for the optional custom-domain
+  site, which ships commented out (see "Custom domains (optional)").
 - No managed databases (Cloud SQL / Memorystore). All state lives on the VM.
 - No backend GCS integration yet — the bucket exists but nothing writes to
   it until the multimodal issue lands.
@@ -497,6 +499,177 @@ Two registry-mode guards worth knowing about, because both protect against a
   in this repo owns; on a freshly provisioned app VM — the migration's first
   deploys, when a rollback is most likely — that state does not exist yet.
   Keep the previous release's tag pullable for as long as you might roll back.
+
+## Custom domains (optional)
+
+A workspace owner can serve a published public MCP endpoint under a host
+name they control, as `https://<their name>/mcp`, once they have proved
+control of the name with a DNS TXT record. The application side (states,
+proof, the right to use it, limits, API, settings) is described in
+[`docs/public-mcp-domains.md`](../../docs/public-mcp-domains.md). This section
+covers the proxy: certificates for those names, and routing them.
+
+**What ships.** `Caddyfile.tpl` carries the proxy part commented out: 30 lines
+that start with the marker `#public-mcp-domains# ` at column 0. Three of them
+sit in the global options (`on_demand_tls` with the `ask` address of the API's
+permission path), the other 27 are a site after the main site. The lines go on
+and off **together**: the site without the three global lines does not load
+(see "Proxy version" below), and the three lines alone configure a
+permission call that no site uses. With them on, the site:
+
+- answers every TLS server name that no other site (the main site, a sibling
+  vhost) claims, and obtains a certificate for such a name on demand, from the
+  ACME issuer with the TLS-ALPN challenge on 443 (port 80 stays closed), only
+  after the API's permission path
+  (`http://api-<color>:8080/internal/public-mcp-domains/tls-permission`; Caddy
+  appends `?domain=<name>`) answers 200, which it does only for an active
+  alias;
+- proxies a request only when its path is `/mcp` or `/mcp/` **and** its `Host`
+  equals the TLS server name of the connection. Every other request is 404 and
+  reaches no upstream: other paths (`/`, `/api/…`, `/internal/…`,
+  `/mcp/public/…`), and a `Host` that differs from the server name
+  (`localhost`, an address, a trailing dot, no `Host` at all);
+- forwards the client's `Host` unchanged, removes `Cookie` and `Authorization`
+  on the way up and `Set-Cookie` on the way down;
+- writes no access log.
+
+`scripts/tests/public_mcp_domains_live.bats` proves each of these against the
+image the compose file runs; `scripts/tests/log_hygiene_static.bats` pins the
+marker lines.
+
+**Before you enable it:**
+
+1. Deploy a release that contains the feature (`./scripts/deploy.sh` runs the
+   migration `f50_2809_public_mcp_domains`; the revision creates one new table
+   and locks no existing one).
+2. Create the **routing target** record: one name in your zone, for example
+   `mcp-domains.example.com`, an `A` record with the VM's `vm_external_ip`,
+   **DNS only** (grey cloud: not proxied by Cloudflare, which holds no
+   certificate for your customers' names). Owners point their names at it
+   with a `CNAME`.
+3. Open 443 to everyone (next paragraph).
+4. Set the `MCP_PUBLIC_DOMAINS_*` settings in `.env.prod` (commented in
+   `.env.prod.example`): `MCP_PUBLIC_DOMAINS_ROUTING_TARGET` to the record of
+   step 2, `MCP_PUBLIC_DOMAINS_APP_HOSTS` to every further name the API is
+   reached under, `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` to your own domain.
+   Confirm that a scheduler leader runs: without the periodic check every
+   alias stops when its 72-hour lease passes.
+5. Switch the feature on (`MCP_PUBLIC_DOMAINS_ENABLED=true`,
+   `./scripts/deploy.sh`), **then** enable the proxy part below: the reverse
+   of the stop order. (A new name gets no certificate while the switch is
+   off, because the permission path answers 404 then, but a name whose
+   certificate is still stored from an earlier run would be routed at once.)
+
+**The firewall rule for 443.** Terraform admits 443 from Cloudflare's ranges
+only. A custom name points straight at the VM, so the CA's TLS-ALPN
+validation and every MCP client connect to it directly. Add a rule by hand
+(Terraform does not manage it; a later `terraform apply` leaves it alone):
+
+```bash
+gcloud compute firewall-rules create <name_prefix>-allow-public-https \
+  --network default --direction INGRESS --action ALLOW --rules tcp:443 \
+  --source-ranges 0.0.0.0/0 --target-tags <name_prefix>-vm
+```
+
+What it exposes: the **main site's origin past the CDN**. Anyone who knows the
+VM's address can now reach the main site directly (with the origin
+certificate, which public clients do not trust, but a client that skips
+verification gets the whole application) without Cloudflare's edge in front.
+Delete the rule when you disable the feature
+(`gcloud compute firewall-rules delete <name_prefix>-allow-public-https`).
+
+**Enabling** (on the VM, in `terraform/single-server`):
+
+```bash
+sed -i 's/^#public-mcp-domains# //' Caddyfile.tpl
+./scripts/deploy.sh --generate-caddyfile
+docker compose -f docker-compose.prod.yml --env-file .env.prod exec caddy \
+  caddy validate --config /etc/caddy/Caddyfile
+docker compose -f docker-compose.prod.yml --env-file .env.prod \
+  up -d --no-deps --force-recreate caddy
+```
+
+**Disabling** is the reverse: restore the template, render, recreate.
+
+```bash
+git checkout -- Caddyfile.tpl     # then re-apply your own domain edit (Step 5)
+./scripts/deploy.sh --generate-caddyfile
+docker compose -f docker-compose.prod.yml --env-file .env.prod \
+  up -d --no-deps --force-recreate caddy
+```
+
+The enabled template is a local edit, like your domain: `git reset --hard`
+in "Update to a new release" restores the shipped (commented) template. Run
+the `sed` again after the reset and before `./scripts/deploy.sh`, or the
+deploy renders the proxy without the site and the aliases stop answering
+(nothing else changes).
+
+**Stopping and rolling back.** Take the alias routing out of the proxy
+**first** (the disabling steps above), **then** switch the feature off
+(`MCP_PUBLIC_DOMAINS_ENABLED=false`, `./scripts/deploy.sh`) or roll back to a
+release without it. While the switch is off, and on a release without the
+feature, the application applies no Host rule: a request under an alias name
+that still reaches it is treated like any other host, and on `/mcp` that is the
+authenticated transport (401 with a sign-in challenge). The other ways to
+stop aliases:
+
+- one name or one zone, at once and reversibly: add it to
+  `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` and restart (`./scripts/deploy.sh`);
+- one name for good: the operator CLI's `release`, run in the active API
+  container (`python -m src.cli.public_mcp_domains release --domain-id <id>`
+  shows the plan, `--apply --yes` acts; see the contract page);
+- every alias while the proxy still routes alias names: keep
+  `MCP_PUBLIC_DOMAINS_ENABLED=true` and set
+  `MCP_PUBLIC_ENDPOINTS_ENABLED=false` (this stops the fixed addresses too).
+
+**ACME account and CA limits.** The first certificate creates an ACME account
+in the proxy's data volume. The template sets no contact address; to get the
+CA's notices, add `email <your address>` to the global options (a comment
+there marks the place). The CA's rate limits apply to this account and to
+each registered domain, and a customer's `CAA` records must allow the CA.
+The permission path answers 200 only for active aliases, and the application
+limits names and activations per workspace, so certificate orders follow
+verified names only.
+
+**Certificate storage.** Certificates and the ACME account live in the
+`kagura_caddy_data` volume (`/data` in the container, under
+`/data/caddy/certificates/<issuer>/<name>/`). It survives restarts,
+`up -d --force-recreate`, reboots and image updates. **Never run
+`docker compose down -v`**: it deletes the volume, and every alias would need a
+new certificate at the same moment.
+
+**Purging a stored certificate.** A detached or released name answers 404 in
+the application from the next request, but its stored certificate stays in
+the volume until it expires. To remove it (lower-case name):
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod exec caddy \
+  sh -c 'ls -d /data/caddy/certificates/*/<name>'      # check what matches
+docker compose -f docker-compose.prod.yml --env-file .env.prod exec caddy \
+  sh -c 'rm -r /data/caddy/certificates/*/<name>'
+docker compose -f docker-compose.prod.yml --env-file .env.prod restart caddy
+```
+
+**Client URLs use the lower-case name.** The site compares `Host` with the TLS
+server name as sent, and the application stores names in lower case: a client
+configured with `https://Mcp.Example.org/mcp` gets 404. Give owners'
+clients the name exactly as `GET …/public-mcp/domains` returns it.
+
+**The proxy's own logs.** The site writes no access log, but the proxy's
+runtime log (stderr, the default logger) names customer hosts: each step of
+obtaining a certificate names the host, and a request whose upstream fails is
+written as an `http.log.error` line with its `Host` (the scrub in "Logs"
+applies; `Cookie` is dropped). These lines are kept as long as the container
+log rotation keeps them.
+
+**Proxy version.** On the image the compose file runs, at the time of
+writing `caddy:2-alpine` = Caddy v2.11.7 (`caddy version`), and also on
+v2.11.4, the site without the three global lines does not load: Caddy refuses
+on-demand TLS without a permission module ("on-demand TLS cannot be enabled
+without a permission module"). Older images were not checked here; case 6 of
+`scripts/tests/public_mcp_domains_live.bats` decides for the image you run.
+The image tag is not pinned (`caddy:2-alpine`); run the live test after an
+image update.
 
 ## Operations
 

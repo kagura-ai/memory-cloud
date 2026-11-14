@@ -21,9 +21,19 @@
 # =============================================================================
 
 {
-	# Use a safe email if ACME is ever reached, but with explicit Origin CA
-	# TLS below, Caddy shouldn't attempt ACME.
-	email admin@example.com
+	# ACME contact: none is set. The main site uses the origin certificate
+	# below and never reaches a CA; only the optional custom-domain site
+	# (after the main site) obtains certificates. To give the CA a contact
+	# for that account, add a line `email <your address>` here.
+
+	# Custom domains of public MCP endpoints (optional, off as shipped): the
+	# three lines below and the site after the main site carry the
+	# public-mcp-domains marker and go on and off together. See README.md
+	# "Custom domains (optional)". The proxy asks the API before it obtains a
+	# certificate for a name and appends ?domain=<name> to this address.
+#public-mcp-domains# 	on_demand_tls {
+#public-mcp-domains# 		ask http://${API_UPSTREAM}:8080/internal/public-mcp-domains/tls-permission
+#public-mcp-domains# 	}
 
 	# Production sizing
 	servers {
@@ -245,6 +255,56 @@ memory.kagura-ai.com {
 		}
 	}
 }
+
+# =============================================================================
+# Custom domains of public MCP endpoints (optional, off as shipped)
+# =============================================================================
+# The site below answers every TLS server name no other site claims. Its
+# lines carry the public-mcp-domains marker together with the three
+# on_demand_tls lines of the global options; enable and disable them together
+# as README.md "Custom domains (optional)" describes, never one part alone.
+#
+#   - Certificates are obtained on demand, only for a name the API's
+#     permission path allows (the `ask` line in the global options), with the
+#     TLS-ALPN challenge on 443 (port 80 stays closed).
+#   - A request is proxied only when its path is /mcp or /mcp/ AND its Host
+#     equals the TLS server name of the connection. Everything else is 404
+#     and reaches no upstream. The comparison sits in the same matcher as the
+#     path, so no directive order can separate them.
+#   - Cookie and Authorization are removed on the way up and Set-Cookie on
+#     the way down; the client's Host is forwarded unchanged.
+#   - No access log here: the main site's `log` block does not apply to this
+#     site, and its lines would name customer hosts.
+#
+# deploy.sh reads the main site address from the first line that starts with
+# a letter, so this site has to stay below the main site.
+#public-mcp-domains# https:// {
+#public-mcp-domains# 	tls {
+#public-mcp-domains# 		on_demand
+#public-mcp-domains# 		issuer acme {
+#public-mcp-domains# 			disable_http_challenge
+#public-mcp-domains# 		}
+#public-mcp-domains# 	}
+#public-mcp-domains# 	@mcp {
+#public-mcp-domains# 		path /mcp /mcp/
+#public-mcp-domains# 		expression {http.request.host} == {http.request.tls.server_name}
+#public-mcp-domains# 	}
+#public-mcp-domains# 	handle @mcp {
+#public-mcp-domains# 		reverse_proxy ${API_UPSTREAM}:8080 {
+#public-mcp-domains# 			header_up -Cookie
+#public-mcp-domains# 			header_up -Authorization
+#public-mcp-domains# 			header_down -Set-Cookie
+#public-mcp-domains# 			flush_interval -1
+#public-mcp-domains# 			transport http {
+#public-mcp-domains# 				read_timeout 24h
+#public-mcp-domains# 				write_timeout 24h
+#public-mcp-domains# 			}
+#public-mcp-domains# 		}
+#public-mcp-domains# 	}
+#public-mcp-domains# 	handle {
+#public-mcp-domains# 		respond 404
+#public-mcp-domains# 	}
+#public-mcp-domains# }
 
 # =============================================================================
 # Extension point for sibling services (one-time, do not remove)

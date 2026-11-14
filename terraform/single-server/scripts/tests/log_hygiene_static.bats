@@ -18,6 +18,14 @@
 #      writes about a request whose upstream failed. The capture-group
 #      reference in the replacement survives deploy.sh's envsubst render
 #      byte-for-byte.
+#   3. CUSTOM DOMAINS (#2809) — the optional site for custom domains of public
+#      MCP endpoints ships commented out behind one line marker. Its lines go
+#      on and off together with one anchored sed, the global `on_demand_tls`
+#      lines stay in the global options, the site comes after the main site
+#      (deploy.sh still reads the main site address), and the site routes only
+#      /mcp and /mcp/ when the Host equals the TLS server name, without
+#      credentials either way. What the uncommented site DOES is proven against
+#      a real Caddy in public_mcp_domains_live.bats.
 #
 # What the filter actually DOES to a log line is proven against a real Caddy in
 # caddy_log_scrub_live.bats; this suite is the cheap half that needs no image
@@ -483,4 +491,225 @@ PYEOF
     [[ "$output" == *.* ]]
     grep -qE '^	tls /etc/caddy/origin-ca/cert\.pem /etc/caddy/origin-ca/key\.pem$' "$TPL"
     grep -qE '^import /opt/kagura-caddy-extra/\*\.caddy$' "$TPL"
+}
+
+# ---------------------------------------------------------------------------
+# 3. Custom domains for public MCP endpoints (#2809)
+# ---------------------------------------------------------------------------
+# The optional site ships commented out: every one of its lines starts with
+# the marker below at column 0, and enabling it is exactly
+#     sed -i 's/^#public-mcp-domains# //' Caddyfile.tpl
+# (README.md "Custom domains (optional)"). An indented marker would survive
+# that anchored sed and leave a line commented, e.g. the site switched on
+# without its permission call.
+
+MARKER='#public-mcp-domains# '
+MARKER_SED='s/^#public-mcp-domains# //'
+
+# The template with the marker removed, exactly as an operator enables it.
+uncommented_tpl() {   # $1 file
+    sed "$MARKER_SED" "$1"
+}
+
+# Line number of the main site address: the first line that starts with a
+# letter (the same rule deploy.sh's domain awk uses).
+main_site_line() {   # $1 file
+    grep -nE '^[a-zA-Z]' "$1" | head -n 1 | cut -d: -f1
+}
+
+# The marker lines with the marker removed, one group per run of consecutive
+# lines, groups separated by a line "--".
+marker_groups() {   # $1 file
+    awk -v m="$MARKER" '
+        index($0, m) == 1 {
+            if (seen && NR != last + 1) print "--"
+            print substr($0, length(m) + 1)
+            seen = 1; last = NR
+        }
+    ' "$1"
+}
+
+# The alias site as an operator enables it: from its address line to the
+# closing brace at column 0.
+alias_site_block() {   # $1 file (uncommented)
+    awk '/^https:\/\/ \{$/ { inside = 1 } inside { print } inside && /^\}$/ { exit }' "$1"
+}
+
+# deploy.sh's own domain awk program, read from the script so the test keeps
+# following whatever it does.
+deploy_domain_awk() {
+    sed -nE "s/^[[:space:]]*domain=\\\$\\(awk '([^']+)'.*/\\1/p" "$BATS_TEST_DIRNAME/../deploy.sh"
+}
+
+EXPECTED_GLOBAL_LINES=$'\ton_demand_tls {\n\t\task http://${API_UPSTREAM}:8080/internal/public-mcp-domains/tls-permission\n\t}'
+EXPECTED_SITE_LINES=$'https:// {
+\ttls {
+\t\ton_demand
+\t\tissuer acme {
+\t\t\tdisable_http_challenge
+\t\t}
+\t}
+\t@mcp {
+\t\tpath /mcp /mcp/
+\t\texpression {http.request.host} == {http.request.tls.server_name}
+\t}
+\thandle @mcp {
+\t\treverse_proxy ${API_UPSTREAM}:8080 {
+\t\t\theader_up -Cookie
+\t\t\theader_up -Authorization
+\t\t\theader_down -Set-Cookie
+\t\t\tflush_interval -1
+\t\t\ttransport http {
+\t\t\t\tread_timeout 24h
+\t\t\t\twrite_timeout 24h
+\t\t\t}
+\t\t}
+\t}
+\thandle {
+\t\trespond 404
+\t}
+}'
+
+@test "custom domains: the template carries no placeholder ACME contact" {
+    run grep -c 'email admin@example.com' "$TPL"
+    [ "$output" -eq 0 ]
+    # No active `email` line at all: a contact is the operator's to add.
+    run grep -cE '^[[:space:]]*email[[:space:]]' "$TPL"
+    [ "$output" -eq 0 ]
+}
+
+@test "custom domains: every line that carries the marker starts with it at column 0" {
+    run grep -cF '#public-mcp-domains#' "$TPL"
+    total="$output"
+    # Guard not vacuous: 3 global lines + 27 site lines.
+    [ "$total" -eq 30 ] || { echo "marker lines: $total, want 30"; return 1; }
+    run grep -c "^$MARKER" "$TPL"
+    [ "$output" -eq "$total" ] || { grep -nF '#public-mcp-domains#' "$TPL" | grep -v ":$MARKER"; return 1; }
+}
+
+@test "custom domains: the global-block marker lines continue with a tab and sit above the main site" {
+    site_at="$(main_site_line "$TPL")"
+    [ -n "$site_at" ]
+    # Above the main site: exactly the three on_demand_tls lines, each with a
+    # tab right after the marker (text at column 0 there would become the
+    # first letter-led line, i.e. what deploy.sh reads as the site domain).
+    run awk -v site="$site_at" -v m="$MARKER" 'NR < site && index($0, m) == 1' "$TPL"
+    [ "${#lines[@]}" -eq 3 ] || { echo "$output"; return 1; }
+    for line in "${lines[@]}"; do
+        [[ "$line" == "$MARKER"$'\t'* ]] || { echo "no tab after the marker: $line"; return 1; }
+    done
+    # ...and they are inside the global options block (which closes with the
+    # first `}` at column 0).
+    open_at="$(grep -n '^{$' "$TPL" | head -n 1 | cut -d: -f1)"
+    close_at="$(grep -n '^}$' "$TPL" | head -n 1 | cut -d: -f1)"
+    first_marker="$(grep -n "^$MARKER" "$TPL" | head -n 1 | cut -d: -f1)"
+    [ "$open_at" -lt "$first_marker" ]
+    [ "$((first_marker + 2))" -lt "$close_at" ]
+}
+
+@test "custom domains: uncommented, the marker lines form the two expected blocks" {
+    run marker_groups "$TPL"
+    [ "$status" -eq 0 ]
+    expected="$EXPECTED_GLOBAL_LINES"$'\n--\n'"$EXPECTED_SITE_LINES"
+    [ "$output" = "$expected" ] || { diff <(echo "$expected") <(echo "$output"); return 1; }
+}
+
+@test "custom domains: the alias site comes after the main site and before the extension import" {
+    on="$(mktemp)"
+    uncommented_tpl "$TPL" > "$on"
+    site_at="$(main_site_line "$on")"
+    alias_at="$(grep -n '^https:// {$' "$on" | cut -d: -f1)"
+    import_at="$(grep -n '^import /opt/kagura-caddy-extra/\*\.caddy$' "$on" | cut -d: -f1)"
+    rm -f "$on"
+    [ -n "$alias_at" ] && [ -n "$import_at" ]
+    [ "$site_at" -lt "$alias_at" ]
+    [ "$alias_at" -lt "$import_at" ]
+}
+
+@test "custom domains: the alias site routes only /mcp and /mcp/ when Host equals the TLS server name" {
+    block="$(uncommented_tpl "$TPL" | alias_site_block /dev/stdin)"
+    [ -n "$block" ]
+    # One path matcher, both spellings, nothing wider (no /mcp*).
+    run grep -cE '^[[:space:]]*path[[:space:]]' <<< "$block"
+    [ "$output" -eq 1 ]
+    grep -qE '^[[:space:]]*path /mcp /mcp/$' <<< "$block"
+    run grep -c 'mcp\*' <<< "$block"
+    [ "$output" -eq 0 ]
+    # The comparison sits in the same named matcher as the path, so no
+    # directive order can separate them.
+    matcher="$(awk '/^\t@mcp \{$/ { inside = 1 } inside { print } inside && /^\t\}$/ { exit }' <<< "$block")"
+    [[ "$matcher" == *"path /mcp /mcp/"* ]]
+    [[ "$matcher" == *"expression {http.request.host} == {http.request.tls.server_name}"* ]]
+    # The only proxy is under that matcher; everything else ends in 404.
+    run grep -cE '^[[:space:]]*reverse_proxy[[:space:]]' <<< "$block"
+    [ "$output" -eq 1 ]
+    [[ "$block" == *$'\n\thandle @mcp {\n\t\treverse_proxy '* ]]
+    fallback="$(awk '/^\thandle \{$/ { inside = 1 } inside { print } inside && /^\t\}$/ { exit }' <<< "$block")"
+    [ "$fallback" = $'\thandle {\n\t\trespond 404\n\t}' ]
+}
+
+@test "custom domains: the alias site strips credentials both ways and writes no access log" {
+    block="$(uncommented_tpl "$TPL" | alias_site_block /dev/stdin)"
+    [ -n "$block" ]
+    grep -qE '^[[:space:]]*header_up -Cookie$' <<< "$block"
+    grep -qE '^[[:space:]]*header_up -Authorization$' <<< "$block"
+    grep -qE '^[[:space:]]*header_down -Set-Cookie$' <<< "$block"
+    run grep -cE '^[[:space:]]*log([[:space:]]|$)' <<< "$block"
+    [ "$output" -eq 0 ]
+    # Streaming as on the main site's /mcp.
+    grep -qE '^[[:space:]]*flush_interval -1$' <<< "$block"
+    # On-demand certificates, TLS-ALPN challenge only (port 80 is closed).
+    grep -qE '^[[:space:]]*on_demand$' <<< "$block"
+    grep -qE '^[[:space:]]*disable_http_challenge$' <<< "$block"
+}
+
+@test "custom domains: the ask line names the upstream placeholder and the permission path, no query" {
+    # shellcheck disable=SC2016  # the literal placeholder, not an expansion
+    want=$'\t\task http://${API_UPSTREAM}:8080/internal/public-mcp-domains/tls-permission'
+    run bash -c 'sed "$1" "$2" | grep -E "^[[:space:]]*ask[[:space:]]"' _ "$MARKER_SED" "$TPL"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$want" ] || { echo "got:  $output"; echo "want: $want"; return 1; }
+    # Caddy appends ?domain=<name> itself; a query here would be sent twice.
+    [[ "$output" != *"?"* ]]
+}
+
+@test "custom domains: the template as shipped enables nothing (no active on_demand)" {
+    # A match before any `#` would be an active directive.
+    run grep -cE '^[^#]*on_demand' "$TPL"
+    [ "$output" -eq 0 ]
+    run grep -cE '^[^#]*https://[[:space:]]*\{' "$TPL"
+    [ "$output" -eq 0 ]
+    run grep -cE '^[^#]*tls-permission' "$TPL"
+    [ "$output" -eq 0 ]
+}
+
+@test "custom domains: deploy.sh's domain awk reads the main site on the uncommented template too" {
+    prog="$(deploy_domain_awk)"
+    [ -n "$prog" ] || { echo "domain awk not found in deploy.sh"; return 1; }
+    shipped="$(awk "$prog" "$TPL")"
+    enabled="$(uncommented_tpl "$TPL" | awk "$prog")"
+    [ -n "$shipped" ]
+    [[ "$shipped" == *.* ]]
+    [[ "$shipped" != *" "* ]]
+    [ "$enabled" = "$shipped" ] || { echo "shipped: $shipped"; echo "enabled: $enabled"; return 1; }
+}
+
+@test "custom domains: generate_caddyfile renders the uncommented template with the color on both new lines" {
+    command -v envsubst > /dev/null 2>&1 || skip "envsubst not available"
+    work="$(mktemp -d)"
+    uncommented_tpl "$TPL" > "$work/Caddyfile.tpl"
+    run bash -c '
+        set -euo pipefail
+        export CADDYFILE_TPL="$1"
+        source "$2/../deploy.sh"
+        CADDYFILE="$3"
+        generate_caddyfile api-green > /dev/null
+    ' _ "$work/Caddyfile.tpl" "$BATS_TEST_DIRNAME" "$work/Caddyfile"
+    rendered="$(cat "$work/Caddyfile" 2> /dev/null || true)"
+    rm -rf "$work"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$rendered" == *$'\t\task http://api-green:8080/internal/public-mcp-domains/tls-permission\n'* ]]
+    [[ "$rendered" == *$'\thandle @mcp {\n\t\treverse_proxy api-green:8080 {\n'* ]]
+    # shellcheck disable=SC2016  # the literal placeholder, not an expansion
+    [[ "$rendered" != *'${API_UPSTREAM}'* ]]
 }
