@@ -708,6 +708,15 @@ Operator notes:
   closed-beta table; on a large install plan a quiet moment. If it fails on
   `lock_timeout` (`KAGURA_MIGRATION_LOCK_TIMEOUT`), everything rolls back:
   rerun it.
+- The upgrade can also fail with `deadlock detected` (40P01) when a request
+  writes `users` or `workspaces` while it runs: v0.162.0's revisions run in one
+  transaction, `f43` and `f44_2802` hold both tables (their new foreign keys)
+  when `f46_2803` alters `users`. Nothing is applied, and the single-server
+  `deploy.sh` does not retry this error (it retries only lock timeouts): it
+  stops at the migration step without starting the new colour or moving
+  traffic. Rerun the deploy (or the upgrade). To avoid it, upgrade in two
+  steps, `alembic upgrade f45_2800_mcp_notice_plans` and then
+  `alembic upgrade head`, so `f46_2803` starts holding no lock.
 - A **downgrade loses the records** written at sign-up for good; a later
   upgrade rebuilds only what the evidence above still gives.
 
@@ -3424,7 +3433,12 @@ again for up to 0.75 s; one still busy rolls the
 workspace and Postgres steps back (one transaction from v0.134.2: no
 hand-over stays committed) and reschedules the request the same way, on the same attempt
 budget (`retry.step` `workspaces` / `postgres`, `error_class`
-`LockNotAvailable` / `DeadlockDetected`); after the last attempt it ends
+`LockNotAvailable` / `DeadlockDetected`). From v0.162.0 (#2803) the
+workspace step first clears the subject from the accounts it invited
+(`users.admitted_by_user_id`), taking their `users` rows the same way: an
+invitee row another transaction holds (a referral redeem, a sign-in
+updating that account) reschedules at `workspaces` too, and the admin user
+delete answers 409. After the last attempt it ends
 `failed` with `failure_reason` starting `lock_conflict after 4 attempts:`. An admin force-erase that
 hits the outage answers 503 `ERASURE-007` with `request_id` and
 `scheduled_for` in `details`; the request is kept and the sweep runs it, so
