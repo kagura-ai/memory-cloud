@@ -127,6 +127,9 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "passkeys": NONE,
     "password": NONE,
     "provider_link_confirm": NONE,
+    # #2809: attach, activation and every check commit through
+    # services.public_mcp_domains.domain_write (paid_integration_write).
+    "public_mcp_domains": Guarded(services=("services.public_mcp_domains",)),
     "public_mcp_endpoints": NONE,
     "public_mcp_usage": NONE,
     "public_search": NONE,

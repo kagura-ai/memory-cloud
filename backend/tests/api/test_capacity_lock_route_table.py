@@ -230,6 +230,12 @@ ROUTES: dict[tuple[str, str], str] = {
     ("DELETE", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
     # #2678: usage event counts and recording health, no memory content
     ("GET", "/api/v1/resources/{resource_id}/public-mcp/usage-health"): ALLOWED,
+    # #2809: custom domain metadata of the publication (owner only); the alias
+    # itself refuses to serve a capacity-locked workspace like the fixed address
+    ("GET", "/api/v1/resources/{resource_id}/public-mcp/domains"): ALLOWED,
+    ("POST", "/api/v1/resources/{resource_id}/public-mcp/domains"): ALLOWED,
+    ("POST", "/api/v1/resources/{resource_id}/public-mcp/domains/{domain_id}/verify"): ALLOWED,
+    ("DELETE", "/api/v1/resources/{resource_id}/public-mcp/domains/{domain_id}"): ALLOWED,
     # #2679: observation credential management (metadata, no memory content)
     ("POST", "/api/v1/observation-credentials"): ALLOWED,
     ("GET", "/api/v1/observation-credentials"): ALLOWED,
@@ -289,6 +295,7 @@ CONTENT_ROUTERS = {
     "workspace",
     "workspaces",
     "resources",
+    "public_mcp_domains",
     "public_mcp_endpoints",
     "public_mcp_usage",
     "observation_credentials",

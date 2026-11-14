@@ -968,6 +968,7 @@ from api.routes import (  # noqa: E402
     passkeys,
     password,  # Issue #1678: self-service password endpoints
     provider_link_confirm,  # Issue #2786: connect a provider after an email confirmation
+    public_mcp_domains,  # #2809: verified custom domains of a public MCP endpoint
     public_mcp_endpoints,  # Issue #2675: publish a resource as a public MCP endpoint
     public_mcp_usage,  # Issue #2678: public MCP usage health
     public_search,  # Issue #238: Public Search API
@@ -1168,6 +1169,9 @@ app.include_router(resources.router, prefix="/api/v1")
 
 # Public MCP endpoint publication (Issue #2675 - owner-only, metadata)
 app.include_router(public_mcp_endpoints.router, prefix="/api/v1")
+
+# Verified custom domains of a public MCP endpoint (#2809 - owner-only, 404 while off)
+app.include_router(public_mcp_domains.router, prefix="/api/v1")
 
 # Public MCP usage event health (Issue #2678 - owner-only)
 app.include_router(public_mcp_usage.router, prefix="/api/v1")

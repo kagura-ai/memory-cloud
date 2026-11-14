@@ -12,7 +12,9 @@ Rows (later work packages add theirs):
 - a request under an alias-shaped Host on ``/mcp`` gets the authenticated
   transport's 401 with ``WWW-Authenticate``, exactly as any other Host;
 - the fixed address ``/mcp/public/{id}`` is served under any Host;
-- the certificate permission endpoint answers 404 and opens no session.
+- the certificate permission endpoint answers 404 and opens no session;
+- every owner domain route answers 404 before any statement, signed in or not;
+- ``/api/v1/system/info`` reports ``features.public_mcp_domains = false``.
 """
 
 from __future__ import annotations
@@ -249,4 +251,58 @@ async def test_fixed_address_is_served_under_any_host(switch_off, monkeypatch) -
         r = await c.post(f"/mcp/public/{endpoint.public_id}", json=INIT)
     assert r.status_code == 200, r.text
     load.assert_awaited_once_with(endpoint.public_id)
+    assert switch_off == []
+
+
+# ----------------------------------------------------------------------------
+# Owner routes and the capability
+# ----------------------------------------------------------------------------
+
+_DOMAIN_ID = "00000000-0000-4000-8000-000000000001"
+OWNER_ROUTES = [
+    ("GET", "/api/v1/resources/faq/public-mcp/domains", None),
+    ("POST", "/api/v1/resources/faq/public-mcp/domains", {"hostname": ALIAS}),
+    ("POST", f"/api/v1/resources/faq/public-mcp/domains/{_DOMAIN_ID}/verify", None),
+    ("DELETE", f"/api/v1/resources/faq/public-mcp/domains/{_DOMAIN_ID}", None),
+]
+
+
+@pytest.mark.parametrize(("method", "path", "body"), OWNER_ROUTES)
+@pytest.mark.parametrize("signed_in", [False, True])
+async def test_owner_routes_are_404_before_any_statement(
+    switch_off, monkeypatch, method, path, body, signed_in
+) -> None:
+    from api.main import app
+    from auth.dependencies import get_user_from_api_key_or_session
+    from services import public_mcp_domains as service
+
+    called: list[str] = []
+    for name in ("attach_domain", "verify_domain", "detach_domain", "list_domains"):
+        monkeypatch.setattr(
+            service, name, AsyncMock(side_effect=lambda *a, n=name: called.append(n))
+        )
+
+    async def user() -> dict[str, Any]:
+        called.append("authenticated")
+        return {"user_id": "owner-1", "role": "user", "current_workspace_id": uuid4()}
+
+    if signed_in:
+        app.dependency_overrides[get_user_from_api_key_or_session] = user
+    try:
+        async with _client("testserver") as c:
+            r = await c.request(method, path, json=body)
+    finally:
+        app.dependency_overrides.pop(get_user_from_api_key_or_session, None)
+    assert r.status_code == 404
+    assert r.json()["error"] == "RES-001"
+    assert r.headers["cache-control"] == "no-store"
+    assert called == []
+    assert switch_off == []
+
+
+async def test_system_info_reports_the_switch_off(switch_off) -> None:
+    async with _client("testserver") as c:
+        r = await c.get("/api/v1/system/info")
+    assert r.status_code == 200
+    assert r.json()["features"]["public_mcp_domains"] is False
     assert switch_off == []
