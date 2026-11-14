@@ -13,15 +13,16 @@ import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.routes import internal_integrations
 from api.routes.internal_billing import BillingPlanPush, set_workspace_plan_from_billing
+from auth.api_keys import APIKeyManager
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import Context, User, Workspace
+from models.auth import APIKey, Context, User, Workspace
 from models.integration_entitlement import WorkspaceIntegrationEvent, WorkspaceIntegrationState
 from models.integration_entitlement_schemas import IntegrationEntitlementPush
 from models.public_mcp import PublicMcpEndpoint
@@ -606,3 +607,55 @@ async def test_require_inside_the_guard_refuses_and_rolls_the_guard_back(store):
                 await service.require_paid_integration(db, store.wid, SERVICE)
         assert "paid_integration_write" not in db.info
     assert await context_name(store) == "Original"
+
+
+# --- Authentication bookkeeping is a write: commit it before entering --------
+
+
+@pytest.mark.parametrize("entry", ["guard", "require"])
+async def test_api_key_bookkeeping_is_refused_until_committed(store, entry):
+    # verify_key flushes api_keys.last_used_at whenever it is due (NULL here,
+    # so the test does not depend on the throttle window) into the request
+    # session without committing. Entering right after it is refused; the
+    # documented order (authenticate, commit, enter) is admitted.
+    await apply(store, snapshot())
+    async with store.factory() as db:
+        plaintext, row = await APIKeyManager(db).create_key(
+            name="paid-integration-guard", user_id=store.uid, workspace_id=store.wid
+        )
+        key_id = row.id
+        await db.commit()
+
+    async def stale_key():
+        async with store.factory() as db:
+            await db.execute(update(APIKey).where(APIKey.id == key_id).values(last_used_at=None))
+            await db.commit()
+
+    try:
+        await stale_key()
+        async with store.factory() as db:
+            assert await APIKeyManager(db).verify_key(plaintext) is not None
+            assert await db.scalar(XID) is not None
+            with pytest.raises(RuntimeError, match="first write or row lock"):
+                await enter(db, store, entry)
+            await db.rollback()
+
+        await stale_key()
+        async with store.factory() as db:
+            assert await APIKeyManager(db).verify_key(plaintext) is not None
+            await db.commit()
+            assert await db.scalar(XID) is None
+            if entry == "guard":
+                async with service.paid_integration_write(db, store.wid, SERVICE):
+                    (await db.get(Context, store.cid)).display_name = "After key auth"
+            else:
+                assert (await service.require_paid_integration(db, store.wid, SERVICE)).allowed
+                await db.rollback()
+        if entry == "guard":
+            assert await context_name(store) == "After key auth"
+        async with store.factory() as db:
+            assert await db.scalar(select(APIKey.last_used_at).where(APIKey.id == key_id))
+    finally:
+        async with store.factory() as db:
+            await db.execute(delete(APIKey).where(APIKey.id == key_id))
+            await db.commit()

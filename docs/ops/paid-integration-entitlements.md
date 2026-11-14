@@ -120,6 +120,18 @@ call commit/rollback, nest transactions or defer writes beyond the guarded
 block. `require_paid_integration` provides the same locked initial check for
 read-only admissions; keep its transaction until the action ends.
 
+Commit the authentication's own writes before entering either one. The
+standard API-key authentication writes into the request session and does not
+commit: `APIKeyManager.verify_key` flushes `api_keys.last_used_at`, and for an
+agent-bound key `AgentRegistryService.touch_last_seen` updates
+`agents.last_seen_at`, each once per throttle window (always for a key that was
+never used). Those writes give the transaction an id, so without an
+`await db.commit()` between authentication and the entry, the entry refuses
+exactly the API-key callers whose bookkeeping was due; cookie sessions and
+requests inside the throttle window pass, which hides the bug in tests. The
+order is: authenticate, `await db.commit()`, then `paid_integration_write` or
+`require_paid_integration`.
+
 The entry order is enforced. Both entries refuse, with `RuntimeError` and
 before they lock, register a commit hook or roll anything back (the caller's
 transaction is left to the caller):
@@ -128,13 +140,18 @@ transaction is left to the caller):
 - a transaction that already has a PostgreSQL transaction id
   (`pg_current_xact_id_if_assigned()` is not `NULL`): any earlier write or row
   lock (`FOR UPDATE` / `FOR NO KEY UPDATE` / `FOR SHARE` / `FOR KEY SHARE`),
-  and also an `ACCESS EXCLUSIVE` table lock, a temp table or a WAL-logged
-  `nextval`. These last ones fail closed.
+  including the authentication bookkeeping above, and also a temp table or a
+  WAL-logged `nextval`. These last ones fail closed.
+- an `ACCESS EXCLUSIVE` table lock, but only when `wal_level` is `replica` or
+  `logical` (the default): PostgreSQL then assigns a transaction id to log the
+  lock for standbys. Under `wal_level=minimal` it assigns none and the lock is
+  not detected.
 
 Earlier plain reads are fine, including `inspect_paid_integration`. Advisory
-locks and table locks below `ACCESS EXCLUSIVE` assign no transaction id and are
-**not** detected; a caller that takes one first follows the global lock order
-in `backend/tests/integration/test_erasure_lock_order_db.py`. It is one
+locks, table locks below `ACCESS EXCLUSIVE` and, under `wal_level=minimal`,
+`ACCESS EXCLUSIVE` itself assign no transaction id and are **not** detected; a
+caller that takes one first follows the global lock order in
+`backend/tests/integration/test_erasure_lock_order_db.py`. It is one
 admission per transaction: a second `require_paid_integration`, or a call
 inside `paid_integration_write`, is refused, because the first one already
 holds the Workspace row lock.
@@ -166,16 +183,24 @@ implementation tasks; this change adds no placeholder privileged endpoints.
   router is caught only through the symbol scan below.
 - **MCP tool set** (`PAID_INTEGRATION_MCP_TOOLS`): every MCP tool carries a
   decision too; all are `NONE` today.
-- **Symbol table** (`PAID_INTEGRATION_SYMBOLS`): an AST scan of `backend/src`
-  lists every module that imports `services.integration_entitlements` or
-  `models.integration_entitlement`, names one of the three entry functions,
-  references a mapped class of `models.integration_entitlement`, or names those
-  modules or the `workspace_integration_*` tables in a string. Each such module
-  has a role, and a role allows only its kinds of use; a module outside the
-  service that names `inspect_paid_integration` must be `display_only`, so a
-  cached inspection used to admit a write needs a visible table change.
-  Consumer tables therefore live in `models/integration_entitlement.py`.
-  Background tasks and other non-route code are covered by this scan only.
+- **Symbol table** (`PAID_INTEGRATION_SYMBOLS`): an AST scan of every module
+  under `backend/src` lists each one that imports
+  `services.integration_entitlements` or `models.integration_entitlement`
+  (relative imports resolved), uses a name of the service through a module
+  object, names one of the three entry functions, references or defines a
+  mapped paid-integration class (a `WorkspaceIntegration*` class or a
+  `workspace_integration_*` table), or names those modules or a mapped
+  `workspace_integration_*` table in a string (docstrings and other text such
+  as log event names do not count). Each such module has a role, and a role
+  allows only its kinds of use. Outside the service no role allows a module
+  import of the service: a consumer imports the names it uses, so a private
+  helper (one that skips the entry-order check, say) can never be reached
+  unnoticed. A `guarded` module imports `paid_integration_write` /
+  `require_paid_integration` by name; a module outside the service that names
+  `inspect_paid_integration` must be `display_only`, so a cached inspection
+  used to admit a write needs a visible table change. Consumer tables
+  therefore live in `models/integration_entitlement.py`. Background tasks and
+  other non-route code are covered by this scan only.
 
 ## Storage and migration
 

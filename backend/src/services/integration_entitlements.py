@@ -278,11 +278,22 @@ async def _refuse_started_transaction(db: AsyncSession) -> None:
     ``users`` row can never wait on a workspace row (the global lock order of
     ``tests/integration/test_erasure_lock_order_db.py``). PostgreSQL assigns a
     transaction id at the first write or row lock (``FOR UPDATE`` / ``NO KEY
-    UPDATE`` / ``SHARE`` / ``KEY SHARE``), and also at an ``ACCESS EXCLUSIVE``
-    table lock, a temp table or a WAL-logged ``nextval``; all of these are
-    refused. Plain reads, advisory locks and table locks below ``ACCESS
-    EXCLUSIVE`` assign none and are not detected here. The check only reads:
-    it never assigns an id itself (``pg_current_xact_id()`` would).
+    UPDATE`` / ``SHARE`` / ``KEY SHARE``), a temp table or a WAL-logged
+    ``nextval``; all of these are refused. An ``ACCESS EXCLUSIVE`` table lock
+    assigns one only when ``wal_level`` is ``replica`` or ``logical`` (the
+    default), to log the lock for standbys; under ``wal_level=minimal`` it
+    assigns none. Plain reads, advisory locks, table locks below ``ACCESS
+    EXCLUSIVE`` and, under ``minimal``, ``ACCESS EXCLUSIVE`` itself are not
+    detected here; callers order those under the global lock order.
+
+    Authentication bookkeeping counts as a write: ``APIKeyManager.verify_key``
+    flushes ``api_keys.last_used_at`` and, for an agent-bound key,
+    ``AgentRegistryService.touch_last_seen`` updates ``agents.last_seen_at``,
+    each once per throttle window, in the request session without
+    committing. A consumer commits that bookkeeping (``await db.commit()``)
+    after authenticating and before entering, or the entry is refused for
+    exactly the callers whose bookkeeping was due. The check only reads: it
+    never assigns an id itself (``pg_current_xact_id()`` would).
     """
     # Sync first, so autoflush cannot flush the caller's pending changes.
     if db.new or db.dirty or db.deleted:
@@ -313,7 +324,10 @@ async def require_paid_integration(
 
     It must be the transaction's first write or row lock (earlier plain reads
     are fine); otherwise it raises ``RuntimeError`` and leaves the transaction
-    to the caller. One admission per transaction: a second call, or a call
+    to the caller. Authenticate first, then ``await db.commit()`` before this
+    call: API-key authentication writes ``api_keys.last_used_at`` /
+    ``agents.last_seen_at`` into the request session once per throttle window
+    (see ``_refuse_started_transaction``). One admission per transaction: a second call, or a call
     inside ``paid_integration_write``, is refused.
     """
     await _refuse_started_transaction(db)
@@ -326,11 +340,14 @@ async def paid_integration_write(
 ) -> AsyncIterator[PaidIntegrationAccess]:
     """Own a write transaction and recheck paid rights after flush, before commit.
 
-    Authenticate first, then enter as the transaction's first write or row
-    lock: a session with pending changes, or a transaction that has already
-    written or locked a row, is refused with ``RuntimeError`` before anything
-    is registered or rolled back (see ``_refuse_started_transaction``; earlier
-    plain reads are fine). Then verify mutable role/installation/target
+    Authenticate first, commit the authentication's bookkeeping
+    (``await db.commit()``: API-key authentication writes
+    ``api_keys.last_used_at`` / ``agents.last_seen_at`` into the request
+    session once per throttle window), then enter as the transaction's first
+    write or row lock: a session with pending changes, or a transaction that
+    has already written or locked a row, is refused with ``RuntimeError``
+    before anything is registered or rolled back (see
+    ``_refuse_started_transaction``; earlier plain reads are fine). Then verify mutable role/installation/target
     authority under the held lock. The caller must hold any further
     authority-row locks through this helper's commit. No caller-controlled
     commit, rollback or nested transaction is allowed. Cancellation, expiry
