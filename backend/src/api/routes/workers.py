@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,12 +61,19 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/workers", tags=["workers"])
 
 
-async def verify_worker_token(authorization: str | None = Header(None)) -> None:
+async def verify_worker_token(request: Request, authorization: str | None = Header(None)) -> None:
     """Authenticate the ai-worker by its shared service token (RFC 6750 Bearer).
 
     Fail-closed: an unset ``WORKER_SERVICE_TOKEN`` disables the endpoint (503),
     so a misconfigured deployment never serves connector secrets unauthenticated.
     """
+    headers = request.headers.getlist("authorization")
+    if len(headers) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A single worker credential is required",
+        )
+    authorization = headers[0] if headers else authorization
     expected = get_settings().worker_service_token
     if not expected:
         raise HTTPException(

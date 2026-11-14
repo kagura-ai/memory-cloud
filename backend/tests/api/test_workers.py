@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from cryptography.fernet import InvalidToken
 from fastapi import Response
+from starlette.requests import Request
 
 import api.routes.workers as workers_module
 from api.routes.workers import (
@@ -54,6 +55,17 @@ def _no_channel_routing():
 _VENDABLE_LLM = {"provider": "anthropic", "model": "m", "api_key": "sk"}
 
 
+def _request(*headers: tuple[str, str]) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [(name.lower().encode(), value.encode()) for name, value in headers],
+        }
+    )
+
+
 def _settings(
     token: str = "wt-secret",
     mcp_url: str = "https://mcp.example/mcp",
@@ -92,7 +104,7 @@ def test_worker_config_omits_only_absent_runtime_block():
 async def test_verify_worker_token_accepts_matching_bearer():
     with patch("api.routes.workers.get_settings", return_value=_settings()):
         # Returns None (no raise) on a valid token.
-        assert await verify_worker_token("Bearer wt-secret") is None
+        assert await verify_worker_token(_request(), "Bearer wt-secret") is None
 
 
 @pytest.mark.asyncio
@@ -101,7 +113,7 @@ async def test_verify_worker_token_rejects_wrong_token():
 
     with patch("api.routes.workers.get_settings", return_value=_settings()):
         with pytest.raises(HTTPException) as exc:
-            await verify_worker_token("Bearer nope")
+            await verify_worker_token(_request(), "Bearer nope")
     assert exc.value.status_code == 401
 
 
@@ -111,8 +123,24 @@ async def test_verify_worker_token_503_when_unconfigured():
 
     with patch("api.routes.workers.get_settings", return_value=_settings(token="")):
         with pytest.raises(HTTPException) as exc:
-            await verify_worker_token("Bearer anything")
+            await verify_worker_token(_request(), "Bearer anything")
     assert exc.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_verify_worker_token_rejects_duplicate_authorization_headers():
+    from fastapi import HTTPException
+
+    with patch("api.routes.workers.get_settings", return_value=_settings()):
+        with pytest.raises(HTTPException) as exc:
+            await verify_worker_token(
+                _request(
+                    ("Authorization", "Bearer wt-secret"),
+                    ("Authorization", "Bearer wt-secret"),
+                ),
+                "Bearer wt-secret",
+            )
+    assert exc.value.status_code == 401
 
 
 @pytest.mark.asyncio

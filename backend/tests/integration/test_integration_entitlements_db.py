@@ -335,6 +335,52 @@ async def test_guard_commits_success_and_rolls_back_expiry_or_early_commit(store
     assert await context_name(store) == "Committed"
 
 
+@pytest.mark.parametrize("entrypoint", ["guard", "require"])
+@pytest.mark.parametrize("preexisting_state", ["flushed_write", "for_update", "key_share"])
+async def test_paid_authority_refuses_preexisting_writes_and_row_locks(
+    store, entrypoint, preexisting_state
+):
+    """Authority must be established before a caller mutates or locks a row."""
+    inserted_user = None
+    async with store.factory() as db:
+        if preexisting_state == "flushed_write":
+            inserted_user = "preexisting-authority-" + uuid4().hex
+            db.add(User(user_id=inserted_user, email=inserted_user + "@example.test"))
+            await db.flush()
+        else:
+            query = select(User).limit(1)
+            if preexisting_state == "for_update":
+                query = query.with_for_update()
+            else:
+                query = query.with_for_update(key_share=True)
+            assert (await db.execute(query)).scalar_one()
+
+        with pytest.raises(RuntimeError, match="before transaction writes or row locks"):
+            if entrypoint == "guard":
+                async with service.paid_integration_write(db, store.wid, SERVICE):
+                    pytest.fail("the guard must reject a transaction with prior state")
+            else:
+                await service.require_paid_integration(db, store.wid, SERVICE)
+
+        assert "paid_integration_write" not in db.info
+        if preexisting_state == "flushed_write":
+            await db.commit()
+        else:
+            await db.rollback()
+
+    if inserted_user is not None:
+        async with store.factory() as cleanup:
+            await cleanup.execute(delete(User).where(User.user_id == inserted_user))
+            await cleanup.commit()
+
+
+async def test_require_paid_integration_allows_plain_reads(store):
+    async with store.factory() as db:
+        await apply(store, snapshot())
+        assert (await service.require_paid_integration(db, store.wid, SERVICE)).allowed
+        await db.rollback()
+
+
 async def wait_blocked(factory, pid):
     """Observe a real PG row lock wait, not a timing assumption."""
     deadline = monotonic() + 5

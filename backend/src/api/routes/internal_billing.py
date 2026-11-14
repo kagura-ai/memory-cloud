@@ -47,7 +47,7 @@ import secrets
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -104,13 +104,19 @@ _ADDON_MAX_BY_KEY: dict[str, int] = {
 }
 
 
-async def verify_billing_service_token(authorization: str | None = Header(None)) -> None:
+async def verify_billing_service_token(
+    request: Request, authorization: str | None = Header(None)
+) -> None:
     """Authenticate the billing service by its shared service token (RFC 6750 Bearer).
 
     Fail-closed: an unset ``BILLING_SERVICE_TOKEN`` disables the endpoint (503),
     so a misconfigured deployment never accepts unauthenticated entitlement
     pushes. Mirrors ``workers.verify_worker_token``.
     """
+    headers = request.headers.getlist("authorization")
+    if len(headers) > 1:
+        raise AuthenticationError("A single billing credential is required")
+    authorization = headers[0] if headers else authorization
     expected = get_settings().billing_service_token
     if not expected:
         # No canonical 503 subclass for "endpoint disabled"; raise the base

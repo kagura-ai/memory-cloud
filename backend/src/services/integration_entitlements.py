@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -266,16 +266,36 @@ async def inspect_paid_integration(
     return await _access(db, workspace_id, service_id, lock=False)
 
 
-async def require_paid_integration(
-    db: AsyncSession, workspace_id: UUID, service_id: str
+async def _ensure_transaction_has_no_writes_or_row_locks(db: AsyncSession) -> None:
+    """Reject callers that already made a write or acquired a row lock."""
+    if await db.scalar(text("SELECT pg_current_xact_id_if_assigned()")) is not None:
+        raise RuntimeError(
+            "Paid integration authority must be checked before transaction writes or row locks"
+        )
+
+
+async def _require_paid_integration(
+    db: AsyncSession,
+    workspace_id: UUID,
+    service_id: str,
+    *,
+    check_transaction: bool,
 ) -> PaidIntegrationAccess:
-    """Require live rights under the shared authority lock, held until transaction end."""
+    if check_transaction:
+        await _ensure_transaction_has_no_writes_or_row_locks(db)
     result = await _access(db, workspace_id, service_id, lock=True)
     if not result.allowed:
         raise AuthorizationError(
             "Paid integration is not available", reason="paid_integration_unavailable"
         )
     return result
+
+
+async def require_paid_integration(
+    db: AsyncSession, workspace_id: UUID, service_id: str
+) -> PaidIntegrationAccess:
+    """Require live rights under the shared authority lock, held until transaction end."""
+    return await _require_paid_integration(db, workspace_id, service_id, check_transaction=True)
 
 
 @asynccontextmanager
@@ -292,6 +312,7 @@ async def paid_integration_write(
     """
     if db.new or db.dirty or db.deleted or db.info.get("paid_integration_write"):
         raise RuntimeError("Paid integration guard requires a clean, unguarded session")
+    await _ensure_transaction_has_no_writes_or_row_locks(db)
     may_commit = False
 
     def only_guard_commits(_session: Session) -> None:
@@ -301,13 +322,15 @@ async def paid_integration_write(
     db.info["paid_integration_write"] = True
     event.listen(db.sync_session, "before_commit", only_guard_commits)
     try:
-        access = await require_paid_integration(db, workspace_id, service_id)
+        access = await _require_paid_integration(
+            db, workspace_id, service_id, check_transaction=False
+        )
         transaction = db.get_transaction()
         yield access
         if db.get_transaction() is not transaction:
             raise RuntimeError("Paid integration transaction changed inside the guard")
         await db.flush()
-        await require_paid_integration(db, workspace_id, service_id)
+        await _require_paid_integration(db, workspace_id, service_id, check_transaction=False)
         may_commit = True
         await db.commit()
     except BaseException:

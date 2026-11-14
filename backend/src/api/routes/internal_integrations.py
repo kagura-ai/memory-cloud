@@ -19,7 +19,6 @@ from services.integration_entitlements import (
     apply_integration_entitlements,
     read_integration_entitlements,
 )
-from utils.exceptions import AuthenticationError
 
 # Keep the window type available with the endpoint's contract.
 __all__ = ["EntitlementWindow", "router"]
@@ -36,10 +35,7 @@ async def billing_integration_caller(
     _credential: Annotated[HTTPAuthorizationCredentials | None, Security(_BILLING)],
 ) -> None:
     """Reuse billing authority; refuse ambiguous headers and every session fallback."""
-    headers = request.headers.getlist("authorization")
-    if len(headers) > 1:
-        raise AuthenticationError("A single billing credential is required")
-    await verify_billing_service_token(headers[0] if headers else None)
+    await verify_billing_service_token(request, None)
 
 
 @router.get(

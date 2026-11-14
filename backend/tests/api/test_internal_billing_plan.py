@@ -113,6 +113,15 @@ def test_invalid_token_returns_401(billing):
     assert resp.status_code == 401
 
 
+def test_duplicate_authorization_headers_return_401(billing):
+    response = billing.client(_make_ws()).put(
+        _PATH,
+        json={"plan_name": "pro"},
+        headers=[("Authorization", "Bearer secret")] * 2,
+    )
+    assert response.status_code == 401
+
+
 def test_invalid_plan_returns_422(billing):
     # Canonical ValidationError (VAL-001 / 422), not a raw HTTPException.
     resp = billing.client(_make_ws()).put(
