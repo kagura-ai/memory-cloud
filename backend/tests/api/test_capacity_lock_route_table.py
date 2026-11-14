@@ -54,6 +54,8 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "external_keys": NOT_APPLICABLE,
     "internal_billing": NOT_APPLICABLE,
     "internal_integrations": NOT_APPLICABLE,  # #2798: billing authority, no content operations
+    # #2809: the proxy's certificate permission call; reads one domain row
+    "internal_public_mcp_domains": NOT_APPLICABLE,
     "internal_sync_installations": NOT_APPLICABLE,  # #2802: provisioning applies its creation gates
     "sync_installations": NOT_APPLICABLE,  # #2802: control metadata; provisioning checks capacity
     "sync_worker": NOT_APPLICABLE,  # #2806: operational identity only; no memory content

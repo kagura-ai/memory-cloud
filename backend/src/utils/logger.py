@@ -26,6 +26,16 @@ from utils.url_redact import redact_invite_tokens
 _PG_DETAIL_RE = re.compile(r"DETAIL:.*", re.DOTALL)
 _REDACTED = "DETAIL: [redacted]"
 
+# #2809: a proxy's certificate permission call names a customer host in its
+# query (``/internal/public-mcp-domains/tls-permission?domain=<name>``), and
+# uvicorn's access line prints the path with its query. The whole query is
+# replaced, whatever it holds; the path stays.
+_TLS_PERMISSION_MARKER = "/public-mcp-domains/tls-permission"
+_TLS_PERMISSION_QUERY_RE = re.compile(
+    r"(/internal/public-mcp-domains/tls-permission/?\?)[^\s\"'#<>]*"
+)
+_TLS_PERMISSION_QUERY_REDACTED = r"\1domain=[REDACTED]"
+
 # Whether setup_logger() has run in this process (see ensure_logger_configured).
 _configured = False
 
@@ -38,9 +48,14 @@ def _scrub_text(text: str) -> str:
     records — ``path=request.url.path`` in the global exception handlers fires
     on every 404/410/429, so a rate-limited preview of a VALID link would log a
     live, account-granting token. Same chokepoint, same reasoning as DETAIL.
+
+    #2809: the query of the custom-domain permission call names a customer
+    host; it becomes ``domain=[REDACTED]``.
     """
     if "DETAIL:" in text:
         text = _PG_DETAIL_RE.sub(_REDACTED, text)
+    if _TLS_PERMISSION_MARKER in text:
+        text = _TLS_PERMISSION_QUERY_RE.sub(_TLS_PERMISSION_QUERY_REDACTED, text)
     return redact_oidc_credentials(redact_invite_tokens(text))
 
 

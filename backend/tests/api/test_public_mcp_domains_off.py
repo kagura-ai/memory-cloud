@@ -11,7 +11,8 @@ Rows (later work packages add theirs):
 - the public transport refuses the alias entry with its one 404 and no lookup;
 - a request under an alias-shaped Host on ``/mcp`` gets the authenticated
   transport's 401 with ``WWW-Authenticate``, exactly as any other Host;
-- the fixed address ``/mcp/public/{id}`` is served under any Host.
+- the fixed address ``/mcp/public/{id}`` is served under any Host;
+- the certificate permission endpoint answers 404 and opens no session.
 """
 
 from __future__ import annotations
@@ -203,6 +204,28 @@ async def test_alias_host_on_mcp_gets_the_authenticated_401(switch_off, monkeypa
     assert answers[0] == answers[1] == answers[2]
     load_alias.assert_not_awaited()
     assert all("public_mcp_domains" not in text for text in switch_off)
+
+
+@pytest.mark.parametrize("host", ["api-blue:8080", "app.example.com", "testserver", ALIAS])
+async def test_permission_endpoint_is_404_without_a_session(switch_off, monkeypatch, host) -> None:
+    from api.routes import internal_public_mcp_domains as permission
+
+    opened: list[object] = []
+
+    async def spy_get_db():
+        opened.append(object())
+        yield None
+
+    lookup = AsyncMock()
+    monkeypatch.setattr(permission, "get_db", spy_get_db)
+    monkeypatch.setattr(permission, "load_serving_endpoint_for_alias", lookup)
+    async with _client(host) as c:
+        r = await c.get("/internal/public-mcp-domains/tls-permission", params={"domain": ALIAS})
+    assert r.status_code == 404
+    assert r.content == b""
+    assert opened == []
+    lookup.assert_not_awaited()
+    assert switch_off == []
 
 
 async def test_fixed_address_is_served_under_any_host(switch_off, monkeypatch) -> None:

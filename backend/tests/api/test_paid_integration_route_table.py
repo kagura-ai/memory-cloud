@@ -100,6 +100,8 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "graph": NONE,
     "internal_billing": NONE,
     "internal_integrations": NONE,  # publisher, consumes no rights
+    # #2809: the certificate permission call reads the domain row's lease only
+    "internal_public_mcp_domains": NONE,
     # Trusted billing activation (#2802): activate_installation enters
     # paid_integration_write; the consent pre-check is a plain read.
     "internal_sync_installations": Guarded(services=("services.sync_installations",)),

@@ -944,6 +944,7 @@ from api.routes import (  # noqa: E402
     graph,
     internal_billing,  # Issue #954: billing-service entitlement push (/internal)
     internal_integrations,  # #2798: finite paid-integration rights (/internal)
+    internal_public_mcp_domains,  # #2809: TLS permission call for custom domains (/internal)
     internal_sync_installations,  # #2802: recorded-consent paid activation
     invitations,
     management_grants,
@@ -1196,6 +1197,10 @@ app.include_router(worker_apps.router, prefix="/api/v1")
 app.include_router(internal_billing.router)
 app.include_router(internal_integrations.router)
 app.include_router(internal_sync_installations.router)
+# #2809: a proxy's certificate permission call for verified custom domains. No
+# credential and no dependency; reachable under application or internal Hosts
+# only (the Host guard answers 404 for /internal under any other Host).
+app.include_router(internal_public_mcp_domains.router)
 # Issue #1093: owner-only billing handoff token. Public surface (/api/v1/billing),
 # session-auth + owner-only, Stripe-agnostic — always mounted (unlike the
 # BILLING_ENABLED-gated Stripe plugin); fail-closed (503) when the signing key is unset.
