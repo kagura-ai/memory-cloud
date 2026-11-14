@@ -54,6 +54,8 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "external_keys": NOT_APPLICABLE,
     "internal_billing": NOT_APPLICABLE,
     "internal_integrations": NOT_APPLICABLE,  # #2798: billing authority, no content operations
+    "internal_sync_installations": NOT_APPLICABLE,  # #2802: provisioning applies its creation gates
+    "sync_installations": NOT_APPLICABLE,  # #2802: control metadata; provisioning checks capacity
     "invitations": NOT_APPLICABLE,
     "mcp": NOT_APPLICABLE,
     "mcp_notices": NOT_APPLICABLE,  # #2762: the caller's own opt-in, no memory content

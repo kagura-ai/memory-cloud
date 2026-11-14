@@ -100,6 +100,13 @@ never memory content, learned signals, payment details or personal identifiers.
 They are excluded from raw-memory export, cascade with workspace deletion and
 survive ownership transfer. Expiring or replacing rights never deletes content.
 
+Synchronization service registration (`sync_services`), bounded owner consent
+(`sync_authorizations`) and retained workspace target bindings
+(`sync_installations`) are operational control-plane data. They contain no
+worker credentials, product/FAQ bodies or learned signal and do not enter raw
+exports. Historical approver identity is nullable and cleared on account
+deletion; workspace deletion cascades consent and installation records.
+
 Derived signal is *supposed* to act on every query — that is its value. The
 ban is on **bulk portability**, not on serving:
 

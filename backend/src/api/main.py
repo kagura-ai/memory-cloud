@@ -925,6 +925,7 @@ from api.routes import (  # noqa: E402
     graph,
     internal_billing,  # Issue #954: billing-service entitlement push (/internal)
     internal_integrations,  # #2798: finite paid-integration rights (/internal)
+    internal_sync_installations,  # #2802: recorded-consent paid activation
     invitations,
     management_grants,
     mcp,
@@ -960,6 +961,7 @@ from api.routes import (  # noqa: E402
     secrets,  # Issue #1128: zero-knowledge secret store
     share_keys,  # Issue #1027: context-scoped read-only TTL share key
     sleep_reports,  # Issue #179: Sleep Report admin UI
+    sync_installations,  # #2802: workspace-owned synchronization controls
     system,
     system_admins,
     users,
@@ -981,6 +983,7 @@ app.include_router(users.router, prefix="/api/v1")
 # Account erasure self-service routes (Issue #360 - GDPR Art.17 / APPI compliance)
 app.include_router(me_account.router, prefix="/api/v1")
 app.include_router(me_workspaces.router, prefix="/api/v1")
+app.include_router(sync_installations.router, prefix="/api/v1")
 
 # Manual OAuth refresh endpoint (Issue #515 - manual IdP re-sync)
 app.include_router(me_oauth.router, prefix="/api/v1")
@@ -1171,6 +1174,7 @@ app.include_router(worker_apps.router, prefix="/api/v1")
 # internal Docker network, with BILLING_SERVICE_TOKEN as the in-app control.
 app.include_router(internal_billing.router)
 app.include_router(internal_integrations.router)
+app.include_router(internal_sync_installations.router)
 # Issue #1093: owner-only billing handoff token. Public surface (/api/v1/billing),
 # session-auth + owner-only, Stripe-agnostic — always mounted (unlike the
 # BILLING_ENABLED-gated Stripe plugin); fail-closed (503) when the signing key is unset.
