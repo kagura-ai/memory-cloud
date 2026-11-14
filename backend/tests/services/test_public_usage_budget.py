@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
@@ -147,3 +149,76 @@ class TestSettings:
         monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_enabled", True)
         monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 7)
         assert public_usage_budget_limit() == 7
+
+
+class TestLogEvents:
+    """R7: aggregates only, the exception message never in a line."""
+
+    WS = UUID("00000000-0000-4000-8000-000000002805")
+
+    @staticmethod
+    def _admitted(used: int, seq: int = 2) -> pub.BudgetCharge:
+        return pub.BudgetCharge(
+            admitted=True,
+            calls_used=used,
+            period_started_at=START,
+            period_seq=seq,
+            retry_after_seconds=None,
+        )
+
+    async def _charge(self, outcome) -> MagicMock:
+        charge = AsyncMock(side_effect=outcome) if isinstance(outcome, Exception) else None
+        charge = charge or AsyncMock(return_value=outcome)
+        with patch.object(pub, "_charge", charge), patch.object(pub, "logger") as log:
+            try:
+                await pub.charge_public_usage(self.WS, limit=25000)
+            except pub.PublicUsageBudgetUnavailable:
+                pass
+        return log
+
+    async def test_first_call_of_a_period_logs_period_started(self) -> None:
+        log = await self._charge(self._admitted(1, seq=3))
+        log.info.assert_called_once_with(
+            "public_usage_budget_period_started",
+            workspace_id=str(self.WS),
+            period_started_at=START.isoformat(),
+            period_seq=3,
+            limit=25000,
+        )
+        log.warning.assert_not_called()
+
+    async def test_threshold_logs_its_level(self) -> None:
+        log = await self._charge(self._admitted(20000))
+        log.warning.assert_called_once_with(
+            "public_usage_budget_threshold",
+            workspace_id=str(self.WS),
+            level=80,
+            calls_used=20000,
+            limit=25000,
+            period_seq=2,
+        )
+        log.info.assert_not_called()
+
+    async def test_an_ordinary_call_logs_nothing(self) -> None:
+        log = await self._charge(self._admitted(7))
+        assert log.method_calls == []
+
+    async def test_refusal_logs_nothing(self) -> None:
+        refused = pub.BudgetCharge(
+            admitted=False,
+            calls_used=25000,
+            period_started_at=START,
+            period_seq=2,
+            retry_after_seconds=3600,
+        )
+        log = await self._charge(refused)
+        assert log.method_calls == []
+
+    async def test_unavailable_never_carries_the_exception_message(self) -> None:
+        log = await self._charge(RuntimeError("secret-sentinel"))
+        assert log.info.call_count == 0
+        log.warning.assert_called_once()
+        args, kwargs = log.warning.call_args
+        assert args == ("public_usage_budget_unavailable",)
+        assert kwargs == {"workspace_id": str(self.WS), "error_type": "RuntimeError"}
+        assert "secret-sentinel" not in repr(log.mock_calls)

@@ -619,3 +619,34 @@ async def test_charge_is_keyed_by_the_loaded_workspace_only(
     endpoint = _endpoint()
     await _call(endpoint, "recall", {"query": "q"}, session_id="mcp-xyz")
     budget.assert_awaited_once_with(endpoint.workspace_id, limit=BUDGET_LIMIT)
+
+
+def test_dispatch_imports_only_the_charge_from_the_budget_module() -> None:
+    """R16.5: dispatch reaches nothing else in the budget module (no refund, settle, ...).
+
+    A failed handler stays counted; the DB test drives the real row. This pins
+    the cheap side: the only names dispatch takes from the module, anywhere in
+    the file (a lazy import inside a function included), and no module-level
+    handle through which another function could be called.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(dispatch.__file__).read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "services.public_usage_budget":
+                imported |= {alias.name for alias in node.names}
+            if node.module == "services":
+                assert "public_usage_budget" not in {alias.name for alias in node.names}
+        if isinstance(node, ast.Import):
+            assert not any(
+                alias.name == "services" or alias.name.startswith("services.public_usage_budget")
+                for alias in node.names
+            )
+    assert imported == {
+        "PublicUsageBudgetUnavailable",
+        "charge_public_usage",
+        "public_usage_budget_limit",
+    }

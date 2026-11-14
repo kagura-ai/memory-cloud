@@ -439,6 +439,45 @@ async def test_usage_budget_is_the_callers_workspace_on_every_read(
             await s.commit()
 
 
+async def test_an_exhausted_budget_keeps_the_endpoint_serving(
+    world: World, switch_on, monkeypatch
+) -> None:
+    """D12: ``serving`` keeps its meaning; exhaustion is reported in ``usage_budget`` only."""
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_enabled", True)
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 10)
+    async with world.factory() as s:
+        await s.execute(
+            text(
+                "INSERT INTO public_usage_budgets "
+                "(workspace_id, period_started_at, calls_used, period_seq, updated_at) "
+                "VALUES (:ws, timezone('UTC', statement_timestamp()) - interval '1 day', "
+                "10, 1, timezone('UTC', statement_timestamp()))"
+            ),
+            {"ws": world.ws},
+        )
+        await s.commit()
+    try:
+        async with _client(world, world.owner) as c:
+            r = await c.post(_path(world.slugs["public"]), json=BODY)
+            assert r.status_code == 201
+            try:
+                bodies = [r.json(), (await c.get(_path(world.slugs["public"]))).json()]
+            finally:
+                assert (await c.delete(_path(world.slugs["public"]))).status_code == 204
+        for body in bodies:
+            assert body["serving"] is True
+            budget = body["usage_budget"]
+            assert budget["state"] == "exhausted"
+            assert (budget["used"], budget["remaining"], budget["limit"]) == (10, 0, 10)
+    finally:
+        async with world.factory() as s:
+            await s.execute(
+                text("DELETE FROM public_usage_budgets WHERE workspace_id = :ws"),
+                {"ws": world.ws},
+            )
+            await s.commit()
+
+
 async def test_usage_budget_idle_without_a_row(world: World, monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_enabled", True)
     monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 10)

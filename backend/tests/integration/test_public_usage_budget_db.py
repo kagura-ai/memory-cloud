@@ -8,17 +8,21 @@ only make sure the contenders are queued before the holder lets go.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config.settings import get_settings
+from mcp_server.public.tools import PublicArgumentError
 from models.auth import Context, Workspace
 from models.public_mcp import PublicMcpEndpoint
 from models.resource import Resource
@@ -347,8 +351,25 @@ async def test_the_database_clock_is_used_without_a_test_clock(env) -> None:
 # ----------------------------------------------------------------------------
 
 
+def _lock_not_available(exc: BaseException) -> bool:
+    """The charge failed on the transaction-local ``lock_timeout`` (SQLSTATE 55P03)."""
+    cause = exc.__cause__
+    if not isinstance(cause, DBAPIError):
+        return False
+    orig = cause.orig
+    codes = {
+        getattr(orig, "sqlstate", None),
+        getattr(orig, "pgcode", None),
+        getattr(getattr(orig, "__cause__", None), "sqlstate", None),
+    }
+    return "55P03" in codes
+
+
 async def test_lock_timeout_fails_closed_and_changes_nothing(env, monkeypatch) -> None:
+    # Only the transaction-local lock timeout can end this wait: the overall
+    # bound is far away.
     monkeypatch.setattr(pub, "CHARGE_LOCK_TIMEOUT_MS", 200)
+    monkeypatch.setattr(pub, "CHARGE_TIMEOUT_SECONDS", 60.0)
     wid = await env.workspace()
     await env.store_row(wid, used=1, start=T0)
     before = await env.row(wid)
@@ -357,14 +378,20 @@ async def test_lock_timeout_fails_closed_and_changes_nothing(env, monkeypatch) -
             text("SELECT 1 FROM public_usage_budgets WHERE workspace_id = :ws FOR UPDATE"),
             {"ws": wid},
         )
-        with pytest.raises(PublicUsageBudgetUnavailable):
+        started = time.monotonic()
+        with pytest.raises(PublicUsageBudgetUnavailable) as excinfo:
             await env.charge(wid, 10, now=T0 + timedelta(hours=1))
+        elapsed = time.monotonic() - started
         await holder.rollback()
+    assert elapsed < 1.5
+    assert _lock_not_available(excinfo.value), repr(excinfo.value.__cause__)
     assert await env.row(wid) == before
 
 
 async def test_overall_bound_fails_closed(env, monkeypatch) -> None:
+    # Only the overall bound can end this wait: the lock timeout is far away.
     monkeypatch.setattr(pub, "CHARGE_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(pub, "CHARGE_LOCK_TIMEOUT_MS", 60_000)
     wid = await env.workspace()
     await env.store_row(wid, used=1, start=T0)
     async with env.factory() as holder:
@@ -372,14 +399,19 @@ async def test_overall_bound_fails_closed(env, monkeypatch) -> None:
             text("SELECT 1 FROM public_usage_budgets WHERE workspace_id = :ws FOR UPDATE"),
             {"ws": wid},
         )
-        with pytest.raises(PublicUsageBudgetUnavailable):
+        started = time.monotonic()
+        with pytest.raises(PublicUsageBudgetUnavailable) as excinfo:
             await env.charge(wid, 10, now=T0 + timedelta(hours=1))
+        elapsed = time.monotonic() - started
         await holder.rollback()
+    assert elapsed < 1.5
+    assert isinstance(excinfo.value.__cause__, TimeoutError)
     assert (await env.row(wid)).calls_used == 1
 
 
 async def test_a_locked_workspace_row_blocks_only_a_first_charge(env, monkeypatch) -> None:
     monkeypatch.setattr(pub, "CHARGE_LOCK_TIMEOUT_MS", 300)
+    monkeypatch.setattr(pub, "CHARGE_TIMEOUT_SECONDS", 60.0)
     stored, fresh = await env.workspace(), await env.workspace()
     await env.store_row(stored, used=1, start=T0)
     async with env.factory() as holder:
@@ -389,10 +421,38 @@ async def test_a_locked_workspace_row_blocks_only_a_first_charge(env, monkeypatc
         )
         result = await env.charge(stored, 10, now=T0 + timedelta(hours=1))
         assert result.admitted and result.calls_used == 2
-        with pytest.raises(PublicUsageBudgetUnavailable):
+        started = time.monotonic()
+        with pytest.raises(PublicUsageBudgetUnavailable) as excinfo:
             await env.charge(fresh, 10, now=T0)
+        elapsed = time.monotonic() - started
         await holder.rollback()
+    assert elapsed < 1.5
+    assert _lock_not_available(excinfo.value), repr(excinfo.value.__cause__)
     assert await env.row(fresh) is None
+
+
+async def test_the_charge_never_touches_the_callers_transaction(env) -> None:
+    """The charge commits on its own session: the caller's stays open and untouched."""
+    wid = await env.workspace()
+    pending = uuid4()
+    try:
+        async with env.factory() as s:
+            s.add(Workspace(id=pending, name=f"pending-{pending.hex[:8]}", owner_user_id="p"))
+            await s.flush()
+            assert s.in_transaction()
+            for admitted, used in ((True, 1), (True, 2), (False, 2)):
+                result = await charge_public_usage(wid, limit=2, db=s)
+                assert result.admitted is admitted
+                assert s.in_transaction()
+                assert await s.scalar(select(Workspace.id).where(Workspace.id == pending))
+                async with env.factory() as other:
+                    assert await other.get(Workspace, pending) is None
+                assert (await env.row(wid)).calls_used == used
+            await s.rollback()
+    finally:
+        async with env.factory() as s:
+            await s.execute(delete(Workspace).where(Workspace.id == pending))
+            await s.commit()
 
 
 # ----------------------------------------------------------------------------
@@ -492,9 +552,13 @@ async def test_reset_refills_and_keeps_the_period(env) -> None:
         plan = await reset_public_usage_budget(s, wid, dry_run=True)
     assert (plan.calls_used_before, plan.period_seq, plan.applied) == (9, 4, False)
     assert await env.row(wid) == before
-    async with env.factory() as s:
-        applied = await reset_public_usage_budget(s, wid, dry_run=False)
+    with patch.object(pub, "logger") as log:
+        async with env.factory() as s:
+            applied = await reset_public_usage_budget(s, wid, dry_run=False)
     assert (applied.calls_used_before, applied.period_seq, applied.applied) == (9, 4, True)
+    log.warning.assert_called_once_with(
+        "public_usage_budget_reset", workspace_id=str(wid), period_seq=4, calls_used_before=9
+    )
     after = await env.row(wid)
     assert (after.calls_used, after.period_started_at, after.period_seq) == (0, T0, 4)
     assert after.updated_at != before.updated_at
@@ -519,15 +583,12 @@ async def test_a_lowered_limit_refuses_until_rollover(env) -> None:
 # ----------------------------------------------------------------------------
 
 
-async def test_mcp_and_rest_search_spend_the_same_row(env, dispatch_on, monkeypatch) -> None:
-    from api.routes import public_search
-
-    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 3)
-    wid = await env.workspace()
+async def _publish(env, wid: UUID, *, revoked: bool = False) -> Context:
+    """A public resource context of ``wid`` with one public MCP endpoint row."""
     slug = "catalog-" + uuid4().hex[:6]
     async with env.factory() as s:
         resource = Resource(workspace_id=wid, resource_id=slug, created_by="owner")
-        published = Context(
+        context = Context(
             id=uuid4(),
             workspace_id=wid,
             name=slug,
@@ -536,35 +597,57 @@ async def test_mcp_and_rest_search_spend_the_same_row(env, dispatch_on, monkeypa
             is_public=True,
             resource_id=slug,
         )
-        unpublished = Context(
-            id=uuid4(),
-            workspace_id=wid,
-            name=slug + "-old",
-            created_by="owner",
-            is_private=False,
-            is_public=True,
-        )
-        s.add_all([resource, published, unpublished])
+        s.add_all([resource, context])
         await s.flush()
         s.add(
             PublicMcpEndpoint(
                 workspace_id=wid,
-                context_id=published.id,
+                context_id=context.id,
                 resource_pk=resource.id,
                 resource_id=slug,
                 public_name="Catalog",
                 created_by="owner",
+                revoked_at=datetime(2030, 1, 1) if revoked else None,
+                revoked_by="owner" if revoked else None,
             )
         )
+        await s.commit()
+    return context
+
+
+async def test_mcp_and_rest_search_spend_the_same_row(env, dispatch_on, monkeypatch) -> None:
+    from api.routes import public_search
+
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 3)
+    wid = await env.workspace()
+    published = await _publish(env, wid)
+    # Its only publication was revoked: no live publication, not counted.
+    revoked = await _publish(env, wid, revoked=True)
+    async with env.factory() as s:
+        unpublished = Context(
+            id=uuid4(),
+            workspace_id=wid,
+            name=published.name + "-old",
+            created_by="owner",
+            is_private=False,
+            is_public=True,
+        )
+        s.add(unpublished)
         await s.commit()
 
     assert await dispatch_on(_serving(wid)) == "success"
     async with env.factory() as s:
         assert await public_search._has_live_publication(s, published.id) is True
         assert await public_search._has_live_publication(s, unpublished.id) is False
+        assert await public_search._has_live_publication(s, revoked.id) is False
         await public_search._charge_public_usage_budget(s, published, bucket_counted=True)
-        # Not published: not counted.
-        await public_search._charge_public_usage_budget(s, unpublished, bucket_counted=False)
+        # Not published, or the publication was revoked: not counted, and an
+        # unreadable bucket does not refuse it either.
+        for context in (unpublished, revoked):
+            assert (
+                await public_search._charge_public_usage_budget(s, context, bucket_counted=False)
+                is None
+            )
     assert (await env.row(wid)).calls_used == 2
     assert await dispatch_on(_serving(wid)) == "success"
     async with env.factory() as s:
@@ -577,3 +660,73 @@ async def test_mcp_and_rest_search_spend_the_same_row(env, dispatch_on, monkeypa
     async with env.factory() as s:
         unused = await s.scalar(select(Workspace.id).where(Workspace.id == wid))
     assert unused == wid
+
+
+async def test_concurrent_rest_charges_never_hold_two_connections(env, monkeypatch) -> None:
+    """More concurrent charged searches than the pool can hold twice still pass.
+
+    Each request holds its session's connection (the context read) when it
+    reaches the charge. If it kept it while the charge checks out a second
+    one, two requests on a pool of two would wait on each other until the
+    charge bound refused both (hold-and-wait).
+    """
+    from api.routes import public_search
+
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_enabled", True)
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 10)
+    monkeypatch.setattr(pub, "CHARGE_TIMEOUT_SECONDS", 2.0)
+    wid = await env.workspace()
+    published = await _publish(env, wid)
+    small = create_async_engine(env.engine.url, pool_size=2, max_overflow=0, pool_timeout=30)
+    factory = async_sessionmaker(small, class_=AsyncSession, expire_on_commit=False)
+    holding = asyncio.Barrier(2)
+
+    async def search() -> None:
+        async with factory() as s:
+            context = await s.get(Context, published.id)
+            assert context is not None
+            await holding.wait()  # both requests hold a connection now
+            await public_search._charge_public_usage_budget(s, context, bucket_counted=True)
+            # The search checks a connection out again and still sees the context.
+            assert (await s.execute(text("SELECT 1"))).scalar_one() == 1
+            assert context.workspace_id == wid
+            await s.commit()
+
+    try:
+        await asyncio.gather(search(), search())
+    finally:
+        await small.dispose()
+    assert (await env.row(wid)).calls_used == 2
+
+
+# ----------------------------------------------------------------------------
+# A failed handler stays counted (no refund, whatever its form)
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        lambda: RuntimeError("provider down"),
+        lambda: TimeoutError(),
+        lambda: PublicArgumentError("bad value"),
+    ],
+    ids=["error", "timeout", "argument"],
+)
+async def test_a_failed_handler_stays_counted_in_the_row(
+    env, dispatch_on, monkeypatch, failure
+) -> None:
+    from mcp_server.public import dispatch
+    from mcp_server.public.definitions import PUBLIC_TOOLS
+
+    async def failing(endpoint, arguments):
+        raise failure()
+
+    monkeypatch.setattr(dispatch, "PUBLIC_HANDLERS", dict.fromkeys(PUBLIC_TOOLS, failing))
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 10)
+    wid = await env.workspace()
+    endpoint = _serving(wid)
+    for n in (1, 2, 3):
+        assert await dispatch_on(endpoint) != "success"
+        # Read after call_public_tool returned: nothing gave the unit back.
+        assert (await env.row(wid)).calls_used == n

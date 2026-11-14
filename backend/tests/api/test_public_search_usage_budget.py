@@ -63,6 +63,7 @@ def _db(plan: str = "pro"):
 
     db = MagicMock()
     db.get = AsyncMock(side_effect=_get)
+    db.commit = AsyncMock()
     return db, context
 
 
@@ -129,6 +130,30 @@ async def test_anonymous_published_search_is_charged_to_the_context_workspace() 
     rig.charge.assert_awaited_once_with(rig.context.workspace_id, limit=LIMIT, db=rig.db)
     rig.published.assert_awaited_once_with(rig.db, rig.context.id)
     assert rig.limit_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_the_request_connection_is_released_before_the_charge() -> None:
+    # The charge checks out a connection of its own; the request's must be
+    # back in the pool first (no hold-and-wait on an anonymous endpoint):
+    # committed after the EXISTS read, before the charge.
+    rig = _Rig()
+    commits_seen: dict[str, int] = {}
+
+    async def published(db, context_id):
+        commits_seen["exists"] = db.commit.await_count
+        return True
+
+    async def charge(*args, **kwargs):
+        commits_seen["charge"] = rig.db.commit.await_count
+        return _charge(True)
+
+    rig.published.side_effect = published
+    rig.charge.side_effect = charge
+    await _reaches_search(rig)
+    assert commits_seen == {"exists": 0, "charge": 1}
+    rig.db.commit.assert_awaited_once_with()
+    rig.db.rollback.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -207,6 +207,14 @@ async def _charge_public_usage_budget(
         return
     if not bucket_counted:
         raise PublicUsageBudgetUnavailableError()
+    # The charge checks out a connection of its own. Release the request's
+    # first (it has only read so far; ``expire_on_commit=False`` keeps the
+    # loaded context and workspace usable), so a request never holds one
+    # connection while it waits for a second: enough concurrent anonymous
+    # searches would otherwise drain the pool and all fail closed together
+    # (hold-and-wait), stalling every other request meanwhile. The search
+    # checks a connection out again afterwards.
+    await db.commit()
     try:
         charge = await charge_public_usage(context.workspace_id, limit=limit, db=db)
     except PublicUsageBudgetUnavailable as exc:
