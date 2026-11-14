@@ -203,7 +203,7 @@ from services.erasure_details import (
 )
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
-from services.user_deletion_service import _contextless_in
+from services.user_deletion_service import _contextless_in, clear_allowlist_inviter
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
 from utils.db_helpers import is_deadlock, is_lock_not_available
@@ -2474,6 +2474,12 @@ class AccountErasureService:
         # redemption record points at them); the labels go. A pending email
         # sign-up for the address goes too.
         counts["signup_allowlist_labels"] = await self._blank_signup_allowlist_labels(user_id)
+        # #2814: the rows the subject added (an admin's manual add, or the
+        # subject's redeemed invite links) lose the subject's user id; the rows
+        # stay. Cleared, as the ``users.admitted_by_user_id`` foreign key is.
+        counts["signup_allowlist_inviters_cleared"] = await clear_allowlist_inviter(
+            self.db, user_id
+        )
         counts["email_signup_requests"] = await self._count_and_delete(
             EmailSignupRequest, EmailSignupRequest.email == func.lower(func.trim(target.email))
         )

@@ -38,7 +38,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import ColumnElement, Select, and_, delete, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -55,6 +55,7 @@ from models.auth import (
     WorkspaceMember,
 )
 from models.memory import Memory
+from models.signup_gate import SignupAllowlistEntry
 from services.billing_contract import ensure_no_billing_contract, workspaces_under_contract
 from services.connector_contexts import (
     connector_write_target_ids,
@@ -606,6 +607,30 @@ async def _transfer_required(
     }
 
 
+async def clear_allowlist_inviter(db: AsyncSession, user_id: str) -> int:
+    """Clear ``user_id`` from ``signup_allowlist.added_by_user_id`` (#2814).
+
+    The column names who added a row: the admin who allowlisted someone, or
+    the user whose closed-beta invite link was redeemed. It has no foreign key,
+    so every path that removes a ``users`` row calls this in the same
+    transaction, after the row is locked: account erasure, the admin user
+    delete and the ``delete_admin`` CLI (both through ``delete_user_rows``),
+    the paths whose foreign key clears ``users.admitted_by_user_id`` (#2803).
+    The rows stay (each still admits the person it names); rows added by
+    someone else keep their value. Returns the number of rows cleared.
+    """
+    result = cast(
+        CursorResult[Any],
+        await db.execute(
+            update(SignupAllowlistEntry)
+            .where(SignupAllowlistEntry.added_by_user_id == user_id)
+            .values(added_by_user_id=None)
+            .execution_options(synchronize_session=False)
+        ),
+    )
+    return result.rowcount or 0
+
+
 async def delete_user_rows(
     db: AsyncSession,
     user_id: str,
@@ -843,6 +868,7 @@ async def delete_user_rows(
     # Administrative and CLI deletion share this transaction. Retained history
     # in surviving workspaces must not keep the departed account's identifiers.
     await erase_operation_history(db, user_id, erasure_pseudonym(user_id))
+    await clear_allowlist_inviter(db, user_id)
     await db.execute(delete(User).where(User.user_id == user_id))
     return result
 

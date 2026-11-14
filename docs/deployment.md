@@ -664,6 +664,11 @@ channel or per inviter.
   (`DELETE /api/v1/admin/users/{id}`) or by `delete_admin`, the link goes and
   the admin API shows no inviter. `admitted_via`, the issuer and the invite id
   stay. Erasing the invited account deletes its row, record included.
+- **The allowlist's `added_by_user_id`** (who added a row: the admin of a
+  manual add, the inviter of a redeemed invite link) has no foreign key; the
+  same three paths clear it in the transaction that removes the account. The
+  row stays and still admits the person it names; rows someone else added keep
+  their value.
 - **`unknown`** is the default of the column: an account the backfill could
   not place, a second account that lost the first-user race (two first
   sign-ups at once: one `first_user`, one `unknown`), and any row written by an

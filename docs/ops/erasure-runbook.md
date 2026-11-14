@@ -90,6 +90,7 @@ FK の依存逆順で削除:
 | `audit_logs` (本人の行 / 本人を名指す他人の行) | SHA256 pseudonymize (§2.5)。本人の行は `ip_address` / `user_agent` も NULL (#2345) | #2287: 同一トランザクション内、`users` 削除の直前。counts キー = `audit_logs_pseudonymized` (本人の行)、`audit_mentions_pseudonymized` (他人の行、#2298) |
 | `users` | `user_id = :uid` | 最後 |
 | `users.admitted_by_user_id` (他人の行) | `admitted_by_user_id = :uid` | #2803: 本人が招待した account の招待者 link。FK `ON DELETE SET NULL` により最後の `users` 削除で NULL になる (sweep の対象外、counts に数えない)。`admitted_via` / `admitted_invite_issuer` / `admitted_beta_invite_id` は保持。admin のユーザー削除・`delete_admin` CLI も同じ |
+| `signup_allowlist.added_by_user_id` (本人が追加した行) | `added_by_user_id = :uid` | #2814: 本人が allowlist に追加した行 (admin の手動追加、本人の招待リンクの redeem) の追加者。FK がないので `users` 削除の前に NULL にする。行そのものは残す (名指す相手を引き続き許可する)。他人が追加した行は変えない。counts キー = `signup_allowlist_inviters_cleared`。admin のユーザー削除・`delete_admin` CLI も同じ helper (`clear_allowlist_inviter`、`delete_user_rows` から) で NULL にする |
 
 ここまでが 1 つの Postgres トランザクション。どこかで失敗すると全体が rollback され (user 行は残る)、request は marker なしの `failed` (id はそのまま) になり、新しい request で再実行できる。
 
