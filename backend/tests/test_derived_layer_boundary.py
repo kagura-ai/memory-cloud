@@ -61,6 +61,7 @@ from models.data_boundary import (
 
 importlib.import_module("models.oidc")
 importlib.import_module("models.integration_entitlement")
+importlib.import_module("models.sync_installation")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DESIGN_DOC = REPO_ROOT / "docs" / "derived-layer-boundary.md"

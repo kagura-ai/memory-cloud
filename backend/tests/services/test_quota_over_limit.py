@@ -258,6 +258,8 @@ _DEF = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(")
 # would not notice a gate added to, say, ``MemoryService.delete_memory`` inside
 # an already-allowed file.
 CREATE_PATH_GATES = {
+    # New dedicated resource/context only; inspection, unlink and retries bypass creation.
+    "services/sync_provisioning.py": {"create_sync_target"},
     # MemoryService.remember — the single memory-write gate; recall / update /
     # forget in the same file never call it.
     "services/memory_service.py": {"_prepare_remember"},  # remember prepares its row here (#1853)

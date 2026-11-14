@@ -70,6 +70,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "workspace_integration_states",
         "workspace_integration_licenses",
         "workspace_integration_events",
+        # Workspace synchronization consent and retained target identity (#2802).
+        "sync_services",
+        "sync_authorizations",
+        "sync_installations",
         # Agent Registry (#1274, RFC-0002 P0-1) — control-plane metadata about
         # agent deployments (kill switch, enforcement mode); no user knowledge
         # content, no learned structure. Governed by the auth/security regime +
