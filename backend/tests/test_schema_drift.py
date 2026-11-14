@@ -102,6 +102,7 @@ _MODEL_MODULES: tuple[str, ...] = (
     "models.oidc",
     "models.integration_entitlement",
     "models.sync_installation",
+    "models.sync_credential",
     "models.operation_history",
     "models.operations_status",
     "models.public_mcp_usage",

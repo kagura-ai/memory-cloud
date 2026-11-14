@@ -107,6 +107,14 @@ worker credentials, product/FAQ bodies or learned signal and do not enter raw
 exports. Historical approver identity is nullable and cleared on account
 deletion; workspace deletion cascades consent and installation records.
 
+Service credential clients/public signing keys, hashed access-token verifiers
+and assertion replay receipts (`sync_credential_clients`, `sync_signing_keys`,
+`sync_access_tokens`, `sync_assertion_uses`, #2806) are operational auth state.
+They contain no private signing keys or plaintext access credentials and never
+enter memory exports. Workspace/installation erasure cascades token verifiers;
+global service keys/clients and short-lived replay receipts follow their own
+operator revocation and expiry cleanup policy.
+
 Derived signal is *supposed* to act on every query — that is its value. The
 ban is on **bulk portability**, not on serving:
 
