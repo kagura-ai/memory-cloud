@@ -240,7 +240,8 @@ async def test_cancellation_rolls_back_and_releases_all_authority_locks(worker):
     task.cancel()
     try:
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, 8)
+        assert task.cancelled()
         assert await context_name(worker) == original
         async with worker.factory() as db:
             async with service.sync_token_boundary(
