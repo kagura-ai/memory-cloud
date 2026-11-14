@@ -26,7 +26,7 @@ REVISION = "f48_2807_sync_feed_runs"
 TABLES = {"sync_feeds", "sync_runs", "sync_chunks", "sync_records", "sync_index_outbox"}
 
 
-def test_feed_migration_roundtrip_constraints_cascades_and_event_preservation():
+def test_feed_migration_roundtrip_constraints_cascades_and_event_preservation(async_engine):
     engine = _sync_engine()
     uid, sid = "migration-" + uuid4().hex, "service-" + uuid4().hex
     wid, rid, cid, iid, fid, run_id = (uuid4() for _ in range(6))
@@ -180,5 +180,11 @@ def test_feed_migration_roundtrip_constraints_cascades_and_event_preservation():
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == REVISION
     finally:
-        _reset_alembic_state()
-        engine.dispose()
+        try:
+            # Other modules may already hold the session-scoped async_engine.
+            # Leave its database at head, rather than dropping its live schema.
+            _reset_alembic_state()
+            with _alembic_at_test_db():
+                command.upgrade(_get_alembic_config(), "head")
+        finally:
+            engine.dispose()
