@@ -15,9 +15,12 @@ assembled, preventing mixed revisions across its metadata and service rows.
 
 `PUT` at the same URL accepts the **complete workspace snapshot** below. Both
 routes require the existing `BILLING_SERVICE_TOKEN` Bearer credential. Missing
-configuration fails closed (503); a wrong credential is 401. Browser sessions,
-identity access tokens, API keys and integration tokens confer no authority.
-Duplicate Authorization headers are refused. Keep this secret in the billing
+configuration fails closed (503, checked first); a missing or wrong credential
+is 401. Two or more `Authorization` headers count as a missing credential (401),
+even when one of them is valid; this holds on every billing and worker
+service-token route and on the system-admin console in `service` mode. Browser
+sessions, identity access tokens, API keys and integration tokens confer no
+authority. Keep this secret in the billing
 publisher only, never in an integration worker or an external application's
 configuration. The existing edge rule blocks `/internal*`; call over the
 private service network. GET/PUT responses are `Cache-Control: no-store`.

@@ -47,11 +47,12 @@ import secrets
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.single_authorization import sole_authorization
 from config.plan_tiers import PLAN_TIERS, PlanName
 from config.retention import OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS
 from config.settings import get_settings
@@ -104,12 +105,25 @@ _ADDON_MAX_BY_KEY: dict[str, int] = {
 }
 
 
-async def verify_billing_service_token(authorization: str | None = Header(None)) -> None:
+async def verify_billing_service_token(
+    request: Request, authorization: str | None = Header(None)
+) -> None:
     """Authenticate the billing service by its shared service token (RFC 6750 Bearer).
+
+    The ``authorization`` parameter documents the header in the OpenAPI
+    document; the value checked is the request's single ``Authorization``
+    header (#2801): two or more are refused like a missing one.
+    """
+    await check_billing_service_token(sole_authorization(request))
+
+
+async def check_billing_service_token(authorization: str | None) -> None:
+    """Check one ``Authorization`` value against ``BILLING_SERVICE_TOKEN``.
 
     Fail-closed: an unset ``BILLING_SERVICE_TOKEN`` disables the endpoint (503),
     so a misconfigured deployment never accepts unauthenticated entitlement
-    pushes. Mirrors ``workers.verify_worker_token``.
+    pushes. ``None`` (no header, or more than one) is the same 401 as a
+    malformed one. Mirrors ``workers.check_worker_token``.
     """
     expected = get_settings().billing_service_token
     if not expected:
