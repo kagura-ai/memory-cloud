@@ -671,7 +671,11 @@ channel or per inviter.
   their value. A redemption of the inviter's link (e-mail, Google or GitHub)
   locks the inviter's `users` row before it writes the allowlist row, so one
   racing the removal either commits first and is cleared, or finds the
-  inviter gone and is refused like an expired link.
+  inviter gone and is refused like an expired link. Rows whose adder was
+  erased or deleted before v0.162.0 still held that id; the migration
+  `f49_2817_clear_allowlist_adders` (v0.163.0) sets it to NULL once on every
+  row whose value matches no account and is not an `operator:` principal,
+  keeps the rows, logs only the number changed, and cannot be undone.
 - **`unknown`** is the default of the column: an account the backfill could
   not place, a second account that lost the first-user race (two first
   sign-ups at once: one `first_user`, one `unknown`), and any row written by an
