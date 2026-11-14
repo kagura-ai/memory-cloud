@@ -14,7 +14,8 @@ Rows (later work packages add theirs):
 - the fixed address ``/mcp/public/{id}`` is served under any Host;
 - the certificate permission endpoint answers 404 and opens no session;
 - every owner domain route answers 404 before any statement, signed in or not;
-- ``/api/v1/system/info`` reports ``features.public_mcp_domains = false``.
+- ``/api/v1/system/info`` reports ``features.public_mcp_domains = false``;
+- unpublishing an endpoint releases no domain and runs no statement on them.
 """
 
 from __future__ import annotations
@@ -305,4 +306,53 @@ async def test_system_info_reports_the_switch_off(switch_off) -> None:
         r = await c.get("/api/v1/system/info")
     assert r.status_code == 200
     assert r.json()["features"]["public_mcp_domains"] is False
+    assert switch_off == []
+
+
+# ----------------------------------------------------------------------------
+# Unpublish
+# ----------------------------------------------------------------------------
+
+
+class _UnpublishSession(_NoDomainSession):
+    async def flush(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("domains_on", [False, True])
+async def test_unpublish_releases_domains_only_while_the_switch_is_on(
+    switch_off, monkeypatch, domains_on
+) -> None:
+    from types import SimpleNamespace
+
+    from api.routes import public_mcp_endpoints as routes
+
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_enabled", domains_on)
+    if domains_on:
+        monkeypatch.setattr(get_settings(), "mcp_public_domains_routing_target", "edge.example.net")
+    row = SimpleNamespace(
+        id=uuid4(),
+        public_id=f"pmcp_{'U' * 22}",
+        context_id=uuid4(),
+        created_by="owner-1",
+        revoked_at=None,
+        revoked_by=None,
+    )
+    monkeypatch.setattr(routes, "_live_endpoint", AsyncMock(return_value=row))
+    monkeypatch.setattr(routes, "record_operation", lambda *a, **k: None)
+    release = AsyncMock(return_value=0)
+    actor = AsyncMock(return_value="actor")
+    monkeypatch.setattr(routes, "release_domains_of_endpoint", release)
+    monkeypatch.setattr(routes, "owner_actor", actor)
+    session: Any = _UnpublishSession(switch_off, None)
+    r = await routes.unpublish_public_mcp_endpoint(
+        owner=("owner-1", uuid4()), resource_id="faq", db=session
+    )
+    assert r.status_code == 204
+    assert row.revoked_at is not None
+    if domains_on:
+        release.assert_awaited_once_with(session, row.id, "actor")
+    else:
+        release.assert_not_awaited()
+        actor.assert_not_awaited()
     assert switch_off == []
