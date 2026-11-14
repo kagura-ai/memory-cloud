@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -184,6 +185,51 @@ def test_refusals_are_value_errors_that_name_the_keys_not_the_input(plans) -> No
     assert _KEYS in message
     assert "enterprise" not in message and "Pro" not in message
     assert repr(plans) not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plans",
+    [
+        pytest.param([], id="empty"),
+        pytest.param(["Pro"], id="miscased"),
+        pytest.param(["pro", "pro"], id="repeated"),
+    ],
+)
+async def test_create_notice_refuses_plans_itself_before_any_statement(plans) -> None:
+    """``create_notice`` refuses a bad plan list on its own, not only behind
+    the route's request model (a direct caller skips that), and before the
+    create lock or any query. ``[]`` is refused, never read as "everyone"
+    (``None`` is the only way to target every plan)."""
+    db = _NoDb()
+    with pytest.raises(ValueError) as caught:
+        await svc.create_notice(
+            db,  # type: ignore[arg-type]
+            raw_text="Maintenance on Saturday.",
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+            starts_at=None,
+            plans=plans,
+            actor=svc.NoticeActor(email="admin@example.com", user_id="u1"),
+        )
+    # An AttributeError from the session stand-in is not a refusal.
+    assert type(caught.value) is ValueError
+    assert db.used == []
+
+
+@pytest.mark.asyncio
+async def test_create_notice_refuses_text_before_any_statement() -> None:
+    """The text refusal holds the same order: nothing is locked or read."""
+    db = _NoDb()
+    with pytest.raises(svc.McpNoticeTextRejectedError):
+        await svc.create_notice(
+            db,  # type: ignore[arg-type]
+            raw_text="   ",
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+            starts_at=None,
+            plans=["pro"],
+            actor=svc.NoticeActor(email="admin@example.com", user_id="u1"),
+        )
+    assert db.used == []
 
 
 def test_the_f44_downgrade_takes_the_create_lock() -> None:
