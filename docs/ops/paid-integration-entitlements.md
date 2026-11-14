@@ -155,6 +155,28 @@ network acknowledgement. No background job or cached token claim grants time.
 Concrete installation, token and sync HTTP consumers are added by their later
 implementation tasks; this change adds no placeholder privileged endpoints.
 
+`backend/tests/api/test_paid_integration_route_table.py` enforces the boundary:
+
+- **Router table** (`PAID_INTEGRATION_ROUTERS`): every router module that serves
+  a REST route in the app carries a decision, `NONE` (grants no paid-integration
+  authority) or `GUARDED` (names the service module whose code calls
+  `paid_integration_write` or `require_paid_integration`; the router imports it).
+  A new router module without a row, or a row whose module no longer serves a
+  route, fails. The table works per module: a paid route added to a `NONE`
+  router is caught only through the symbol scan below.
+- **MCP tool set** (`PAID_INTEGRATION_MCP_TOOLS`): every MCP tool carries a
+  decision too; all are `NONE` today.
+- **Symbol table** (`PAID_INTEGRATION_SYMBOLS`): an AST scan of `backend/src`
+  lists every module that imports `services.integration_entitlements` or
+  `models.integration_entitlement`, names one of the three entry functions,
+  references a mapped class of `models.integration_entitlement`, or names those
+  modules or the `workspace_integration_*` tables in a string. Each such module
+  has a role, and a role allows only its kinds of use; a module outside the
+  service that names `inspect_paid_integration` must be `display_only`, so a
+  cached inspection used to admit a write needs a visible table change.
+  Consumer tables therefore live in `models/integration_entitlement.py`.
+  Background tasks and other non-route code are covered by this scan only.
+
 ## Storage and migration
 
 `f43_2798_paid_integrations` adds current workspace state, named service licenses
