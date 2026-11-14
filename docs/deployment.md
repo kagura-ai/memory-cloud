@@ -714,9 +714,13 @@ Operator notes:
   when `f46_2803` alters `users`. Nothing is applied, and the single-server
   `deploy.sh` does not retry this error (it retries only lock timeouts): it
   stops at the migration step without starting the new colour or moving
-  traffic. Rerun the deploy (or the upgrade). To avoid it, upgrade in two
-  steps, `alembic upgrade f45_2800_mcp_notice_plans` and then
-  `alembic upgrade head`, so `f46_2803` starts holding no lock.
+  traffic. Rerun the deploy (or the upgrade). To avoid it, upgrade in three
+  steps: `alembic upgrade f45_2806_sync_credentials`, then
+  `alembic upgrade f45_2800_mcp_notice_plans`, then `alembic upgrade head`.
+  The last step then runs only `f46_2803` and the no-DDL merge revision
+  `f47_2819_merge_sync_credentials`, so `f46_2803` starts holding no lock.
+  (With two steps, `f45_2806_sync_credentials` would run in the same
+  transaction as `f46_2803` and take its locks on `workspaces` there.)
 - A **downgrade loses the records** written at sign-up for good; a later
   upgrade rebuilds only what the evidence above still gives.
 
