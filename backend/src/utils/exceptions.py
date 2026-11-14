@@ -1895,6 +1895,30 @@ class ManagementRequestTooLargeError(MemoryCloudException):
         super().__init__("Management request exceeds limit", status_code=413, error_code="MGMT-001")
 
 
+class SyncProtocolError(MemoryCloudException):
+    """Canonical exception with the isolated sync protocol's fixed wire errors."""
+
+    log_level: ClassVar[Literal["error", "warning"]] = "warning"
+
+    def __init__(
+        self,
+        error: Literal[
+            "invalid_request",
+            "request_too_large",
+            "invalid_manifest",
+            "invalid_record",
+            "run_too_large",
+            "too_many_records",
+            "invalid_cursor",
+            "human_approval_required",
+        ],
+        status_code: Literal[400, 409, 413] = 400,
+    ) -> None:
+        super().__init__(
+            "Synchronization request refused", status_code=status_code, error_code=error
+        )
+
+
 class TemporarilyUnavailableError(MemoryCloudException):
     """The workspace cannot be served right now (503, ``Retry-After: 300``).
 

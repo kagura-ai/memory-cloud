@@ -26,7 +26,11 @@ store, worker, feeds = fixtures.store, fixtures.worker, fixtures.feeds
 async def counts(worker):
     async with worker.factory() as db:
         return [
-            await db.scalar(select(func.count()).select_from(model))
+            await db.scalar(
+                select(func.count())
+                .select_from(model)
+                .where(model.resource_pk == UUID(worker.target["resource_pk"]))
+            )
             for model in (ResourceEvent, SyncRecord, SyncIndexOutbox)
         ]
 
@@ -63,7 +67,12 @@ async def test_partial_upload_never_publishes_and_complete_commit_is_durable(fee
         recovered.json()["state"] == "committed" and recovered.json()["index_status"] == "pending"
     )
     async with feeds.factory() as db:
-        assert all(item.records is None for item in (await db.scalars(select(SyncChunk))).all())
+        assert all(
+            item.records is None
+            for item in (
+                await db.scalars(select(SyncChunk).where(SyncChunk.run_id == UUID(rid)))
+            ).all()
+        )
 
 
 async def test_changed_operation_or_chunk_body_conflicts_without_events(feeds):
@@ -99,7 +108,12 @@ async def test_invalid_or_private_fields_never_enter_staging(feeds, records):
     assert result.headers["cache-control"] == "no-store"
     assert await counts(feeds) == [0, 0, 0]
     async with feeds.factory() as db:
-        assert await db.scalar(select(func.count()).select_from(SyncChunk)) == 0
+        assert (
+            await db.scalar(
+                select(func.count()).select_from(SyncChunk).where(SyncChunk.run_id == UUID(rid))
+            )
+            == 0
+        )
 
 
 async def test_duplicate_external_ids_and_bad_snapshot_digest_cannot_prepare(feeds):
@@ -130,10 +144,22 @@ async def test_destructive_diff_requires_finite_current_human_editor_approval(fe
     )
     assert result.status_code == 200, result.text
     async with feeds.factory() as db:
-        events = (await db.scalars(select(ResourceEvent).order_by(ResourceEvent.id))).all()
+        events = (
+            await db.scalars(
+                select(ResourceEvent)
+                .where(ResourceEvent.resource_pk == UUID(feeds.target["resource_pk"]))
+                .order_by(ResourceEvent.id)
+            )
+        ).all()
         assert [event.op for event in events] == ["upsert", "delete"]
         assert events[1].version == 1 and events[1].payload is None
-        assert (await db.scalar(select(SyncRecord))).payload is None
+        assert (
+            await db.scalar(
+                select(SyncRecord).where(
+                    SyncRecord.resource_pk == UUID(feeds.target["resource_pk"])
+                )
+            )
+        ).payload is None
 
 
 async def test_expired_preparation_or_changed_configuration_cannot_commit(feeds):

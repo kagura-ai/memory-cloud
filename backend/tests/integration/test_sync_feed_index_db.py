@@ -33,9 +33,17 @@ async def test_actual_indexer_embeds_product_text_and_publishes_owned_memory(fee
     qdrant.upsert = AsyncMock()
     monkeypatch.setattr(resource_indexer, "get_qdrant_client", lambda: qdrant)
     async with feeds.factory() as db:
-        event = await db.scalar(select(ResourceEvent))
+        event = await db.scalar(
+            select(ResourceEvent).where(
+                ResourceEvent.resource_pk == UUID(feeds.target["resource_pk"])
+            )
+        )
         context = await db.get(Context, UUID(feeds.target["context_id"]))
-        schema = await db.scalar(select(ResourceSchema))
+        schema = await db.scalar(
+            select(ResourceSchema).where(
+                ResourceSchema.resource_pk == UUID(feeds.target["resource_pk"])
+            )
+        )
         indexer = resource_indexer.ResourceIndexer(db)
         assert await guard_sync_event(db, event, context)
         await indexer._apply_upsert(event, schema, context, "test-collection", embed)
@@ -49,7 +57,11 @@ async def test_actual_indexer_embeds_product_text_and_publishes_owned_memory(fee
         assert qdrant.upsert.await_count == 1
     async with feeds.factory() as db:
         await maintain_sync_runs(db)
-        state = await db.scalar(select(IndexerState))
+        state = await db.scalar(
+            select(IndexerState).where(
+                IndexerState.resource_pk == UUID(feeds.target["resource_pk"])
+            )
+        )
         state.last_offset = (await db.get(SyncIndexOutbox, UUID(row["run_id"]))).last_event_id
         await db.commit()
     assert (await service(feeds, "GET", f"runs/{row['run_id']}")).json()[
@@ -76,7 +88,11 @@ async def test_obsolete_pending_upserts_cannot_reappear_after_canonical_delete(f
     async with feeds.factory() as db:
         context = await db.get(Context, UUID(feeds.target["context_id"]))
         old_events = (
-            await db.scalars(select(ResourceEvent).where(ResourceEvent.op == "upsert"))
+            await db.scalars(
+                select(ResourceEvent)
+                .where(ResourceEvent.resource_pk == UUID(feeds.target["resource_pk"]))
+                .where(ResourceEvent.op == "upsert")
+            )
         ).all()
         assert len(old_events) == 2
         for event in old_events:
@@ -87,7 +103,11 @@ async def test_outbox_recovers_crash_after_running_but_does_not_steal_live_batch
     await committed(feeds, [product()])
     async with feeds.factory() as db:
         await maintain_sync_runs(db)
-        state = await db.scalar(select(IndexerState))
+        state = await db.scalar(
+            select(IndexerState).where(
+                IndexerState.resource_pk == UUID(feeds.target["resource_pk"])
+            )
+        )
         state.job_status, state.last_run_at = "running", feeds.store.clock.now - timedelta(hours=1)
         await db.commit()
     async with feeds.factory() as active:
@@ -96,11 +116,23 @@ async def test_outbox_recovers_crash_after_running_but_does_not_steal_live_batch
         )
         async with feeds.factory() as db:
             await maintain_sync_runs(db)
-            assert (await db.scalar(select(IndexerState))).job_status == "running"
+            assert (
+                await db.scalar(
+                    select(IndexerState).where(
+                        IndexerState.resource_pk == UUID(feeds.target["resource_pk"])
+                    )
+                )
+            ).job_status == "running"
         await active.rollback()  # A process crash releases this transaction's receipt lock.
     async with feeds.factory() as db:
         await maintain_sync_runs(db)
-        assert (await db.scalar(select(IndexerState))).job_status == "queued"
+        assert (
+            await db.scalar(
+                select(IndexerState).where(
+                    IndexerState.resource_pk == UUID(feeds.target["resource_pk"])
+                )
+            )
+        ).job_status == "queued"
 
 
 async def test_older_held_receipts_do_not_starve_a_different_healthy_target(feeds):
@@ -179,7 +211,9 @@ async def test_older_held_receipts_do_not_starve_a_different_healthy_target(feed
 async def test_failed_older_version_delete_never_reports_search_complete(feeds):
     await committed(feeds, [product()])
     async with feeds.factory() as db:
-        record = await db.scalar(select(SyncRecord))
+        record = await db.scalar(
+            select(SyncRecord).where(SyncRecord.resource_pk == UUID(feeds.target["resource_pk"]))
+        )
         context = await db.get(Context, UUID(feeds.target["context_id"]))
         db.add(
             Memory(
@@ -220,7 +254,11 @@ async def test_failed_older_version_delete_never_reports_search_complete(feeds):
     assert result.status_code == 200, result.text
     async with feeds.factory() as db:
         await maintain_sync_runs(db)
-        state = await db.scalar(select(IndexerState))
+        state = await db.scalar(
+            select(IndexerState).where(
+                IndexerState.resource_pk == UUID(feeds.target["resource_pk"])
+            )
+        )
         state.last_offset = (await db.get(SyncIndexOutbox, UUID(row["run_id"]))).last_event_id
         await db.commit()
     assert (await service(feeds, "GET", f"runs/{row['run_id']}")).json()["index_status"] == "failed"
@@ -263,7 +301,13 @@ async def test_full_process_skips_alternating_obsolete_upserts_before_zero_room_
         assert metrics.batch_committed and not metrics.reason, metrics.to_dict()
         assert quota.await_count == 0 and embed.embed.await_count == 0
         assert qdrant.upsert.await_count == 0
-        assert (await db.scalar(select(IndexerState))).last_offset > 0
+        assert (
+            await db.scalar(
+                select(IndexerState).where(
+                    IndexerState.resource_pk == UUID(feeds.target["resource_pk"])
+                )
+            )
+        ).last_offset > 0
     assert (await service(feeds, "GET", f"runs/{row['run_id']}")).json()[
         "index_status"
     ] == "complete"
@@ -272,7 +316,9 @@ async def test_full_process_skips_alternating_obsolete_upserts_before_zero_room_
 async def test_foreign_tombstone_cannot_be_retired_by_sync_upsert(feeds):
     await committed(feeds, [product()])
     async with feeds.factory() as db:
-        record = await db.scalar(select(SyncRecord))
+        record = await db.scalar(
+            select(SyncRecord).where(SyncRecord.resource_pk == UUID(feeds.target["resource_pk"]))
+        )
         memory = Memory(
             user_id=feeds.store.users["member"],
             workspace_id=feeds.store.wid,
@@ -303,7 +349,11 @@ async def test_foreign_tombstone_cannot_be_retired_by_sync_upsert(feeds):
     assert result.status_code == 409
     async with feeds.factory() as db:
         context = await db.get(Context, UUID(feeds.target["context_id"]))
-        event = await db.scalar(select(ResourceEvent).where(ResourceEvent.op == "upsert"))
+        event = await db.scalar(
+            select(ResourceEvent)
+            .where(ResourceEvent.resource_pk == UUID(feeds.target["resource_pk"]))
+            .where(ResourceEvent.op == "upsert")
+        )
         with pytest.raises(ConflictError):
             await guard_sync_event(db, event, context)
         assert (await db.get(Memory, memory_id)).content == "Foreign deleted body"
@@ -327,7 +377,9 @@ async def test_late_details_move_never_overwrites_or_deletes_foreign_memory(
             )
         ).status_code == 200
     async with feeds.factory() as db:
-        record = await db.scalar(select(SyncRecord))
+        record = await db.scalar(
+            select(SyncRecord).where(SyncRecord.resource_pk == UUID(feeds.target["resource_pk"]))
+        )
         foreign = Memory(
             user_id=feeds.store.users["member"],
             workspace_id=feeds.store.wid,
@@ -363,12 +415,16 @@ async def test_late_details_move_never_overwrites_or_deletes_foreign_memory(
     monkeypatch.setattr(resource_indexer, "get_qdrant_client", lambda: qdrant)
     async with feeds.factory() as db:
         event = await db.scalar(
-            select(ResourceEvent).where(
-                ResourceEvent.op == ("delete" if collision == "delete" else "upsert")
-            )
+            select(ResourceEvent)
+            .where(ResourceEvent.resource_pk == UUID(feeds.target["resource_pk"]))
+            .where(ResourceEvent.op == ("delete" if collision == "delete" else "upsert"))
         )
         context = await db.get(Context, UUID(feeds.target["context_id"]))
-        schema = await db.scalar(select(ResourceSchema))
+        schema = await db.scalar(
+            select(ResourceSchema).where(
+                ResourceSchema.resource_pk == UUID(feeds.target["resource_pk"])
+            )
+        )
         indexer = resource_indexer.ResourceIndexer(db)
         assert await guard_sync_event(db, event, context)
         if collision == "delete":
@@ -414,7 +470,13 @@ async def test_late_details_move_never_overwrites_or_deletes_foreign_memory(
 async def test_full_replacement_frees_owned_capacity_before_creating_new_ids(feeds, monkeypatch):
     first = await committed(feeds, [product(f"old-{index}") for index in range(3)])
     async with feeds.factory() as db:
-        for record in (await db.scalars(select(SyncRecord))).all():
+        for record in (
+            await db.scalars(
+                select(SyncRecord).where(
+                    SyncRecord.resource_pk == UUID(feeds.target["resource_pk"])
+                )
+            )
+        ).all():
             db.add(
                 Memory(
                     user_id=feeds.store.users["owner"],
@@ -438,7 +500,11 @@ async def test_full_replacement_frees_owned_capacity_before_creating_new_ids(fee
             )
         await db.commit()
         await maintain_sync_runs(db)
-        state = await db.scalar(select(IndexerState))
+        state = await db.scalar(
+            select(IndexerState).where(
+                IndexerState.resource_pk == UUID(feeds.target["resource_pk"])
+            )
+        )
         state.last_offset = (await db.get(SyncIndexOutbox, UUID(first["run_id"]))).last_event_id
         previous_offset = state.last_offset
         await db.commit()
@@ -457,6 +523,7 @@ async def test_full_replacement_frees_owned_capacity_before_creating_new_ids(fee
         events = (
             await db.scalars(
                 select(ResourceEvent)
+                .where(ResourceEvent.resource_pk == UUID(feeds.target["resource_pk"]))
                 .where(ResourceEvent.id > previous_offset)
                 .order_by(ResourceEvent.id)
             )

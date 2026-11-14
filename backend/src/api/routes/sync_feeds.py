@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, TypeVar
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,7 @@ from services.sync_credentials import CredentialAuthority, sync_token_boundary
 from services.sync_feed_authority import FeedFence, feed_fence, runs_enabled, worker_target
 from services.sync_feed_commit import commit_run
 from services.sync_feed_index import index_status
+from utils.exceptions import SyncProtocolError
 
 router = APIRouter(
     prefix="/sync/installations/{installation_id}",
@@ -70,7 +71,7 @@ def exact_query(request: Request, allowed: set[str] | None = None) -> None:
     if not set(keys).issubset(allowed or set()) or any(
         len(request.query_params.getlist(key)) != 1 for key in keys
     ):
-        raise HTTPException(400, "invalid_request")
+        raise SyncProtocolError("invalid_request")
 
 
 def unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -91,17 +92,17 @@ async def bounded_body(
         request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         != "application/json"
     ):
-        raise HTTPException(400, "invalid_request")
+        raise SyncProtocolError("invalid_request")
     payload = bytearray()
     async for part in request.stream():
         if len(payload) + len(part) > maximum:
-            raise HTTPException(413, "request_too_large")
+            raise SyncProtocolError("request_too_large", 413)
         payload.extend(part)
     try:
         json.loads(payload, object_pairs_hook=unique_object)
         return model.model_validate_json(bytes(payload)), len(payload)
     except (ValueError, ValidationError, UnicodeError, RecursionError):
-        raise HTTPException(400, "invalid_request") from None
+        raise SyncProtocolError("invalid_request") from None
 
 
 @asynccontextmanager

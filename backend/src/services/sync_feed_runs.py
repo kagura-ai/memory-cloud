@@ -3,7 +3,6 @@
 from datetime import timedelta
 from uuid import UUID, uuid4
 
-from fastapi import HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +19,7 @@ from models.sync_feed_schemas import (
 from services.sync_credentials import CredentialAuthority
 from services.sync_feed_authority import FeedFence, current_schema, locked
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import ConflictError, NotFoundException
+from utils.exceptions import ConflictError, NotFoundException, SyncProtocolError
 
 
 def generations(authority: CredentialAuthority) -> list[int]:
@@ -109,7 +108,7 @@ async def create_run(
         or body.records < body.chunks
         or body.records > body.chunks * 100
     ):
-        raise HTTPException(400, "invalid_manifest")
+        raise SyncProtocolError("invalid_manifest")
     await schema_matches(db, authority)
     pending = await db.scalar(
         select(func.count())
@@ -166,14 +165,14 @@ async def stage_chunk(
         for record in body.records:
             record.public_payload(feed.kind)
     except ValueError:
-        raise HTTPException(400, "invalid_record") from None
+        raise SyncProtocolError("invalid_record") from None
     total = (
         await db.scalar(
             select(func.coalesce(func.sum(SyncChunk.byte_count), 0)).where(SyncChunk.run_id == rid)
         )
     ) or 0
     if total + byte_count > MAX_RUN_BYTES:
-        raise HTTPException(400, "run_too_large")
+        raise SyncProtocolError("run_too_large")
     accepted = (
         await db.scalar(
             select(func.coalesce(func.sum(SyncChunk.record_count), 0)).where(
@@ -182,7 +181,7 @@ async def stage_chunk(
         )
     ) or 0
     if accepted + len(records) > row.manifest["records"]:
-        raise HTTPException(400, "too_many_records")
+        raise SyncProtocolError("too_many_records")
     db.add(
         SyncChunk(
             run_id=rid,

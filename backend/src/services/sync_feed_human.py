@@ -4,7 +4,6 @@ import base64
 import json
 from uuid import UUID, uuid4
 
-from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +25,7 @@ from models.sync_installation import SyncService
 from services.sync_feed_authority import current_schema, human_feed_boundary, locked
 from services.sync_feed_runs import run_view
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import ConflictError, NotFoundException
+from utils.exceptions import ConflictError, NotFoundException, SyncProtocolError
 
 
 async def configure_feed(
@@ -153,7 +152,7 @@ def decode_cursor(value: str | None, revision: str) -> UUID | None:
             raise ValueError
         after = UUID(parsed["after"])
     except (ValueError, TypeError, KeyError, UnicodeError):
-        raise HTTPException(400, "invalid_cursor") from None
+        raise SyncProtocolError("invalid_cursor") from None
     if parsed["revision"] != revision:
         raise ConflictError("Synchronization projection changed; restart pagination")
     return after

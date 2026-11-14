@@ -3,7 +3,6 @@
 import hashlib
 from uuid import UUID
 
-from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +17,7 @@ from services.sync_feed_authority import FeedFence, lock_membership
 from services.sync_feed_provenance import assert_managed_memories
 from services.sync_feed_runs import build_diff, clear_staging, editable, run_for, staged_records
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError
+from utils.exceptions import ConflictError, SyncProtocolError
 
 
 def document_id(iid: UUID, fid: UUID, external_id: str) -> str:
@@ -103,7 +102,7 @@ async def commit_run(
             or workspace is None
             or workspace.ownership_epoch != row.approval_epoch
         ):
-            raise HTTPException(409, "human_approval_required")
+            raise SyncProtocolError("human_approval_required", 409)
         await lock_membership(db, row.approved_by, authority.installation, write=True)
     elif body.approval_id is not None and body.approval_id != row.approval_id:
         raise ConflictError("Unknown synchronization approval")

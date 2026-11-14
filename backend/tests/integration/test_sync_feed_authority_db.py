@@ -42,7 +42,14 @@ async def test_failure_after_event_flush_rolls_back_canonical_events_and_outbox(
     assert result.status_code == 503
     async with feeds.factory() as db:
         for model in (ResourceEvent, SyncRecord, SyncIndexOutbox):
-            assert await db.scalar(select(func.count()).select_from(model)) == 0
+            assert (
+                await db.scalar(
+                    select(func.count())
+                    .select_from(model)
+                    .where(model.resource_pk == UUID(feeds.target["resource_pk"]))
+                )
+                == 0
+            )
         assert (await db.get(SyncRun, UUID(row["run_id"]))).state == "prepared"
         assert (await db.get(SyncChunk, (UUID(row["run_id"]), 0))).records is not None
 
@@ -61,8 +68,22 @@ async def test_expiry_after_last_await_is_rechecked_by_actual_commit(feeds, monk
     )
     assert result.status_code == 401, result.text
     async with feeds.factory() as db:
-        assert await db.scalar(select(func.count()).select_from(ResourceEvent)) == 0
-        assert await db.scalar(select(func.count()).select_from(SyncRecord)) == 0
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(ResourceEvent)
+                .where(ResourceEvent.resource_pk == UUID(feeds.target["resource_pk"]))
+            )
+            == 0
+        )
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(SyncRecord)
+                .where(SyncRecord.resource_pk == UUID(feeds.target["resource_pk"]))
+            )
+            == 0
+        )
 
 
 @pytest.mark.parametrize("kind", ["paid", "client_generation", "installation_generation"])
@@ -81,7 +102,14 @@ async def test_pending_run_cannot_survive_changed_live_authority(feeds, kind):
     )
     assert result.status_code in {403, 409}, result.text
     async with feeds.factory() as db:
-        assert await db.scalar(select(func.count()).select_from(ResourceEvent)) == 0
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(ResourceEvent)
+                .where(ResourceEvent.resource_pk == UUID(feeds.target["resource_pk"]))
+            )
+            == 0
+        )
 
 
 async def test_membership_removal_after_destructive_approval_denies_commit(feeds):
@@ -127,7 +155,9 @@ async def test_two_prepared_runs_cannot_commit_the_same_baseline(feeds):
 async def test_foreign_event_cannot_be_overwritten_or_deleted(feeds):
     await committed(feeds, [product()])
     async with feeds.factory() as db:
-        record = await db.scalar(select(SyncRecord))
+        record = await db.scalar(
+            select(SyncRecord).where(SyncRecord.resource_pk == UUID(feeds.target["resource_pk"]))
+        )
         db.add(
             ResourceEvent(
                 resource_pk=record.resource_pk,
@@ -145,7 +175,14 @@ async def test_foreign_event_cannot_be_overwritten_or_deleted(feeds):
     )
     assert result.status_code == 409, result.text
     async with feeds.factory() as db:
-        assert await db.scalar(select(func.count()).select_from(ResourceEvent)) == 2
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(ResourceEvent)
+                .where(ResourceEvent.resource_pk == UUID(feeds.target["resource_pk"]))
+            )
+            == 2
+        )
 
 
 async def test_same_operation_waiting_on_workspace_remains_one_durable_run(feeds):
@@ -154,4 +191,9 @@ async def test_same_operation_waiting_on_workspace_remains_one_durable_run(feeds
     assert [result.status_code for result in results] == [201, 201]
     assert results[0].json()["run_id"] == results[1].json()["run_id"]
     async with feeds.factory() as db:
-        assert await db.scalar(select(func.count()).select_from(SyncRun)) == 1
+        assert (
+            await db.scalar(
+                select(func.count()).select_from(SyncRun).where(SyncRun.feed_id == feeds.fid)
+            )
+            == 1
+        )
