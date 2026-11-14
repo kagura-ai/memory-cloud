@@ -234,6 +234,13 @@ REFUSALS: list[Refusal] = [
         carries_counts=False,
     ),
     Refusal(
+        id="plan/resources-sync-target",
+        site="services.sync_provisioning:create_sync_target",
+        exc=FeatureNotAvailableError.for_feature(_FREE, "resources"),
+        site_literal="resources",
+        carries_counts=False,
+    ),
+    Refusal(
         id="plan/connectors",
         site=(
             "services.connector_provisioning:"
@@ -1695,6 +1702,7 @@ MCP_ROUTES: dict[str, tuple[McpRoute, ...]] = {
 # Every other refusal, and why no MCP tool sees it. A new refusal must land
 # in exactly one of the two tables (``test_every_refusal_is_routed_or_excused``).
 NOT_ON_MCP = {
+    "plan/resources-sync-target": "OIDC/internal REST controls only; no MCP tool provisions a target",
     "plan/team_invitations": "REST route only; no MCP tool invites members",
     "plan/team_invitations-direct-add": "REST route only; no MCP tool adds members",
     "plan/team_invitations-accept": "REST route only; no MCP tool accepts invitations",

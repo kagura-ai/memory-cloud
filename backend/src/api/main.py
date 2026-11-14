@@ -400,6 +400,10 @@ openapi_tags = [
     {"name": "workspace", "description": "Workspace dashboard and stats"},
     {"name": "workspaces", "description": "Workspace CRUD operations"},
     {"name": "workspace-plan", "description": "Workspace plan management (self-service)"},
+    {
+        "name": "workspace-sync",
+        "description": "Workspace-owned synchronization consent and installation controls",
+    },
     {"name": "invitations", "description": "Team member invitations"},
     {"name": "member-credentials", "description": "API key and OAuth credential management"},
     {

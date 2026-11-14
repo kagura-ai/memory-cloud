@@ -36445,6 +36445,9 @@
       "name": "workspace-plan"
     },
     {
+      "name": "workspace-sync"
+    },
+    {
       "name": "workspaces"
     }
   ]
