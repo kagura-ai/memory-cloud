@@ -30,7 +30,9 @@ if TYPE_CHECKING:
     from models.oidc import OIDCClient
 
 DEFAULT_CLIENT_SCOPE = "openid profile workspaces:read"
-_ALLOWED_SCOPES = frozenset({"openid", "profile", "workspaces:read", "integrations:manage"})
+_ALLOWED_SCOPES = frozenset(
+    {"openid", "profile", "workspaces:read", "integrations:manage", "sync.records:read"}
+)
 _CLIENT_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 
 

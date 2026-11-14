@@ -1,4 +1,4 @@
-"""Async identity-only Bearer authentication, isolated from memory credentials."""
+"""Async OIDC Bearer authentication, isolated from general memory credentials."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from utils.datetime import utcnow
 _BEARER = HTTPBearer(
     auto_error=False,
     scheme_name="OIDCIdentity",
-    description="Isolated OIDC access token with workspaces:read; no session or memory credentials.",
+    description="Isolated OIDC access token with explicit consented scopes; no session or general memory credentials.",
 )
 _TOKEN = re.compile(r"kmc_oidc_at_[A-Za-z0-9_-]{43}")
 _SCOPE = "workspaces:read"

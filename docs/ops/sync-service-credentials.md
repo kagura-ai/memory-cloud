@@ -121,9 +121,10 @@ feeds a service principal into general REST/MCP/API-key/Resource Token auth.
 
 The delivered `GET /api/v1/sync/installations/{installation_id}` consumes
 `results:read` and returns only its fixed operational target IDs, generation and
-approved operations. Product/FAQ schemas, staged runs, batches and result/data
-projection endpoints belong to the next task. Use the same boundary around
-their actual content changes; a prior metadata inspection is not authority.
+approved operations. Product/FAQ staged runs and human data projection are
+documented in [staged feed synchronization](staged-feed-sync.md). Each worker
+operation uses the same boundary around its actual content changes; a prior
+metadata inspection is not authority.
 
 The boundary owns the transaction. Only plain SELECTs may precede the paid guard;
 pending/flushed writes or earlier row locks are refused without rolling back
