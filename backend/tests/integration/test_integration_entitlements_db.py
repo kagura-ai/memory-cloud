@@ -13,14 +13,16 @@ import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.routes import internal_integrations
 from api.routes.internal_billing import BillingPlanPush, set_workspace_plan_from_billing
+from auth.api_keys import APIKeyManager
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import Context, User, Workspace
+from models.auth import APIKey, Context, User, Workspace
 from models.integration_entitlement import WorkspaceIntegrationEvent, WorkspaceIntegrationState
 from models.integration_entitlement_schemas import IntegrationEntitlementPush
 from models.public_mcp import PublicMcpEndpoint
@@ -114,7 +116,13 @@ async def store(async_engine, monkeypatch):
     app.dependency_overrides[get_db] = sessions
     try:
         yield SimpleNamespace(
-            factory=factory, app=app, wid=wid, other=other, cid=cid, endpoint_id=endpoint_id
+            factory=factory,
+            app=app,
+            wid=wid,
+            other=other,
+            cid=cid,
+            endpoint_id=endpoint_id,
+            uid=uid,
         )
     finally:
         async with factory() as db:
@@ -497,3 +505,157 @@ async def test_revocation_ahead_of_waiting_writer_invalidates_prior_inspection(s
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+# --- #2801: the guard and the public require start the transaction's writes ---
+
+XID = text("SELECT pg_current_xact_id_if_assigned()::text")
+EARLIER = ["flushed_insert", "users_for_update", "users_for_key_share"]
+
+
+async def earlier_action(db, store, action, extra_uid):
+    if action == "flushed_insert":
+        db.add(User(user_id=extra_uid, email=extra_uid + "@example.test"))
+        await db.flush()
+        return
+    mode = "UPDATE" if action == "users_for_update" else "KEY SHARE"
+    await db.execute(text(f"SELECT 1 FROM users WHERE user_id = :u FOR {mode}"), {"u": store.uid})
+
+
+async def enter(db, store, entry):
+    if entry == "guard":
+        async with service.paid_integration_write(db, store.wid, SERVICE):
+            pytest.fail("The guard admitted a transaction that already wrote or locked a row")
+    else:
+        await service.require_paid_integration(db, store.wid, SERVICE)
+
+
+async def workspace_row_is_free(store):
+    async with store.factory() as other:
+        try:
+            locked = await other.scalar(
+                select(Workspace.id).where(Workspace.id == store.wid).with_for_update(nowait=True)
+            )
+        except DBAPIError as exc:
+            if "could not obtain lock" not in str(exc):
+                raise
+            return False
+        finally:
+            await other.rollback()
+    return locked == store.wid
+
+
+@pytest.mark.parametrize("entry", ["guard", "require"])
+@pytest.mark.parametrize("action", EARLIER)
+async def test_entry_refuses_a_transaction_that_already_wrote_or_locked_a_row(store, action, entry):
+    await apply(store, snapshot())
+    extra_uid = "paid-integration-extra-" + uuid4().hex
+    try:
+        async with store.factory() as db:
+            await earlier_action(db, store, action, extra_uid)
+            xid = await db.scalar(XID)
+            assert xid is not None
+            hooks = list(db.sync_session.dispatch.before_commit)
+            with pytest.raises(RuntimeError, match="first write or row lock"):
+                await enter(db, store, entry)
+            # The caller's transaction is left to the caller: not rolled back,
+            # no commit hook or guard flag left behind, no workspace row lock.
+            assert await db.scalar(XID) == xid
+            assert await db.scalar(
+                select(func.count()).select_from(User).where(User.user_id == extra_uid)
+            ) == int(action == "flushed_insert")
+            assert "paid_integration_write" not in db.info
+            assert list(db.sync_session.dispatch.before_commit) == hooks
+            assert await workspace_row_is_free(store)
+            await db.commit()
+    finally:
+        async with store.factory() as db:
+            await db.execute(delete(User).where(User.user_id == extra_uid))
+            await db.commit()
+
+
+async def test_guard_admits_a_read_only_transaction_and_commits(store):
+    await apply(store, snapshot())
+    async with store.factory() as db:
+        assert (await db.get(Context, store.cid)).display_name == "Original"
+        assert (await service.inspect_paid_integration(db, store.wid, SERVICE)).allowed
+        await db.scalar(select(func.count()).select_from(Workspace))
+        assert await db.scalar(XID) is None
+        async with service.paid_integration_write(db, store.wid, SERVICE):
+            (await db.get(Context, store.cid)).display_name = "Admitted after reads"
+    assert await context_name(store) == "Admitted after reads"
+
+
+async def test_require_admits_a_read_only_transaction_once(store):
+    await apply(store, snapshot())
+    async with store.factory() as db:
+        assert (await service.inspect_paid_integration(db, store.wid, SERVICE)).allowed
+        assert (await service.require_paid_integration(db, store.wid, SERVICE)).allowed
+        # The admission holds the workspace row lock, so it is one per transaction.
+        assert not await workspace_row_is_free(store)
+        with pytest.raises(RuntimeError, match="first write or row lock"):
+            await service.require_paid_integration(db, store.wid, SERVICE)
+        await db.rollback()
+
+
+async def test_require_inside_the_guard_refuses_and_rolls_the_guard_back(store):
+    await apply(store, snapshot())
+    async with store.factory() as db:
+        with pytest.raises(RuntimeError, match="first write or row lock"):
+            async with service.paid_integration_write(db, store.wid, SERVICE):
+                (await db.get(Context, store.cid)).display_name = "Must roll back"
+                await service.require_paid_integration(db, store.wid, SERVICE)
+        assert "paid_integration_write" not in db.info
+    assert await context_name(store) == "Original"
+
+
+# --- Authentication bookkeeping is a write: commit it before entering --------
+
+
+@pytest.mark.parametrize("entry", ["guard", "require"])
+async def test_api_key_bookkeeping_is_refused_until_committed(store, entry):
+    # verify_key flushes api_keys.last_used_at whenever it is due (NULL here,
+    # so the test does not depend on the throttle window) into the request
+    # session without committing. Entering right after it is refused; the
+    # documented order (authenticate, commit, enter) is admitted.
+    await apply(store, snapshot())
+    async with store.factory() as db:
+        plaintext, row = await APIKeyManager(db).create_key(
+            name="paid-integration-guard", user_id=store.uid, workspace_id=store.wid
+        )
+        key_id = row.id
+        await db.commit()
+
+    async def stale_key():
+        async with store.factory() as db:
+            await db.execute(update(APIKey).where(APIKey.id == key_id).values(last_used_at=None))
+            await db.commit()
+
+    try:
+        await stale_key()
+        async with store.factory() as db:
+            assert await APIKeyManager(db).verify_key(plaintext) is not None
+            assert await db.scalar(XID) is not None
+            with pytest.raises(RuntimeError, match="first write or row lock"):
+                await enter(db, store, entry)
+            await db.rollback()
+
+        await stale_key()
+        async with store.factory() as db:
+            assert await APIKeyManager(db).verify_key(plaintext) is not None
+            await db.commit()
+            assert await db.scalar(XID) is None
+            if entry == "guard":
+                async with service.paid_integration_write(db, store.wid, SERVICE):
+                    (await db.get(Context, store.cid)).display_name = "After key auth"
+            else:
+                assert (await service.require_paid_integration(db, store.wid, SERVICE)).allowed
+                await db.rollback()
+        if entry == "guard":
+            assert await context_name(store) == "After key auth"
+        async with store.factory() as db:
+            assert await db.scalar(select(APIKey.last_used_at).where(APIKey.id == key_id))
+    finally:
+        async with store.factory() as db:
+            await db.execute(delete(APIKey).where(APIKey.id == key_id))
+            await db.commit()

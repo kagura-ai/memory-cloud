@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import VerifiedKey
 from auth.oauth2_bearer import is_oauth_bearer_token, verify_oauth_bearer_token
+from auth.single_authorization import sole_authorization
 from auth.system_admin_mode import (
     OPERATOR_EMAIL_HEADER,
     build_operator_principal,
@@ -231,7 +232,8 @@ def _require_service_operator(request: Request) -> dict:
     if networks and not client_in_networks(request, networks):
         raise HTTPException(status_code=404, detail="Not Found")
     try:
-        slot = verify_service_credential(request.headers.get("authorization"))
+        # #2801: two Authorization headers are a missing credential (401).
+        slot = verify_service_credential(sole_authorization(request))
     except SystemAdminCredentialError:
         logger.warning(
             "system_admin_service_auth_failed",

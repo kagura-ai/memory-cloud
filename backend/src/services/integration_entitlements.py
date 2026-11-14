@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -262,14 +262,53 @@ async def _access(
 async def inspect_paid_integration(
     db: AsyncSession, workspace_id: UUID, service_id: str
 ) -> PaidIntegrationAccess:
-    """Inspect current eligibility for display; writes must use the transaction guard."""
+    """Inspect current eligibility for display only; it takes no lock.
+
+    A cached inspection never admits a write: writes enter
+    ``paid_integration_write`` and read-only admissions ``require_paid_integration``.
+    """
     return await _access(db, workspace_id, service_id, lock=False)
 
 
-async def require_paid_integration(
+async def _refuse_started_transaction(db: AsyncSession) -> None:
+    """Refuse a transaction that has already written or locked a row.
+
+    The workspace row lock must be the transaction's first write or row lock,
+    so an earlier write cannot ride on the paid check's commit and a held
+    ``users`` row can never wait on a workspace row (the global lock order of
+    ``tests/integration/test_erasure_lock_order_db.py``). PostgreSQL assigns a
+    transaction id at the first write or row lock (``FOR UPDATE`` / ``NO KEY
+    UPDATE`` / ``SHARE`` / ``KEY SHARE``), a temp table or a WAL-logged
+    ``nextval``; all of these are refused. An ``ACCESS EXCLUSIVE`` table lock
+    assigns one only when ``wal_level`` is ``replica`` or ``logical`` (the
+    default), to log the lock for standbys; under ``wal_level=minimal`` it
+    assigns none. Plain reads, advisory locks, table locks below ``ACCESS
+    EXCLUSIVE`` and, under ``minimal``, ``ACCESS EXCLUSIVE`` itself are not
+    detected here; callers order those under the global lock order.
+
+    Authentication bookkeeping counts as a write: ``APIKeyManager.verify_key``
+    flushes ``api_keys.last_used_at`` and, for an agent-bound key,
+    ``AgentRegistryService.touch_last_seen`` updates ``agents.last_seen_at``,
+    each once per throttle window, in the request session without
+    committing. A consumer commits that bookkeeping (``await db.commit()``)
+    after authenticating and before entering, or the entry is refused for
+    exactly the callers whose bookkeeping was due. The check only reads: it
+    never assigns an id itself (``pg_current_xact_id()`` would).
+    """
+    # Sync first, so autoflush cannot flush the caller's pending changes.
+    if db.new or db.dirty or db.deleted:
+        raise RuntimeError(
+            "Paid integration admission must be the transaction's first write or row lock"
+        )
+    if await db.scalar(text("SELECT pg_current_xact_id_if_assigned() IS NULL")) is not True:
+        raise RuntimeError(
+            "Paid integration admission must be the transaction's first write or row lock"
+        )
+
+
+async def _require_paid_integration_locked(
     db: AsyncSession, workspace_id: UUID, service_id: str
 ) -> PaidIntegrationAccess:
-    """Require live rights under the shared authority lock, held until transaction end."""
     result = await _access(db, workspace_id, service_id, lock=True)
     if not result.allowed:
         raise AuthorizationError(
@@ -278,20 +317,47 @@ async def require_paid_integration(
     return result
 
 
+async def require_paid_integration(
+    db: AsyncSession, workspace_id: UUID, service_id: str
+) -> PaidIntegrationAccess:
+    """Admit a read-only action under the workspace row lock, held until transaction end.
+
+    It must be the transaction's first write or row lock (earlier plain reads
+    are fine); otherwise it raises ``RuntimeError`` and leaves the transaction
+    to the caller. Authenticate first, then ``await db.commit()`` before this
+    call: API-key authentication writes ``api_keys.last_used_at`` /
+    ``agents.last_seen_at`` into the request session once per throttle window
+    (see ``_refuse_started_transaction``). One admission per transaction: a second call, or a call
+    inside ``paid_integration_write``, is refused.
+    """
+    await _refuse_started_transaction(db)
+    return await _require_paid_integration_locked(db, workspace_id, service_id)
+
+
 @asynccontextmanager
 async def paid_integration_write(
     db: AsyncSession, workspace_id: UUID, service_id: str
 ) -> AsyncIterator[PaidIntegrationAccess]:
     """Own a write transaction and recheck paid rights after flush, before commit.
 
-    Authenticate first, enter before mutations or other row locks, then verify
-    mutable role/installation/target authority under the held lock. The caller
-    must hold any further authority-row locks through this helper's commit.
-    No caller-controlled commit, rollback or nested transaction is allowed.
-    Cancellation, expiry and errors roll back the batch.
+    Authenticate first, commit the authentication's bookkeeping
+    (``await db.commit()``: API-key authentication writes
+    ``api_keys.last_used_at`` / ``agents.last_seen_at`` into the request
+    session once per throttle window), then enter as the transaction's first
+    write or row lock: a session with pending changes, or a transaction that
+    has already written or locked a row, is refused with ``RuntimeError``
+    before anything is registered or rolled back (see
+    ``_refuse_started_transaction``; earlier plain reads are fine). Then verify mutable role/installation/target
+    authority under the held lock. The caller must hold any further
+    authority-row locks through this helper's commit. No caller-controlled
+    commit, rollback or nested transaction is allowed. Cancellation, expiry
+    and errors roll back the batch.
     """
     if db.new or db.dirty or db.deleted or db.info.get("paid_integration_write"):
         raise RuntimeError("Paid integration guard requires a clean, unguarded session")
+    # Outside the try: a refusal neither rolls back the caller's transaction
+    # nor pops an outer guard's flag.
+    await _refuse_started_transaction(db)
     may_commit = False
 
     def only_guard_commits(_session: Session) -> None:
@@ -301,13 +367,13 @@ async def paid_integration_write(
     db.info["paid_integration_write"] = True
     event.listen(db.sync_session, "before_commit", only_guard_commits)
     try:
-        access = await require_paid_integration(db, workspace_id, service_id)
+        access = await _require_paid_integration_locked(db, workspace_id, service_id)
         transaction = db.get_transaction()
         yield access
         if db.get_transaction() is not transaction:
             raise RuntimeError("Paid integration transaction changed inside the guard")
         await db.flush()
-        await require_paid_integration(db, workspace_id, service_id)
+        await _require_paid_integration_locked(db, workspace_id, service_id)
         may_commit = True
         await db.commit()
     except BaseException:

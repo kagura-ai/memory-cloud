@@ -339,6 +339,22 @@ def test_service_lower_case_bearer_scheme_is_401(client, service):
     assert response.status_code == 401
 
 
+@pytest.mark.parametrize("second", ["valid", "wrong"])
+def test_service_two_authorization_headers_are_401(client, service, second):
+    # #2801: a duplicate is a missing credential, even when the first is valid.
+    other = service if second == "valid" else "b" * 64
+    response = client.get(
+        "/api/v1/admin/users",
+        headers=[
+            ("Authorization", f"Bearer {service}"),
+            ("Authorization", f"Bearer {other}"),
+            ("X-Operator-Email", OPERATOR),
+        ],
+    )
+    assert response.status_code == 401, response.text
+    assert response.json()["error"] == "SYSADMIN-002"
+
+
 def test_service_repeated_operator_header_is_400(client, service):
     response = client.get(
         "/api/v1/admin/users",
