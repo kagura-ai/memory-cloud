@@ -163,7 +163,7 @@ the budget is on:
 |---|---|---|---|
 | `429` | `usage_budget_exhausted` | `Retry-After: <n>` (60–3,600) | the period's calls are used; `details.retry_after` = n |
 | `503` | `temporarily_unavailable` | `Retry-After: 60` | the budget store failed, or the per-minute bucket could not be read |
-| `429` | `RATE-001` | `Retry-After` | the per-minute bucket refused it (as before; not counted) |
+| `429` | `RATE-001` | none (`details.retry_after: 60` in the body) | the per-minute bucket refused it (as before; not counted) |
 
 On this path an unreadable per-minute bucket refuses the request instead of
 counting it or serving it uncounted: a unit is charged only to a request a
@@ -230,8 +230,11 @@ The observability API, the sync installation view, `/api/v1/usage`, the MCP
 
 - **Deploy order:** run the database migration (`f48_2805_public_usage_budgets`)
   before setting `MCP_PUBLIC_USAGE_BUDGET_ENABLED=true`. New code with the
-  switch on and no table refuses every public `tools/call` (fail closed). In
-  a rolling deploy, processes that still run the old code do not count.
+  switch on and no table refuses every public `tools/call` and every counted
+  anonymous REST search (`503`, fail closed), and the owner routes GET / POST /
+  PATCH `/api/v1/resources/{id}/public-mcp` answer `503` `DB-002` (a publish or
+  update is not saved) until the migration has run. In a rolling deploy,
+  processes that still run the old code do not count.
 - **Drain:** see "What it bounds". The log lines below show a drain coming.
 - **Inspect and refill** a workspace's budget, where the API runs (same
   environment):
@@ -277,7 +280,7 @@ text, `public_id` or exception message. No line per refused call.
 
 | Event | Level | Fields | When |
 |---|---|---|---|
-| `public_usage_budget_period_started` | info | `workspace_id`, `period_started_at`, `period_seq`, `limit` | an admitted call started a period |
-| `public_usage_budget_threshold` | warning | `workspace_id`, `level`, `calls_used`, `limit`, `period_seq` | an admitted call reached 80, 95 or 100 % of the limit (once each per period; when several levels fall on the same call, the highest only) |
+| `public_usage_budget_period_started` | info | `workspace_id`, `period_started_at`, `period_seq`, `limit` | an admitted call returned `calls_used = 1`: it started a new period, or it was the first call after an operator refill (then with the same `period_seq` and `period_started_at`) |
+| `public_usage_budget_threshold` | warning | `workspace_id`, `level`, `calls_used`, `limit`, `period_seq` | an admitted call reached 80, 95 or 100 % of the limit (once each per period, again after an operator refill and possibly again after a changed limit; when several levels fall on the same call, the highest only) |
 | `public_usage_budget_unavailable` | warning | `workspace_id`, `error_type` | the charge failed |
-| `public_usage_budget_reset` | warning | `workspace_id`, `period_seq`, `calls_used_before` | an operator refill was applied |
+| `public_usage_budget_reset` | warning | `workspace_id`, `period_seq`, `calls_used_before` | an operator refill was applied; written by the CLI process (to its stderr), not by the API |
