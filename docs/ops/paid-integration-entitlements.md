@@ -105,20 +105,42 @@ at either end. Reads refresh ORM state and do not cache authorization results.
 
 Installation creation, token issuance and synchronization commit handlers must
 use `paid_integration_write(db, workspace_id, service_id)` after authenticating
-the caller, and **before** taking other row locks or staging changes. Inside
-the guarded block, verify the current role, installation/generation and fixed
+the caller, as the transaction's **first write or row lock**. Inside the
+guarded block, verify the current role, installation/generation and fixed
 target; hold any additional authority-row locks through the helper's commit so
 they cannot change after verification. A cached inspection outside the block
-is insufficient. The helper itself grants none of those authorities. It
-requires a clean session (an existing read-only transaction is
-fine), takes the Workspace row lock, admits work, flushes, and checks current
-rights and current time again immediately before owning the final commit.
-It rolls back on expiry, failure or cancellation; commits inside its body are
-refused. Do not call commit/rollback, nest transactions or defer writes beyond
-the guarded block. `require_paid_integration` provides the same locked initial
-check for read-only admissions; keep its transaction until the action ends.
+is insufficient. The helper itself grants none of those authorities. It takes
+the Workspace row lock, admits work, flushes, and checks current rights and
+current time again immediately before owning the final commit. It rolls back
+on expiry, failure or cancellation; commits inside its body are refused. Do not
+call commit/rollback, nest transactions or defer writes beyond the guarded
+block. `require_paid_integration` provides the same locked initial check for
+read-only admissions; keep its transaction until the action ends.
 
-The common lock order is **Workspace → entitlement/installation/resource rows**.
+The entry order is enforced. Both entries refuse, with `RuntimeError` and
+before they lock, register a commit hook or roll anything back (the caller's
+transaction is left to the caller):
+
+- a session with pending ORM changes;
+- a transaction that already has a PostgreSQL transaction id
+  (`pg_current_xact_id_if_assigned()` is not `NULL`): any earlier write or row
+  lock (`FOR UPDATE` / `FOR NO KEY UPDATE` / `FOR SHARE` / `FOR KEY SHARE`),
+  and also an `ACCESS EXCLUSIVE` table lock, a temp table or a WAL-logged
+  `nextval`. These last ones fail closed.
+
+Earlier plain reads are fine, including `inspect_paid_integration`. Advisory
+locks and table locks below `ACCESS EXCLUSIVE` assign no transaction id and are
+**not** detected; a caller that takes one first follows the global lock order
+in `backend/tests/integration/test_erasure_lock_order_db.py`. It is one
+admission per transaction: a second `require_paid_integration`, or a call
+inside `paid_integration_write`, is refused, because the first one already
+holds the Workspace row lock.
+
+The common lock order is **Workspace → entitlement/installation/resource rows**,
+and a transaction holding a `users` row never waits on a workspace row (the
+rule of `test_erasure_lock_order_db.py`). The deadlock partner of a caller that
+locked its `users` row first would be a workspace → users path such as
+`WorkspaceService.delete_workspace`; the entry check refuses such a caller.
 Publisher updates take the same Workspace lock. An in-flight writer that owns
 it either completes its final valid gate and commits before revocation, or a
 revocation that owns it first makes the writer fail. Previously issued tokens
