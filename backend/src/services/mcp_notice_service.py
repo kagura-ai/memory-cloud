@@ -23,14 +23,20 @@ asked for it, at the start of their next AI session:
   :data:`MCP_NOTICE_MAX_SCHEDULE_DAYS` ahead, at most
   :data:`MCP_NOTICE_MAX_CREATED_PER_DAY` created in any 24 hours (withdrawn
   ones count). Both counts run under one transaction-level advisory lock.
+  A notice may name plans (#2800, :func:`normalize_notice_plans`: tier keys,
+  stored in tier order); without plans it is for everyone. Targeted notices
+  count toward both caps like any other.
 - Delivery: ``bootstrap`` reads the candidates (:func:`read_notice_candidates`)
   and, after the reply is otherwise built, claims the ones that fit with
   :func:`claim_notice_deliveries`: one ``INSERT ... SELECT ... ON CONFLICT DO
   NOTHING RETURNING`` that re-checks activeness, the person's newest answer,
-  that no erasure request is pending, cooling off or in progress, and first
-  delivery, together. Only the returned ids are placed, so a notice reaches a
-  person at most once across every client. All times are the database's
-  ``now()``.
+  that no erasure request is pending, cooling off or in progress, the plan
+  and first delivery, together. Only the returned ids are placed, so a notice
+  reaches a person at most once across every client. The plan is that of the
+  workspace of the context the ``bootstrap`` call opens, read in the read and
+  again in the claim (a plain read, no lock on the workspace); without a
+  workspace id only notices without plans are offered or claimed. All times
+  are the database's ``now()``.
 
 Nothing here is reachable from the anonymous public MCP endpoint, share keys,
 agent-bound or connector keys, or any tool but ``bootstrap``.
@@ -39,16 +45,18 @@ agent-bound or connector keys, or any tool but ``bootstrap``.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final, Literal
 
-from sqlalchemy import String, case, exists, func, literal, select, text, update
+from sqlalchemy import String, any_, case, exists, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.plan_tiers import PLAN_ORDER, PLAN_TIERS
 from config.settings import get_settings
-from models.auth import AuditLog, User
+from models.auth import AuditLog, User, Workspace
 from models.erasure import STATUS_COOLING_OFF, STATUS_IN_PROGRESS, STATUS_PENDING, ErasureRequest
 from models.mcp_notice import McpNotice, McpNoticeConsent, McpNoticeDelivery
 from services.mcp_notice_text import NoticeTextError, normalize_notice_text
@@ -81,6 +89,7 @@ __all__ = [
     "current_mcp_notice_wording_version",
     "list_notices",
     "mcp_notices_enabled",
+    "normalize_notice_plans",
     "read_notice_candidates",
     "record_mcp_notice_consent",
     "withdraw_notice",
@@ -250,7 +259,10 @@ class NoticeActor:
 
 @dataclass(frozen=True)
 class NoticeView:
-    """A notice as the admin routes show it (``delivered_count`` is an aggregate)."""
+    """A notice as the admin routes show it (``delivered_count`` is an aggregate).
+
+    ``plans``: the tier keys it is for, in tier order, or ``None`` for every plan.
+    """
 
     id: uuid.UUID
     text: str
@@ -260,6 +272,37 @@ class NoticeView:
     created_at: datetime
     state: NoticeState
     delivered_count: int
+    plans: list[str] | None
+
+
+# One fixed text: it never includes the input (the 422 handler returns
+# ``msg``, so an echo would reflect the request).
+_PLANS_REFUSED: Final = (
+    f"plans must be a non-empty list of distinct plan names, each one of: {', '.join(PLAN_ORDER)}"
+)
+
+
+def normalize_notice_plans(values: Sequence[str]) -> list[str]:
+    """The plan list as stored: distinct tier keys in tier order (#2800).
+
+    Every entry must be a string and a key of ``PLAN_TIERS``, compared exactly
+    (no stripping, no case folding). A list naming every tier stays a list:
+    unlike ``None`` it does not cover a tier added later. Returns plain
+    ``str`` values (the registry holds ``PlanName`` members).
+
+    Raises:
+        ValueError: An empty list, a non-string entry, an unknown name or a
+            repeated name. Only ``ValueError`` (pydantic turns it into a 422);
+            the message lists the allowed keys and never the input.
+    """
+    chosen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or value not in PLAN_TIERS or value in chosen:
+            raise ValueError(_PLANS_REFUSED)
+        chosen.add(value)
+    if not chosen:
+        raise ValueError(_PLANS_REFUSED)
+    return [str(p) for p in PLAN_ORDER if p in chosen]
 
 
 def _state_at(
@@ -315,25 +358,30 @@ async def create_notice(
     raw_text: str,
     expires_at: datetime,
     starts_at: datetime | None,
+    plans: Sequence[str] | None,
     actor: NoticeActor,
 ) -> NoticeView:
     """Write a notice and its audit row. Flushes; the caller commits.
 
-    ``starts_at`` absent = now. The text is normalised first (nothing is
-    locked for a text that is refused), then the create lock is taken and the
-    window, the active count and the 24-hour count are checked against the
-    database clock.
+    ``starts_at`` absent = now. ``plans`` ``None`` = every plan; otherwise
+    it passes :func:`normalize_notice_plans`. The text and the plans are
+    normalised first (nothing is locked for a value that is refused), then
+    the create lock is taken and the window, the active count and the
+    24-hour count are checked against the database clock. Targeted notices
+    count toward both caps.
 
     Raises:
         McpNoticeTextRejectedError: 422 ``MCPNOTICE-001``.
         McpNoticeWindowInvalidError: 422 ``MCPNOTICE-002``.
         McpNoticeActiveLimitError: 409 ``MCPNOTICE-003``.
         McpNoticeDailyLimitError: 409 ``MCPNOTICE-007``.
+        ValueError: ``plans`` refused (the request model checks it first).
     """
     try:
         notice_text = normalize_notice_text(raw_text)
     except NoticeTextError as exc:
         raise McpNoticeTextRejectedError(exc.reason) from None
+    notice_plans = normalize_notice_plans(plans) if plans is not None else None
 
     await session.execute(_CREATE_LOCK_SQL)
     now: datetime = (await session.execute(select(func.now()))).scalar_one()
@@ -365,6 +413,7 @@ async def create_notice(
         starts_at=start,
         expires_at=expires_at,
         created_at=now,
+        plans=notice_plans,
     )
     session.add(notice)
     session.add(
@@ -375,6 +424,7 @@ async def create_notice(
             notice_text,
             starts_at=start.isoformat(),
             expires_at=expires_at.isoformat(),
+            plans=notice_plans,
         )
     )
     await session.flush()
@@ -387,6 +437,7 @@ async def create_notice(
         created_at=now,
         state=_state_at(now, start, expires_at, None),
         delivered_count=0,
+        plans=notice_plans,
     )
 
 
@@ -420,6 +471,7 @@ def _view_query() -> Any:
         McpNotice.created_at,
         _state_column().label("state"),
         _delivered_count().label("delivered_count"),
+        McpNotice.plans,
     )
 
 
@@ -433,6 +485,7 @@ def _view(row: Any) -> NoticeView:
         created_at=row.created_at,
         state=row.state,
         delivered_count=int(row.delivered_count),
+        plans=list(row.plans) if row.plans is not None else None,
     )
 
 
@@ -504,8 +557,24 @@ class NoticeCandidate:
     created_at: datetime
 
 
-def _deliverable_to(user_id: str) -> list[Any]:
-    """Live now, the person's newest answer is "yes", no erasure under way."""
+def _plan_matches(workspace_id: uuid.UUID | None) -> Any:
+    """#2800: no plans, or the plan of ``workspace_id`` is one of them.
+
+    The only plan check. The plan is read in the statement that uses it (an
+    uncorrelated scalar subquery: one primary-key lookup, no lock), so a plan
+    change is seen at the next read or claim. A missing workspace, or a
+    ``NULL`` element, matches nothing (fails closed). Without a workspace id
+    only notices without plans pass.
+    """
+    if workspace_id is None:
+        return McpNotice.plans.is_(None)
+    plan = select(Workspace.plan_name).where(Workspace.id == workspace_id).scalar_subquery()
+    return or_(McpNotice.plans.is_(None), plan == any_(McpNotice.plans))
+
+
+def _deliverable_to(user_id: str, workspace_id: uuid.UUID | None) -> list[Any]:
+    """Live now, the person's newest answer is "yes", no erasure under way,
+    and for the plan of ``workspace_id`` (:func:`_plan_matches`)."""
     now = func.now()
     newest_answer = (
         select(McpNoticeConsent.value)
@@ -524,15 +593,21 @@ def _deliverable_to(user_id: str) -> list[Any]:
         McpNotice.expires_at > now,
         newest_answer.is_(True),
         ~erasing,
+        _plan_matches(workspace_id),
     ]
 
 
-async def read_notice_candidates(session: AsyncSession, user_id: str) -> list[NoticeCandidate]:
+async def read_notice_candidates(
+    session: AsyncSession, user_id: str, *, workspace_id: uuid.UUID | None
+) -> list[NoticeCandidate]:
     """Notices to offer this person now, in delivery order. Read only.
 
     Order: ``expires_at``, then ``starts_at``, then ``id``. Nothing when the
     person never turned notices on, turned them off, has an erasure request
-    under way, or already got every live notice.
+    under way, or already got every live notice. ``workspace_id`` is the
+    workspace of the context the ``bootstrap`` call opens: a notice with
+    plans is offered only when that workspace is on one of them; ``None``
+    offers only notices without plans (#2800).
     """
     delivered = exists().where(
         McpNoticeDelivery.user_id == user_id,
@@ -547,7 +622,7 @@ async def read_notice_candidates(session: AsyncSession, user_id: str) -> list[No
                 McpNotice.expires_at,
                 McpNotice.created_at,
             )
-            .where(*_deliverable_to(user_id), ~delivered)
+            .where(*_deliverable_to(user_id, workspace_id), ~delivered)
             .order_by(McpNotice.expires_at, McpNotice.starts_at, McpNotice.id)
             .limit(_CANDIDATE_LIMIT)
         )
@@ -565,15 +640,21 @@ async def read_notice_candidates(session: AsyncSession, user_id: str) -> list[No
 
 
 async def claim_notice_deliveries(
-    session: AsyncSession, *, user_id: str, notice_ids: list[uuid.UUID]
+    session: AsyncSession,
+    *,
+    user_id: str,
+    notice_ids: list[uuid.UUID],
+    workspace_id: uuid.UUID | None,
 ) -> set[uuid.UUID]:
     """Claim the fitted notices for this person and commit; returns the ids won.
 
-    ONE statement decides activeness, the newest answer, the erasure state and
-    first delivery together (``INSERT ... SELECT ... ON CONFLICT DO NOTHING
-    RETURNING``), so a withdraw, an opt-out or a concurrent session start
-    between the read and this call removes the notice instead of delivering it
-    twice or against the person's answer. The database bounds the wait
+    ONE statement decides activeness, the newest answer, the erasure state,
+    the plan of ``workspace_id`` and first delivery together (``INSERT ...
+    SELECT ... ON CONFLICT DO NOTHING RETURNING``), so a withdraw, an opt-out,
+    a plan change or a concurrent session start between the read and this
+    call removes the notice instead of delivering it twice, against the
+    person's answer or outside its plans (it stays for a later call). ``None``
+    claims only notices without plans (#2800). The database bounds the wait
     (``lock_timeout`` 1 s, ``statement_timeout`` 2 s, set first in the
     transaction); no client-side timeout wraps the insert or the commit.
 
@@ -586,7 +667,7 @@ async def claim_notice_deliveries(
     await session.execute(_CLAIM_LOCK_TIMEOUT_SQL)
     await session.execute(_CLAIM_STATEMENT_TIMEOUT_SQL)
     chosen = select(literal(user_id, type_=String(255)), McpNotice.id).where(
-        McpNotice.id.in_(notice_ids), *_deliverable_to(user_id)
+        McpNotice.id.in_(notice_ids), *_deliverable_to(user_id, workspace_id)
     )
     statement = (
         pg_insert(McpNoticeDelivery)

@@ -21,7 +21,12 @@ The handler runs with the database, the lanes and the notice service stubbed
   are placed; a claim or read failure leaves the key out and the call
   succeeds;
 - a stored row the sanitiser refuses is skipped, logged without its text and
-  never claimed.
+  never claimed;
+- #2800: the read and the claim get the workspace of the context the call
+  opens (``CTX_WS``), never the handler's ``workspace_id`` (``WS``), read
+  before the lanes so an expired context instance does not lose it; no
+  context (missing ``context_id``, a context the caller cannot read) means
+  no read and no claim.
 """
 
 from __future__ import annotations
@@ -54,6 +59,9 @@ from services.mcp_notice_service import NoticeCandidate
 from utils.response_budget import json_chars
 
 WS = uuid.uuid4()
+# The workspace of the context the call opens; never the handler's ``WS``.
+CTX_WS = uuid.uuid4()
+assert CTX_WS != WS
 USER = "user-1"
 CONTEXT_FIELDS = {
     "context_id": "00000000-0000-4000-8000-00000000c0de",
@@ -130,7 +138,7 @@ class Notices:
         self.read = AsyncMock(return_value=list(candidates))
         if claim is None:
 
-            async def _claim(session, *, user_id, notice_ids):
+            async def _claim(session, *, user_id, notice_ids, workspace_id):
                 return set(notice_ids)
 
             self.claim = AsyncMock(side_effect=_claim)
@@ -156,6 +164,7 @@ def _stub_bootstrap(
     headroom: dict | None = None,
     build=None,
     log_usage: AsyncMock | None = None,
+    context=None,
 ) -> MagicMock:
     """Stub everything bootstrap touches but the notice code; returns the build stub."""
     db = AsyncMock()
@@ -176,7 +185,9 @@ def _stub_bootstrap(
         patch.object(
             module,
             "_resolve_context_for_read",
-            new=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4(), workspace_id=WS)),
+            new=AsyncMock(
+                return_value=context or SimpleNamespace(id=uuid.uuid4(), workspace_id=CTX_WS)
+            ),
         )
     )
     stack.enter_context(patch.object(module, "_log_tool_usage", new=log_usage or AsyncMock()))
@@ -211,13 +222,14 @@ async def _run(
     headroom: dict | None = None,
     build=None,
     log_usage: AsyncMock | None = None,
+    context=None,
 ) -> tuple[str, MagicMock, Notices]:
     """Run bootstrap; returns the reply text, the build stub and the notice stubs."""
     notices = notices or Notices()
     call_args = {"context_id": CONTEXT_FIELDS["context_id"], **(args or {})}
     with ExitStack() as stack:
         build_stub = _stub_bootstrap(
-            stack, notices, headroom=headroom, build=build, log_usage=log_usage
+            stack, notices, headroom=headroom, build=build, log_usage=log_usage, context=context
         )
         if via == "dispatcher":
             (block,) = await tools_mod.execute_tool_call("bootstrap", call_args, user_id, WS)
@@ -392,7 +404,46 @@ class TestDelivery:
         assert _dumps(rest) == _baseline()
         notices.read.assert_awaited_once()
         assert notices.read.await_args.args[1] == USER
-        assert notices.claim.await_args.kwargs == {"user_id": USER, "notice_ids": [cand.id]}
+        # #2800: the context's workspace, not the handler's WS.
+        assert notices.read.await_args.kwargs == {"workspace_id": CTX_WS}
+        assert notices.claim.await_args.kwargs == {
+            "user_id": USER,
+            "notice_ids": [cand.id],
+            "workspace_id": CTX_WS,
+        }
+        (item,) = reply["notices"]["items"]
+        assert set(item) == {"id", "text", "published_at", "expires_at"}
+
+    @pytest.mark.asyncio
+    async def test_the_claim_keeps_the_workspace_read_before_the_lanes(self, flag, signed_in):
+        """#2800: a failed lane rolls the session back and expires the context
+        instance; the claim runs after the lanes. Simulated: the context's
+        ``workspace_id`` raises once the build has run. The claim still gets
+        the id read right after the context was resolved."""
+
+        class _ExpiringContext:
+            def __init__(self) -> None:
+                self.id = uuid.uuid4()
+                self.expired = False
+
+            @property
+            def workspace_id(self):
+                if self.expired:
+                    raise RuntimeError("instance expired")
+                return CTX_WS
+
+        context = _ExpiringContext()
+
+        async def build(**kwargs):
+            context.expired = True
+            return _envelope(kwargs["format"])
+
+        cand = _candidate()
+        text, _, notices = await _run(notices=Notices([cand]), build=build, context=context)
+
+        assert context.expired
+        assert notices.claim.await_args.kwargs["workspace_id"] == CTX_WS
+        assert [i["id"] for i in json.loads(text)["notices"]["items"]] == [str(cand.id)]
 
     @pytest.mark.asyncio
     async def test_published_at_is_never_before_creation(self, flag, signed_in):
@@ -456,7 +507,7 @@ class TestDelivery:
             order.append("build")
             return _envelope(kwargs["format"])
 
-        async def claim(session, *, user_id, notice_ids):
+        async def claim(session, *, user_id, notice_ids, workspace_id):
             order.append("claim")
             claim.session = session
             return set(notice_ids)
@@ -562,6 +613,19 @@ class TestErrors:
                 )
         assert "notices" not in json.loads(block.text)
         notices.read.assert_not_awaited()
+        notices.claim.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_context_id_means_no_notice_query(self, flag, signed_in):
+        """#2800: without a context there is no workspace to match a plan
+        against; the call is refused before any notice query."""
+        notices = Notices([_candidate()])
+        with ExitStack() as stack:
+            _stub_bootstrap(stack, notices)
+            (block,) = await module.handle_bootstrap({}, USER, WS)
+        assert json.loads(block.text)["error"] == "missing_fields"
+        notices.read.assert_not_awaited()
+        notices.claim.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_build_failure(self, flag, signed_in):

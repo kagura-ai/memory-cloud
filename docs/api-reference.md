@@ -2219,9 +2219,39 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 
 - `session` (default): a session cookie of a user with `role=admin`; `401` without a session, `403` (`HTTP-403`) otherwise. Unchanged.
 - `off`: every such route answers `404` with the unknown-path body (`HTTP-404`), whatever the caller sends, and is left out of the OpenAPI document.
-- `service`: only an operator console. Send `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` and `X-Operator-Email: <address of the person acting>`; a session cookie is ignored. Errors, in this order: `404` outside `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS`, `503 SYSADMIN-001` (credential not configured), `401 SYSADMIN-002` (credential missing, another scheme, or wrong; `WWW-Authenticate: Bearer`), `400 SYSADMIN-003` (`X-Operator-Email` missing, repeated or not a plain address), `403 SYSADMIN-004` (a route that acts on the caller's own account: `POST /admin/sleep/run`, `POST /admin/sleep/actions/{action_id}/undo-merge`, `GET /admin/memory-health`, and `POST /admin/contexts/recover` with `dry_run=false`). Writes record the actor as `operator:<address>`.
+- `service`: only an operator console. Send `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` and `X-Operator-Email: <address of the person acting>`; a session cookie is ignored. Errors, in this order: `404` outside `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS`, `503 SYSADMIN-001` (credential not configured), `401 SYSADMIN-002` (credential missing, another scheme, wrong, or sent in two `Authorization` headers even when the first one is valid; `WWW-Authenticate: Bearer`), `400 SYSADMIN-003` (`X-Operator-Email` missing, repeated or not a plain address), `403 SYSADMIN-004` (a route that acts on the caller's own account: `POST /admin/sleep/run`, `POST /admin/sleep/actions/{action_id}/undo-merge`, `GET /admin/memory-health`, and `POST /admin/contexts/recover` with `dry_run=false`). Writes record the actor as `operator:<address>`.
 
 `PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
+
+### Users
+
+How each account was admitted (Issue #2803). Both routes answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/users` | The user list. Each row carries `admitted_via`. Two filters, combined with the existing `search`, `role`, `workspace_id` and `plan`: `admitted_via=<value>` (one of the values below; anything else is a `422`) and `invited_by=<user_id>` (1-255 characters: the accounts admitted by an invite that user minted). `total` counts the users that match every filter, so it gives the number of accounts per channel and per inviter. |
+| `GET /api/v1/admin/users/{user_id}` | The user detail. `admission` = `{"via", "invite_issuer", "invite_id", "invited_by"}`. |
+
+`admitted_via` is written once, by the code that creates the account, and never rewritten:
+
+| Value | Admitted by |
+|-------|-------------|
+| `beta_invite` | a closed-beta invite link ([Closed-beta invite links](deployment.md#closed-beta-invite-links-issue-1581)) |
+| `allowlist` | a manual allowlist row (a pending Google row included) |
+| `workspace_invitation` | a pending workspace invitation addressed to the verified address |
+| `open_registration` | `ALLOW_REGISTRATION` with the signup gate off |
+| `first_user` | the first account of an empty deployment |
+| `admin_cli` | a local admin created by `create_admin` / `seed_e2e_admin` |
+| `unknown` | no evidence: accounts created before v0.162.0 that the backfill could not place, and a second account that lost the first-user race |
+
+For `beta_invite`:
+
+- `invite_id` is the id of the invite spent (it stays after the invite row is gone);
+- `invite_issuer` is `admin` when the inviter's `users.role` was `admin` when the account was created, in every `SYSTEM_ADMIN_MODE`, and `user` otherwise; it is null when the inviter's account was already gone then;
+- `invited_by` (`{"user_id", "email"}`) names the inviter of a user-minted invite. It is read live from the inviter's account: null for an admin-minted invite and once the inviter's account is erased or deleted.
+- accounts created before v0.162.0 were filled by the upgrade's backfill ([How each account was admitted](deployment.md#how-each-account-was-admitted-issue-2803)): their `invite_issuer` is the inviter's role at upgrade time, not at sign-up, and `invite_id`, `invite_issuer` and `invited_by` are all null when no live invite remained then, even though `via` is `beta_invite`.
+
+For every other value the three fields are null. The invite's label (the inviter's private note) is never part of a response, a log line or an audit row. Neither filter value is written to the application's structured log lines or audit rows; the request line itself (the API's uvicorn access log and a reverse proxy's access log) records the query string, as for any admin URL that names a user.
 
 ### Operations status
 
@@ -2241,21 +2271,22 @@ No user, workspace or context identifier, email address, memory text or exceptio
 
 ### Service notices over MCP
 
-Issue #2762. The notices delivered once per opted-in user in the MCP `bootstrap` reply ([Service notices over MCP](#service-notices-over-mcp)). The routes follow `SYSTEM_ADMIN_MODE` like every system-admin route (a service operator may call them) and work while `MCP_NOTICES_ENABLED` is off, so a notice can be prepared first. There is no edit and no delete: a correction is withdraw + create. Every create and withdraw writes an audit row (`mcp_notice.created` / `mcp_notice.withdrawn`, the actor, the SHA-256 of the text, never the text) and a WARNING log line `mcp_notice_created` / `mcp_notice_withdrawn` with the actor, the id and the character count.
+Issue #2762. The notices delivered once per opted-in user in the MCP `bootstrap` reply ([Service notices over MCP](#service-notices-over-mcp)). The routes follow `SYSTEM_ADMIN_MODE` like every system-admin route (a service operator may call them) and work while `MCP_NOTICES_ENABLED` is off, so a notice can be prepared first. There is no edit and no delete: a correction is withdraw + create. Every create and withdraw writes an audit row (`mcp_notice.created` / `mcp_notice.withdrawn`, the actor, the SHA-256 of the text, never the text; a create also `plans`) and a WARNING log line `mcp_notice_created` / `mcp_notice_withdrawn` with the actor, the id and the character count (a create also `plans`).
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /api/v1/admin/mcp-notices` | Write a notice. Body `{"text", "expires_at", "starts_at"?}` (no other key; times with a UTC offset). `201` with the notice. |
+| `POST /api/v1/admin/mcp-notices` | Write a notice. Body `{"text", "expires_at", "starts_at"?, "plans"?}` (no other key; times with a UTC offset). `201` with the notice. |
 | `GET /api/v1/admin/mcp-notices?state=all&limit=50` | The notices, newest first: `{"notices": [...], "delivering": <MCP_NOTICES_ENABLED>}`. `state`: `active`, `scheduled`, `ended` (expired or withdrawn) or `all` (default); `limit` 1-100 (default 50). |
 | `POST /api/v1/admin/mcp-notices/{notice_id}/withdraw` | End a notice now: every `bootstrap` that claims notices after the withdrawal commits skips it, while one already claiming at that moment may still deliver it once. Idempotent: an ended notice (withdrawn, or expired on its own) is returned unchanged and no audit row is written. |
 
-A notice: `{"id", "text", "starts_at", "expires_at", "withdrawn_at", "created_at", "state", "delivered_count"}`; `delivered_count` is the number of people it was delivered to (an aggregate: no recipient is ever listed).
+A notice: `{"id", "text", "starts_at", "expires_at", "withdrawn_at", "created_at", "state", "delivered_count", "plans"}`; `delivered_count` is the number of people it was delivered to (an aggregate: no recipient is ever listed); `plans` is the list of tier keys it is for, in tier order, or `null` for everyone (notices written before Issue #2800 read `null`). A notice with `plans` is delivered only in a `bootstrap` call whose context is in a workspace on one of those plans, read at delivery, still once per person across all workspaces.
 
 The rules, checked on create:
 
 - **Text** (`422 MCPNOTICE-001`, `details.reason`): one line of plain text, 1-300 characters and at most 900 UTF-8 bytes after normalisation (Unicode NFC, the ideographic space read as a space, spaces trimmed and collapsed). Refused: control and formatting characters, line breaks, every space but U+0020 (`control_or_format_char`); invisible characters such as zero-width or variation selectors (`invisible_char`); `<` `>` `[` `]` `` ` `` `"` `\` `{` `}` `@` and HTML character references such as `&#64;` or `&lt;` (`markup_char`; a plain `&` as in `Q&A` passes); and anything a client could render as a link (`link`): a scheme with `//`, `//` followed by anything but a space (a protocol-relative link such as `//localhost`; also `a//b`), `mailto:` / `javascript:` / `data:` / `vbscript:` / `file:` / `tel:` / `sms:`, `www.`, a host name in any script such as `example.com`, `例え.jp` or `пример.рф` (also `README.md`, `Node.js`, `Ver.アップ`, or `。` with ASCII on both sides such as `Kagura。Kagura` or `MCP。Kagura`: reword them or put a space after `。`; `。` and `｡` count as a dot unless the character directly before or directly after them is Japanese — kanji, kana including `ー`, CJK punctuation, fullwidth and halfwidth forms — so `example。com`, `examplе。com` with a Cyrillic `е`, `test_。com`, `例えa。jp` and `пример。рф` are refused while 「…しました。Kagura」, 「対象は MCP。保存は…」 and 「接続先は MCP。」 pass; accepted residual: a label whose character next to `。` is Japanese, such as `例え。jp` or `exa例。com`, is read as prose, although a browser still resolves such a host; the ideographic numerals `〇` and `〡` do not count as Japanese, so `hell〇。com` is refused), an `xn--` label, an IPv4 or IPv6 address — also in their fullwidth forms and with combining marks inside them. Other reasons: `empty`, `too_long` (also any text over 1,200 characters before normalisation), `too_many_bytes`. The text is never echoed in an error.
 - **Window** (`422 MCPNOTICE-002`, `details.reason`): `expires_at` after `starts_at` (`ends_before_start`) and in the future (`already_expired`); at most 30 days long (`too_long`); `starts_at` (default now) at most 90 days ahead (`starts_too_far_ahead`) and not more than 60 seconds in the past (`starts_in_the_past`).
-- **Caps**: at most 3 notices live or scheduled at a time (`409 MCPNOTICE-003`); at most 5 created in any 24 hours, withdrawn ones included (`409 MCPNOTICE-007`).
+- **Plans** (Issue #2800, `422 VAL-001` with `details.errors[].loc` starting `["body", "plans", ...]`): absent or `null` means everyone who opted in; otherwise a JSON array of one or more distinct tier keys (`free`, `basic`, `pro`, `promax`), compared exactly. Refused: `[]`, an unknown, miscased or padded name (`"enterprise"`, `"Pro"`, `" pro"`), a repeated name (for these `msg` lists the allowed keys), an entry that is not a string (`loc` `["body", "plans", 0]`) and a value that is not an array (pydantic's own `msg`). The input is never echoed. Stored and returned in tier order; a list of all four tiers stays a list (a tier added later is not in it). No edit: withdraw + create.
+- **Caps**: at most 3 notices live or scheduled at a time (`409 MCPNOTICE-003`); at most 5 created in any 24 hours, withdrawn ones included (`409 MCPNOTICE-007`). Targeted notices count alike.
 
 `POST .../withdraw` with an unknown id: `404 MCPNOTICE-004`.
 

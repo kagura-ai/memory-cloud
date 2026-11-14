@@ -81,7 +81,8 @@ async def test_invitation_addressed_to_the_email_passes_the_gate(db_session):
                 user_id=sub,
                 admit_by_invitation=_admission(db_session, email, sub),
             )
-            is None
+            # #2803: the admission the new account records.
+            == "workspace_invitation"
         )
         rows = list(
             await db_session.scalars(select(AuditLog.action).where(AuditLog.user_id == sub))
@@ -139,3 +140,25 @@ async def test_plan_blocked_invitation_does_not_admit_a_new_address(db_session):
     )
     assert isinstance(blocked, RedirectResponse)
     assert "error=registration_disabled" in blocked.headers["location"]
+
+
+async def test_each_admission_is_answered_and_a_login_is_none(db_session, monkeypatch):
+    """#2803: the first account, ``ALLOW_REGISTRATION`` and a login, by value."""
+    email = f"open-{uuid.uuid4()}@example.com"
+    empty = not await db_session.scalar(select(User.id).limit(1))
+    if empty:
+        assert await _check_registration_allowed(email, db_session) == "first_user"
+    seeded = User(
+        email=f"seed-{uuid.uuid4()}@example.com", user_id=f"s-{uuid.uuid4()}", role="user"
+    )
+    db_session.add(seeded)
+    await db_session.flush()
+    try:
+        monkeypatch.setattr(
+            "config.settings.get_settings",
+            lambda: SimpleNamespace(allow_registration=True, audit_hmac_key="test-hmac-key"),
+        )
+        assert await _check_registration_allowed(email, db_session) == "open_registration"
+        assert await _check_registration_allowed(seeded.email, db_session) is None
+    finally:
+        await db_session.rollback()

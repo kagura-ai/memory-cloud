@@ -20,18 +20,27 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import OperationalError
 
+from auth.admission import AdmissionRecord
 from auth.roles import _OAUTH_CALLBACK_ACTOR
 from models.auth import AuditLog
 from services.signup_gate_service import SignupGateService, check_signup_access
 
 TOKEN_HASH = "e" * 64
 ADDRESS = "invitee@example.test"
+
+
+# #2803: a redemption answers how the account is admitted.
+REDEEMED = AdmissionRecord(
+    "beta_invite",
+    beta_invite_id=UUID("00000000-0000-4000-8000-000000002803"),
+    inviter_user_id="inviter-sub",
+)
 
 
 def _inv(
@@ -64,9 +73,9 @@ def _closed_gate_new_user(svc: SignupGateService, *, enabled: bool = True) -> No
     svc._load_config = AsyncMock(return_value=SimpleNamespace(enabled=enabled, mode="manual"))
     svc._is_existing_user = AsyncMock(return_value=False)
     svc._is_first_user = AsyncMock(return_value=False)
-    svc._is_allowlisted = AsyncMock(return_value=False)
+    svc._allowlist_admission = AsyncMock(return_value=None)
     svc._promote_pending_google_entry = AsyncMock(return_value=False)
-    svc._redeem_beta_invite = AsyncMock(return_value=False)
+    svc._redeem_beta_invite = AsyncMock(return_value=None)
     svc._record_blocked_signup = AsyncMock()
 
 
@@ -77,7 +86,8 @@ def _invitation_service(rows: list) -> tuple[MagicMock, object]:
 
 
 async def _check(svc: SignupGateService, *, provider: str = "google", **kwargs):
-    return await svc.check_access(
+    # #2803: the gate's full answer (redirect, admission record or None).
+    return await svc.decide(
         provider=provider,  # type: ignore[arg-type]
         oauth_sub="sub-12345678",
         email=ADDRESS,
@@ -105,7 +115,7 @@ class TestGateOn:
                 svc, provider=provider, email_verified=True, beta_invite_token_hash=TOKEN_HASH
             )
 
-        assert result is None
+        assert result == AdmissionRecord("workspace_invitation")
         service.get_pending_invitations_for_email.assert_awaited_once_with(email=ADDRESS)
         svc._redeem_beta_invite.assert_not_awaited()
         svc._record_blocked_signup.assert_not_awaited()
@@ -153,12 +163,12 @@ class TestGateOn:
     async def test_unverified_address_with_a_beta_invite_is_admitted_by_the_invite(self) -> None:
         svc = _svc()
         _closed_gate_new_user(svc)
-        svc._redeem_beta_invite = AsyncMock(return_value=True)
+        svc._redeem_beta_invite = AsyncMock(return_value=REDEEMED)
         service, patched = _invitation_service([_inv()])
         with patched:
             result = await _check(svc, email_verified=False, beta_invite_token_hash=TOKEN_HASH)
 
-        assert result is None
+        assert result is REDEEMED
         svc._redeem_beta_invite.assert_awaited_once()
         service.get_pending_invitations_for_email.assert_not_awaited()
         assert _audits(svc) == []
@@ -178,15 +188,26 @@ class TestGateOn:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "admitting_lookup", ["_is_existing_user", "_is_first_user", "_is_allowlisted"]
+        "admitting_lookup", ["_is_existing_user", "_is_first_user", "_allowlist_admission"]
     )
     async def test_earlier_admissions_never_look_up_invitations(self, admitting_lookup) -> None:
         svc = _svc()
         _closed_gate_new_user(svc)
-        setattr(svc, admitting_lookup, AsyncMock(return_value=True))
+        answers = {
+            "_is_existing_user": True,
+            "_is_first_user": True,
+            "_allowlist_admission": AdmissionRecord("allowlist"),
+        }
+        # #2803: a login answers None; the others say how the account is admitted.
+        expected = {
+            "_is_existing_user": None,
+            "_is_first_user": AdmissionRecord("first_user"),
+            "_allowlist_admission": AdmissionRecord("allowlist"),
+        }
+        setattr(svc, admitting_lookup, AsyncMock(return_value=answers[admitting_lookup]))
         service, patched = _invitation_service([_inv()])
         with patched:
-            assert await _check(svc, email_verified=True) is None
+            assert await _check(svc, email_verified=True) == expected[admitting_lookup]
         service.get_pending_invitations_for_email.assert_not_awaited()
         assert _audits(svc) == []
 
@@ -197,7 +218,7 @@ class TestGateOn:
         svc._promote_pending_google_entry = AsyncMock(return_value=True)
         service, patched = _invitation_service([_inv()])
         with patched:
-            assert await _check(svc, email_verified=True) is None
+            assert await _check(svc, email_verified=True) == AdmissionRecord("allowlist")
         service.get_pending_invitations_for_email.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -218,7 +239,7 @@ class TestGateOn:
         rows = [_inv() for _ in range(7)]
         _service, patched = _invitation_service(rows)
         with patched:
-            assert await _check(svc, email_verified=True) is None
+            assert await _check(svc, email_verified=True) == AdmissionRecord("workspace_invitation")
         (audit,) = _audits(svc)
         assert [i["id"] for i in audit.user_metadata["invitations"]] == [
             r.public_id for r in rows[:5]
@@ -251,7 +272,7 @@ class TestPendingGoogleRowNeedsAVerifiedAddress:
         svc._promote_pending_google_entry = AsyncMock(return_value=True)
         svc._legacy_check = AsyncMock()
 
-        assert await _check(svc, email_verified=True) is None
+        assert await _check(svc, email_verified=True) == AdmissionRecord("allowlist")
         svc._promote_pending_google_entry.assert_awaited_once_with(
             email=ADDRESS, oauth_sub="sub-12345678"
         )
@@ -271,7 +292,7 @@ class TestGateOff:
 
         async def fake_registration_check(email, db, *, user_id, admit_by_invitation):
             captured.update(email=email, db=db, user_id=user_id, admit=admit_by_invitation)
-            return None
+            return "open_registration"
 
         with patch("api.routes.auth._check_registration_allowed", fake_registration_check):
             await _check(svc, provider=provider, email_verified=verified)
@@ -292,7 +313,7 @@ class TestGateOff:
 
         async def fake_registration_check(email, db, *, user_id, admit_by_invitation):
             captured["admitted"] = await admit_by_invitation()
-            return None
+            return "workspace_invitation"
 
         _service, patched = _invitation_service([row])
         with patched, patch("api.routes.auth._check_registration_allowed", fake_registration_check):
@@ -350,7 +371,7 @@ class TestCheckSignupAccessForwards:
         kwargs = {} if passed is None else {"email_verified": passed}
         with (
             patch("services.signup_gate_service.get_db", fake_get_db),
-            patch.object(SignupGateService, "check_access", AsyncMock(return_value=None)) as gate,
+            patch.object(SignupGateService, "decide", AsyncMock(return_value=None)) as gate,
         ):
             await check_signup_access(provider="google", oauth_sub="sub", email=ADDRESS, **kwargs)
         assert gate.await_args.kwargs["email_verified"] is expected

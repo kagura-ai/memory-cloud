@@ -19,10 +19,11 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.single_authorization import sole_authorization
 from config.constants import DeployColor
 from config.settings import get_settings
 from db.base import get_db
@@ -61,11 +62,22 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/workers", tags=["workers"])
 
 
-async def verify_worker_token(authorization: str | None = Header(None)) -> None:
+async def verify_worker_token(request: Request, authorization: str | None = Header(None)) -> None:
     """Authenticate the ai-worker by its shared service token (RFC 6750 Bearer).
+
+    The ``authorization`` parameter documents the header in the OpenAPI
+    document; the value checked is the request's single ``Authorization``
+    header (#2801): two or more are refused like a missing one.
+    """
+    await check_worker_token(sole_authorization(request))
+
+
+async def check_worker_token(authorization: str | None) -> None:
+    """Check one ``Authorization`` value against ``WORKER_SERVICE_TOKEN``.
 
     Fail-closed: an unset ``WORKER_SERVICE_TOKEN`` disables the endpoint (503),
     so a misconfigured deployment never serves connector secrets unauthenticated.
+    ``None`` (no header, or more than one) is the same 401 as a malformed one.
     """
     expected = get_settings().worker_service_token
     if not expected:

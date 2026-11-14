@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from sqlalchemy.exc import IntegrityError as _IntegrityError
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from auth.admission import AdmissionRecord, AdmittedVia
     from models.auth import User as _UserModel
     from models.auth import UserOAuthProvider as _UserOAuthProviderModel
     from services.announcement_consent_service import SignupAnnouncementConsent
@@ -483,6 +484,40 @@ def stage_address_link(
     )
 
 
+async def admission_columns(
+    db: AsyncSession, admission: AdmissionRecord | None, via: AdmittedVia
+) -> dict[str, Any]:
+    """The four ``users.admitted_*`` values of an account being created now (#2803).
+
+    Called by the two code paths that insert a ``users`` row for a sign-up,
+    only once the row will really be inserted, in the same transaction.
+    ``via`` is the admission as finally decided (``first_user`` may have
+    become ``unknown`` under the first-account lock). For a beta invite the
+    invite id is copied, and the issuer is read under the inviter's row lock
+    (:func:`services.beta_invite_service.lock_invite_issuer`): ``admin`` names
+    nobody, ``user`` names the inviter. An inviter whose account is gone by
+    now leaves both NULL. The invite's label is never read.
+    """
+    columns: dict[str, Any] = {
+        "admitted_via": via,
+        "admitted_beta_invite_id": None,
+        "admitted_invite_issuer": None,
+        "admitted_by_user_id": None,
+    }
+    if admission is None or via != "beta_invite" or admission.via != "beta_invite":
+        return columns
+    columns["admitted_beta_invite_id"] = admission.beta_invite_id
+    if admission.inviter_user_id is None:
+        return columns
+    # Lazy: beta_invite_service imports this module.
+    from services.beta_invite_service import lock_invite_issuer
+
+    issuer = await lock_invite_issuer(db, admission.inviter_user_id)
+    if issuer is not None:
+        columns["admitted_invite_issuer"], columns["admitted_by_user_id"] = issuer
+    return columns
+
+
 async def stage_email_account(
     db: AsyncSession,
     *,
@@ -492,6 +527,7 @@ async def stage_email_account(
     password_hash: str,
     locale: str | None,
     timezone: str | None,
+    admission: AdmissionRecord,
 ) -> Role:
     """Add the ``users`` row of an email sign-up; never commits (#1734).
 
@@ -499,10 +535,14 @@ async def stage_email_account(
     sign-up. The address counts as verified (the person followed the link
     mailed to it). No provider and no login id: a later Google sign-in may
     link to it (``ensure_user``), the admin CLIs never take it for theirs.
+    ``admission`` is what the sign-up controls answered (#2803), written once
+    with the row (:func:`admission_columns`); a first user was decided under
+    the first-account lock already.
     """
     from models.auth import User
 
     role = await new_account_role(db)
+    admitted = await admission_columns(db, admission, admission.via)
     prefs: dict[str, Any] = {}
     if is_valid_locale(locale):
         prefs["locale"] = locale
@@ -522,6 +562,10 @@ async def stage_email_account(
             auth_provider=None,
             email_verified_at=now,
             last_login_at=now,
+            admitted_via=admitted["admitted_via"],
+            admitted_beta_invite_id=admitted["admitted_beta_invite_id"],
+            admitted_invite_issuer=admitted["admitted_invite_issuer"],
+            admitted_by_user_id=admitted["admitted_by_user_id"],
             **prefs,
         )
     )
@@ -588,6 +632,7 @@ class RoleManager:
         locale: str | None = None,
         timezone: str | None = None,
         announcement_consent: SignupAnnouncementConsent | None = None,
+        admission: AdmissionRecord | None = None,
     ) -> Role:
         """Ensure user exists; on existing users, sync email/name from IdP.
 
@@ -630,6 +675,12 @@ class RoleManager:
                 ``signup``) only when this call creates the account, in the
                 same commit as the ``users`` row; an existing account keeps its
                 own answer. ``None`` records nothing ("never answered").
+            admission: How the signup gate admitted this sign-in (#2803), or
+                ``None`` (an existing account, or a caller that does not
+                know: recorded as ``unknown``). Written only when this call
+                creates the account; nothing rewrites an existing row (a
+                login, the race retry, a link to an email sign-up account).
+                ``first_user`` is decided again under the first-account lock.
 
         Returns:
             The user's assigned role.
@@ -665,6 +716,7 @@ class RoleManager:
                 locale=locale,
                 timezone=timezone,
                 announcement_consent=announcement_consent,
+                admission=admission,
             )
 
         # In-memory backend (testing only) — keyed by email for backward
@@ -693,6 +745,7 @@ class RoleManager:
         timezone: str | None = None,
         email_authoritative: bool = False,
         announcement_consent: SignupAnnouncementConsent | None = None,
+        admission: AdmissionRecord | None = None,
     ) -> Role:
         """PostgreSQL-backed ``ensure_user``. See ``ensure_user`` docstring."""
         from sqlalchemy import select
@@ -754,7 +807,16 @@ class RoleManager:
                     sync_profile=user.auth_provider == auth_provider,
                 )
 
-            # New user path. First user = ADMIN in session mode, else USER
+            # New user path. #2803: how the gate admitted this sign-in. A
+            # first-user admission is decided again here, under the
+            # first-account lock as the FIRST lock of the transaction (the
+            # email completion's order), in every SYSTEM_ADMIN_MODE: of two
+            # first sign-ups the second records ``unknown``.
+            via: AdmittedVia = admission.via if admission is not None else "unknown"
+            if via == "first_user" and not await claim_first_account(db, serialize=True):
+                via = "unknown"
+
+            # First user = ADMIN in session mode, else USER
             # (#2767: new_account_role is the one place for that rule).
             role = await new_account_role(db)
 
@@ -778,6 +840,11 @@ class RoleManager:
             if linked_role is not None:
                 return linked_role
 
+            # #2803: a row really is inserted now. For a beta invite this
+            # takes KEY SHARE on the inviter's row, so the inviter foreign key
+            # below cannot fail: a gone inviter is recorded as NULL instead.
+            admitted = await admission_columns(db, admission, via)
+
             # #2700: seed the new row with the sign-in page's language and
             # time zone. Passed only when valid, so otherwise the column
             # defaults (``en`` / ``UTC``) apply. Never applied to an existing
@@ -800,6 +867,10 @@ class RoleManager:
                 # #1752: only an address the IdP attested as verified counts
                 # as verified (security notices go only to verified addresses).
                 email_verified_at=utcnow() if email_verified else None,
+                admitted_via=admitted["admitted_via"],
+                admitted_beta_invite_id=admitted["admitted_beta_invite_id"],
+                admitted_invite_issuer=admitted["admitted_invite_issuer"],
+                admitted_by_user_id=admitted["admitted_by_user_id"],
                 **prefs,
             )
             db.add(new_user)

@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 from contextlib import ExitStack
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -673,8 +675,14 @@ async def _handler_build_kwargs(args):
     service.build = AsyncMock(return_value={"status": "success"})
     with ExitStack() as stack:
         stack.enter_context(patch("db.base.get_db", new=gen))
+        # A resolved context always has a workspace (``contexts.workspace_id``
+        # is NOT NULL); the handler reads it for the service notices (#2800).
+        context = SimpleNamespace(workspace_id=uuid4())
         stack.enter_context(
-            patch.object(module, "_resolve_context_for_read", new=AsyncMock(return_value=object()))
+            patch.object(module, "_resolve_context_for_read", new=AsyncMock(return_value=context))
+        )
+        stack.enter_context(
+            patch.object(module, "_plan_headroom_field", new=AsyncMock(return_value={}))
         )
         stack.enter_context(patch.object(module, "_log_tool_usage", new=AsyncMock()))
         stack.enter_context(patch.object(module, "_context_response_fields", return_value=fields))

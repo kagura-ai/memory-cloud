@@ -13,9 +13,9 @@ from fastapi import Response
 import api.routes.workers as workers_module
 from api.routes.workers import (
     WorkerConnectorConfig,
+    check_worker_token,
     get_worker_apps,
     get_worker_config,
-    verify_worker_token,
 )
 from utils.datetime import utcnow
 
@@ -89,29 +89,29 @@ def test_worker_config_omits_only_absent_runtime_block():
 
 
 @pytest.mark.asyncio
-async def test_verify_worker_token_accepts_matching_bearer():
+async def test_check_worker_token_accepts_matching_bearer():
     with patch("api.routes.workers.get_settings", return_value=_settings()):
         # Returns None (no raise) on a valid token.
-        assert await verify_worker_token("Bearer wt-secret") is None
+        assert await check_worker_token("Bearer wt-secret") is None
 
 
 @pytest.mark.asyncio
-async def test_verify_worker_token_rejects_wrong_token():
+async def test_check_worker_token_rejects_wrong_token():
     from fastapi import HTTPException
 
     with patch("api.routes.workers.get_settings", return_value=_settings()):
         with pytest.raises(HTTPException) as exc:
-            await verify_worker_token("Bearer nope")
+            await check_worker_token("Bearer nope")
     assert exc.value.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_verify_worker_token_503_when_unconfigured():
+async def test_check_worker_token_503_when_unconfigured():
     from fastapi import HTTPException
 
     with patch("api.routes.workers.get_settings", return_value=_settings(token="")):
         with pytest.raises(HTTPException) as exc:
-            await verify_worker_token("Bearer anything")
+            await check_worker_token("Bearer anything")
     assert exc.value.status_code == 503
 
 

@@ -24,6 +24,15 @@ Delivery:
   locked users row, a pending delivery row) ends at its own ``lock_timeout``
   and ``claim_notices`` returns no block in time;
 - deliveries and consents go with the user.
+
+Plans (#2800):
+- a create stores the plans in tier order (all four stay a list, never
+  ``null``), the list and withdraw return them, the audit row carries them;
+- a notice with plans is offered and claimed only for the workspace of a
+  plan it names, the plan read at delivery (read and claim each), once per
+  person across workspaces; no workspace id means only notices without
+  plans; the caps count targeted notices; ``claim_notices`` on the real
+  database delivers a targeted notice in a matching workspace only.
 """
 
 from __future__ import annotations
@@ -129,13 +138,16 @@ async def _opt(db: AsyncSession, user: User, value: bool) -> None:
     await db.commit()
 
 
-async def _create(db: AsyncSession, body: str = "Maintenance on Saturday.", **kw) -> svc.NoticeView:
+async def _create(
+    db: AsyncSession, body: str = "Maintenance on Saturday.", *, plans=None, **kw
+) -> svc.NoticeView:
     now = await _now(db)
     view = await svc.create_notice(
         db,
         raw_text=body,
         expires_at=kw.pop("expires_at", now + timedelta(days=2)),
         starts_at=kw.pop("starts_at", None),
+        plans=plans,
         actor=ACTOR,
     )
     await db.commit()
@@ -214,9 +226,65 @@ def _assert_text_in_no_column(rows: list[dict], body: str) -> None:
             assert not leaked, (column, leaked)
 
 
-async def _claim(db: AsyncSession, user: User, ids: list[uuid.UUID]) -> set[uuid.UUID]:
+async def _claim(
+    db: AsyncSession, user: User, ids: list[uuid.UUID], workspace_id: uuid.UUID | None = None
+) -> set[uuid.UUID]:
     async with _maker(db)() as session:
-        return await svc.claim_notice_deliveries(session, user_id=user.user_id, notice_ids=ids)
+        return await svc.claim_notice_deliveries(
+            session, user_id=user.user_id, notice_ids=ids, workspace_id=workspace_id
+        )
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def make_workspace(db_session: AsyncSession) -> AsyncIterator:
+    """Raw ``workspaces`` rows on a given plan; deleted in teardown."""
+    created: list[uuid.UUID] = []
+
+    async def _make(plan: str) -> uuid.UUID:
+        workspace_id = uuid4()
+        await db_session.execute(
+            text(
+                "INSERT INTO workspaces (id, name, owner_user_id, plan_name)"
+                " VALUES (:id, :name, 'notice-owner', :plan)"
+            ),
+            {"id": workspace_id, "name": f"mn-ws-{workspace_id.hex[:8]}", "plan": plan},
+        )
+        await db_session.commit()
+        created.append(workspace_id)
+        return workspace_id
+
+    yield _make
+    await db_session.rollback()
+    if created:
+        await db_session.execute(
+            text("DELETE FROM workspaces WHERE id = ANY(:ids)"), {"ids": created}
+        )
+        await db_session.commit()
+
+
+async def _set_plan(db: AsyncSession, workspace_id: uuid.UUID, plan: str) -> None:
+    async with _maker(db)() as session:
+        await session.execute(
+            text("UPDATE workspaces SET plan_name = :plan WHERE id = :id"),
+            {"plan": plan, "id": workspace_id},
+        )
+        await session.commit()
+
+
+async def _ids(db: AsyncSession, user: User, workspace_id: uuid.UUID | None) -> list[uuid.UUID]:
+    return [
+        c.id for c in await svc.read_notice_candidates(db, user.user_id, workspace_id=workspace_id)
+    ]
+
+
+async def _delivery_rows(db: AsyncSession, notice_id: uuid.UUID) -> int:
+    return (
+        await db.execute(
+            select(func.count())
+            .select_from(McpNoticeDelivery)
+            .where(McpNoticeDelivery.notice_id == notice_id)
+        )
+    ).scalar_one()
 
 
 # --- consent ------------------------------------------------------------------
@@ -352,8 +420,13 @@ async def test_consents_never_cross_purposes(db_session, make_users) -> None:
 
     # The email opt-in does not make anyone a notice candidate.
     await _create(db_session)
-    assert await svc.read_notice_candidates(db_session, emails_only.user_id) == []
-    assert len(await svc.read_notice_candidates(db_session, notices_only.user_id)) == 1
+    assert (
+        await svc.read_notice_candidates(db_session, emails_only.user_id, workspace_id=None) == []
+    )
+    assert (
+        len(await svc.read_notice_candidates(db_session, notices_only.user_id, workspace_id=None))
+        == 1
+    )
 
 
 # --- writing ------------------------------------------------------------------
@@ -380,6 +453,7 @@ async def test_create_writes_one_audit_row_without_the_text(db_session, make_use
         "text_chars": len(body),
         "starts_at": view.starts_at.isoformat(),
         "expires_at": view.expires_at.isoformat(),
+        "plans": None,
     }
     # The text is in no column of the audit row (only its hash and length are),
     # read back from the table itself, every column, stringified.
@@ -519,6 +593,7 @@ async def test_concurrent_creates_respect_the_active_cap(db_session, make_users)
                     raw_text="Concurrent notice.",
                     expires_at=now + timedelta(days=1),
                     starts_at=None,
+                    plans=None,
                     actor=ACTOR,
                 )
                 # Hold the lock a moment so the other writer has to wait for it.
@@ -648,19 +723,23 @@ async def test_candidates_follow_consent_window_and_delivery(db_session, make_us
     await _raw_notice(db_session, start_offset=timedelta(days=1), end_offset=timedelta(days=2))
 
     # Never answered, then turned on, then off.
-    assert await svc.read_notice_candidates(db_session, frank.user_id) == []
+    assert await svc.read_notice_candidates(db_session, frank.user_id, workspace_id=None) == []
     await _opt(db_session, frank, True)
-    assert [c.id for c in await svc.read_notice_candidates(db_session, frank.user_id)] == [
+    assert [
+        c.id for c in await svc.read_notice_candidates(db_session, frank.user_id, workspace_id=None)
+    ] == [
         soon.id,
         late.id,
     ]
-    assert await svc.read_notice_candidates(db_session, never.user_id) == []
+    assert await svc.read_notice_candidates(db_session, never.user_id, workspace_id=None) == []
 
     assert await _claim(db_session, frank, [soon.id]) == {soon.id}
-    assert [c.id for c in await svc.read_notice_candidates(db_session, frank.user_id)] == [late.id]
+    assert [
+        c.id for c in await svc.read_notice_candidates(db_session, frank.user_id, workspace_id=None)
+    ] == [late.id]
 
     await _opt(db_session, frank, False)
-    assert await svc.read_notice_candidates(db_session, frank.user_id) == []
+    assert await svc.read_notice_candidates(db_session, frank.user_id, workspace_id=None) == []
 
 
 def _erasure_request(user: User, status: str) -> ErasureRequest:
@@ -681,12 +760,12 @@ async def test_erasure_under_way_gets_no_notice(db_session, make_users, status: 
     gina = await make_users()
     await _opt(db_session, gina, True)
     view = await _create(db_session)
-    assert len(await svc.read_notice_candidates(db_session, gina.user_id)) == 1
+    assert len(await svc.read_notice_candidates(db_session, gina.user_id, workspace_id=None)) == 1
 
     db_session.add(_erasure_request(gina, status))
     await db_session.commit()
 
-    assert await svc.read_notice_candidates(db_session, gina.user_id) == []
+    assert await svc.read_notice_candidates(db_session, gina.user_id, workspace_id=None) == []
     assert await _claim(db_session, gina, [view.id]) == set()
 
 
@@ -703,7 +782,9 @@ async def test_ended_erasure_request_does_not_block_notices(
     db_session.add(_erasure_request(gina, status))
     await db_session.commit()
 
-    assert [c.id for c in await svc.read_notice_candidates(db_session, gina.user_id)] == [view.id]
+    assert [
+        c.id for c in await svc.read_notice_candidates(db_session, gina.user_id, workspace_id=None)
+    ] == [view.id]
     assert await _claim(db_session, gina, [view.id]) == {view.id}
 
 
@@ -752,7 +833,7 @@ async def test_claim_for_a_deleted_user_raises_and_writes_nothing(db_session, ma
     kim = await make_users()
     await _opt(db_session, kim, True)
     view = await _create(db_session)
-    candidates = await svc.read_notice_candidates(db_session, kim.user_id)
+    candidates = await svc.read_notice_candidates(db_session, kim.user_id, workspace_id=None)
     assert [c.id for c in candidates] == [view.id]
 
     # The user goes between the read and the claim: no consent row is left,
@@ -842,21 +923,23 @@ async def test_claim_notices_behind_a_lock_returns_no_key_in_time(
     nina = await make_users()
     await _opt(db_session, nina, True)
     view = await _create(db_session)
-    (candidate,) = await svc.read_notice_candidates(db_session, nina.user_id)
+    (candidate,) = await svc.read_notice_candidates(db_session, nina.user_id, workspace_id=None)
     block = {"notices": {"provenance": NOTICES_PROVENANCE, "items": [notice_item(candidate)]}}
 
     async with _maker(db_session)() as holder:
         await _hold_conflicting_lock(holder, how, nina, view.id)
         loop = asyncio.get_running_loop()
         started = loop.time()
-        result = await asyncio.wait_for(claim_notices(db_session, nina.user_id, block), timeout=10)
+        result = await asyncio.wait_for(
+            claim_notices(db_session, nina.user_id, block, workspace_id=None), timeout=10
+        )
         elapsed = loop.time() - started
         await holder.rollback()
 
     assert result == {}
     assert elapsed < 3
     # Not used up: the lock is gone, so the next claim delivers it.
-    assert await claim_notices(db_session, nina.user_id, block) == block
+    assert await claim_notices(db_session, nina.user_id, block, workspace_id=None) == block
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -914,3 +997,209 @@ async def test_account_erasure_removes_consents_and_deliveries(
         ).scalar_one()
         assert left == 0
     assert [n.id for n in await svc.list_notices(db_session)] == [view.id]
+
+
+# --- plans (#2800) ------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_plans_are_stored_in_tier_order_and_returned(db_session, make_users) -> None:
+    await make_users()
+    targeted = await _create(db_session, plans=["promax", "pro"])
+    everyone = await _create(db_session)
+
+    assert targeted.plans == ["pro", "promax"]
+    assert everyone.plans is None
+    stored = dict((await db_session.execute(select(McpNotice.id, McpNotice.plans))).tuples().all())
+    assert stored == {targeted.id: ["pro", "promax"], everyone.id: None}
+    listed = {n.id: n.plans for n in await svc.list_notices(db_session)}
+    assert listed == {targeted.id: ["pro", "promax"], everyone.id: None}
+
+    withdrawn, changed = await svc.withdraw_notice(db_session, notice_id=targeted.id, actor=ACTOR)
+    await db_session.commit()
+    assert changed and withdrawn.plans == ["pro", "promax"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_all_four_tiers_are_kept_as_a_list(db_session, make_users) -> None:
+    await make_users()
+    view = await _create(db_session, plans=["promax", "free", "pro", "basic"])
+
+    assert view.plans == ["free", "basic", "pro", "promax"]
+    stored = (
+        await db_session.execute(select(McpNotice.plans).where(McpNotice.id == view.id))
+    ).scalar_one()
+    assert stored == ["free", "basic", "pro", "promax"]
+    (listed,) = await svc.list_notices(db_session)
+    assert listed.plans == ["free", "basic", "pro", "promax"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_create_audit_row_carries_the_plans(db_session, make_users) -> None:
+    await make_users()
+    targeted = await _create(db_session, plans=["promax", "pro"])
+    everyone = await _create(db_session)
+
+    (created,) = await _fresh_audits(db_session, targeted.id)
+    assert created.user_metadata["plans"] == ["pro", "promax"]
+    (untargeted,) = await _fresh_audits(db_session, everyone.id)
+    assert "plans" in untargeted.user_metadata and untargeted.user_metadata["plans"] is None
+
+    await svc.withdraw_notice(db_session, notice_id=targeted.id, actor=ACTOR)
+    await db_session.commit()
+    withdrawn = (await _fresh_audits(db_session, targeted.id))[1]
+    assert withdrawn.user_metadata == {"text_chars": len(targeted.text)}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_plan_notice_goes_to_its_plan_only(db_session, make_users, make_workspace) -> None:
+    olga = await make_users()
+    await _opt(db_session, olga, True)
+    pro_ws = await make_workspace("pro")
+    free_ws = await make_workspace("free")
+    now = await _now(db_session)
+    for_pro = await _create(db_session, plans=["pro"], expires_at=now + timedelta(days=1))
+    everyone = await _create(db_session, expires_at=now + timedelta(days=2))
+
+    assert await _ids(db_session, olga, pro_ws) == [for_pro.id, everyone.id]
+    assert await _ids(db_session, olga, free_ws) == [everyone.id]
+    # A workspace that does not exist matches no plan (fails closed).
+    assert await _ids(db_session, olga, uuid4()) == [everyone.id]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_plan_is_read_at_delivery_time(db_session, make_users, make_workspace) -> None:
+    pia = await make_users()
+    await _opt(db_session, pia, True)
+    workspace = await make_workspace("free")
+    for_pro = await _create(db_session, plans=["pro"])
+
+    assert await _ids(db_session, pia, workspace) == []
+    await _set_plan(db_session, workspace, "pro")
+    assert await _ids(db_session, pia, workspace) == [for_pro.id]
+    assert await _claim(db_session, pia, [for_pro.id], workspace) == {for_pro.id}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_claim_checks_the_plan_again(db_session, make_users, make_workspace) -> None:
+    """A workspace moved off the plan between the read and the claim gets no
+    delivery row; the notice stays for a later call in a matching workspace."""
+    quinn = await make_users()
+    await _opt(db_session, quinn, True)
+    moving = await make_workspace("pro")
+    other_pro = await make_workspace("pro")
+    for_pro = await _create(db_session, plans=["pro"])
+
+    assert await _ids(db_session, quinn, moving) == [for_pro.id]
+    await _set_plan(db_session, moving, "basic")
+    assert await _claim(db_session, quinn, [for_pro.id], moving) == set()
+    assert await _delivery_rows(db_session, for_pro.id) == 0
+
+    assert await _claim(db_session, quinn, [for_pro.id], other_pro) == {for_pro.id}
+    assert await _delivery_rows(db_session, for_pro.id) == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_once_per_person_across_workspaces(db_session, make_users, make_workspace) -> None:
+    rosa = await make_users()
+    await _opt(db_session, rosa, True)
+    free_ws = await make_workspace("free")
+    pro_ws = await make_workspace("pro")
+    for_pro = await _create(db_session, plans=["pro"])
+
+    # First a call in the free workspace: nothing offered, nothing claimed.
+    assert await _ids(db_session, rosa, free_ws) == []
+    assert await _claim(db_session, rosa, [for_pro.id], free_ws) == set()
+    # Then the pro workspace delivers it.
+    assert await _ids(db_session, rosa, pro_ws) == [for_pro.id]
+    assert await _claim(db_session, rosa, [for_pro.id], pro_ws) == {for_pro.id}
+    # Never again, in either.
+    for workspace in (pro_ws, free_ws):
+        assert await _ids(db_session, rosa, workspace) == []
+        assert await _claim(db_session, rosa, [for_pro.id], workspace) == set()
+    (listed,) = await svc.list_notices(db_session)
+    assert listed.delivered_count == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_without_a_workspace_only_untargeted_notices(
+    db_session, make_users, make_workspace
+) -> None:
+    sam = await make_users()
+    await _opt(db_session, sam, True)
+    await make_workspace("pro")
+    now = await _now(db_session)
+    for_all_tiers = await _create(
+        db_session, plans=["free", "basic", "pro", "promax"], expires_at=now + timedelta(days=1)
+    )
+    everyone = await _create(db_session, expires_at=now + timedelta(days=2))
+
+    assert await _ids(db_session, sam, None) == [everyone.id]
+    assert await _claim(db_session, sam, [for_all_tiers.id, everyone.id], None) == {everyone.id}
+    assert await _delivery_rows(db_session, for_all_tiers.id) == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_caps_count_targeted_notices(db_session, make_users) -> None:
+    await make_users()
+    for plans in (["free"], ["pro"], ["promax"]):
+        await _create(db_session, plans=plans)
+    with pytest.raises(McpNoticeActiveLimitError) as caught:
+        await _create(db_session, plans=["basic"])
+    assert caught.value.status_code == 409 and caught.value.error_code == "MCPNOTICE-003"
+    await db_session.rollback()
+    with pytest.raises(McpNoticeActiveLimitError):
+        await _create(db_session)
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_withdrawn_targeted_notices_count_toward_the_daily_cap(
+    db_session, make_users
+) -> None:
+    await make_users()
+    for _ in range(svc.MCP_NOTICE_MAX_CREATED_PER_DAY):
+        view = await _create(db_session, plans=["pro"])
+        await svc.withdraw_notice(db_session, notice_id=view.id, actor=ACTOR)
+        await db_session.commit()
+    with pytest.raises(McpNoticeDailyLimitError):
+        await _create(db_session)
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_concurrent_claims_of_a_targeted_notice(
+    db_session, make_users, make_workspace
+) -> None:
+    tara = await make_users()
+    await _opt(db_session, tara, True)
+    pro_ws = await make_workspace("pro")
+    for_pro = await _create(db_session, plans=["pro"])
+
+    outcomes = await asyncio.gather(
+        *(_claim(db_session, tara, [for_pro.id], pro_ws) for _ in range(6))
+    )
+
+    assert sum(len(o) for o in outcomes) == 1
+    assert await _delivery_rows(db_session, for_pro.id) == 1
+    assert await _claim(db_session, tara, [for_pro.id], pro_ws) == set()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_claim_notices_delivers_a_targeted_notice_in_a_matching_workspace(
+    db_session, make_users, make_workspace
+) -> None:
+    from mcp_server.tools._notices import NOTICES_PROVENANCE, claim_notices, notice_item
+
+    uma = await make_users()
+    await _opt(db_session, uma, True)
+    free_ws = await make_workspace("free")
+    pro_ws = await make_workspace("pro")
+    view = await _create(db_session, plans=["pro"])
+    (candidate,) = await svc.read_notice_candidates(db_session, uma.user_id, workspace_id=pro_ws)
+    block = {"notices": {"provenance": NOTICES_PROVENANCE, "items": [notice_item(candidate)]}}
+
+    assert await claim_notices(db_session, uma.user_id, block, workspace_id=free_ws) == {}
+    assert await _delivery_rows(db_session, view.id) == 0
+    assert await claim_notices(db_session, uma.user_id, block, workspace_id=pro_ws) == block
+    assert await _delivery_rows(db_session, view.id) == 1

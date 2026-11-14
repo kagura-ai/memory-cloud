@@ -17,6 +17,11 @@ KEY SHARE`` holder, which may lock users rows in another order, never waits on
 it. A referral redemption holds the referrer's and the
 referee's ``users`` rows from its cap check, so it takes workspace rows
 ``NOWAIT`` too and answers 409 when one stays busy (#2443).
+A deletion of a ``users`` row clears the rows of the accounts it invited
+(``users.admitted_by_user_id``, #2803) right after it locked that row, ``NOWAIT``:
+the foreign key's ``ON DELETE SET NULL`` at the final ``DELETE`` would wait on
+an invitee's row a redeem or a workspace delete holds while it waits on the
+subject's.
 Each test drives two real Postgres sessions and waits on
 ``pg_blocking_pids`` before releasing the paused one.
 """
@@ -3005,3 +3010,237 @@ async def test_a_redeem_and_a_restore_locking_its_users_rows_by_id_never_deadloc
         .where(ReferralGrant.referrer_user_id == referrer)
     )
     assert paid == 2
+
+
+# ---------------------------------------------------------------------------
+# #2803: the accounts the subject invited (``users.admitted_by_user_id``)
+# ---------------------------------------------------------------------------
+
+
+async def _invited_pair(world) -> tuple[str, str]:
+    """An inviter and an account its user-minted invite admitted (#2803). The
+    invitee's ``user_id`` sorts first, so a transaction that locks both rows
+    in ``user_id`` order (a referral redeem, a workspace delete) holds the
+    invitee's while it waits on the inviter's."""
+    inviter = await world.user("inviter")
+    invitee = await world.user("ainvitee")
+    await world.db.execute(
+        update(User)
+        .where(User.user_id == invitee)
+        .values(
+            admitted_via="beta_invite",
+            admitted_beta_invite_id=uuid4(),
+            admitted_invite_issuer="user",
+            admitted_by_user_id=inviter,
+        )
+    )
+    await world.db.commit()
+    assert invitee < inviter
+    return inviter, invitee
+
+
+async def _admitted_by(db, invitee: str) -> str | None:
+    db.expire_all()
+    return await db.scalar(select(User.admitted_by_user_id).where(User.user_id == invitee))
+
+
+def _delete_inviter(maker, path: str, inviter: str):
+    """The three ways an inviter's ``users`` row goes, in a session of its own."""
+    from services.user_deletion_service import delete_user_rows
+
+    async def run():
+        if path == "erasure":
+            return await _force_erase(maker, inviter)
+        async with maker() as db:
+            if path == "admin_delete":
+                return await delete_user(inviter, {"user_id": "operator"}, db)
+            try:  # the ``delete_admin`` CLI's row deletion
+                return await delete_user_rows(db, inviter)
+            finally:
+                await db.rollback()
+
+    return run()
+
+
+def _assert_refused_without_waiting(path: str, result: object) -> None:
+    from utils.db_helpers import is_lock_not_available
+
+    if path == "erasure":
+        assert isinstance(result, ErasureRetryScheduledError), result
+    elif path == "admin_delete":
+        assert isinstance(result, HTTPException), result
+        assert result.status_code == 409
+    else:
+        assert isinstance(result, BaseException) and is_lock_not_available(result), result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["erasure", "admin_delete", "delete_user_rows"])
+async def test_deleting_an_inviter_never_waits_on_an_invitees_row(
+    db_session, connector_world, path
+):
+    """The foreign key's ``ON DELETE SET NULL`` updates every invitee's
+    ``users`` row at the final ``DELETE``, which waited on a row another
+    transaction held while this one held the subject's row and everything
+    after it. The deletion now takes the invitee rows ``NOWAIT`` right after
+    the subject's and clears them itself: a held one stops it (the erasure
+    is rescheduled, the admin delete answers 409, the CLI's row deletion
+    raises 55P03) and nothing is deleted."""
+    world = connector_world
+    inviter, invitee = await _invited_pair(world)
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holding, release = asyncio.Event(), asyncio.Event()
+    holder: dict = {}
+
+    async def hold_the_invitees_row() -> None:
+        async with maker() as db:
+            holder["pid"] = await _pid(db)
+            await db.execute(
+                select(User.user_id).where(User.user_id == invitee).with_for_update(key_share=True)
+            )
+            holding.set()
+            await asyncio.wait_for(release.wait(), 30)
+            await db.commit()
+
+    tasks: list[asyncio.Task] = []
+    with _external_stores_stubbed():
+        try:
+            held = asyncio.create_task(hold_the_invitees_row())
+            tasks.append(held)
+            await asyncio.wait_for(holding.wait(), 15)
+            deleting = asyncio.create_task(_delete_inviter(maker, path, inviter))
+            tasks.append(deleting)
+            await _done_or_waiting_on(maker, deleting, holder)
+            waited = not deleting.done()
+            release.set()
+            result, held_result = await asyncio.wait_for(
+                asyncio.gather(deleting, held, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert not waited, "the deletion waited on the invitee's users row"
+    assert held_result is None, held_result
+    _assert_refused_without_waiting(path, result)
+    if path == "erasure":
+        retry = (await _request_of(db_session, inviter)).deleted_data_summary["retry"]
+        assert (retry["step"], retry["error_class"]) == ("workspaces", "LockNotAvailable")
+    assert await db_session.scalar(select(User.user_id).where(User.user_id == inviter)) == inviter
+    assert await _admitted_by(db_session, invitee) == inviter
+
+
+@contextmanager
+def _deletion_paused_after_the_subjects_row(path: str):
+    """The erasure stops at step 1 (the vector store), the admin delete at
+    its identity-link lock: each holds the subject's ``users`` row and
+    nothing else of it."""
+    import services.user_deletion_service as deletion_module
+    import services.vector_erasure as vector_module
+
+    holding, release = asyncio.Event(), asyncio.Event()
+
+    async def pause() -> None:
+        if not holding.is_set():
+            holding.set()
+            await asyncio.wait_for(release.wait(), 30)
+
+    if path == "erasure":
+        original_points = vector_module.delete_subject_points
+
+        async def paused_points(db, user_id):
+            await pause()
+            return await original_points(db, user_id)
+
+        with patch.object(vector_module, "delete_subject_points", paused_points):
+            yield holding, release
+    else:
+        original_link = deletion_module.lock_identity_links
+
+        async def paused_link(db):
+            await pause()
+            return await original_link(db)
+
+        with patch.object(deletion_module, "lock_identity_links", paused_link):
+            yield holding, release
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["erasure", "admin_delete"])
+async def test_an_invitees_redeem_and_the_inviters_deletion_never_deadlock(
+    db_session, referral_world, path
+):
+    """The cycle of #2803's foreign key: the deletion holds the inviter's
+    row; the invitee redeems the inviter's referral code, which locks both
+    rows in ``user_id`` order, so it holds the invitee's and waits on the
+    inviter's. The deletion's final ``DELETE`` then waited on the invitee's
+    row through ``ON DELETE SET NULL`` (40P01, either side the victim). Now
+    the deletion finds the invitee's row held, stops (``NOWAIT``) and rolls
+    back, and the redeem goes through."""
+    world = referral_world
+    inviter, invitee = await _invited_pair(world)
+    await world.workspace(inviter)
+    code = f"code{uuid4().hex[:16]}"
+    await db_session.execute(update(User).where(User.user_id == inviter).values(referral_code=code))
+    await db_session.commit()
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    redeem_pid: int | None = None
+
+    async def redeem() -> str:
+        nonlocal redeem_pid
+        async with maker() as db:
+            redeem_pid = await _pid(db)
+            grant = await ReferralService(db).redeem(referred_user_id=invitee, code=code)
+            return grant.referrer_user_id
+
+    tasks: list[asyncio.Task] = []
+    with (
+        _external_stores_stubbed(),
+        _deletion_paused_after_the_subjects_row(path) as (
+            holding,
+            release,
+        ),
+    ):
+        try:
+            deleting = asyncio.create_task(_delete_inviter(maker, path, inviter))
+            tasks.append(deleting)
+            await asyncio.wait_for(holding.wait(), 15)
+            redeeming = asyncio.create_task(redeem())
+            tasks.append(redeeming)
+            await _done_or_blocked(maker, redeeming, lambda: redeem_pid)
+            assert not redeeming.done(), "the redeem did not wait on the inviter's row"
+            release.set()
+            result, redeemed = await asyncio.wait_for(
+                asyncio.gather(deleting, redeeming, return_exceptions=True), 30
+            )
+        finally:
+            release.set()
+            await _cancel_all(tasks)
+
+    assert redeemed == inviter, redeemed
+    _assert_refused_without_waiting(path, result)
+    if path == "erasure":
+        retry = (await _request_of(db_session, inviter)).deleted_data_summary["retry"]
+        # a deadlock victim would be ``DeadlockDetected`` at step ``postgres``
+        assert (retry["step"], retry["error_class"]) == ("workspaces", "LockNotAvailable")
+    assert await _admitted_by(db_session, invitee) == inviter
+
+
+@pytest.mark.asyncio
+async def test_an_erasure_clears_its_invitees_right_after_the_subjects_row(
+    db_session, connector_world
+):
+    """Uncontended: the invitee rows come right after the subject's row and
+    before the identity-link lock (``NOWAIT``, then the ``UPDATE`` that
+    clears them), and the final ``DELETE`` has nothing left to cascade to."""
+    world = connector_world
+    inviter, invitee = await _invited_pair(world)
+
+    with _external_stores_stubbed(), _LockTrace(db_session.bind) as trace:
+        await world.erase(inviter)
+
+    _assert_global_order(trace)
+    step_two = next(tx for tx in trace.kinds() if ("link", False) in tx)
+    assert step_two[:3] == [("users", False), ("users", True), ("users_dml", False)], step_two
+    assert step_two.index(("users", True)) < step_two.index(("link", False))
+    assert await _admitted_by(db_session, invitee) is None

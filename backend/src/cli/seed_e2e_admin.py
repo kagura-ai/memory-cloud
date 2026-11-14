@@ -98,6 +98,8 @@ def seed_e2e_admin() -> None:
                 totp_enabled=False,
                 is_initial_admin=is_first_admin,
                 last_login_at=utcnow(),
+                # #2803: a local admin created from the shell.
+                admitted_via="admin_cli",
             )
             db.add(admin)
             db.flush()

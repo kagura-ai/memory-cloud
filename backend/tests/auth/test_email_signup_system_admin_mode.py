@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import auth.roles as roles_module
+from auth.admission import AdmissionRecord
 from auth.roles import Role, is_initial_admin_role, stage_email_account
 from config.settings import get_settings
 
@@ -36,6 +37,7 @@ async def _stage(db) -> Role:
         password_hash="hash",
         locale=None,
         timezone=None,
+        admission=AdmissionRecord("first_user"),
     )
 
 
@@ -54,6 +56,9 @@ async def test_first_email_account(monkeypatch, mode, role, initial_admin) -> No
     added = db.add.call_args.args[0]
     assert (added.role, added.is_initial_admin) == (role.value, initial_admin)
     assert added.email == "first@example.test"
+    # #2803: the admission is written with the row (no invite: no extra query).
+    assert added.admitted_via == "first_user"
+    assert added.admitted_by_user_id is None
     # new_account_role: one count; in session on an empty table the
     # first-account lock and a recount follow (#2788).
     assert db.execute.await_count == (3 if mode == "session" else 1)

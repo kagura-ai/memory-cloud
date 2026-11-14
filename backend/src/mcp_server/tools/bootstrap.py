@@ -214,6 +214,12 @@ async def handle_bootstrap(
             # Read before any lane runs: the guardrails read and the lanes roll
             # the session back when they fail, which expires this instance.
             context_fields = _context_response_fields(context)
+            # #2800: the plan a targeted service notice is matched against is
+            # that of the context's workspace, never the handler's
+            # ``workspace_id`` (a session / OAuth / global-key caller's current
+            # workspace). Read here, before the lanes: a failed lane expires
+            # the context instance, and the claim runs after them.
+            notice_workspace_id: UUID = context.workspace_id
             # #2615: a session start always carries the notice (no throttle).
             # Its reads run in a session of their own, so a failed one cannot
             # abort the transaction the lanes read in; its room comes off the
@@ -230,7 +236,9 @@ async def handle_bootstrap(
                     headroom_db, context, workspace_id, throttle=False
                 )
                 notice_items = (
-                    await read_notice_items(headroom_db, user_id) if deliver_notices else []
+                    await read_notice_items(headroom_db, user_id, workspace_id=notice_workspace_id)
+                    if deliver_notices
+                    else []
                 )
             headroom = fit_headroom(headroom, max_chars)
             notices = fit_notices(
@@ -257,7 +265,7 @@ async def handle_bootstrap(
             await _log_tool_usage(db, user_id, "bootstrap", start, 200, context_id, workspace_id)
             # #2762: the claim is the last fallible step; only what it returns
             # is placed (right after ``status``), and a failure places nothing.
-            notices = await claim_notices(db, user_id, notices)
+            notices = await claim_notices(db, user_id, notices, workspace_id=notice_workspace_id)
             envelope = place_notices(envelope, notices)
             envelope.update(context_fields)
             envelope.update(headroom)

@@ -40,8 +40,16 @@ def test_sync_migration_round_trip_preserves_targets_and_enforces_authority_cons
         with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), PARENT)
         with Session(engine) as db, db.begin():
-            db.add(User(user_id=uid, email=uid + "@example.test"))
-            db.flush()
+            # Raw SQL: the User model maps columns of later revisions
+            # (f46_2803_admission_record), which do not exist at PARENT.
+            db.execute(
+                text(
+                    "INSERT INTO users (email, user_id, role, timezone, locale, "
+                    "is_initial_admin, auth_method) "
+                    "VALUES (:email, :uid, 'user', 'UTC', 'en', false, 'oauth')"
+                ),
+                {"email": uid + "@example.test", "uid": uid},
+            )
             db.add(Workspace(id=wid, name="Keep workspace", owner_user_id=uid))
             db.flush()
             db.add(Resource(id=rid, workspace_id=wid, resource_id=slug))
@@ -146,8 +154,8 @@ def test_sync_migration_round_trip_preserves_targets_and_enforces_authority_cons
                 )
                 db.flush()
             if cycle == 1:
-                with Session(engine) as db, db.begin():
-                    db.delete(db.scalar(select(User).where(User.user_id == uid)))
+                with engine.begin() as conn:
+                    conn.execute(text("DELETE FROM users WHERE user_id = :uid"), {"uid": uid})
                 with Session(engine) as db:
                     assert db.get(SyncAuthorization, aid).authorized_by is None
             with _alembic_at_test_db():
