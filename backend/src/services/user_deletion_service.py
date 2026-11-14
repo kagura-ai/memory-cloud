@@ -636,10 +636,12 @@ async def clear_invitees_nowait(db: AsyncSession, user_id: str) -> int:
     """Clear ``user_id`` from ``users.admitted_by_user_id`` without waiting
     (#2803). Returns the number of invitee rows cleared.
 
-    Every path that deletes a ``users`` row calls this right after it has
-    locked that row ``FOR UPDATE``: account erasure (before step 2's
-    identity-link lock) and ``delete_user_rows`` (the admin user delete and
-    the ``delete_admin`` CLI). The foreign key's ``ON DELETE SET NULL`` would
+    Every path that deletes a ``users`` row calls this after it has locked
+    that row ``FOR UPDATE``: account erasure (before step 2's identity-link
+    lock) and ``delete_user_rows`` (the admin user delete and the
+    ``delete_admin`` CLI). On the admin delete that is after
+    ``transfer_user_ownership``'s locks, which is safe because this never
+    waits. The foreign key's ``ON DELETE SET NULL`` would
     otherwise update the invitee rows at the final ``DELETE``, waiting on
     each one while the transaction holds the subject's row and everything
     after it. A transaction that locks two ``users`` rows in ``user_id``

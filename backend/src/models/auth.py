@@ -111,9 +111,10 @@ class User(Base):
             ``SET NULL`` foreign key: deleting the inviter's account clears it.
 
         The four admission columns are written once, by the code that creates
-        the row, and never rewritten; only the foreign key's ``SET NULL``
-        changes ``admitted_by_user_id`` afterwards. The invite's label is never
-        recorded.
+        the row, and never rewritten; only the deletion of the inviter's account
+        changes ``admitted_by_user_id`` afterwards (``clear_invitees_nowait``,
+        with the foreign key's ``SET NULL`` as the backstop). The invite's label
+        is never recorded.
     """
 
     __tablename__ = "users"
