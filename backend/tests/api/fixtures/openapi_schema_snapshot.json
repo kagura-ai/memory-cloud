@@ -12316,6 +12316,68 @@
         ],
         "type": "object"
       },
+      "SyncWorkerError": {
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "SyncWorkerInstallationView": {
+        "properties": {
+          "context_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "endpoint_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer"
+          },
+          "installation_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "resource_pk": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "service_id": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context_id",
+          "endpoint_id",
+          "generation",
+          "installation_id",
+          "operations",
+          "resource_id",
+          "resource_pk",
+          "service_id",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "SystemAdminListResponse": {
         "properties": {
           "admins": {
@@ -15104,6 +15166,10 @@
         "type": "http"
       },
       "OIDCIdentity": {
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "SyncService": {
         "scheme": "bearer",
         "type": "http"
       }
@@ -31114,6 +31180,104 @@
         },
         "tags": [
           "share-keys"
+        ]
+      }
+    },
+    "/api/v1/sync/installations/{installation_id}": {
+      "get": {
+        "operationId": "inspect_sync_target_api_v1_sync_installations__installation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncWorkerInstallationView"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncWorkerError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncWorkerError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncWorkerError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncWorkerError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncWorkerError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncWorkerError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncWorkerError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "SyncService": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
         ]
       }
     },

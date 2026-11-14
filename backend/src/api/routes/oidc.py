@@ -12,15 +12,16 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC
-from typing import TypeVar, cast
+from typing import Annotated, TypeVar, cast
 from urllib.parse import parse_qsl, urlencode
 
 from authlib.common.urls import add_params_to_uri
 from authlib.oauth2.rfc6749.errors import OAuth2Error
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.oidc_config import load_oidc_config
 from auth.oidc_limits import check_oidc_rate_limit
@@ -34,10 +35,12 @@ from auth.oidc_server import (
 )
 from auth.session import SESSION_COOKIE_NAME, get_session_manager
 from config.settings import get_settings
-from db.base import get_sync_session
+from db.base import get_db, get_sync_session
 from models.auth import User
 from models.oidc import OIDCClient, OIDCGrant, OIDCToken
+from services.sync_credentials import SyncCredentialError, issue_token
 from utils.datetime import utcnow
+from utils.exceptions import MemoryCloudException
 from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
 
@@ -133,6 +136,9 @@ async def discovery() -> Response:
     except ValueError:
         return _error("temporarily_unavailable", 503)
     issuer = config.issuer
+    sync_enabled = (
+        get_settings().sync_credentials_enabled and get_settings().sync_integrations_enabled
+    )
     return JSONResponse(
         {
             "issuer": issuer,
@@ -143,13 +149,22 @@ async def discovery() -> Response:
             "revocation_endpoint": issuer + "/revoke",
             "response_types_supported": ["code"],
             "response_modes_supported": ["query"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "grant_types_supported": ["authorization_code", "refresh_token"]
+            + (["client_credentials"] if sync_enabled else []),
             "subject_types_supported": ["public"],
             "id_token_signing_alg_values_supported": ["RS256"],
-            "token_endpoint_auth_methods_supported": TOKEN_AUTH_METHODS,
+            "token_endpoint_auth_methods_supported": TOKEN_AUTH_METHODS
+            + (["private_key_jwt"] if sync_enabled else []),
             "revocation_endpoint_auth_methods_supported": TOKEN_AUTH_METHODS,
+            **(
+                {"token_endpoint_auth_signing_alg_values_supported": ["RS256"]}
+                if sync_enabled
+                else {}
+            ),
             "code_challenge_methods_supported": ["S256"],
-            "scopes_supported": sorted(IDENTITY_SCOPES),
+            "scopes_supported": sorted(
+                IDENTITY_SCOPES | ({"resource.sync"} if sync_enabled else set())
+            ),
             "claims_supported": [
                 "iss",
                 "sub",
@@ -320,7 +335,7 @@ async def authorize(request: Request) -> Response:
 
 
 @router.post("/token")
-async def token(request: Request) -> Response:
+async def token(request: Request, db: Annotated[AsyncSession, Depends(get_db)]) -> Response:
     """Exchange or refresh in one transaction, including ID-token signing."""
     if not _configured():
         return _error("not_found", 404)
@@ -330,6 +345,25 @@ async def token(request: Request) -> Response:
     form = await _load_form(request)
     if request.query_params or form is None or len(request.headers.getlist("authorization")) > 1:
         return _error("invalid_request")
+    if form.get("grant_type") == "client_credentials":
+        if not (
+            get_settings().sync_credentials_enabled and get_settings().sync_integrations_enabled
+        ):
+            return _error("unsupported_grant_type")
+        if request.headers.getlist("authorization"):
+            return _error("invalid_client")
+        try:
+            return JSONResponse(await issue_token(db, form), headers=_NO_STORE)
+        except SyncCredentialError as exc:
+            return _error(
+                "invalid_client" if exc.error == "invalid_token" else exc.error,
+                400 if exc.error == "invalid_token" else exc.status,
+            )
+        except MemoryCloudException:
+            return _error("access_denied", 403)
+        except Exception as exc:
+            logger.warning("sync_token_unavailable", failure_type=type(exc).__name__)
+            return _error("temporarily_unavailable", 503)
     allowed = {"grant_type", "client_id", "client_secret"}
     if form.get("grant_type") == "authorization_code":
         allowed |= {"code", "redirect_uri", "code_verifier"}

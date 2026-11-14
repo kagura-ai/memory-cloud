@@ -14,6 +14,7 @@ from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
+from auth.client_registration import reserve_client_id  # noqa: E402
 from models.oidc import OIDCClient  # noqa: E402
 from models.sync_installation import SyncService  # noqa: E402
 
@@ -32,6 +33,7 @@ def register_service(
         or browser_client_id == service_client_id
     ):
         raise ValueError("Browser and service client IDs must be valid and distinct")
+    reserve_client_id(db, service_client_id)
     client = db.scalar(
         select(OIDCClient)
         .where(OIDCClient.client_id == browser_client_id)

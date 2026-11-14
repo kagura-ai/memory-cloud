@@ -53,6 +53,7 @@ from models.worker_app import WorkerAppIdentity
 importlib.import_module("models.oidc")
 importlib.import_module("models.integration_entitlement")
 importlib.import_module("models.sync_installation")
+importlib.import_module("models.sync_credential")
 
 __all__ = [
     "NeuralConfig",
