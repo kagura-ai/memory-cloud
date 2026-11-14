@@ -13,11 +13,14 @@ only. This test makes that boundary a table change, in three parts:
   without a row, or a stale row, fails.
 * ``PAID_INTEGRATION_MCP_TOOLS``: the same decision for every MCP tool (the
   REST discovery skips ``/mcp``).
-* ``PAID_INTEGRATION_SYMBOLS``: an AST scan of ``backend/src`` lists every
-  module that touches the service, its models, the three entry functions or
-  the ``workspace_integration_*`` tables; each such module has a role, and a
-  role allows only its kinds of use. Background tasks and other non-route code
-  are covered by this scan only.
+* ``PAID_INTEGRATION_SYMBOLS``: an AST scan of every module under
+  ``backend/src`` lists each one that touches the service (by name, through a
+  module object, or by a relative import), its models, the three entry
+  functions or the ``workspace_integration_*`` tables; each such module has a
+  role, and a role allows only its kinds of use. Outside the service only
+  named imports are allowed, so every name a consumer takes from the service is
+  classified. Background tasks and other non-route code are covered by this
+  scan only.
 
 The checks are pure functions over names and sources, so the stub tests below
 prove each failure without changing the app.
@@ -26,8 +29,11 @@ prove each failure without changing the app.
 from __future__ import annotations
 
 import ast
+import re
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -225,6 +231,9 @@ REGISTRY = "registry"  # names the models module in a string
 DATA_BOUNDARY = "data_boundary"  # names the tables in strings
 DISPLAY_ONLY = "display_only"  # inspect_paid_integration, for display only
 GUARDED = "guarded"  # paid_integration_write / require_paid_integration + models
+# Outside the service no role allows a service module import: a module object
+# reaches every private helper (``_access``, ``_require_paid_integration_locked``
+# skips the entry-order check), so consumers import the names they use.
 
 PAID_INTEGRATION_SYMBOLS: dict[str, str] = {
     "services.integration_entitlements": SERVICE,
@@ -262,7 +271,7 @@ ROLE_KINDS: dict[str, frozenset[str]] = {
     REGISTRY: frozenset({STRING}),
     DATA_BOUNDARY: frozenset({STRING}),
     DISPLAY_ONLY: frozenset({INSPECT}),
-    GUARDED: frozenset({WRITE, REQUIRE, SERVICE_MODULE_IMPORT, MODELS_MODULE_IMPORT, MODEL_CLASS}),
+    GUARDED: frozenset({WRITE, REQUIRE, MODELS_MODULE_IMPORT, MODEL_CLASS}),
 }
 
 
@@ -361,71 +370,213 @@ def guarded_router_problems(
     return problems
 
 
+@cache
+def _paid_mapped_classes() -> dict[str, str]:
+    """``{class name: table name}`` of every mapped paid-integration class.
+
+    Taken from the declarative registry after importing ``models`` (which
+    registers every model): the classes of ``models.integration_entitlement``
+    and any mapped class elsewhere named ``WorkspaceIntegration*`` or mapped to
+    a ``workspace_integration_*`` table.
+    """
+    import models  # noqa: F401  (registers every mapped class)
+    from db.base import Base
+
+    found: dict[str, str] = {}
+    for mapper in Base.registry.mappers:
+        cls = mapper.class_
+        table = str(getattr(cls, "__tablename__", "") or "")
+        if (
+            cls.__module__ == MODELS_MODULE
+            or cls.__name__.startswith(CLASS_PREFIX)
+            or table.startswith(TABLE_PREFIX)
+        ):
+            found[cls.__name__] = table
+    return found
+
+
 def _mapped_class_names() -> frozenset[str]:
-    import models.integration_entitlement as models_module
+    return frozenset(_paid_mapped_classes())
 
-    return frozenset(
-        name
-        for name, value in vars(models_module).items()
-        if isinstance(value, type)
-        and value.__module__ == models_module.__name__
-        and hasattr(value, "__mapper__")
+
+def _paid_table_names() -> frozenset[str]:
+    return frozenset(table for table in _paid_mapped_classes().values() if table)
+
+
+def _resolve_import(module: str | None, level: int, package: str) -> str | None:
+    """The absolute module an ``ImportFrom`` names, relative ones resolved against ``package``."""
+    if level == 0:
+        return module or ""
+    parts = package.split(".") if package else []
+    if level - 1 > len(parts):
+        return None
+    parts = parts[: len(parts) - (level - 1)]
+    if module:
+        parts.append(module)
+    return ".".join(parts)
+
+
+def _dotted(node: ast.expr) -> str | None:
+    """``a.b.c`` for a chain of names and attributes, else ``None``."""
+    names: list[str] = []
+    while isinstance(node, ast.Attribute):
+        names.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    names.append(node.id)
+    return ".".join(reversed(names))
+
+
+def _docstring_nodes(tree: ast.Module) -> set[int]:
+    """``id()`` of every module, class and function docstring constant."""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            first = node.body[0] if node.body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                ids.add(id(first.value))
+    return ids
+
+
+def _orm_table(node: ast.ClassDef) -> str | None:
+    """The class's ``__tablename__`` ("" when not a constant), or ``None`` if not mapped.
+
+    A class is taken as mapped when its body assigns ``__tablename__`` or it
+    subclasses the declarative ``Base``; a Pydantic or plain class is not.
+    """
+    for stmt in node.body:
+        targets = (
+            stmt.targets
+            if isinstance(stmt, ast.Assign)
+            else [stmt.target]
+            if isinstance(stmt, ast.AnnAssign)
+            else []
+        )
+        if any(isinstance(t, ast.Name) and t.id == "__tablename__" for t in targets):
+            value = stmt.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                return value.value
+            return ""
+    if any((_dotted(base) or "").split(".")[-1] == "Base" for base in node.bases):
+        return ""
+    return None
+
+
+def symbol_kinds(
+    source: str,
+    mapped: frozenset[str],
+    *,
+    tables: frozenset[str] | None = None,
+    module: str = "",
+    is_package: bool = False,
+) -> set[str]:
+    """The kinds of paid-integration use in one module's source.
+
+    ``module`` (dotted) and ``is_package`` resolve relative imports. Strings
+    count when they name the service or models module, or contain a mapped
+    paid-integration table name as a whole word (raw SQL); docstrings never
+    count. A class definition counts only when it is mapped (``__tablename__``
+    or ``Base``) and is a ``WorkspaceIntegration*`` class or maps a
+    ``workspace_integration_*`` table.
+    """
+    tables = _paid_table_names() if tables is None else tables
+    table_word = (
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:"
+            + "|".join(re.escape(t) for t in sorted(tables))
+            + r")(?![A-Za-z0-9_])"
+        )
+        if tables
+        else None
     )
-
-
-def symbol_kinds(source: str, mapped: frozenset[str]) -> set[str]:
-    """The kinds of paid-integration use in one module's source."""
-
-    def is_mapped(name: str) -> bool:
-        return name in mapped or name.startswith(CLASS_PREFIX)
+    package = module if is_package else module.rpartition(".")[0]
 
     def name_kind(name: str) -> str | None:
         if name in ENTRY_NAMES:
             return name
-        if is_mapped(name):
+        if name in mapped:
             return MODEL_CLASS
         return None
 
+    def service_name_kind(name: str) -> str:
+        if name in ENTRY_NAMES:
+            return name
+        if name.startswith(("apply_", "read_")):
+            return PUBLISH_API
+        return SERVICE_INTERNAL
+
+    tree = ast.parse(source)
+    docstrings = _docstring_nodes(tree)
     kinds: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
+    # Local names bound to the service or models module object (flow-insensitive).
+    module_aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == SERVICE_MODULE:
                     kinds.add(SERVICE_MODULE_IMPORT)
                 elif alias.name == MODELS_MODULE:
                     kinds.add(MODELS_MODULE_IMPORT)
+                if alias.asname and alias.name in (SERVICE_MODULE, MODELS_MODULE):
+                    module_aliases[alias.asname] = alias.name
         elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
+            resolved = _resolve_import(node.module, node.level, package)
+            if resolved is None:
+                continue
             for alias in node.names:
-                full = f"{module}.{alias.name}"
+                full = f"{resolved}.{alias.name}" if resolved else alias.name
                 if full == SERVICE_MODULE:
                     kinds.add(SERVICE_MODULE_IMPORT)
+                    module_aliases[alias.asname or alias.name] = SERVICE_MODULE
                 elif full == MODELS_MODULE:
                     kinds.add(MODELS_MODULE_IMPORT)
+                    module_aliases[alias.asname or alias.name] = MODELS_MODULE
+                elif resolved == SERVICE_MODULE:
+                    kinds.add(service_name_kind(alias.name))
                 elif (kind := name_kind(alias.name)) is not None:
                     kinds.add(kind)
-                elif module == SERVICE_MODULE:
-                    kinds.add(
-                        PUBLISH_API
-                        if alias.name.startswith(("apply_", "read_"))
-                        else SERVICE_INTERNAL
-                    )
-                elif module == MODELS_MODULE:
+                elif resolved == MODELS_MODULE:
                     kinds.add(MODELS_MODULE_IMPORT)
-        elif isinstance(node, ast.Name):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
             if (kind := name_kind(node.id)) is not None:
                 kinds.add(kind)
         elif isinstance(node, ast.Attribute):
             if (kind := name_kind(node.attr)) is not None:
                 kinds.add(kind)
+            own = _dotted(node)
+            if own in (SERVICE_MODULE, MODELS_MODULE):
+                kinds.add(SERVICE_MODULE_IMPORT if own == SERVICE_MODULE else MODELS_MODULE_IMPORT)
+            base = _dotted(node.value)
+            base = module_aliases.get(base, base) if base is not None else None
+            if base == SERVICE_MODULE:
+                kinds.add(service_name_kind(node.attr))
+            elif base == MODELS_MODULE:
+                kinds.add(MODELS_MODULE_IMPORT)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name in ENTRY_NAMES:
                 kinds.add(node.name)
         elif isinstance(node, ast.ClassDef):
-            if is_mapped(node.name):
+            table = _orm_table(node)
+            if table is not None and (
+                node.name in mapped
+                or node.name.startswith(CLASS_PREFIX)
+                or table.startswith(TABLE_PREFIX)
+            ):
                 kinds.add(MODEL_CLASS_DEF)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value in (SERVICE_MODULE, MODELS_MODULE) or TABLE_PREFIX in node.value:
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+        ):
+            if node.value in (SERVICE_MODULE, MODELS_MODULE) or (
+                table_word is not None and table_word.search(node.value)
+            ):
                 kinds.add(STRING)
     return kinds
 
@@ -437,11 +588,20 @@ def symbol_problems(
 ) -> list[str]:
     """Unlisted modules, stale rows and uses a module's role does not allow."""
     mapped = _mapped_class_names() if mapped is None else mapped
+    tables = _paid_table_names()
     see = _see("PAID_INTEGRATION_SYMBOLS")
     found = {
         module: kinds
         for module, source in sources.items()
-        if (kinds := symbol_kinds(source, mapped))
+        if (
+            kinds := symbol_kinds(
+                source,
+                mapped,
+                tables=tables,
+                module=module,
+                is_package=_is_package(module, sources),
+            )
+        )
     }
     problems = [
         f"PAID_INTEGRATION_SYMBOLS: module {module!r} uses the paid-integration surface "
@@ -494,8 +654,19 @@ def mcp_problems(tools: Iterable[str], table: Mapping[str, str]) -> list[str]:
     return problems
 
 
+def _is_package(module: str, sources: Mapping[str, str]) -> bool:
+    """A package (``pkg/__init__.py``): the file exists under ``SRC`` or a submodule is listed."""
+    if (SRC.joinpath(*module.split(".")) / "__init__.py").is_file():
+        return True
+    return any(name.startswith(module + ".") for name in sources)
+
+
 def src_sources() -> dict[str, str]:
-    """``{dotted module: source}`` for every ``.py`` under ``backend/src``."""
+    """``{dotted module: source}`` for every ``.py`` under ``backend/src``.
+
+    ``pkg/__init__.py`` maps to ``pkg``; the root ``__init__.py`` has no name
+    and is skipped.
+    """
     sources: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):
         parts = list(path.relative_to(SRC).with_suffix("").parts)
@@ -705,3 +876,210 @@ def test_stub_guarded_router_fails_without_a_guard_call(defect):
     _assert_problem(
         guarded_router_problems(table, sources, symbols), "PAID_INTEGRATION_ROUTERS", needle
     )
+
+
+# --- The source walker: every module under SRC is scanned -------------------
+
+
+def test_src_sources_walks_every_module_under_src(tmp_path, monkeypatch):
+    # Nested packages outside the five rows are scanned too: a future consumer
+    # under services/ or background/ cannot hide from the symbol scan.
+    files = {
+        "__init__.py": "",
+        "services/__init__.py": "",
+        "services/integration_installations.py": f"from {SERVICE_MODULE} import {WRITE}\n",
+        "background/__init__.py": "",
+        "background/sync/__init__.py": "",
+        "background/sync/job.py": f"from {MODELS_MODULE} import WorkspaceIntegrationState\n",
+        "pkg/__init__.py": "TABLE = 'workspace_integration_states'\n",
+    }
+    for relative, text in files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "SRC", tmp_path)
+
+    sources = src_sources()
+    # The root __init__ has no name; pkg/__init__ maps to its package.
+    assert set(sources) == {
+        "services",
+        "services.integration_installations",
+        "background",
+        "background.sync",
+        "background.sync.job",
+        "pkg",
+    }
+    problems = symbol_problems(sources, {})
+    for module, kind in [
+        ("services.integration_installations", WRITE),
+        ("background.sync.job", MODEL_CLASS),
+        ("pkg", STRING),
+    ]:
+        _assert_problem(problems, "PAID_INTEGRATION_SYMBOLS", f"{module!r}", kind, "has no row")
+    assert len(problems) == 3, problems
+
+
+def test_src_sources_covers_the_real_tree():
+    expected = set()
+    for path in SRC.rglob("*.py"):
+        if path == SRC / "__init__.py":
+            continue
+        parts = list(path.relative_to(SRC).with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        expected.add(".".join(parts))
+    assert set(src_sources()) == expected
+    assert len(expected) == len(list(SRC.rglob("*.py"))) - 1
+    # Spot-check the trees the five rows do not cover.
+    assert any(name.startswith("background.") for name in expected)
+    assert any(name.startswith("services.") and name != SERVICE_MODULE for name in expected)
+
+
+# --- No back door through a module object or a relative import --------------
+
+INSTALLATIONS = "services.integration_installations"
+
+
+@pytest.mark.parametrize(
+    ("source", "kind"),
+    [
+        (
+            "from services import integration_entitlements as ie\n"
+            "async def f(db, w, s):\n"
+            "    await ie._access(db, w, s, lock=False)\n",
+            SERVICE_INTERNAL,
+        ),
+        (
+            "import services.integration_entitlements as ie\n"
+            "async def f(db, w, s):\n"
+            "    await ie._require_paid_integration_locked(db, w, s)\n",
+            SERVICE_INTERNAL,
+        ),
+        (
+            "import services\n"
+            "async def f(db, w, s):\n"
+            "    await services.integration_entitlements._access(db, w, s, lock=False)\n",
+            SERVICE_INTERNAL,
+        ),
+        (
+            "from .integration_entitlements import _access\n",
+            SERVICE_INTERNAL,
+        ),
+        (
+            "from .integration_entitlements import _require_paid_integration_locked as admit\n",
+            SERVICE_INTERNAL,
+        ),
+        ("from . import integration_entitlements\n", SERVICE_MODULE_IMPORT),
+        (f"from .integration_entitlements import {WRITE}\n", WRITE),
+        ("from ..models.integration_entitlement import WorkspaceIntegrationState\n", MODEL_CLASS),
+    ],
+    ids=[
+        "module-alias-access",
+        "import-as-locked",
+        "package-attribute",
+        "relative-access",
+        "relative-locked-alias",
+        "relative-module",
+        "relative-write",
+        "relative-model",
+    ],
+)
+def test_stub_service_internals_are_reported_in_every_import_form(source, kind):
+    problems = symbol_problems({INSTALLATIONS: source}, {})
+    _assert_problem(problems, "PAID_INTEGRATION_SYMBOLS", f"{INSTALLATIONS!r}", kind, "has no row")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from services import integration_entitlements as ie\n"
+        "async def f(db, w):\n"
+        "    await db.execute('SELECT 1 FROM users WHERE user_id = :u FOR UPDATE')\n"
+        "    await ie._require_paid_integration_locked(db, w, 'sync')\n",
+        "from services import integration_entitlements as ie\n"
+        "async def f(db, w):\n"
+        "    async with ie.paid_integration_write(db, w, 'sync'):\n"
+        "        pass\n",
+        "from .integration_entitlements import _require_paid_integration_locked\n",
+    ],
+    ids=["module-import-locked", "module-import-write", "relative-locked"],
+)
+def test_stub_guarded_module_must_import_the_entries_by_name(source):
+    problems = symbol_problems({INSTALLATIONS: source}, {INSTALLATIONS: GUARDED})
+    _assert_problem(
+        problems, "PAID_INTEGRATION_SYMBOLS", f"{INSTALLATIONS!r}", "its role does not allow"
+    )
+
+
+# --- No false failures on unrelated modules ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import structlog\nlogger = structlog.get_logger()\n"
+        "def f():\n    logger.info('workspace_integration_installed')\n",
+        '"""Mirrors workspace_integration_states and services.integration_entitlements."""\n',
+        "class Connector:\n"
+        '    """Unlike workspace_integration_licenses, this is per connector."""\n',
+        "class WorkspaceIntegrationConfig:\n    pass\n",
+        "from pydantic import BaseModel\nclass WorkspaceIntegrationConfig(BaseModel):\n"
+        "    name: str\n",
+        "def f(cfg):\n    return WorkspaceIntegrationConfig(**cfg)\n",
+        "def f(x):\n    return x._state\n",
+    ],
+    ids=[
+        "log-event",
+        "module-docstring",
+        "class-docstring",
+        "plain-class",
+        "pydantic-class",
+        "unrelated-reference",
+        "unrelated-private-attr",
+    ],
+)
+def test_stub_unrelated_module_is_not_a_consumer(source):
+    assert (
+        symbol_kinds(source, _mapped_class_names(), module="services.workspace_connectors") == set()
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "kind"),
+    [
+        ("Q = 'SELECT 1 FROM workspace_integration_states WHERE workspace_id = :w'\n", STRING),
+        (
+            "def f(w):\n    return f'DELETE FROM workspace_integration_events WHERE id = {w}'\n",
+            STRING,
+        ),
+        ("TABLE = 'workspace_integration_licenses'\n", STRING),
+        (f"MODULE = '{SERVICE_MODULE}'\n", STRING),
+        (
+            "from db.base import Base\n"
+            "class WorkspaceIntegrationToken(Base):\n"
+            "    __tablename__ = 'workspace_integration_tokens'\n",
+            MODEL_CLASS_DEF,
+        ),
+        (
+            "from db.base import Base\n"
+            "class IntegrationToken(Base):\n"
+            "    __tablename__ = 'workspace_integration_tokens'\n",
+            MODEL_CLASS_DEF,
+        ),
+        (
+            "import db.base\nclass WorkspaceIntegrationGrant(db.base.Base):\n    pass\n",
+            MODEL_CLASS_DEF,
+        ),
+    ],
+    ids=[
+        "raw-sql",
+        "f-string-sql",
+        "table-name",
+        "module-path",
+        "mapped-prefix",
+        "mapped-table",
+        "base-subclass",
+    ],
+)
+def test_stub_real_table_and_mapped_class_uses_still_count(source, kind):
+    assert kind in symbol_kinds(source, _mapped_class_names())
