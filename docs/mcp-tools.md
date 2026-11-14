@@ -74,7 +74,8 @@ Error results (`isError: true`, HTTP 200):
 | `context_not_available` | A `context_id` other than the published one |
 | `memory_not_found` | `Memory not found on this endpoint: <id>` — the same text for an unknown, deleted, foreign or non-public id |
 | `rate_limit_exceeded` | The endpoint's or session's per-minute budget is spent (`retry_after_seconds`) |
-| `temporarily_unavailable` | The rate-limit store cannot be read, or a workspace limit stopped the call (`retry_after_seconds`) |
+| `usage_budget_exhausted` | Only when the operator enabled the [usage budget](public-usage-budget.md): the workspace's seven-day budget of public calls is used; the tool did not run (`retry_after_seconds`, at most 3600) |
+| `temporarily_unavailable` | The rate-limit store cannot be read, a workspace limit stopped the call, or the usage budget could not be charged (`retry_after_seconds`) |
 | `internal_error` / `timeout` / `service_unavailable` | A server failure, with a `correlation_id`; the exception text is never returned |
 
 HTTP-level answers: `404 {"error": "not_found", …}` for every address that is not served (unknown, unpublished, data no longer public, operator switch off), `503 {"error": "temporarily_unavailable"}` while the workspace's plan pauses public serving or it is over its capacity, `429 {"error": "rate_limited"}` with `Retry-After` for the handshake / listing methods, `400` for a body over 64 KiB, a JSON-RPC batch or a malformed request, `405` for `GET`. `tools/list` and `server/discover` carry `ttlMs` 300,000 with `cacheScope: "public"`: a client may keep a stale list up to 5 minutes after an unpublish, but every call is refused.
