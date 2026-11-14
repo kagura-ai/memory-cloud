@@ -392,8 +392,8 @@ migrate-create:
 
 .PHONY: migrate-down
 migrate-down:
-	@echo "Rolling back last migration..."
-	cd $(BACKEND_DIR) && alembic downgrade -1
+	@echo "Rolling back to $(or $(revision),-1)..."
+	cd $(BACKEND_DIR) && alembic downgrade $(or $(revision),-1)
 	@echo "Rollback complete."
 
 .PHONY: migrate-status
