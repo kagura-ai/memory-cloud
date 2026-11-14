@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.responses import RedirectResponse
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
 from auth.admission import AdmissionRecord
@@ -48,6 +49,8 @@ def _svc() -> SignupGateService:
     db.flush = AsyncMock()
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
+    # #2814: lock_invite_issuer reads the inviter's users.role under a lock.
+    db.scalar = AsyncMock(return_value="user")
     return SignupGateService(db)
 
 
@@ -334,6 +337,40 @@ class TestRedeem:
 
         svc.db.commit.assert_awaited_once()
         svc.db.rollback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_inviters_row_is_locked_before_the_allowlist_row(self, invites_enabled):
+        # #2814: KEY SHARE on the inviter's users row before anything is added.
+        svc = _svc()
+        order: list[str] = []
+        svc.db.scalar.side_effect = lambda *_a, **_k: order.append("lock") or "user"
+        svc.db.add.side_effect = lambda *_a, **_k: order.append("add")
+
+        with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
+            invites_cls.return_value.find_redeemable = AsyncMock(return_value=_redeemable_invite())
+            invites_cls.return_value.mark_redeemed = AsyncMock(return_value=True)
+            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is not None
+
+        statement = str(svc.db.scalar.await_args.args[0].compile(dialect=postgresql.dialect()))
+        assert "FOR KEY SHARE" in statement and "users" in statement
+        assert order[0] == "lock" and order.count("lock") == 1
+
+    @pytest.mark.asyncio
+    async def test_an_inviter_gone_by_the_lock_refuses_and_writes_nothing(self, invites_enabled):
+        # #2814: the inviter's erasure or deletion committed first.
+        svc = _svc()
+        svc.db.scalar = AsyncMock(return_value=None)
+
+        with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
+            invites_cls.return_value.find_redeemable = AsyncMock(return_value=_redeemable_invite())
+            invites_cls.return_value.mark_redeemed = AsyncMock(return_value=True)
+            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is None
+            invites_cls.return_value.mark_redeemed.assert_not_awaited()
+
+        svc.db.add.assert_not_called()
+        svc.db.flush.assert_not_awaited()
+        svc.db.commit.assert_not_awaited()
+        svc.db.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_github_row_fills_legacy_columns_with_id_and_login(self, invites_enabled):

@@ -668,7 +668,10 @@ channel or per inviter.
   manual add, the inviter of a redeemed invite link) has no foreign key; the
   same three paths clear it in the transaction that removes the account. The
   row stays and still admits the person it names; rows someone else added keep
-  their value.
+  their value. A redemption of the inviter's link (e-mail, Google or GitHub)
+  locks the inviter's `users` row before it writes the allowlist row, so one
+  racing the removal either commits first and is cleared, or finds the
+  inviter gone and is refused like an expired link.
 - **`unknown`** is the default of the column: an account the backfill could
   not place, a second account that lost the first-user race (two first
   sign-ups at once: one `first_user`, one `unknown`), and any row written by an

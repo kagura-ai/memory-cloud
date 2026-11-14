@@ -9,6 +9,11 @@ When that person's account goes, the column is cleared, on the same paths as
 - ``DELETE /admin/users/{id}`` (the handler, through ``delete_user_rows``);
 - ``delete_user_rows`` and the ``delete_admin`` CLI's row deletion.
 
+A beta-invite redemption locks the inviter's ``users`` row (KEY SHARE) before
+it writes its allowlist row, on the e-mail and the Google/GitHub path alike,
+so a redemption racing the inviter's removal either commits before the
+removal locks the row (and is cleared) or finds the inviter gone and refuses.
+
 The row itself stays (it still admits the person it names), and rows added by
 someone else keep their ``added_by_user_id``.
 
@@ -17,21 +22,29 @@ Run on a private database only (``REQUIRE_TEST_DATABASE=1 TEST_DATABASE_URL=...`
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.routes.admin import delete_user
+from auth.admission import AdmissionRecord
 from cli.delete_admin import _delete_admin_rows
+from config.settings import get_settings
 from models.auth import User
-from models.signup_gate import SignupAllowlistEntry
+from models.beta_invite import BetaInvite
+from models.signup_gate import SignupAllowlistEntry, SignupGateConfig
 from services.account_erasure_service import AccountErasureService
-from services.user_deletion_service import delete_user_rows
+from services.signup_gate_service import SignupGateService
+from services.user_deletion_service import clear_allowlist_inviter, delete_user_rows
+from utils.datetime import utcnow
+from utils.hashing import sha256_hex
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -172,3 +185,97 @@ async def test_delete_admin_cli_clears_the_inviter_from_the_allowlist(rows, make
         await _delete_admin_rows(s, gone, [])
 
     await _assert_cleared(rows, invited, manual, kept, other)
+
+
+async def _waits_on_a_row_lock(maker: async_sessionmaker[AsyncSession], task: asyncio.Task) -> bool:
+    """True once a backend waits for a row lock; False if ``task`` ends first."""
+    for _ in range(100):
+        if task.done():
+            return False
+        async with maker() as probe:
+            waiting = await probe.scalar(
+                text(
+                    "SELECT count(*) FROM pg_locks "
+                    "WHERE NOT granted AND locktype IN ('transactionid', 'tuple')"
+                )
+            )
+        if waiting:
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+async def test_oauth_redemption_racing_the_inviters_erasure_is_refused(
+    rows, maker, db_session, monkeypatch
+) -> None:
+    # The removal holds the inviter's row (FOR UPDATE, as erasure and
+    # delete_user_rows take it first) and has cleared the allowlist when a
+    # Google sign-in redeems the inviter's link. The redemption waits on the
+    # row, then finds the inviter gone and refuses: no allowlist row keeps the
+    # departed user id. Without the lock it committed at once with the id.
+    monkeypatch.setattr(get_settings(), "enable_beta_invites", True)
+    gate = SignupGateService(db_session)
+    config = await gate.get_config()
+    previous = (config.enabled, config.mode)
+    await gate.update_config(enabled=True, mode="manual")
+    inviter = await rows.person()
+    sub, email = _uid("go"), f"{_uid('race')}@example.test"
+    token = uuid4().hex + uuid4().hex
+    db_session.add(
+        BetaInvite(
+            token_hash=sha256_hex(token),
+            inviter_user_id=inviter,
+            expires_at=utcnow() + timedelta(days=7),
+        )
+    )
+    await db_session.commit()
+
+    async def redeem():
+        async with maker() as s:
+            return await SignupGateService(s).decide(
+                provider="google",
+                oauth_sub=sub,
+                email=email,
+                username=email,
+                beta_invite_token_hash=sha256_hex(token),
+                email_verified=True,
+            )
+
+    try:
+        async with maker() as eraser:
+            await eraser.execute(
+                select(User.user_id).where(User.user_id == inviter).with_for_update()
+            )
+            await clear_allowlist_inviter(eraser, inviter)
+            task = asyncio.create_task(redeem())
+            waited = await _waits_on_a_row_lock(maker, task)
+            await eraser.execute(delete(User).where(User.user_id == inviter))
+            await eraser.commit()
+        answer = await asyncio.wait_for(task, timeout=30)
+        kept = (
+            (
+                await db_session.execute(
+                    select(SignupAllowlistEntry.added_by_user_id)
+                    .where(SignupAllowlistEntry.subject_id == sub)
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    finally:
+        await db_session.rollback()
+        await db_session.execute(
+            update(SignupGateConfig)
+            .where(SignupGateConfig.id == 1)
+            .values(enabled=previous[0], mode=previous[1])
+        )
+        await db_session.execute(
+            delete(SignupAllowlistEntry).where(SignupAllowlistEntry.subject_id == sub)
+        )
+        await db_session.commit()
+
+    assert inviter not in kept
+    assert kept == []
+    assert not isinstance(answer, AdmissionRecord)
+    assert waited

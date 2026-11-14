@@ -1279,6 +1279,22 @@ class SignupGateService:
         invite_id = invite.id
         inviter_user_id = invite.inviter_user_id
 
+        # #2814: lock the inviter's row (KEY SHARE, held to the commit below)
+        # before the allowlist row names them, as the e-mail path does. An
+        # erasure or deletion that holds the row first runs to its commit,
+        # and then the inviter is gone and this refuses; one that comes later
+        # waits for this commit and clears the row it finds. Lock order: the
+        # inviter's row, then the invite, the order erasure takes.
+        if await lock_invite_issuer(self.db, inviter_user_id) is None:
+            await self.db.rollback()
+            logger.info(
+                "beta_invite_redeem_rejected",
+                invite_id=str(invite_id),
+                provider=provider,
+                subject_id=oauth_sub,
+            )
+            return None
+
         # Deprecated NOT-NULL legacy columns (#655): filled exactly the way the
         # admin route fills them — numeric ID + login for github, the
         # ``<provider>:<sub>`` sentinel + label for everything else.
