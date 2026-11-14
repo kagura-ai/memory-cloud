@@ -49,6 +49,7 @@ from services.worker_app_identity import (
     opaque_revision,
 )
 from utils.exceptions import (
+    AuthenticationError,
     WorkerAppDisabledError,
     WorkerAppNotFoundError,
     WorkerAppNotReadyError,
@@ -69,10 +70,7 @@ async def verify_worker_token(request: Request, authorization: str | None = Head
     """
     headers = request.headers.getlist("authorization")
     if len(headers) > 1:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="A single worker credential is required",
-        )
+        raise AuthenticationError("A single worker credential is required")
     authorization = headers[0] if headers else authorization
     expected = get_settings().worker_service_token
     if not expected:

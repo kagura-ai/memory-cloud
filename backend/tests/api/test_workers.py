@@ -129,10 +129,10 @@ async def test_verify_worker_token_503_when_unconfigured():
 
 @pytest.mark.asyncio
 async def test_verify_worker_token_rejects_duplicate_authorization_headers():
-    from fastapi import HTTPException
+    from utils.exceptions import AuthenticationError
 
     with patch("api.routes.workers.get_settings", return_value=_settings()):
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(AuthenticationError) as exc:
             await verify_worker_token(
                 _request(
                     ("Authorization", "Bearer wt-secret"),
