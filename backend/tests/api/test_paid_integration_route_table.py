@@ -252,6 +252,9 @@ PAID_INTEGRATION_SYMBOLS: dict[str, str] = {
     # paid_integration_write, entered before any write or row lock.
     "services.sync_installations": GUARDED,
     "services.sync_credentials": GUARDED,
+    # #2809: domain_write enters paid_integration_write for the reserved
+    # service id public-mcp-domains, as the transaction's first row lock.
+    "services.public_mcp_domains": GUARDED,
 }
 
 # Kinds of use the scan reports.
