@@ -141,6 +141,8 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "system": NONE,
     "sync_installations": Guarded(services=("services.sync_installations",)),  # #2802
     "sync_worker": Guarded(services=("services.sync_credentials",)),
+    "sync_feeds": Guarded(services=("services.sync_credentials",)),
+    "sync_records": NONE,  # Human RBAC/explicit OIDC scope; no paid worker grant.
     "system_admins": NONE,
     "users": NONE,
     "well_known": NONE,
