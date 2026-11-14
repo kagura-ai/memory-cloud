@@ -279,7 +279,9 @@ v0.162.0 in [Sync service credentials](ops/sync-service-credentials.md): they
 first revert `f49_2817` (no-op) and `f48_2805`. Turn
 `MCP_PUBLIC_USAGE_BUDGET_ENABLED` off before any of them (see "Deploy order"
 for what the switch does without the table); the table comes back only with
-`alembic upgrade head`.
+`alembic upgrade head`. After a downgrade that reverted
+`f46_2803_admission_record`, run `alembic upgrade
+f47_2819_merge_sync_credentials` first and then `alembic upgrade head`.
 
 ## Log events
 

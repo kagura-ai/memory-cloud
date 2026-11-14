@@ -216,5 +216,11 @@ drops the table `public_usage_budgets`. Turn `MCP_PUBLIC_USAGE_BUDGET_ENABLED`
 off before it: with the switch on and no table, public `tools/call` is refused
 (`temporarily_unavailable`), counted anonymous REST searches answer `503` and
 the public MCP owner routes answer `503 DB-002`. The table comes back only with
-`alembic upgrade head`, which also re-creates the credential tables (see
-[Public usage budget](../public-usage-budget.md)).
+`alembic upgrade head`, which also re-applies what the downgrade removed (see
+[Public usage budget](../public-usage-budget.md)). After a downgrade that
+reverted `f46_2803_admission_record` (`alembic downgrade
+f45_2800_mcp_notice_plans`, or a plain downgrade to `f44_2802_sync_installations`
+or lower), run `alembic upgrade f47_2819_merge_sync_credentials` first and then
+`alembic upgrade head`, so that `f46_2803` does not share a transaction with
+`f48_2805` (see "How each account was admitted" in
+[deployment.md](../deployment.md)).
