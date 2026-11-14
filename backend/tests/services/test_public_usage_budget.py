@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -170,10 +171,9 @@ class TestLogEvents:
         charge = AsyncMock(side_effect=outcome) if isinstance(outcome, Exception) else None
         charge = charge or AsyncMock(return_value=outcome)
         with patch.object(pub, "_charge", charge), patch.object(pub, "logger") as log:
-            try:
+            # A failed charge raises; these tests only read what it logged.
+            with contextlib.suppress(pub.PublicUsageBudgetUnavailable):
                 await pub.charge_public_usage(self.WS, limit=25000)
-            except pub.PublicUsageBudgetUnavailable:
-                pass
         return log
 
     async def test_first_call_of_a_period_logs_period_started(self) -> None:
