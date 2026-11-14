@@ -667,6 +667,18 @@ from api.middleware.correlation import CorrelationMiddleware  # noqa: E402
 app.add_middleware(CorrelationMiddleware)
 logger.info("correlation_middleware_registered")
 
+# Host guard of verified custom domains (#2809). Added LAST so that it wraps
+# every middleware above: a request under a Host that is neither the
+# application's nor an internal caller's reaches only the public MCP transport
+# (on /mcp) or a 404, never the session, rate-limit, logging, correlation or
+# CORS layers. While MCP_PUBLIC_DOMAINS_ENABLED is off it applies no Host rule.
+# Execution order (outermost→inner): HostGuard → Correlation → RequestLogger
+# → RateLimit → Session → CORS → Route handler. Keep this the last add_middleware.
+from api.middleware.public_mcp_domain_host import PublicMcpDomainHostGuard  # noqa: E402
+
+app.add_middleware(PublicMcpDomainHostGuard)
+logger.info("public_mcp_domain_host_guard_registered")
+
 
 # ============================================================================
 # Exception Handlers
