@@ -49,6 +49,8 @@ Console setup (which tools to mark for user confirmation): [Google Connected App
 
 `profile`, `tools` and `add_tools` on `/mcp` are a **listing profile**: they shape `tools/list` for a signed-in client and restrict nothing. The **enforced restriction** is a separate address, the anonymous public endpoint `/mcp/public/<public_id>` ([#2675](https://github.com/kagura-ai/memory-cloud/issues/2675)): there the server owns the policy — five read-only tools over one published resource dataset, checked on `tools/call` before any handler runs, with the URL able only to narrow it (`?tools=` intersects the five; `profile` and `add_tools` are ignored). Nothing changes on `/mcp`: there is no restrict flag for signed-in clients. Publishing: [Resource Tokens Guide](resource-tokens-guide.md#publishing-a-resource-as-a-public-mcp-endpoint); connecting: [MCP Client Setup](mcp-clients.md#public-read-only-endpoint-no-sign-in); operator settings: [Deployment](deployment.md#public-mcp-endpoints--issue-2675).
 
+When the operator enables the workspace-wide seven-day budget ([Public usage budget](public-usage-budget.md), #2805), a public `tools/call` past it returns `{"status": "error", "error": "usage_budget_exhausted", "message": …, "retry_after_seconds": n}` (`isError: true`, n ≤ 3600) without running the tool; the listing methods keep answering.
+
 ### Public endpoint tools
 
 The public endpoint has its own definitions for `recall`, `reference`, `explore`, `list_tags` and `get_context_info` (≈ 5k characters in all), each annotated read-only (`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`) with `additionalProperties: false`. Every tool takes an optional `context_id`, which must be the published context's id. Its server `instructions` name the dataset and the five tools (≤ 240 characters); `serverInfo.name` is `kagura-memory-cloud-public`. The rows served are the published resource's ingested, non-deleted rows only. Responses carry exactly these fields (`?` = omitted when empty):
@@ -72,7 +74,8 @@ Error results (`isError: true`, HTTP 200):
 | `context_not_available` | A `context_id` other than the published one |
 | `memory_not_found` | `Memory not found on this endpoint: <id>` — the same text for an unknown, deleted, foreign or non-public id |
 | `rate_limit_exceeded` | The endpoint's or session's per-minute budget is spent (`retry_after_seconds`) |
-| `temporarily_unavailable` | The rate-limit store cannot be read, or a workspace limit stopped the call (`retry_after_seconds`) |
+| `usage_budget_exhausted` | Only when the operator enabled the [usage budget](public-usage-budget.md): the workspace's seven-day budget of public calls is used; the tool did not run (`retry_after_seconds`, at most 3600) |
+| `temporarily_unavailable` | The rate-limit store cannot be read, a workspace limit stopped the call, or the usage budget could not be charged (`retry_after_seconds`) |
 | `internal_error` / `timeout` / `service_unavailable` | A server failure, with a `correlation_id`; the exception text is never returned |
 
 HTTP-level answers: `404 {"error": "not_found", …}` for every address that is not served (unknown, unpublished, data no longer public, operator switch off), `503 {"error": "temporarily_unavailable"}` while the workspace's plan pauses public serving or it is over its capacity, `429 {"error": "rate_limited"}` with `Retry-After` for the handshake / listing methods, `400` for a body over 64 KiB, a JSON-RPC batch or a malformed request, `405` for `GET`. `tools/list` and `server/discover` carry `ttlMs` 300,000 with `cacheScope: "public"`: a client may keep a stale list up to 5 minutes after an unpublish, but every call is refused.

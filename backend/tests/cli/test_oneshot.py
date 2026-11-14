@@ -46,6 +46,7 @@ _WS = "00000000-0000-0000-0000-000000000001"
         ("apply_rerank_defaults", ["--all"]),
         ("backfill_deleted_context_files", []),
         ("restore_context", [_WS]),
+        ("public_usage_budget", ["reset", _WS]),
         ("transfer_context_creator", ["--from", "a", "--to", "b", "--workspace", _WS]),
         ("sweep_orphan_vectors", []),
         ("reprocess_erasures", ["--all"]),
@@ -55,7 +56,7 @@ _WS = "00000000-0000-0000-0000-000000000001"
 async def test_every_plan_apply_command_refuses_yes_without_apply(
     module: str, argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The six commands on the scaffold: ``--yes`` alone exits 2 and opens no
+    """The commands on the scaffold: ``--yes`` alone exits 2 and opens no
     session."""
     import importlib
 

@@ -25,6 +25,7 @@ _COMMANDS = {
     "backfill_deleted_context_files": [],
     "file_scan": ["status"],
     "restore_context": [_UUID],
+    "public_usage_budget": ["reset", _UUID],
     "sweep_orphan_vectors": [],
     "transfer_context_creator": ["--from", "local:x", "--to", _UUID, "--workspace", _UUID],
     "reprocess_erasures": ["--all"],

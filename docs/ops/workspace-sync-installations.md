@@ -159,7 +159,10 @@ There is no manual-resume shortcut. Later safe resume must reuse the retained
 target after its own stop/drain/diff-approval checks. A deleted, moved, private,
 unpublished or otherwise mismatched target cannot be silently repaired/rebound.
 Inspection reports structural `target_available`; it does not promise serving
-when deployment switches, plan/capacity policy or future usage gates refuse it.
+when deployment switches, plan/capacity policy or the workspace's public usage
+budget ([Public usage budget](../public-usage-budget.md), #2805) refuse it. The
+installation's endpoint is an ordinary public endpoint and shares that budget;
+unlink, re-activation and owner transfer leave the budget's period untouched.
 
 ## Storage, downgrade and recovery
 

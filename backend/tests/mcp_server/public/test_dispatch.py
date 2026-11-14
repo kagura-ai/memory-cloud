@@ -399,3 +399,254 @@ def test_keys_carry_no_client_identifier() -> None:
     source = inspect.getsource(limits).lower()
     for word in ("client_ip", "remote_addr", "x-forwarded-for", "user-agent", "user_agent"):
         assert word not in source
+
+
+# ----------------------------------------------------------------------------
+# #2805: the workspace-wide seven-day usage budget, charged before the handler
+# ----------------------------------------------------------------------------
+
+BUDGET_LIMIT = 25000
+
+
+def _charge(admitted: bool = True, *, used: int = 1, retry: int | None = None):
+    from datetime import datetime
+
+    from services.public_usage_budget import BudgetCharge
+
+    return BudgetCharge(
+        admitted=admitted,
+        calls_used=used,
+        period_started_at=datetime(2026, 11, 10, 8, 0, 0),
+        period_seq=1,
+        retry_after_seconds=retry,
+    )
+
+
+@pytest.fixture
+def order() -> list[str]:
+    return []
+
+
+@pytest.fixture
+def budget(monkeypatch, order) -> AsyncMock:
+    """Switch on (limit 25000); the charge admits and records its place."""
+
+    async def charge(workspace_id, **kwargs):
+        order.append("charge")
+        return _charge()
+
+    mock = AsyncMock(side_effect=charge)
+    monkeypatch.setattr(dispatch, "public_usage_budget_limit", lambda: BUDGET_LIMIT)
+    monkeypatch.setattr(dispatch, "charge_public_usage", mock)
+    return mock
+
+
+@pytest.fixture
+def ordered(bucket, handlers, order):
+    async def tick(*args, **kwargs):
+        order.append("bucket")
+
+    bucket.side_effect = tick
+    for name, handler in handlers.items():
+
+        async def run(endpoint, arguments, _name=name):
+            order.append("handler")
+            return _ok(tool=_name)
+
+        handler.side_effect = run
+    return order
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("remember", {"summary": "s"}),
+        ("recall", ["not", "an", "object"]),
+        ("recall", {"query": "q", "nope": 1}),
+    ],
+)
+async def test_budget_refusals_before_the_bucket_never_charge(
+    name, arguments, recorded, bucket, handlers, budget
+) -> None:
+    await _call(_endpoint(), name, arguments)
+    bucket.assert_not_called()
+    budget.assert_not_awaited()
+
+
+async def test_minute_refusal_and_unreadable_redis_never_charge(
+    recorded, bucket, handlers, budget
+) -> None:
+    bucket.return_value = 60
+    content = await _call(_endpoint(), "recall", {"query": "q"})
+    assert _body(content)["error"] == "rate_limit_exceeded"
+    bucket.side_effect = limits.PublicRateLimitUnavailable()
+    content = await _call(_endpoint(), "recall", {"query": "q"})
+    assert _body(content)["error"] == "temporarily_unavailable"
+    budget.assert_not_awaited()
+    assert all(h.await_count == 0 for h in handlers.values())
+
+
+async def test_wrong_context_id_never_charges(recorded, bucket, handlers, budget) -> None:
+    content = await _call(_endpoint(), "recall", {"query": "q", "context_id": str(uuid4())})
+    assert _body(content)["error"] == "context_not_available"
+    budget.assert_not_awaited()
+
+
+async def test_admitted_call_runs_the_handler_after_the_charge(
+    recorded, ordered, budget, handlers
+) -> None:
+    endpoint = _endpoint()
+    content = await _call(
+        endpoint, "recall", {"query": "q", "context_id": str(endpoint.context_id)}
+    )
+    assert _body(content)["status"] == "success"
+    assert ordered == ["bucket", "charge", "handler"]
+    handlers["recall"].assert_awaited_once()
+    assert recorded[0].outcome == "success"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("provider down"),
+        TimeoutError(),
+        PublicArgumentError("bad value"),
+        QuotaExceededError("over"),
+    ],
+    ids=["error", "timeout", "argument", "masked"],
+)
+async def test_a_failed_handler_stays_counted(failure, recorded, bucket, handlers, budget) -> None:
+    handlers["recall"].side_effect = failure
+    content = await _call(_endpoint(), "recall", {"query": "q"})
+    assert getattr(content, "is_error", False) is True
+    budget.assert_awaited_once()
+    handlers["recall"].assert_awaited_once()
+
+
+async def test_a_cancelled_call_stays_counted(recorded, bucket, handlers, budget) -> None:
+    import asyncio
+
+    handlers["recall"].side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await _call(_endpoint(), "recall", {"query": "q"})
+    budget.assert_awaited_once()
+    assert [r.outcome for r in recorded] == ["cancelled"]
+
+
+async def test_exhausted_budget_refuses_without_the_handler(
+    recorded, bucket, handlers, budget
+) -> None:
+    budget.side_effect = None
+    budget.return_value = _charge(False, used=BUDGET_LIMIT, retry=3600)
+    content = await _call(_endpoint(), "recall", {"query": "q"})
+    assert getattr(content, "is_error", False) is True
+    body = _body(content)
+    assert body == {
+        "status": "error",
+        "error": "usage_budget_exhausted",
+        "message": (
+            "This public endpoint has used its call allowance for the current period. "
+            "Try again later."
+        ),
+        "retry_after_seconds": 3600,
+    }
+    assert body["retry_after_seconds"] <= 3600
+    assert str(BUDGET_LIMIT) not in content[0].text
+    assert all(h.await_count == 0 for h in handlers.values())
+    assert [(r.outcome, r.error_code) for r in recorded] == [
+        ("rate_limited", "usage_budget_exhausted")
+    ]
+
+
+async def test_store_failure_refuses_as_unavailable(recorded, bucket, handlers, budget) -> None:
+    from services.public_usage_budget import PublicUsageBudgetUnavailable
+
+    budget.side_effect = PublicUsageBudgetUnavailable("down")
+    content = await _call(_endpoint(), "recall", {"query": "q"})
+    assert _body(content) == {
+        "status": "error",
+        "error": "temporarily_unavailable",
+        "message": dispatch.UNAVAILABLE_MESSAGE,
+        "retry_after_seconds": 60,
+    }
+    assert all(h.await_count == 0 for h in handlers.values())
+    assert [(r.outcome, r.error_code) for r in recorded] == [("error", "usage_budget_unavailable")]
+
+
+async def test_unexpected_charge_error_never_runs_the_handler(
+    recorded, bucket, handlers, budget
+) -> None:
+    budget.side_effect = RuntimeError("bug")
+    content = await _call(_endpoint(), "recall", {"query": "q"})
+    assert _body(content)["error"] == "temporarily_unavailable"
+    assert all(h.await_count == 0 for h in handlers.values())
+    assert recorded[0].outcome == "error"
+
+
+async def test_two_identical_calls_are_two_charges(recorded, bucket, handlers, budget) -> None:
+    endpoint = _endpoint()
+    for _ in range(2):
+        await _call(endpoint, "recall", {"query": "q"}, session_id="mcp-same")
+    assert budget.await_count == 2
+    assert handlers["recall"].await_count == 2
+
+
+async def test_switch_off_never_charges(monkeypatch, recorded, bucket, handlers) -> None:
+    charge = AsyncMock(side_effect=AssertionError("charged"))
+    monkeypatch.setattr(dispatch, "charge_public_usage", charge)
+    monkeypatch.setattr(dispatch, "public_usage_budget_limit", lambda: None)
+    content = await _call(_endpoint(), "recall", {"query": "q"})
+    assert _body(content)["status"] == "success"
+    charge.assert_not_awaited()
+
+
+async def test_the_switch_is_read_once_per_call(monkeypatch, recorded, bucket, handlers) -> None:
+    reads: list[int] = []
+
+    def limit() -> int:
+        reads.append(1)
+        return BUDGET_LIMIT
+
+    monkeypatch.setattr(dispatch, "public_usage_budget_limit", limit)
+    monkeypatch.setattr(dispatch, "charge_public_usage", AsyncMock(return_value=_charge()))
+    await _call(_endpoint(), "recall", {"query": "q"})
+    assert reads == [1]
+
+
+async def test_charge_is_keyed_by_the_loaded_workspace_only(
+    recorded, bucket, handlers, budget
+) -> None:
+    endpoint = _endpoint()
+    await _call(endpoint, "recall", {"query": "q"}, session_id="mcp-xyz")
+    budget.assert_awaited_once_with(endpoint.workspace_id, limit=BUDGET_LIMIT)
+
+
+def test_dispatch_imports_only_the_charge_from_the_budget_module() -> None:
+    """R16.5: dispatch reaches nothing else in the budget module (no refund, settle, ...).
+
+    A failed handler stays counted; the DB test drives the real row. This pins
+    the cheap side: the only names dispatch takes from the module, anywhere in
+    the file (a lazy import inside a function included), and no module-level
+    handle through which another function could be called.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(dispatch.__file__).read_text())
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "services.public_usage_budget":
+                imported |= {alias.name for alias in node.names}
+            if node.module == "services":
+                assert "public_usage_budget" not in {alias.name for alias in node.names}
+        if isinstance(node, ast.Import):
+            assert not any(
+                alias.name == "services" or alias.name.startswith("services.public_usage_budget")
+                for alias in node.names
+            )
+    assert imported == {
+        "PublicUsageBudgetUnavailable",
+        "charge_public_usage",
+        "public_usage_budget_limit",
+    }

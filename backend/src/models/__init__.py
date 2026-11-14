@@ -29,6 +29,7 @@ import models.operation_history  # noqa: F401  # Issue #2739: standalone create_
 import models.operations_status  # noqa: F401  # Issue #2768: scheduled job runs, LLM lanes
 import models.public_mcp  # noqa: F401  # Issue #2675: anonymous public MCP endpoints
 import models.public_mcp_usage  # noqa: F401  # Issue #2678: public MCP usage events
+import models.public_usage_budget  # noqa: F401  # Issue #2805: public usage budgets
 import models.referral  # noqa: F401  # Issue #1470: referral program ledger
 import models.retrieval_feedback  # noqa: F401  # Issue #888: retrieval feedback signal
 import models.secrets  # noqa: F401  # Issue #1128: zero-knowledge secret store

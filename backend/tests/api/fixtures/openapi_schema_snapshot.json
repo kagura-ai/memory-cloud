@@ -9284,7 +9284,8 @@
           "public_usage_guide": {},
           "resource_id": {},
           "serving": {},
-          "updated_at": {}
+          "updated_at": {},
+          "usage_budget": {}
         },
         "required": [
           "context_id",
@@ -9293,7 +9294,8 @@
           "public_id",
           "public_name",
           "resource_id",
-          "serving"
+          "serving",
+          "usage_budget"
         ],
         "type": "object"
       },
@@ -9665,6 +9667,24 @@
           "last_n_days",
           "timeline",
           "total_searches"
+        ],
+        "type": "object"
+      },
+      "PublicUsageBudgetStatus": {
+        "properties": {
+          "as_of": {},
+          "limit": {},
+          "period_days": {},
+          "period_seq": {},
+          "period_started_at": {},
+          "remaining": {},
+          "resets_at": {},
+          "state": {},
+          "used": {}
+        },
+        "required": [
+          "as_of",
+          "state"
         ],
         "type": "object"
       },

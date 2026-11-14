@@ -556,3 +556,79 @@ def test_public_instructions_budget(name: str) -> None:
     assert text.startswith("Read-only public data: ")
     for word in ("list_contexts", "remember", "bootstrap", "sign"):
         assert word not in text
+
+
+# ----------------------------------------------------------------------------
+# #2805: the usage budget refuses tools/call only; credentials never exempt
+# ----------------------------------------------------------------------------
+
+
+def _budget(monkeypatch, *, admitted: bool) -> AsyncMock:
+    from datetime import datetime
+
+    from services.public_usage_budget import BudgetCharge
+
+    charge = AsyncMock(
+        return_value=BudgetCharge(
+            admitted=admitted,
+            calls_used=5,
+            period_started_at=datetime(2026, 11, 10),
+            period_seq=1,
+            retry_after_seconds=None if admitted else 3600,
+        )
+    )
+    monkeypatch.setattr(dispatch, "public_usage_budget_limit", lambda: 5)
+    monkeypatch.setattr(dispatch, "charge_public_usage", charge)
+    return charge
+
+
+async def test_exhausted_budget_still_answers_listing_on_both_eras(
+    client: _Client, monkeypatch
+) -> None:
+    charge = _budget(monkeypatch, admitted=False)
+    session = await _initialize(client)
+    send = await client.call(_rpc("tools/list"), headers=session)
+    assert [t["name"] for t in send.body["result"]["tools"]] == list(PUBLIC_TOOLS)
+    send = await client.call(_rpc("ping"), headers=session)
+    assert send.body["result"] == {}
+    send = await client.call(_rpc("tools/call", name="recall", arguments={}), headers=session)
+    assert send.status == 200
+    result = send.body["result"]
+    assert result["isError"] is True
+    assert json.loads(result["content"][0]["text"])["error"] == "usage_budget_exhausted"
+    assert b"retry-after" not in send.headers
+
+    for method in ("server/discover", "tools/list", "ping"):
+        body, headers = _modern(method)
+        send = await client.call(body, headers=headers)
+        assert send.status == 200, method
+        assert "error" not in send.body, method
+    body, headers = _modern("tools/call", name="recall", arguments={})
+    send = await client.call(body, headers=headers)
+    assert send.status == 200
+    payload = json.loads(send.body["result"]["content"][0]["text"])
+    assert payload["error"] == "usage_budget_exhausted"
+    assert charge.await_count == 2
+
+
+async def test_credentials_on_the_public_path_are_charged_like_anyone(
+    client: _Client, monkeypatch
+) -> None:
+    charge = _budget(monkeypatch, admitted=True)
+    owner_headers = {
+        b"authorization": b"Bearer kagura_owner_key",
+        b"cookie": b"session=owner-browser",
+    }
+    session = await _initialize(client)
+    send = await client.call(
+        _rpc("tools/call", name="recall", arguments={}), headers={**session, **owner_headers}
+    )
+    assert send.status == 200
+    assert "isError" not in send.body["result"]
+    body, headers = _modern("tools/call", name="recall", arguments={})
+    send = await client.call(body, headers={**headers, **owner_headers})
+    assert send.status == 200
+    assert charge.await_count == 2
+    for call in charge.await_args_list:
+        assert call.args == (client.endpoint.workspace_id,)
+        assert call.kwargs == {"limit": 5}

@@ -115,6 +115,12 @@ enter memory exports. Workspace/installation erasure cascades token verifiers;
 global service keys/clients and short-lived replay receipts follow their own
 operator revocation and expiry cleanup policy.
 
+The workspace-wide seven-day budget of anonymous public calls
+(`public_usage_budgets`, #2805) is operational quota state: one row per
+workspace with the running period's start, count and number. It contains no
+person, address, client identifier or content, never enters exports and
+cascades with workspace deletion.
+
 Derived signal is *supposed* to act on every query — that is its value. The
 ban is on **bulk portability**, not on serving:
 

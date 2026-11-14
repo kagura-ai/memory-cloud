@@ -671,7 +671,11 @@ channel or per inviter.
   their value. A redemption of the inviter's link (e-mail, Google or GitHub)
   locks the inviter's `users` row before it writes the allowlist row, so one
   racing the removal either commits first and is cleared, or finds the
-  inviter gone and is refused like an expired link.
+  inviter gone and is refused like an expired link. Rows whose adder was
+  erased or deleted before v0.162.0 still held that id; the migration
+  `f49_2817_clear_allowlist_adders` (v0.163.0) sets it to NULL once on every
+  row whose value matches no account and is not an `operator:` principal,
+  keeps the rows, logs only the number changed, and cannot be undone.
 - **`unknown`** is the default of the column: an account the backfill could
   not place, a second account that lost the first-user race (two first
   sign-ups at once: one `first_user`, one `unknown`), and any row written by an
@@ -714,13 +718,21 @@ Operator notes:
   when `f46_2803` alters `users`. Nothing is applied, and the single-server
   `deploy.sh` does not retry this error (it retries only lock timeouts): it
   stops at the migration step without starting the new colour or moving
-  traffic. Rerun the deploy (or the upgrade). To avoid it, upgrade in three
+  traffic. Rerun the deploy (or the upgrade). To avoid it, upgrade in four
   steps: `alembic upgrade f45_2806_sync_credentials`, then
-  `alembic upgrade f45_2800_mcp_notice_plans`, then `alembic upgrade head`.
-  The last step then runs only `f46_2803` and the no-DDL merge revision
-  `f47_2819_merge_sync_credentials`, so `f46_2803` starts holding no lock.
+  `alembic upgrade f45_2800_mcp_notice_plans`, then
+  `alembic upgrade f47_2819_merge_sync_credentials`, then
+  `alembic upgrade head`. The third step runs only `f46_2803` and the no-DDL
+  merge revision `f47_2819_merge_sync_credentials`, so `f46_2803` starts
+  holding no lock. The last step runs the later revisions on their own
+  (from v0.163.0: `f48_2805_public_usage_budgets`, whose new table has a
+  foreign key to `workspaces`, and `f49_2817_clear_allowlist_adders`), so
+  none of them asks for `workspaces` while `f46_2803` holds `users`.
   (With two steps, `f45_2806_sync_credentials` would run in the same
-  transaction as `f46_2803` and take its locks on `workspaces` there.)
+  transaction as `f46_2803` and take its locks on `workspaces` there; with
+  three, ending in `alembic upgrade head`, `f48_2805` would.) A database
+  already at `f47_2819_merge_sync_credentials` (v0.162.0) needs only
+  `alembic upgrade head`.
 - A **downgrade loses the records** written at sign-up for good; a later
   upgrade rebuilds only what the evidence above still gives.
 
@@ -4172,8 +4184,12 @@ A workspace owner can publish one resource context as an **anonymous, read-only 
 | `MCP_PUBLIC_ENDPOINTS_ENABLED` | `false` | Operator switch. Off: every `/mcp/public/*` request answers `404` before any database read, while the owner routes (`/api/v1/resources/{resource_id}/public-mcp`) keep working and report `serving: false`, so publications can be prepared before enabling. |
 | `MCP_PUBLIC_RATE_LIMIT_PER_MINUTE` | `120` | `tools/call` per endpoint per minute, all anonymous callers together. The handshake / listing methods (`initialize`, `tools/list`, `server/discover`, `ping`) share a separate bucket of 5× this value; over it they answer HTTP `429` with `Retry-After: 60`. |
 | `MCP_PUBLIC_SESSION_RATE_LIMIT_PER_MINUTE` | `30` | `tools/call` per MCP session per minute (session-based clients only). A session is a client connection, not a person. |
+| `MCP_PUBLIC_USAGE_BUDGET_ENABLED` | `false` | Workspace-wide seven-day budget of anonymous public calls (#2805; contract: [Public usage budget](public-usage-budget.md)). On: every public `tools/call` that the minute buckets admit is charged to the workspace (all its endpoints together) before it runs, and refused with `usage_budget_exhausted` once the period's calls are used; an anonymous REST search of a context with a live publication is charged too. Off: nothing is counted. |
+| `MCP_PUBLIC_USAGE_BUDGET_CALLS` | `25000` | Counted calls per workspace per seven-day period (1–1,000,000,000; `0` is refused at start-up, it never means unlimited). A period starts at the workspace's first counted call and the next one starts at the first counted call after it ended. |
 
-The buckets live in Redis and are keyed by the endpoint id and the server-minted session id only — no IP address or other client identifier is read or stored. **While Redis cannot be read, public `tools/call` is refused** (`temporarily_unavailable`, `retry_after_seconds: 60`): these buckets are the only limit on the anonymous path (the workspace's daily MCP quota applies to signed-in calls), and every public `recall` costs an embedding call. The handshake / listing methods stay available. The REST public search keeps its own fail-open bucket.
+The buckets live in Redis and are keyed by the endpoint id and the server-minted session id only — no IP address or other client identifier is read or stored. **While Redis cannot be read, public `tools/call` is refused** (`temporarily_unavailable`, `retry_after_seconds: 60`): every public `recall` costs an embedding call, and the workspace's daily MCP quota applies to signed-in calls only. The handshake / listing methods stay available. The REST public search keeps its own fail-open bucket, except for an anonymous search the usage budget charges: that one is refused (`503`) while its bucket cannot be read.
+
+**Usage budget operations (#2805).** Run the migration (`f48_2805_public_usage_budgets`) **before** setting `MCP_PUBLIC_USAGE_BUDGET_ENABLED=true`: with the switch on and no table, every public `tools/call` is refused (`temporarily_unavailable`, HTTP `200`) and so is every counted anonymous REST search (`503`): the budget fails closed (it uses Postgres, no Redis). The owner routes GET / POST / PATCH `/api/v1/resources/{id}/public-mcp` answer `503` `DB-002` (a publish or update is not saved) until the migration has run. The budget bounds the deployment's cost, not a workspace's availability: anyone can spend a workspace's budget (about 3.5 hours at the default limits for one endpoint), after which its public tool calls are refused until the period ends; per-client limiting in a reverse proxy is the operator's tool against that. The log shows `public_usage_budget_threshold` at 80, 95 and 100 % of a period. Inspect or refill a workspace's budget with `python -m src.cli.public_usage_budget show|reset <workspace-id>` (`reset` plans by default; `--apply --yes` sets the running period's count to 0 and keeps the period). Owners see it as `usage_budget` on the public MCP owner routes.
 
 Fixed caps (not settings): request body 64 KiB, no JSON-RPC batches, `recall` query 500 characters and `k` ≤ 20, `explore` depth ≤ 2 and limit ≤ 25, `list_tags` limit ≤ 100, at most 10 filter tags, responses 10,000–40,000 characters (default 20,000).
 

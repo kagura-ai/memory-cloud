@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.workspace_roles import WorkspaceRole
@@ -204,6 +204,7 @@ async def test_owner_publishes_reads_edits_and_unpublishes(world: World, switch_
             "created_at",
             "updated_at",
             "serving",
+            "usage_budget",
         }
         pid = body["public_id"]
         assert re.fullmatch(public_id_pattern(PublicIdPrefix.PUBLIC_MCP), pid)
@@ -350,3 +351,151 @@ async def test_serving_turns_false_when_the_context_stops_being_public(
                 await s.commit()
             r = await c.delete(_path(world.slugs["public"]))
             assert r.status_code == 204
+
+
+# ----------------------------------------------------------------------------
+# #2805: the workspace-wide usage budget on the owner's read
+# ----------------------------------------------------------------------------
+
+
+async def test_usage_budget_disabled_reports_nulls(world: World) -> None:
+    assert get_settings().mcp_public_usage_budget_enabled is False
+    async with _client(world, world.owner) as c:
+        r = await c.post(_path(world.slugs["public"]), json=BODY)
+        assert r.status_code == 201
+        try:
+            budget = r.json()["usage_budget"]
+            as_of = budget.pop("as_of")
+            assert as_of.endswith("Z")
+            assert budget == {
+                "state": "disabled",
+                "limit": None,
+                "period_days": 7,
+                "used": None,
+                "remaining": None,
+                "period_started_at": None,
+                "resets_at": None,
+                "period_seq": None,
+            }
+        finally:
+            assert (await c.delete(_path(world.slugs["public"]))).status_code == 204
+
+
+async def test_usage_budget_is_the_callers_workspace_on_every_read(
+    world: World, switch_on, monkeypatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_enabled", True)
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 10)
+    other = uuid4()
+    async with world.factory() as s:
+        s.add(Workspace(id=other, name=f"pm-other-{world.tag}", owner_user_id=world.owner))
+        await s.flush()
+        for ws, used, seq in ((world.ws, 3, 2), (other, 9, 5)):
+            await s.execute(
+                text(
+                    "INSERT INTO public_usage_budgets "
+                    "(workspace_id, period_started_at, calls_used, period_seq, updated_at) "
+                    "VALUES (:ws, timezone('UTC', statement_timestamp()) - interval '1 day', "
+                    ":used, :seq, timezone('UTC', statement_timestamp()))"
+                ),
+                {"ws": ws, "used": used, "seq": seq},
+            )
+        await s.commit()
+    try:
+        async with _client(world, world.owner) as c:
+            r = await c.post(_path(world.slugs["public"]), json=BODY)
+            assert r.status_code == 201
+            seen = [r.json()["usage_budget"]]
+            seen.append((await c.get(_path(world.slugs["public"]))).json()["usage_budget"])
+            r = await c.patch(_path(world.slugs["public"]), json={"public_name": "Catalog v3"})
+            seen.append(r.json()["usage_budget"])
+            assert (await c.delete(_path(world.slugs["public"]))).status_code == 204
+        for budget in seen:
+            assert budget["state"] == "active"
+            assert (budget["limit"], budget["used"], budget["remaining"]) == (10, 3, 7)
+            assert budget["period_seq"] == 2
+            assert budget["period_days"] == 7
+            assert budget["period_started_at"].endswith("Z")
+            assert budget["resets_at"].endswith("Z")
+        # The read wrote nothing.
+        async with world.factory() as s:
+            rows = (
+                await s.execute(
+                    text(
+                        "SELECT workspace_id, calls_used, period_seq FROM public_usage_budgets "
+                        "WHERE workspace_id IN (:a, :b) ORDER BY calls_used"
+                    ),
+                    {"a": world.ws, "b": other},
+                )
+            ).all()
+            assert [(r.calls_used, r.period_seq) for r in rows] == [(3, 2), (9, 5)]
+    finally:
+        async with world.factory() as s:
+            await s.execute(
+                text("DELETE FROM public_usage_budgets WHERE workspace_id = :ws"),
+                {"ws": world.ws},
+            )
+            await s.execute(delete(Workspace).where(Workspace.id == other))
+            await s.commit()
+
+
+async def test_an_exhausted_budget_keeps_the_endpoint_serving(
+    world: World, switch_on, monkeypatch
+) -> None:
+    """D12: ``serving`` keeps its meaning; exhaustion is reported in ``usage_budget`` only."""
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_enabled", True)
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 10)
+    async with world.factory() as s:
+        await s.execute(
+            text(
+                "INSERT INTO public_usage_budgets "
+                "(workspace_id, period_started_at, calls_used, period_seq, updated_at) "
+                "VALUES (:ws, timezone('UTC', statement_timestamp()) - interval '1 day', "
+                "10, 1, timezone('UTC', statement_timestamp()))"
+            ),
+            {"ws": world.ws},
+        )
+        await s.commit()
+    try:
+        async with _client(world, world.owner) as c:
+            r = await c.post(_path(world.slugs["public"]), json=BODY)
+            assert r.status_code == 201
+            try:
+                bodies = [r.json(), (await c.get(_path(world.slugs["public"]))).json()]
+            finally:
+                assert (await c.delete(_path(world.slugs["public"]))).status_code == 204
+        for body in bodies:
+            assert body["serving"] is True
+            budget = body["usage_budget"]
+            assert budget["state"] == "exhausted"
+            assert (budget["used"], budget["remaining"], budget["limit"]) == (10, 0, 10)
+    finally:
+        async with world.factory() as s:
+            await s.execute(
+                text("DELETE FROM public_usage_budgets WHERE workspace_id = :ws"),
+                {"ws": world.ws},
+            )
+            await s.commit()
+
+
+async def test_usage_budget_idle_without_a_row(world: World, monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_enabled", True)
+    monkeypatch.setattr(get_settings(), "mcp_public_usage_budget_calls", 10)
+    async with _client(world, world.owner) as c:
+        r = await c.post(_path(world.slugs["public"]), json=BODY)
+        assert r.status_code == 201
+        try:
+            budget = r.json()["usage_budget"]
+            assert budget["state"] == "idle"
+            assert (budget["used"], budget["remaining"], budget["limit"]) == (0, 10, 10)
+            assert budget["period_seq"] is None
+        finally:
+            assert (await c.delete(_path(world.slugs["public"]))).status_code == 204
+    async with world.factory() as s:
+        count = (
+            await s.execute(
+                text("SELECT count(*) FROM public_usage_budgets WHERE workspace_id = :ws"),
+                {"ws": world.ws},
+            )
+        ).scalar_one()
+        assert count == 0

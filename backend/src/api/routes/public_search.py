@@ -12,6 +12,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager, VerifiedKey
@@ -20,12 +21,25 @@ from config.plan_tiers import get_plan_tier
 from db.base import get_db
 from db.redis import incrby_counter
 from models.auth import Context, Workspace
+from models.public_mcp import PublicMcpEndpoint
 from services.capacity_lock import ensure_not_capacity_locked
 from services.plan_suspension import ensure_public_serving_allowed
+from services.public_usage_budget import (
+    PublicUsageBudgetUnavailable,
+    charge_public_usage,
+    public_usage_budget_limit,
+)
 from services.resource_lookup import get_latest_schema
 from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import APIKeyError, AuthorizationError, NotFoundException, RateLimitError
+from utils.exceptions import (
+    APIKeyError,
+    AuthorizationError,
+    NotFoundException,
+    PublicUsageBudgetExhaustedError,
+    PublicUsageBudgetUnavailableError,
+    RateLimitError,
+)
 from utils.logger import get_logger
 from utils.query_log import query_log_fields
 from utils.usage_logger import log_usage
@@ -92,7 +106,7 @@ async def check_public_search_rate_limit(
     context_id: UUID,
     user_id: str | None,
     limit_per_minute: int = 50,
-) -> None:
+) -> bool:
     """Check rate limit for public search API.
 
     Args:
@@ -100,13 +114,19 @@ async def check_public_search_rate_limit(
         user_id: User ID (None for anonymous/public token)
         limit_per_minute: Rate limit (default: 50/min for public, unlimited for workspace members)
 
+    Returns:
+        ``True`` when the bucket counted the request; ``False`` when Redis
+        could not be read (the bucket fails open, and the caller decides:
+        a search charged to the public usage budget is refused then, #2805).
+        A workspace member is not counted here (``False``).
+
     Raises:
         RateLimitError: If rate limit exceeded
     """
     # Skip rate limit check for authenticated workspace members
     if user_id:
         logger.debug("rate_limit_skipped_for_workspace_member", user_id=user_id)
-        return
+        return False
 
     # Apply rate limit for anonymous/public token access. ``incrby_counter``
     # post-checks the TTL via ``TTL`` and sets ``EXPIRE`` whenever absent —
@@ -137,12 +157,72 @@ async def check_public_search_rate_limit(
             current=current_count,
             limit=limit_per_minute,
         )
+        return True
 
     except RateLimitError:
         raise
     except Exception as e:
-        # Redis errors should not block search (fail open)
+        # Redis errors should not block search (fail open) — except on the
+        # path charged to the public usage budget, where the caller refuses.
         logger.error("redis_rate_limit_check_failed", error=str(e))
+        return False
+
+
+async def _has_live_publication(db: AsyncSession, context_id: UUID) -> bool:
+    """Whether the context has a live (not revoked) public MCP endpoint (#2805).
+
+    One ``EXISTS`` on the partial unique index of live publications.
+    """
+    return bool(
+        await db.scalar(
+            select(
+                exists().where(
+                    PublicMcpEndpoint.context_id == context_id,
+                    PublicMcpEndpoint.revoked_at.is_(None),
+                )
+            )
+        )
+    )
+
+
+async def _charge_public_usage_budget(
+    db: AsyncSession, context: Context, *, bucket_counted: bool
+) -> None:
+    """Charge an anonymous search to the workspace's public usage budget (#2805).
+
+    Only when the operator switch is on and the context has a live public MCP
+    publication (the rows the MCP endpoint serves); otherwise nothing is
+    counted, as before. On the charged path a unit is charged only to a
+    request the per-minute bucket admitted: an unreadable bucket refuses.
+
+    Raises:
+        PublicUsageBudgetUnavailableError: The bucket was not read, or the
+            charge failed (fail closed, 503).
+        PublicUsageBudgetExhaustedError: The period's calls are used (429).
+    """
+    limit = public_usage_budget_limit()
+    if limit is None:
+        return
+    if not await _has_live_publication(db, context.id):
+        return
+    if not bucket_counted:
+        raise PublicUsageBudgetUnavailableError()
+    # The charge checks out a connection of its own. Release the request's
+    # first (it has only read so far; ``expire_on_commit=False`` keeps the
+    # loaded context and workspace usable), so a request never holds one
+    # connection while it waits for a second: enough concurrent anonymous
+    # searches would otherwise drain the pool and all fail closed together
+    # (hold-and-wait), stalling every other request meanwhile. The search
+    # checks a connection out again afterwards.
+    await db.commit()
+    try:
+        charge = await charge_public_usage(context.workspace_id, limit=limit, db=db)
+    except PublicUsageBudgetUnavailable as exc:
+        raise PublicUsageBudgetUnavailableError() from exc
+    if not charge.admitted:
+        raise PublicUsageBudgetExhaustedError(
+            retry_after=charge.retry_after_seconds or 60,
+        )
 
 
 async def check_bound_key_rate_limit(key_id: int, limit_per_minute: int) -> None:
@@ -345,6 +425,11 @@ async def public_search(
         - Public-bound key: per-key bucket from workspace plan tier
           (``bound_public_calls_per_minute``)
         - Workspace members: No limit (uses normal workspace quota)
+        - Public usage budget (#2805, when MCP_PUBLIC_USAGE_BUDGET_ENABLED
+          is on): an anonymous search of a context with a live public MCP
+          publication is charged to the workspace's seven-day budget, shared
+          with its public MCP endpoints (docs/public-usage-budget.md).
+          Members and bound keys are never charged.
 
     Request:
         POST /api/v1/public/{context_id}/search
@@ -383,7 +468,11 @@ async def public_search(
                API key is bound to a different context (CWE-639 IDOR)
         - 404: Context not found
         - 429: Rate limit exceeded (anonymous or per-key bucket), or the
-               workspace's plan has no public API allowance (#1939)
+               workspace's plan has no public API allowance (#1939), or
+               ``usage_budget_exhausted`` (#2805, ``Retry-After`` 60–3600 s)
+        - 503: ``temporarily_unavailable`` — on the budget-charged path, the
+               budget store failed or the per-minute bucket could not be
+               read (#2805, ``Retry-After: 60``)
     """
     start_time = utcnow()
 
@@ -452,6 +541,7 @@ async def public_search(
     # path needs the plan tier (so it fetches workspace inline); other
     # paths fetch lazily below, only on requests that survive the bucket.
     workspace: Workspace | None = None
+    anonymous_bucket_counted = False
     if bound_key is not None:
         workspace = await db.get(Workspace, context.workspace_id)
         if workspace is None:
@@ -465,7 +555,7 @@ async def public_search(
         # Anonymous shared bucket — existing behavior preserved.
         # Workspace lookup is deferred to step 4 below: under abuse, a
         # 429 returns BEFORE any Workspace SELECT.
-        await check_public_search_rate_limit(context_id, None)
+        anonymous_bucket_counted = await check_public_search_rate_limit(context_id, None)
     # else: workspace member session → no rate limit (existing behavior).
 
     # 4. Resolve workspace lazily if not already fetched above. Required
@@ -498,6 +588,14 @@ async def public_search(
         await ensure_not_capacity_locked(db, workspace, user_id=user.get("user_id"))
     else:
         await ensure_not_capacity_locked(db, workspace, outsider=True)
+
+    # #2805: an anonymous search of a context with a live public MCP
+    # publication spends the workspace's public usage budget, like a public
+    # tools/call. After the bucket, the plan pause and the capacity check;
+    # before the search, so a search that fails afterwards stays counted.
+    # Members and bound keys are never charged.
+    if user is None and bound_key is None:
+        await _charge_public_usage_budget(db, context, bucket_counted=anonymous_bucket_counted)
 
     # 5. Hoist usage-log attribution + caller id once so the success and
     # error paths below share one definition.

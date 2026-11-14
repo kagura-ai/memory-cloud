@@ -1236,7 +1236,9 @@ Workspace owner only (session or owner API key). Publishes a resource's public c
 | `DELETE /api/v1/resources/{resource_id}/public-mcp` | Unpublish → `204`; `404` when none is live. Publishing again mints a new address |
 | `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` | Usage event health ([#2678](https://github.com/kagura-ai/memory-cloud/issues/2678)): `{resource_id, endpoint_id, window_hours, events, outcomes, gaps: {count, dropped_events, last_gap_at}, writer: {enabled, queue_depth, queue_capacity, dropped_since_start, last_flush_at, last_flush_ok, process_local}, retention_days}`. `endpoint_id` is the live endpoint (`null` when unpublished); `events` / `outcomes` count its calls of the last 24 hours; `gaps` are the deployment's gap rows in that window (events the server could not record); `writer` is the answering API process only. `404` for a slug of another workspace. See [Public MCP usage events](public-mcp-usage-events.md) |
 
-Response: `{public_id, endpoint_path, resource_id, context_id, public_name, public_description, public_usage_guide, created_at, updated_at, serving}`. `endpoint_path` is a path on this deployment; `serving` is true while `MCP_PUBLIC_ENDPOINTS_ENABLED` is on and the context is still public and bound to the resource.
+Response: `{public_id, endpoint_path, resource_id, context_id, public_name, public_description, public_usage_guide, created_at, updated_at, serving, usage_budget}`. `endpoint_path` is a path on this deployment; `serving` is true while `MCP_PUBLIC_ENDPOINTS_ENABLED` is on and the context is still public and bound to the resource.
+
+`usage_budget` ([#2805](https://github.com/kagura-ai/memory-cloud/issues/2805)) is the **workspace-wide** seven-day budget of anonymous public calls, the same on every endpoint of the workspace: `{state, limit, period_days, used, remaining, period_started_at, resets_at, period_seq, as_of}`. `state` is `disabled` (operator switch `MCP_PUBLIC_USAGE_BUDGET_ENABLED` off; the numbers and times are `null`), `idle` (no period runs; `used` 0), `active` or `exhausted` (`used >= limit`). It does not change `serving`. Contract: [Public usage budget](public-usage-budget.md).
 
 ### Observation credentials and the observability API
 
@@ -1308,6 +1310,8 @@ curl -X POST https://memory.kagura-ai.com/api/v1/public/CTX_UUID/search \
 
 Rate-limited to **50 requests/minute per context**, shared across all anonymous callers. The bucket is `public_search:{ctx}:minute` in Redis. The shared quota means a single noisy client can saturate the bucket — that's the gap public-bound API keys fill.
 
+When the operator enables the public usage budget (`MCP_PUBLIC_USAGE_BUDGET_ENABLED`, [#2805](https://github.com/kagura-ai/memory-cloud/issues/2805)), an anonymous search of a context that has a live public MCP endpoint also spends that workspace's seven-day budget, shared with its public MCP endpoints: over it the search answers `429` `usage_budget_exhausted` with `Retry-After` (60–3600 s), and when the budget cannot be charged — or the per-minute bucket cannot be read — `503` `temporarily_unavailable` with `Retry-After: 60`. A request with a bound key or a signed-in session is never charged; a context without a live publication is not counted. Contract: [Public usage budget](public-usage-budget.md).
+
 ### Attributed access (with public-bound API key)
 
 ```bash
@@ -1335,6 +1339,8 @@ The bound key MUST be created with `bound_context_id` set (see API Keys Manageme
 | API key is not public-bound | `403` |
 | API key is bound to a different context (CWE-639) | `403` |
 | Per-key / shared rate limit exhausted | `429` |
+| Public usage budget exhausted (anonymous, published context, #2805) | `429` `usage_budget_exhausted` |
+| Public usage budget could not be charged (#2805) | `503` `temporarily_unavailable` |
 
 ---
 

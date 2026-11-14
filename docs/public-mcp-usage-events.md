@@ -37,6 +37,8 @@ A `doc_key` is an opaque 32-hex key: an HMAC of the resource identity and the re
 
 **Timeout and cancellation.** A tool that runs past its timeout answers the public error result and is recorded as `error` with `error_code: "timeout"`. A call cancelled because the client went away or the server shut down is recorded as `cancelled` and then cancelled. A call refused because the rate-limit store cannot be read is `error` / `temporarily_unavailable`.
 
+**Usage budget ([#2805](public-usage-budget.md)).** A call refused because the workspace's seven-day budget is used is `rate_limited` with `error_code: "usage_budget_exhausted"` (the per-minute refusal is `rate_limited` / `rate_limit_exceeded`: split `rate_limited` by `error_code`). A call refused because the budget could not be charged is `error` with `error_code: "usage_budget_unavailable"` (its response says `temporarily_unavailable`). Events therefore count more than the budget's `calls_used`: they include refusals, and the budget counts only admitted calls.
+
 ### Never recorded
 
 No query text, no tool arguments, no result text, no memory ids, no document titles, summaries, URLs or document ids, no raw session id, no IP address, no user agent, no request headers, no workspace, context or resource names, and no credentials. The public endpoint has no credentials to record.

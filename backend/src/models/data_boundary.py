@@ -114,6 +114,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "public_mcp_usage_events",
         "public_mcp_doc_keys",
         "public_mcp_usage_retention",
+        # Workspace-wide seven-day budget of anonymous public calls (#2805):
+        # the workspace id, the running period's start, count and number. No
+        # person, no address, no content; cascades with the workspace.
+        "public_usage_budgets",
         # Read-only observability credentials (#2679) — SHA-256 verifiers,
         # their workspace / resource binding, expiry and revocation. Auth
         # plumbing like share_keys.

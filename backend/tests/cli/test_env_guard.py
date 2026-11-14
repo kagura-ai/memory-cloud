@@ -29,6 +29,7 @@ from cli import (  # noqa: E402
     create_admin,
     delete_admin,
     migrate_context_embedding,
+    public_usage_budget,
     rekey_encrypted_secrets,
     reprocess_erasures,
     reset_password,
@@ -140,6 +141,7 @@ _UUID = "00000000-0000-0000-0000-000000000001"
         (apply_rerank_defaults, ["--all"], "cli._oneshot.get_db"),
         (backfill_deleted_context_files, [], "cli._oneshot.get_db"),
         (restore_context, [_UUID], "cli._oneshot.get_db"),
+        (public_usage_budget, ["reset", _UUID], "cli._oneshot.get_db"),
         (sweep_orphan_vectors, [], "cli._oneshot.get_db"),
         (
             transfer_context_creator,
@@ -160,6 +162,7 @@ _UUID = "00000000-0000-0000-0000-000000000001"
         "apply_rerank_defaults",
         "backfill_deleted_context_files",
         "restore_context",
+        "public_usage_budget",
         "sweep_orphan_vectors",
         "transfer_context_creator",
         "reprocess_erasures",
