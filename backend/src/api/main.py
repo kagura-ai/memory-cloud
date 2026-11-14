@@ -122,6 +122,9 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("application_starting", version=app.version)
     _log_system_admin_mode()
+    from mcp_server.public.domains import log_application_hosts
+
+    log_application_hosts()  # #2809: the hosts kept for the application (switch on)
 
     # Fail-closed: refuse to boot if OAuth endpoint overrides (E2E test-IdP
     # harness, #937) are active in production — they would redirect token

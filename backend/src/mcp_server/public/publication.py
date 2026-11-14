@@ -8,6 +8,10 @@ off — is the same ``None``, so the caller answers one indistinguishable 404.
 Nothing is cached: unpublishing takes effect on the next request, including
 on a session opened before it.
 
+``load_serving_endpoint_for_alias`` is the same SELECT for a verified custom
+domain (#2809): joined to its ``active`` domain row whose lease is current.
+Both entries resolve to the same ``ServingEndpoint``.
+
 ``check_publishable`` backs the owner's publish route with the same
 preconditions, as typed errors naming the one that failed (the owner may see
 why).
@@ -18,12 +22,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import Row, Select, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
+from mcp_server.public.domains import public_domains_enabled
 from models.auth import Context, Workspace
 from models.public_mcp import PublicMcpEndpoint
+from models.public_mcp_domain import PublicMcpDomain
 from models.resource import Resource
 from services.capacity_lock import ensure_not_capacity_locked
 from services.plan_suspension import ensure_public_serving_allowed
@@ -36,6 +42,9 @@ from utils.exceptions import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# The database clock, the only clock of a lease decision.
+_DB_NOW = literal_column("timezone('UTC', statement_timestamp())")
 
 
 @dataclass(frozen=True)
@@ -73,49 +82,41 @@ def public_endpoints_enabled() -> bool:
     return bool(get_settings().mcp_public_endpoints_enabled)
 
 
-async def load_serving_endpoint(db: AsyncSession, public_id: str) -> ServingEndpoint | None:
-    """Return the endpoint served at ``public_id``, or ``None`` (one 404 for all).
+def _serving_select() -> Select[PublicMcpEndpoint, str, Workspace]:
+    """The serving SELECT without an address: joins and preconditions only.
 
-    Args:
-        db: Session.
-        public_id: The address segment (``pmcp_…``).
-
-    Returns:
-        The endpoint when the switch is on, it is not revoked, its context is
-        live, public, not private and still bound to the same slug, its
-        resource row is the bound one, and its workspace is not deleted.
+    The endpoint, its context (same workspace, same slug), its resource row
+    (the bound one, same workspace, same slug) and its workspace; the
+    endpoint not revoked, the context live, public and not private, the
+    workspace not deleted. Both entries add only their own address to it.
     """
-    if not public_endpoints_enabled():
-        return None
-    row = (
-        await db.execute(
-            select(PublicMcpEndpoint, Context.name, Workspace)
-            .join(
-                Context,
-                (Context.id == PublicMcpEndpoint.context_id)
-                & (Context.workspace_id == PublicMcpEndpoint.workspace_id)
-                & (Context.resource_id == PublicMcpEndpoint.resource_id),
-            )
-            .join(
-                Resource,
-                (Resource.id == PublicMcpEndpoint.resource_pk)
-                & (Resource.workspace_id == PublicMcpEndpoint.workspace_id)
-                & (Resource.resource_id == PublicMcpEndpoint.resource_id),
-            )
-            .join(Workspace, Workspace.id == PublicMcpEndpoint.workspace_id)
-            .where(
-                PublicMcpEndpoint.public_id == public_id,
-                PublicMcpEndpoint.revoked_at.is_(None),
-                Context.deleted_at.is_(None),
-                Context.is_public.is_(True),
-                Context.is_private.is_(False),
-                Workspace.deleted_at.is_(None),
-            )
+    return (
+        select(PublicMcpEndpoint, Context.name, Workspace)
+        .join(
+            Context,
+            (Context.id == PublicMcpEndpoint.context_id)
+            & (Context.workspace_id == PublicMcpEndpoint.workspace_id)
+            & (Context.resource_id == PublicMcpEndpoint.resource_id),
         )
-    ).first()
-    if row is None:
-        logger.debug("public_mcp_not_published", public_id=public_id)
-        return None
+        .join(
+            Resource,
+            (Resource.id == PublicMcpEndpoint.resource_pk)
+            & (Resource.workspace_id == PublicMcpEndpoint.workspace_id)
+            & (Resource.resource_id == PublicMcpEndpoint.resource_id),
+        )
+        .join(Workspace, Workspace.id == PublicMcpEndpoint.workspace_id)
+        .where(
+            PublicMcpEndpoint.revoked_at.is_(None),
+            Context.deleted_at.is_(None),
+            Context.is_public.is_(True),
+            Context.is_private.is_(False),
+            Workspace.deleted_at.is_(None),
+        )
+    )
+
+
+def _serving_endpoint(row: Row[PublicMcpEndpoint, str, Workspace]) -> ServingEndpoint:
+    """The ``ServingEndpoint`` of one row of ``_serving_select()``."""
     endpoint, context_name, workspace = row
     return ServingEndpoint(
         id=endpoint.id,
@@ -131,6 +132,70 @@ async def load_serving_endpoint(db: AsyncSession, public_id: str) -> ServingEndp
         owner_user_id=workspace.owner_user_id,
         workspace=workspace,
     )
+
+
+async def load_serving_endpoint(db: AsyncSession, public_id: str) -> ServingEndpoint | None:
+    """Return the endpoint served at ``public_id``, or ``None`` (one 404 for all).
+
+    Args:
+        db: Session.
+        public_id: The address segment (``pmcp_…``).
+
+    Returns:
+        The endpoint when the switch is on, it is not revoked, its context is
+        live, public, not private and still bound to the same slug, its
+        resource row is the bound one, and its workspace is not deleted.
+    """
+    if not public_endpoints_enabled():
+        return None
+    row = (
+        await db.execute(_serving_select().where(PublicMcpEndpoint.public_id == public_id))
+    ).first()
+    if row is None:
+        logger.debug("public_mcp_not_published", public_id=public_id)
+        return None
+    return _serving_endpoint(row)
+
+
+async def load_serving_endpoint_for_alias(
+    db: AsyncSession, hostname: str
+) -> ServingEndpoint | None:
+    """Return the endpoint a verified custom domain serves, or ``None`` (#2809).
+
+    The same SELECT as ``load_serving_endpoint`` joined to the domain row of
+    the same endpoint and workspace, which must be ``active`` with its lease
+    (``serve_until``) still ahead of the database clock. The lease predicate
+    is the same under both authority settings. One query, no cache; the host
+    name is never logged.
+
+    Args:
+        db: Session.
+        hostname: The normalised, claimable host name of the request.
+
+    Returns:
+        The endpoint when both switches are on and the alias is served; the
+        same ``ServingEndpoint`` the fixed address loads.
+    """
+    if not public_endpoints_enabled() or not public_domains_enabled():
+        return None
+    statement = (
+        _serving_select()
+        .join(
+            PublicMcpDomain,
+            (PublicMcpDomain.endpoint_id == PublicMcpEndpoint.id)
+            & (PublicMcpDomain.workspace_id == PublicMcpEndpoint.workspace_id),
+        )
+        .where(
+            PublicMcpDomain.hostname == hostname,
+            PublicMcpDomain.state == "active",
+            PublicMcpDomain.serve_until > _DB_NOW,
+        )
+    )
+    row = (await db.execute(statement)).first()
+    if row is None:
+        logger.debug("public_mcp_alias_not_served")
+        return None
+    return _serving_endpoint(row)
 
 
 async def serving_paused(db: AsyncSession, endpoint: ServingEndpoint) -> bool:
