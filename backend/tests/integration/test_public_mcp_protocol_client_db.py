@@ -165,3 +165,145 @@ async def test_sdk_client_initializes_lists_and_calls(published, monkeypatch) ->
             denied = await session.call_tool("remember", {"summary": "x"})
             assert denied.is_error
             assert json.loads(denied.content[0].text)["error"] == "unknown_tool"
+
+
+MODERN = "2026-07-28"
+
+
+def _modern_call(name: str, request_id: int) -> tuple[dict, dict[str, str]]:
+    body = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": {},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MODERN,
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+        },
+    }
+    headers = {
+        "content-type": "application/json",
+        "accept": "application/json, text/event-stream",
+        "mcp-protocol-version": MODERN,
+        "mcp-method": "tools/call",
+        "mcp-name": name,
+    }
+    return body, headers
+
+
+async def test_usage_budget_is_shared_by_both_eras_and_every_endpoint(
+    published, monkeypatch
+) -> None:
+    """#2805: limit 3 — the SDK (session era), a stateless retry with the same
+    JSON-RPC id (counted twice), then every endpoint of the workspace refuses,
+    while listing keeps answering."""
+    from mcp.client.session import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    from sqlalchemy import select, text
+
+    import db.base as db_base
+    from api.main import app
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "mcp_public_endpoints_enabled", True)
+    monkeypatch.setattr(settings, "mcp_public_usage_budget_enabled", True)
+    monkeypatch.setattr(settings, "mcp_public_usage_budget_calls", 3)
+    factory = published["factory"]
+    monkeypatch.setattr(db_base, "async_session_factory", factory)
+
+    async with factory() as s:
+        endpoint = await s.scalar(
+            select(PublicMcpEndpoint).where(PublicMcpEndpoint.public_id == published["public_id"])
+        )
+        ws_id = endpoint.workspace_id
+        slug = f"second-{uuid4().hex[:6]}"
+        resource = Resource(workspace_id=ws_id, resource_id=slug, created_by=endpoint.created_by)
+        ctx = Context(
+            id=uuid4(),
+            workspace_id=ws_id,
+            name=slug,
+            created_by=endpoint.created_by,
+            is_private=False,
+            is_public=True,
+            resource_id=slug,
+        )
+        s.add_all([resource, ctx])
+        await s.flush()
+        second = PublicMcpEndpoint(
+            workspace_id=ws_id,
+            context_id=ctx.id,
+            resource_pk=resource.id,
+            resource_id=slug,
+            public_name="Second dataset",
+            created_by=endpoint.created_by,
+        )
+        s.add(second)
+        await s.commit()
+        second_id = second.public_id
+
+    async def _db() -> AsyncIterator[AsyncSession]:
+        async with factory() as s:
+            yield s
+
+    counts: dict[str, int] = {}
+
+    async def incr(key: str, amount: int, ttl: int | None = None) -> int:
+        counts[key] = counts.get(key, 0) + amount
+        return counts[key]
+
+    async def used() -> int:
+        async with factory() as s:
+            return (
+                await s.execute(
+                    text("SELECT calls_used FROM public_usage_budgets WHERE workspace_id = :ws"),
+                    {"ws": ws_id},
+                )
+            ).scalar_one()
+
+    url = f"http://testserver/mcp/public/{published['public_id']}"
+    with (
+        patch("db.base.get_db", new=_db),
+        patch("mcp_server.public.limits.incrby_counter", new=incr),
+    ):
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url="http://testserver"
+        ) as http_client:
+            async with (
+                streamable_http_client(url, http_client=http_client) as streams,
+                ClientSession(streams[0], streams[1]) as session,
+            ):
+                await session.initialize()
+                info = await session.call_tool("get_context_info", {})
+                assert not info.is_error
+                assert await used() == 1
+
+                body, headers = _modern_call("get_context_info", 42)
+                for expected in (2, 3):
+                    response = await http_client.post(url, json=body, headers=headers)
+                    assert response.status_code == 200
+                    assert "isError" not in response.json()["result"]
+                    assert await used() == expected
+
+                refused = await session.call_tool("get_context_info", {})
+                assert refused.is_error
+                payload = json.loads(refused.content[0].text)
+                assert payload["error"] == "usage_budget_exhausted"
+                assert 60 <= payload["retry_after_seconds"] <= 3600
+                assert set(payload) == {"status", "error", "message", "retry_after_seconds"}
+                listed = await session.list_tools()
+                assert len(listed.tools) == 5
+
+            response = await http_client.post(url, json=body, headers=headers)
+            text_body = response.json()["result"]["content"][0]["text"]
+            assert json.loads(text_body)["error"] == "usage_budget_exhausted"
+
+            second_url = f"http://testserver/mcp/public/{second_id}"
+            response = await http_client.post(second_url, json=body, headers=headers)
+            assert response.status_code == 200
+            text_body = response.json()["result"]["content"][0]["text"]
+            assert json.loads(text_body)["error"] == "usage_budget_exhausted"
+
+    assert await used() == 3

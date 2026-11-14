@@ -1304,6 +1304,24 @@ class Settings(BaseSettings):
         ge=1,
         description="tools/call per public MCP session per minute",
     )
+    # #2805: the workspace-wide seven-day budget of anonymous public calls
+    # (docs/public-usage-budget.md). Off by default; on, every admitted public
+    # tools/call (and an anonymous REST search of a context with a live
+    # publication) is charged to the workspace's stored budget period
+    # before it runs, and refused once the period's calls are used. The count
+    # is never 0 ("unlimited" is the switch being off).
+    mcp_public_usage_budget_enabled: bool = Field(
+        default=False,
+        description="Enforce the workspace-wide seven-day budget of anonymous public calls",
+    )
+    mcp_public_usage_budget_calls: int = Field(
+        default=25000,
+        ge=1,
+        le=1_000_000_000,
+        description=(
+            "Public tools/call per workspace per seven-day period, all its public endpoints together"
+        ),
+    )
     # #2678: durable usage events of the public endpoint (one row per completed
     # tools/call). A per-process bounded queue feeds a background writer, so a
     # public call never waits on the database; lost events are recorded as gap

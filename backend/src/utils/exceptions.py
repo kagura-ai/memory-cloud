@@ -999,6 +999,44 @@ class RateLimitError(MemoryCloudException):
         return int(retry) if retry is not None else None
 
 
+class PublicUsageBudgetExhaustedError(MemoryCloudException):
+    """An anonymous public search met the workspace's exhausted usage budget (429).
+
+    #2805: no count, limit, plan, workspace or absolute time — the caller is
+    anonymous. ``retry_after`` is the capped hint (60–3600 seconds).
+    """
+
+    log_level = "warning"
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(
+            "This public endpoint has used its call allowance for the current period. "
+            "Try again later.",
+            status_code=429,
+            error_code="usage_budget_exhausted",
+            retry_after=retry_after,
+        )
+        self.response_headers = {"Retry-After": str(retry_after)}
+
+
+class PublicUsageBudgetUnavailableError(MemoryCloudException):
+    """The public usage budget could not be charged, so the search is refused (503).
+
+    #2805: fail closed — a store failure or an unreadable per-minute bucket on
+    the charged path never serves the request uncounted.
+    """
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The data is briefly unavailable. Try again shortly.",
+            status_code=503,
+            error_code="temporarily_unavailable",
+        )
+        self.response_headers = {"Retry-After": "60"}
+
+
 class QuotaExceededError(MemoryCloudException):
     """Quota exceeded (429 by default).
 

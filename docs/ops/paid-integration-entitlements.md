@@ -70,7 +70,9 @@ delivery returns the **current** state, never the older submitted state.
 - Omitted services lose their license on a newer snapshot. To end only one
   service, include every unrelated license unchanged. `services: []` removes
   all service rights. `max_access: null` removes paid Max authority. These
-  operations never delete content, resources or public endpoint publications.
+  operations never delete content, resources or public endpoint publications,
+  and never reset or refill the workspace's public usage budget (#2805): its
+  period and count are workspace state, independent of entitlements.
 
 ## Publisher responsibilities and rollout
 

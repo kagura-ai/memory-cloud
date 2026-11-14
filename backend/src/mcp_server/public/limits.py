@@ -1,11 +1,14 @@
 """Fixed caps and Redis minute buckets of the public MCP endpoint (#2675).
 
 The caps are constants, not settings: they bound the work one anonymous
-request can cause. The buckets are the only rate limit on this path (the
+request can cause. The buckets are the per-minute limit on this path (the
 workspace's daily MCP quota belongs to the authenticated dispatcher, which
 anonymous calls never reach), keyed by the endpoint id and, on the session
 era, the server-minted session id — never by IP or anything else a client
-sends. A session is a client connection, not a person.
+sends. A session is a client connection, not a person. Since #2805 they are
+not the only limit: a call they admit is then charged to the workspace-wide
+seven-day budget (``services.public_usage_budget``, when the operator switch
+is on), which a call they refuse never reaches.
 
 Redis unreadable: ``tools/call`` is refused (every public ``recall`` costs an
 embedding call, so an outage must not mean "unlimited"); the control methods

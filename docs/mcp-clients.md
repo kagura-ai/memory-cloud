@@ -451,6 +451,7 @@ The endpoint lists exactly five read-only tools, all bound to the one published 
 - `?tools=recall,reference` on the URL lists and allows fewer of the five; nothing on the URL adds a tool (`profile=`, `add_tools=` are ignored). Any other tool name answers `unknown_tool`.
 - A credential sent to this URL is ignored — the answers are the same public ones.
 - Limits are per endpoint and per session (a client connection, not a person): by default 120 tool calls a minute for all visitors together and 30 per session; over the limit a call returns `rate_limit_exceeded` with `retry_after_seconds`. No IP address is used or stored.
+- The operator can also bound all public endpoints of a workspace together over seven days ([Public usage budget](public-usage-budget.md)). When that allowance is used, tool calls return `usage_budget_exhausted` with `retry_after_seconds` (at most 3600; retry then) until the period ends; `initialize`, `tools/list`, `ping` and `server/discover` keep answering, and the data and the URL stay.
 - When the owner unpublishes, or the data stops being public, the URL answers `404` from the next request on, also for clients that are already connected. A client may show a cached tool list for up to 5 minutes (`ttlMs`), but every call is refused.
 
 ## Other MCP Clients / REST API

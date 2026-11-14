@@ -30,7 +30,9 @@ from models.public_mcp import (
     PUBLIC_USAGE_GUIDE_MAX_CHARS,
     PublicMcpEndpoint,
 )
+from models.public_usage_budget import PublicUsageBudgetStatus
 from services.operation_history_writer import record_operation
+from services.public_usage_budget import read_public_usage_budget
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -96,6 +98,14 @@ class PublicMcpEndpointResponse(TZAwareBaseModel):
             "and bound to the resource"
         ),
     )
+    usage_budget: PublicUsageBudgetStatus = Field(
+        ...,
+        description=(
+            "The workspace-wide seven-day budget of anonymous public calls "
+            "(MCP_PUBLIC_USAGE_BUDGET_ENABLED), shared by all the workspace's public "
+            "endpoints: the same numbers on every endpoint. Not part of `serving`."
+        ),
+    )
 
 
 async def _live_endpoint(
@@ -114,6 +124,9 @@ async def _live_endpoint(
 
 async def _response(db: AsyncSession, row: PublicMcpEndpoint) -> PublicMcpEndpointResponse:
     serving = await load_serving_endpoint(db, row.public_id) is not None
+    # #2805: the row's workspace, which ``WorkspaceOwner`` scoped to the
+    # caller; never a workspace id from the request.
+    usage_budget = await read_public_usage_budget(db, row.workspace_id)
     return PublicMcpEndpointResponse(
         public_id=row.public_id,
         endpoint_path=f"{PUBLIC_MCP_PATH_PREFIX}{row.public_id}",
@@ -125,6 +138,7 @@ async def _response(db: AsyncSession, row: PublicMcpEndpoint) -> PublicMcpEndpoi
         created_at=row.created_at,
         updated_at=row.updated_at,
         serving=serving,
+        usage_budget=usage_budget,
     )
 
 

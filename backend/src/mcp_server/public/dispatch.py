@@ -10,7 +10,13 @@ One pipeline for both protocol eras, in this order:
    (``version`` on ``reference`` gets its own message);
 4. the per-minute buckets (fail closed when Redis cannot be read);
 5. ``context_id``, when given, must be the bound context;
-6. the public handler, under the tool's timeout.
+6. the workspace-wide usage budget (#2805), when the operator switch is on:
+   one unit is charged to ``endpoint.workspace_id`` and committed on a
+   session of its own, or the call is refused (``usage_budget_exhausted``;
+   ``temporarily_unavailable`` when the charge fails — fail closed). No
+   database session is open at this point;
+7. the public handler, under the tool's timeout. A call that reached it stays
+   counted whatever the handler does (no refund).
 
 ``record_public_call`` runs once for every call that reaches step 1,
 whatever the outcome — ``cancelled`` (recorded, then the cancellation goes
@@ -38,6 +44,11 @@ from mcp_server.public.telemetry import PublicCallRecord, record_public_call
 from mcp_server.public.tools import PUBLIC_HANDLERS, PublicArgumentError, PublicToolResult
 from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import _error_response, execute_with_timeout
+from services.public_usage_budget import (
+    PublicUsageBudgetUnavailable,
+    charge_public_usage,
+    public_usage_budget_limit,
+)
 from utils.datetime import utcnow
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
@@ -47,6 +58,9 @@ logger = get_logger(__name__)
 _NAME_CHARS = 64
 
 UNAVAILABLE_MESSAGE = "The public endpoint is briefly unavailable. Try again shortly."
+BUDGET_EXHAUSTED_MESSAGE = (
+    "This public endpoint has used its call allowance for the current period. Try again later."
+)
 
 
 def _unknown_tool(name: object) -> list[TextContent]:
@@ -59,6 +73,16 @@ def _unavailable() -> list[TextContent]:
         "temporarily_unavailable",
         UNAVAILABLE_MESSAGE,
         retry_after_seconds=PUBLIC_RETRY_AFTER_SECONDS,
+    )
+
+
+def _budget_exhausted(retry_after_seconds: int | None) -> list[TextContent]:
+    # No count, limit, remaining, plan, workspace or absolute time: the
+    # caller is anonymous. The hint is already capped by the budget module.
+    return _error_response(
+        "usage_budget_exhausted",
+        BUDGET_EXHAUSTED_MESSAGE,
+        retry_after_seconds=retry_after_seconds or PUBLIC_RETRY_AFTER_SECONDS,
     )
 
 
@@ -127,6 +151,24 @@ async def _run(
             ),
             "denied",
         )
+    # #2805: charged after the minute buckets and the context check, before
+    # the handler; keyed by the server-loaded endpoint's workspace only. The
+    # switch is read once and decided once.
+    limit = public_usage_budget_limit()
+    if limit is not None:
+        try:
+            charge = await charge_public_usage(endpoint.workspace_id, limit=limit)
+        except PublicUsageBudgetUnavailable:
+            return PublicToolResult(_unavailable(), "error", error_code="usage_budget_unavailable")
+        except Exception as exc:  # noqa: BLE001 - fail closed: never run uncounted
+            logger.warning(
+                "public_usage_budget_unavailable",
+                workspace_id=str(endpoint.workspace_id),
+                error_type=type(exc).__name__,
+            )
+            return PublicToolResult(_unavailable(), "error", error_code="usage_budget_unavailable")
+        if not charge.admitted:
+            return PublicToolResult(_budget_exhausted(charge.retry_after_seconds), "rate_limited")
     handler = PUBLIC_HANDLERS[name]
     try:
         return await execute_with_timeout(handler(endpoint, arguments), operation_name=name)
