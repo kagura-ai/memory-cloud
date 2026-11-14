@@ -95,7 +95,6 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 __all__ = [
-    "CLI_ACTOR",
     "SYSTEM_ACTOR",
     "AppliedCheck",
     "AuditAction",
@@ -451,8 +450,9 @@ class DomainActor:
     email: str
 
 
+# The maintenance job. ``AuditLog.user_email`` is NOT NULL: the actor string
+# fills both columns.
 SYSTEM_ACTOR = DomainActor("system:public-mcp-domains", "system:public-mcp-domains")
-CLI_ACTOR = DomainActor("operator:cli", "operator:cli")
 
 
 async def owner_actor(db: AsyncSession, user_id: str) -> DomainActor:
