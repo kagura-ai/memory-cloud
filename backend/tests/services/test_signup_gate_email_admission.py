@@ -20,12 +20,14 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from auth.admission import AdmissionRecord
 from config.settings import get_settings
 from models.auth import AuditLog
 from models.signup_gate import SignupAllowlistEntry
 from services.signup_gate_service import SignupGateService
 
 TOKEN_HASH = "d" * 64
+INVITE_ID = uuid4()
 
 
 def _svc(*, first_user: bool = False) -> SignupGateService:
@@ -40,7 +42,7 @@ def _svc(*, first_user: bool = False) -> SignupGateService:
     db.begin_nested = AsyncMock(return_value=savepoint)
     svc = SignupGateService(db)
     svc._is_first_user = AsyncMock(return_value=first_user)
-    svc._is_allowlisted = AsyncMock(return_value=True)
+    svc._allowlist_admission = AsyncMock(return_value=AdmissionRecord("allowlist"))
     svc._promote_pending_google_entry = AsyncMock(return_value=True)
     svc._record_blocked_signup = AsyncMock()
     return svc
@@ -114,7 +116,7 @@ class TestGateOff:
         svc = _svc()
         assert await _admissible(svc, enabled=False, invitation=False) is None
         # The provider-identity grants never admit an email identity.
-        svc._is_allowlisted.assert_not_awaited()
+        svc._allowlist_admission.assert_not_awaited()
         svc._promote_pending_google_entry.assert_not_awaited()
         svc._record_blocked_signup.assert_not_awaited()
 
@@ -206,15 +208,30 @@ async def _admit(
     flush_error=False,
     invitation=False,
     gate_enabled=True,
+    inviter_gone=False,
+    calls: list[str] | None = None,
 ):
     if flush_error:
         svc.db.flush = AsyncMock(side_effect=IntegrityError("INSERT", {}, Exception("dup")))
+    order = calls if calls is not None else []
+    savepoint = svc.db.begin_nested.return_value
+
+    async def _lock(db, inviter_user_id):
+        order.append(f"lock:{inviter_user_id}")
+        return None if inviter_gone else ("user", inviter_user_id)
+
+    async def _begin_nested():
+        order.append("begin_nested")
+        return savepoint
+
+    svc.db.begin_nested = AsyncMock(side_effect=_begin_nested, return_value=savepoint)
     with (
         _invitations(invitation),
         patch("services.signup_gate_service.BetaInviteService") as invites_cls,
+        patch("services.signup_gate_service.lock_invite_issuer", new=_lock),
     ):
         invites_cls.return_value.find_redeemable = AsyncMock(
-            return_value=SimpleNamespace(id=uuid4(), inviter_user_id="inviter")
+            return_value=SimpleNamespace(id=INVITE_ID, inviter_user_id="inviter")
             if redeemable
             else None
         )
@@ -234,7 +251,13 @@ class TestConsumingRedemption:
     @pytest.mark.asyncio
     async def test_success_stages_row_claim_and_audit_and_never_commits(self, settings) -> None:
         svc = _svc()
-        assert await _admit(svc) == "beta_invite"
+        calls: list[str] = []
+        # #2803: the admission names the invite and its inviter.
+        assert await _admit(svc, calls=calls) == AdmissionRecord(
+            "beta_invite", INVITE_ID, "inviter"
+        )
+        # The inviter's row is locked before the claim's savepoint (erasure's order).
+        assert calls == ["lock:inviter", "begin_nested"]
         added = [c.args[0] for c in svc.db.add.call_args_list]
         entry = next(o for o in added if isinstance(o, SignupAllowlistEntry))
         assert (entry.provider, entry.subject_id, entry.source) == (
@@ -251,6 +274,15 @@ class TestConsumingRedemption:
         svc.db.commit.assert_not_awaited()
         svc.db.rollback.assert_not_awaited()
         svc.db.begin_nested.return_value.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_inviter_gone_before_the_claim_refuses_and_writes_nothing(self, settings) -> None:
+        """#2803: the invite is cascading away with its inviter's account."""
+        svc = _svc()
+        calls: list[str] = []
+        assert await _admit(svc, inviter_gone=True, calls=calls) is None
+        assert calls == ["lock:inviter"]
+        svc.db.add.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_lost_race_rolls_back_the_savepoint_only(self, settings) -> None:
@@ -283,8 +315,8 @@ class TestInvitationAdmissionRecord:
     @pytest.mark.parametrize("gate_enabled", [True, False])
     async def test_stages_the_record_and_never_commits(self, settings, gate_enabled) -> None:
         svc = _svc()
-        assert (
-            await _admit(svc, invitation=True, gate_enabled=gate_enabled) == "workspace_invitation"
+        assert await _admit(svc, invitation=True, gate_enabled=gate_enabled) == AdmissionRecord(
+            "workspace_invitation"
         )
         added = [c.args[0] for c in svc.db.add.call_args_list]
         (audit,) = added

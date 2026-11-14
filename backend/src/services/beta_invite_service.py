@@ -38,6 +38,7 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, Select, Update, and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.admission import InviteIssuer
 from auth.roles import Role
 from auth.system_admin_mode import role_grants_system_admin
 from config.settings import get_settings
@@ -256,6 +257,45 @@ class MintedBetaInvite:
     url: str
 
 
+def is_batch_admin_role(role: str | None) -> bool:
+    """Is ``role`` the ``users.role`` of an admin, in every ``SYSTEM_ADMIN_MODE``?
+
+    The file's one comparison with the admin role: CLI batch minting
+    (``_require_batch_admin``) and the issuer of an invite (#2803,
+    :func:`lock_invite_issuer`) read the raw row, never
+    ``role_grants_system_admin`` (False outside ``session``).
+    """
+    return role == Role.ADMIN
+
+
+async def lock_invite_issuer(
+    db: AsyncSession, inviter_user_id: str
+) -> tuple[InviteIssuer, str | None] | None:
+    """Who issued an invite, read under the inviter's row lock (#2803).
+
+    ``SELECT role ... FOR KEY SHARE`` on the inviter's ``users`` row, held to
+    the end of the transaction: the row cannot be deleted meanwhile, so the
+    ``admitted_by_user_id`` foreign key written in the same transaction always
+    finds it. Lock order: this row before any ``beta_invites`` row lock, the
+    order erasure takes (the inviter's row, then the cascade into their
+    invites).
+
+    Returns:
+        ``None`` when the inviter's account is gone; ``("admin", None)`` when
+        its ``users.role`` is admin (a CLI batch is never attributed to a
+        person); ``("user", inviter_user_id)`` otherwise. The role is read
+        now, when the account is created, in every ``SYSTEM_ADMIN_MODE``.
+    """
+    role = await db.scalar(
+        select(User.role).where(User.user_id == inviter_user_id).with_for_update(key_share=True)
+    )
+    if role is None:
+        return None
+    if is_batch_admin_role(role):
+        return ("admin", None)
+    return ("user", inviter_user_id)
+
+
 class BetaInviteService:
     """Mint, list, revoke and preview invite links; claim one at redemption."""
 
@@ -432,7 +472,7 @@ class BetaInviteService:
             raise
 
     async def _require_batch_admin(self, user_id: str) -> None:
-        if await self._lock_inviter_role(user_id) != Role.ADMIN:
+        if not is_batch_admin_role(await self._lock_inviter_role(user_id)):
             raise PermissionError("Batch operations require a system admin")
 
     async def revoke_unused_by_label(
@@ -749,6 +789,25 @@ class BetaInviteService:
                 BetaInvite.expires_at > now,
             )
         )
+
+    async def redeemed_with_entry(
+        self, allowlist_entry_id: uuid.UUID
+    ) -> tuple[uuid.UUID, str] | None:
+        """The ``(id, inviter_user_id)`` of the invite redeemed into this allowlist row.
+
+        #2803: how a returning invitee was admitted. Columns only — never the
+        label. None when the invite is gone (its inviter's account was
+        deleted) or never pointed at this row.
+        """
+        row = (
+            await self.db.execute(
+                select(BetaInvite.id, BetaInvite.inviter_user_id)
+                .where(BetaInvite.redeemed_allowlist_entry_id == allowlist_entry_id)
+                .order_by(BetaInvite.redeemed_at, BetaInvite.id)
+                .limit(1)
+            )
+        ).first()
+        return (row.id, row.inviter_user_id) if row is not None else None
 
     async def mark_redeemed(
         self, *, token_hash: str, allowlist_entry_id: uuid.UUID, now: datetime

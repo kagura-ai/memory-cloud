@@ -359,6 +359,8 @@ def create_admin(skip_mcp_json: bool = False):
             totp_enabled=totp_enabled,
             is_initial_admin=(admin_count == 0),
             last_login_at=utcnow(),
+            # #2803: a local admin created from the shell.
+            admitted_via="admin_cli",
         )
         recovery_codes = []
         if totp_enabled:

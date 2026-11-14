@@ -9,7 +9,7 @@ patched so each test pins one decision. What is pinned here:
   consume a token;
 - ``ENABLE_BETA_INVITES=false`` makes a presented token completely inert;
 - a redemption that loses the single-use race rolls back and blocks;
-- ``_is_allowlisted`` honours ``source='beta_invite'`` under ``mode='manual'``.
+- ``_allowlist_admission`` honours ``source='beta_invite'`` under ``mode='manual'``.
 
 The real transaction behaviour (allowlist row + claim + audit in one commit, the
 double-redeem race) is in ``tests/integration/test_beta_invite_signup_gate_db.py``.
@@ -20,17 +20,26 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
 
+from auth.admission import AdmissionRecord
 from models.auth import AuditLog
 from models.signup_gate import SignupAllowlistEntry
 from services.signup_gate_service import SignupGateService, check_signup_access
 
 TOKEN_HASH = "c" * 64
+
+
+# #2803: a redemption answers how the account is admitted.
+REDEEMED = AdmissionRecord(
+    "beta_invite",
+    beta_invite_id=UUID("00000000-0000-4000-8000-000000002803"),
+    inviter_user_id="inviter-sub",
+)
 
 
 def _svc() -> SignupGateService:
@@ -51,7 +60,7 @@ def _closed_gate_new_user(svc: SignupGateService) -> None:
     svc._load_config = AsyncMock(return_value=_config(enabled=True))
     svc._is_existing_user = AsyncMock(return_value=False)
     svc._is_first_user = AsyncMock(return_value=False)
-    svc._is_allowlisted = AsyncMock(return_value=False)
+    svc._allowlist_admission = AsyncMock(return_value=None)
     svc._promote_pending_google_entry = AsyncMock(return_value=False)
     svc._admit_by_workspace_invitation = AsyncMock(return_value=False)
     svc._record_blocked_signup = AsyncMock()
@@ -69,9 +78,9 @@ class TestInvitePathPlacement:
     async def test_valid_invite_passes_a_new_user_through_the_closed_gate(self):
         svc = _svc()
         _closed_gate_new_user(svc)
-        svc._redeem_beta_invite = AsyncMock(return_value=True)
+        svc._redeem_beta_invite = AsyncMock(return_value=REDEEMED)
 
-        result = await svc.check_access(
+        result = await svc.decide(
             provider="github",
             oauth_sub="1234",
             email="new@example.test",
@@ -81,7 +90,8 @@ class TestInvitePathPlacement:
             beta_invite_token_hash=TOKEN_HASH,
         )
 
-        assert result is None
+        # #2803: the redemption's admission (invite id and inviter) is the answer.
+        assert result is REDEEMED
         svc._redeem_beta_invite.assert_awaited_once_with(
             token_hash=TOKEN_HASH,
             provider="github",
@@ -98,7 +108,7 @@ class TestInvitePathPlacement:
         """Expired / revoked / redeemed / unknown all surface as redeem=False."""
         svc = _svc()
         _closed_gate_new_user(svc)
-        svc._redeem_beta_invite = AsyncMock(return_value=False)
+        svc._redeem_beta_invite = AsyncMock(return_value=None)
 
         result = await svc.check_access(
             provider="google",
@@ -118,7 +128,7 @@ class TestInvitePathPlacement:
         [
             "_is_existing_user",
             "_is_first_user",
-            "_is_allowlisted",
+            "_allowlist_admission",
             "_promote_pending_google_entry",
             "_admit_by_workspace_invitation",
         ],
@@ -127,8 +137,11 @@ class TestInvitePathPlacement:
         """An existing user logging in with ``invite=`` must not burn the link."""
         svc = _svc()
         _closed_gate_new_user(svc)
-        setattr(svc, admitting_lookup, AsyncMock(return_value=True))
-        svc._redeem_beta_invite = AsyncMock(return_value=True)
+        admits = (
+            AdmissionRecord("allowlist") if admitting_lookup == "_allowlist_admission" else True
+        )
+        setattr(svc, admitting_lookup, AsyncMock(return_value=admits))
+        svc._redeem_beta_invite = AsyncMock(return_value=REDEEMED)
 
         result = await svc.check_access(
             provider="google",
@@ -147,15 +160,16 @@ class TestInvitePathPlacement:
     @pytest.mark.parametrize("legacy_blocks", [False, True])
     async def test_disabled_gate_never_consumes_the_token(self, legacy_blocks):
         """Gate off = the legacy env gate owns the decision (open registration
-        when ``ALLOW_REGISTRATION=true``). The token is left alone either way."""
+        when ``ALLOW_REGISTRATION=true``). The token is left alone either way,
+        and the admission is open registration, never the invite (#2803)."""
         svc = _svc()
         svc._load_config = AsyncMock(return_value=_config(enabled=False))
-        svc._is_allowlisted = AsyncMock(return_value=False)
+        svc._allowlist_admission = AsyncMock(return_value=None)
         legacy = RedirectResponse("/login?error=registration_disabled", status_code=303)
-        svc._legacy_check = AsyncMock(return_value=legacy if legacy_blocks else None)
-        svc._redeem_beta_invite = AsyncMock(return_value=True)
+        svc._legacy_check = AsyncMock(return_value=legacy if legacy_blocks else "open_registration")
+        svc._redeem_beta_invite = AsyncMock(return_value=REDEEMED)
 
-        result = await svc.check_access(
+        result = await svc.decide(
             provider="github",
             oauth_sub="1234",
             email="new@example.test",
@@ -163,7 +177,10 @@ class TestInvitePathPlacement:
             beta_invite_token_hash=TOKEN_HASH,
         )
 
-        assert result is (legacy if legacy_blocks else None)
+        if legacy_blocks:
+            assert result is legacy
+        else:
+            assert result == AdmissionRecord("open_registration")
         svc._redeem_beta_invite.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -174,7 +191,7 @@ class TestInvitePathPlacement:
         (``ALLOW_REGISTRATION=false`` is the closed-beta default)."""
         svc = _svc()
         _closed_gate_new_user(svc)
-        svc._redeem_beta_invite = AsyncMock(return_value=True)
+        svc._redeem_beta_invite = AsyncMock(return_value=REDEEMED)
         svc._legacy_check = AsyncMock(
             return_value=RedirectResponse("/login?error=registration_disabled", status_code=303)
         )
@@ -194,18 +211,18 @@ class TestInvitePathPlacement:
     async def test_wrapper_forwards_the_hash(self):
         captured = {}
 
-        async def fake_check_access(self, **kwargs):
+        async def fake_decide(self, **kwargs):
             captured.update(kwargs)
-            return None
+            return REDEEMED
 
         async def fake_get_db():
             yield MagicMock()
 
         with (
             patch("services.signup_gate_service.get_db", fake_get_db),
-            patch.object(SignupGateService, "check_access", fake_check_access),
+            patch.object(SignupGateService, "decide", fake_decide),
         ):
-            await check_signup_access(
+            answer = await check_signup_access(
                 provider="github",
                 oauth_sub="1234",
                 email="new@example.test",
@@ -213,6 +230,8 @@ class TestInvitePathPlacement:
             )
 
         assert captured["beta_invite_token_hash"] == TOKEN_HASH
+        # #2803: the wrapper hands back the gate's admission as is.
+        assert answer is REDEEMED
 
 
 def _redeemable_invite() -> SimpleNamespace:
@@ -247,7 +266,7 @@ class TestRedeem:
         svc = _svc()
 
         with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
-            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is False
+            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is None
 
         invites_cls.assert_not_called()
         svc.db.add.assert_not_called()
@@ -257,7 +276,7 @@ class TestRedeem:
         svc = _svc()
 
         with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
-            assert await svc._redeem_beta_invite(**_redeem_kwargs(token_hash=None)) is False
+            assert await svc._redeem_beta_invite(**_redeem_kwargs(token_hash=None)) is None
 
         invites_cls.assert_not_called()
 
@@ -267,7 +286,7 @@ class TestRedeem:
 
         with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
             invites_cls.return_value.find_redeemable = AsyncMock(return_value=None)
-            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is False
+            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is None
 
         svc.db.add.assert_not_called()
         svc.db.commit.assert_not_awaited()
@@ -282,7 +301,10 @@ class TestRedeem:
         with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
             invites_cls.return_value.find_redeemable = AsyncMock(return_value=invite)
             invites_cls.return_value.mark_redeemed = AsyncMock(return_value=True)
-            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is True
+            # #2803: the admission names the invite and its inviter.
+            assert await svc._redeem_beta_invite(**_redeem_kwargs()) == AdmissionRecord(
+                "beta_invite", invite.id, "inviter-1"
+            )
             claim = invites_cls.return_value.mark_redeemed.await_args.kwargs
 
         added = [c.args[0] for c in svc.db.add.call_args_list]
@@ -340,7 +362,7 @@ class TestRedeem:
         with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
             invites_cls.return_value.find_redeemable = AsyncMock(return_value=_redeemable_invite())
             invites_cls.return_value.mark_redeemed = AsyncMock(return_value=False)
-            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is False
+            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is None
 
         svc.db.rollback.assert_awaited_once()
         svc.db.commit.assert_not_awaited()
@@ -352,16 +374,17 @@ class TestRedeem:
         Roll back, then answer from the allowlist — the winner's row IS the grant."""
         svc = _svc()
         svc.db.flush = AsyncMock(side_effect=IntegrityError("INSERT", {}, Exception("dup")))
-        svc._is_allowlisted = AsyncMock(return_value=True)
+        svc._allowlist_admission = AsyncMock(return_value=REDEEMED)
 
         with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
             invites_cls.return_value.find_redeemable = AsyncMock(return_value=_redeemable_invite())
             invites_cls.return_value.mark_redeemed = AsyncMock(return_value=True)
-            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is True
+            # #2803: the answer is the winning row's admission (its invite).
+            assert await svc._redeem_beta_invite(**_redeem_kwargs()) is REDEEMED
             invites_cls.return_value.mark_redeemed.assert_not_awaited()
 
         svc.db.rollback.assert_awaited_once()
-        svc._is_allowlisted.assert_awaited_once_with("google", "108276939729829363", "manual")
+        svc._allowlist_admission.assert_awaited_once_with("google", "108276939729829363", "manual")
 
 
 class TestIsAllowlistedHonoursBetaInvite:
@@ -380,7 +403,7 @@ class TestIsAllowlistedHonoursBetaInvite:
             return result
 
         svc.db.execute = fake_execute
-        await svc._is_allowlisted("github", "1234", mode)
+        await svc._allowlist_admission("github", "1234", mode)
         return captured["sql"]
 
     @pytest.mark.asyncio
@@ -392,5 +415,61 @@ class TestIsAllowlistedHonoursBetaInvite:
     @pytest.mark.asyncio
     async def test_sponsors_mode_still_excludes_beta_invite_rows(self):
         sql = await self._sql_for("github_sponsors")
-        assert "signup_allowlist.source = 'github_sponsors'" in sql
-        assert "beta_invite" not in sql
+        where = sql.split("ORDER BY")[0]
+        assert "signup_allowlist.source = 'github_sponsors'" in where
+        assert "beta_invite" not in where
+
+    @pytest.mark.asyncio
+    async def test_a_beta_invite_row_is_preferred(self):
+        """#2803: the identity's beta_invite row decides the admission first."""
+        sql = await self._sql_for("manual")
+        order = sql.split("ORDER BY")[1]
+        assert order.strip().startswith("signup_allowlist.source = 'beta_invite' DESC")
+
+
+class TestAllowlistAdmission:
+    """#2803: the matched row, not the gate step, says how the account is admitted."""
+
+    @staticmethod
+    def _svc_matching(row) -> SignupGateService:
+        svc = _svc()
+        result = MagicMock()
+        result.first = MagicMock(return_value=row)
+        svc.db.execute = AsyncMock(return_value=result)
+        return svc
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["manual", "github_sponsors"])
+    async def test_any_other_row_is_allowlist(self, source):
+        svc = self._svc_matching(SimpleNamespace(id=uuid4(), source=source))
+
+        with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
+            assert await svc._allowlist_admission("github", "1", "both") == AdmissionRecord(
+                "allowlist"
+            )
+        invites_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_beta_invite_row_names_its_invite(self):
+        entry_id = uuid4()
+        svc = self._svc_matching(SimpleNamespace(id=entry_id, source="beta_invite"))
+        invite_id = uuid4()
+
+        with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
+            invites_cls.return_value.redeemed_with_entry = AsyncMock(
+                return_value=(invite_id, "inviter-1")
+            )
+            answer = await svc._allowlist_admission("google", "1", "manual")
+
+        assert answer == AdmissionRecord("beta_invite", invite_id, "inviter-1")
+        invites_cls.return_value.redeemed_with_entry.assert_awaited_once_with(entry_id)
+
+    @pytest.mark.asyncio
+    async def test_a_beta_invite_row_whose_invite_is_gone(self):
+        svc = self._svc_matching(SimpleNamespace(id=uuid4(), source="beta_invite"))
+
+        with patch("services.signup_gate_service.BetaInviteService") as invites_cls:
+            invites_cls.return_value.redeemed_with_entry = AsyncMock(return_value=None)
+            answer = await svc._allowlist_admission("google", "1", "manual")
+
+        assert answer == AdmissionRecord("beta_invite")

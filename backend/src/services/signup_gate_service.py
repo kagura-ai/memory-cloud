@@ -23,6 +23,12 @@ It writes no grant: the invitation admits while it is pending, and each
 admission is recorded as a ``signup_admitted`` audit row. The same rule holds
 for a pending Google allowlist row (``pending:<email>``), which is promoted
 only for a verified address.
+
+#2803: when the gate admits a sign-up that will create an account, it says how
+(:meth:`SignupGateService.decide` answers an ``AdmissionRecord``); the code that
+creates the row records it once. The record comes from what matched, never from
+which step returned: a ``beta_invite`` allowlist row records the invite it was
+redeemed with (columns only, never the label), any other row ``allowlist``.
 """
 
 import hashlib
@@ -37,6 +43,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.admission import AdmissionRecord, SignupAdmission
 from auth.roles import _OAUTH_CALLBACK_ACTOR, address_holder_clause
 from auth.system_admin_mode import first_user_bootstrap_applies
 from auth.workspace_roles import WorkspaceRole
@@ -44,7 +51,7 @@ from config.settings import get_settings
 from db.base import get_db
 from models.auth import AuditLog, User, WorkspaceInvitation
 from models.signup_gate import SignupAllowlistEntry, SignupGateConfig
-from services.beta_invite_service import BetaInviteService
+from services.beta_invite_service import BetaInviteService, lock_invite_issuer
 from utils.datetime import utcnow
 from utils.github_user import resolve_github_user_id
 from utils.hashing import hmac_sha256_hex
@@ -116,11 +123,11 @@ async def check_signup_access(
     user_agent: str | None = None,
     beta_invite_token_hash: str | None = None,
     email_verified: bool = False,
-) -> RedirectResponse | None:
+) -> RedirectResponse | AdmissionRecord | None:
     """Run the signup gate for an OAuth callback.
 
     Convenience wrapper that opens a DB session, instantiates the service,
-    and delegates to ``check_access``. Keeps OAuth callback handlers free of
+    and delegates to ``decide``. Keeps OAuth callback handlers free of
     the ``async for db in get_db()`` boilerplate and the inline service
     import (which exists to break a circular dependency with auth.py).
 
@@ -150,11 +157,14 @@ async def check_signup_access(
             invitation and no pending row.
 
     Returns:
-        None when signup is allowed, a RedirectResponse when blocked.
+        A RedirectResponse when blocked; an ``AdmissionRecord`` when a new
+        account may be created (how it was admitted, #2803); None for an
+        existing account (a login). The record is truthy: callers test the
+        answer with ``isinstance(answer, RedirectResponse)``, never by truth.
     """
     async for db in get_db():
         gate = SignupGateService(db)
-        return await gate.check_access(
+        return await gate.decide(
             provider=provider,
             oauth_sub=oauth_sub,
             email=email,
@@ -191,6 +201,38 @@ class SignupGateService:
     ) -> RedirectResponse | None:
         """Return None when signup is allowed, RedirectResponse when blocked.
 
+        :meth:`decide` without the admission: same rules, same writes.
+        """
+        answer = await self.decide(
+            provider=provider,
+            oauth_sub=oauth_sub,
+            email=email,
+            username=username,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            beta_invite_token_hash=beta_invite_token_hash,
+            email_verified=email_verified,
+        )
+        return answer if isinstance(answer, RedirectResponse) else None
+
+    async def decide(
+        self,
+        *,
+        provider: SignupGateProvider,
+        oauth_sub: str,
+        email: str,
+        username: str | None,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+        beta_invite_token_hash: str | None = None,
+        email_verified: bool = False,
+    ) -> RedirectResponse | AdmissionRecord | None:
+        """RedirectResponse when blocked, else how a new account would be admitted.
+
+        An ``AdmissionRecord`` (#2803) when a new account may be created;
+        None for an existing account (a login, or the address of an account
+        ``ensure_user`` links to or refuses), which records nothing.
+
         Rules (top-down, applied uniformly across both providers since #655):
         1. ``enabled=false`` → the manual allowlist, a pending Google row
            (verified address only), then the legacy env-based gate (OSS path),
@@ -220,8 +262,9 @@ class SignupGateService:
             # manual path: (provider, subject_id=oauth_sub), source='manual',
             # state='active' (the state filter lives in _is_allowlisted, so a
             # revoked entry never resurfaces here).
-            if await self._is_allowlisted(provider, oauth_sub, "manual"):
-                return None
+            matched = await self._allowlist_admission(provider, oauth_sub, "manual")
+            if matched is not None:
+                return matched
             # Parity with gate-ON: a Google admin can pre-allowlist by email
             # (pending:<email> sentinel) before the user has OAuth'd. Promote
             # that row to the real OIDC sub on first callback so the pre-grant
@@ -233,8 +276,8 @@ class SignupGateService:
                 and email_verified
                 and await self._promote_pending_google_entry(email=email, oauth_sub=oauth_sub)
             ):
-                return None
-            return await self._legacy_check(
+                return AdmissionRecord("allowlist")
+            legacy = await self._legacy_check(
                 email,
                 oauth_sub,
                 provider=provider,
@@ -242,6 +285,9 @@ class SignupGateService:
                 ip_address=ip_address,
                 user_agent=user_agent,
             )
+            if legacy is None or isinstance(legacy, RedirectResponse):
+                return legacy
+            return AdmissionRecord(legacy)
 
         # #655: the historical Google pass-through is removed. Google's
         # "Testing" status does NOT enforce the test-users list for
@@ -253,7 +299,7 @@ class SignupGateService:
             return None
 
         if await self._is_first_user():
-            return None
+            return AdmissionRecord("first_user")
 
         # Validate the mode against the Literal allow-list before narrowing.
         # The DB has a CHECK constraint that pins ``mode`` to the same set,
@@ -279,8 +325,9 @@ class SignupGateService:
             effective_mode = "manual"
 
         if effective_mode == "manual":
-            if await self._is_allowlisted(provider, oauth_sub, effective_mode):
-                return None
+            matched = await self._allowlist_admission(provider, oauth_sub, effective_mode)
+            if matched is not None:
+                return matched
             # Phase 2 (#655 follow-up): Google admins can pre-allowlist a
             # target by email before the user has OAuth'd. Such rows carry
             # a sentinel ``subject_id='pending:<email>'`` (set by the admin
@@ -296,7 +343,7 @@ class SignupGateService:
                 and email_verified
                 and await self._promote_pending_google_entry(email=email, oauth_sub=oauth_sub)
             ):
-                return None
+                return AdmissionRecord("allowlist")
             # #2785: a pending workspace invitation addressed to the verified
             # address admits, before the beta invite so an invitee keeps the
             # token. Nothing is consumed; the admission is recorded.
@@ -307,14 +354,14 @@ class SignupGateService:
                 ip_address=ip_address,
                 user_agent=user_agent,
             ):
-                return None
+                return AdmissionRecord("workspace_invitation")
             # #1581: closed-beta invite link — the LAST thing tried, only where
             # the gate would otherwise block. Placement is the contract: every
             # path above returned already, so an existing user, the first user,
             # an allowlisted identity or a promoted pending row never burns a
             # token, and the disabled gate (legacy / open registration) never
             # reaches here at all.
-            if await self._redeem_beta_invite(
+            redeemed = await self._redeem_beta_invite(
                 token_hash=beta_invite_token_hash,
                 provider=provider,
                 oauth_sub=oauth_sub,
@@ -322,8 +369,9 @@ class SignupGateService:
                 username=username,
                 ip_address=ip_address,
                 user_agent=user_agent,
-            ):
-                return None
+            )
+            if redeemed is not None:
+                return redeemed
             await self._record_blocked_signup(
                 provider=provider,
                 oauth_sub=oauth_sub,
@@ -372,7 +420,7 @@ class SignupGateService:
         The address is verified by construction: the link goes to it alone.
         """
         config = await self._load_config()
-        return await self._email_admission(
+        record = await self._email_admission(
             gate_enabled=config.enabled,
             gate_mode=config.mode,
             email=email,
@@ -380,6 +428,8 @@ class SignupGateService:
             redeem=None,
             record_invitations=None,
         )
+        # Every email answer is one of EmailSignupAdmission (_email_admission).
+        return cast(EmailSignupAdmission, record.via) if record is not None else None
 
     async def admit_email_signup(
         self,
@@ -391,7 +441,7 @@ class SignupGateService:
         beta_invite_token_hash: str | None,
         ip_address: str | None,
         user_agent: str | None,
-    ) -> EmailSignupAdmission | None:
+    ) -> AdmissionRecord | None:
         """Run the sign-up controls for an email account being created now. Never commits.
 
         Called inside the account-creating transaction with the gate config
@@ -401,7 +451,8 @@ class SignupGateService:
         savepoint that a lost race rolls back on its own. An admission by a
         workspace invitation stages its ``signup_admitted`` audit row (#2785),
         committed with the account or not at all. Nothing is written when the
-        answer is ``None``.
+        answer is ``None``. The answer is the admission the account records
+        (#2803): a beta invite's id and inviter included.
         """
 
         def record_invitations(invitations: list[WorkspaceInvitation]) -> None:
@@ -417,7 +468,7 @@ class SignupGateService:
                 )
             )
 
-        async def redeem() -> bool:
+        async def redeem() -> AdmissionRecord | None:
             return await self._stage_email_beta_invite_redemption(
                 token_hash=beta_invite_token_hash,
                 new_user_id=new_user_id,
@@ -475,23 +526,25 @@ class SignupGateService:
         gate_mode: str,
         email: str,
         beta_invite_token_hash: str | None,
-        redeem: Callable[[], Awaitable[bool]] | None,
+        redeem: Callable[[], Awaitable[AdmissionRecord | None]] | None,
         record_invitations: Callable[[list[WorkspaceInvitation]], None] | None,
-    ) -> EmailSignupAdmission | None:
+    ) -> AdmissionRecord | None:
         """The sign-up controls for an email identity, in the OAuth order.
+
+        Every answer's ``via`` is one of ``EmailSignupAdmission``.
 
         ``redeem`` / ``record_invitations`` are None at request time (read
         only) and stage the beta invite redemption / the ``signup_admitted``
         row at completion, inside the account-creating transaction.
         """
         if first_user_bootstrap_applies() and await self._is_first_user():
-            return "first_user"
+            return AdmissionRecord("first_user")
         settings = get_settings()
         if not gate_enabled:
             # The legacy gate's order (``_check_registration_allowed``). A beta
             # invite is never consumed with the gate off, as for OAuth.
             if settings.allow_registration:
-                return "open_registration"
+                return AdmissionRecord("open_registration")
             return self._invitation_admission(
                 await self._addressed_invitations(email), record_invitations
             )
@@ -501,8 +554,11 @@ class SignupGateService:
             return None
         # #2785: a pending workspace invitation addressed to the address, before
         # the beta invite (an invitee keeps the token, as for OAuth).
-        if self._invitation_admission(await self._addressed_invitations(email), record_invitations):
-            return "workspace_invitation"
+        invited = self._invitation_admission(
+            await self._addressed_invitations(email), record_invitations
+        )
+        if invited is not None:
+            return invited
         # Sponsor modes are GitHub-specific; for email they mean manual (as
         # for Google). The manual allowlist and pending Google rows belong to
         # a provider identity and never admit an email identity.
@@ -512,19 +568,19 @@ class SignupGateService:
             invite = await BetaInviteService(self.db).find_redeemable(
                 beta_invite_token_hash, utcnow()
             )
-            return "beta_invite" if invite is not None else None
-        return "beta_invite" if await redeem() else None
+            return AdmissionRecord("beta_invite") if invite is not None else None
+        return await redeem()
 
     @staticmethod
     def _invitation_admission(
         invitations: list[WorkspaceInvitation],
         record_invitations: Callable[[list[WorkspaceInvitation]], None] | None,
-    ) -> EmailSignupAdmission | None:
+    ) -> AdmissionRecord | None:
         if not invitations:
             return None
         if record_invitations is not None:
             record_invitations(invitations)
-        return "workspace_invitation"
+        return AdmissionRecord("workspace_invitation")
 
     async def _stage_email_beta_invite_redemption(
         self,
@@ -534,7 +590,7 @@ class SignupGateService:
         email: str,
         ip_address: str | None,
         user_agent: str | None,
-    ) -> bool:
+    ) -> AdmissionRecord | None:
         """Spend a beta invite on a new email account (#1734); never commits.
 
         The email twin of :meth:`_redeem_beta_invite`: the same three writes
@@ -542,17 +598,31 @@ class SignupGateService:
         audit row), staged in a SAVEPOINT of the account-creating transaction
         instead of committed. A lost race or a constraint error rolls back the
         savepoint only, and the caller refuses the sign-up.
+
+        #2803: the inviter's row is locked (KEY SHARE) before the claim, the
+        order erasure takes (the inviter's row, then their invites), so the
+        claim never deadlocks with the inviter's erasure; an inviter gone by
+        then refuses, as a lost race would. Returns the admission (the invite
+        id and inviter) or None.
         """
         if not token_hash or not get_settings().enable_beta_invites:
-            return False
+            return None
         invites = BetaInviteService(self.db)
         now = utcnow()
         invite = await invites.find_redeemable(token_hash, now)
         if invite is None:
             logger.info("beta_invite_redeem_rejected", provider="email", subject_id=new_user_id)
-            return False
+            return None
         invite_id = invite.id
         inviter_user_id = invite.inviter_user_id
+        if await lock_invite_issuer(self.db, inviter_user_id) is None:
+            logger.info(
+                "beta_invite_redeem_rejected",
+                invite_id=str(invite_id),
+                provider="email",
+                subject_id=new_user_id,
+            )
+            return None
         entry_id = uuid4()
         savepoint = await self.db.begin_nested()
         try:
@@ -581,7 +651,7 @@ class SignupGateService:
                     provider="email",
                     subject_id=new_user_id,
                 )
-                return False
+                return None
             self.db.add(
                 AuditLog(
                     user_email=EMAIL_SIGNUP_ACTOR,
@@ -602,7 +672,7 @@ class SignupGateService:
         except IntegrityError:
             await savepoint.rollback()
             logger.info("beta_invite_redeem_conflict", provider="email", subject_id=new_user_id)
-            return False
+            return None
         logger.info(
             "beta_invite_redeemed",
             invite_id=str(invite_id),
@@ -610,7 +680,7 @@ class SignupGateService:
             subject_id=new_user_id,
             inviter_user_id=inviter_user_id,
         )
-        return True
+        return AdmissionRecord("beta_invite", invite_id, inviter_user_id)
 
     # ------------------------------------------------------------------
     # Admin: config
@@ -1076,12 +1146,19 @@ class SignupGateService:
         )
         return True
 
-    async def _is_allowlisted(
+    async def _allowlist_admission(
         self,
         provider: SignupGateProvider,
         subject_id: str,
         mode: SignupGateMode,
-    ) -> bool:
+    ) -> AdmissionRecord | None:
+        """The admission of an active allowlist row of this identity, or None.
+
+        #2803: the matched row says how the account is admitted. A
+        ``beta_invite`` row (preferred when the identity has both kinds)
+        records the invite whose claim points at it, or no details when that
+        invite is gone; any other row records ``allowlist``.
+        """
         # Filter by source so mode='manual' doesn't silently accept a
         # sponsor-only row in Phase 2, and mode='github_sponsors' doesn't
         # silently accept a manually-added row — i.e. keep 'manual' and 'both'
@@ -1106,11 +1183,28 @@ class SignupGateService:
         # mode == "both" → no source filter
 
         # A single (provider, subject_id) can have multiple rows (one per
-        # source), so scalar_one_or_none would raise MultipleResultsFound
-        # when mode='both' matches two rows. first() returns whichever
-        # active row hits first.
-        result = await self.db.execute(select(SignupAllowlistEntry.id).where(*filters).limit(1))
-        return result.first() is not None
+        # source): the beta_invite row first, then the lowest id, so the
+        # answer does not depend on the plan.
+        row = (
+            await self.db.execute(
+                select(SignupAllowlistEntry.id, SignupAllowlistEntry.source)
+                .where(*filters)
+                .order_by(
+                    (SignupAllowlistEntry.source == "beta_invite").desc(),
+                    SignupAllowlistEntry.id,
+                )
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return None
+        if row.source != "beta_invite":
+            return AdmissionRecord("allowlist")
+        redeemed = await BetaInviteService(self.db).redeemed_with_entry(row.id)
+        if redeemed is None:
+            return AdmissionRecord("beta_invite")
+        invite_id, inviter_user_id = redeemed
+        return AdmissionRecord("beta_invite", invite_id, inviter_user_id)
 
     async def _redeem_beta_invite(
         self,
@@ -1122,8 +1216,8 @@ class SignupGateService:
         username: str | None,
         ip_address: str | None,
         user_agent: str | None,
-    ) -> bool:
-        """Spend a closed-beta invite on this identity (#1581). True = admitted.
+    ) -> AdmissionRecord | None:
+        """Spend a closed-beta invite on this identity (#1581). A record = admitted.
 
         One transaction, three writes: the ``signup_allowlist`` row (keyed on the
         immutable IdP identity — the e-mail is the label only, #655), the
@@ -1154,11 +1248,12 @@ class SignupGateService:
             user_agent: Caller User-Agent for the audit row.
 
         Returns:
-            True when the invite was redeemed (or this identity already holds
-            the winning row from a parallel tab); False to fall through to block.
+            The admission (the invite id and inviter, #2803) when the invite
+            was redeemed, or the admission of the winning row this identity
+            already holds from a parallel tab; None to fall through to block.
         """
         if not token_hash or not get_settings().enable_beta_invites:
-            return False
+            return None
 
         invites = BetaInviteService(self.db)
         now = utcnow()
@@ -1167,7 +1262,7 @@ class SignupGateService:
             # Unknown / expired / revoked / already used — deliberately one
             # undifferentiated outcome. The blocked-signup audit row follows.
             logger.info("beta_invite_redeem_rejected", provider=provider, subject_id=oauth_sub)
-            return False
+            return None
 
         # Snapshot before any commit/rollback: both expire ORM instances, and
         # touching ``invite.id`` afterwards would lazy-load in async context
@@ -1209,7 +1304,7 @@ class SignupGateService:
             # answer from the allowlist — a winning active row IS the grant; an
             # inactive one is not, and the token stays unspent.
             await self.db.rollback()
-            return await self._is_allowlisted(provider, oauth_sub, "manual")
+            return await self._allowlist_admission(provider, oauth_sub, "manual")
 
         claimed = await invites.mark_redeemed(
             token_hash=token_hash, allowlist_entry_id=entry_id, now=now
@@ -1224,7 +1319,7 @@ class SignupGateService:
                 provider=provider,
                 subject_id=oauth_sub,
             )
-            return False
+            return None
 
         self.db.add(
             AuditLog(
@@ -1253,7 +1348,7 @@ class SignupGateService:
             subject_id=oauth_sub,
             inviter_user_id=inviter_user_id,
         )
-        return True
+        return AdmissionRecord("beta_invite", invite_id, inviter_user_id)
 
     async def _legacy_check(
         self,
@@ -1264,8 +1359,12 @@ class SignupGateService:
         email_verified: bool,
         ip_address: str | None = None,
         user_agent: str | None = None,
-    ) -> RedirectResponse | None:
+    ) -> RedirectResponse | SignupAdmission | None:
         """Delegate to the pre-existing env-based gate.
+
+        Its answer (#2803): a redirect when blocked, None for an existing
+        account, else the admission (``first_user``, ``open_registration``
+        or ``workspace_invitation``).
 
         Lazy import to avoid a circular dependency (``api.routes.auth``
         imports service modules for other flows). Shares ``self.db`` with

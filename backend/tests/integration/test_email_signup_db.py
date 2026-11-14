@@ -293,8 +293,9 @@ class TestBetaInvite:
 
         # The email allowlist row never admits an OAuth identity.
         async with maker() as s:
-            assert not await SignupGateService(s)._is_allowlisted(
-                "google", created.user_id, "manual"
+            assert (
+                await SignupGateService(s)._allowlist_admission("google", created.user_id, "manual")
+                is None
             )
 
     async def test_revoked_invite_admits_nobody(self, env, maker, db_session, someone) -> None:

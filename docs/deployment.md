@@ -636,6 +636,73 @@ The 7-day lifetime is fixed in code. Notes for operators:
   whose `user_metadata` cross-reference the two invites (`reissued_from` /
   `reissued_to`, ids only — never the label).
 
+### How each account was admitted (Issue #2803)
+
+Every account records, once, in the transaction that creates it, which control
+let it in: `users.admitted_via` is `beta_invite`, `allowlist`,
+`workspace_invitation`, `open_registration`, `first_user`, `admin_cli` (the
+admin CLIs) or `unknown`. Nothing rewrites it later: a sign-in, an identity
+linked to the account and the admin routes leave it alone. The admin API shows
+it ([Admin APIs → Users](api-reference.md#users)): the list filters by
+`admitted_via` and by inviter (`invited_by`), and its `total` is the count per
+channel or per inviter.
+
+- **The record comes from what admitted the sign-up.** An identity holding the
+  `beta_invite` allowlist row of an earlier redemption records `beta_invite`
+  (a returning invitee, also with the gate off); a manual row, or a pending
+  Google row, records `allowlist`. With the gate off no invite is redeemed (the
+  token is ignored as before), so an account admitted by `ALLOW_REGISTRATION`
+  records `open_registration` even when an invite link was used.
+- **A beta invite** also records the invite id (it outlives the invite row)
+  and the issuer: `admin` when the inviter's `users.role` is `admin` when the
+  account is created (in every `SYSTEM_ADMIN_MODE`, so a CLI batch counts as
+  `admin`), `user` otherwise. For a `user` issuer the inviter's `user_id` is
+  recorded too (`admitted_by_user_id`). A promotion or demotion between minting
+  and sign-up follows the role at sign-up. The invite's label is never copied.
+- **Deletion.** `admitted_by_user_id` is a foreign key with `ON DELETE SET
+  NULL`: when the inviter's account is erased, deleted by an admin
+  (`DELETE /api/v1/admin/users/{id}`) or by `delete_admin`, the link goes and
+  the admin API shows no inviter. `admitted_via`, the issuer and the invite id
+  stay. Erasing the invited account deletes its row, record included.
+- **`unknown`** is the default of the column: an account the backfill could
+  not place, a second account that lost the first-user race (two first
+  sign-ups at once: one `first_user`, one `unknown`), and any row written by an
+  instance from before v0.162.0 during a rolling deploy.
+
+The migration (`f45_2803_admission_record`) fills existing accounts from the
+evidence there is, in this order (the first match wins):
+
+1. `admin_cli`: a `local:` account with a login id;
+2. the `user.signed_up` audit row of an email sign-up (its admission);
+3. `first_user`: `is_initial_admin` on the oldest account;
+4. `beta_invite`: a `beta_invite` allowlist row of the identity that created
+   the account (rows of identities linked later do not count), or a
+   `beta_invite.redeemed` audit row of the account;
+5. `allowlist`: a manual allowlist row of that identity created no later than
+   the account;
+6. `workspace_invitation`: a `signup_admitted` audit row (#2785);
+7. `unknown`: everything else (most accounts of an open-registration install).
+
+For a `beta_invite` account it then looks for the live invite (through the
+allowlist row, else through the audit row's invite id) and fills the invite id,
+the issuer (the inviter's role now) and, for a `user` issuer, the inviter; with
+no live invite the three stay empty. It never reads the allowlist row's
+`added_by_user_id` or the audit row's `inviter_user_id`. It logs one line with
+the count per kind and nothing else.
+
+Operator notes:
+
+- **Deploy v0.162.0 before pruning manual allowlist rows** at the end of the
+  closed beta: the backfill reads them. A beta-invite admission survives the
+  pruning through its audit row; a manual-allowlist admission does not.
+- The migration holds `users` (ACCESS EXCLUSIVE) while it backfills: every
+  request that reads `users` waits until it commits. That is short on a
+  closed-beta table; on a large install plan a quiet moment. If it fails on
+  `lock_timeout` (`KAGURA_MIGRATION_LOCK_TIMEOUT`), everything rolls back:
+  rerun it.
+- A **downgrade loses the records** written at sign-up for good; a later
+  upgrade rebuilds only what the evidence above still gives.
+
 ### Invites and device or MCP sign-in (Issue #1655)
 
 An invite only counts when it rides the OAuth login that `/join/{token}`
