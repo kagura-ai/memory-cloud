@@ -56,7 +56,7 @@ the closed beta. A beta-invite admission survives the pruning through its
 audit row; a manual-allowlist admission does not.
 
 Revision ID: f45_2803_admission_record
-Revises: f43_2798_paid_integrations
+Revises: f44_2800_mcp_notice_plans
 
 Note: revision IDs must stay <= 32 chars — ``alembic_version.version_num``
 is varchar(32).
@@ -73,7 +73,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "f45_2803_admission_record"
-down_revision: str | None = "f43_2798_paid_integrations"
+down_revision: str | None = "f44_2800_mcp_notice_plans"
 branch_labels: str | None = None
 depends_on: str | None = None
 
