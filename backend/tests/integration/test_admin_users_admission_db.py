@@ -7,7 +7,9 @@ it builds):
 - ``GET /api/v1/admin/users/{id}``: ``admission`` = ``via``,
   ``invite_issuer``, ``invite_id`` and ``invited_by`` (``user_id``, ``email``)
   read live, for a user-minted invite; ``invited_by`` null for an
-  admin-minted one, after the inviter's erasure, and for ``unknown``;
+  admin-minted one, after the inviter's erasure, and for ``unknown``; the
+  issuer is the recorded one, unchanged by a later promotion or demotion of
+  the inviter, and a new inviter address shows on the next read;
 - ``GET /api/v1/admin/users``: ``admitted_via`` on each row; the
   ``admitted_via`` and ``invited_by`` filters alone and combined with
   ``workspace_id``, ``plan``, ``role`` and ``search``, with the right
@@ -103,7 +105,17 @@ async def world(db_session: AsyncSession, maker, monkeypatch) -> AsyncIterator[S
     inviter = await person("inviter")
     admin_inviter = await person("admininviter", role="admin")
     gone_inviter = await person("goneinviter")
-    invite_ids = {"admin": uuid4(), "gone": uuid4()}
+    # A real invite minted by an admin: the admin-minted account points at
+    # it, so a detail that reached the minter's CURRENT role (through the
+    # invite row) would be caught when that role changes.
+    admin_invite = BetaInvite(
+        token_hash=sha256_hex(uuid4().hex + uuid4().hex),
+        inviter_user_id=admin_inviter,
+        expires_at=utcnow() + timedelta(days=7),
+    )
+    db_session.add(admin_invite)
+    await db_session.commit()
+    invite_ids = {"admin": admin_invite.id, "gone": uuid4()}
     admin_minted = await person(
         "adminminted",
         admitted_via="beta_invite",
@@ -222,12 +234,49 @@ async def world(db_session: AsyncSession, maker, monkeypatch) -> AsyncIterator[S
 
 @pytest.mark.parametrize("mode", list(PRINCIPALS))
 class TestDetail:
-    async def test_user_minted_invite_names_the_inviter_live(self, world, maker, mode) -> None:
-        async with _client(maker, PRINCIPALS[mode]) as client:
-            response = await client.get(f"/api/v1/admin/users/{world.invitee}")
+    async def test_user_minted_invite_names_the_inviter_live(
+        self, world, maker, db_session, mode
+    ) -> None:
+        def expected(email: str) -> dict:
+            return {
+                "via": "beta_invite",
+                "invite_issuer": "user",
+                "invite_id": str(world.invite_ids["user"]),
+                "invited_by": {"user_id": world.inviter, "email": email},
+            }
 
-        assert response.status_code == 200
-        assert response.json()["admission"] == {
+        new_email = f"renamed-{world.tag}@admission.example"
+        async with _client(maker, PRINCIPALS[mode]) as client:
+            first = await client.get(f"/api/v1/admin/users/{world.invitee}")
+            # Live, not a copy: the inviter's new address shows on the next read.
+            await db_session.execute(
+                update(User).where(User.user_id == world.inviter).values(email=new_email)
+            )
+            await db_session.commit()
+            second = await client.get(f"/api/v1/admin/users/{world.invitee}")
+
+        assert first.status_code == 200 and second.status_code == 200
+        assert first.json()["admission"] == expected(f"inviter-{world.tag}@admission.example")
+        assert second.json()["admission"] == expected(new_email)
+
+    async def test_the_issuer_is_the_recorded_one_not_the_inviters_role_now(
+        self, world, maker, db_session, mode
+    ) -> None:
+        # Promote the user inviter and demote the admin minter after the
+        # sign-ups: the detail shows what was recorded at creation, never a
+        # role read now (through the inviter's row or the invite's).
+        await db_session.execute(
+            update(User).where(User.user_id == world.inviter).values(role="admin")
+        )
+        await db_session.execute(
+            update(User).where(User.user_id == world.admin_inviter).values(role="user")
+        )
+        await db_session.commit()
+        async with _client(maker, PRINCIPALS[mode]) as client:
+            invitee = (await client.get(f"/api/v1/admin/users/{world.invitee}")).json()
+            minted = (await client.get(f"/api/v1/admin/users/{world.admin_minted}")).json()
+
+        assert invitee["admission"] == {
             "via": "beta_invite",
             "invite_issuer": "user",
             "invite_id": str(world.invite_ids["user"]),
@@ -235,6 +284,12 @@ class TestDetail:
                 "user_id": world.inviter,
                 "email": f"inviter-{world.tag}@admission.example",
             },
+        }
+        assert minted["admission"] == {
+            "via": "beta_invite",
+            "invite_issuer": "admin",
+            "invite_id": str(world.invite_ids["admin"]),
+            "invited_by": None,
         }
 
     async def test_admin_minted_invite_names_nobody(self, world, maker, mode) -> None:

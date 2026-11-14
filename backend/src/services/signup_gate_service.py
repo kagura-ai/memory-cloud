@@ -157,10 +157,14 @@ async def check_signup_access(
             invitation and no pending row.
 
     Returns:
-        A RedirectResponse when blocked; an ``AdmissionRecord`` when a new
-        account may be created (how it was admitted, #2803); None for an
-        existing account (a login). The record is truthy: callers test the
-        answer with ``isinstance(answer, RedirectResponse)``, never by truth.
+        A RedirectResponse when blocked; otherwise an ``AdmissionRecord``
+        (how a new account would be admitted, #2803) or None. None is not a
+        reliable "this is a login": with the gate off an allowlisted identity
+        gets a record even when its account exists, so a caller must never
+        classify a sign-in by this answer. ``ensure_user`` stores the record
+        only when it creates the row and ignores it for an existing one. The
+        record is truthy: callers test the answer with
+        ``isinstance(answer, RedirectResponse)``, never by truth.
     """
     async for db in get_db():
         gate = SignupGateService(db)
@@ -231,7 +235,12 @@ class SignupGateService:
 
         An ``AdmissionRecord`` (#2803) when a new account may be created;
         None for an existing account (a login, or the address of an account
-        ``ensure_user`` links to or refuses), which records nothing.
+        ``ensure_user`` links to or refuses), which records nothing. The two
+        are not exclusive: with the gate off (rule 1) the allowlist runs
+        before any existing-user check, so the login of an allowlisted
+        account also gets a record. ``ensure_user`` writes the record only
+        when it creates the row, so a record never rewrites an existing
+        account; never read None as "this is a login".
 
         Rules (top-down, applied uniformly across both providers since #655):
         1. ``enabled=false`` → the manual allowlist, a pending Google row
@@ -260,7 +269,7 @@ class SignupGateService:
             # falling back to the legacy env gate (which blocks new signups when
             # ALLOW_REGISTRATION=false). Matching is identical to the gate-ON
             # manual path: (provider, subject_id=oauth_sub), source='manual',
-            # state='active' (the state filter lives in _is_allowlisted, so a
+            # state='active' (the state filter lives in _allowlist_admission, so a
             # revoked entry never resurfaces here).
             matched = await self._allowlist_admission(provider, oauth_sub, "manual")
             if matched is not None:

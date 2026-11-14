@@ -286,8 +286,12 @@ async def lock_invite_issuer(
         person); ``("user", inviter_user_id)`` otherwise. The role is read
         now, when the account is created, in every ``SYSTEM_ADMIN_MODE``.
     """
+    # read=True: ``key_share=True`` alone compiles to FOR NO KEY UPDATE, which
+    # would also serialize concurrent invitees and the inviter's own updates.
     role = await db.scalar(
-        select(User.role).where(User.user_id == inviter_user_id).with_for_update(key_share=True)
+        select(User.role)
+        .where(User.user_id == inviter_user_id)
+        .with_for_update(read=True, key_share=True)
     )
     if role is None:
         return None

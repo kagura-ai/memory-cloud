@@ -1,6 +1,6 @@
 """DB contract for the admission-record migration f45 (#2803).
 
-Upgrades a clean database to f43, seeds raw rows for every kind of evidence
+Upgrades a clean database to f45's parent, seeds raw rows for every kind of evidence
 and every conflict, then upgrades to f45 and checks what each account reads:
 
 - ``admin_cli``: a CLI-created local admin (even with ``is_initial_admin``);
@@ -19,12 +19,19 @@ and every conflict, then upgrades to f45 and checks what each account reads:
 The log carries counts only (no id, address, invite id or label), no row's
 ``updated_at`` moves, the downgrade removes the columns and constraints, and
 a re-upgrade rebuilds the record from the evidence.
+
+PRE_REV is read from the module (its ``down_revision``), so re-chaining f45
+onto another parent changes the migration only, and the seed always runs at
+f45's own parent. The test ends on an empty schema at head: the rows it
+seeds (a CLI password admin among them) must not reach later DB tests.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
+import sys
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -40,9 +47,13 @@ from tests.integration.test_alembic_migrations import (
     _reset_alembic_state,
     _sync_engine,
 )
+from tests.migration_ast import ALEMBIC_VERSIONS
 
-PRE_REV = "f43_2798_paid_integrations"
+if str(ALEMBIC_VERSIONS) not in sys.path:
+    sys.path.insert(0, str(ALEMBIC_VERSIONS))
+
 REV = "f45_2803_admission_record"
+PRE_REV: str = importlib.import_module(REV).down_revision
 LABEL = "SENTINEL-LABEL-f45-do-not-log"
 
 _CHECKS = (
@@ -373,6 +384,11 @@ class TestF45AdmissionBackfill:
                 assert _record(conn, ids["manual_before"])[0] == "allowlist"
             self._check_schema(engine)
         finally:
+            # Leave an empty schema at head, as the test found it: the seeded
+            # rows (a CLI password admin, an initial admin, allowlist, audit
+            # and invite rows) would otherwise break later DB tests that
+            # expect one password admin or an empty table.
+            _reset_alembic_state()
             with _alembic_at_test_db():
                 command.upgrade(_get_alembic_config(), "head")
 

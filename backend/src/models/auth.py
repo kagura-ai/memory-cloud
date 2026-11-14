@@ -104,6 +104,9 @@ class User(Base):
             admission spent. No foreign key: it survives the invite row.
         admitted_invite_issuer: ``admin`` or ``user``, from the inviter's
             ``users.role`` when the account was created (``beta_invite`` only).
+            For an account created before v0.162.0 the f45 backfill took the
+            inviter's role at upgrade time, and left the invite id, issuer and
+            inviter NULL when no live invite remained (docs/deployment.md).
         admitted_by_user_id: The inviter of a user-minted invite. A
             ``SET NULL`` foreign key: deleting the inviter's account clears it.
 

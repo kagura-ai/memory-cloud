@@ -2249,6 +2249,7 @@ For `beta_invite`:
 - `invite_id` is the id of the invite spent (it stays after the invite row is gone);
 - `invite_issuer` is `admin` when the inviter's `users.role` was `admin` when the account was created, in every `SYSTEM_ADMIN_MODE`, and `user` otherwise; it is null when the inviter's account was already gone then;
 - `invited_by` (`{"user_id", "email"}`) names the inviter of a user-minted invite. It is read live from the inviter's account: null for an admin-minted invite and once the inviter's account is erased or deleted.
+- accounts created before v0.162.0 were filled by the upgrade's backfill ([How each account was admitted](deployment.md#how-each-account-was-admitted-issue-2803)): their `invite_issuer` is the inviter's role at upgrade time, not at sign-up, and `invite_id`, `invite_issuer` and `invited_by` are all null when no live invite remained then, even though `via` is `beta_invite`.
 
 For every other value the three fields are null. The invite's label (the inviter's private note) is never part of a response, a log line or an audit row. Neither filter value is logged.
 

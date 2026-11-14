@@ -5,13 +5,17 @@ admission on the new ``users`` row: open registration, a workspace
 invitation, a beta invite (user-minted: issuer ``user`` and the inviter;
 admin-minted: issuer ``admin``, no inviter) and the first user (private
 schema). An inviter whose account is gone before the claim refuses the
-sign-up and writes nothing.
+sign-up at the inviter pre-check (not as a lost claim) and writes nothing.
+While the inviter's erasure holds their ``users`` row, the completion waits
+on that row, before touching any ``beta_invites`` row (erasure's lock order),
+then refuses once the inviter is deleted, without a deadlock.
 
 Run on a private database only (``REQUIRE_TEST_DATABASE=1 TEST_DATABASE_URL=...``).
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from datetime import timedelta
@@ -21,7 +25,8 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select, update
+import structlog
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
@@ -239,26 +244,7 @@ async def test_admin_minted_beta_invite(world, maker, env, mode) -> None:
     assert await _record(maker, created.user_id) == ("beta_invite", invite_id, "admin", None)
 
 
-async def test_inviter_gone_before_the_claim_refuses(world, maker, monkeypatch) -> None:
-    await world.gate.update_config(enabled=True, mode="manual")
-    inviter = await world.person()
-    invite_id, token = await world.invite(inviter)
-    email = _addr("gone")
-    real_find = BetaInviteService.find_redeemable
-
-    async def _find_then_erase(self, token_hash, now):
-        found = await real_find(self, token_hash, now)
-        # The inviter's account goes away between the pre-check and the claim.
-        async with maker() as other:
-            await other.execute(delete(User).where(User.user_id == inviter))
-            await other.commit()
-        return found
-
-    monkeypatch.setattr(BetaInviteService, "find_redeemable", _find_then_erase)
-
-    with pytest.raises(SignupNotAllowedError):
-        await _complete(maker, await _link(maker, email, sha256_hex(token)))
-
+async def _nothing_written(maker, email: str, invite_id: UUID) -> None:
     async with maker() as s:
         assert (
             await s.scalar(select(func.count()).select_from(User).where(User.email == email))
@@ -277,6 +263,102 @@ async def test_inviter_gone_before_the_claim_refuses(world, maker, monkeypatch) 
                 .where(AuditLog.resource == f"beta_invite:{invite_id}")
             )
         ) == 0
+
+
+def _refused_at_the_inviter_check(events: list[dict], invite_id: UUID) -> bool:
+    """The inviter pre-check refused, not a lost claim (the cascade of the
+    inviter's deletion also removes the invite, so a claim would fail too)."""
+    names = [e.get("event") for e in events]
+    return "beta_invite_redeem_lost_race" not in names and any(
+        e.get("event") == "beta_invite_redeem_rejected" and e.get("invite_id") == str(invite_id)
+        for e in events
+    )
+
+
+async def test_inviter_gone_before_the_claim_refuses_at_the_inviter_check(
+    world, maker, monkeypatch
+) -> None:
+    await world.gate.update_config(enabled=True, mode="manual")
+    inviter = await world.person()
+    invite_id, token = await world.invite(inviter)
+    email = _addr("gone")
+    real_find = BetaInviteService.find_redeemable
+
+    async def _find_then_erase(self, token_hash, now):
+        found = await real_find(self, token_hash, now)
+        # The inviter's account goes away between the pre-check and the claim.
+        async with maker() as other:
+            await other.execute(delete(User).where(User.user_id == inviter))
+            await other.commit()
+        return found
+
+    monkeypatch.setattr(BetaInviteService, "find_redeemable", _find_then_erase)
+
+    with structlog.testing.capture_logs() as events:
+        with pytest.raises(SignupNotAllowedError):
+            await _complete(maker, await _link(maker, email, sha256_hex(token)))
+
+    assert _refused_at_the_inviter_check(events, invite_id)
+    await _nothing_written(maker, email, invite_id)
+
+
+async def _blocked_by(
+    maker, holder_pid: int, task: asyncio.Task, timeout: float = 15
+) -> str | None:
+    """The statement of the backend ``holder_pid`` blocks, or None once
+    ``task`` finished without waiting on it."""
+
+    async def poll() -> str | None:
+        while not task.done():
+            async with maker() as observer:
+                query = await observer.scalar(
+                    text(
+                        "SELECT query FROM pg_stat_activity "
+                        "WHERE :pid = ANY(pg_blocking_pids(pid)) LIMIT 1"
+                    ),
+                    {"pid": holder_pid},
+                )
+            if query is not None:
+                return query
+            await asyncio.sleep(0.02)
+        return None
+
+    return await asyncio.wait_for(poll(), timeout)
+
+
+@pytest.mark.timeout(90)
+async def test_inviter_erasure_in_flight_the_completion_waits_on_the_users_row(
+    world, maker
+) -> None:
+    """Lock order (#2803): the inviter's ``users`` row (KEY SHARE) before any
+    ``beta_invites`` row, the order erasure takes (the row, then the cascade
+    into the invites). An erasure holding the row makes the completion wait
+    on it; the deletion then refuses the sign-up, and nobody deadlocks."""
+    await world.gate.update_config(enabled=True, mode="manual")
+    inviter = await world.person()
+    invite_id, token = await world.invite(inviter)
+    email = _addr("held")
+    raw = await _link(maker, email, sha256_hex(token))
+
+    with structlog.testing.capture_logs() as events:
+        async with maker() as eraser:
+            await eraser.execute(select(User.id).where(User.user_id == inviter).with_for_update())
+            eraser_pid = await eraser.scalar(text("SELECT pg_backend_pid()"))
+            task = asyncio.create_task(_complete(maker, raw))
+            try:
+                waiting = await _blocked_by(maker, eraser_pid, task)
+                assert waiting is not None, "the completion never waited on the inviter's row"
+                assert "FOR KEY SHARE" in waiting and "FROM users" in waiting, waiting
+                await eraser.execute(delete(User).where(User.user_id == inviter))
+                await eraser.commit()
+                with pytest.raises(SignupNotAllowedError):
+                    await asyncio.wait_for(task, 30)
+            finally:
+                if not task.done():
+                    task.cancel()
+
+    assert _refused_at_the_inviter_check(events, invite_id)
+    await _nothing_written(maker, email, invite_id)
 
 
 # ---------------------------------------------------------------------------
