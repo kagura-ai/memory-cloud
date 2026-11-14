@@ -122,9 +122,10 @@ Exempt (the authenticated control-UI read projection):
 - the authenticated `/mcp` tools (member token; the workspace's daily MCP
   quota applies there);
 - share-key recall;
-- REST public search with a public-bound API key. A request that carries a
-  signed-in session is not charged either: the route checks it against the
-  session's workspace before the per-minute bucket and the budget.
+- REST public search with a public-bound API key. A signed-in session is no
+  credential there: the route does not read the session cookie, so a request
+  that carries one is served, counted and charged like an anonymous one
+  (#2823).
 
 Not counted and still served when the budget is exhausted: `initialize`,
 `tools/list`, `ping`, `server/discover`, `GET /api/v1/public/{context_id}/info`,
@@ -156,9 +157,9 @@ is refused with the existing body
 
 ### Anonymous REST search
 
-`POST /api/v1/public/{context_id}/search` without a signed-in session and
-without a bound key, on a context with a live public MCP publication, while
-the budget is on:
+`POST /api/v1/public/{context_id}/search` without a bound key (a session
+cookie changes nothing, #2823), on a context with a live public MCP
+publication, while the budget is on:
 
 | Status | `error` | Header | When |
 |---|---|---|---|

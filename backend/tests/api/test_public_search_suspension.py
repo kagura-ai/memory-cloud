@@ -1,8 +1,8 @@
 """Anonymous public serving pauses on a plan with no public allowance (#1939).
 
-The context keeps ``is_public``; only serving stops, with the same
-``api_public_daily`` refusal an authenticated caller already gets from the
-rate-limit middleware on such a plan. Re-subscribing serves it again.
+The context keeps ``is_public``; only serving stops, with the
+``api_public_daily`` refusal. A request with a session cookie is anonymous on
+this route (#2823) and is paused like any other. Re-subscribing serves it again.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from api.routes.public_search import (
     public_search,
 )
 from models.auth import Context, Workspace
+from tests.api.test_public_search_session_record import _Rig, _session_record
 from utils.exceptions import QuotaExceededError
 
 
@@ -49,7 +50,7 @@ def _db(plan: str):
     return db, context
 
 
-async def _search(plan: str, user: dict | None = None):
+async def _search(plan: str):
     db, context = _db(plan)
     search = MagicMock()
     search.return_value.hybrid_search = AsyncMock(side_effect=_Stop())
@@ -61,7 +62,6 @@ async def _search(plan: str, user: dict | None = None):
         return await public_search(
             context_id=context.id,
             request=PublicSearchRequest(query="q", limit=3),
-            user=user,
             api_key=None,
             db=db,
         )
@@ -106,10 +106,15 @@ async def test_anonymous_search_refused_on_basic():
         await _search("basic")
 
 
-@pytest.mark.asyncio
-async def test_signed_in_member_search_is_not_paused_on_free():
-    """Only anonymous callers meet the pause; a member session reads its own data."""
-    # Whatever the member path answers downstream, it is not the plan pause.
-    with pytest.raises(HTTPException) as exc:
-        await _search("free", user={"user_id": "owner"})
-    assert not isinstance(exc.value, QuotaExceededError)
+@pytest.mark.parametrize("user_id", ["owner-user", "someone-else"])
+def test_signed_in_search_is_paused_on_free_like_anyone(user_id: str):
+    """#2823: the route does not read the session, so a request with a session
+    cookie (behind the real session middleware) is paused like an anonymous
+    one, whether or not the signed-in user belongs to the workspace."""
+    rig = _Rig(_session_record(user_id))
+    rig.workspace.plan_name = "free"
+    response = rig.post()
+    assert response.status_code == 429
+    assert response.json()["error"] == QuotaExceededError("x").error_code
+    rig.charge.assert_not_awaited()
+    rig.search.return_value.hybrid_search.assert_not_awaited()

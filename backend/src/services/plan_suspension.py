@@ -207,11 +207,11 @@ async def ensure_ingest_allowed(
 def ensure_public_serving_allowed(workspace: Workspace) -> None:
     """Refuse anonymous public serving on a plan with no public-call allowance.
 
-    For anonymous callers only: signed-in callers are metered by the
-    rate-limit middleware on their own plan, which answers the same
-    ``api_public_daily`` refusal at a zero allowance (no counts — the
-    rate-limit family has none to ship). The context keeps ``is_public``;
-    re-subscribing serves it again.
+    The public serving paths call it for every read without a public-bound
+    key (a bound key is refused on such a plan by its zero per-key bucket).
+    A REST public search that carries a session cookie is one of these reads:
+    the route does not read the session (#2823). The refusal carries no
+    counts. The context keeps ``is_public``; re-subscribing serves it again.
 
     Args:
         workspace: The public context's workspace.
