@@ -5,10 +5,12 @@ import hashlib
 import json
 
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 from joserfc import jwt
 from joserfc.jwk import RSAKey
 
-from auth.sync_service_jwt import InvalidAssertion, public_key, verify_assertion
+from auth.sync_service_jwt import InvalidAssertion, assertion_header, public_key, verify_assertion
 
 ISSUER = "https://identity.example.test/oidc"
 NOW = 1800000000
@@ -41,6 +43,15 @@ def verify(value, key):
     return verify_assertion(
         value, public_key(key.as_dict(private=False)), client_id="worker", issuer=ISSUER, now=NOW
     )
+
+
+def signed_raw(key, header, claims):
+    """Sign exact JSON bytes so malformed profiles still have a valid signature."""
+    parts = [base64.urlsafe_b64encode(value.encode()).rstrip(b"=") for value in (header, claims)]
+    message = b".".join(parts)
+    signature = key.private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
+    key.public_key.verify(signature, message, padding.PKCS1v15(), hashes.SHA256())
+    return (message + b"." + base64.urlsafe_b64encode(signature).rstrip(b"=")).decode()
 
 
 def test_valid_assertion_is_bound_and_jti_is_not_retained(key):
@@ -97,20 +108,42 @@ def test_different_signature_and_modified_payload_are_rejected(key):
     ],
 )
 def test_untrusted_headers_never_choose_remote_keys_or_other_algorithms(key, header):
-    token = assertion(key)
-    parts = token.split(".")
+    claims = base64.urlsafe_b64decode(assertion(key).split(".")[1] + "==").decode()
     original = {"alg": "RS256", "kid": "worker-key", "typ": "client-authentication+jwt"}
     original.update(header)
-    parts[0] = base64.urlsafe_b64encode(json.dumps(original).encode()).decode().rstrip("=")
+    token = signed_raw(key, json.dumps(original), claims)
+    if "kid" not in header:
+        with pytest.raises(InvalidAssertion):
+            assertion_header(token)
     with pytest.raises(InvalidAssertion):
-        verify(".".join(parts), key)
+        verify(token, key)
 
 
-def test_duplicate_json_claims_are_rejected_before_verification(key):
+@pytest.mark.parametrize("part", ["header", "claims"])
+def test_duplicate_json_members_are_rejected_with_valid_signature_and_claims(key, part):
     parts = assertion(key).split(".")
-    parts[1] = base64.urlsafe_b64encode(b'{"iss":"other","iss":"worker"}').decode().rstrip("=")
+    header, claims = [base64.urlsafe_b64decode(value + "==").decode() for value in parts[:2]]
+    assert verify(signed_raw(key, header, claims), key).client_id == "worker"
+    if part == "claims":
+        claims = '{"iss":"other",' + claims[1:]
+        assert json.loads(claims)["iss"] == "worker"
+    else:
+        header = '{"typ":"at+jwt",' + header[1:]
+        assert json.loads(header)["typ"] == "client-authentication+jwt"
+    token = signed_raw(key, header, claims)
     with pytest.raises(InvalidAssertion):
-        verify(".".join(parts), key)
+        assertion_header(token)
+    with pytest.raises(InvalidAssertion):
+        verify(token, key)
+
+
+@pytest.mark.parametrize("typ", [None, "JWT", "client-authentication+jwt"])
+def test_compatible_assertion_types_are_accepted(key, typ):
+    header = {"alg": "RS256", "kid": "worker-key"}
+    if typ is not None:
+        header["typ"] = typ
+    claims = base64.urlsafe_b64decode(assertion(key).split(".")[1] + "==").decode()
+    assert verify(signed_raw(key, json.dumps(header), claims), key).client_id == "worker"
 
 
 def test_only_public_key_material_can_be_registered(key):
