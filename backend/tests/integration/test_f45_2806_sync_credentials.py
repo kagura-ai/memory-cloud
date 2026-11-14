@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 from joserfc.jwk import RSAKey
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -49,8 +49,15 @@ def test_credential_migration_roundtrip_and_constraints_preserve_existing_target
         with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), PARENT)
         with Session(engine) as db, db.begin():
-            db.add(User(user_id=uid, email=uid + "@example.test"))
-            db.flush()
+            # This historical schema predates the admission columns on User.
+            db.execute(
+                text(
+                    "INSERT INTO users (email, user_id, role, timezone, locale, "
+                    "is_initial_admin, auth_method) "
+                    "VALUES (:email, :uid, 'user', 'UTC', 'en', false, 'oauth')"
+                ),
+                {"email": uid + "@example.test", "uid": uid},
+            )
             db.add(Workspace(id=wid, name="Preserved", owner_user_id=uid))
             db.flush()
             db.add(Resource(id=rid, workspace_id=wid, resource_id=slug))

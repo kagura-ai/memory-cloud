@@ -187,3 +187,14 @@ installation, canonical content and publication identities remain. Re-upgrade
 requires explicit operator client/public-key registration; it does not restore
 old token or replay authority. Production enablement and downstream rollout are
 separate from merging this implementation.
+
+Migration `f47_2819_merge_sync_credentials` reconciles the credential revision
+with the parallel notice/admission history. Use the ordinary `alembic upgrade
+head` command from either prior head: Alembic applies the missing branch before
+the no-DDL merge node. Existing revision IDs and data remain intact. Downgrading
+only the merge node restores both parent markers and keeps both schemas; removing
+the credential tables is a separate downgrade governed by the precautions above.
+To undo just the merge, name either immediate parent explicitly; relative `-1`
+is ambiguous at a merge point. For example, from this merge revision use
+`make migrate-down revision=f46_2803_admission_record`; both parent schemas
+remain, and `alembic upgrade head` rejoins them.

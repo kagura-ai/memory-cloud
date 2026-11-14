@@ -120,7 +120,7 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "oauth": NONE,
     "observability": NONE,
     "observation_credentials": NONE,
-    "oidc": NONE,
+    "oidc": Guarded(services=("services.sync_credentials",)),  # sync credential issuance
     "operation_history": NONE,
     "passkeys": NONE,
     "password": NONE,
@@ -140,6 +140,7 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "sleep_reports": NONE,
     "system": NONE,
     "sync_installations": Guarded(services=("services.sync_installations",)),  # #2802
+    "sync_worker": Guarded(services=("services.sync_credentials",)),
     "system_admins": NONE,
     "users": NONE,
     "well_known": NONE,
@@ -248,6 +249,7 @@ PAID_INTEGRATION_SYMBOLS: dict[str, str] = {
     # #2802: activate_installation creates the sync target inside
     # paid_integration_write, entered before any write or row lock.
     "services.sync_installations": GUARDED,
+    "services.sync_credentials": GUARDED,
 }
 
 # Kinds of use the scan reports.
