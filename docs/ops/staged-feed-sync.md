@@ -12,6 +12,13 @@ false). Existing OIDC, synchronization-control and service-credential switches
 must also be enabled for worker calls. Register the browser and service clients
 using the existing [credential runbook](sync-service-credentials.md).
 
+In the combined application checkout, run `alembic upgrade head`. The no-op
+merge `f50_2807_merge_sync_heads` joins the feed migration with
+`f49_2817_clear_allowlist_adders` (which follows the public usage-budget
+migration). Either deployed parent, their common ancestor or both parent
+markers can upgrade normally; do not stamp or renumber existing revisions.
+The merge itself rewrites no tables, counters, period boundaries or feed data.
+
 The browser client must explicitly register and request `sync.records:read` to
 read managed bodies. Existing grants and `workspaces:read` do not gain data
 access on refresh. The consent screen describes this separate permission.
@@ -171,3 +178,9 @@ disable the flag and back up feed canonical/staging tables first. Downgrading
 f48 drops only the five new tables. It retains existing
 Resource/Context/endpoint/credential rows and already committed Resource events
 and Memories; downgrade does not reverse a published content change.
+
+Rolling back the merge node to either explicit parent only unmerges its version
+markers: both parents' schemas and data remain. Further downgrade to a shared
+ancestor also affects the public-budget branch and must be planned for both
+features; it is not a feed-only rollback. Prefer disabling the sync flag when
+only staged-feed admission needs to stop.
