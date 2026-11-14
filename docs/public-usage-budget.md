@@ -122,8 +122,9 @@ Exempt (the authenticated control-UI read projection):
 - the authenticated `/mcp` tools (member token; the workspace's daily MCP
   quota applies there);
 - share-key recall;
-- REST public search with a public-bound API key, or with a signed-in session
-  of the context's own workspace.
+- REST public search with a public-bound API key. A request that carries a
+  signed-in session is not charged either: the route checks it against the
+  session's workspace before the per-minute bucket and the budget.
 
 Not counted and still served when the budget is exhausted: `initialize`,
 `tools/list`, `ping`, `server/discover`, `GET /api/v1/public/{context_id}/info`,
