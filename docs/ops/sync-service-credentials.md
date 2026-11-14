@@ -195,13 +195,26 @@ the no-DDL merge node. Existing revision IDs and data remain intact. Downgrading
 only the merge node restores both parent markers and keeps both schemas; removing
 the credential tables is a separate downgrade governed by the precautions above:
 `alembic downgrade f45_2806_sync_credentials@f44_2802_sync_installations`
-runs only the merge node's and the credential revision's downgrades and leaves
+runs only the downgrades of the revisions above the merge node (from v0.163.0:
+`f49_2817_clear_allowlist_adders` and `f48_2805_public_usage_budgets`), the
+merge node's and the credential revision's, and leaves
 `f46_2803_admission_record` applied. Do **not** use a plain
 `alembic downgrade f44_2802_sync_installations` for that: from the merged head it
 reverts both branches, so it also drops the admission records (for good) and
 the notice plans, or stops at the notice-plan downgrade guard. To remove only
-the admission record, use `alembic downgrade f45_2800_mcp_notice_plans`.
+the admission record, use `alembic downgrade f45_2800_mcp_notice_plans`
+(it, too, first reverts `f49_2817` and `f48_2805`).
 To undo just the merge, name either immediate parent explicitly; relative `-1`
 is ambiguous at a merge point. For example, from this merge revision use
-`make migrate-down revision=f46_2803_admission_record`; both parent schemas
+`make migrate-down revision=f46_2803_admission_record` (at head, `f49_2817`
+and `f48_2805` are reverted first); both parent schemas
 remain, and `alembic upgrade head` rejoins them.
+
+From v0.163.0, every downgrade below `f48_2805_public_usage_budgets`, these
+per-branch ones included, first runs `f49_2817` (no-op) and `f48_2805`, which
+drops the table `public_usage_budgets`. Turn `MCP_PUBLIC_USAGE_BUDGET_ENABLED`
+off before it: with the switch on and no table, public `tools/call` is refused
+(`temporarily_unavailable`), counted anonymous REST searches answer `503` and
+the public MCP owner routes answer `503 DB-002`. The table comes back only with
+`alembic upgrade head`, which also re-creates the credential tables (see
+[Public usage budget](../public-usage-budget.md)).

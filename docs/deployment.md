@@ -718,13 +718,21 @@ Operator notes:
   when `f46_2803` alters `users`. Nothing is applied, and the single-server
   `deploy.sh` does not retry this error (it retries only lock timeouts): it
   stops at the migration step without starting the new colour or moving
-  traffic. Rerun the deploy (or the upgrade). To avoid it, upgrade in three
+  traffic. Rerun the deploy (or the upgrade). To avoid it, upgrade in four
   steps: `alembic upgrade f45_2806_sync_credentials`, then
-  `alembic upgrade f45_2800_mcp_notice_plans`, then `alembic upgrade head`.
-  The last step then runs only `f46_2803` and the no-DDL merge revision
-  `f47_2819_merge_sync_credentials`, so `f46_2803` starts holding no lock.
+  `alembic upgrade f45_2800_mcp_notice_plans`, then
+  `alembic upgrade f47_2819_merge_sync_credentials`, then
+  `alembic upgrade head`. The third step runs only `f46_2803` and the no-DDL
+  merge revision `f47_2819_merge_sync_credentials`, so `f46_2803` starts
+  holding no lock. The last step runs the later revisions on their own
+  (from v0.163.0: `f48_2805_public_usage_budgets`, whose new table has a
+  foreign key to `workspaces`, and `f49_2817_clear_allowlist_adders`), so
+  none of them asks for `workspaces` while `f46_2803` holds `users`.
   (With two steps, `f45_2806_sync_credentials` would run in the same
-  transaction as `f46_2803` and take its locks on `workspaces` there.)
+  transaction as `f46_2803` and take its locks on `workspaces` there; with
+  three, ending in `alembic upgrade head`, `f48_2805` would.) A database
+  already at `f47_2819_merge_sync_credentials` (v0.162.0) needs only
+  `alembic upgrade head`.
 - A **downgrade loses the records** written at sign-up for good; a later
   upgrade rebuilds only what the evidence above still gives.
 

@@ -272,7 +272,13 @@ address, no endpoint, no client and no content. A workspace hard delete
 removes the row (foreign key cascade); a soft delete keeps it; account erasure
 has nothing to erase in it; it is in no export. Downgrading the migration
 drops the table: counts and periods are lost and every workspace starts a
-fresh period at its next counted call.
+fresh period at its next counted call. So does every downgrade to a revision
+below `f48_2805_public_usage_budgets`, including the per-branch downgrades of
+v0.162.0 in [Sync service credentials](ops/sync-service-credentials.md): they
+first revert `f49_2817` (no-op) and `f48_2805`. Turn
+`MCP_PUBLIC_USAGE_BUDGET_ENABLED` off before any of them (see "Deploy order"
+for what the switch does without the table); the table comes back only with
+`alembic upgrade head`.
 
 ## Log events
 
