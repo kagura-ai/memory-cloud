@@ -6591,6 +6591,19 @@
             "format": "date-time",
             "type": "string"
           },
+          "plans": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "starts_at": {
             "anyOf": [
               {
@@ -6636,6 +6649,7 @@
           "delivered_count": {},
           "expires_at": {},
           "id": {},
+          "plans": {},
           "starts_at": {},
           "state": {},
           "text": {},

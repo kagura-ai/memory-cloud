@@ -5,8 +5,10 @@ Three tables:
 - ``mcp_notices``: a short plain-text notice an administrator of this server
   wrote, live from ``starts_at`` until ``expires_at`` (or ``withdrawn_at``).
   The text is immutable (a correction is withdraw + create) and stored in the
-  normalised form ``services.mcp_notice_text`` produces. No actor column: who
-  wrote it is in ``audit_logs``, so the row holds no personal identifier.
+  normalised form ``services.mcp_notice_text`` produces. ``plans`` (#2800)
+  names the plan tiers it is for, in tier order; ``NULL`` is every plan. No
+  actor column: who wrote it is in ``audit_logs``, so the row holds no
+  personal identifier.
 - ``mcp_notice_deliveries``: one row per (user, notice), written when the
   notice was placed in a ``bootstrap`` reply for that person. The primary key
   makes "at most once per user" hold across every client.
@@ -38,6 +40,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy import text as sql_text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -59,6 +62,11 @@ class McpNotice(Base):
         expires_at: When it stops being deliverable (after ``starts_at``).
         withdrawn_at: Set when an administrator ended it early.
         created_at: When it was written.
+        plans: The plan tiers it is for (#2800): tier keys in tier order, at
+            least one (CHECK); ``NULL`` = every plan. Delivered only in a
+            ``bootstrap`` whose context's workspace is on one of them. The
+            names are checked by the API against the tier registry, not by
+            the database, so a new tier needs no change here.
     """
 
     __tablename__ = "mcp_notices"
@@ -73,6 +81,7 @@ class McpNotice(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    plans: Mapped[list[str] | None] = mapped_column(ARRAY(String(50)), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -80,6 +89,10 @@ class McpNotice(Base):
             name="ck_mcp_notices_text_size",
         ),
         CheckConstraint("expires_at > starts_at", name="ck_mcp_notices_window"),
+        # #2800: byte-identical to the f44 migration (schema drift test).
+        CheckConstraint(
+            "plans IS NULL OR cardinality(plans) >= 1", name="ck_mcp_notices_plans_nonempty"
+        ),
         # Serves the delivery read and the active count.
         Index(
             "ix_mcp_notices_active",

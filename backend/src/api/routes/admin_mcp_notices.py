@@ -8,8 +8,13 @@ console in ``service`` mode, nobody in ``off`` mode (the routes then answer
 - ``POST``: write a notice. The text passes the notice sanitiser (one line
   of plain text, no links, markup or hidden characters, 1-300 characters);
   ``expires_at`` is required and timezone-aware, ``starts_at`` defaults to
-  now. Caps: 3 live or scheduled, 30 days long, at most 90 days ahead, 5
-  created in any 24 hours (withdrawn ones count).
+  now. ``plans`` (#2800), optional: absent or ``null`` = everyone who opted
+  in; otherwise one or more distinct tier keys (``free``, ``basic``, ``pro``,
+  ``promax``, compared exactly), stored in tier order, and the notice is
+  delivered only in a ``bootstrap`` whose context's workspace is on one of
+  them. Anything else answers 422 ``VAL-001`` under ``["body", "plans"]``.
+  Caps: 3 live or scheduled, 30 days long, at most 90 days ahead, 5 created
+  in any 24 hours (withdrawn ones count); targeted notices count alike.
 - ``GET``: the notices, newest first, each with an aggregate
   ``delivered_count`` (no recipient is ever listed), and ``delivering``
   (``MCP_NOTICES_ENABLED``).
@@ -17,11 +22,12 @@ console in ``service`` mode, nobody in ``off`` mode (the routes then answer
   start after it commits skip the notice; one already running may still
   deliver it once.
 
-The text cannot be edited and there is no delete: a correction is withdraw +
-create, so everyone who saw a notice saw the same text. Every create and
-withdraw writes an ``audit_logs`` row in the same transaction (the text's
-sha256, never the text) and a WARNING log line with the actor, the id and the
-character count, never the text. The routes work while delivery is off, so a
+The text and the plans cannot be edited and there is no delete: a correction
+is withdraw + create, so everyone who saw a notice saw the same text. Every
+create and withdraw writes an ``audit_logs`` row in the same transaction (the
+text's sha256, never the text; a create also the plans) and a WARNING log
+line with the actor, the id and the character count (a create also the
+plans), never the text. The routes work while delivery is off, so a
 notice can be prepared first.
 """
 
@@ -32,7 +38,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from pydantic import AwareDatetime, BaseModel, ConfigDict, StrictStr
+from pydantic import AwareDatetime, BaseModel, ConfigDict, StrictStr, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import AdminUser
@@ -45,6 +51,7 @@ from services.mcp_notice_service import (
     create_notice,
     list_notices,
     mcp_notices_enabled,
+    normalize_notice_plans,
     withdraw_notice,
 )
 from utils.logger import get_logger
@@ -71,6 +78,10 @@ class McpNoticeCreateRequest(BaseModel):
             after ``starts_at``).
         starts_at: When delivery starts (timezone-aware; default now; at most
             90 days ahead, not in the past).
+        plans: The plan tiers it is for (#2800): absent or ``null`` =
+            everyone; otherwise one or more distinct tier keys, compared
+            exactly, returned in tier order. A list of every tier is kept as
+            a list (it does not cover a tier added later).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -78,10 +89,23 @@ class McpNoticeCreateRequest(BaseModel):
     text: StrictStr
     expires_at: AwareDatetime
     starts_at: AwareDatetime | None = None
+    plans: list[StrictStr] | None = None
+
+    @field_validator("plans")
+    @classmethod
+    def _known_plans(cls, value: list[str] | None) -> list[str] | None:
+        # After mode: a type error ([1], "pro") keeps pydantic's own message
+        # and loc; only the registry check (#1548 style) is ours.
+        if value is None:
+            return None
+        return normalize_notice_plans(value)
 
 
 class McpNoticeResponse(TZAwareBaseModel):
-    """A notice. ``state``: ``scheduled``, ``active`` or ``ended`` (expired or withdrawn)."""
+    """A notice. ``state``: ``scheduled``, ``active`` or ``ended`` (expired or withdrawn).
+
+    ``plans``: the tier keys it is for, in tier order; ``null`` = everyone.
+    """
 
     id: UUID
     text: str
@@ -91,6 +115,7 @@ class McpNoticeResponse(TZAwareBaseModel):
     created_at: datetime
     state: Literal["scheduled", "active", "ended"]
     delivered_count: int
+    plans: list[str] | None = None
 
 
 class McpNoticeListResponse(BaseModel):
@@ -110,6 +135,7 @@ def _response(view: NoticeView) -> McpNoticeResponse:
         created_at=view.created_at,
         state=view.state,
         delivered_count=view.delivered_count,
+        plans=view.plans,
     )
 
 
@@ -150,6 +176,7 @@ async def create_mcp_notice(
         raw_text=payload.text,
         expires_at=payload.expires_at,
         starts_at=payload.starts_at,
+        plans=payload.plans,
         actor=actor,
     )
     await db.commit()
@@ -158,6 +185,7 @@ async def create_mcp_notice(
         actor=actor.email,
         notice_id=str(view.id),
         text_chars=len(view.text),
+        plans=view.plans,
     )
     return _response(view)
 

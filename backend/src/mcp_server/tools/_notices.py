@@ -12,9 +12,11 @@
    a connector key, and the user id is not an ``operator:`` / ``public:``
    principal. False: no notice query runs and the reply is unchanged.
 2. :func:`read_notice_items` — the candidates (live, never delivered to this
-   person, whose newest answer is "yes", no erasure under way), each passed
-   through the notice sanitiser again; a row it refuses is skipped and logged
-   without its text. Advisory: a failure or a read slower than 2 s gives none.
+   person, whose newest answer is "yes", no erasure under way, and either
+   without plans or for the plan of the workspace of the context the call
+   opens, #2800), each passed through the notice sanitiser again; a row it
+   refuses is skipped and logged without its text. Advisory: a failure or a
+   read slower than 2 s gives none.
 3. :func:`fit_notices` — whole items, in order, within what the
    ``plan_headroom`` field leaves of ``max_chars // 4`` (the two server
    notices share one quarter, so the lanes keep three quarters); an item that
@@ -37,6 +39,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import parse_qsl
+from uuid import UUID
 
 from services.mcp_notice_service import (
     MCP_NOTICE_BUDGET_SHARE,
@@ -115,16 +118,20 @@ def notice_item(candidate: NoticeCandidate, text: str | None = None) -> dict[str
     }
 
 
-async def read_notice_items(session: AsyncSession, user_id: str) -> list[dict[str, Any]]:
+async def read_notice_items(
+    session: AsyncSession, user_id: str, *, workspace_id: UUID | None
+) -> list[dict[str, Any]]:
     """The deliverable items for this person, sanitised again, in delivery order.
 
-    Read only; ``session`` is closed by the caller, never committed. Any
-    failure (or a read past :data:`READ_TIMEOUT_SECONDS`) is logged and gives
-    no items.
+    ``workspace_id``: the workspace of the context the call opens (#2800);
+    ``None`` reads only notices without plans. Read only; ``session`` is
+    closed by the caller, never committed. Any failure (or a read past
+    :data:`READ_TIMEOUT_SECONDS`) is logged and gives no items.
     """
     try:
         candidates = await asyncio.wait_for(
-            read_notice_candidates(session, user_id), timeout=READ_TIMEOUT_SECONDS
+            read_notice_candidates(session, user_id, workspace_id=workspace_id),
+            timeout=READ_TIMEOUT_SECONDS,
         )
     except Exception:
         logger.warning("mcp_notice_read_failed", exc_info=True)
@@ -163,24 +170,28 @@ def fit_notices(
     return _block(fitted) if fitted else {}
 
 
-async def claim_notices(db: Any, user_id: str, block: dict[str, Any]) -> dict[str, Any]:
+async def claim_notices(
+    db: Any, user_id: str, block: dict[str, Any], *, workspace_id: UUID | None
+) -> dict[str, Any]:
     """Claim the fitted notices; the block with only the claimed items, or ``{}``.
 
-    Opens a session of its own only when there is something to claim. Never
-    retries and never raises: a failure (a lock or statement timeout, the
-    account deleted under it, a lost connection) leaves the key out.
+    ``workspace_id``: the same workspace the read got (#2800); the claim
+    checks the plan again. Opens a session of its own only when there is
+    something to claim. Never retries and never raises: a failure (a lock or
+    statement timeout, the account deleted under it, a lost connection)
+    leaves the key out.
     """
     if not block:
         return {}
-    from uuid import UUID
-
     from db.base import isolated_session
 
     items = block["notices"]["items"]
     ids = [UUID(item["id"]) for item in items]
     try:
         async with isolated_session(db) as claim_db:
-            won = await claim_notice_deliveries(claim_db, user_id=user_id, notice_ids=ids)
+            won = await claim_notice_deliveries(
+                claim_db, user_id=user_id, notice_ids=ids, workspace_id=workspace_id
+            )
     except Exception:
         logger.warning("mcp_notice_claim_failed", exc_info=True)
         return {}

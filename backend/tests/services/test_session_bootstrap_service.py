@@ -846,39 +846,20 @@ def _headroom_entry(dimension: str, level: str) -> dict:
     }
 
 
-async def _session_start_with_a_notice(db_session, monkeypatch, headroom: dict):
-    """bootstrap(index, 5,000) through the handler on the #2485-sized context,
-    with ``headroom`` as the plan_headroom field and one live 300-character
-    Japanese service notice the owner opted into. Returns (reply text, the
-    delivery rows written)."""
+async def _bootstrap_through_the_handler(
+    db_session, monkeypatch, *, owner: str, context_id: str, workspace_id, headroom: dict, notice_id
+):
+    """One bootstrap(index, 5,000) through the handler, notices on and the
+    caller signed in, with ``headroom`` as the plan_headroom field and
+    ``workspace_id`` as the handler's own argument. Returns (reply, reply
+    length, delivery rows of ``notice_id``)."""
     import json
     from contextlib import ExitStack
-    from datetime import UTC
     from unittest.mock import AsyncMock
 
     from config.settings import get_settings
     from mcp_server.auth import set_mcp_notice_eligible
     from mcp_server.tools import bootstrap as module
-    from models.mcp_notice import McpNotice
-    from services import mcp_notice_service as notices
-
-    owner, ws, ctx = await _live_like_context(db_session)
-    await notices.record_mcp_notice_consent(
-        db_session, user_id=owner, value=True, wording_version=notices.MCP_NOTICES_WORDING_VERSION
-    )
-    notice_id = uuid4()
-    live_from = datetime.now(UTC) - timedelta(hours=1)
-    db_session.add(
-        McpNotice(
-            id=notice_id,
-            text="お" * 300,
-            starts_at=live_from,
-            expires_at=live_from + timedelta(days=1),
-        )
-    )
-    await db_session.commit()
-    context_id = str(ctx.id)
-    workspace_id = ws.id
 
     async def gen():
         yield db_session
@@ -906,9 +887,105 @@ async def _session_start_with_a_notice(db_session, monkeypatch, headroom: dict):
     finally:
         set_mcp_notice_eligible(False)
         await db_session.rollback()
-        await db_session.execute(text("DELETE FROM mcp_notices WHERE id = :id"), {"id": notice_id})
-        await db_session.commit()
     return json.loads(block.text), len(block.text), delivered
+
+
+async def _live_notice_for(db_session, owner: str, plans: list[str] | None = None):
+    """The owner opts in; one live 300-character Japanese notice (for
+    ``plans``, or everyone). Returns its id."""
+    from datetime import UTC
+
+    from models.mcp_notice import McpNotice
+    from services import mcp_notice_service as notices
+
+    await notices.record_mcp_notice_consent(
+        db_session, user_id=owner, value=True, wording_version=notices.MCP_NOTICES_WORDING_VERSION
+    )
+    notice_id = uuid4()
+    live_from = datetime.now(UTC) - timedelta(hours=1)
+    db_session.add(
+        McpNotice(
+            id=notice_id,
+            text="お" * 300,
+            starts_at=live_from,
+            expires_at=live_from + timedelta(days=1),
+            plans=plans,
+        )
+    )
+    await db_session.commit()
+    return notice_id
+
+
+async def _drop_notice(db_session, notice_id) -> None:
+    await db_session.rollback()
+    await db_session.execute(text("DELETE FROM mcp_notices WHERE id = :id"), {"id": notice_id})
+    await db_session.commit()
+
+
+async def _session_start_with_a_notice(db_session, monkeypatch, headroom: dict):
+    """bootstrap(index, 5,000) through the handler on the #2485-sized context,
+    with ``headroom`` as the plan_headroom field and one live 300-character
+    Japanese service notice the owner opted into. Returns (reply text, the
+    delivery rows written)."""
+    owner, ws, ctx = await _live_like_context(db_session)
+    notice_id = await _live_notice_for(db_session, owner)
+    try:
+        return await _bootstrap_through_the_handler(
+            db_session,
+            monkeypatch,
+            owner=owner,
+            context_id=str(ctx.id),
+            workspace_id=ws.id,
+            headroom=headroom,
+            notice_id=notice_id,
+        )
+    finally:
+        await _drop_notice(db_session, notice_id)
+
+
+@pytest.mark.asyncio
+async def test_a_plan_notice_follows_the_context_workspace_plan(db_session, monkeypatch):
+    """#2800, the handler and the SQL together: a notice for ``pro`` is not
+    delivered while the workspace of the context the call opens is on
+    ``free``, whatever the handler's own ``workspace_id`` says (here another
+    id); once that workspace moves to ``pro`` the next call delivers it,
+    claimed once. No headroom, so there is room."""
+    owner, ws, ctx = await _live_like_context(db_session)
+    notice_id = await _live_notice_for(db_session, owner, plans=["pro"])
+    context_id, context_ws = str(ctx.id), ws.id
+    try:
+        reply, _, delivered = await _bootstrap_through_the_handler(
+            db_session,
+            monkeypatch,
+            owner=owner,
+            context_id=context_id,
+            workspace_id=uuid4(),
+            headroom={},
+            notice_id=notice_id,
+        )
+        assert "notices" not in reply and delivered == 0
+        assert reply["status"] == "success"
+
+        await db_session.execute(
+            text("UPDATE workspaces SET plan_name = 'pro' WHERE id = :id"), {"id": context_ws}
+        )
+        await db_session.commit()
+
+        reply, length, delivered = await _bootstrap_through_the_handler(
+            db_session,
+            monkeypatch,
+            owner=owner,
+            context_id=context_id,
+            workspace_id=uuid4(),
+            headroom={},
+            notice_id=notice_id,
+        )
+        assert length <= 5_000
+        assert list(reply)[:2] == ["status", "notices"]
+        assert [i["text"] for i in reply["notices"]["items"]] == ["お" * 300]
+        assert delivered == 1
+    finally:
+        await _drop_notice(db_session, notice_id)
 
 
 @pytest.mark.asyncio

@@ -196,11 +196,11 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # structure. Cascades with the user on erasure.
         "announcement_email_consents",
         # Service notices over MCP (#2762): the notices an administrator
-        # wrote (text and window, no actor column), one delivery row per
-        # (user, notice), and the per-user opt-in history (the #2761 shape in
-        # a table of its own). Platform messaging and consent bookkeeping, no
-        # user content and no learned structure. Deliveries and consents
-        # cascade with the user on erasure.
+        # wrote (text, window and target plans (#2800), no actor column), one
+        # delivery row per (user, notice), and the per-user opt-in history
+        # (the #2761 shape in a table of its own). Platform messaging and
+        # consent bookkeeping, no user content and no learned structure.
+        # Deliveries and consents cascade with the user on erasure.
         "mcp_notices",
         "mcp_notice_deliveries",
         "mcp_notice_consents",
