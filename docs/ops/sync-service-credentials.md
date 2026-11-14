@@ -194,7 +194,14 @@ with the parallel notice/admission history. Use the ordinary `alembic upgrade
 head` command from either prior head: Alembic applies the missing branch before
 the no-DDL merge node. Existing revision IDs and data remain intact. Downgrading
 only the merge node restores both parent markers and keeps both schemas; removing
-the credential tables is a separate downgrade governed by the precautions above.
+the credential tables is a separate downgrade governed by the precautions above:
+`alembic downgrade f45_2806_sync_credentials@f44_2802_sync_installations`
+runs only the merge node's and the credential revision's downgrades and leaves
+`f46_2803_admission_record` applied. Do **not** use a plain
+`alembic downgrade f44_2802_sync_installations` for that: from the merged head it
+reverts both branches, so it also drops the admission records (for good) and
+the notice plans, or stops at the notice-plan downgrade guard. To remove only
+the admission record, use `alembic downgrade f45_2800_mcp_notice_plans`.
 To undo just the merge, name either immediate parent explicitly; relative `-1`
 is ambiguous at a merge point. For example, from this merge revision use
 `make migrate-down revision=f46_2803_admission_record`; both parent schemas
