@@ -574,7 +574,7 @@ class EmailSignupService:
             raise SignupAccountExistsError()
 
         user_id = f"email:{uuid4()}"
-        admission = await gate.admit_email_signup(
+        record = await gate.admit_email_signup(
             gate_enabled=gate_enabled,
             gate_mode=gate_mode,
             email=email,
@@ -583,7 +583,7 @@ class EmailSignupService:
             ip_address=ip_address,
             user_agent=user_agent,
         )
-        if admission is None:
+        if record is None:
             await self.db.commit()  # the link stays spent; the gate staged nothing
             logger.info("email_signup_blocked", request_id=str(request_id), email_hmac=email_hmac)
             raise SignupNotAllowedError()
@@ -596,7 +596,10 @@ class EmailSignupService:
             password_hash=password_hash,
             locale=locale,
             timezone=timezone,
+            admission=record,
         )
+        # Every email admission is one of EmailSignupAdmission (_email_admission).
+        admission = cast(EmailSignupAdmission, record.via)
         # The acceptance and consent rows reference users.user_id.
         await self.db.flush()
         if current_terms is not None:

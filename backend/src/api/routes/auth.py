@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # for readers and analyzers alike.
 import auth.oauth_browser as oauth_browser
 import auth.oauth_endpoints as oauth_endpoints
+from auth.admission import SignupAdmission
 from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
 from auth.password import hash_password, verify_password
@@ -195,17 +196,18 @@ async def _check_registration_allowed(
     *,
     user_id: str | None = None,
     admit_by_invitation: Callable[[], Awaitable[bool]] | None = None,
-) -> RedirectResponse | None:
+) -> RedirectResponse | SignupAdmission | None:
     """Check if a new user is allowed to register.
 
-    Returns None if allowed, RedirectResponse if blocked.
-    Rules:
-    - Existing users: always allowed (login, not registration)
+    Returns None for an existing account, the admission (#2803) when a new
+    account is allowed, a RedirectResponse when blocked. Rules:
+    - Existing users: always allowed (login, not registration) → None
     - First user (no users exist): always allowed (need initial admin)
-    - ALLOW_REGISTRATION=true: always allowed
+      → ``first_user``
+    - ALLOW_REGISTRATION=true: always allowed → ``open_registration``
     - A pending workspace invitation addressed to this email: allowed through
       ``admit_by_invitation``, which the signup gate passes only when the
-      provider reports the address verified (#2785)
+      provider reports the address verified (#2785) → ``workspace_invitation``
     - Otherwise: blocked → redirect to login with error
 
     Args:
@@ -230,7 +232,7 @@ async def _check_registration_allowed(
 
     settings = get_settings()
 
-    async def _run(session: AsyncSession) -> RedirectResponse | None:
+    async def _run(session: AsyncSession) -> RedirectResponse | SignupAdmission | None:
         # Existing users can always login. NOTE (#481): an email match here
         # also lets through cross-provider squatters (e.g. Google user
         # alice@x.com → GitHub login with same address). That case is caught
@@ -259,16 +261,16 @@ async def _check_registration_allowed(
         # First user always allowed
         user_count_result = await session.execute(select(func.count()).select_from(User))
         if user_count_result.scalar() == 0:
-            return None
+            return "first_user"
 
         # Registration open
         if settings.allow_registration:
-            return None
+            return "open_registration"
 
         # Invited users bypass the gate: a pending invitation addressed to this
         # (verified) address, the same rule as with the signup gate on.
         if admit_by_invitation is not None and await admit_by_invitation():
-            return None
+            return "workspace_invitation"
 
         # Block. Log the HMAC of the email rather than the plaintext —
         # mirrors the audit-log pattern used elsewhere in the auth flow
@@ -1345,7 +1347,7 @@ async def google_callback(
         # the immutable OIDC `sub` claim; ip_address/user_agent are plumbed
         # in so the audit_log row written on a blocked attempt has triage
         # context (CSO gate1 D2).
-        blocked = await check_signup_access(
+        gate = await check_signup_access(
             provider="google",
             oauth_sub=user_info["sub"],
             email=user_info["email"],
@@ -1361,8 +1363,11 @@ async def google_callback(
             # #2785: an address matches an invitation only when verified.
             email_verified=user_info.get("email_verified") is True,
         )
-        if blocked:
-            return blocked
+        # #2803: the answer is a redirect (blocked), how a new account is
+        # admitted (a truthy record that must never become the response) or
+        # None (an existing account): tested by type only.
+        if isinstance(gate, RedirectResponse):
+            return gate
 
         # 4. Ensure user exists in database & assign role.
         # Issue #481: pass email_verified from Google's userinfo response so
@@ -1389,6 +1394,8 @@ async def google_callback(
             timezone=signup_timezone,
             # #2761: likewise — an existing account keeps its own answer.
             announcement_consent=signup_announcement,
+            # #2803: how the gate admitted it; recorded only on a new row.
+            admission=gate,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).
@@ -3065,7 +3072,7 @@ async def github_callback(
         # _check_registration_allowed delegation when disabled (Issue #349).
         # #655 added ip_address/user_agent plumbing so the audit_log row
         # written on a blocked attempt has triage context.
-        blocked = await check_signup_access(
+        gate = await check_signup_access(
             provider="github",
             oauth_sub=user_info["sub"],
             email=user_info["email"],
@@ -3078,8 +3085,11 @@ async def github_callback(
             # _github_get_user_info); strict, as for Google.
             email_verified=user_info.get("email_verified") is True,
         )
-        if blocked:
-            return blocked
+        # #2803: the answer is a redirect (blocked), how a new account is
+        # admitted (a truthy record that must never become the response) or
+        # None (an existing account): tested by type only.
+        if isinstance(gate, RedirectResponse):
+            return gate
 
         # 4. Ensure user exists & assign role.
         # Issue #481: lookup is by user_id (GitHub sub), so the post-call DB
@@ -3110,6 +3120,8 @@ async def github_callback(
             timezone=signup_timezone,
             # #2761: likewise — an existing account keeps its own answer.
             announcement_consent=signup_announcement,
+            # #2803: how the gate admitted it; recorded only on a new row.
+            admission=gate,
         )
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).

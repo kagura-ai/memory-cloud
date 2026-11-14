@@ -96,6 +96,24 @@ class User(Base):
             silently. Set once and never cleared — a password reset deletes the
             device rows but keeps this, so the next sign-in from every browser
             is reported.
+        admitted_via: How the account was admitted (#2803, ``auth.admission``):
+            ``beta_invite`` / ``allowlist`` / ``workspace_invitation`` /
+            ``open_registration`` / ``first_user`` / ``admin_cli``, or
+            ``unknown`` (backfill, or a creation nothing described).
+        admitted_beta_invite_id: The ``beta_invites.id`` a ``beta_invite``
+            admission spent. No foreign key: it survives the invite row.
+        admitted_invite_issuer: ``admin`` or ``user``, from the inviter's
+            ``users.role`` when the account was created (``beta_invite`` only).
+            For an account created before v0.162.0 the f45 backfill took the
+            inviter's role at upgrade time, and left the invite id, issuer and
+            inviter NULL when no live invite remained (docs/deployment.md).
+        admitted_by_user_id: The inviter of a user-minted invite. A
+            ``SET NULL`` foreign key: deleting the inviter's account clears it.
+
+        The four admission columns are written once, by the code that creates
+        the row, and never rewritten; only the foreign key's ``SET NULL``
+        changes ``admitted_by_user_id`` afterwards. The invite's label is never
+        recorded.
     """
 
     __tablename__ = "users"
@@ -191,6 +209,25 @@ class User(Base):
         String(24), nullable=True, unique=True, index=True
     )
 
+    # Issue #2803: how the account was admitted, written once at creation.
+    # NOT NULL with a server default so a writer that does not know (an app
+    # instance from before #2803 during a rolling deploy) records ``unknown``.
+    admitted_via: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'unknown'")
+    )
+    admitted_beta_invite_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    admitted_invite_issuer: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # ``use_alter``: a self-reference to ``user_id``, whose unique index
+    # ``create_all`` builds after the table, so the key is added after it.
+    admitted_by_user_id: Mapped[str | None] = mapped_column(
+        String(255),
+        ForeignKey("users.user_id", ondelete="SET NULL", use_alter=True),
+        nullable=True,
+        index=True,
+    )
+
     # Relationships
     current_workspace: Mapped["Workspace | None"] = relationship(
         "Workspace", foreign_keys=[current_workspace_id]
@@ -209,6 +246,25 @@ class User(Base):
         # ``lower(email)``. Non-unique (case variants may coexist; the lookup
         # fails closed). Mirrors alembic e86_1678_email_password.
         Index("ix_users_email_lower", text("lower(email)")),
+        # Issue #2803: byte-identical to alembic f45_2803_admission_record.
+        CheckConstraint(
+            "admitted_via IN ('admin_cli', 'allowlist', 'beta_invite', 'first_user', "
+            "'open_registration', 'unknown', 'workspace_invitation')",
+            name="valid_admitted_via",
+        ),
+        CheckConstraint(
+            "admitted_invite_issuer IN ('admin', 'user')",
+            name="valid_admitted_invite_issuer",
+        ),
+        CheckConstraint(
+            "admitted_via = 'beta_invite' OR (admitted_beta_invite_id IS NULL AND "
+            "admitted_invite_issuer IS NULL AND admitted_by_user_id IS NULL)",
+            name="admitted_invite_fields_beta_only",
+        ),
+        CheckConstraint(
+            "admitted_by_user_id IS NULL OR admitted_invite_issuer = 'user'",
+            name="admitted_by_user_issuer_user",
+        ),
     )
 
     def __repr__(self) -> str:

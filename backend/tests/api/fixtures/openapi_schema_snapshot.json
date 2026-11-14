@@ -13042,6 +13042,7 @@
       },
       "UserInfo": {
         "properties": {
+          "admitted_via": {},
           "auth_provider": {},
           "base_cap": {},
           "cap": {},
@@ -17075,6 +17076,47 @@
             "schema": {
               "default": "created_at",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "admitted_via",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "admin_cli",
+                    "allowlist",
+                    "beta_invite",
+                    "first_user",
+                    "open_registration",
+                    "unknown",
+                    "workspace_invitation"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "invited_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         ],

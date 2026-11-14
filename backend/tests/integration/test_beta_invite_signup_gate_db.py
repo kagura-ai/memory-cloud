@@ -385,7 +385,7 @@ class TestGateRedemption:
             await BetaInviteService(db_session).preview(token)
 
         # Regression (#1581): the invitee's own row keeps admitting them with no
-        # token at all — _is_allowlisted honours source='beta_invite'. They have
+        # token at all — _allowlist_admission honours source='beta_invite'. They have
         # no users row here, so this is NOT the existing-user path.
         assert await _gate(db_session, sub=sub, token=None, provider=provider) is None
 

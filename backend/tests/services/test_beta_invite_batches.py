@@ -121,3 +121,19 @@ async def test_inviter_lock_allows_foreign_key_checks():
     await svc._lock_inviter_role("admin")
     statement = svc.db.scalar.await_args.args[0]
     assert "FOR NO KEY UPDATE" in str(statement.compile(dialect=postgresql.dialect()))
+
+
+async def test_invite_issuer_lock_is_key_share():
+    """#2803: the sign-up takes the inviter's row FOR KEY SHARE (it only must
+    stay undeleted); FOR NO KEY UPDATE would also queue every concurrent
+    invitee and the inviter's own row updates behind it."""
+    from sqlalchemy.dialects import postgresql
+
+    from services.beta_invite_service import lock_invite_issuer
+
+    db = AsyncMock()
+    db.scalar.return_value = "user"
+    assert await lock_invite_issuer(db, "inviter") == ("user", "inviter")
+    statement = db.scalar.await_args.args[0]
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    assert sql.rstrip().endswith("FOR KEY SHARE")

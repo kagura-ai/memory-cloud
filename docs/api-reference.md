@@ -2223,6 +2223,36 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 
 `PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
 
+### Users
+
+How each account was admitted (Issue #2803). Both routes answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/users` | The user list. Each row carries `admitted_via`. Two filters, combined with the existing `search`, `role`, `workspace_id` and `plan`: `admitted_via=<value>` (one of the values below; anything else is a `422`) and `invited_by=<user_id>` (1-255 characters: the accounts admitted by an invite that user minted). `total` counts the users that match every filter, so it gives the number of accounts per channel and per inviter. |
+| `GET /api/v1/admin/users/{user_id}` | The user detail. `admission` = `{"via", "invite_issuer", "invite_id", "invited_by"}`. |
+
+`admitted_via` is written once, by the code that creates the account, and never rewritten:
+
+| Value | Admitted by |
+|-------|-------------|
+| `beta_invite` | a closed-beta invite link ([Closed-beta invite links](deployment.md#closed-beta-invite-links-issue-1581)) |
+| `allowlist` | a manual allowlist row (a pending Google row included) |
+| `workspace_invitation` | a pending workspace invitation addressed to the verified address |
+| `open_registration` | `ALLOW_REGISTRATION` with the signup gate off |
+| `first_user` | the first account of an empty deployment |
+| `admin_cli` | a local admin created by `create_admin` / `seed_e2e_admin` |
+| `unknown` | no evidence: accounts created before v0.162.0 that the backfill could not place, and a second account that lost the first-user race |
+
+For `beta_invite`:
+
+- `invite_id` is the id of the invite spent (it stays after the invite row is gone);
+- `invite_issuer` is `admin` when the inviter's `users.role` was `admin` when the account was created, in every `SYSTEM_ADMIN_MODE`, and `user` otherwise; it is null when the inviter's account was already gone then;
+- `invited_by` (`{"user_id", "email"}`) names the inviter of a user-minted invite. It is read live from the inviter's account: null for an admin-minted invite and once the inviter's account is erased or deleted.
+- accounts created before v0.162.0 were filled by the upgrade's backfill ([How each account was admitted](deployment.md#how-each-account-was-admitted-issue-2803)): their `invite_issuer` is the inviter's role at upgrade time, not at sign-up, and `invite_id`, `invite_issuer` and `invited_by` are all null when no live invite remained then, even though `via` is `beta_invite`.
+
+For every other value the three fields are null. The invite's label (the inviter's private note) is never part of a response, a log line or an audit row. Neither filter value is logged.
+
 ### Operations status
 
 | Endpoint | Purpose |

@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from auth.admission import AdmittedVia, InviteIssuer
 from auth.connector_keys import reject_reserved_key_name
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from models.api_base import TZAwareBaseModel
@@ -2264,17 +2265,42 @@ class WorkspaceSummary(BaseModel):
     owned_workspaces: list[OwnedWorkspaceInfo]
 
 
+class AdmissionInvitedBy(BaseModel):
+    """The inviter of a user-minted beta invite, read live (#2803)."""
+
+    user_id: str
+    email: str
+
+
+class AdmissionInfo(BaseModel):
+    """How an account was admitted, for the admin user detail (#2803).
+
+    ``via`` is written once when the account is created. For a beta invite,
+    ``invite_issuer`` (``admin`` / ``user``, the inviter's role then) and
+    ``invite_id`` are recorded too; ``invited_by`` names the inviter of a
+    user-minted invite, read live: null for an admin-minted invite and once
+    the inviter's account is gone. The invite's label is never shown.
+    """
+
+    via: AdmittedVia
+    invite_issuer: InviteIssuer | None
+    invite_id: str | None
+    invited_by: AdmissionInvitedBy | None
+
+
 class UserDetailResponse(BaseModel):
     """Comprehensive user detail response.
 
     Issue #164: User detail page.
     Issue #676: Adds ``workspace_summary`` for the admin slot-bonus UI.
+    Issue #2803: Adds ``admission``.
     """
 
     user: dict  # Basic user info
     workspaces: list[UserWorkspaceInfo]
     accessible_contexts: list[UserAccessibleContext]
     stats: dict  # Usage statistics
+    admission: AdmissionInfo  # #2803
     workspace_summary: WorkspaceSummary | None = None  # #676
 
     class Config:

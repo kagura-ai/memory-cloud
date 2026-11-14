@@ -16,6 +16,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.admission import AdmittedVia, InviteIssuer
 from auth.dependencies import require_admin
 from auth.system_admin_mode import is_operator_principal
 from auth.workspace_roles import ContextRole, WorkspaceRole
@@ -33,6 +34,8 @@ from models.auth import (
 )
 from models.memory import Memory
 from models.schemas import (
+    AdmissionInfo,
+    AdmissionInvitedBy,
     UpdateWorkspaceSlotBonusRequest,
     UpdateWorkspaceSlotBonusResponse,
     UserWorkspaceInfo,
@@ -111,6 +114,9 @@ class UserInfo(TZAwareBaseModel):
     base_cap: int = BASE_CAP
     cap: int = BASE_CAP
 
+    # Issue #2803: how the account was admitted (the detail has the rest).
+    admitted_via: AdmittedVia = "unknown"
+
     # Issue #246: current_context_id removed
     # current_context_id: str | None = None
     # current_context_name: str | None = None
@@ -163,8 +169,14 @@ def _apply_user_list_filters(
     role: str | None,
     workspace_id: str | None,
     plan: str | None,
+    admitted_via: str | None = None,
+    invited_by: str | None = None,
 ) -> tuple[Any, bool]:
     """Apply the admin user-list filters (#164), returning (stmt, joined).
+
+    #2803: ``admitted_via`` and ``invited_by`` (the inviter's ``user_id``) are
+    plain columns of ``users``: no join, so the DISTINCT flag and ``total``
+    are unaffected.
 
     ``WorkspaceMember.user_id`` is not a FK to ``User.user_id`` (it stores the
     OAuth ``sub`` claim as a plain string), so SQLAlchemy cannot infer the ON
@@ -190,6 +202,12 @@ def _apply_user_list_filters(
 
     if role:
         stmt = stmt.where(User.role == role)
+
+    if admitted_via is not None:
+        stmt = stmt.where(User.admitted_via == admitted_via)
+
+    if invited_by is not None:
+        stmt = stmt.where(User.admitted_by_user_id == invited_by)
 
     join_filter_applied = workspace_id is not None or plan is not None
     if workspace_id:
@@ -322,6 +340,9 @@ async def list_users(
     role: str | None = Query(None),  # Issue #164: Filter by system role
     plan: str | None = Query(None),  # Issue #164: Filter by plan tier
     sort: str = Query("created_at"),  # Issue #164: Sort field
+    # Issue #2803: how accounts were admitted, and who invited them.
+    admitted_via: AdmittedVia | None = Query(None),
+    invited_by: str | None = Query(None, min_length=1, max_length=255),
 ):
     """List all users with their memory statistics.
 
@@ -340,13 +361,22 @@ async def list_users(
         role: Filter by system role (admin/user)
         plan: Filter by plan tier (free/basic/pro/promax)
         sort: Sort field (created_at, last_login, memory_count)
+        admitted_via: Only accounts admitted this way (#2803)
+        invited_by: Only accounts admitted by an invite this user minted
+            (``user_id``; user-minted invites only, #2803)
 
     Returns:
         List of users with memory counts, storage usage, and optionally workspace info
     """
     try:
         stmt, join_filter_applied = _apply_user_list_filters(
-            select(User), search=search, role=role, workspace_id=workspace_id, plan=plan
+            select(User),
+            search=search,
+            role=role,
+            workspace_id=workspace_id,
+            plan=plan,
+            admitted_via=admitted_via,
+            invited_by=invited_by,
         )
         # Deduplicate the user list / count when any JOIN-based filter is
         # active — see the helper's docstring for why total breaks without it.
@@ -403,7 +433,9 @@ async def list_users(
                 UserInfo(
                     id=u.user_id,
                     email=u.email,
-                    name=u.name,
+                    # An email sign-up may have no name (#1734); the row's
+                    # field is a string, so None would fail the whole list.
+                    name=u.name or "",
                     picture=u.picture,
                     role=u.role or "user",
                     created_at=u.created_at,
@@ -417,6 +449,7 @@ async def list_users(
                     workspace_slot_bonus=cap["workspace_slot_bonus"],  # Issue #695
                     base_cap=cap["base_cap"],  # Issue #695
                     cap=cap["cap"],  # Issue #695
+                    admitted_via=cast(AdmittedVia, u.admitted_via),  # Issue #2803
                     # Issue #246: current_context_id removed
                     # current_context_id=context_info.get('context_id'),
                     # current_context_name=context_info.get('context_name'),
@@ -719,7 +752,31 @@ async def get_user_detail(
             owned_workspaces=owned_ws_list,
         )
 
-        # 6. Build response
+        # 6. How the account was admitted (#2803). The inviter is read live:
+        # gone (erased or deleted) reads as null. Never the invite's row.
+        invited_by = None
+        if target_user.admitted_by_user_id is not None:
+            inviter = (
+                await db.execute(
+                    select(User.user_id, User.email).where(
+                        User.user_id == target_user.admitted_by_user_id
+                    )
+                )
+            ).first()
+            if inviter is not None:
+                invited_by = AdmissionInvitedBy(user_id=inviter.user_id, email=inviter.email)
+        admission = AdmissionInfo(
+            via=cast(AdmittedVia, target_user.admitted_via),
+            invite_issuer=cast(InviteIssuer | None, target_user.admitted_invite_issuer),
+            invite_id=(
+                str(target_user.admitted_beta_invite_id)
+                if target_user.admitted_beta_invite_id is not None
+                else None
+            ),
+            invited_by=invited_by,
+        )
+
+        # 7. Build response
 
         return UserDetailResponse(
             user={
@@ -737,6 +794,7 @@ async def get_user_detail(
             workspaces=workspaces,
             accessible_contexts=accessible_contexts,
             stats=stats,
+            admission=admission,
             workspace_summary=workspace_summary,
         )
 
