@@ -230,9 +230,10 @@ The observability API, the sync installation view, `/api/v1/usage`, the MCP
 
 - **Deploy order:** run the database migration (`f48_2805_public_usage_budgets`)
   before setting `MCP_PUBLIC_USAGE_BUDGET_ENABLED=true`. New code with the
-  switch on and no table refuses every public `tools/call` and every counted
-  anonymous REST search (`503`, fail closed), and the owner routes GET / POST /
-  PATCH `/api/v1/resources/{id}/public-mcp` answer `503` `DB-002` (a publish or
+  switch on and no table refuses every public `tools/call`
+  (`temporarily_unavailable`, HTTP `200`) and every counted anonymous REST
+  search (`503`): the budget fails closed. The owner routes GET / POST / PATCH
+  `/api/v1/resources/{id}/public-mcp` answer `503` `DB-002` (a publish or
   update is not saved) until the migration has run. In a rolling deploy,
   processes that still run the old code do not count.
 - **Drain:** see "What it bounds". The log lines below show a drain coming.
