@@ -150,6 +150,10 @@ new canonical version/deletion. Deletions address only explicitly owned versions
 which can remain visible, so accumulated retired history does not make a valid
 snapshot undeletable. Existing indexer failure inspection/rewind procedures
 apply to failed Resource events.
+Within a committed replacement, owned deletion events precede new-ID upserts.
+This lets a full workspace free its own capacity in one batch before a later
+batch creates the replacement rows. The existing scheduler retry policy still
+applies; this ordering does not promise immediate search reflection.
 
 ## Retention and rollback
 

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.sql import Select
 
 from models.auth import Context
@@ -409,3 +409,95 @@ async def test_late_details_move_never_overwrites_or_deletes_foreign_memory(
         foreign = await db.get(Memory, foreign_id)
         assert foreign is not None and foreign.content == "Must remain independent"
         assert foreign.source == "mcp_remember" and foreign.user_id == feeds.store.users["member"]
+
+
+async def test_full_replacement_frees_owned_capacity_before_creating_new_ids(feeds, monkeypatch):
+    first = await committed(feeds, [product(f"old-{index}") for index in range(3)])
+    async with feeds.factory() as db:
+        for record in (await db.scalars(select(SyncRecord))).all():
+            db.add(
+                Memory(
+                    user_id=feeds.store.users["owner"],
+                    workspace_id=feeds.store.wid,
+                    context_id=UUID(feeds.target["context_id"]),
+                    summary="Old owned product",
+                    content=json.dumps(record.payload),
+                    details={
+                        "resource_id": feeds.target["resource_id"],
+                        "doc_id": record.doc_id,
+                        "version": record.version,
+                    },
+                    source="resource_ingest",
+                    client="resource_indexer",
+                    source_type="connector",
+                    embedding_status="success",
+                    type="fact",
+                    scope="working",
+                    importance=0.6,
+                )
+            )
+        await db.commit()
+        await maintain_sync_runs(db)
+        state = await db.scalar(select(IndexerState))
+        state.last_offset = (await db.get(SyncIndexOutbox, UUID(first["run_id"]))).last_event_id
+        previous_offset = state.last_offset
+        await db.commit()
+    row = await staged(feeds, [product(f"new-{index}") for index in range(3)])
+    body = {"diff_hash": row["diff_hash"]}
+    approval = (await human(feeds, "POST", f"runs/{row['run_id']}/approvals", body=body)).json()
+    assert (
+        await service(
+            feeds,
+            "POST",
+            f"runs/{row['run_id']}/commit",
+            body={**body, "approval_id": approval["approval_id"]},
+        )
+    ).status_code == 200
+    async with feeds.factory() as db:
+        events = (
+            await db.scalars(
+                select(ResourceEvent)
+                .where(ResourceEvent.id > previous_offset)
+                .order_by(ResourceEvent.id)
+            )
+        ).all()
+        assert [event.op for event in events] == ["delete"] * 3 + ["upsert"] * 3
+    qdrant = MagicMock()
+    qdrant.upsert, qdrant.delete = AsyncMock(), AsyncMock()
+    embed = AsyncMock()
+    embed.embed.return_value = [0.1] * 1536
+    monkeypatch.setattr(resource_indexer, "get_qdrant_client", lambda: qdrant)
+    monkeypatch.setattr(
+        resource_indexer,
+        "resolve_context_routing",
+        AsyncMock(return_value=("test-collection", embed)),
+    )
+    monkeypatch.setattr(
+        resource_indexer.QuotaService,
+        "check_memories_per_day",
+        AsyncMock(return_value=(True, None)),
+    )
+    async with feeds.factory() as db:
+
+        async def room(_workspace_id):
+            count = await db.scalar(
+                select(func.count())
+                .select_from(Memory)
+                .where(Memory.workspace_id == feeds.store.wid, Memory.deleted_at.is_(None))
+            )
+            return 3 - count
+
+        indexer = resource_indexer.ResourceIndexer(db)
+        indexer._plan_suspended = AsyncMock(return_value=False)
+        indexer._workspace_memory_room = room
+        first_batch = await indexer.process_incremental(
+            feeds.target["resource_id"], UUID(feeds.target["context_id"])
+        )
+        assert first_batch.batch_committed and first_batch.applied_deletes == 3
+        second_batch = await indexer.process_incremental(
+            feeds.target["resource_id"], UUID(feeds.target["context_id"])
+        )
+        assert second_batch.batch_committed and second_batch.applied_upserts == 3
+    assert (await service(feeds, "GET", f"runs/{row['run_id']}")).json()[
+        "index_status"
+    ] == "complete"

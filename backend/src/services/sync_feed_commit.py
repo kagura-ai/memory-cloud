@@ -137,7 +137,9 @@ async def commit_run(
             if version is not None:
                 delete_versions[doc].add(version)
     events: list[tuple[dict, ResourceEvent]] = []
-    for change in diff:
+    # Release owned rows before new IDs consume capacity. Otherwise a full
+    # workspace can stall forever at an upsert ahead of its own queued deletes.
+    for change in sorted(diff, key=lambda item: item["op"] != "delete"):
         eid = change["external_id"]
         old = previous.get(eid)
         # Deletion addresses precisely the last feed-owned resource version.
