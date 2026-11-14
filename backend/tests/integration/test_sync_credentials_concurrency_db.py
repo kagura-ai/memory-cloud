@@ -248,8 +248,9 @@ async def test_cancellation_rolls_back_and_releases_all_authority_locks(worker):
                 result["access_token"],
                 UUID(worker.target["installation_id"]),
                 operation="results:read",
-            ):
-                pass
+            ) as authority:
+                assert authority.installation.id == UUID(worker.target["installation_id"])
+                assert authority.context.display_name == original
     finally:
         finish.set()
 
