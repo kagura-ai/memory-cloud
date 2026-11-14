@@ -15,6 +15,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    func,
+    true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -34,9 +36,11 @@ class SyncService(Base):
     service_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     browser_client_id: Mapped[str] = mapped_column(String(128), unique=True)
     service_client_id: Mapped[str] = mapped_column(String(128), unique=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    generation: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    generation: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, server_default=func.now()
+    )
 
 
 class SyncAuthorization(Base):
