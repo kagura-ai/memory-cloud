@@ -146,7 +146,9 @@ def _allowed_origins() -> set[str]:
     return {origin for origin in map(_normalize_origin, candidates) if origin}
 
 
-async def _reject_disallowed_origin(headers: dict[bytes, bytes], send: Send) -> bool:
+async def _reject_disallowed_origin(
+    headers: dict[bytes, bytes], send: Send, *, log_origin: bool = True
+) -> bool:
     """Answer 403 when the request carries an ``Origin`` that is not allow-listed.
 
     MCP Streamable HTTP: servers MUST validate ``Origin`` on incoming
@@ -155,6 +157,13 @@ async def _reject_disallowed_origin(headers: dict[bytes, bytes], send: Send) -> 
     no preflight stops. Runs before authentication (#1740). A request without
     ``Origin`` is served: server-side clients (the Claude and ChatGPT backends,
     CLI clients) send none. ``null`` (sandboxed frames, ``file:``) is invalid.
+
+    Args:
+        headers: Lower-cased request headers.
+        send: ASGI send callable.
+        log_origin: When False the refusal is logged as a fixed line without
+            the ``Origin`` value (the custom-domain alias entry, #2809, writes
+            no request text to the log).
 
     Returns:
         True when the refusal was sent and the request must go no further.
@@ -166,7 +175,10 @@ async def _reject_disallowed_origin(headers: dict[bytes, bytes], send: Send) -> 
     normalized = _normalize_origin(origin)
     if normalized is not None and normalized in _allowed_origins():
         return False
-    logger.warning(f"MCP request refused: Origin {origin[:100]!r} is not allowed")
+    if log_origin:
+        logger.warning(f"MCP request refused: Origin {origin[:100]!r} is not allowed")
+    else:
+        logger.warning("MCP request refused: Origin is not allowed")
     await _send_json_error(
         send,
         403,
