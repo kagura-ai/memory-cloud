@@ -1,8 +1,9 @@
 """Deleting an inviter's account keeps the invitee's admission record (#2803).
 
 ``users.admitted_by_user_id`` is a foreign key to ``users.user_id`` with
-``ON DELETE SET NULL``: every path that deletes the inviter's row clears it,
-and nothing else. ``admitted_via``, the issuer and the invite id stay:
+``ON DELETE SET NULL``: every path that deletes the inviter's row clears it
+(itself, ``NOWAIT``, right after it locked the inviter's row; the key is the
+backstop, ``test_erasure_lock_order_db``), and nothing else. ``admitted_via``, the issuer and the invite id stay:
 
 - account erasure (``AccountErasureService._delete_postgres``);
 - ``DELETE /admin/users/{id}`` (the handler, through ``delete_user_rows``);

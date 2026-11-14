@@ -615,7 +615,8 @@ async def clear_allowlist_inviter(db: AsyncSession, user_id: str) -> int:
     so every path that removes a ``users`` row calls this in the same
     transaction, after the row is locked: account erasure, the admin user
     delete and the ``delete_admin`` CLI (both through ``delete_user_rows``),
-    the paths whose foreign key clears ``users.admitted_by_user_id`` (#2803).
+    the paths that clear ``users.admitted_by_user_id`` (#2803,
+    ``clear_invitees_nowait``).
     The rows stay (each still admits the person it names); rows added by
     someone else keep their value. Returns the number of rows cleared.
     """
@@ -629,6 +630,50 @@ async def clear_allowlist_inviter(db: AsyncSession, user_id: str) -> int:
         ),
     )
     return result.rowcount or 0
+
+
+async def clear_invitees_nowait(db: AsyncSession, user_id: str) -> int:
+    """Clear ``user_id`` from ``users.admitted_by_user_id`` without waiting
+    (#2803). Returns the number of invitee rows cleared.
+
+    Every path that deletes a ``users`` row calls this right after it has
+    locked that row ``FOR UPDATE``: account erasure (before step 2's
+    identity-link lock) and ``delete_user_rows`` (the admin user delete and
+    the ``delete_admin`` CLI). The foreign key's ``ON DELETE SET NULL`` would
+    otherwise update the invitee rows at the final ``DELETE``, waiting on
+    each one while the transaction holds the subject's row and everything
+    after it. A transaction that locks two ``users`` rows in ``user_id``
+    order (a referral redeem, a workspace delete) can hold an invitee's row
+    and wait on the subject's: that wait closed a cycle (40P01). The rows
+    are taken in ``user_id`` order ``FOR NO KEY UPDATE NOWAIT`` (a remember's
+    ``FOR KEY SHARE`` does not conflict), so a held one raises 55P03 at once:
+    the erasure reschedules, the admin delete answers 409, the CLI reports a
+    lock conflict. No invitee can be added afterwards: a sign-up's foreign
+    key takes ``FOR KEY SHARE`` on the inviter's row, which waits on the
+    caller's ``FOR UPDATE``. The foreign key stays as the backstop.
+
+    Raises:
+        DBAPIError: 55P03 (lock_not_available) when an invitee row is held.
+    """
+    invitees = list(
+        (
+            await db.execute(
+                select(User.user_id)
+                .where(User.admitted_by_user_id == user_id)
+                .order_by(User.user_id)
+                .with_for_update(key_share=True, nowait=True)
+            )
+        ).scalars()
+    )
+    if not invitees:
+        return 0
+    await db.execute(
+        update(User)
+        .where(User.user_id.in_(invitees))
+        .values(admitted_by_user_id=None)
+        .execution_options(synchronize_session=False)
+    )
+    return len(invitees)
 
 
 async def delete_user_rows(
@@ -663,6 +708,9 @@ async def delete_user_rows(
         return (or_(_personal(c, user_id), c.workspace_id.in_(workspace_ids)),)
 
     await db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
+    # #2803: the accounts the user invited, NOWAIT, right after its own row
+    # and before anything else: the final DELETE then has none to update.
+    await clear_invitees_nowait(db, user_id)
     await lock_identity_links(db)
     # Block FK inserts of new contexts before collecting the cascade union.
     # NOWAIT also avoids workspace-delete -> user-preference lock crossings.

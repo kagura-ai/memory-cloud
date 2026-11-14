@@ -203,7 +203,11 @@ from services.erasure_details import (
 )
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
-from services.user_deletion_service import _contextless_in, clear_allowlist_inviter
+from services.user_deletion_service import (
+    _contextless_in,
+    clear_allowlist_inviter,
+    clear_invitees_nowait,
+)
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
 from utils.db_helpers import is_deadlock, is_lock_not_available
@@ -1689,6 +1693,10 @@ class AccountErasureService:
             try:
                 # Step 2: workspace ownership transfer / abort gate
                 step = "workspaces"
+                # #2803: first the accounts the subject invited, NOWAIT, right
+                # after the subject's row and before the identity-link lock.
+                # A held one reschedules the request here (``workspaces``).
+                await self._clear_invitees(target.user_id)
                 listed: list[Workspace] = []
                 workspaces_summary = await self._handle_owned_workspaces(
                     target.user_id, listed=listed
@@ -2131,7 +2139,9 @@ class AccountErasureService:
         deletes, so a failure or a lock conflict there rolls them back too.
 
         Lock order (#2418, ``lock_identity_links``): the subject's ``users``
-        row (held since ``_guard_erasure_run``) -> the identity-link lock ->
+        row (held since ``_guard_erasure_run``) -> the ``users`` rows of the
+        accounts it invited, ``NOWAIT`` (``_clear_invitees``, taken by
+        ``_execute`` just before this step, #2803) -> the identity-link lock ->
         every live workspace the subject owns, in id order, ``NOWAIT``
         (``_lock_without_waiting``), before their members are read (#2455):
         a member added to a sole-owned one afterwards waits for the commit
@@ -2164,7 +2174,8 @@ class AccountErasureService:
         # Serialize successor selection with administrative/CLI/erasure deletion.
         # Do not acquire successor User locks after holding the subject User: the
         # shared identity lock provides this fence without reversing user order.
-        # Order: users -> link lock -> live workspaces (id, NOWAIT) -> soft-deleted
+        # Order: users (the subject's, then its invitees' NOWAIT, #2803) -> link
+        # lock -> live workspaces (id, NOWAIT) -> soft-deleted
         # workspaces -> contexts -> memories -> child rows (#2418).
         from services.identity_link_service import lock_identity_links
 
@@ -2277,6 +2288,23 @@ class AccountErasureService:
             await asyncio.sleep(WORKSPACE_LOCK_BACKOFF_SECONDS * 2**attempt)
         raise AssertionError("unreachable")  # pragma: no cover
 
+    async def _clear_invitees(self, user_id: str) -> int:
+        """``clear_invitees_nowait`` (#2803) under :meth:`_lock_without_waiting`:
+        a held invitee row is tried again, then raises :class:`_LockConflict`.
+        Run right after the subject's ``users`` row is locked: ``_execute``
+        before step 2, ``_delete_postgres`` after its guard (a re-run there
+        under ``_execute`` finds nothing left to clear)."""
+
+        async def clear() -> int:
+            try:
+                return await clear_invitees_nowait(self.db, user_id)
+            except DBAPIError as exc:
+                if is_lock_not_available(exc):
+                    raise _LockConflict(LOCK_CONFLICT_ERROR_CLASS) from exc
+                raise
+
+        return await self._lock_without_waiting(clear)
+
     async def _lock_workspace_nowait(self, workspace_id: UUID) -> Workspace:
         """``lock_workspace_for_update`` ``NOWAIT``, a busy row as
         :class:`_LockConflict` (step 2, #2418)."""
@@ -2388,6 +2416,9 @@ class AccountErasureService:
         # commits nothing), so this re-take is free; it still checks the
         # request's marker in this transaction.
         await self._guard_erasure_run(target, request_id=request_id)
+        # #2803: the invitee rows, NOWAIT, before any other lock (``_execute``
+        # cleared them before step 2 already; a direct call clears them here).
+        await self._clear_invitees(user_id)
 
         # #2347: the sole-owner cascade also reaches contexts/memories. Take
         # the identity lock and one ordered union BEFORE any cascade, not just
@@ -2476,7 +2507,7 @@ class AccountErasureService:
         counts["signup_allowlist_labels"] = await self._blank_signup_allowlist_labels(user_id)
         # #2814: the rows the subject added (an admin's manual add, or the
         # subject's redeemed invite links) lose the subject's user id; the rows
-        # stay. Cleared, as the ``users.admitted_by_user_id`` foreign key is.
+        # stay. Cleared, as ``users.admitted_by_user_id`` is (``_clear_invitees``).
         counts["signup_allowlist_inviters_cleared"] = await clear_allowlist_inviter(
             self.db, user_id
         )
@@ -2841,8 +2872,11 @@ class AccountErasureService:
         # #2286: "this step committed", on the request row and in the same
         # commit: a crash after it (no handler runs) is then told apart from
         # a run that never reached it. The request row is the last row this
-        # transaction locks (the user row is locked since the grant revoke);
-        # no other writer holds a request row while waiting on these rows.
+        # transaction locks: the user row is locked since the first guard, and
+        # the other users rows the final DELETE's foreign key would update
+        # (the accounts the subject invited, #2803) are cleared and held since
+        # just after it (``_clear_invitees``), so that DELETE waits on none.
+        # No other writer holds a request row while waiting on these rows.
         # ``_execute`` overwrites the summary later with the fuller one.
         # Merged into what the row holds (``||``), not replacing it: a key
         # written before this step (#2282's ``retry``) survives a crash too.

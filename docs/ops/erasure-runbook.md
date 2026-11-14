@@ -297,7 +297,7 @@ BYOK キーでの呼び出しは、キーを登録した workspace とプロバ�
 
 4 回目の失敗では request は `failed` になり、レスポンスは vector store 自身のエラー (502 `EXT-001`)。
 
-同じ 503 `ERASURE-007` は、workspace の譲渡 (§2.3) か Postgres ステップで他の処理が持つ lock に当たったときにも返る (v0.134.0, #2418)。譲渡と Postgres ステップは 1 つのトランザクションなので両方とも rollback され (v0.134.2 から。譲渡も削除も何も commit されない。v0.134.0 / v0.134.1 では commit 済みの譲渡が残った)、request は vector store の障害と同じく `cooling_off` に戻る。`message` は `Another operation holds rows the erasure needs; ...`、`details.error_class` は `LockNotAvailable` (`NOWAIT` の lock が取れなかった、55P03) か `DeadlockDetected` (40P01)。`deleted_data_summary.retry.step` は `workspaces` か `postgres`。試行回数は vector store の障害と合算で最大 4 回。4 回目も lock に当たると `failed` + `failure_reason = "lock_conflict after 4 attempts: <step>: <error_class> (another operation held the account's rows)"` になり、レスポンスは 409 `RES-002`。
+同じ 503 `ERASURE-007` は、workspace の譲渡 (§2.3) か Postgres ステップで他の処理が持つ lock に当たったときにも返る (v0.134.0, #2418)。譲渡と Postgres ステップは 1 つのトランザクションなので両方とも rollback され (v0.134.2 から。譲渡も削除も何も commit されない。v0.134.0 / v0.134.1 では commit 済みの譲渡が残った)、request は vector store の障害と同じく `cooling_off` に戻る。`message` は `Another operation holds rows the erasure needs; ...`、`details.error_class` は `LockNotAvailable` (`NOWAIT` の lock が取れなかった、55P03) か `DeadlockDetected` (40P01)。`deleted_data_summary.retry.step` は `workspaces` か `postgres`。v0.162.0 (#2803) から `workspaces` ステップは最初に、本人が招待したアカウント (`users.admitted_by_user_id`) の `users` 行を同じく待たずに取って本人の id を消す。その行を他の処理 (referral の redeem、そのアカウントのサインインなど) が持っていても `workspaces` で再スケジュールされる。試行回数は vector store の障害と合算で最大 4 回。4 回目も lock に当たると `failed` + `failure_reason = "lock_conflict after 4 attempts: <step>: <error_class> (another operation held the account's rows)"` になり、レスポンスは 409 `RES-002`。
 
 ### 5.4 失敗時の手動再試行
 
