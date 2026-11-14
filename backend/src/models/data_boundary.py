@@ -74,6 +74,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "sync_services",
         "sync_authorizations",
         "sync_installations",
+        "sync_credential_clients",
+        "sync_signing_keys",
+        "sync_assertion_uses",
+        "sync_access_tokens",
         # Agent Registry (#1274, RFC-0002 P0-1) — control-plane metadata about
         # agent deployments (kill switch, enforcement mode); no user knowledge
         # content, no learned structure. Governed by the auth/security regime +

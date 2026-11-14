@@ -128,6 +128,9 @@ def register_client(
 
     redirects, scopes = validate_registration(client_id, client_name, redirect_uris, scope)
     secret = _validate_secret(client_secret)
+    from auth.client_registration import reserve_oidc_client_id
+
+    reserve_oidc_client_id(db, client_id)
     if db.get(OIDCClient, client_id) is not None:
         raise ValueError("OIDC client ID already exists; register a distinct client ID")
     client = OIDCClient(

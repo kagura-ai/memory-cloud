@@ -236,11 +236,18 @@ def test_noninteractive_registration_requires_a_secret_file(monkeypatch):
 
 
 @pytest.fixture
-def client_database(tmp_path):
+def client_database(tmp_path, monkeypatch):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
+    import auth.client_registration
     from models.oidc import OIDCClient
+
+    # This SQLite unit fixture owns secret/hash/output behavior only. The
+    # cross-namespace reservation and real advisory-lock races run on PostgreSQL.
+    monkeypatch.setattr(
+        auth.client_registration, "reserve_oidc_client_id", lambda db, client_id: None
+    )
 
     engine = create_engine("sqlite:///" + str(tmp_path / "clients.sqlite"))
     OIDCClient.__table__.create(engine)

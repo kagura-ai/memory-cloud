@@ -10,6 +10,7 @@ from contextlib import contextmanager
 
 import pytest
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
 from alembic import command
@@ -157,9 +158,23 @@ class TestAlembicMigrations:
     def test_downgrade_one_step(self):
         """Most recent migration can be rolled back."""
         config = _get_alembic_config()
+        latest = ScriptDirectory.from_config(config).get_revision("head")
+        assert latest is not None
+        parent = latest.down_revision
+        parents = (parent,) if isinstance(parent, str) else (parent or ())
         with _alembic_at_test_db():
             command.upgrade(config, "head")
-            command.downgrade(config, "-1")
+            # At a merge, -1 is ambiguous. Either explicit parent rolls back
+            # the merge node, restoring all immediate parent markers.
+            command.downgrade(config, parents[0] if parents else "base")
+            engine = _sync_engine()
+            try:
+                with engine.connect() as conn:
+                    assert set(
+                        conn.scalars(text("SELECT version_num FROM alembic_version"))
+                    ) == set(parents)
+            finally:
+                engine.dispose()
             # Re-apply to leave DB in clean state
             command.upgrade(config, "head")
 
