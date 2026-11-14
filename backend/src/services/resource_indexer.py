@@ -688,7 +688,11 @@ def build_resource_point(
 
 
 def _fit_memory_room(
-    events: Sequence[ResourceEvent], known_doc_ids: set[str], room: int | None
+    events: Sequence[ResourceEvent],
+    known_doc_ids: set[str],
+    room: int | None,
+    *,
+    ignored_event_ids: set[int] | None = None,
 ) -> tuple[int, int]:
     """Longest prefix of ``events`` that fits ``room`` new memories (#1939).
 
@@ -705,6 +709,8 @@ def _fit_memory_room(
         known_doc_ids: doc_ids with a live row before the batch.
         room: Free memory slots in the workspace (may be negative when over
             the limit); ``None`` means unlimited.
+        ignored_event_ids: Server-proven obsolete upserts, which neither
+            change the live set nor reserve a creation, even across deletes.
 
     Returns:
         ``(prefix_len, creations)`` — how many leading events to apply and how
@@ -714,6 +720,8 @@ def _fit_memory_room(
     net = 0
     creations = 0
     for index, event in enumerate(events):
+        if ignored_event_ids and event.id in ignored_event_ids:
+            continue
         if event.op == "upsert":
             if event.doc_id in live:
                 continue
@@ -828,6 +836,9 @@ class ResourceIndexer:
 
             # 2. Get or create indexer state
             state = await self._get_or_create_state(resource_id, context_id, resource_pk)
+            from services.sync_feed_index import hold_sync_index_receipt
+
+            await hold_sync_index_receipt(self.db, resource_pk, context_id)
             last_offset = state.last_offset
 
             # 3. Fetch pending events
@@ -895,7 +906,12 @@ class ResourceIndexer:
                 )
             else:
                 known_doc_ids = set()
-            batch_len, new_count = _fit_memory_room(events, known_doc_ids, room=None)
+            from services.sync_feed_provenance import obsolete_sync_event_ids
+
+            obsolete = await obsolete_sync_event_ids(self.db, events)
+            batch_len, new_count = _fit_memory_room(
+                events, known_doc_ids, room=None, ignored_event_ids=obsolete
+            )
             if new_count:
                 # #1939: resource ingest creates memories too, so it honours the
                 # workspace memory limit like remember does. Read BEFORE the
@@ -908,7 +924,9 @@ class ResourceIndexer:
                 # deletes in that prefix free room for the upserts after them.
                 # Only when not even the first new doc fits is it held back.
                 room = await self._workspace_memory_room(context.workspace_id)
-                batch_len, new_count = _fit_memory_room(events, known_doc_ids, room=room)
+                batch_len, new_count = _fit_memory_room(
+                    events, known_doc_ids, room=room, ignored_event_ids=obsolete
+                )
                 if batch_len == 0:
                     metrics.skipped = True
                     metrics.reason = "memory_limit_exceeded"
@@ -963,11 +981,14 @@ class ResourceIndexer:
                     # the rest of the batch, so one poisoned event can neither
                     # sink the batch nor commit half of itself with it.
                     async with self.db.begin_nested():
-                        if event.op == "upsert":
+                        from services.sync_feed_provenance import guard_sync_event
+
+                        applicable = await guard_sync_event(self.db, event, context)
+                        if applicable and event.op == "upsert":
                             await self._apply_upsert(
                                 event, schema, context, collection_name, embedding_service
                             )
-                        elif event.op == "delete":
+                        elif applicable and event.op == "delete":
                             await self._apply_delete(event, context, collection_name)
                     # Counted after RELEASE SAVEPOINT: a failed release must
                     # not count the event.
@@ -1391,6 +1412,9 @@ class ResourceIndexer:
             )
             raise
         existing_memory = existing_memory_query.scalar_one_or_none()
+        from services.sync_feed_provenance import assert_sync_memory_ids, sync_candidate_lock
+
+        assert_sync_memory_ids(self.db, event, [existing_memory] if existing_memory else [])
         memory_id = existing_memory.id if existing_memory else uuid4()
 
         # The row's values as this upsert leaves them, computed once for both
@@ -1634,15 +1658,19 @@ class ResourceIndexer:
                 unowned: list[tuple[UUID, UUID | None, str]] = []
                 async with self.db.begin_nested():
                     old_memories_result = await self.db.execute(
-                        select(Memory).where(
-                            Memory.workspace_id == context.workspace_id,
-                            Memory.context_id == context.id,
-                            Memory.resource_id == event.resource_id,
-                            Memory.resource_doc_id == event.doc_id,
-                            Memory.resource_version != event.version,
+                        sync_candidate_lock(
+                            select(Memory).where(
+                                Memory.workspace_id == context.workspace_id,
+                                Memory.context_id == context.id,
+                                Memory.resource_id == event.resource_id,
+                                Memory.resource_doc_id == event.doc_id,
+                                Memory.resource_version != event.version,
+                            ),
+                            event,
                         )
                     )
                     old_memories = old_memories_result.scalars().all()
+                    assert_sync_memory_ids(self.db, event, old_memories)
 
                     if old_memories:
                         for old_mem in old_memories:
@@ -2080,18 +2108,27 @@ class ResourceIndexer:
 
                 # Delete from Memory table with 3-level isolation
                 # Performance: Use generated columns (Migration 061) instead of JSONB search
+                from services.sync_feed_provenance import (
+                    assert_sync_memory_ids,
+                    sync_candidate_lock,
+                )
+
                 result = await self.db.execute(
-                    select(Memory).where(
-                        Memory.workspace_id == context.workspace_id,
-                        Memory.context_id == context.id,
-                        Memory.resource_id == event.resource_id,  # Generated column (fast!)
-                        Memory.resource_doc_id == event.doc_id,  # Generated column (fast!)
-                        Memory.resource_version == event.version,  # Generated column (fast!)
+                    sync_candidate_lock(
+                        select(Memory).where(
+                            Memory.workspace_id == context.workspace_id,
+                            Memory.context_id == context.id,
+                            Memory.resource_id == event.resource_id,  # Generated column (fast!)
+                            Memory.resource_doc_id == event.doc_id,  # Generated column (fast!)
+                            Memory.resource_version == event.version,  # Generated column (fast!)
+                        ),
+                        event,
                     )
                 )
                 # Several rows: a forgotten document synced again has a live
                 # row beside its tombstone, at one version.
                 memories = result.scalars().all()
+                assert_sync_memory_ids(self.db, event, memories)
 
                 if not memories:
                     # Not this context's point to delete: the sweep judges it.

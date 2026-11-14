@@ -18,6 +18,7 @@ from db.base import get_db
 from db.redis import get_redis_client, increment_counter
 from models.resource import IndexerState
 from services.resource_indexer import ResourceIndexer, recorded_failed_events
+from services.sync_feed_index import maintain_sync_runs
 from tasks.job_runs import JobResult, job_failed
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -132,6 +133,7 @@ async def run_queued_indexers() -> JobResult:
 
     async for db in get_db():
         try:
+            await maintain_sync_runs(db)
             # Find queued indexers ready to run
             result = await db.execute(
                 select(IndexerState)

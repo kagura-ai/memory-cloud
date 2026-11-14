@@ -54,6 +54,8 @@ feature-development time, not discovered at export time.
 | `contexts` | User-authored container name/description |
 | `resources` | Connected source-of-truth resources |
 | `resource_events` | Ingested raw source events |
+| `sync_records` | Canonical approved product/FAQ fields and their feed provenance |
+| `sync_chunks` | Temporary raw staging; bodies are cleared on commit, abort and expiry |
 | `resource_schemas` | User-registered resource schemas |
 
 Also raw: **declared edges** — links the user explicitly created via

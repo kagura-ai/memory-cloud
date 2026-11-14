@@ -40,6 +40,8 @@ RAW_EXPORTABLE_TABLES: frozenset[str] = frozenset(
         "resources",  # connected source-of-truth resources
         "resource_events",  # ingested raw source events
         "resource_schemas",  # user-registered resource schemas
+        "sync_records",  # approved canonical product/FAQ fields
+        "sync_chunks",  # finite raw staging, purged after 24h/commit/abort
     }
 )
 
@@ -78,6 +80,9 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "sync_signing_keys",
         "sync_assertion_uses",
         "sync_access_tokens",
+        "sync_feeds",
+        "sync_runs",
+        "sync_index_outbox",
         # Agent Registry (#1274, RFC-0002 P0-1) — control-plane metadata about
         # agent deployments (kill switch, enforcement mode); no user knowledge
         # content, no learned structure. Governed by the auth/security regime +
