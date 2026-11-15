@@ -38,6 +38,7 @@ from services import public_mcp_domains as service
 from services.public_mcp_domain_dns import DomainCheck
 from services.public_mcp_domains import (
     SYSTEM_ACTOR,
+    PublicMcpDomainChangedError,
     PublicMcpDomainExistsError,
     PublicMcpDomainHeldError,
     PublicMcpDomainHostnameNotAllowedError,
@@ -758,6 +759,32 @@ async def test_attach_against_unpublish_attach_first(world: World, monkeypatch) 
     await _republish(w, "b")
 
 
+async def test_attach_binds_the_publication_read_in_its_write_transaction(
+    world: World, monkeypatch
+) -> None:
+    """Unpublish and republish between attach's first read and its write.
+
+    The row binds the publication that is live when the write transaction
+    reads it (``FOR SHARE``), never the revoked one the first read saw.
+    """
+    w = world
+    old_id = w.endpoint["a"]
+    # Attach has done its plain reads (the endpoint included) and holds no lock.
+    pause = Pause(w, monkeypatch, "owner_actor")
+    attach = asyncio.create_task(w.attach("a", w.name()))
+    await asyncio.wait_for(pause.reached.wait(), 5)
+    async with w.factory() as s:
+        await _unpublish(s, old_id)
+        await s.commit()
+    await _republish(w, "a")
+    pause.release.set()
+    created = await attach
+    assert created.endpoint_id == w.endpoint["a"]
+    assert created.endpoint_id != old_id
+    assert await _open_rows_of(w, old_id) == []
+    await w.detach("a", created.id)
+
+
 # ----------------------------------------------------------------------------
 # The right
 # ----------------------------------------------------------------------------
@@ -965,6 +992,63 @@ async def test_a_row_changed_during_the_lookup_is_not_overwritten(world: World) 
     after = await w.row(a.id)
     assert after.proof_missing_checks == 0 and after.check_seq == seen + 1
     await w.detach("a", a.id)
+
+
+async def test_owner_verify_of_a_row_changed_during_the_lookup_is_409(
+    world: World, monkeypatch
+) -> None:
+    """I2 on the owner side: 409 ``public_mcp_domain_changed``, nothing written.
+
+    Both paths of verify: the record of a ``pending`` row whose proof is
+    missing, and the check of an ``active`` row (``apply_check`` fenced).
+    """
+    w = world
+
+    async def verify_with_a_change_during_the_lookup(row_id: UUID) -> None:
+        pause = Pause(w, monkeypatch, "lookup")
+        verify = asyncio.create_task(w.verify("a", row_id))
+        await asyncio.wait_for(pause.reached.wait(), 5)
+        await w.sql(
+            "UPDATE public_mcp_domains SET check_seq = check_seq + 1 WHERE id = :id", id=row_id
+        )
+        pause.release.set()
+        with pytest.raises(PublicMcpDomainChangedError) as refused:
+            await verify
+        assert refused.value.error_code == "public_mcp_domain_changed"
+        assert refused.value.status_code == 409
+
+    pending = await w.attach("a", w.name())  # its proof is not published: missing
+    before = await w.row(pending.id)
+    await verify_with_a_change_during_the_lookup(pending.id)
+    after = await w.row(pending.id)
+    assert after.check_seq == before.check_seq + 1  # only the other writer's bump
+    assert (after.state, after.last_checked_at, after.last_proof_result) == (
+        "pending",
+        before.last_checked_at,
+        before.last_proof_result,
+    )
+    await w.detach("a", pending.id)
+
+    active = await w.active("a")
+    w.dns.withdraw(active.hostname)  # a missing proof would count an absence
+    before = await w.row(active.id)
+    await verify_with_a_change_during_the_lookup(active.id)
+    after = await w.row(active.id)
+    assert after.check_seq == before.check_seq + 1
+    assert (
+        after.state,
+        after.last_checked_at,
+        after.last_proof_result,
+        after.proof_missing_checks,
+        after.serve_until,
+    ) == (
+        "active",
+        before.last_checked_at,
+        before.last_proof_result,
+        before.proof_missing_checks,
+        before.serve_until,
+    )
+    await w.detach("a", active.id)
 
 
 async def test_unavailable_check_keeps_state_and_renews_the_lease(world: World) -> None:
