@@ -43,7 +43,8 @@ ADMIN_OPERATIONS = {
 def test_off_document_has_no_admin_operation(mode):
     mode("off")
     schema = app.openapi()
-    assert len(ADMIN_OPERATIONS) == 58  # #2762: + the three mcp-notices routes
+    # #2762: + the three mcp-notices routes; #2842: + the sleep report actions page
+    assert len(ADMIN_OPERATIONS) == 59
     assert not ADMIN_OPERATIONS & _operations(schema)
     assert "/api/v1/admin/users" not in schema["paths"]
     # Everything else stays.

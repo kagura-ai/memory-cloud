@@ -2338,7 +2338,8 @@ The rules, checked on create:
 | Endpoint                                         | Purpose                                                       |
 |--------------------------------------------------|---------------------------------------------------------------|
 | `GET /api/v1/admin/sleep-reports`                | List reports with filters (`status`, `source`, `context_id`, `user_id`) and pagination. `source` is `sleep` (Sleep runs), `analysis` (Memory Analysis spend rows) or `all` (default); each row carries its `source` (#2219). |
-| `GET /api/v1/admin/sleep-reports/{report_id}`    | Fetch a single report with per-phase results and the full action audit log. |
+| `GET /api/v1/admin/sleep-reports/{report_id}`    | Fetch a single report with per-phase results and the full action audit log: `{"report", "actions", "action_count"}`. `?include_actions=false` (#2842) answers `actions: []` and reads no action; `action_count` is still the run's number of actions. |
+| `GET /api/v1/admin/sleep-reports/{report_id}/actions` | One page of a report's actions (#2842): `{"actions", "total", "limit", "offset"}`. `limit` 1-500 (default 50) and `offset` from 0; a value outside is a `422`, as is a `report_id` that is not a UUID. Actions come in `id` order (the order the run recorded them, so a running report's new actions land on later pages) and carry the fields of the detail route's actions. `total` equals the detail route's `action_count`. An unknown report is a `404` on both routes. Read only. |
 
 See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `sleep_mode`, and rollback semantics.
 

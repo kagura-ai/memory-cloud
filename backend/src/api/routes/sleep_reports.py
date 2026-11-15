@@ -3,6 +3,8 @@
 Two endpoints share one ``SleepReporterService`` instance:
 
 - ``GET /api/v1/admin/sleep-reports`` — admin-only, sees every workspace.
+  Its detail route can leave the actions out (``include_actions=false``) and
+  ``GET /api/v1/admin/sleep-reports/{report_id}/actions`` pages them (#2842).
 - ``GET /api/v1/workspaces/{workspace_id}/sleep-reports`` —
   workspace owner / admin scoped via
   ``PermissionService.check_workspace_admin``. The path-bound
@@ -19,7 +21,7 @@ Issue #179: Sleep Report admin UI (split from #104).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -126,6 +128,15 @@ class SleepReportDetailResponse(BaseModel):
     action_count: int
 
 
+class SleepActionListResponse(BaseModel):
+    """One page of a sleep report's actions (#2842)."""
+
+    actions: list[SleepActionItem]
+    total: int
+    limit: int
+    offset: int
+
+
 # ============================================================================
 # Shared validation
 # ============================================================================
@@ -140,6 +151,14 @@ def _validate_status(status_filter: str | None) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid status. Must be one of: {sorted(_VALID_STATUSES)}",
         )
+
+
+def _raise_report_not_found(report_id: UUID) -> NoReturn:
+    """The admin routes' one answer for a report id with no row."""
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Sleep report {report_id} not found.",
+    )
 
 
 # #2219: shared by both list endpoints.
@@ -221,20 +240,36 @@ async def get_sleep_report_detail(
     report_id: UUID,
     _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep
     db: AsyncSession = Depends(get_db),
+    include_actions: bool = Query(
+        True,
+        description=(
+            "``false`` answers ``actions: []`` and reads no action row; "
+            "``action_count`` is still the run's total. Page the actions with "
+            "``GET /admin/sleep-reports/{report_id}/actions``."
+        ),
+    ),
 ) -> SleepReportDetailResponse:
     """Get a single Sleep Maintenance report with its full action audit log.
 
-    Admin-only.
+    Admin-only. With ``include_actions=false`` (#2842) the answer holds the
+    report's own row and the number of actions, and no action.
     """
     service = SleepReporterService(db)
-    result = await service.get_report_detail(report_id)
-    if not result:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Sleep report {report_id} not found.",
-        )
-
-    report, actions = result
+    actions: list[SleepActionItem]
+    if include_actions:
+        result = await service.get_report_detail(report_id)
+        if not result:
+            _raise_report_not_found(report_id)
+        report, action_rows = result
+        actions = [SleepActionItem.model_validate(a, from_attributes=True) for a in action_rows]
+        action_count = len(actions)
+    else:
+        found = await service.get_report(report_id)
+        if found is None:
+            _raise_report_not_found(report_id)
+        report = found
+        actions = []
+        action_count = await service.count_actions(report_id)
 
     context_name, context_deleted = await service.resolve_context_name(
         report.context_id  # type: ignore[arg-type]
@@ -249,8 +284,53 @@ async def get_sleep_report_detail(
 
     return SleepReportDetailResponse(
         report=report_detail,
-        actions=[SleepActionItem.model_validate(a, from_attributes=True) for a in actions],
-        action_count=len(actions),
+        actions=actions,
+        action_count=action_count,
+    )
+
+
+@router.get(
+    "/admin/sleep-reports/{report_id}/actions",
+    response_model=SleepActionListResponse,
+    summary="Page the actions of a Sleep Maintenance report (admin)",
+    tags=["sleep-reports"],
+)
+async def list_sleep_report_actions(
+    report_id: UUID,
+    _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> SleepActionListResponse:
+    """Read one page of a report's action audit log (#2842).
+
+    Admin-only, read only. Actions come in ``id`` order, the order the run
+    recorded them: a running report's new actions land on later pages.
+    ``total`` is the run's action count, the detail route's ``action_count``.
+    An unknown report answers 404, as the detail route.
+    """
+    service = SleepReporterService(db)
+    if not await service.report_exists(report_id):
+        _raise_report_not_found(report_id)
+
+    total = await service.count_actions(report_id)
+    rows = await service.list_actions(report_id, limit=limit, offset=offset)
+    return SleepActionListResponse(
+        actions=[
+            SleepActionItem(
+                id=row.id,
+                phase=row.phase,
+                action_type=row.action_type,
+                memory_id=row.memory_id,
+                target_id=row.target_id,
+                details=row.details,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
     )
 
 

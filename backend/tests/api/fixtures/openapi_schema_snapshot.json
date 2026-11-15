@@ -11976,6 +11976,32 @@
         ],
         "type": "object"
       },
+      "SleepActionListResponse": {
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/SleepActionItem"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "actions",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "type": "object"
+      },
       "SleepContextsUsage": {
         "properties": {
           "addon_bonus": {
@@ -17113,6 +17139,15 @@
               "format": "uuid",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "include_actions",
+            "required": false,
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -17121,6 +17156,66 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SleepReportDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "sleep-reports"
+        ]
+      }
+    },
+    "/api/v1/admin/sleep-reports/{report_id}/actions": {
+      "get": {
+        "operationId": "list_sleep_report_actions_api_v1_admin_sleep_reports__report_id__actions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SleepActionListResponse"
                 }
               }
             }

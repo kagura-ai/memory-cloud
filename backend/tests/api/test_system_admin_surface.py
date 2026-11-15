@@ -62,6 +62,7 @@ ADMIN_SURFACE = frozenset(
         ("GET", "/api/v1/admin/signup-gate/config"),
         ("GET", "/api/v1/admin/sleep-reports"),
         ("GET", "/api/v1/admin/sleep-reports/{report_id}"),
+        ("GET", "/api/v1/admin/sleep-reports/{report_id}/actions"),
         ("GET", "/api/v1/admin/system-admins"),
         ("GET", "/api/v1/admin/users"),
         ("GET", "/api/v1/admin/users/{user_id}"),

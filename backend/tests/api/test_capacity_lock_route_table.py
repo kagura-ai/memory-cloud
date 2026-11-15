@@ -216,6 +216,7 @@ ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/workspaces/{workspace_id}/sleep-reports/{report_id}"): BLOCKED,
     ("GET", "/api/v1/admin/sleep-reports"): ALLOWED,
     ("GET", "/api/v1/admin/sleep-reports/{report_id}"): ALLOWED,
+    ("GET", "/api/v1/admin/sleep-reports/{report_id}/actions"): ALLOWED,
     # share keys — outsiders read content (redacted refusal); key management is metadata
     ("POST", "/api/v1/share/recall"): BLOCKED,
     ("GET", "/api/v1/share/sessions"): BLOCKED,
