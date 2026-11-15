@@ -19152,6 +19152,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }
@@ -19172,6 +19173,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -19187,6 +19189,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "format": "uuid",
                   "type": "string"
                 },
                 {
@@ -19202,6 +19205,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -19217,6 +19221,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -19267,6 +19272,7 @@
                 {
                   "maxLength": 255,
                   "minLength": 1,
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {

@@ -33,6 +33,14 @@ PAST_OFFSET = 2**63
 REFUSED = [
     ("GET", f"{USERS}?user_id=a%00b", None),
     ("GET", f"{USERS}?user_id=%00", None),
+    # The parameters the user list already had, bounded with it (#2843).
+    ("GET", f"{USERS}?search=a%00b", None),
+    ("GET", f"{USERS}?role=a%00b", None),
+    ("GET", f"{USERS}?plan=%00", None),
+    ("GET", f"{USERS}?invited_by=a%00b", None),
+    ("GET", f"{USERS}?offset={PAST_OFFSET}", None),
+    ("GET", f"{USERS}?workspace_id=not-a-uuid", None),
+    ("GET", f"{USERS}?workspace_id=a%00b", None),
     ("GET", f"{DELETED_CONTEXTS}?created_by=a%00b", None),
     ("GET", f"{DELETED_CONTEXTS}?deleted_by=%00", None),
     ("GET", f"{DELETED_CONTEXTS}?offset={PAST_OFFSET}", None),
@@ -81,6 +89,12 @@ def test_a_value_the_database_would_refuse_is_a_422_before_any_statement(
     "url",
     [
         f"{USERS}?user_id={{value}}%00",
+        f"{USERS}?search={{value}}%00",
+        f"{USERS}?role={{value}}%00",
+        f"{USERS}?plan={{value}}%00",
+        f"{USERS}?invited_by={{value}}%00",
+        f"{USERS}?workspace_id={{value}}",
+        f"{USERS}?search={{value}}&offset={PAST_OFFSET}",
         f"{DELETED_CONTEXTS}?created_by={{value}}%00",
         f"{DELETED_CONTEXTS}?deleted_by={{value}}%00",
         f"{DELETED_CONTEXTS}?created_by={{value}}&offset={PAST_OFFSET}",
@@ -117,6 +131,11 @@ def test_a_refused_account_id_is_logged_as_the_request_path_only(client, session
     "url",
     [
         f"{USERS}?user_id=a%0Ab%25%20c",
+        f"{USERS}?search=a%0Ab%25%20c&role=a%0Ab&plan=a%0Ab&invited_by=a%0Ab%25%20c",
+        f"{USERS}?offset={PAST_OFFSET - 1}",
+        f"{USERS}?workspace_id=11111111-2222-4333-8444-555555555555",
+        # An empty value is no filter, as it was before the id was typed.
+        f"{USERS}?workspace_id=&role=&plan=&search=",
         f"{DELETED_CONTEXTS}?created_by=a%0Ab%25%20c&deleted_by=system:capacity-purge",
         f"{DELETED_CONTEXTS}?offset={PAST_OFFSET - 1}",
         f"{EMBEDDING_FAILURES}?offset={PAST_OFFSET - 1}",

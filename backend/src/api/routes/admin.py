@@ -10,7 +10,7 @@ from typing import Annotated, Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from sqlalchemy import and_, exists, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
@@ -166,12 +166,17 @@ class RoleUpdateRequest(BaseModel):
 # ============================================================================
 
 
+def _empty_is_absent(value: Any) -> Any:
+    """Read an empty query value as an absent one (the user list's ``workspace_id``)."""
+    return None if value == "" else value
+
+
 def _apply_user_list_filters(
     stmt: Any,
     *,
     search: str | None,
     role: str | None,
-    workspace_id: str | None,
+    workspace_id: UUID | None,
     plan: str | None,
     admitted_via: str | None = None,
     invited_by: str | None = None,
@@ -200,8 +205,6 @@ def _apply_user_list_filters(
         K matching workspaces produces K rows and inflates ``total`` into a
         count of workspace matches, breaking pagination.
     """
-    from uuid import UUID
-
     if search:
         search_pattern = f"%{search}%"
         stmt = stmt.where(or_(User.email.ilike(search_pattern), User.name.ilike(search_pattern)))
@@ -219,18 +222,18 @@ def _apply_user_list_filters(
         stmt = stmt.where(User.user_id == user_id)
 
     join_filter_applied = workspace_id is not None or plan is not None
-    if workspace_id:
+    if workspace_id is not None:
         stmt = (
             stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id)
             .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
             .where(
-                WorkspaceMember.workspace_id == UUID(workspace_id),
+                WorkspaceMember.workspace_id == workspace_id,
                 Workspace.deleted_at.is_(None),  # #681 pattern: soft-delete safe
             )
         )
 
     if plan:
-        if not workspace_id:  # not already joined
+        if workspace_id is None:  # not already joined
             stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id).join(
                 Workspace, Workspace.id == WorkspaceMember.workspace_id
             )
@@ -342,16 +345,20 @@ async def list_users(
     user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
     include_workspaces: bool = Query(False),  # Issue #164: Include workspace info
-    search: str | None = Query(None),  # Issue #164: Search by email/name
-    workspace_id: str | None = Query(None),  # Issue #164: Filter by workspace
-    role: str | None = Query(None),  # Issue #164: Filter by system role
-    plan: str | None = Query(None),  # Issue #164: Filter by plan tier
+    # Issue #164: Search by email/name
+    search: str | None = Query(None, pattern=NO_NUL_PATTERN),
+    # Issue #164: Filter by workspace. An empty value is no filter.
+    workspace_id: Annotated[UUID | None, BeforeValidator(_empty_is_absent), Query()] = None,
+    # Issue #164: Filter by system role
+    role: str | None = Query(None, pattern=NO_NUL_PATTERN),
+    # Issue #164: Filter by plan tier
+    plan: str | None = Query(None, pattern=NO_NUL_PATTERN),
     sort: str = Query("created_at"),  # Issue #164: Sort field
     # Issue #2803: how accounts were admitted, and who invited them.
     admitted_via: AdmittedVia | None = Query(None),
-    invited_by: str | None = Query(None, min_length=1, max_length=255),
+    invited_by: str | None = Query(None, min_length=1, max_length=255, pattern=NO_NUL_PATTERN),
     # Issue #2843: the one account with this exact id.
     user_id: str | None = Query(None, min_length=1, max_length=255, pattern=NO_NUL_PATTERN),
 ):
@@ -365,10 +372,11 @@ async def list_users(
         user: Authenticated admin user
         db: Database session
         limit: Maximum number of users to return
-        offset: Pagination offset
+        offset: Pagination offset (0 to 2^63 - 1)
         include_workspaces: Include workspace membership info
         search: Search by email or name (partial match)
-        workspace_id: Filter by workspace ID
+        workspace_id: Filter by workspace ID (a UUID; an empty value is no
+            filter)
         role: Filter by system role (admin/user)
         plan: Filter by plan tier (free/basic/pro/promax)
         sort: Sort field (created_at, last_login, memory_count)
@@ -378,6 +386,10 @@ async def list_users(
         user_id: Only the account whose ``user_id`` is exactly this value
             (case-sensitive, nothing trimmed; an unknown id is an empty
             list with ``total`` 0, #2843)
+
+    A ``workspace_id`` that is not a UUID, an ``offset`` above 2^63 - 1 and a
+    NUL character in ``search``, ``role``, ``plan``, ``invited_by`` or
+    ``user_id`` answer 422.
 
     Returns:
         List of users with memory counts, storage usage, and optionally workspace info

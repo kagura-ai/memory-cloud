@@ -57,6 +57,12 @@ async def client(async_engine) -> AsyncIterator[httpx.AsyncClient]:
     ("method", "url"),
     [
         ("GET", f"{USERS}?user_id=a%00b"),
+        ("GET", f"{USERS}?search=a%00b"),
+        ("GET", f"{USERS}?role=a%00b"),
+        ("GET", f"{USERS}?plan=a%00b"),
+        ("GET", f"{USERS}?invited_by=a%00b"),
+        ("GET", f"{USERS}?offset={MAX_OFFSET + 1}"),
+        ("GET", f"{USERS}?workspace_id=not-a-uuid"),
         ("GET", f"{DELETED_CONTEXTS}?created_by=a%00b"),
         ("GET", f"{DELETED_CONTEXTS}?deleted_by=a%00b"),
         ("GET", f"{DELETED_CONTEXTS}?offset={MAX_OFFSET + 1}"),
@@ -83,6 +89,13 @@ async def test_a_value_postgres_would_refuse_is_a_422(client, method, url) -> No
         # Characters a LIKE would read as wildcards, a line break and a space.
         (f"{USERS}?user_id=%25", "users"),
         (f"{USERS}?user_id=a%0Ab%20_", "users"),
+        # The parameters the user list already had: the same values as before.
+        (f"{USERS}?offset={MAX_OFFSET}", "users"),
+        (f"{USERS}?search={'s' * 255}&role={'r' * 255}&plan={'p' * 255}", "users"),
+        (f"{USERS}?search=a%0Ab%20c&role=a%0Ab&plan=a%0Ab&invited_by={'i' * 255}", "users"),
+        (f"{USERS}?workspace_id=11111111-2222-4333-8444-555555555555", "users"),
+        # An empty value is no filter, as it was before the id was typed.
+        (f"{USERS}?workspace_id=&role=&plan=&search=&user_id=no-such-account", "users"),
         (f"{DELETED_CONTEXTS}?created_by=%25&deleted_by=_", "items"),
     ],
 )
