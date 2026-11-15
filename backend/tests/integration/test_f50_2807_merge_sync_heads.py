@@ -183,14 +183,12 @@ def _assert_preserved(engine, ids, *, sync, budget):
             )
 
 
-def test_combined_checkout_has_one_migration_head():
-    assert ScriptDirectory.from_config(_get_alembic_config()).get_heads() == [MERGE]
-
-
 @pytest.mark.parametrize("starting_heads", [(COMMON,), (BUDGET,), (CLEAR,), (SYNC,), (SYNC, CLEAR)])
 def test_upgrade_and_unmerge_preserve_both_branches(async_engine, starting_heads):
     engine = _sync_engine()
     try:
+        current_head = ScriptDirectory.from_config(_get_alembic_config()).get_current_head()
+        assert current_head is not None
         _reset_alembic_state()
         for revision in starting_heads:
             _migrate(command.upgrade, revision)
@@ -203,13 +201,17 @@ def test_upgrade_and_unmerge_preserve_both_branches(async_engine, starting_heads
             _seed_budget(engine, ids)
         _migrate(command.upgrade, "head")
         with engine.connect() as conn:
-            assert set(conn.scalars(text("SELECT version_num FROM alembic_version"))) == {MERGE}
+            assert set(conn.scalars(text("SELECT version_num FROM alembic_version"))) == {
+                current_head
+            }
         _assert_preserved(engine, ids, sync=has_sync, budget=has_budget)
         if not has_sync:
             _seed_sync(engine, ids)
         if not has_budget:
             _seed_budget(engine, ids)
         for parent in (SYNC, CLEAR):
+            # Revert any future descendants before testing this fixed merge node.
+            _migrate(command.downgrade, MERGE)
             _migrate(command.downgrade, parent)
             with engine.connect() as conn:
                 assert set(conn.scalars(text("SELECT version_num FROM alembic_version"))) == {
