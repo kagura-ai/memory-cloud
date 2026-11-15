@@ -169,8 +169,11 @@ cascades data; removing an approver clears historical user identity.
 
 To roll back deliberately, stop new runs, drain committed indexing receipts,
 disable the flag and back up feed canonical/staging tables first.
-`alembic downgrade f49_2817_clear_allowlist_adders` reverts only
-`f48_2807_sync_feed_runs` and drops only the five new tables; a downgrade to a
-lower revision reverts the later revisions too. It retains existing
+`alembic downgrade f49_2817_clear_allowlist_adders` reverts
+`f48_2807_sync_feed_runs` and drops the five new tables; from v0.164.0 it
+first reverts `f50_2809_public_mcp_domains`, which follows it and drops
+`public_mcp_domains` with every custom domain binding (see
+[Public MCP custom domains](../public-mcp-domains.md), "Stopping and rolling
+back"); a downgrade to a lower revision reverts the earlier revisions too. It retains existing
 Resource/Context/endpoint/credential rows and already committed Resource events
 and Memories; downgrade does not reverse a published content change.

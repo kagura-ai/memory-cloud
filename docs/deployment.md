@@ -4245,10 +4245,13 @@ the application hosts (a warning when the list is empty).
 **Before switching on:**
 
 1. Run the migration first: `alembic upgrade head` runs
-   `f50_2809_public_mcp_domains` **before** `MCP_PUBLIC_DOMAINS_ENABLED=true`.
-   The revision creates one new, empty table and its indexes, with no foreign
-   key and no statement on any existing table: it locks no existing table. Its
-   downgrade drops the table and every binding with it.
+   `f50_2809_public_mcp_domains` (it follows `f48_2807_sync_feed_runs`)
+   **before** `MCP_PUBLIC_DOMAINS_ENABLED=true`. The revision creates one new,
+   empty table and its indexes, with no foreign key and no statement on any
+   existing table: it locks no existing table. Its
+   downgrade, and every downgrade to a revision below it, drops the table and
+   every binding with it: take the alias routing out of the proxy and switch
+   the feature off first.
 2. List in `MCP_PUBLIC_DOMAINS_APP_HOSTS` every name the API is reached under
    that the four URL settings do not already name (internal service names
    with dots included): once the switch is on, such a Host is treated as an

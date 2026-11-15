@@ -197,23 +197,32 @@ only the merge node restores both parent markers and keeps both schemas; removin
 the credential tables is a separate downgrade governed by the precautions above:
 `alembic downgrade f45_2806_sync_credentials@f44_2802_sync_installations`
 runs only the downgrades of the revisions above the merge node
-(`f48_2807_sync_feed_runs`, `f49_2817_clear_allowlist_adders` and
-`f48_2805_public_usage_budgets`), the
+(`f50_2809_public_mcp_domains`, `f48_2807_sync_feed_runs`,
+`f49_2817_clear_allowlist_adders` and `f48_2805_public_usage_budgets`), the
 merge node's and the credential revision's, and leaves
 `f46_2803_admission_record` applied. Do **not** use a plain
 `alembic downgrade f44_2802_sync_installations` for that: from the merged head it
 reverts both branches, so it also drops the admission records (for good) and
 the notice plans, or stops at the notice-plan downgrade guard. To remove only
 the admission record, use `alembic downgrade f45_2800_mcp_notice_plans`
-(it, too, first reverts `f48_2807`, `f49_2817` and `f48_2805`).
+(it, too, first reverts `f50_2809`, `f48_2807`, `f49_2817` and `f48_2805`).
 To undo just the merge, name either immediate parent explicitly; relative `-1`
 is ambiguous at a merge point. For example, from this merge revision use
-`make migrate-down revision=f46_2803_admission_record` (at head, `f48_2807`,
-`f49_2817` and `f48_2805` are reverted first); both parent schemas
+`make migrate-down revision=f46_2803_admission_record` (at head, `f50_2809`,
+`f48_2807`, `f49_2817` and `f48_2805` are reverted first); both parent schemas
 remain, and `alembic upgrade head` rejoins them.
 
+From v0.164.0, `f50_2809_public_mcp_domains` follows `f48_2807_sync_feed_runs`,
+so every downgrade below `f50_2809`, these per-branch ones included, first
+reverts it and drops the table `public_mcp_domains` with every binding: every
+custom domain alias stops being served and every claim, proof state and
+cooldown is lost. Take the alias routing out of the proxy first, then switch
+`MCP_PUBLIC_DOMAINS_ENABLED` off, before such a downgrade (see
+[Public MCP custom domains](../public-mcp-domains.md), "Stopping and rolling
+back").
+
 `f48_2807_sync_feed_runs` follows `f49_2817_clear_allowlist_adders`, so every
-downgrade below `f49_2817`, these per-branch ones included, first reverts
+downgrade below `f49_2817`, these per-branch ones included, then reverts
 `f48_2807` and drops the five staged feed tables with their records: stop new
 runs and back those tables up first (see
 [staged feed synchronization](staged-feed-sync.md), "Retention and rollback").

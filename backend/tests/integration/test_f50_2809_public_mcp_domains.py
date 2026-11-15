@@ -111,7 +111,7 @@ def _refused(engine, statement: str, params: dict | None = None) -> None:
 def test_f50_metadata() -> None:
     module = _module()
     assert module.revision == REVISION
-    assert module.down_revision == "f49_2817_clear_allowlist_adders"
+    assert module.down_revision == "f48_2807_sync_feed_runs"
     source = _PATH.read_text(encoding="utf-8")
     assert "from src" not in source and "import src" not in source
     assert "ForeignKey" not in source
