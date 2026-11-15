@@ -6,7 +6,7 @@ from sqlalchemy.dialects import postgresql as pg
 from alembic import op
 
 revision = "f48_2807_sync_feed_runs"
-down_revision = "f47_2819_merge_sync_credentials"
+down_revision = "f49_2817_clear_allowlist_adders"
 branch_labels = None
 depends_on = None
 
