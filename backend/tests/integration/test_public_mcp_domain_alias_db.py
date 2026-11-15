@@ -368,8 +368,13 @@ async def test_a_reserved_name_with_an_active_row_is_404_before_any_job(
     async with w.factory() as s:
         row = await s.get(PublicMcpDomain, UUID(domain["domain_id"]))
     assert row.state == "active"  # the row is marked later, by the job
+    # The owner sees what the request path does: the alias does not answer.
+    listed = (await w.owner.get(w.domains)).json()["domains"]
+    assert [(d["state"], d["serving"]) for d in listed] == [("active", False)]
     monkeypatch.setattr(get_settings(), "mcp_public_domains_reserved_suffixes", "")
     assert (await _alias(domain["hostname"])).status_code == 200
+    listed = (await w.owner.get(w.domains)).json()["domains"]
+    assert [(d["state"], d["serving"]) for d in listed] == [("active", True)]
     await w.detach(domain["domain_id"])
 
 

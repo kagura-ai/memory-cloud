@@ -207,3 +207,14 @@ async def test_an_unserved_alias_logs_no_host_name(switches_on) -> None:
     with structlog.testing.capture_logs() as logs:
         assert await load_serving_endpoint_for_alias(_Db(), ALIAS) is None
     assert ALIAS not in repr(logs)
+
+
+async def test_a_name_reserved_after_activation_is_never_served(switches_on, monkeypatch) -> None:
+    """The loader agrees with the Host guard: a name that is no longer claimable
+    is ``None`` before any statement, whatever its row says (request path,
+    permission endpoint and the owner's ``serving`` all read this answer)."""
+    zone = ALIAS.split(".", 1)[1]
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_reserved_suffixes", zone)
+    assert await load_serving_endpoint_for_alias(_NoDb(), ALIAS) is None
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_reserved_suffixes", "")
+    assert await load_serving_endpoint_for_alias(_Db(_row()), ALIAS) is not None

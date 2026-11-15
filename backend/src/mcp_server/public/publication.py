@@ -10,7 +10,10 @@ on a session opened before it.
 
 ``load_serving_endpoint_for_alias`` is the same SELECT for a verified custom
 domain (#2809): joined to its ``active`` domain row whose lease is current.
-Both entries resolve to the same ``ServingEndpoint``.
+Both entries resolve to the same ``ServingEndpoint``. A name that is no longer
+claimable (an operator reserved it after activation) is ``None`` before any
+statement, so every reader of this answer (the request path, the permission
+endpoint, the owner's ``serving``) agrees with the Host guard.
 
 ``check_publishable`` backs the owner's publish route with the same
 preconditions, as typed errors naming the one that failed (the owner may see
@@ -26,7 +29,7 @@ from sqlalchemy import Row, Select, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from mcp_server.public.domains import public_domains_enabled
+from mcp_server.public.domains import claimable_hostname, public_domains_enabled
 from models.auth import Context, Workspace
 from models.public_mcp import PublicMcpEndpoint
 from models.public_mcp_domain import PublicMcpDomain
@@ -166,7 +169,10 @@ async def load_serving_endpoint_for_alias(
     the same endpoint and workspace, which must be ``active`` with its lease
     (``serve_until``) still ahead of the database clock. The lease predicate
     is the same under both authority settings. One query, no cache; the host
-    name is never logged.
+    name is never logged. A name ``claimable_hostname`` refuses (malformed,
+    or reserved since its row was activated) is ``None`` without a statement,
+    whatever its row says: the job marks such a row ``suspended(reserved)``
+    at its next check.
 
     Args:
         db: Session.
@@ -177,6 +183,8 @@ async def load_serving_endpoint_for_alias(
         same ``ServingEndpoint`` the fixed address loads.
     """
     if not public_endpoints_enabled() or not public_domains_enabled():
+        return None
+    if claimable_hostname(hostname) != hostname:
         return None
     statement = (
         _serving_select()
