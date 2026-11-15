@@ -23,6 +23,18 @@ from mcp_server.public.domains import (
 )
 from models.public_mcp_domain import CHALLENGE_LABEL, CHALLENGE_VALUE_PREFIX
 
+# What ``configured`` makes ``application_hosts().names()`` return: exact
+# names sorted, then zones with a leading dot. The billing, CORS, origin and
+# routing hosts are reserved but are not application hosts.
+EXPECTED_APPLICATION_HOST_NAMES = [
+    "api-internal.example.org",
+    "api.example.com",
+    "app.example.com",
+    "id.example.com",
+    "mcp.example.com",
+    ".ops.example.org",
+]
+
 
 @pytest.fixture
 def configured(monkeypatch):
@@ -71,8 +83,8 @@ def test_application_hosts(configured) -> None:
         "localhost",
     ):
         assert not hosts.matches(name), name
-    assert "localhost" not in hosts.names()
-    assert ".ops.example.org" in hosts.names()
+    # The whole list, compared as a value (localhost is not in it).
+    assert hosts.names() == EXPECTED_APPLICATION_HOST_NAMES
 
 
 def test_internal_shaped_hosts_are_dropped(monkeypatch) -> None:
@@ -186,8 +198,7 @@ def test_startup_line_lists_the_application_hosts(configured) -> None:
     lines = [e for e in logs if e["event"] == "public_mcp_domains_application_hosts"]
     assert len(lines) == 1
     assert lines[0]["log_level"] == "info"
-    assert "app.example.com" in lines[0]["hosts"]
-    assert ".ops.example.org" in lines[0]["hosts"]
+    assert lines[0]["hosts"] == EXPECTED_APPLICATION_HOST_NAMES
 
 
 def test_startup_line_warns_when_empty(monkeypatch) -> None:
