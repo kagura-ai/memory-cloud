@@ -2682,14 +2682,13 @@ class MemoryService:
         from services.sync_managed_guard import assert_memory_mutable
 
         with self.db.no_autoflush:
-            initial = await self.memory_repo.get(memory_id, include_deleted=include_deleted)
-        if initial is not None:
-            await assert_memory_mutable(self.db, initial)
-        memory = await self.memory_repo.get(
-            memory_id, include_deleted=include_deleted, for_update=True
-        )
+            memory = await self.memory_repo.get(
+                memory_id, include_deleted=include_deleted, for_update=True
+            )
         if not memory:
             raise NotFoundException("Memory", str(memory_id))
+        # No mutation/autoflush precedes the target fence. Its advisory lock
+        # is nonblocking, so a transition holding the opposite order retries.
         await assert_memory_mutable(self.db, memory)
         return memory
 

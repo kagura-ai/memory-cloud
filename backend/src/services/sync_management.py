@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy import and_, case, cast, func, or_, select, update
@@ -32,7 +33,15 @@ from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException
 
-_maintenance_after: UUID | None = None
+
+@dataclass
+class MaintenanceScan:
+    """A process continues to the next UUID page even after a failed drain."""
+
+    after: UUID | None = None
+
+
+_maintenance_scan = MaintenanceScan()
 
 
 async def discard_pending_runs(db: AsyncSession, iid: UUID) -> None:
@@ -452,17 +461,16 @@ async def maintain_sync_management(db: AsyncSession) -> None:
     """Bounded periodic recovery catches clock expiry and crashes while retaining failed locks."""
     from models.sync_management import SyncResumeCandidate, SyncResumePreview
 
-    global _maintenance_after
     query = (
         select(SyncManagedTarget.installation_id)
         .order_by(SyncManagedTarget.installation_id)
         .limit(100)
     )
-    if _maintenance_after is not None:
-        query = query.where(SyncManagedTarget.installation_id > _maintenance_after)
+    if _maintenance_scan.after is not None:
+        query = query.where(SyncManagedTarget.installation_id > _maintenance_scan.after)
     rows = (await db.scalars(query)).all()
-    if not rows and _maintenance_after is not None:
-        _maintenance_after = None
+    if not rows and _maintenance_scan.after is not None:
+        _maintenance_scan.after = None
         rows = (
             await db.scalars(
                 select(SyncManagedTarget.installation_id)
@@ -472,7 +480,7 @@ async def maintain_sync_management(db: AsyncSession) -> None:
         ).all()
     if rows:
         # Progress even when every selected target is busy or awaits operator repair.
-        _maintenance_after = rows[-1]
+        _maintenance_scan.after = rows[-1]
     await db.rollback()
     for iid in rows:
         try:

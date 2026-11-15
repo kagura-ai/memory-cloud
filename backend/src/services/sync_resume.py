@@ -6,6 +6,7 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.sync_identity import SyncPrincipal
@@ -153,17 +154,24 @@ async def manual_snapshot(
     ).all()
     if len(summaries) > 20000 or sum(item[1] for item in summaries) > 2 * MAX_RUN_BYTES:
         raise ConflictError("Manual snapshot exceeds resume history limits")
-    memories = list(
-        (
-            await db.scalars(
-                select(Memory)
-                .where(Memory.context_id == installation.context_id)
-                .order_by(Memory.id)
-                .with_for_update(nowait=True)
-                .execution_options(populate_existing=True)
-            )
-        ).all()
-    )
+    try:
+        memories = list(
+            (
+                await db.scalars(
+                    select(Memory)
+                    .where(Memory.context_id == installation.context_id)
+                    .order_by(Memory.id)
+                    .with_for_update(nowait=True)
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        )
+    except DBAPIError as exc:
+        from utils.db_helpers import is_lock_not_available
+
+        if is_lock_not_available(exc):
+            raise ConflictError("Manual data is changing; retry the preview") from exc
+        raise
     if sum(memory.deleted_at is None for memory in memories) > MAX_RECORDS:
         raise ConflictError("Manual snapshot exceeds resume limits")
     permission = PermissionService(db)

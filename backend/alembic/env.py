@@ -6,6 +6,7 @@ Database URL is read from DATABASE_URL environment variable
 """
 
 import asyncio
+import importlib
 import logging
 from logging.config import fileConfig
 
@@ -32,7 +33,6 @@ import models.public_usage_budget  # noqa: F401  # Issue #2805: public usage bud
 import models.resource  # noqa: F401
 import models.secrets  # noqa: F401  # Issue #1128: zero-knowledge secret store
 import models.sleep  # noqa: F401  # Issue #471: SleepReportLLMUsage child added
-import models.sync_management  # noqa: F401  # Issue #2808: durable managed-data fences
 from alembic import context
 from config.database import get_database_url, to_async_database_url
 from config.settings import get_settings
@@ -44,6 +44,9 @@ from db.migration_helpers import (
     migration_lock_timeout,
     reapply_migration_lock_timeout,
 )
+
+# Model registration is an explicit import side effect for autogeneration.
+importlib.import_module("models.sync_management")
 
 # The production secret guard (#2225, #2239): under ENVIRONMENT=production a
 # development-default or short secret stops the migration here, before any

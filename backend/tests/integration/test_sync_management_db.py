@@ -40,7 +40,7 @@ store, worker, feeds = fixtures.store, fixtures.worker, fixtures.feeds
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def managed(feeds, monkeypatch):
-    monkeypatch.setattr(sync_management, "_maintenance_after", None)
+    monkeypatch.setattr(sync_management, "_maintenance_scan", sync_management.MaintenanceScan())
     monkeypatch.setattr(sync_management.get_settings(), "sync_managed_enabled", True)
     for module in (sync_management, sync_resume):
         monkeypatch.setattr(module, "utcnow", lambda: feeds.store.clock.now)
@@ -875,6 +875,44 @@ async def test_actual_batch_suppresses_old_source_in_manual_and_honors_resume_ca
     assert qdrant.upsert.await_count == 1
     await stop(managed)
     assert (await finalize(managed))["mode"] == "manual"
+
+
+async def test_row_lock_before_editor_fence_racing_resume_retries_without_overwrite(
+    managed, monkeypatch
+):
+    from services.memory_service import MemoryService
+
+    await committed(managed, [product()])
+    await apply_pending(managed, monkeypatch)
+    await manual(managed)
+    await pin(managed, [product(title="Approved next source")])
+    p = (await human(managed, "POST", "management/resume/preview")).json()
+    body = {
+        "operation_id": str(uuid4()),
+        "preview_id": p["preview_id"],
+        "diff_hash": p["diff_hash"],
+    }
+    async with managed.factory() as editor:
+        memory = await editor.scalar(
+            select(Memory)
+            .where(
+                Memory.context_id == UUID(managed.target["context_id"]), Memory.deleted_at.is_(None)
+            )
+            .with_for_update()
+        )
+        # The editor has not obtained its nonblocking context fence yet.
+        result = await human(managed, "POST", "management/resume/confirm", body=body)
+        assert result.status_code == 409, result.text
+        locked_memory = await MemoryService(editor)._lock_for_edit(memory.id)
+        locked_memory.content = "A concurrent manual change"
+        locked_memory.version += 1
+        await MemoryRepository(editor).update(memory.id, locked_memory)
+        await editor.commit()
+    result = await human(managed, "POST", "management/resume/confirm", body=body)
+    assert result.status_code == 409
+    async with managed.factory() as db:
+        assert (await db.get(Memory, memory.id)).content == "A concurrent manual change"
+        assert (await db.get(SyncManagedTarget, managed.iid)).mode == "manual"
 
 
 async def test_diff_page_must_still_be_live_after_snapshot_work(managed, monkeypatch):
