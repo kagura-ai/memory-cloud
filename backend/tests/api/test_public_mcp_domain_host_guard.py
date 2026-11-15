@@ -225,10 +225,16 @@ async def test_arpa_and_onion_names_are_foreign_and_never_served(host) -> None:
 # Foreign Host: only /mcp, and only for a claimable name
 # ----------------------------------------------------------------------------
 
+_SYNC_ID = "00000000-0000-4000-8000-000000000001"
+
 ROUTE_INVENTORY = [
     "/api/v1/auth/login",
     "/api/v1/oauth/authorize",
     "/api/v1/workspaces",
+    # #2807's staged feed routes: a foreign Host never reaches them either.
+    "/api/v1/sync/installations/" + _SYNC_ID + "/schema",
+    "/api/v1/sync/installations/" + _SYNC_ID + "/runs",
+    "/api/v1/workspaces/" + _SYNC_ID + "/sync-installations/" + _SYNC_ID + "/records",
     "/.well-known/oauth-protected-resource",
     "/.well-known/oauth-authorization-server",
     "/.well-known/openid-configuration",
@@ -436,7 +442,12 @@ async def test_a_foreign_request_reaches_no_application_middleware(monkeypatch, 
     monkeypatch.setattr(pt, "_load_alias", load_alias)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url=f"http://{ALIAS}") as c:
-        for path in ("/api/v1/auth/login", "/health", "/.well-known/openid-configuration"):
+        for path in (
+            "/api/v1/auth/login",
+            "/health",
+            "/.well-known/openid-configuration",
+            "/api/v1/sync/installations/" + _SYNC_ID + "/schema",
+        ):
             r = await c.get(path, headers={"Origin": f"https://{APP_HOST}"})
             assert r.status_code == 404, path
             assert r.json() == NOT_PUBLISHED_BODY
