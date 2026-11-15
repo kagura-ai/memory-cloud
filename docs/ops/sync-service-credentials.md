@@ -186,7 +186,8 @@ For rollback, turn the credential capability off before reverting the app/DDL.
 The credential revision itself removes only credential/client/key/replay tables;
 existing workspace, installation, Resource events, Memories and publication
 identities remain. Reaching it from the combined head also removes, first, the
-custom domain table `public_mcp_domains` with every binding, then the later
+five managed-feed tables and the custom domain table `public_mcp_domains` with
+every binding, then the later
 staged-feed canonical/staging tables and public-budget rows: follow the backup
 and feature-shutdown precautions below before doing so. Re-upgrade
 requires explicit operator client/public-key registration; it does not restore
@@ -204,7 +205,8 @@ only the merge node restores both parent markers and keeps both schemas; removin
 the credential tables is a separate downgrade governed by the precautions above:
 `alembic downgrade f45_2806_sync_credentials@f44_2802_sync_installations`
 runs only the downgrades of the revisions above the merge node (from the
-combined head: `f51_2809_public_mcp_domains`, `f50_2807_merge_sync_heads`,
+combined head: `f52_2808_merge_feed_domains`, `f51_2808_managed_sync`,
+`f51_2809_public_mcp_domains`, `f50_2807_merge_sync_heads`,
 `f48_2807_sync_feed_runs`,
 `f49_2817_clear_allowlist_adders` and `f48_2805_public_usage_budgets`), the
 merge node's and the credential revision's, and leaves
@@ -213,13 +215,13 @@ merge node's and the credential revision's, and leaves
 reverts both branches, so it also drops the admission records (for good) and
 the notice plans, or stops at the notice-plan downgrade guard. To remove only
 the admission record, use `alembic downgrade f45_2800_mcp_notice_plans`
-(it, too, first reverts `f51_2809`, the combined-head merge and both later
-branches).
+(it, too, first reverts `f52_2808`, both `f51` revisions, the combined-head
+merge `f50_2807` and both later branches).
 To undo just the merge, name either immediate parent explicitly; relative `-1`
 is ambiguous at a merge point. For example, from this merge revision use
 `make migrate-down revision=f46_2803_admission_record` (at the combined head,
-`f51_2809`, `f50_2807`, `f48_2807`, `f49_2817` and `f48_2805` are reverted
-first); both parent schemas
+`f52_2808`, `f51_2808`, `f51_2809`, `f50_2807`, `f48_2807`, `f49_2817` and
+`f48_2805` are reverted first); both parent schemas
 remain. Re-upgrade in separate steps: `alembic upgrade
 f47_2819_merge_sync_credentials`, then `alembic upgrade
 f49_2817_clear_allowlist_adders`, then `alembic upgrade head`.
@@ -230,10 +232,19 @@ new runs, drain committed indexing and back up feed tables before doing so;
 see [staged-feed rollback](staged-feed-sync.md#retention-and-rollback). Merely
 unmerging `f50_2807` to either explicit parent leaves both parents applied.
 
-From v0.164.0, `f51_2809_public_mcp_domains` follows the merge node
-`f50_2807_merge_sync_heads`, so every downgrade below `f51_2809`, these
-per-branch ones and unmerging `f50_2807` included, first reverts it and drops
-the table `public_mcp_domains` with every binding: every custom domain alias stops being served and every claim, proof state and
+From v0.164.0, `f51_2808_managed_sync` and `f51_2809_public_mcp_domains` both
+follow the merge node `f50_2807_merge_sync_heads`, and the no-DDL merge
+revision `f52_2808_merge_feed_domains` joins them as the single head. A plain
+downgrade to `f50_2807` and every downgrade below it, these per-branch ones
+and unmerging `f50_2807` included, first unmerges `f52_2808` and reverts both
+`f51` revisions. `f51_2808` drops the five managed-feed tables
+(`sync_managed_targets`, `sync_resume_candidates`, `sync_resume_previews`,
+`sync_mode_operations` and `sync_manual_retirements`): the ownership rows,
+operation receipts, resume snapshots and retirement proofs are lost, and the
+v0.164.0 application cannot write content or list Contexts without
+`sync_managed_targets`, so stop it first (see
+[Feed ownership and safe manual operation](feed-managed-sync.md)). `f51_2809`
+drops the table `public_mcp_domains` with every binding: every custom domain alias stops being served and every claim, proof state and
 cooldown is lost. Take the alias routing out of the proxy first, then switch
 `MCP_PUBLIC_DOMAINS_ENABLED` off, before such a downgrade (see
 [Public MCP custom domains](../public-mcp-domains.md), "Stopping and rolling

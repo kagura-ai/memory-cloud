@@ -572,9 +572,15 @@ concurrent lookups per process and 3 s.
 
 1. **Run the migration first.** `alembic upgrade head` runs
    `f51_2809_public_mcp_domains` (it follows the merge revision
-   `f50_2807_merge_sync_heads`): one new, empty table and its indexes. It has
+   `f50_2807_merge_sync_heads`, beside `f51_2808_managed_sync`; the no-DDL
+   merge revision `f52_2808_merge_feed_domains` joins the two and is the
+   single head): one new, empty table and its indexes. It has
    no foreign key and no statement on any existing table, so it locks no
-   existing table. Run it before `MCP_PUBLIC_DOMAINS_ENABLED=true`.
+   existing table. (The same `alembic upgrade head` runs
+   `f51_2808_managed_sync`, whose foreign keys take locks on
+   `sync_installations`, `users` and `memories`, and on the feed tables
+   `sync_feeds` and `sync_runs`.) Run it before
+   `MCP_PUBLIC_DOMAINS_ENABLED=true`.
 2. **Application hosts.** Once the switch is on, a request under a Host that is
    neither an application host nor an internal shape is treated as an alias
    candidate: everything but `/mcp` answers `404`. List every name the API is
@@ -627,10 +633,20 @@ While the switch is off no job runs: host names of released rows stay until
 the operator removes them with the CLI or switches the feature on again, and
 no lease is renewed (an alias whose lease passed meanwhile serves again only
 after its first check). The migration's downgrade drops the table and every
-binding with it: `alembic downgrade f50_2807_merge_sync_heads` reverts
-`f51_2809` alone and drops `public_mcp_domains` with every binding, and every
-downgrade to a lower revision does so first. Switch the feature off, after the
-proxy step above, before any of them.
+binding with it. Name the target: at the head `f52_2808_merge_feed_domains`,
+`alembic downgrade -1` is refused (two parents), and
+`alembic downgrade f51_2809_public_mcp_domains` only unmerges `f52_2808`
+(no DDL): the table and every binding stay. To drop this table alone, use
+`alembic downgrade f51_2809_public_mcp_domains@f50_2807_merge_sync_heads`:
+it unmerges `f52_2808`, reverts `f51_2809` alone, drops `public_mcp_domains`
+with every binding and leaves the database at `f51_2808_managed_sync`;
+`alembic upgrade head` applies `f51_2809` and the merge again. A plain
+`alembic downgrade f50_2807_merge_sync_heads` reverts both `f51` revisions:
+besides `public_mcp_domains` it drops the five managed-feed tables, which the
+v0.164.0 application reads on every content write (see
+[Feed ownership and safe manual operation](ops/feed-managed-sync.md)), and
+every downgrade to a lower revision does both first. Switch the feature off,
+after the proxy step above, before any of them.
 
 ## What the application does not guarantee
 

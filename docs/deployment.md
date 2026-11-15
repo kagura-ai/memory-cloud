@@ -730,9 +730,12 @@ Operator notes:
   no-DDL `f50_2807_merge_sync_heads`. This also keeps `f48_2805`'s foreign-key
   lock on `workspaces` out of the transaction where `f48_2807` takes foreign-key
   locks on `users`, `resources`, `resource_events`, `contexts` and
-  `sync_installations`. From v0.164.0 the last step also runs
-  `f51_2809_public_mcp_domains` after the merge node; its new table has no
-  foreign key, and it locks no existing table.
+  `sync_installations`. From v0.164.0 the last step also runs, after the
+  merge node, `f51_2809_public_mcp_domains` (its new table has no foreign
+  key, and it locks no existing table), `f51_2808_managed_sync` (its foreign
+  keys take locks on the existing tables `sync_installations`, `users` and
+  `memories`, in the same transaction as `f48_2807`'s) and the no-DDL merge revision
+  `f52_2808_merge_feed_domains`, the single head.
   (With two steps, `f45_2806_sync_credentials` would run in the same
   transaction as `f46_2803` and take its locks on `workspaces` there; with
   three, ending in `alembic upgrade head`, `f48_2805` would; with four,
@@ -4248,12 +4251,28 @@ the application hosts (a warning when the list is empty).
 
 1. Run the migration first: `alembic upgrade head` runs
    `f51_2809_public_mcp_domains` (it follows the merge revision
-   `f50_2807_merge_sync_heads`) **before** `MCP_PUBLIC_DOMAINS_ENABLED=true`. The revision creates one new,
+   `f50_2807_merge_sync_heads`, beside `f51_2808_managed_sync`; the no-DDL
+   merge revision `f52_2808_merge_feed_domains` joins the two and is the
+   single head) **before** `MCP_PUBLIC_DOMAINS_ENABLED=true`. The revision creates one new,
    empty table and its indexes, with no foreign key and no statement on any
-   existing table: it locks no existing table. Its
-   downgrade, and every downgrade to a revision below it, drops the table and
-   every binding with it: take the alias routing out of the proxy and switch
-   the feature off first.
+   existing table: it locks no existing table. (The same `alembic upgrade
+   head` runs `f51_2808_managed_sync`, whose foreign keys take locks on
+   `sync_installations`, `users` and `memories`, and on the feed tables
+   `sync_feeds` and `sync_runs`.) Its
+   downgrade drops the table and every binding with it, and so does a plain
+   downgrade to `f50_2807_merge_sync_heads` and every downgrade to a revision
+   below that: take the alias routing out of the proxy and switch
+   the feature off first. Name the target: `alembic downgrade -1` is refused
+   at the head (two parents), and
+   `alembic downgrade f51_2809_public_mcp_domains` only unmerges
+   `f52_2808_merge_feed_domains` and keeps the table. To drop this table
+   alone, use
+   `alembic downgrade f51_2809_public_mcp_domains@f50_2807_merge_sync_heads`
+   (the database is then at `f51_2808_managed_sync`). A plain
+   `alembic downgrade f50_2807_merge_sync_heads` also reverts
+   `f51_2808_managed_sync` and drops the five managed-feed tables, which the
+   v0.164.0 application reads on every content write (see
+   [Feed ownership and safe manual operation](ops/feed-managed-sync.md)).
 2. List in `MCP_PUBLIC_DOMAINS_APP_HOSTS` every name the API is reached under
    that the four URL settings do not already name (internal service names
    with dots included): once the switch is on, such a Host is treated as an
