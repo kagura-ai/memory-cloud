@@ -83,9 +83,12 @@ def _admin_rows_lock(user_id: str, also_lock: ColumnElement[bool] | None = None)
     Every admin row that counts (``_counted_admin_row``: not one under
     erasure, whose run holds it), the target and the rows ``also_lock``
     matches, in ``user_id`` order, ``FOR NO KEY UPDATE`` (never ``FOR
-    UPDATE``: a ``FOR KEY SHARE`` holder of another account's row does not
-    wait on it, and nothing here waits on one). ``populate_existing``: a row
-    the session already holds is refreshed from the locked read.
+    UPDATE``: a ``FOR KEY SHARE`` holder of another account's row, a row
+    inserted that references it, neither waits on it nor is waited on by this
+    statement). A caller that strengthens a row it took here to ``FOR UPDATE``
+    later (the admin deletion, ``deletion_users``) waits for the ``FOR KEY
+    SHARE`` holders granted in between. ``populate_existing``: a row the
+    session already holds is refreshed from the locked read.
     """
     conditions = [_counted_admin_row(), User.user_id == user_id]
     if also_lock is not None:

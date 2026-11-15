@@ -263,6 +263,14 @@ def deletion_users(
     rows to ``SystemAdminService.can_delete_admin`` first (#2855), so the
     transaction's first lock statement takes all of them, in ``user_id``
     order, with the admin rows.
+
+    That first statement takes them ``FOR NO KEY UPDATE``, and the transfer
+    then strengthens them to ``FOR UPDATE``. A ``FOR KEY SHARE`` (a row
+    inserted that references the user) does not conflict with the first and
+    is granted in between; the strengthening waits for it. If the holder's
+    transaction then updates the same ``users`` row, it waits on the
+    deletion in turn: PostgreSQL ends one of the two with a deadlock error
+    (40P01), and the route answers it with its 409 "retry deletion".
     """
     successors = set(workspace_transfers.values()) | set(context_transfers.values())
     # The owners the user's connector write targets go to (#2420) are locked
@@ -320,7 +328,8 @@ async def transfer_user_ownership(
     """
     successors = set(workspace_transfers.values()) | set(context_transfers.values())
     # ``deletion_users``: the subject, the successors and the connector
-    # write targets' owners (#2420).
+    # write targets' owners (#2420). On the admin route this strengthens
+    # rows already held ``FOR NO KEY UPDATE`` (see ``deletion_users``).
     users = set(
         (
             await db.execute(
