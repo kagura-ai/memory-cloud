@@ -405,7 +405,7 @@ class TestForceTransferRequests:
                 assert sentinel not in raw, label
                 assert sentinel.lower() not in raw.lower(), label
             assert "decided_by_email" not in raw
-            assert "people.example" not in raw
+            assert "@people" not in raw
             assert world.owner not in raw
             for item in response.json()["items"]:
                 assert set(item) == ITEM_KEYS
