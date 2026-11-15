@@ -9,10 +9,11 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockGet = vi.fn();
+const mockPut = vi.fn();
 vi.mock("@/lib/api", () => ({
   apiClient: {
     get: (...args: unknown[]) => mockGet(...args),
-    put: vi.fn(),
+    put: (...args: unknown[]) => mockPut(...args),
   },
 }));
 
@@ -66,6 +67,8 @@ beforeEach(() => {
   mockReplace.mockReset();
   mockGet.mockReset();
   mockGet.mockResolvedValue({ users: [USER], total: 1 });
+  mockPut.mockReset();
+  mockPut.mockResolvedValue({});
 });
 
 describe("AdminUsersPage categories (#2765)", () => {
@@ -129,5 +132,54 @@ describe("AdminUsersPage categories (#2765)", () => {
     fireEvent.mouseDown(screen.getByRole("tab", { name: "tabs.planChanges" }));
 
     expect(mockReplace).toHaveBeenCalledWith("/admin/users?tab=plan-changes");
+  });
+});
+
+describe("AdminUsersPage system role change (#2854)", () => {
+  const ADMIN = { ...USER, id: "u2", name: "Admin Two", role: "admin" };
+  const OTHER_ADMIN = { ...USER, id: "u3", name: "Admin Three", role: "admin" };
+
+  const openRowMenu = (index: number) => {
+    const trigger = screen.getAllByRole("button", { name: "Row actions" })[
+      index
+    ];
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+  };
+
+  it("offers only admin and user: a user is promoted to admin", async () => {
+    render(<AdminUsersPage />);
+    await screen.findByText("Someone");
+
+    openRowMenu(0);
+    fireEvent.click(await screen.findByText("Promote to System Admin"));
+
+    expect(mockPut).toHaveBeenCalledTimes(1);
+    expect(mockPut).toHaveBeenCalledWith("/api/v1/admin/users/u1/role", {
+      role: "admin",
+    });
+  });
+
+  it("offers only admin and user: an admin is demoted to user", async () => {
+    mockGet.mockResolvedValue({ users: [ADMIN, OTHER_ADMIN], total: 2 });
+    render(<AdminUsersPage />);
+    await screen.findByText("Admin Two");
+
+    openRowMenu(0);
+    fireEvent.click(await screen.findByText("Demote from System Admin"));
+
+    expect(mockPut).toHaveBeenCalledTimes(1);
+    expect(mockPut).toHaveBeenCalledWith("/api/v1/admin/users/u2/role", {
+      role: "user",
+    });
+  });
+
+  it("offers no other role in the row menu", async () => {
+    render(<AdminUsersPage />);
+    await screen.findByText("Someone");
+
+    openRowMenu(0);
+    await screen.findByText("Promote to System Admin");
+
+    expect(screen.queryByText(/read.?only/i)).toBeNull();
   });
 });

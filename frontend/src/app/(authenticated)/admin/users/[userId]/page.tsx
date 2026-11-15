@@ -108,10 +108,10 @@ interface UserDetail {
   workspace_summary?: WorkspaceSummary | null; // #676 (optional during rollout)
 }
 
+// The system roles (admin, user: #2854), then the workspace and context roles.
 const KNOWN_ROLE_VALUES = [
   "admin",
   "user",
-  "read_only",
   "owner",
   "member",
   "viewer",

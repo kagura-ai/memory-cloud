@@ -6,7 +6,7 @@ Issue #106: Refactored to use consolidated utilities
 """
 
 from datetime import datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
@@ -156,9 +156,14 @@ class UserListResponse(BaseModel):
 
 
 class RoleUpdateRequest(BaseModel):
-    """Request to update user role."""
+    """Request to update user role.
 
-    role: str
+    ``admin`` and ``user`` are the system roles the ``valid_role`` CHECK of
+    ``users`` allows; any other name answers 422 before a statement runs
+    (#2854).
+    """
+
+    role: Literal["admin", "user"]
 
 
 # ============================================================================
@@ -841,6 +846,7 @@ async def update_user_role(
 ):
     """Update user role (Admin-only).
 
+    ``role`` is ``admin`` or ``user``; any other name answers 422 (#2854).
     Taking the admin role from an account answers 403 `ADMIN-001` when the
     account is the initial system administrator or the last remaining one,
     as `DELETE /api/v1/admin/system-admins/{user_id}` does (#2828). A caller
@@ -848,14 +854,6 @@ async def update_user_role(
     nothing.
     """
     admin_id = get_user_id(admin)
-
-    # Validate role
-    valid_roles = ["admin", "user", "read_only"]
-    if request.role not in valid_roles:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}",
-        )
 
     # Prevent self-demotion
     if admin_id == user_id and request.role != "admin":

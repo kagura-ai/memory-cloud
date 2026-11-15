@@ -12001,6 +12001,10 @@
       "RoleUpdateRequest": {
         "properties": {
           "role": {
+            "enum": [
+              "admin",
+              "user"
+            ],
             "type": "string"
           }
         },

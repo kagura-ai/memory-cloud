@@ -170,7 +170,11 @@ export default function AdminUsersPage() {
     router.push(adminUserPath(userId));
   };
 
-  const handleRoleChange = async (userId: string, newRole: string) => {
+  // #2854: the two system roles PUT .../role accepts.
+  const handleRoleChange = async (
+    userId: string,
+    newRole: "admin" | "user",
+  ) => {
     try {
       await apiClient.put(`/api/v1/admin/users/${userId}/role`, {
         role: newRole,
