@@ -503,6 +503,13 @@ The console reads job runs, work queue backlogs and LLM lane health from
 needs no LLM key for it): see
 [Operations status](#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768).
 
+From v0.165.0 (#2837) the console reads the environment-backed settings from
+`GET /api/v1/admin/environment`, the `hosted` category included
+([Environment Console](api-reference.md#environment-console)). The values are
+those of the process that answers: in this setup the `service` process, so
+give it the same values as the public processes for the settings you want to
+read there.
+
 Each request of the console carries the credential and `X-Operator-Email`, the
 address of the person acting (exactly one header value; lower-cased; ASCII; at
 most 246 characters; local part `[a-z0-9._+-]`). memory-cloud trusts the
@@ -515,13 +522,25 @@ included) `401 SYSADMIN-002` with `WWW-Authenticate: Bearer`, bad operator
 address `400 SYSADMIN-003`. Routes that act on the caller's own account
 (`POST /admin/sleep/run`, `POST /admin/sleep/actions/{id}/undo-merge`, the
 deprecated `GET /admin/memory-health`) and applying `POST /admin/contexts/recover`
-(`dry_run=false`) answer `403 SYSADMIN-004` to an operator.
+(`dry_run=false`) answer `403 SYSADMIN-004` to an operator. For Sleep an
+operator has its own two routes (#2838): `POST /admin/users/{user_id}/sleep/run`
+runs Sleep for a named user's context, and
+`POST /admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge` undoes one
+merge of a named report. The run executes inside the process that answers the
+request, with that process's LLM, embedding, vector-store and Sleep settings
+(the undo re-embeds the restored memory there too), so the `service` process
+needs the same settings as the public processes for these routes.
 
 **What an operator leaves behind.** Admin writes store the operator as
 `operator:<address>` wherever they store an actor (audit rows, plan changes,
 add-ons, allowlist entries, erasure and force-transfer requests, worker apps).
 `PUT /admin/users/{id}/role` now writes a `system_role_update` audit row in
-every mode. The customer-visible operation history stores an operator's action
+every mode. A Sleep run started for a user and a merge undone in a user's report
+write `sleep_run_trigger` and `sleep_merge_undo` audit rows (the caller as actor;
+the target user, workspace, context, report, action and memory ids in the
+metadata, and no text); `GET /api/v1/admin/audit-logs` returns both. The report's own `undo_merge` action, which workspace
+members can read, records an operator as `operator` without the address. The
+customer-visible operation history stores an operator's action
 without an actor id (`principal_kind = operator`, shown as "Service operator").
 These are operator accountability records: erasing a product account, even one
 with the same address, does not rewrite them. On a force transfer, the four-eyes
@@ -537,7 +556,9 @@ configuration category. The first account created on an empty database gets
 (as in `session`), so a fresh `off` deployment gets its first user from that
 first sign-up, from `ALLOW_REGISTRATION=true`, an allowlisted identity, or a
 CLI-created account. Accounts that already have `role=admin` keep it (the
-initial and last admin cannot be demoted); a process started without the
+initial and last admin cannot be demoted: `PUT /admin/users/{id}/role` and
+`DELETE /admin/system-admins/{id}` both answer `403 ADMIN-001`, in every mode,
+and two demotions at once still leave one admin, #2828); a process started without the
 setting serves them the session surface again, which is why the mode must be
 set on every process. Batch beta invites stay CLI-only in every mode
 ([Dated beta invite batches](#dated-beta-invite-batches)).
@@ -2254,6 +2275,11 @@ reports the case that matters, and below D3 the event would fire on every
 ingest of a fresh deployment. To see them, set `LOG_LEVEL=debug` for a while,
 then set it back.
 
+Whether an embedder has a calibration row, how old it is and the threshold it
+gives can be read without the log or the database:
+`GET /api/v1/admin/neural/calibrations` (#2845,
+[Embedding calibrations](api-reference.md#embedding-calibrations)).
+
 ## Tag Co-Occurrence Cold-Start Seeding (Issue #223)
 
 Migration `b05_223_tag_cooccurrence` adds the schema; seeding fires
@@ -3474,7 +3500,11 @@ delete answers 409. After the last attempt it ends
 hits the outage answers 503 `ERASURE-007` with `request_id` and
 `scheduled_for` in `details`; the request is kept and the sweep runs it, so
 do not retry the call (a second one answers 409 while the request waits), and
-the member cannot cancel it. A member whose self-service request is waiting
+the member cannot cancel it. From v0.165.0 (#2834)
+`GET /api/v1/admin/erasure-requests/{request_id}` shows where such a request
+stands: its `status`, `scheduled_for`, the `retry` block and, once it failed,
+its `failure_kind` ([Erasure requests](api-reference.md#erasure-requests)).
+A member whose self-service request is waiting
 can still cancel it on the account page; memories whose points were already
 deleted then stay out of search results until they are re-embedded. From
 v0.128.0 (#2304) the service re-queues them itself: when a request that
@@ -3650,6 +3680,15 @@ or, as a system admin, `POST /api/v1/admin/contexts/{context_id}/restore` with
 another name). The restore is recorded in the audit log (`context_restore`),
 under the admin for the endpoint and under `--actor` for the command (default
 `cli:<OS user>`).
+
+To find the id, `GET /api/v1/admin/contexts/deleted` (#2833) lists the
+soft-deleted contexts of live workspaces, newest deletion first, with optional
+`workspace_id`, `created_by` and `deleted_by` filters. Each row has the
+context's id and name, its workspace, who created and deleted it,
+`deleted_memories` (the rows a restore still has; `0` after the purge) and
+two flags, `name_taken` and `resource_taken`: with both false the dry run
+answers `200`, with either true `409` (`name_taken` is solved with `new_name`).
+See [Deleted contexts](api-reference.md#deleted-contexts).
 
 **What comes back.** The context row, and the memories its deletion
 soft-deleted: they are live again and marked `pending`, and the embedding sweep
@@ -5903,13 +5942,13 @@ drain it.
 |---|---|---|
 | `embedding_pending` / `embedding_processing` | Memories waiting for, or in, their embedding | `sweep_pending_embeddings` |
 | `embedding_failed_retryable` | Failed embeddings with retries left | `sweep_pending_embeddings` |
-| `embedding_failed_stalled` | Failed embeddings with no retries left (not searchable) | people: `POST /api/v1/admin/embedding/retry-failed` |
+| `embedding_failed_stalled` | Failed embeddings with no retries left (not searchable) | people: `GET /api/v1/admin/embedding/failures` says which workspaces and contexts hold them and why (#2832), `POST /api/v1/admin/embedding/retry-failed` resets them |
 | `deferred_point_deletes` | Vector deletes waiting for their drain | `drain_deferred_point_deletes` |
 | `erasure_pending` | Account erasures awaiting the user's confirmation | people |
 | `erasure_cooling_off` / `erasure_cooling_off_due` | Erasures in their cooling-off period / past it | `sweep_pending_erasures` |
 | `erasure_in_progress` / `erasure_failed` | Erasures running / failed | `sweep_pending_erasures` / people |
 | `vector_erasure_jobs` | Vector payload erasures not yet complete | `sweep_pending_erasures` |
-| `force_transfer_requests_pending` | Ownership force transfers awaiting a second admin | people |
+| `force_transfer_requests_pending` | Ownership force transfers awaiting a second admin | people: `GET /api/v1/admin/force-transfer-requests?status=pending` lists them (#2846) |
 | `storage_object_deletions_due` | Stored objects due for deletion | `storage_object_deletion_sweeper` |
 | `file_reservations_expired` / `file_soft_deleted_due` | Abandoned upload reservations / deleted files past retention | `orphan_file_sweeper` / `soft_delete_file_gc` |
 | `files_awaiting_scan` / `files_unscanned` | Uploads due for their malware scan / files never scanned (listed while `FILE_SCAN_ENABLED` is on) | `file_scan_sweeper` |

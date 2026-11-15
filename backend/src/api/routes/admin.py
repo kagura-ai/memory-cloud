@@ -6,15 +6,16 @@ Issue #106: Refactored to use consolidated utilities
 """
 
 from datetime import datetime
-from typing import Any, cast
+from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select, text, update
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from sqlalchemy import and_, exists, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from auth.admission import AdmittedVia, InviteIssuer
 from auth.dependencies import require_admin
@@ -32,6 +33,7 @@ from models.auth import (
     Workspace,
     WorkspaceMember,
 )
+from models.auth import WorkspaceOwnershipForceTransferRequest as ForceTransferRequest
 from models.memory import Memory
 from models.schemas import (
     AdmissionInfo,
@@ -41,6 +43,7 @@ from models.schemas import (
     UserWorkspaceInfo,
 )
 from services.email_service import get_email_service
+from services.system_admin_service import SystemAdminService
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
@@ -61,6 +64,7 @@ from utils.plan_resolver import (
     get_user_workspace_cap_summary,
     resolve_workspace_cap,
 )
+from utils.query_bounds import MAX_OFFSET, NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -162,21 +166,28 @@ class RoleUpdateRequest(BaseModel):
 # ============================================================================
 
 
+def _empty_is_absent(value: Any) -> Any:
+    """Read an empty query value as an absent one (the user list's ``workspace_id``)."""
+    return None if value == "" else value
+
+
 def _apply_user_list_filters(
     stmt: Any,
     *,
     search: str | None,
     role: str | None,
-    workspace_id: str | None,
+    workspace_id: UUID | None,
     plan: str | None,
     admitted_via: str | None = None,
     invited_by: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[Any, bool]:
     """Apply the admin user-list filters (#164), returning (stmt, joined).
 
     #2803: ``admitted_via`` and ``invited_by`` (the inviter's ``user_id``) are
     plain columns of ``users``: no join, so the DISTINCT flag and ``total``
-    are unaffected.
+    are unaffected. #2843: so is ``user_id``, the account's own id, compared
+    as given (exact, case-sensitive, nothing trimmed).
 
     ``WorkspaceMember.user_id`` is not a FK to ``User.user_id`` (it stores the
     OAuth ``sub`` claim as a plain string), so SQLAlchemy cannot infer the ON
@@ -194,8 +205,6 @@ def _apply_user_list_filters(
         K matching workspaces produces K rows and inflates ``total`` into a
         count of workspace matches, breaking pagination.
     """
-    from uuid import UUID
-
     if search:
         search_pattern = f"%{search}%"
         stmt = stmt.where(or_(User.email.ilike(search_pattern), User.name.ilike(search_pattern)))
@@ -209,19 +218,22 @@ def _apply_user_list_filters(
     if invited_by is not None:
         stmt = stmt.where(User.admitted_by_user_id == invited_by)
 
+    if user_id is not None:
+        stmt = stmt.where(User.user_id == user_id)
+
     join_filter_applied = workspace_id is not None or plan is not None
-    if workspace_id:
+    if workspace_id is not None:
         stmt = (
             stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id)
             .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
             .where(
-                WorkspaceMember.workspace_id == UUID(workspace_id),
+                WorkspaceMember.workspace_id == workspace_id,
                 Workspace.deleted_at.is_(None),  # #681 pattern: soft-delete safe
             )
         )
 
     if plan:
-        if not workspace_id:  # not already joined
+        if workspace_id is None:  # not already joined
             stmt = stmt.join(WorkspaceMember, WorkspaceMember.user_id == User.user_id).join(
                 Workspace, Workspace.id == WorkspaceMember.workspace_id
             )
@@ -333,16 +345,22 @@ async def list_users(
     user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
     include_workspaces: bool = Query(False),  # Issue #164: Include workspace info
-    search: str | None = Query(None),  # Issue #164: Search by email/name
-    workspace_id: str | None = Query(None),  # Issue #164: Filter by workspace
-    role: str | None = Query(None),  # Issue #164: Filter by system role
-    plan: str | None = Query(None),  # Issue #164: Filter by plan tier
+    # Issue #164: Search by email/name
+    search: str | None = Query(None, pattern=NO_NUL_PATTERN),
+    # Issue #164: Filter by workspace. An empty value is no filter.
+    workspace_id: Annotated[UUID | None, BeforeValidator(_empty_is_absent), Query()] = None,
+    # Issue #164: Filter by system role
+    role: str | None = Query(None, pattern=NO_NUL_PATTERN),
+    # Issue #164: Filter by plan tier
+    plan: str | None = Query(None, pattern=NO_NUL_PATTERN),
     sort: str = Query("created_at"),  # Issue #164: Sort field
     # Issue #2803: how accounts were admitted, and who invited them.
     admitted_via: AdmittedVia | None = Query(None),
-    invited_by: str | None = Query(None, min_length=1, max_length=255),
+    invited_by: str | None = Query(None, min_length=1, max_length=255, pattern=NO_NUL_PATTERN),
+    # Issue #2843: the one account with this exact id.
+    user_id: str | None = Query(None, min_length=1, max_length=255, pattern=NO_NUL_PATTERN),
 ):
     """List all users with their memory statistics.
 
@@ -354,16 +372,24 @@ async def list_users(
         user: Authenticated admin user
         db: Database session
         limit: Maximum number of users to return
-        offset: Pagination offset
+        offset: Pagination offset (0 to 2^63 - 1)
         include_workspaces: Include workspace membership info
         search: Search by email or name (partial match)
-        workspace_id: Filter by workspace ID
+        workspace_id: Filter by workspace ID (a UUID; an empty value is no
+            filter)
         role: Filter by system role (admin/user)
         plan: Filter by plan tier (free/basic/pro/promax)
         sort: Sort field (created_at, last_login, memory_count)
         admitted_via: Only accounts admitted this way (#2803)
         invited_by: Only accounts admitted by an invite this user minted
             (``user_id``; user-minted invites only, #2803)
+        user_id: Only the account whose ``user_id`` is exactly this value
+            (case-sensitive, nothing trimmed; an unknown id is an empty
+            list with ``total`` 0, #2843)
+
+    A ``workspace_id`` that is not a UUID, an ``offset`` above 2^63 - 1 and a
+    NUL character in ``search``, ``role``, ``plan``, ``invited_by`` or
+    ``user_id`` answer 422.
 
     Returns:
         List of users with memory counts, storage usage, and optionally workspace info
@@ -377,6 +403,7 @@ async def list_users(
             plan=plan,
             admitted_via=admitted_via,
             invited_by=invited_by,
+            user_id=user_id,
         )
         # Deduplicate the user list / count when any JOIN-based filter is
         # active — see the helper's docstring for why total breaks without it.
@@ -807,12 +834,19 @@ async def get_user_detail(
 
 @router.put("/users/{user_id}/role")
 async def update_user_role(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     request: RoleUpdateRequest,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update user role (Admin-only)."""
+    """Update user role (Admin-only).
+
+    Taking the admin role from an account answers 403 `ADMIN-001` when the
+    account is the initial system administrator or the last remaining one,
+    as `DELETE /api/v1/admin/system-admins/{user_id}` does (#2828). A caller
+    cannot change their own admin role either. A refused change writes
+    nothing.
+    """
     admin_id = get_user_id(admin)
 
     # Validate role
@@ -828,8 +862,10 @@ async def update_user_role(
         raise AdminProtectionError("Cannot change your own admin role", reason="self_demotion")
 
     async with db_transaction(db, "update_user_role", "Failed to update user role"):
-        result = await db.execute(select(User).where(User.user_id == user_id))
-        target_user = result.scalar_one_or_none()
+        # #2828: the lock, the fresh read and both admin protections (initial
+        # admin, last admin) of DELETE /admin/system-admins/{user_id}. A
+        # refusal is raised before any write and the transaction rolls back.
+        target_user = await SystemAdminService(db).lock_for_role_change(user_id, request.role)
 
         if not target_user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -1537,6 +1573,131 @@ async def get_force_transfer_request(
     }
 
 
+ForceTransferRequestStatus = Literal["pending", "approved", "cancelled", "superseded"]
+
+
+class ForceTransferRequestItem(TZAwareBaseModel):
+    """One ownership force-transfer request: the eleven fields of the read by id.
+
+    ``decided_by_email`` is not part of it, and nothing is looked up for the
+    workspace, its owner or the target user.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID
+    workspace_id: UUID
+    target_user_id: str
+    reason: str = Field(description="The initiating admin's text")
+    status: ForceTransferRequestStatus
+    initiated_by_user_id: str
+    initiated_by_email: str = Field(
+        description="The initiator as stored: `operator:<address>` in `service` mode"
+    )
+    ownership_epoch_at_initiation: int
+    created_at: datetime
+    decided_by_user_id: str | None
+    decided_at: datetime | None
+
+
+class ForceTransferRequestListResponse(TZAwareBaseModel):
+    """A page of ownership force-transfer requests."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ForceTransferRequestItem]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/force-transfer-requests", response_model=ForceTransferRequestListResponse)
+async def list_force_transfer_requests(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    status_filter: ForceTransferRequestStatus | None = Query(
+        None, alias="status", description="Only requests in this state"
+    ),
+    workspace_id: UUID | None = Query(None, description="Only requests for this workspace"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
+) -> ForceTransferRequestListResponse:
+    """List ownership force-transfer requests (#2846).
+
+    Dual control (#1113) files a `pending` request that a second system admin
+    approves or cancels; this lists them, so the approver finds the requests
+    that wait. Newest first, then by id; `total` counts the filtered rows.
+    `status=pending` is the queue the operations status counts as
+    `force_transfer_requests_pending`.
+
+    The request table alone is read: a request whose workspace or target
+    user is gone is still listed. Each item has the fields of
+    `GET /api/v1/admin/force-transfer-requests/{request_id}`.
+
+    Read only: no row changes and no audit row is written.
+    """
+    filters = []
+    if status_filter is not None:
+        filters.append(ForceTransferRequest.status == status_filter)
+    if workspace_id is not None:
+        filters.append(ForceTransferRequest.workspace_id == workspace_id)
+
+    total = (
+        await db.execute(select(func.count()).select_from(ForceTransferRequest).where(*filters))
+    ).scalar_one()
+    rows = (
+        await db.execute(
+            select(
+                ForceTransferRequest.id,
+                ForceTransferRequest.workspace_id,
+                ForceTransferRequest.target_user_id,
+                ForceTransferRequest.reason,
+                ForceTransferRequest.status,
+                ForceTransferRequest.initiated_by_user_id,
+                ForceTransferRequest.initiated_by_email,
+                ForceTransferRequest.ownership_epoch_at_initiation,
+                ForceTransferRequest.created_at,
+                ForceTransferRequest.decided_by_user_id,
+                ForceTransferRequest.decided_at,
+            )
+            .where(*filters)
+            .order_by(ForceTransferRequest.created_at.desc(), ForceTransferRequest.id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    items = [
+        ForceTransferRequestItem(
+            request_id=row.id,
+            workspace_id=row.workspace_id,
+            target_user_id=row.target_user_id,
+            reason=row.reason,
+            status=row.status,
+            initiated_by_user_id=row.initiated_by_user_id,
+            initiated_by_email=row.initiated_by_email,
+            ownership_epoch_at_initiation=row.ownership_epoch_at_initiation,
+            created_at=row.created_at,
+            decided_by_user_id=row.decided_by_user_id,
+            decided_at=row.decided_at,
+        )
+        for row in rows
+    ]
+
+    logger.info(
+        "admin_force_transfer_requests_listed",
+        actor=get_user_id(admin),
+        count=len(items),
+        total=total,
+        limit=limit,
+        offset=offset,
+        status=status_filter,
+        workspace_filter=workspace_id is not None,
+    )
+
+    return ForceTransferRequestListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
 async def _notify_force_transfer_best_effort(
     db: AsyncSession, workspace_id: UUID, previous_owner_id: str
 ) -> None:
@@ -1666,6 +1827,180 @@ async def retry_failed_embeddings(
     return {"status": "success", "reset_count": reset_count}
 
 
+class EmbeddingFailureGroup(TZAwareBaseModel):
+    """Failed embeddings of one workspace and context, in counts (#2832).
+
+    No memory id, text, tag, author or stored error: the error is answered
+    as a class only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    workspace_name: str | None = Field(description="Null when the workspace has no row")
+    context_id: UUID | None = Field(description="Null for memories without a context")
+    context_name: str | None = Field(description="Null without a context, or when it has no row")
+    failed: int = Field(
+        description=(
+            "Failed rows that are not an erased author's: what "
+            "`POST /api/v1/admin/embedding/retry-failed` resets without `include_erased`"
+        )
+    )
+    stalled: int = Field(
+        description="The part of `failed` with no retry left: nothing retries it on its own"
+    )
+    capped: int = Field(description="The part of `failed` refused by the embedding spend cap")
+    configuration: int = Field(
+        description=(
+            "The part of `failed` that failed on configuration (no credential, no plan "
+            "feature, an unreachable self-hosted endpoint); retried without bound"
+        )
+    )
+    other: int = Field(description="The rest of `failed`")
+    erased: int = Field(
+        description=(
+            "Failed rows of an erased author, kept out of the queue. `failed + erased` "
+            "is what the retry resets with `include_erased=true`"
+        )
+    )
+    oldest_attempt_at: datetime | None = Field(
+        description="The earliest embedding attempt among the group's rows, or null"
+    )
+    newest_attempt_at: datetime | None = Field(
+        description="The latest embedding attempt among the group's rows, or null"
+    )
+
+
+class EmbeddingFailureListResponse(TZAwareBaseModel):
+    """A page of failed-embedding groups; `total` is the number of groups."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int
+    limit: int
+    offset: int
+    groups: list[EmbeddingFailureGroup]
+
+
+@router.get("/embedding/failures", response_model=EmbeddingFailureListResponse)
+async def list_embedding_failures(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    workspace_id: UUID | None = Query(None, description="Only this workspace"),
+    context_id: UUID | None = Query(None, description="Only this context"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
+) -> EmbeddingFailureListResponse:
+    """Where failed embeddings are, per workspace and context (#2832).
+
+    Counts the rows `POST /api/v1/admin/embedding/retry-failed` counts
+    (`embedding_status = 'failed'`, not deleted), grouped by workspace and
+    context; memories without a context are a group of their own. Groups come
+    by `failed` descending, then workspace, then context; `total` is the
+    number of groups.
+
+    `failed` is split into `capped`, `configuration` and `other` by the code
+    the failure stored, and `stalled` is its part with no retry left.
+    Resetting a `capped` or `configuration` row changes nothing until the cap
+    or the configuration does; a `stalled` row only starts again through the
+    retry route.
+
+    Counts, names and two times only. Read only: no row changes and no audit
+    row is written.
+    """
+    from services.memory_service import embedding_failure_class_clauses
+
+    erased, capped, configuration, stalled = embedding_failure_class_clauses()
+    # The retry route's own rows.
+    filters = [Memory.embedding_status == "failed", Memory.deleted_at.is_(None)]
+    if workspace_id is not None:
+        filters.append(Memory.workspace_id == workspace_id)
+    if context_id is not None:
+        filters.append(Memory.context_id == context_id)
+
+    failed_count = func.count().filter(~erased).label("failed")
+    grouped = (
+        select(
+            Memory.workspace_id,
+            Memory.context_id,
+            failed_count,
+            func.count().filter(stalled, ~erased).label("stalled"),
+            func.count().filter(capped, ~erased).label("capped"),
+            func.count().filter(configuration, ~erased).label("configuration"),
+            func.count().filter(erased).label("erased"),
+            func.min(Memory.embedding_attempted_at).label("oldest_attempt_at"),
+            func.max(Memory.embedding_attempted_at).label("newest_attempt_at"),
+        )
+        .where(*filters)
+        .group_by(Memory.workspace_id, Memory.context_id)
+    )
+
+    total = (
+        await db.execute(
+            select(func.count()).select_from(
+                select(Memory.workspace_id, Memory.context_id)
+                .where(*filters)
+                .group_by(Memory.workspace_id, Memory.context_id)
+                .subquery()
+            )
+        )
+    ).scalar_one()
+    rows = (
+        await db.execute(
+            grouped.order_by(failed_count.desc(), Memory.workspace_id, Memory.context_id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    # The name lookups bind the page's ids only (at most ``limit`` each).
+    workspace_names: dict[UUID, str] = {}
+    context_names: dict[UUID, str] = {}
+    workspace_ids = {row.workspace_id for row in rows}
+    context_ids = {row.context_id for row in rows if row.context_id is not None}
+    if workspace_ids:
+        found = await db.execute(
+            select(Workspace.id, Workspace.name).where(Workspace.id.in_(workspace_ids))
+        )
+        workspace_names = {row.id: row.name for row in found.all()}
+    if context_ids:
+        found = await db.execute(
+            select(Context.id, Context.name).where(Context.id.in_(context_ids))
+        )
+        context_names = {row.id: row.name for row in found.all()}
+
+    groups = [
+        EmbeddingFailureGroup(
+            workspace_id=row.workspace_id,
+            workspace_name=workspace_names.get(row.workspace_id),
+            context_id=row.context_id,
+            context_name=context_names.get(row.context_id) if row.context_id else None,
+            failed=row.failed,
+            stalled=row.stalled,
+            capped=row.capped,
+            configuration=row.configuration,
+            other=row.failed - row.capped - row.configuration,
+            erased=row.erased,
+            oldest_attempt_at=row.oldest_attempt_at,
+            newest_attempt_at=row.newest_attempt_at,
+        )
+        for row in rows
+    ]
+
+    logger.info(
+        "admin_embedding_failures_listed",
+        actor=get_user_id(admin),
+        count=len(groups),
+        total=total,
+        limit=limit,
+        offset=offset,
+        workspace_filter=workspace_id is not None,
+        context_filter=context_id is not None,
+    )
+
+    return EmbeddingFailureListResponse(total=total, limit=limit, offset=offset, groups=groups)
+
+
 # ============================================================================
 # Context Restore from soft-deleted rows (Issue #1804)
 # ============================================================================
@@ -1745,6 +2080,206 @@ async def restore_context(
         warnings=result.warnings,
         dry_run=result.dry_run,
     )
+
+
+# ============================================================================
+# Soft-deleted contexts, for the restore above (Issue #2833)
+# ============================================================================
+
+
+class DeletedContextItem(TZAwareBaseModel):
+    """One soft-deleted context the restore can be asked for.
+
+    Ids, the name and what the restore's dry run would answer. No other
+    column of the context, no memory column and no ``users`` column.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    context_id: UUID
+    name: str
+    workspace_id: UUID
+    workspace_name: str
+    created_by: str | None = Field(description="The stored creator id, or null")
+    deleted_at: datetime
+    deleted_by: str | None = Field(
+        description="The stored value: a user id, `system:capacity-purge`, or null"
+    )
+    deleted_memories: int = Field(
+        description=(
+            "The context's soft-deleted memory rows still held: the dry run's "
+            "`memories_restored + memories_left_deleted`. 0 once the tombstone "
+            "sweep removed them (a restore then brings back an empty context)."
+        )
+    )
+    name_taken: bool = Field(
+        description=(
+            "A live context of the workspace has this name: the restore answers "
+            "409 without `new_name`"
+        )
+    )
+    resource_taken: bool = Field(
+        description=(
+            "The context has a `resource_id` and a live context serves it: the restore answers 409"
+        )
+    )
+
+
+class DeletedContextListResponse(TZAwareBaseModel):
+    """A page of soft-deleted contexts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[DeletedContextItem]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/contexts/deleted", response_model=DeletedContextListResponse)
+async def list_deleted_contexts(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    workspace_id: UUID | None = Query(None, description="Only contexts of this workspace"),
+    created_by: str | None = Query(
+        None,
+        min_length=1,
+        max_length=255,
+        pattern=NO_NUL_PATTERN,
+        description="Only contexts this user id created (exact)",
+    ),
+    deleted_by: str | None = Query(
+        None,
+        min_length=1,
+        max_length=255,
+        pattern=NO_NUL_PATTERN,
+        description="Only contexts with this stored `deleted_by` (exact)",
+    ),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
+) -> DeletedContextListResponse:
+    """List soft-deleted contexts, to find the one to restore (#2833).
+
+    The contexts with a deletion time whose workspace is not deleted (the
+    restore always refuses a context of a deleted workspace), newest deletion
+    first, then by id. `total` counts the filtered rows. The filters are
+    exact matches, ANDed.
+
+    Each row says what `POST /api/v1/admin/contexts/{context_id}/restore`
+    would meet: `deleted_memories`, `name_taken` and `resource_taken`. With
+    both flags false its dry run answers 200; with either true, 409.
+
+    Read only: no row changes and no audit row is written.
+    """
+    filters = [Context.deleted_at.is_not(None), Workspace.deleted_at.is_(None)]
+    if workspace_id is not None:
+        filters.append(Context.workspace_id == workspace_id)
+    if created_by is not None:
+        filters.append(Context.created_by == created_by)
+    if deleted_by is not None:
+        filters.append(Context.deleted_by == deleted_by)
+
+    total = (
+        await db.execute(
+            select(func.count())
+            .select_from(Context)
+            .join(Workspace, Workspace.id == Context.workspace_id)
+            .where(*filters)
+        )
+    ).scalar_one()
+    rows = (
+        await db.execute(
+            select(
+                Context.id,
+                Context.name,
+                Context.workspace_id,
+                Workspace.name.label("workspace_name"),
+                Context.created_by,
+                Context.deleted_at,
+                Context.deleted_by,
+            )
+            .join(Workspace, Workspace.id == Context.workspace_id)
+            .where(*filters)
+            .order_by(Context.deleted_at.desc(), Context.id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    # The lookups of the page bind its ids only (at most ``limit``).
+    page_ids = [row.id for row in rows]
+    deleted_memories: dict[UUID | None, int] = {}
+    taken: dict[UUID, tuple[bool, bool]] = {}
+    if page_ids:
+        # The rows the restore's dry run counts: the context's tombstones in
+        # its own workspace.
+        counted = await db.execute(
+            select(Memory.context_id, func.count())
+            .join(
+                Context,
+                and_(Context.id == Memory.context_id, Context.workspace_id == Memory.workspace_id),
+            )
+            .where(Memory.context_id.in_(page_ids), Memory.deleted_at.is_not(None))
+            .group_by(Memory.context_id)
+        )
+        deleted_memories = {context_id: int(count) for context_id, count in counted.all()}
+
+        # The two refusals of the restore that depend on live contexts. Only
+        # the booleans leave the database, never the ``resource_id``.
+        live = aliased(Context)
+        flags = await db.execute(
+            select(
+                Context.id,
+                exists()
+                .where(
+                    live.workspace_id == Context.workspace_id,
+                    live.name == Context.name,
+                    live.deleted_at.is_(None),
+                )
+                .label("name_taken"),
+                and_(
+                    func.coalesce(Context.resource_id, "") != "",
+                    exists().where(
+                        live.resource_id == Context.resource_id,
+                        live.deleted_at.is_(None),
+                    ),
+                ).label("resource_taken"),
+            ).where(Context.id.in_(page_ids))
+        )
+        taken = {
+            context_id: (bool(name_taken), bool(resource_taken))
+            for context_id, name_taken, resource_taken in flags.all()
+        }
+
+    items = [
+        DeletedContextItem(
+            context_id=row.id,
+            name=row.name,
+            workspace_id=row.workspace_id,
+            workspace_name=row.workspace_name,
+            created_by=row.created_by,
+            deleted_at=row.deleted_at,
+            deleted_by=row.deleted_by,
+            deleted_memories=deleted_memories.get(row.id, 0),
+            name_taken=taken.get(row.id, (False, False))[0],
+            resource_taken=taken.get(row.id, (False, False))[1],
+        )
+        for row in rows
+    ]
+
+    logger.info(
+        "admin_deleted_contexts_listed",
+        actor=get_user_id(admin),
+        count=len(items),
+        total=total,
+        limit=limit,
+        offset=offset,
+        workspace_filter=workspace_id is not None,
+        created_by_filter=created_by is not None,
+        deleted_by_filter=deleted_by is not None,
+    )
+
+    return DeletedContextListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 # ============================================================================

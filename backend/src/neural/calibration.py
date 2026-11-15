@@ -54,6 +54,28 @@ logger = get_logger(__name__)
 _LAZY_TTL_TASKS: set[asyncio.Task] = set()
 
 
+def knn_seed_threshold_of(calibration: EmbeddingCalibration, config: NeuralMemoryConfig) -> float:
+    """The kNN-seed threshold a ``knn_seed`` row gives under ``config``.
+
+    ``max(percentile(knn_seed_min_percentile), knn_seed_min_similarity_floor)``.
+    Pure: no query, no enqueue. ``resolve_knn_threshold`` serves it and the
+    admin calibration read reports it (#2845), so the two cannot differ.
+    """
+    percentile_value = calibration.percentile(config.knn_seed_min_percentile)
+    return max(percentile_value, config.knn_seed_min_similarity_floor)
+
+
+def edge_gate_threshold_of(calibration: EmbeddingCalibration, config: NeuralMemoryConfig) -> float:
+    """The semantic-gate threshold an ``edge_gate`` row gives under ``config``.
+
+    ``max(percentile(min_similarity_for_edge_percentile),
+    min_similarity_for_edge_floor)``. Pure, shared by ``resolve_edge_threshold``
+    and the admin calibration read (#2845).
+    """
+    percentile_value = calibration.percentile(config.min_similarity_for_edge_percentile)
+    return max(percentile_value, config.min_similarity_for_edge_floor)
+
+
 async def resolve_knn_threshold(
     db: AsyncSession,
     config: NeuralMemoryConfig,
@@ -117,8 +139,7 @@ async def resolve_knn_threshold(
                     model=model_name,
                     dimensions=dimensions,
                 )
-        percentile_value = calibration.percentile(config.knn_seed_min_percentile)
-        return max(percentile_value, config.knn_seed_min_similarity_floor)
+        return knn_seed_threshold_of(calibration, config)
 
     # Step 3: no calibration yet → disable seeding. Bootstrap trigger in the
     # remember() path will populate the row once the context crosses D3.
@@ -211,8 +232,7 @@ async def resolve_edge_threshold(
     )
 
     if calibration is not None:
-        percentile_value = calibration.percentile(config.min_similarity_for_edge_percentile)
-        return max(percentile_value, config.min_similarity_for_edge_floor)
+        return edge_gate_threshold_of(calibration, config)
 
     # Step 2: uncalibrated → absolute fallback keeps the anti-noise gate active.
     return config.min_similarity_for_edge

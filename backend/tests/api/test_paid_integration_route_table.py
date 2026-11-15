@@ -68,6 +68,9 @@ class Guarded:
 # table: each new router needs its own paid-integration decision.
 PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "admin": NONE,
+    "admin_audit_logs": NONE,
+    "admin_environment": NONE,
+    "admin_erasure_requests": NONE,
     "admin_mcp_notices": NONE,
     "admin_memory_health": NONE,
     "admin_neural": NONE,

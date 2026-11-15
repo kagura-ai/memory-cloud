@@ -44,7 +44,7 @@ async def quota_workspace(db_session: AsyncSession, request) -> dict:
     db_session.add(ws)
     await db_session.commit()
 
-    return {"workspace_id": str(ws.id), "plan_name": plan_name}
+    return {"workspace_id": ws.id, "plan_name": plan_name}
 
 
 class TestBaseMemoryLimitReadsPlanTier:
@@ -122,7 +122,7 @@ class TestBaseMemoryLimitReadsPlanTier:
         await db_session.commit()
 
         result = await get_workspace_quotas(
-            workspace_id=str(ws.id),
+            workspace_id=ws.id,
             admin_user=mock_admin(),
             db=db_session,
         )

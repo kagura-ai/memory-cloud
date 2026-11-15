@@ -8,7 +8,9 @@ Endpoints:
 - DELETE /api/v1/admin/system-admins/{user_id} - Demote system admin
 """
 
-from fastapi import APIRouter, Depends
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Path
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +25,7 @@ from models.schemas import (
 from services.system_admin_service import SystemAdminService
 from utils.datetime import utcnow
 from utils.logger import get_logger
+from utils.query_bounds import NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -193,7 +196,7 @@ async def promote_to_system_admin(
 
 @router.delete("/{user_id}")
 async def demote_system_admin(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     current_user: AdminUser,
     db: AsyncSession = Depends(get_db),
 ):

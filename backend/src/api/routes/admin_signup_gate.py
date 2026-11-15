@@ -9,12 +9,12 @@ boundary so a DB edit is the only way to reach them.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import AdminUser
@@ -23,9 +23,12 @@ from models.api_base import TZAwareBaseModel
 from services.signup_gate_service import SignupGateService
 from utils.github_user import GitHubUserNotFound
 from utils.google_user import GoogleUserNotFound, resolve_google_sub_by_email
+from utils.list_search import search_validator
 from utils.logger import get_logger
+from utils.query_bounds import MAX_OFFSET
 
 logger = get_logger(__name__)
+
 
 router = APIRouter(prefix="/admin/signup-gate", tags=["admin-signup-gate"])
 
@@ -84,6 +87,22 @@ class AllowlistEntryResponse(TZAwareBaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AllowlistListResponse(BaseModel):
+    """One page of the allowlist (#2831)."""
+
+    items: list[AllowlistEntryResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+# The list's exact filters (#2831): the values the table's CHECK constraints
+# allow (``models.signup_gate``; a test compares the two).
+AllowlistProvider = Literal["github", "google", "email"]
+AllowlistSource = Literal["manual", "github_sponsors", "beta_invite"]
+AllowlistState = Literal["active", "grace", "revoked"]
 
 
 class AllowlistAddRequest(BaseModel):
@@ -206,14 +225,55 @@ async def update_config(
 # ============================================================================
 
 
-@router.get("/allowlist", response_model=list[AllowlistEntryResponse])
+@router.get("/allowlist", response_model=AllowlistListResponse)
 async def list_allowlist(
     user: AdminUser,
     db: AsyncSession = Depends(get_db),
-) -> list[AllowlistEntryResponse]:
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0, le=MAX_OFFSET)] = 0,
+    search: Annotated[
+        str | None,
+        AfterValidator(search_validator(255)),
+        Query(
+            description="Case-insensitive substring of subject_label, at most 255 "
+            "characters; trimmed, wildcards match literally",
+        ),
+    ] = None,
+    provider: Annotated[AllowlistProvider | None, Query()] = None,
+    source: Annotated[AllowlistSource | None, Query()] = None,
+    state: Annotated[AllowlistState | None, Query()] = None,
+) -> AllowlistListResponse:
+    """List the allowlist one page at a time (#2831).
+
+    Args:
+        limit: Page size, 1 to 200 (default 50).
+        offset: Rows to skip (from 0).
+        search: Case-insensitive substring of ``subject_label``. Trimmed;
+            empty means no filter; ``\\``, ``%`` and ``_`` match literally.
+        provider: Exact provider.
+        source: Exact source.
+        state: Exact state.
+
+    Returns:
+        ``{items, total, limit, offset}``: the page, newest first
+        (``created_at`` descending, then ``id``), and the count of every row
+        that matches the filters.
+    """
     svc = SignupGateService(db)
-    entries = await svc.list_allowlist()
-    return [AllowlistEntryResponse.model_validate(e) for e in entries]
+    entries, total = await svc.list_allowlist(
+        limit=limit,
+        offset=offset,
+        search=search,
+        provider=provider,
+        source=source,
+        state=state,
+    )
+    return AllowlistListResponse(
+        items=[AllowlistEntryResponse.model_validate(e) for e in entries],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(

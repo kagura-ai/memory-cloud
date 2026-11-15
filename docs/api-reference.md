@@ -2262,9 +2262,11 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 
 - `session` (default): a session cookie of a user with `role=admin`; `401` without a session, `403` (`HTTP-403`) otherwise. Unchanged.
 - `off`: every such route answers `404` with the unknown-path body (`HTTP-404`), whatever the caller sends, and is left out of the OpenAPI document.
-- `service`: only an operator console. Send `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` and `X-Operator-Email: <address of the person acting>`; a session cookie is ignored. Errors, in this order: `404` outside `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS`, `503 SYSADMIN-001` (credential not configured), `401 SYSADMIN-002` (credential missing, another scheme, wrong, or sent in two `Authorization` headers even when the first one is valid; `WWW-Authenticate: Bearer`), `400 SYSADMIN-003` (`X-Operator-Email` missing, repeated or not a plain address), `403 SYSADMIN-004` (a route that acts on the caller's own account: `POST /admin/sleep/run`, `POST /admin/sleep/actions/{action_id}/undo-merge`, `GET /admin/memory-health`, and `POST /admin/contexts/recover` with `dry_run=false`). Writes record the actor as `operator:<address>`.
+- `service`: only an operator console. Send `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` and `X-Operator-Email: <address of the person acting>`; a session cookie is ignored. Errors, in this order: `404` outside `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS`, `503 SYSADMIN-001` (credential not configured), `401 SYSADMIN-002` (credential missing, another scheme, wrong, or sent in two `Authorization` headers even when the first one is valid; `WWW-Authenticate: Bearer`), `400 SYSADMIN-003` (`X-Operator-Email` missing, repeated or not a plain address), `403 SYSADMIN-004` (a route that acts on the caller's own account: `POST /admin/sleep/run`, `POST /admin/sleep/actions/{action_id}/undo-merge`, `GET /admin/memory-health`, and `POST /admin/contexts/recover` with `dry_run=false`; for Sleep an operator calls the target-user routes of #2838 instead, see [Sleep Maintenance](#sleep-maintenance)). Writes record the actor as `operator:<address>`.
 
 `PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
+
+Two rules protect the accounts with `role=admin`, in every mode and on both routes that can take the role away (`PUT /api/v1/admin/users/{user_id}/role` with another role, and `DELETE /api/v1/admin/system-admins/{user_id}`) (#2828): the initial system administrator keeps the role, and so does the last remaining admin. Either answers `403 ADMIN-001` with the message naming the rule, changes nothing and writes no audit row. The check and the change are one transaction under a lock on the admin rows, so two demotions sent at once leave one admin: one succeeds, the other answers `403 ADMIN-001`. Promotion to `admin` and changes that take the admin role from nobody are not affected. On the role PUT a session admin still cannot change their own admin role; the demote route has no such check. On both routes a `user_id` that holds a NUL character answers `422`.
 
 ### Users
 
@@ -2272,7 +2274,7 @@ How each account was admitted (Issue #2803). Both routes answer a session admin 
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/v1/admin/users` | The user list. Each row carries `admitted_via`. Two filters, combined with the existing `search`, `role`, `workspace_id` and `plan`: `admitted_via=<value>` (one of the values below; anything else is a `422`) and `invited_by=<user_id>` (1-255 characters: the accounts admitted by an invite that user minted). `total` counts the users that match every filter, so it gives the number of accounts per channel and per inviter. |
+| `GET /api/v1/admin/users` | The user list. Each row carries `admitted_via`. Two filters, combined with the existing `search`, `role`, `workspace_id` and `plan`: `admitted_via=<value>` (one of the values below; anything else is a `422`) and `invited_by=<user_id>` (1-255 characters: the accounts admitted by an invite that user minted). `total` counts the users that match every filter, so it gives the number of accounts per channel and per inviter. `user_id=<user_id>` (1-255 characters, no NUL character, #2843) finds one account by its own id: the match is exact and case-sensitive, nothing is trimmed, and it is ANDed with the other filters. The answer is the same list shape with at most one row and `total` 0 or 1; an id that is no account answers `200` with `{"users": [], "total": 0}`, not `404`. It reads the row, its memory count and its owned-workspace cap only (plus the live workspaces with `include_workspaces=true`), so it is the light way to put an address and a name beside a bare user id. Bounds of the other parameters: `workspace_id` is a UUID (an empty value is no filter), `offset` goes from 0 to 2^63 - 1, and `search`, `role`, `plan` and `invited_by` hold no NUL character; a value outside these answers `422`. |
 | `GET /api/v1/admin/users/{user_id}` | The user detail. `admission` = `{"via", "invite_issuer", "invite_id", "invited_by"}`. |
 
 `admitted_via` is written once, by the code that creates the account, and never rewritten:
@@ -2296,6 +2298,118 @@ For `beta_invite`:
 
 For every other value the three fields are null. The invite's label (the inviter's private note) is never part of a response, a log line or an audit row. Neither filter value is written to the application's structured log lines or audit rows; the request line itself (the API's uvicorn access log and a reverse proxy's access log) records the query string, as for any admin URL that names a user.
 
+### Workspace plans
+
+The plan and add-on reads under `/api/v1/admin/plans`. They answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/plans/workspaces` | The live workspaces with their plan, one page at a time (Issue #2841): `{"items", "total", "limit", "offset"}`. Each item is `{"id", "name", "plan_name", "owner_user_id", "owner_name", "owner_email", "total_memories", "memory_limit", "mcp_calls_per_day", "mcp_calls_per_week", "entitlement_source"}`. |
+| `GET /api/v1/admin/plans/workspaces/{workspace_id}` | One live workspace, as the list's item for it (Issue #2841). `404` (`RES-001`, "Workspace not found") for an unknown or soft-deleted workspace; `422` for an id that is not a UUID. |
+| `GET /api/v1/admin/plans/workspaces/{workspace_id}/quotas` | One workspace's limits: `base`, `addon`, `effective`, `usage`, `spend_cap`, its `entitlement_source` and its `addon_records`. `404` for an unknown or soft-deleted workspace; `422` for an id that is not a UUID. |
+| `GET /api/v1/admin/plans/audit` | The plan changes made through the admin plan route, newest first, as a bare array of `{"id", "workspace_id", "workspace_name", "old_plan", "new_plan", "changed_by", "changed_by_name", "changed_by_email", "changed_at", "reason"}`. Parameters (Issue #2830): `workspace_id` (a UUID: only that workspace's changes, a soft-deleted workspace's included; an id with no change answers `[]`), `limit` (1 to 500, default 100) and `offset` (from 0, at most 2^63 - 1). The order is `changed_at` descending, then `id` descending; page until a page holds fewer entries than `limit`. A value outside these rules answers `422` (`VAL-001`). |
+
+The workspace list's parameters, all optional and combined with AND:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `limit` | Page size, 1 to 500 (default 50). |
+| `offset` | Rows to skip, from 0 (default 0), at most 2^63 - 1. |
+| `search` | A case-insensitive substring of the workspace name, at most 255 characters. It is trimmed and an empty value means no filter; `\`, `%` and `_` match literally. |
+| `plan` | Exact: one of the plan keys (`free`, `basic`, `pro`, `promax`). |
+| `owner_user_id` | Exact, 1 to 255 characters without a NUL. |
+
+A value outside these rules (a `limit` of 0 or 501, a negative `offset`, an unknown `plan`, a `search` that is too long or holds a control character) answers `422` (`VAL-001`); nothing is clamped. The order is `created_at` ascending, then `id`, so walking the pages with `offset` returns each workspace once while none is added or removed. `total` counts every live workspace that matches the filters; soft-deleted workspaces are in neither `items` nor `total`. The `search` text is not written to the application's structured log lines. Until v0.164.0 the route took no parameter and answered every live workspace as a bare array.
+
+`entitlement_source` (Issue #2829) says who owns the workspace's plan: `admin_grant` (the default, and what `PUT /api/v1/admin/plans/workspaces/{workspace_id}/plan` sets) or `external_billing` (what a billing push sets). Only an `external_billing` workspace counts as under a running contract or can be capacity-locked.
+
+`addon_records` (Issue #2829) are the workspace's active add-on records, the rows its add-on limits are computed from: `{"id", "addon_type", "source", "quantity", "bonus", "active_from", "active_until", "created_at", "created_by"}`, ordered by `addon_type`, then `source` (`admin_grant` or `stripe`). `bonus` is `quantity` times the unit value of the add-on type, so the sum of `bonus` per add-on type is the `expected_value` of `GET /api/v1/admin/plans/addon-cache-consistency`. `active_until` is `null` for a record with no end; a record that has expired or starts later is not listed. A later admin grant changes only `quantity`, so `created_by` names who first granted it. A billing push that carries add-ons sets the workspace's add-on values directly and writes no record.
+
+### Signup allowlist
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/signup-gate/allowlist` | The signup allowlist, one page at a time (Issue #2831): `{"items", "total", "limit", "offset"}`, newest first (`created_at` descending, then `id`). Each item is `{"id", "provider", "subject_id", "subject_label", "github_user_id", "github_username", "source", "state", "added_by_user_id", "created_at"}`. |
+
+Its parameters, all optional and combined with AND:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `limit` | Page size, 1 to 200 (default 50). |
+| `offset` | Rows to skip, from 0 (default 0), at most 2^63 - 1. |
+| `search` | A case-insensitive substring of `subject_label`, at most 255 characters. It is trimmed and an empty value means no filter; `\`, `%` and `_` match literally. `subject_id` and the legacy `github_*` fields are not searched. |
+| `provider` | Exact: `github`, `google` or `email`. |
+| `source` | Exact: `manual`, `github_sponsors` or `beta_invite`. |
+| `state` | Exact: `active`, `grace` or `revoked`. |
+
+A value outside these rules answers `422` (`VAL-001`); nothing is clamped. `total` counts every row that matches the filters. Walking the pages with `offset` returns each row once while none is added; a row added meanwhile (an admin add, a redeemed closed-beta invite link) is the newest and moves the later rows down by one. Until v0.164.0 the route took no parameter and answered every row as a bare array.
+
+### Referral ledger
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/referrals` | The referral grants, newest first: `{"items", "total", "limit", "offset"}`. Filters, combined with AND: `referrer_user_id` (the grants a user earned by inviting others), `referred_user_id` (Issue #2836: the grant a user received; exact, and a user is referred at most once, so at most one row) and `include_revoked` (default `true`). `limit` 1 to 200 (default 50), `offset` from 0 (at most 2^63 - 1). A user id with a NUL, like any value outside these, answers `422`. The grant of an erased user is not found by `referred_user_id`. |
+
+### Deleted contexts
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/contexts/deleted` | The soft-deleted contexts a restore can be asked for (#2833): the contexts with a deletion time whose workspace is not deleted. Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
+
+Query: `workspace_id` (UUID), `created_by` and `deleted_by` (1-255 characters without a NUL character, exact match on the stored value; `deleted_by` is a user id or `system:capacity-purge`), ANDed; `limit` 1-500 (default 50) and `offset` from 0 to 2^63-1. A value outside these answers `422`. Order: `deleted_at` newest first, then `id`.
+
+Answer `{"items": [...], "total", "limit", "offset"}`; `total` counts the filtered rows. An item:
+
+| Field | Value |
+|-------|-------|
+| `context_id`, `name` | the context |
+| `workspace_id`, `workspace_name` | its workspace |
+| `created_by`, `deleted_by` | the stored ids, or null |
+| `deleted_at` | UTC time of the deletion |
+| `deleted_memories` | the context's soft-deleted memory rows still held: `memories_restored + memories_left_deleted` of the restore's dry run. `0` once the tombstone purge removed them: the context is still listed, and a restore brings it back empty |
+| `name_taken` | a live context of the workspace has this name: `POST /api/v1/admin/contexts/{context_id}/restore` answers `409` without `new_name` |
+| `resource_taken` | the context has a `resource_id` and a live context serves it: the restore answers `409` |
+
+With both flags false the restore's dry run answers `200`. The answer holds no description, summary or usage guide of the context, no memory text and no email address; a context of a deleted workspace is not listed, because the restore always refuses it. See [Restoring a deleted context](deployment.md#restoring-a-deleted-context--issue-1804).
+
+### Failed embeddings
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/embedding/failures` | Where failed embeddings are, per workspace and context, in counts (#2832). Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
+| `POST /api/v1/admin/embedding/retry-failed` | Reset failed embeddings to `pending` for a `workspace_id`, a `context_id` or both (at least one). Answers `reset_count`. |
+
+The read counts the rows the retry counts (`embedding_status = 'failed'`, not deleted), grouped by `workspace_id` and `context_id`; memories without a context are a group with `context_id: null`. Query: optional `workspace_id` and `context_id` (UUIDs), `limit` 1-500 (default 100), `offset` from 0 to 2^63-1; a value outside these answers `422`. Order: `failed` descending, then `workspace_id`, then `context_id`. Answer `{"total", "limit", "offset", "groups": [...]}`; `total` is the number of groups. A group:
+
+| Field | Value |
+|-------|-------|
+| `workspace_id`, `workspace_name` | the workspace; the name is null when it has no row |
+| `context_id`, `context_name` | the context, both null for memories without one |
+| `failed` | failed rows that are not an erased author's: what the retry resets without `include_erased` |
+| `stalled` | the part of `failed` with no retry left (`embedding_retry_count >= 3`): nothing retries it on its own, only the retry route starts it again |
+| `capped` | the part of `failed` refused by the embedding spend cap (`QUOTA-002`) |
+| `configuration` | the part of `failed` that failed on configuration (`CFG-*`, `FEAT-*`: no credential, no plan feature, an unreachable self-hosted endpoint). The sweep retries these without bound, so a reset changes nothing until the configuration does; the same holds for `capped` and the cap |
+| `other` | the rest of `failed` (a provider or input failure, and rows failed before the code prefix existed) |
+| `erased` | failed rows of an erased author, kept out of the queue. `failed + erased` is what the retry resets with `include_erased=true` |
+| `oldest_attempt_at`, `newest_attempt_at` | the earliest and latest embedding attempt among the group's rows, null when none has one |
+
+`failed = capped + configuration + other`. The answer holds no memory id, summary, content, tag, author id or stored error text: the error is answered as a class only. The deployment-wide totals are in [Operations status](#operations-status) (`embedding_failed_retryable`, `embedding_failed_stalled`).
+
+### Ownership force-transfer requests
+
+With `REQUIRE_DUAL_CONTROL_FORCE_TRANSFER` on, `POST /api/v1/admin/workspaces/{workspace_id}/force-transfer-ownership` files a `pending` request (`202` with its `request_id`) that a second, different system admin approves or cancels.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/force-transfer-requests` | The requests, newest first, then by `id` (#2846), so the approver finds the ones that wait without being given an id. Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
+| `GET /api/v1/admin/force-transfer-requests/{request_id}` | One request. |
+
+Query of the list: `status` (`pending`, `approved`, `cancelled` or `superseded`) and `workspace_id` (UUID), both optional and ANDed; `limit` 1-500 (default 50) and `offset` from 0 to 2^63-1. A value outside these answers `422`. Answer `{"items": [...], "total", "limit", "offset"}`; `total` counts the filtered rows, and for `status=pending` it is the `force_transfer_requests_pending` count of [Operations status](#operations-status).
+
+An item has the fields of the read by id and no other: `request_id`, `workspace_id`, `target_user_id`, `reason` (the initiating admin's text), `status`, `initiated_by_user_id`, `initiated_by_email` (as stored: `operator:<address>` in `service` mode; the four-eyes check compares it), `ownership_epoch_at_initiation`, `created_at`, `decided_by_user_id`, `decided_at`. The deciding admin's address is not answered, and no name or address is looked up for the workspace, its owner or the target user.
+
+The list reads the request table alone. A request whose workspace was deleted is still listed, and stays `pending`: approving, cancelling and filing a new request all need the live workspace. Filing a request for a workspace marks its pending one `superseded`, so `?status=pending&workspace_id=<id>` shows first whether one is waiting.
+
 ### Operations status
 
 | Endpoint | Purpose |
@@ -2311,6 +2425,71 @@ The response (`schema_version: 1`) has `as_of`, `overdue_grace_seconds`, `schedu
 | `llm` | `lane` (`embedding`, `sleep_judge`, `supersede_verify`, `recall_selector`, `analysis`, `rerank`), `provider`, `model`, `credential_present`, `snapshot_at`, `usage_recorded`, `usage_attribution` (`platform` / `includes_workspace_keys`), `last_success_at`, `calls_last_hour`, `calls_last_day`, `error_class`, `probe` (`null` unless the opt-in probe ran: `last_probe_at`, `last_outcome`, `last_latency_ms`, `error_class`, `consecutive_failures`, `last_success_at`) |
 
 No user, workspace or context identifier, email address, memory text or exception message is part of the response. See [Operations status](deployment.md#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768) for the meaning of each field, the probe setting and what to alert on.
+
+### Erasure requests
+
+Issue #2834. Read-only: where an account erasure stands after it was requested. Both routes answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route. Neither writes a row.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/erasure-requests` | A page of requests, newest `requested_at` first, then by `request_id`: `{"items", "total", "limit", "offset"}`. Filters, combined with AND: `status` (`pending`, `cooling_off`, `in_progress`, `complete`, `failed` or `cancelled`), `user_id` (1-255 characters without a NUL, compared exactly with the stored value) and `is_self_service` (`true` / `false`). `limit` 1-200 (default 50), `offset` from 0 (at most 2^63 - 1). A value outside these is a `422`. `total` counts the requests that match the filters. |
+| `GET /api/v1/admin/erasure-requests/{request_id}` | One request, with the same fields. `404 RES-001` for an unknown id, `422` for an id that is not a UUID. |
+
+A request:
+
+| Field | Meaning |
+|-------|---------|
+| `request_id` | The request's id, as `POST /api/v1/admin/users/{user_id}/erase` answered it. |
+| `user_id` | As stored: the subject's id until the erasure completes, the subject's pseudonym afterwards (also on a request that failed after its Postgres step). The `user_id` filter therefore finds a completed request by its pseudonym, not by the id the account had. |
+| `status` | One of the six statuses above. |
+| `is_self_service`, `reason_code` | Who asked (the member, or an admin on the member's behalf) and the reason code given. |
+| `initiated_by` | As stored: the admin's user id, `operator:<address>` for a request made in `service` mode, or the subject for a self-service request (pseudonymized with it). |
+| `requested_at`, `confirmed_at`, `scheduled_for`, `started_at`, `completed_at`, `cancelled_at` | Times with their zone; null when the step did not happen. `scheduled_for` is when the sweep runs a `cooling_off` request next. |
+| `retry` | `{"attempts", "step", "error_class", "last_attempt_at", "embeddings_requeued"}` for a request that was rescheduled (`503 ERASURE-007`, a lock conflict) or whose embeddings were re-queued; null otherwise. A key the request does not have is null. |
+| `failure_kind` | For a `failed` request, one of `after_postgres_commit` (the account is erased in Postgres; a later step failed or was interrupted), `billing_contract_active`, `workspace_transfer_required`, `vector_store_unavailable`, `lock_conflict` or `other`. Null for every other status. |
+
+### Audit log
+
+Issue #2835. Read-only: the `audit_logs` rows that admin actions and sign-up decisions write. The route answers a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route. Reading writes no audit row.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/audit-logs` | The rows of the actions listed below, newest first (`id` descending): `{"entries": [...], "next_before_id": <id or null>}`. |
+
+Query parameters, all optional and combined with AND. A value outside these rules is a `422`:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `action` | Repeatable. Each value must be one of the actions listed below. Without it the route returns every listed action. |
+| `user_id`, `user_email`, `resource` | 1-255 characters without a NUL, compared exactly with the stored value (no trimming, no case folding, no wildcard). |
+| `from`, `to` | Bounds on `created_at`: `from` inclusive, `to` exclusive. ISO 8601 with a zone (`2026-11-15T09:00:00Z`; percent-encode the `+` of an offset as `%2B`). A value without a zone, a time whose UTC value is outside the years 1 to 9999, and `from` later than `to`, are refused. |
+| `limit` | 1 to 100 (default 50). |
+| `before_id` | Cursor, 1 to 2147483647: rows with a smaller `id`. Pass the previous answer's `next_before_id`; it is `null` on the last page. |
+
+An entry: `{"id", "created_at", "action", "user_id", "user_email", "resource", "old_value", "new_value", "metadata"}`. `created_at` is UTC with its zone. `user_id`, `user_email` and `resource` are answered as stored, so after an account erasure a row shows what the erasure left (pseudonyms). In `service` mode a writer stores the actor as `operator:<address>`. What the three columns mean depends on the action:
+
+| `action` | `user_id` | `user_email` | `resource` | `metadata` keys |
+|----------|-----------|--------------|------------|-----------------|
+| `system_role_update` | the actor | the actor | `user:<target id>` | `actor_user_id`, `target_user_id`, `old_role`, `new_role` |
+| `system_admin_promote`, `system_admin_demote` | the target | the actor | `user:<target address>` | `promoted_by`, `is_initial_admin` / `demoted_by`, `was_initial_admin` |
+| `workspace_slot_bonus_update` | the actor | the actor | `user:<target address>` | `actor_user_id`, `target_user_id`, `before_value`, `after_value`, `delta`, `reason` |
+| `referral_grant_revoke` | the actor | the actor | `referral_grant:<id>` | `actor_user_id`, `referrer_user_id`, `referred_user_id`, `referrer_bonus_memories`, `referred_bonus_memories`, `reason` |
+| `workspace_ownership_force_transfer` | the actor | the actor | `workspace:<id>` | `break_glass`, `reason`, `previous_owner_id`, `new_owner_id`, `ownership_epoch`, `target_was_member`, `self_transfer`; with dual control also `dual_control`, `force_transfer_request_id`, `initiated_by_user_id`, `initiated_by_email`, `approved_by_user_id` |
+| `workspace_ownership_transfer` | the actor: the owner handing on, an admin or a CLI run | the actor | `workspace:<id>` | `previous_owner_id`, `new_owner_id`, `ownership_epoch` |
+| `workspace_purged` | the actor or the owner | the actor | `workspace:<id>` | `previous_owner_id`, `soft_deleted`, `contexts`, `memories`, `billing_contract_active` |
+| `account_erasure` | the subject's pseudonym | the pseudonym of the subject's address | `user_pseudonym:<prefix>` | `request_id`, `is_self_service`, `initiated_by`, `reason_code` |
+| `context_restore` | the actor | the actor | `context:<id>` | `workspace_id`, `name`, `renamed_from`, `deleted_at`, `deleted_by`, `memories_restored`, `memories_left_deleted`, `files_restored`, `file_bytes_restored` |
+| `bm25_drift_reveal_terms` | the actor | the actor | `bm25_drift_log:<id>` | `outcome`, `context_id`, `reason`, `num_terms_resolved`, `num_terms_total` |
+| `mcp_notice.created`, `mcp_notice.withdrawn` | the actor | the actor | `mcp_notice:<id>` | `text_chars`; a create also `starts_at`, `expires_at`, `plans` |
+| `signup_blocked` | the subject | `oauth-callback` | `signup_gate:<provider>` | `provider` |
+| `signup_admitted` | the subject | the sign-up path | `signup_gate:<provider>` | `provider`, `admission`, `invitations` (each `id`, `workspace_id`, `invited_by`), `invitation_count` |
+| `beta_invite.redeemed` | the subject | `email-signup` or `oauth-callback` | `beta_invite:<id>` | `provider`, `inviter_user_id`, `allowlist_entry_id` |
+| `sleep_run_trigger` | the actor | the actor | `context:<id>` | `target_user_id`, `workspace_id`, `context_id`, `report_id` |
+| `sleep_merge_undo` | the actor | the actor | `sleep_report:<id>` | `target_user_id`, `workspace_id`, `context_id`, `report_id`, `action_id`, `restored_memory_id`, `winner_id` |
+
+- `old_value` and `new_value` are the stored values for `system_role_update`, `system_admin_promote`, `system_admin_demote`, `workspace_slot_bonus_update` and `referral_grant_revoke` (roles and numbers), and `null` for every other action.
+- `metadata` holds the keys of the table that the row has, each as stored when it is a string, a number, a boolean or null (`plans` a list of strings, `invitations` a list of objects with the three keys named). It is `null` for a row that stores none.
+- Rows of other actions (a user's own account events, member and workspace events, system and CLI events) are not part of this read; asking for one with `action` is a `422`. Plan changes have their own read, `GET /api/v1/admin/plans/audit`.
 
 ### Service notices over MCP
 
@@ -2337,8 +2516,31 @@ The rules, checked on create:
 
 | Endpoint                                         | Purpose                                                       |
 |--------------------------------------------------|---------------------------------------------------------------|
-| `GET /api/v1/admin/sleep-reports`                | List reports with filters (`status`, `source`, `context_id`, `user_id`) and pagination. `source` is `sleep` (Sleep runs), `analysis` (Memory Analysis spend rows) or `all` (default); each row carries its `source` (#2219). |
-| `GET /api/v1/admin/sleep-reports/{report_id}`    | Fetch a single report with per-phase results and the full action audit log. |
+| `GET /api/v1/admin/sleep-reports`                | List reports with filters (`status`, `source`, `context_id`, `user_id`, `workspace_id`) and pagination. `source` is `sleep` (Sleep runs), `analysis` (Memory Analysis spend rows) or `all` (default); each row carries its `source` (#2219). `workspace_id` (#2844) answers only the reports whose stored workspace id is that UUID, ANDed with the other filters, and `total` counts only those; a value that is not a UUID is a `422`, an id with no report answers an empty list, and a report without a workspace id never matches. |
+| `GET /api/v1/admin/sleep-reports/{report_id}`    | Fetch a single report with per-phase results and the full action audit log: `{"report", "actions", "action_count"}`. `?include_actions=false` (#2842) answers `actions: []` and reads no action; `action_count` is still the run's number of actions. |
+| `GET /api/v1/admin/sleep-reports/{report_id}/actions` | One page of a report's actions (#2842): `{"actions", "total", "limit", "offset"}`. `limit` 1-500 (default 50) and `offset` from 0 to 2^63-1; a value outside is a `422`, as is a `report_id` that is not a UUID. Actions come in `id` order (the order the run recorded them, so a running report's new actions land on later pages) and carry the fields of the detail route's actions. `total` equals the detail route's `action_count`. An unknown report is a `404` on both routes. Read only. |
+| `POST /api/v1/admin/sleep/run` | Run Sleep for the calling admin's own contexts. Body `{"context_id"?}`. `202 {"report_ids": [...]}`; `409 SLEEP-002` while the caller has a running report; `404 SLEEP-003` when no context is eligible. Own-account: a service operator gets `403 SYSADMIN-004`. |
+| `POST /api/v1/admin/sleep/actions/{action_id}/undo-merge` | Undo one dedup merge of the calling admin's own report. Own-account: a service operator gets `403 SYSADMIN-004`. |
+| `POST /api/v1/admin/users/{user_id}/sleep/run` | Run Sleep once for a named user's context (#2838). Body `{"context_id": "<uuid>"}` (required, `422` without it). `202 {"report_ids": ["<uuid>"]}`: one report, whose `user_id` is the target user. A session admin and a service operator may call it. |
+| `POST /api/v1/admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge` | Undo one dedup merge of a named sleep report (#2838). No body. `200 {"restored_memory_id", "winner_id", "report_id", "undone_action_id"}` (ids only). A session admin and a service operator may call it. |
+
+**Run for a user** (`POST /api/v1/admin/users/{user_id}/sleep/run`). The run is the one the scheduled sweep starts for `(user_id, the context's workspace, context_id)`, in the background; the run itself applies the workspace's Sleep state, as for the sweep. It executes inside the process that answers the request, with that process's LLM, embedding, vector-store and Sleep settings (as does the re-embedding of the undo below), so a `service` process needs the same settings as the public processes for these two routes. Checks, in this order:
+
+- `404 RES-001`: no account with this `user_id`.
+- `409 SLEEP-002` with `details.running_report_id` and `details.started_at`: the target user has a running report (a running report of the caller does not count). Best-effort under concurrent calls.
+- `404 SLEEP-003` with `details.context_id`: the context is not eligible. Eligible means the context is live, its `sleep_mode` is not `skip` and the user has a live memory in it. Every cause answers the same message.
+
+The handler writes an `audit_logs` row in the report's commit: action `sleep_run_trigger`, the caller as actor (`operator:<address>` in `service` mode), resource `context:<context_id>`, metadata `{"target_user_id", "workspace_id", "context_id", "report_id"}`. The row records the request and stays when the run fails. A refusal writes nothing. The row is read back through `GET /api/v1/admin/audit-logs` (`action=sleep_run_trigger`, see [Audit log](#audit-log)).
+
+**Undo for a report** (`POST /api/v1/admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge`). The action is found by `action_id` and `report_id`, whoever the report belongs to. `404 SLEEP-UNDO-action_not_found` for an unknown action, an action of another report and an unknown report alike. Then the checks and answers of the own-account undo: `400 SLEEP-UNDO-not_a_merge`, `409 SLEEP-UNDO-already_restored`, `409 SLEEP-UNDO-edge_changed`, `409 SLEEP-UNDO-not_merge_deleted`, `410 SLEEP-UNDO-memory_purged`. A successful undo records:
+
+- an `undo_merge` action on the same report, whose `undone_by` is the caller's `user_id` for a session admin and the fixed string `operator` for a service operator (the report's actions are read by workspace members; an operator's address is recorded in `audit_logs` only);
+- the workspace's operation history event `sleep.undo` (without an actor for an operator);
+- an `audit_logs` row: action `sleep_merge_undo`, the caller as actor, resource `sleep_report:<report_id>`, metadata `{"target_user_id", "workspace_id", "context_id", "report_id", "action_id", "restored_memory_id", "winner_id"}`, read back through `GET /api/v1/admin/audit-logs` (`action=sleep_merge_undo`).
+
+Neither route answers, logs or audits memory text, tags, the target user's e-mail or name, or a context's name; the audit row names the caller, as stated above. The own-account undo writes no `audit_logs` row.
+
+Each report, in the list rows and in the detail's `report`, carries `workspace_name` next to `workspace_id` (#2844): the workspace's name while it is live, `null` for a soft-deleted or missing workspace and for a report without a workspace id. One query resolves the names of a response; nothing else about the workspace (owner, members, plan) is answered. The workspace-scoped routes (`GET /api/v1/workspaces/{workspace_id}/sleep-reports` and its detail) share the model and fill it the same way.
 
 See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `sleep_mode`, and rollback semantics.
 
@@ -2357,12 +2559,51 @@ Read-only view of the deployment's environment-backed settings, behind the admin
 | `GET /api/v1/config`              | The **effective** value of each key (what the running process uses), as `{key, value, category, description, is_sensitive, read_only}`. `read_only` is `true` for every key. Any authenticated caller; the `hosted` category (BYOK / cost-display / plan-page flags, managed LLM lane, reranker defaults and endpoint) is returned to system admins only. Credentials embedded in a URL value are always masked (`https://***@host`). |
 | `GET /api/v1/config/schema`       | Display metadata per key (type, description, `requires_restart`, impact, examples). |
 | `PUT /api/v1/config/{key}`, `POST /api/v1/config/batch` | Always refused with `409` `CFG-002` (`details.keys` lists the refused keys); a batch is refused as a whole. Change the environment and restart/redeploy instead. |
+| `GET /api/v1/admin/environment` | The same settings for an administrator (#2837): a session admin in `session`, a service operator in `service`, `404` in `off`, like every system-admin route. No query parameter. `{"configs": [...], "embedding_models": {...}}`, described below. |
+
+`GET /api/v1/admin/environment` answers the values of the process that serves the request. Processes of one deployment can run with different environments (a `service` process beside public ones), so the answer describes that process only.
+
+- `configs`: every key of the four categories (`embedding`, `search`, `system`, `hosted`), in that order, as `{"key", "category", "value", "type", "description", "requires_restart"}`. `value` is the effective value; `type`, `description` and `requires_restart` come from the key's schema entry and are null for a key without one. Credentials embedded in a URL inside any string value are masked (`https://***@host`). A key whose value is not answered carries the string `***MASKED***` as its `value`, whatever it is set to; every key of today's categories is answered.
+- `embedding_models`: `{"default_model", "offered": [{"name", "dimensions", "provider"}]}`, the models the deployment offers (`EMBEDDING_MODEL_ALLOWLIST`) and its default. The route does not report whether a provider is reachable: it reads no stored key and calls no endpoint.
 
 Rows written to the `config_overrides` table by earlier versions were never read by any runtime consumer; they are ignored.
 
 ### Neural Config
 
 Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, reranker weights) are persisted in `neural_config` and exposed under `/api/v1/admin/neural-config`. The fields are editable from the admin UI's Neural Config page.
+
+### Embedding calibrations
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/v1/admin/neural/recalibrate?model=&dimensions=` | Start a model-global calibration for one embedding model and dimensions. Always `202` with `accepted` (`false` when a run for the pair is already in flight) and an echo of the pair. The answer does not say what the run wrote: read the rows below. |
+| `GET /api/v1/admin/neural/calibrations` | The model-global calibration rows (#2845). Read only, no parameters, no paging: at most two rows (`knn_seed`, `edge_gate`) per model and dimensions. Follows `SYSTEM_ADMIN_MODE` like every system-admin route (a service operator may call it). |
+
+```json
+{
+  "knn_seed_override": null,
+  "calibrations": [
+    {
+      "model_name": "text-embedding-3-small",
+      "dimensions": 512,
+      "kind": "knn_seed",
+      "p25": 0.41, "p50": 0.48, "p75": 0.55, "p90": 0.63, "p95": 0.67, "p99": 0.74,
+      "sample_size": 10000,
+      "sampled_at": "2026-11-01T03:00:00Z",
+      "valid_until": "2026-12-01T03:00:00Z",
+      "expired": false,
+      "threshold": 0.63
+    }
+  ]
+}
+```
+
+- `calibrations` is ordered by `model_name`, `dimensions`, `kind`. A pair that was never calibrated has no row. A run that writes nothing (no context uses the pair, or the sample was too small) leaves the pair's earlier rows as they are. A successful run replaces the pair's rows, so `sampled_at` tells when the values were computed and whether a run wrote.
+- `kind`: `knn_seed` is the top-k neighbour distribution behind the k-NN seed edges written on ingest; `edge_gate` is the random-pair distribution behind the co-activation edge gate.
+- `expired`: `valid_until` has passed. An expired row is still used at runtime.
+- `threshold` is computed with the config of the process that answers (its `neural_config` values at that moment): for `knn_seed`, the larger of the row's `knn_seed_min_percentile` percentile and `knn_seed_min_similarity_floor`; for `edge_gate`, the larger of its `min_similarity_for_edge_percentile` percentile and `min_similarity_for_edge_floor`. Another process with a different config can give another value for the same row.
+- `knn_seed_override` is `knn_seed_min_similarity`, or `null`. When it is set, it is the seeding threshold and the `knn_seed` rows are not used.
+- The read starts no calibration, also for an expired row. Per-context rows are never answered, and the answer holds no row id and no context, workspace, memory or user identifier.
 
 ### Worker App Identities
 

@@ -11,9 +11,12 @@ Same two-endpoint pattern as ``CostAggregationService`` (#472):
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, Row, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context
@@ -23,10 +26,14 @@ from models.sleep import (
     SleepAction,
     SleepReport,
 )
-from services.label_resolver import resolve_user_labels
+from services.label_resolver import resolve_user_labels, resolve_workspace_names
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# One selected ``sleep_actions`` row of ``list_actions`` (#2842): id, phase,
+# action_type, memory_id, target_id, details, created_at.
+SleepActionRow = Row[int, str, str, UUID | None, UUID | None, dict[str, Any] | None, datetime]
 
 
 def sleep_report_source_condition(source: str) -> ColumnElement[bool] | None:
@@ -135,22 +142,84 @@ class SleepReporterService:
             wrong workspace.  Callers must resolve ``context_name`` and
             ``context_deleted`` themselves.
         """
-        report_stmt = select(SleepReport).where(SleepReport.id == report_id)
+        report = await self.get_report(report_id, workspace_id=workspace_id)
+        if report is None:
+            return None
+
         actions_stmt = (
             select(SleepAction).where(SleepAction.report_id == report_id).order_by(SleepAction.id)
         )
+        actions_result = await self.db.execute(actions_stmt)
+        actions = list(actions_result.scalars().all())
+        return report, actions
 
-        report_result = await self.db.execute(report_stmt)
+    async def get_report(
+        self,
+        report_id: UUID,
+        *,
+        workspace_id: UUID | None = None,
+    ) -> SleepReport | None:
+        """Get a single sleep report's own row, without its actions (#2842).
+
+        If ``workspace_id`` is provided, returns ``None`` when the report
+        belongs to a different workspace (caller should surface 404).
+        """
+        report_result = await self.db.execute(
+            select(SleepReport).where(SleepReport.id == report_id)
+        )
         report = report_result.scalar_one_or_none()
         if not report:
             return None
 
         if workspace_id is not None and report.workspace_id != workspace_id:  # type: ignore[operator]
             return None
+        return report
 
-        actions_result = await self.db.execute(actions_stmt)
-        actions = list(actions_result.scalars().all())
-        return report, actions
+    # ------------------------------------------------------------------
+    # Actions (#2842)
+    # ------------------------------------------------------------------
+
+    async def report_exists(self, report_id: UUID) -> bool:
+        """Whether a sleep report with this id exists (reads the id only)."""
+        result = await self.db.execute(select(SleepReport.id).where(SleepReport.id == report_id))
+        return result.scalar_one_or_none() is not None
+
+    async def count_actions(self, report_id: UUID) -> int:
+        """The number of actions a run recorded, without reading an action row."""
+        result = await self.db.execute(
+            select(func.count()).select_from(SleepAction).where(SleepAction.report_id == report_id)
+        )
+        return result.scalar() or 0
+
+    async def list_actions(
+        self, report_id: UUID, *, limit: int, offset: int
+    ) -> Sequence[SleepActionRow]:
+        """One page of a run's actions in ``id`` order (the order they were recorded).
+
+        ``sleep_actions.id`` is unique and grows with every insert, so a
+        running report's new actions land on later pages and a walk by
+        ``offset`` meets each action once.
+
+        Returns:
+            Rows of ``(id, phase, action_type, memory_id, target_id, details,
+            created_at)``: the fields of an action the routes answer.
+        """
+        result = await self.db.execute(
+            select(
+                SleepAction.id,
+                SleepAction.phase,
+                SleepAction.action_type,
+                SleepAction.memory_id,
+                SleepAction.target_id,
+                SleepAction.details,
+                SleepAction.created_at,
+            )
+            .where(SleepAction.report_id == report_id)
+            .order_by(SleepAction.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return result.all()
 
     # ------------------------------------------------------------------
     # Context resolution helper
@@ -200,6 +269,20 @@ class SleepReporterService:
         if ctx_deleted_at is not None:
             return None, True
         return ctx_display_name or ctx_name, False
+
+    # ------------------------------------------------------------------
+    # Workspace name resolution helper (#2844)
+    # ------------------------------------------------------------------
+
+    async def resolve_workspace_names(self, workspace_ids: set[UUID]) -> dict[UUID, str]:
+        """Batch-resolve ``workspace_id → name`` for Sleep report rows.
+
+        Delegates to ``services.label_resolver.resolve_workspace_names``
+        (#1861), which the cost-aggregation routes share. One query, none for
+        an empty set; a soft-deleted or missing workspace is left out, so its
+        reports answer ``workspace_name: null``.
+        """
+        return await resolve_workspace_names(self.db, workspace_ids)
 
     # ------------------------------------------------------------------
     # User identity resolution helper (#1201)

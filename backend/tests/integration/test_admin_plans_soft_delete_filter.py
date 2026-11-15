@@ -28,6 +28,8 @@ omissions.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
@@ -95,7 +97,7 @@ class TestGetWorkspaceQuotas:
     ) -> None:
         with pytest.raises(HTTPException) as exc_info:
             await get_workspace_quotas(
-                workspace_id=soft_deleted_workspace["workspace_id"],
+                workspace_id=UUID(soft_deleted_workspace["workspace_id"]),
                 admin_user=mock_admin(),
                 db=db_session,
             )

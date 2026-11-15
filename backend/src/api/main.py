@@ -914,6 +914,9 @@ for _exc_cls in (
 
 from api.routes import (  # noqa: E402
     admin,
+    admin_audit_logs,  # Issue #2835: admin read of the audit log
+    admin_environment,  # Issue #2837: admin read of the effective environment settings
+    admin_erasure_requests,  # Issue #2834: admin reads of erasure requests
     admin_mcp_notices,  # Issue #2762: service notices over MCP (create/list/withdraw)
     admin_memory_health,  # Issue #2764: deprecated alias of memory_health
     admin_neural,  # Issue #406: Manual kNN calibration recalibrate trigger
@@ -1101,6 +1104,8 @@ app.include_router(analyses.router, prefix="/api/v1")
 
 # Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)
 app.include_router(admin_sleep.router, prefix="/api/v1")
+# The same run and merge undo for a target user (Issue #2838)
+app.include_router(admin_sleep.target_router, prefix="/api/v1")
 
 # Consolidated memory-health report (Issue #1211); session users since #2764,
 # the admin path is a deprecated alias for one release.
@@ -1129,6 +1134,15 @@ app.include_router(beta_invites.router, prefix="/api/v1")
 # so an operator can unwind grants after flipping the kill switch off.
 app.include_router(referrals.router, prefix="/api/v1")
 app.include_router(admin_referrals.router, prefix="/api/v1")
+
+# Admin reads of erasure requests: a filtered page and one by id (Issue #2834)
+app.include_router(admin_erasure_requests.router, prefix="/api/v1")
+
+# Admin read of the audit log: admin actions and sign-up decisions (Issue #2835)
+app.include_router(admin_audit_logs.router, prefix="/api/v1")
+
+# Admin read of the effective environment settings (Issue #2837)
+app.include_router(admin_environment.router, prefix="/api/v1")
 
 # BM25 IDF Drift admin (Issue #343 - cron disabled by default until v0.14.0)
 app.include_router(bm25_drift.router, prefix="/api/v1")

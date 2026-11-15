@@ -85,6 +85,12 @@ Ephemeral derived state also exists outside the DB: Redis
 `co_activations:{user_id}` keys (in-flight Hebbian co-activation sums). Same
 rule applies — serving-only, never exported.
 
+Some derived tables have an operator read behind the system-admin gate
+(`GET /api/v1/admin/sleep-reports`, `GET /api/v1/admin/bm25-drift`,
+`GET /api/v1/admin/neural/calibrations`). These are not export surfaces: no
+customer credential reaches them, and their response models stay out of
+`EXPORT_SURFACE_SCHEMA_NAMES`.
+
 ### Why exporting derived fields leaks the moat
 
 - `weight` + `origin` together let a client replay the Hebbian decay schedule

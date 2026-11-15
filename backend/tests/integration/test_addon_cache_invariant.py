@@ -419,7 +419,7 @@ class TestGetResponseShape:
         )
 
         response = await get_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             admin_user=mock_admin(),
             db=db_session,
         )
@@ -462,7 +462,7 @@ class TestGetResponseShape:
         )
 
         response = await get_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             admin_user=mock_admin(),
             db=db_session,
         )

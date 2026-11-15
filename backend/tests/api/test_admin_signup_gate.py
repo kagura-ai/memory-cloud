@@ -131,25 +131,113 @@ class TestUpdateConfig:
 
 
 class TestListAllowlist:
+    """The paged list (#2831): ``{items, total, limit, offset}``."""
+
+    LIST = "/api/v1/admin/signup-gate/allowlist"
+    SERVICE = "services.signup_gate_service.SignupGateService.list_allowlist"
+
     def test_empty_list(self, client, monkeypatch):
-        monkeypatch.setattr(
-            "services.signup_gate_service.SignupGateService.list_allowlist",
-            AsyncMock(return_value=[]),
-        )
-        response = client.get("/api/v1/admin/signup-gate/allowlist")
+        monkeypatch.setattr(self.SERVICE, AsyncMock(return_value=([], 0)))
+        response = client.get(self.LIST)
         assert response.status_code == 200
-        assert response.json() == []
+        assert response.json() == {"items": [], "total": 0, "limit": 50, "offset": 0}
 
     def test_returns_entries(self, client, monkeypatch):
         monkeypatch.setattr(
-            "services.signup_gate_service.SignupGateService.list_allowlist",
-            AsyncMock(return_value=[_mock_entry("octocat"), _mock_entry("hubot", "1")]),
+            self.SERVICE,
+            AsyncMock(return_value=([_mock_entry("octocat"), _mock_entry("hubot", "1")], 7)),
         )
-        response = client.get("/api/v1/admin/signup-gate/allowlist")
+        response = client.get(self.LIST)
         assert response.status_code == 200
         body = response.json()
-        assert len(body) == 2
-        assert body[0]["github_username"] == "octocat"
+        assert len(body["items"]) == 2
+        assert body["items"][0]["github_username"] == "octocat"
+        assert body["total"] == 7
+
+    def test_passes_the_validated_parameters_to_the_service(self, client, monkeypatch):
+        service = AsyncMock(return_value=([], 0))
+        monkeypatch.setattr(self.SERVICE, service)
+        response = client.get(
+            self.LIST,
+            params={
+                "limit": "200",
+                "offset": "400",
+                "search": "  Octo_Cat  ",
+                "provider": "email",
+                "source": "beta_invite",
+                "state": "revoked",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == {"items": [], "total": 0, "limit": 200, "offset": 400}
+        service.assert_awaited_once_with(
+            limit=200,
+            offset=400,
+            search="Octo_Cat",
+            provider="email",
+            source="beta_invite",
+            state="revoked",
+        )
+
+    def test_defaults_are_50_rows_from_0_without_a_filter(self, client, monkeypatch):
+        service = AsyncMock(return_value=([], 0))
+        monkeypatch.setattr(self.SERVICE, service)
+        assert client.get(self.LIST, params={"search": "   "}).status_code == 200
+        service.assert_awaited_once_with(
+            limit=50, offset=0, search=None, provider=None, source=None, state=None
+        )
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"limit": "0"},
+            {"limit": "201"},
+            {"limit": "-1"},
+            {"offset": "-1"},
+            {"provider": "gitlab"},
+            {"provider": "GitHub"},
+            {"provider": ""},
+            {"source": "stripe"},
+            {"state": "pending"},
+            {"search": "x" * 256},
+            {"search": "a\x00b"},
+            {"search": "a\tb"},
+        ],
+        ids=lambda params: "&".join(f"{key}={value!r:.12}" for key, value in params.items()),
+    )
+    def test_a_bad_value_is_422_and_the_service_is_not_called(self, client, monkeypatch, params):
+        service = AsyncMock(return_value=([], 0))
+        monkeypatch.setattr(self.SERVICE, service)
+        response = client.get(self.LIST, params=params)
+        assert response.status_code == 422, response.text
+        assert response.json()["error"] == "VAL-001"
+        service.assert_not_awaited()
+        # The refusal names the parameter and never repeats the value.
+        for value in params.values():
+            if len(value) > 3:
+                assert value not in response.text
+
+    def test_filter_values_are_the_ones_the_table_allows(self):
+        """The route's literals are the values of the table's CHECK constraints."""
+        import re
+        import typing
+
+        from api.routes import admin_signup_gate as routes
+        from models.signup_gate import SignupAllowlistEntry
+
+        checks = {
+            constraint.name: set(re.findall(r"'([a-z_]+)'", str(constraint.sqltext)))
+            for constraint in SignupAllowlistEntry.__table__.constraints
+            if hasattr(constraint, "sqltext")
+        }
+        assert (
+            set(typing.get_args(routes.AllowlistProvider))
+            == checks["valid_signup_allowlist_provider"]
+        )
+        assert (
+            set(typing.get_args(routes.AllowlistSource)) == checks["valid_signup_allowlist_source"]
+        )
+        assert set(typing.get_args(routes.AllowlistState)) == checks["valid_signup_allowlist_state"]
 
 
 class TestAddToAllowlist:

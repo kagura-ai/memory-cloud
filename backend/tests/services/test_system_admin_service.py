@@ -10,8 +10,11 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from fastapi import HTTPException
+from sqlalchemy import event, func, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from api.routes.admin import RoleUpdateRequest, update_user_role
 from models.auth import AuditLog, User
 from services.system_admin_service import SystemAdminService
 from utils.exceptions import AdminProtectionError, BadRequestError, NotFoundException
@@ -254,6 +257,162 @@ class TestDemoteSystemAdmin:
         assert "last" in exc.value.message.lower()
 
 
+OPERATOR = {"user_id": "operator:ops@example.com", "email": "operator:ops@example.com"}
+
+# The two routes that take the admin role from an account (#2828). The role
+# PUT is tried with both roles it can move an admin to.
+ROUTES = ["put:user", "put:read_only", "demote"]
+
+
+async def _take_admin_role(db_session, route: str, user_id: str):
+    """Demote ``user_id`` through the role PUT or through the demote route's service."""
+    if route.startswith("put:"):
+        request = RoleUpdateRequest(role=route.removeprefix("put:"))
+        return await update_user_role(user_id, request, OPERATOR, db_session)
+    return await SystemAdminService(db_session).demote_system_admin(user_id, OPERATOR["email"])
+
+
+async def _stored(db_session, user_id: str) -> tuple[str | None, int]:
+    """The role now stored for ``user_id`` and the number of audit rows, read fresh."""
+    await db_session.rollback()
+    role = await db_session.scalar(select(User.role).where(User.user_id == user_id))
+    audits = await db_session.scalar(select(func.count()).select_from(AuditLog))
+    return role, audits
+
+
+class TestRoleChangeProtectionsAreTheSameOnBothRoutes:
+    """#2828: the role PUT and the demote route share ``lock_for_role_change``."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ROUTES)
+    async def test_the_initial_admin_is_refused_and_nothing_changes(
+        self, db_session, fixture_admin, fixture_second_admin, route
+    ):
+        initial_id = fixture_admin.user_id
+        await db_session.commit()
+        with pytest.raises(AdminProtectionError) as refused:
+            await _take_admin_role(db_session, route, initial_id)
+        assert refused.value.status_code == 403
+        assert refused.value.error_code == "ADMIN-001"
+        assert refused.value.reason == "initial_admin"
+        assert refused.value.message == (
+            "Cannot demote the initial system administrator. This is a protected account."
+        )
+        assert await _stored(db_session, initial_id) == ("admin", 0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ROUTES)
+    async def test_the_last_admin_is_refused_and_nothing_changes(
+        self, db_session, fixture_second_admin, fixture_regular, route
+    ):
+        # One admin (not the initial one) beside a regular account.
+        last_id = fixture_second_admin.user_id
+        await db_session.commit()
+        with pytest.raises(AdminProtectionError) as refused:
+            await _take_admin_role(db_session, route, last_id)
+        assert refused.value.status_code == 403
+        assert refused.value.error_code == "ADMIN-001"
+        assert refused.value.reason == "last_admin"
+        assert refused.value.message == (
+            "Cannot demote the last remaining system administrator. At least one admin must exist."
+        )
+        assert await _stored(db_session, last_id) == ("admin", 0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ["put:user", "demote"])
+    async def test_a_second_admin_is_demoted_with_one_audit_row_in_one_commit(
+        self, db_session, fixture_admin, fixture_second_admin, route
+    ):
+        target_id, target_email = fixture_second_admin.user_id, fixture_second_admin.email
+        await db_session.commit()
+        commits: list[object] = []
+        on_commit = commits.append
+        event.listen(db_session.sync_session, "after_commit", on_commit)
+        try:
+            await _take_admin_role(db_session, route, target_id)
+        finally:
+            event.remove(db_session.sync_session, "after_commit", on_commit)
+        assert len(commits) == 1
+
+        # What another session reads: the role and its audit row, together.
+        maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+        async with maker() as other:
+            role = await other.scalar(select(User.role).where(User.user_id == target_id))
+            [audit] = (await other.execute(select(AuditLog))).scalars().all()
+        assert role == "user"
+        assert audit.old_value_hash == "admin"
+        assert audit.new_value_hash == "user"
+        assert audit.user_email == OPERATOR["email"]
+        if route == "demote":
+            assert audit.action == "system_admin_demote"
+            assert audit.user_id == target_id
+            assert audit.resource == f"user:{target_email}"
+            assert audit.user_metadata == {
+                "demoted_by": OPERATOR["email"],
+                "was_initial_admin": False,
+            }
+        else:
+            assert audit.action == "system_role_update"
+            assert audit.user_id == OPERATOR["user_id"]
+            assert audit.resource == f"user:{target_id}"
+            assert audit.user_metadata == {
+                "actor_user_id": OPERATOR["user_id"],
+                "target_user_id": target_id,
+                "old_role": "admin",
+                "new_role": "user",
+            }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ROUTES)
+    async def test_an_unknown_user_is_404_and_nothing_is_written(
+        self, db_session, fixture_admin, route
+    ):
+        admin_id = fixture_admin.user_id
+        await db_session.commit()
+        with pytest.raises((HTTPException, NotFoundException)) as missing:
+            await _take_admin_role(db_session, route, "nonexistent")
+        assert missing.value.status_code == 404
+        assert await _stored(db_session, admin_id) == ("admin", 0)
+
+
+class TestRolePutLeavesOtherChangesAlone:
+    """#2828: a change that takes the admin role from nobody is not held back."""
+
+    @pytest.mark.asyncio
+    async def test_a_promotion_beside_the_last_admin_is_stored_with_its_audit_row(
+        self, db_session, fixture_second_admin, fixture_regular
+    ):
+        target_id = fixture_regular.user_id
+        await db_session.commit()
+        answer = await update_user_role(
+            target_id, RoleUpdateRequest(role="admin"), OPERATOR, db_session
+        )
+        assert answer == {
+            "message": "User role updated to admin",
+            "user_id": target_id,
+            "new_role": "admin",
+        }
+        assert await _stored(db_session, target_id) == ("admin", 1)
+        [audit] = (await db_session.execute(select(AuditLog))).scalars().all()
+        assert audit.action == "system_role_update"
+        assert audit.user_metadata == {
+            "actor_user_id": OPERATOR["user_id"],
+            "target_user_id": target_id,
+            "old_role": "user",
+            "new_role": "admin",
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_last_admin_can_be_set_to_admin_again(self, db_session, fixture_admin):
+        admin_id = fixture_admin.user_id
+        await db_session.commit()
+        answer = await update_user_role(
+            admin_id, RoleUpdateRequest(role="admin"), OPERATOR, db_session
+        )
+        assert answer["new_role"] == "admin"
+        assert await _stored(db_session, admin_id) == ("admin", 1)
+
+
 class TestCanDeleteAdmin:
     @pytest.mark.asyncio
     async def test_not_admin_returns_allowed(self, db_session, fixture_regular):
@@ -292,6 +451,23 @@ class TestCanDeleteAdmin:
         ok, reason = await service.can_delete_admin(lone_admin.user_id)
         assert ok is False
         assert "last" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_the_two_refusals_keep_their_exact_answers(
+        self, db_session, fixture_admin, fixture_regular
+    ):
+        # #2828 only respelled the admin predicate of the count.
+        service = SystemAdminService(db_session)
+        assert await service.can_delete_admin(fixture_admin.user_id) == (
+            False,
+            "Cannot delete the initial system administrator",
+        )
+        fixture_admin.is_initial_admin = False
+        await db_session.flush()
+        assert await service.can_delete_admin(fixture_admin.user_id) == (
+            False,
+            "Cannot delete the last remaining system administrator",
+        )
 
     @pytest.mark.asyncio
     async def test_allowed_when_multiple_admins(

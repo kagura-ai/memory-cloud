@@ -3556,7 +3556,12 @@
         "grace": "猶予期間",
         "revoked": "無効"
       },
-      "githubUserId": "(ID: {id})"
+      "githubUserId": "(ID: {id})",
+      "pagination": {
+        "showing": "{total} 件中 {from}〜{to} 件目",
+        "previous": "前へ",
+        "next": "次へ"
+      }
     }
   },
   "resourceTokens": {

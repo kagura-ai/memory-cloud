@@ -88,6 +88,13 @@ def _user_result(rows=(("local:owner", "owner@test.com"),)):
     return r
 
 
+def _ws_result(rows=((_WORKSPACE_ID, "Path Workspace"),)):
+    """Mock result for the #2844 batch ``workspace_id → name`` query."""
+    r = MagicMock()
+    r.all.return_value = list(rows)
+    return r
+
+
 @pytest.fixture
 def client(monkeypatch):
     """TestClient that exposes monkeypatch + auto-clears overrides."""
@@ -173,7 +180,7 @@ class TestWorkspaceListSleepReports:
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
         # No context query (all context_ids None); then the batch user query.
-        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
+        mock_db.execute.side_effect = [count_result, list_result, _ws_result(), _user_result()]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
@@ -222,7 +229,7 @@ class TestWorkspaceListSleepReports:
         count_result.scalar.return_value = 1
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
-        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
+        mock_db.execute.side_effect = [count_result, list_result, _ws_result(), _user_result()]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
@@ -264,7 +271,7 @@ class TestWorkspaceListSleepReports:
         # No context query (context_id None); then the batch user resolution.
         user_result = MagicMock()
         user_result.all.return_value = [("local:owner", "owner@test.com")]
-        mock_db.execute.side_effect = [count_result, list_result, user_result]
+        mock_db.execute.side_effect = [count_result, list_result, _ws_result(), user_result]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
@@ -286,7 +293,7 @@ class TestWorkspaceListSleepReports:
         list_result.scalars.return_value.all.return_value = [report]
         user_result = MagicMock()
         user_result.all.return_value = []  # not in users table
-        mock_db.execute.side_effect = [count_result, list_result, user_result]
+        mock_db.execute.side_effect = [count_result, list_result, _ws_result(), user_result]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
@@ -305,7 +312,7 @@ class TestWorkspaceListSleepReportsSourceFilter:
         count_result.scalar.return_value = len(reports)
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
-        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
+        mock_db.execute.side_effect = [count_result, list_result, _ws_result(), _user_result()]
         return mock_db
 
     @staticmethod
@@ -368,7 +375,7 @@ class TestWorkspaceGetSleepReportDetail:
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = actions
         # No context query (context_id None); then the user query.
-        mock_db.execute.side_effect = [report_result, actions_result, _user_result()]
+        mock_db.execute.side_effect = [report_result, actions_result, _ws_result(), _user_result()]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
@@ -391,7 +398,7 @@ class TestWorkspaceGetSleepReportDetail:
         # report + actions; context skipped (context_id None); then user resolution.
         user_result = MagicMock()
         user_result.all.return_value = [("local:owner", "owner@test.com")]
-        mock_db.execute.side_effect = [report_result, actions_result, user_result]
+        mock_db.execute.side_effect = [report_result, actions_result, _ws_result(), user_result]
 
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
@@ -478,7 +485,9 @@ class TestWorkspaceSleepReportsHideFormerMemberEmail:
         count_result.scalar.return_value = len(reports)
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = reports
-        mock_db.execute.side_effect = [count_result, list_result]
+        # The user label query is replaced by the resolver above; the
+        # workspace name query (#2844) is the real one.
+        mock_db.execute.side_effect = [count_result, list_result, _ws_result()]
         return mock_db
 
     def _detail_db(self, report):
@@ -487,7 +496,7 @@ class TestWorkspaceSleepReportsHideFormerMemberEmail:
         report_result.scalar_one_or_none.return_value = report
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, actions_result]
+        mock_db.execute.side_effect = [report_result, actions_result, _ws_result()]
         return mock_db
 
     def test_list_hides_former_member_and_keeps_current_member(self, client):
@@ -545,7 +554,7 @@ class TestWorkspaceSleepReportsMembershipQuery:
         count_result.scalar.return_value = 1
         list_result = MagicMock()
         list_result.scalars.return_value.all.return_value = [_make_mock_report()]
-        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
+        mock_db.execute.side_effect = [count_result, list_result, _ws_result(), _user_result()]
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
         response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports")
@@ -562,7 +571,7 @@ class TestWorkspaceSleepReportsMembershipQuery:
         report_result.scalar_one_or_none.return_value = report
         actions_result = MagicMock()
         actions_result.scalars.return_value.all.return_value = []
-        mock_db.execute.side_effect = [report_result, actions_result, _user_result()]
+        mock_db.execute.side_effect = [report_result, actions_result, _ws_result(), _user_result()]
         _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
 
         response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports/{report.id}")
@@ -571,6 +580,60 @@ class TestWorkspaceSleepReportsMembershipQuery:
         sql = self._label_sql(mock_db)
         assert "workspace_members" in sql
         assert str(_WORKSPACE_ID) in sql
+
+
+# ============================================================================
+# Workspace name (#2844)
+# ============================================================================
+
+
+class TestWorkspaceSleepReportsWorkspaceName:
+    """#2844: the workspace routes share the model and fill ``workspace_name``
+    the same way: the name of the workspace in the path, resolved once."""
+
+    @staticmethod
+    def _workspace_statements(mock_db) -> list[str]:
+        return [
+            sql
+            for sql in (str(call.args[0].compile()) for call in mock_db.execute.await_args_list)
+            if "FROM workspaces" in sql
+        ]
+
+    def test_list_rows_carry_the_path_workspaces_name(self, client):
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 2
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = [
+            _make_mock_report(),
+            _make_mock_report(),
+        ]
+        mock_db.execute.side_effect = [count_result, list_result, _ws_result(), _user_result()]
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports")
+
+        assert response.status_code == 200, response.text
+        assert [r["workspace_name"] for r in response.json()["reports"]] == ["Path Workspace"] * 2
+        statements = self._workspace_statements(mock_db)
+        assert len(statements) == 1
+        assert "workspaces.deleted_at IS NULL" in statements[0]
+
+    def test_detail_carries_the_path_workspaces_name(self, client):
+        report = _make_mock_report()
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        mock_db.execute.side_effect = [report_result, actions_result, _ws_result(), _user_result()]
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports/{report.id}")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["report"]["workspace_name"] == "Path Workspace"
+        assert len(self._workspace_statements(mock_db)) == 1
 
 
 # ============================================================================

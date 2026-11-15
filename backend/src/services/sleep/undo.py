@@ -22,8 +22,10 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.system_admin_mode import OPERATOR_PRINCIPAL_PREFIX
 from config.constants import TOMBSTONE_PURGER_CLAUSE
 from db.point_writer_lock import hold_point_writer_lock
+from models.auth import AuditLog
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory
 from models.sleep import SleepAction, SleepReport
 from services.sleep.merge_retention import restore_sleep_tombstone_stmt
@@ -31,6 +33,9 @@ from utils.datetime import utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# The ``audit_logs`` action of an undo of a named report (#2838).
+SLEEP_MERGE_UNDO_AUDIT_ACTION = "sleep_merge_undo"
 
 
 class ShadowEdgeRevert(StrEnum):
@@ -340,16 +345,114 @@ async def _resolve_embedding_info(
     return embedding_model, collection_name
 
 
+def _undone_by(acting_user_id: str) -> str:
+    """What an ``undo_merge`` action records as ``undone_by`` (#2838).
+
+    The caller's id, or the fixed string ``operator`` for an operator
+    principal: the report's actions are read by workspace members, and an
+    operator's address is recorded in ``audit_logs`` only.
+    """
+    if acting_user_id.startswith(OPERATOR_PRINCIPAL_PREFIX):
+        return "operator"
+    return acting_user_id
+
+
+def _record_undo(
+    db: AsyncSession,
+    *,
+    action: SleepAction,
+    report: SleepReport,
+    loser_id: UUID,
+    winner_id: UUID | None,
+    acting_user_id: str,
+    audit_actor_email: str | None,
+    shadow: bool,
+) -> None:
+    """Queue what a successful undo records; the caller commits once.
+
+    Both success paths (the tombstone restore and the shadow edge revert) call
+    this before their single commit, so they record the same things: the
+    ``undo_merge`` action on the merge's own report, the operation history
+    event and, for an undo of a named report (``audit_actor_email`` set,
+    #2838), the ``sleep_merge_undo`` audit row naming the caller as actor.
+    The audit row holds ids only.
+    """
+    from services.operation_history_writer import record_operation
+
+    details: dict[str, Any] = {
+        "undone_action_id": action.id,
+        "undone_by": _undone_by(acting_user_id),
+    }
+    if shadow:
+        details["mode"] = "shadow"
+    db.add(
+        SleepAction(
+            report_id=action.report_id,
+            phase="dedup_merge",
+            action_type="undo_merge",
+            memory_id=loser_id,
+            target_id=winner_id,
+            details=details,
+        )
+    )
+    record_operation(
+        db,
+        operation="sleep.undo",
+        actor_user_id=acting_user_id,
+        workspace_id=report.workspace_id,
+        context_id=report.context_id,
+        target_id=report.id,
+        event_key=f"sleep-undo:{action.id}",
+    )
+    if audit_actor_email is not None:
+        db.add(
+            AuditLog(
+                user_email=audit_actor_email,
+                user_id=acting_user_id,
+                action=SLEEP_MERGE_UNDO_AUDIT_ACTION,
+                resource=f"sleep_report:{action.report_id}",
+                user_metadata={
+                    "target_user_id": report.user_id,
+                    "workspace_id": str(report.workspace_id) if report.workspace_id else None,
+                    "context_id": str(report.context_id) if report.context_id else None,
+                    "report_id": str(action.report_id),
+                    "action_id": action.id,
+                    "restored_memory_id": str(loser_id),
+                    "winner_id": str(winner_id) if winner_id else None,
+                },
+            )
+        )
+
+
 async def undo_merge_action(
     db: AsyncSession,
     action_id: int,
     *,
     acting_user_id: str,
+    target_report_id: UUID | None = None,
+    actor_email: str | None = None,
 ) -> dict[str, Any]:
     """Restore the loser of ONE dedup merge (row + vector) and audit the undo.
 
-    Self-scoped: the merge's report must belong to ``acting_user_id`` (the
-    same Phase-1 scoping the admin sleep trigger uses).
+    Two scopes, chosen by ``target_report_id``:
+
+    - ``None`` (the default, the own-account route): the merge's report must
+      belong to ``acting_user_id``, and no ``audit_logs`` row is written.
+    - set (#2838, the undo of a named report): the action is found by its id
+      and that report id, whoever the report belongs to, and a successful
+      undo writes a ``sleep_merge_undo`` audit row with the caller as actor.
+
+    Every check after the lookup, and every answer, is the same in both.
+
+    Args:
+        db: The request's session; the undo commits it once on success.
+        action_id: The merge action to undo.
+        acting_user_id: The caller. Recorded as ``undone_by`` (``operator``
+            for an operator principal) and as the audit row's actor.
+        target_report_id: The report the action must belong to, or ``None``
+            for the caller's own reports.
+        actor_email: The caller's address for the audit row. Required with
+            ``target_report_id``, unused without it.
 
     Returns:
         Summary dict: restored memory id, winner id, report id, undo action id.
@@ -358,20 +461,29 @@ async def undo_merge_action(
         UndoMergeError: with a stable ``code`` for every non-restorable state
             — including ``memory_purged`` once the retention policy
             (``sleep_merge_retention_days``) has hard-deleted the loser.
+        ValueError: ``target_report_id`` without ``actor_email``.
     """
     from services.embedding_service import EmbeddingService
 
-    result = await db.execute(
-        select(SleepAction, SleepReport)
-        .join(SleepReport, SleepAction.report_id == SleepReport.id)
-        .where(SleepAction.id == action_id, SleepReport.user_id == acting_user_id)
+    lookup = select(SleepAction, SleepReport).join(
+        SleepReport, SleepAction.report_id == SleepReport.id
     )
+    audit_actor_email: str | None = None
+    if target_report_id is None:
+        lookup = lookup.where(SleepAction.id == action_id, SleepReport.user_id == acting_user_id)
+        not_found = f"Sleep action {action_id} not found or not owned by you."
+    else:
+        if not actor_email:
+            raise ValueError("actor_email is required to undo a merge of a named report")
+        audit_actor_email = actor_email
+        lookup = lookup.where(
+            SleepAction.id == action_id, SleepAction.report_id == target_report_id
+        )
+        not_found = f"Sleep action {action_id} not found in sleep report {target_report_id}."
+    result = await db.execute(lookup)
     row = result.first()
     if row is None:
-        raise UndoMergeError(
-            "action_not_found",
-            f"Sleep action {action_id} not found or not owned by you.",
-        )
+        raise UndoMergeError("action_not_found", not_found)
     action, report = row
     from services.sync_managed_guard import assert_context_mutable
 
@@ -423,29 +535,15 @@ async def undo_merge_action(
                 "restored without discarding that newer state. The merge was not "
                 "reversed; the edge needs a look before retrying.",
             )
-        undo_action = SleepAction(
-            report_id=action.report_id,
-            phase="dedup_merge",
-            action_type="undo_merge",
-            memory_id=loser_id,
-            target_id=winner_id,
-            details={
-                "undone_action_id": action.id,
-                "undone_by": acting_user_id,
-                "mode": "shadow",
-            },
-        )
-        db.add(undo_action)
-        from services.operation_history_writer import record_operation
-
-        record_operation(
+        _record_undo(
             db,
-            operation="sleep.undo",
-            actor_user_id=acting_user_id,
-            workspace_id=report.workspace_id,
-            context_id=report.context_id,
-            target_id=report.id,
-            event_key=f"sleep-undo:{action.id}",
+            action=action,
+            report=report,
+            loser_id=loser_id,
+            winner_id=winner_id,
+            acting_user_id=acting_user_id,
+            audit_actor_email=audit_actor_email,
+            shadow=True,
         )
         await db.commit()
         logger.info(
@@ -530,28 +628,15 @@ async def undo_merge_action(
 
     # Audit symmetry: the undo is a SleepAction on the SAME report, so the
     # merge's full history (merge -> undo_merge) reads out of one audit log.
-    undo_action = SleepAction(
-        report_id=action.report_id,
-        phase="dedup_merge",
-        action_type="undo_merge",
-        memory_id=loser_id,
-        target_id=winner_id,
-        details={
-            "undone_action_id": action.id,
-            "undone_by": acting_user_id,
-        },
-    )
-    db.add(undo_action)
-    from services.operation_history_writer import record_operation
-
-    record_operation(
+    _record_undo(
         db,
-        operation="sleep.undo",
-        actor_user_id=acting_user_id,
-        workspace_id=report.workspace_id,
-        context_id=report.context_id,
-        target_id=report.id,
-        event_key=f"sleep-undo:{action.id}",
+        action=action,
+        report=report,
+        loser_id=loser_id,
+        winner_id=winner_id,
+        acting_user_id=acting_user_id,
+        audit_actor_email=audit_actor_email,
+        shadow=False,
     )
     await db.commit()
 

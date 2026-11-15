@@ -126,7 +126,7 @@ class TestHistoryRetentionGrant:
         assert ws is not None
         assert ws.addon_history_retention_days_bonus == 275
         detail = await get_workspace_quotas(
-            workspace_id=plan_workspace["workspace_id"], admin_user=mock_admin(), db=db_session
+            workspace_id=plan_workspace["ws_uuid"], admin_user=mock_admin(), db=db_session
         )
         assert detail.base.history_retention_days == 90
         assert detail.addon.history_retention_days_bonus == 275
