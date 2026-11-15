@@ -14,7 +14,7 @@ service deletes the user row itself; readers must therefore not assume
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import (
     Boolean,
@@ -69,6 +69,55 @@ FAILURE_AFTER_POSTGRES_COMMIT = "after_postgres_commit: "
 # The ``<step>: <class>`` slots of the marker: step ``interrupted``, found by
 # the ``sweep``.
 INTERRUPTED_AFTER_POSTGRES_COMMIT = f"{FAILURE_AFTER_POSTGRES_COMMIT}interrupted: sweep"
+
+# #2834: the other fixed ``failure_reason`` prefixes. ``AccountErasureService``
+# writes each reason through its constant and ``failure_kind_of`` reads the
+# same constant, so the stored text and its classification stay together.
+FAILURE_PREFIX_BILLING_CONTRACT = "billing_contract_active: "
+FAILURE_PREFIX_WORKSPACE_TRANSFER = "workspace_transfer_required: "
+FAILURE_PREFIX_VECTOR_STORE = "vector_store_unavailable after "
+FAILURE_PREFIX_LOCK_CONFLICT = "lock_conflict after "
+
+FailureKind = Literal[
+    "after_postgres_commit",
+    "billing_contract_active",
+    "workspace_transfer_required",
+    "vector_store_unavailable",
+    "lock_conflict",
+    "other",
+]
+
+# In the order ``failure_kind_of`` tries them.
+_FAILURE_KIND_BY_PREFIX: tuple[tuple[str, FailureKind], ...] = (
+    (FAILURE_AFTER_POSTGRES_COMMIT, "after_postgres_commit"),
+    (FAILURE_PREFIX_BILLING_CONTRACT, "billing_contract_active"),
+    (FAILURE_PREFIX_WORKSPACE_TRANSFER, "workspace_transfer_required"),
+    (FAILURE_PREFIX_VECTOR_STORE, "vector_store_unavailable"),
+    (FAILURE_PREFIX_LOCK_CONFLICT, "lock_conflict"),
+)
+
+
+def failure_kind_of(status: str, failure_reason: str | None) -> FailureKind | None:
+    """Classify a request's ``failure_reason`` as one fixed token (#2834).
+
+    Args:
+        status: The request's status.
+        failure_reason: The stored reason, or None.
+
+    Returns:
+        None unless the request is ``failed``; else the kind of the first
+        prefix the reason starts with, or ``other`` (a reason with no known
+        prefix, or no reason). Only the literals of ``FailureKind``: no part
+        of the reason itself.
+    """
+    if status != STATUS_FAILED:
+        return None
+    if failure_reason is not None:
+        for prefix, kind in _FAILURE_KIND_BY_PREFIX:
+            if failure_reason.startswith(prefix):
+                return kind
+    return "other"
+
 
 # The sweep's ``deleted_data_summary`` on a request whose user row was gone
 # and whose run never reached the Postgres commit: ``{"note": ...}``. Since

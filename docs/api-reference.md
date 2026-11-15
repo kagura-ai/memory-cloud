@@ -2312,6 +2312,28 @@ The response (`schema_version: 1`) has `as_of`, `overdue_grace_seconds`, `schedu
 
 No user, workspace or context identifier, email address, memory text or exception message is part of the response. See [Operations status](deployment.md#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768) for the meaning of each field, the probe setting and what to alert on.
 
+### Erasure requests
+
+Issue #2834. Read-only: where an account erasure stands after it was requested. Both routes answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route. Neither writes a row.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/erasure-requests` | A page of requests, newest `requested_at` first, then by `request_id`: `{"items", "total", "limit", "offset"}`. Filters, combined with AND: `status` (`pending`, `cooling_off`, `in_progress`, `complete`, `failed` or `cancelled`), `user_id` (1-255 characters, compared exactly with the stored value) and `is_self_service` (`true` / `false`). `limit` 1-200 (default 50), `offset` from 0. A value outside these is a `422`. `total` counts the requests that match the filters. |
+| `GET /api/v1/admin/erasure-requests/{request_id}` | One request, with the same fields. `404 RES-001` for an unknown id, `422` for an id that is not a UUID. |
+
+A request:
+
+| Field | Meaning |
+|-------|---------|
+| `request_id` | The request's id, as `POST /api/v1/admin/users/{user_id}/erase` answered it. |
+| `user_id` | As stored: the subject's id until the erasure completes, the subject's pseudonym afterwards (also on a request that failed after its Postgres step). The `user_id` filter therefore finds a completed request by its pseudonym, not by the id the account had. |
+| `status` | One of the six statuses above. |
+| `is_self_service`, `reason_code` | Who asked (the member, or an admin on the member's behalf) and the reason code given. |
+| `initiated_by` | As stored: the admin's user id, `operator:<address>` for a request made in `service` mode, or the subject for a self-service request (pseudonymized with it). |
+| `requested_at`, `confirmed_at`, `scheduled_for`, `started_at`, `completed_at`, `cancelled_at` | Times with their zone; null when the step did not happen. `scheduled_for` is when the sweep runs a `cooling_off` request next. |
+| `retry` | `{"attempts", "step", "error_class", "last_attempt_at", "embeddings_requeued"}` for a request that was rescheduled (`503 ERASURE-007`, a lock conflict) or whose embeddings were re-queued; null otherwise. A key the request does not have is null. |
+| `failure_kind` | For a `failed` request, one of `after_postgres_commit` (the account is erased in Postgres; a later step failed or was interrupted), `billing_contract_active`, `workspace_transfer_required`, `vector_store_unavailable`, `lock_conflict` or `other`. Null for every other status. |
+
 ### Service notices over MCP
 
 Issue #2762. The notices delivered once per opted-in user in the MCP `bootstrap` reply ([Service notices over MCP](#service-notices-over-mcp)). The routes follow `SYSTEM_ADMIN_MODE` like every system-admin route (a service operator may call them) and work while `MCP_NOTICES_ENABLED` is off, so a notice can be prepared first. There is no edit and no delete: a correction is withdraw + create. Every create and withdraw writes an audit row (`mcp_notice.created` / `mcp_notice.withdrawn`, the actor, the SHA-256 of the text, never the text; a create also `plans`) and a WARNING log line `mcp_notice_created` / `mcp_notice_withdrawn` with the actor, the id and the character count (a create also `plans`).

@@ -4273,6 +4273,58 @@
         ],
         "type": "object"
       },
+      "ErasureRequestItem": {
+        "additionalProperties": false,
+        "properties": {
+          "cancelled_at": {},
+          "completed_at": {},
+          "confirmed_at": {},
+          "failure_kind": {},
+          "initiated_by": {},
+          "is_self_service": {},
+          "reason_code": {},
+          "request_id": {},
+          "requested_at": {},
+          "retry": {},
+          "scheduled_for": {},
+          "started_at": {},
+          "status": {},
+          "user_id": {}
+        },
+        "required": [
+          "cancelled_at",
+          "completed_at",
+          "confirmed_at",
+          "failure_kind",
+          "initiated_by",
+          "is_self_service",
+          "reason_code",
+          "request_id",
+          "requested_at",
+          "retry",
+          "scheduled_for",
+          "started_at",
+          "status",
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "ErasureRequestListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {},
+          "limit": {},
+          "offset": {},
+          "total": {}
+        },
+        "required": [
+          "items",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "type": "object"
+      },
       "ErasureRequestStateResponse": {
         "properties": {
           "cancelled_at": {},
@@ -4291,6 +4343,24 @@
           "request_id",
           "requested_at",
           "status"
+        ],
+        "type": "object"
+      },
+      "ErasureRetry": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {},
+          "embeddings_requeued": {},
+          "error_class": {},
+          "last_attempt_at": {},
+          "step": {}
+        },
+        "required": [
+          "attempts",
+          "embeddings_requeued",
+          "error_class",
+          "last_attempt_at",
+          "step"
         ],
         "type": "object"
       },
@@ -15902,6 +15972,152 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/erasure-requests": {
+      "get": {
+        "operationId": "list_erasure_requests_api_v1_admin_erasure_requests_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "pending",
+                    "cooling_off",
+                    "in_progress",
+                    "complete",
+                    "failed",
+                    "cancelled"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "is_self_service",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErasureRequestListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/erasure-requests/{request_id}": {
+      "get": {
+        "operationId": "get_erasure_request_api_v1_admin_erasure_requests__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErasureRequestItem"
+                }
+              }
+            }
+          },
+          "404": {},
           "422": {
             "content": {
               "application/json": {

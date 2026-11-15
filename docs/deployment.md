@@ -3474,7 +3474,11 @@ delete answers 409. After the last attempt it ends
 hits the outage answers 503 `ERASURE-007` with `request_id` and
 `scheduled_for` in `details`; the request is kept and the sweep runs it, so
 do not retry the call (a second one answers 409 while the request waits), and
-the member cannot cancel it. A member whose self-service request is waiting
+the member cannot cancel it. From v0.165.0 (#2834)
+`GET /api/v1/admin/erasure-requests/{request_id}` shows where such a request
+stands: its `status`, `scheduled_for`, the `retry` block and, once it failed,
+its `failure_kind` ([Erasure requests](api-reference.md#erasure-requests)).
+A member whose self-service request is waiting
 can still cancel it on the account page; memories whose points were already
 deleted then stay out of search results until they are re-embedded. From
 v0.128.0 (#2304) the service re-queues them itself: when a request that

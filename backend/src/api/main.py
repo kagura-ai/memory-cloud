@@ -914,6 +914,7 @@ for _exc_cls in (
 
 from api.routes import (  # noqa: E402
     admin,
+    admin_erasure_requests,  # Issue #2834: admin reads of erasure requests
     admin_mcp_notices,  # Issue #2762: service notices over MCP (create/list/withdraw)
     admin_memory_health,  # Issue #2764: deprecated alias of memory_health
     admin_neural,  # Issue #406: Manual kNN calibration recalibrate trigger
@@ -1127,6 +1128,9 @@ app.include_router(beta_invites.router, prefix="/api/v1")
 # so an operator can unwind grants after flipping the kill switch off.
 app.include_router(referrals.router, prefix="/api/v1")
 app.include_router(admin_referrals.router, prefix="/api/v1")
+
+# Admin reads of erasure requests: a filtered page and one by id (Issue #2834)
+app.include_router(admin_erasure_requests.router, prefix="/api/v1")
 
 # BM25 IDF Drift admin (Issue #343 - cron disabled by default until v0.14.0)
 app.include_router(bm25_drift.router, prefix="/api/v1")
