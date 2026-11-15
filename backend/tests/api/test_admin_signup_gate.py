@@ -212,6 +212,10 @@ class TestListAllowlist:
         assert response.status_code == 422, response.text
         assert response.json()["error"] == "VAL-001"
         service.assert_not_awaited()
+        # The refusal names the parameter and never repeats the value.
+        for value in params.values():
+            if len(value) > 3:
+                assert value not in response.text
 
     def test_filter_values_are_the_ones_the_table_allows(self):
         """The route's literals are the values of the table's CHECK constraints."""

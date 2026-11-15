@@ -8,6 +8,7 @@ one seeds rows newer than anything else can be.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -222,3 +223,35 @@ async def test_reserved_columns_are_not_in_the_answer(db_session: AsyncSession) 
     assert set(item) == ENTRY_KEYS
     for forbidden in ("987654321", "2077-07-07", "2078-08-08", "sponsor_tier_cents"):
         assert forbidden not in response.text
+
+
+async def test_search_text_is_not_logged_and_no_row_is_written(db_session: AsyncSession) -> None:
+    sentinel = f"search-sentinel-{uuid4().hex}"
+    db_session.add(_entry(f"label {sentinel}"))
+    await db_session.commit()
+
+    with (
+        patch("api.routes.admin_signup_gate.logger") as route_logger,
+        patch("services.signup_gate_service.logger") as service_logger,
+    ):
+        async with admin_http(db_session) as client:
+            response = await client.get(LIST, params={"search": sentinel.upper()})
+
+    assert response.json()["total"] == 1
+    logged = repr([*route_logger.mock_calls, *service_logger.mock_calls]).lower()
+    assert sentinel not in logged
+    # A read: the session holds nothing to write.
+    assert not db_session.new and not db_session.dirty and not db_session.deleted
+
+
+async def test_a_search_as_long_as_the_column_is_accepted(db_session: AsyncSession) -> None:
+    label = f"{uuid4().hex}-".ljust(255, "l")
+    db_session.add(_entry(label))
+    await db_session.commit()
+
+    async with admin_http(db_session) as client:
+        response = await client.get(LIST, params={"search": label, "limit": 200})
+
+    assert response.status_code == 200, response.text
+    assert [item["subject_label"] for item in response.json()["items"]] == [label]
+    assert (response.json()["total"], response.json()["limit"]) == (1, 200)
