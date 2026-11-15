@@ -206,6 +206,10 @@ async def apply_integration_entitlements(
             service_count=len(body.services),
         )
     view = await read_integration_entitlements(db, workspace_id)
+    if outcome == "applied":
+        from services.sync_management import stop_ineligible_workspace
+
+        await stop_ineligible_workspace(db, workspace_id)
     return IntegrationEntitlementResult(
         **view.model_dump(), applied=outcome == "applied", outcome=outcome
     )

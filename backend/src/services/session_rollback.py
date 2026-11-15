@@ -1349,6 +1349,10 @@ async def rollback_session(
     # answering no_writes_in_window forever: an omitted until would keep
     # continuing it and never reach the caller's newer writes.
 
+    if not dry_run:
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(db, scope.context_id)
     batch = await _read_batch(db, scope, requested_by, workspace_id, lock=not dry_run)
     if not batch.items:
         if record is not None and record.status in _FINAL_STATUSES:

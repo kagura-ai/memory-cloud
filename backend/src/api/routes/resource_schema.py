@@ -272,6 +272,9 @@ async def create_schema(
         )
 
     # Get next schema version (strict resource_pk filter — see get_schema).
+    from services.sync_managed_guard import assert_resource_mutable
+
+    await assert_resource_mutable(db, resource_pk)
     result = await db.execute(
         select(ResourceSchema.schema_version)
         .where(ResourceSchema.resource_pk == resource_pk)

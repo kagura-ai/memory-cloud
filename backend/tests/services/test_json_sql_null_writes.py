@@ -37,6 +37,7 @@ from models.schemas import RememberRequest
 from models.sleep import SleepAction, SleepReport
 from models.sync_feed import SyncChunk, SyncFeed, SyncRecord, SyncRun
 from models.sync_installation import SyncInstallation, SyncService
+from models.sync_management import SyncResumeCandidate
 from services.memory_service import MemoryService
 from services.quota_service import DailyReservation
 from services.secret_store_service import SecretStoreService
@@ -157,6 +158,27 @@ def _memory(s: Scope, **col: Any) -> Memory:
 # (table, column, attribute, factory, the table accepts UPDATE)
 Factory = Callable[[Scope, dict[str, Any]], Any]
 CASES: list[tuple[str, str, str, Factory, bool]] = [
+    (
+        "sync_resume_candidates",
+        "records",
+        "records",
+        lambda s, c: SyncResumeCandidate(
+            id=s.sync_runs.pop().id,
+            installation_id=s.sync_feed.installation_id,
+            feed_id=s.sync_feed.id,
+            active=False,
+            epoch=1,
+            generations=[1, 1, 1],
+            manifest={},
+            record_count=0,
+            byte_count=2,
+            snapshot_hash="4" * 64,
+            created_at=utcnow(),
+            expires_at=utcnow() + timedelta(hours=23),
+            **c,
+        ),
+        True,
+    ),
     (
         "sync_runs",
         "diff",
@@ -431,7 +453,7 @@ async def _stored(db, table: str, column: str, row_id: Any) -> tuple[bool, str |
 )
 async def test_none_is_stored_as_sql_null(db_session, table, column, attr, factory, updatable):
     scope = await _scope(db_session)
-    if table in {"sync_runs", "sync_chunks", "sync_records"}:
+    if table in {"sync_runs", "sync_chunks", "sync_records", "sync_resume_candidates"}:
         await _sync_parents(db_session, scope)
 
     explicit = factory(scope, {attr: None})

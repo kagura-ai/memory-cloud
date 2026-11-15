@@ -144,6 +144,32 @@ async def feed_schema(installation_id: UUID, request: Request, token: Token, db:
     return result
 
 
+class ResumeCandidateBody(BaseModel):
+    """Only the server's existing strict upload may become a resume candidate."""
+
+    model_config = {"extra": "forbid", "strict": True}
+    run_id: UUID
+
+
+@router.post("/resume-candidates", openapi_extra=json_body(ResumeCandidateBody))
+async def create_resume_candidate(
+    installation_id: UUID, request: Request, token: Token, db: Database
+) -> dict:
+    """Pin a manual-mode snapshot without granting the worker permission to resume."""
+    from services.sync_management import management_enabled
+    from services.sync_resume import pin_candidate
+
+    management_enabled()
+    exact_query(request)
+    body, _ = await bounded_body(request, ResumeCandidateBody)
+    async with worker(db, token, installation_id, "records:write", write=True) as (
+        authority,
+        fence,
+    ):
+        result = await pin_candidate(db, authority, body.run_id, fence)
+    return result
+
+
 @router.post("/runs", status_code=201, openapi_extra=json_body(RunManifest))
 async def new_feed_run(installation_id: UUID, request: Request, token: Token, db: Database) -> dict:
     """Create or recover a durable operation receipt without publishing content."""

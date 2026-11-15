@@ -818,6 +818,13 @@ class ResourceIndexer:
             # queries below filter by resource_pk to avoid the CWE-639
             # slug-reuse leak when a soft-deleted context releases its slug.
             context = await self._get_context(context_id)
+            from services.sync_managed_guard import target_fence
+
+            managed_fence = await target_fence(self.db, context_id)
+            if managed_fence.legacy is not None:
+                from utils.exceptions import ConflictError
+
+                raise ConflictError("Enroll the retained synchronization target before indexing")
 
             from services.resource_lookup import resolve_resource_pk
 
@@ -909,6 +916,11 @@ class ResourceIndexer:
             from services.sync_feed_provenance import obsolete_sync_event_ids
 
             obsolete = await obsolete_sync_event_ids(self.db, events)
+            from services.sync_managed_guard import event_applicable
+
+            for event in events:
+                if not await event_applicable(self.db, event, context_id):
+                    obsolete.add(event.id)
             batch_len, new_count = _fit_memory_room(
                 events, known_doc_ids, room=None, ignored_event_ids=obsolete
             )
@@ -1674,6 +1686,10 @@ class ResourceIndexer:
 
                     if old_memories:
                         for old_mem in old_memories:
+                            from services.sync_feed_provenance import preserve_manual_tombstone
+
+                            if preserve_manual_tombstone(self.db, event, old_mem):
+                                continue
                             version_point = resource_point_id(
                                 event.resource_id, event.doc_id, old_mem.resource_version
                             )
@@ -1915,7 +1931,10 @@ class ResourceIndexer:
                 version; the same one is refused as a duplicate) rebuilds it.
             QdrantError: The upsert failed.
         """
+        from services.sync_managed_guard import assert_context_mutable
         from services.vector_erasure import embedding_author_current, reconcile_erased_writer
+
+        await assert_context_mutable(self.db, memory.context_id)
 
         if not await embedding_author_current(self.db, memory):
             return memory.point_id
@@ -2141,6 +2160,10 @@ class ResourceIndexer:
                     return
 
                 for memory in memories:
+                    from services.sync_feed_provenance import preserve_manual_tombstone
+
+                    if preserve_manual_tombstone(self.db, event, memory):
+                        continue
                     await self.db.delete(memory)
                 await self.db.flush()
                 self._history_changes["memory.deleted"] += len(memories)

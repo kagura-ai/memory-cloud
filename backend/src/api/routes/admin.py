@@ -1833,6 +1833,11 @@ async def recover_context(
     except ValueError as e:
         raise HTTPException(status_code=400, detail="Invalid context_id format") from e
 
+    if not request_body.dry_run:
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(db, PyUUID(context_id))
+
     settings = get_settings()
     client = get_qdrant_client()
     collection_name = KAGURA_MEMORIES_COLLECTION

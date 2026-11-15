@@ -107,7 +107,12 @@ async def exact_target(db: AsyncSession, row: SyncInstallation) -> None:
 
 
 async def lock_membership(
-    db: AsyncSession, user_id: str, row: SyncInstallation, *, write: bool
+    db: AsyncSession,
+    user_id: str,
+    row: SyncInstallation,
+    *,
+    write: bool,
+    capacity: CapacityPolicy = CapacityPolicy.BLOCKED,
 ) -> None:
     """Fence membership deletion, role/reach changes and context grants before RBAC."""
     user = await locked(db, User, User.user_id == user_id)
@@ -129,7 +134,7 @@ async def lock_membership(
         user_id,
         row.context_id,
         required_role=ContextRole.EDITOR if write else ContextRole.VIEWER,
-        capacity=CapacityPolicy.BLOCKED,
+        capacity=capacity,
         key_workspace_id=row.workspace_id,
     )
 

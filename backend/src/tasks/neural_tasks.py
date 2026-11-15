@@ -232,6 +232,15 @@ async def consolidation_task() -> JobResult:
                     # after the loop (no row locks taken against recall's order).
                     to_promote: dict[Any, tuple[Any, int]] = {}
                     for memory in working_memories:
+                        from services.sync_managed_guard import assert_memory_mutable
+                        from utils.exceptions import ConflictError, ManagedDataLockedError
+
+                        try:
+                            await assert_memory_mutable(db, memory)
+                        except (ConflictError, ManagedDataLockedError):
+                            # A protected target must not abort retention of
+                            # ordinary contexts sharing this scheduled page.
+                            continue
                         age_days = (utcnow() - memory.created_at).days
 
                         # Promotion criteria (Issue #1)

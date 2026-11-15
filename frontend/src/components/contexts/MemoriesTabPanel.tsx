@@ -70,6 +70,7 @@ import type {
 interface MemoriesTabPanelProps {
   contextId: string;
   recallOnly?: boolean;
+  readOnly?: boolean;
 }
 
 const PAGE_SIZE = 50;
@@ -89,7 +90,7 @@ function recallScope(request: { query: string; include_superseded: boolean; filt
 
 type SearchMode = "text" | "recall";
 
-export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabPanelProps) {
+export function MemoriesTabPanel({ contextId, recallOnly = false, readOnly = false }: MemoriesTabPanelProps) {
   const t = useTranslations("contextDetail.memoriesPanel");
   const tRecall = useTranslations("contextDetail.memoriesPanel.recall");
   const { toast } = useToast();
@@ -541,7 +542,7 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
           ))}
         </ToggleGroup>}
         <ContextualHelp topic="search" />
-        {!recallOnly && <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}>
+        {!recallOnly && !readOnly && <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}>
           {tBulk("open")}
         </Button>}
       </div>
@@ -662,8 +663,8 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
         memory={dialog.hydrated}
         open={dialog.detailOpen}
         onOpenChange={dialog.handleDetailOpenChange}
-        onEdit={dialog.hydrated ? dialog.handleDetailEdit : undefined}
-        onDelete={dialog.handleDetailDelete}
+        onEdit={!readOnly && dialog.hydrated ? dialog.handleDetailEdit : undefined}
+        onDelete={readOnly ? undefined : dialog.handleDetailDelete}
         notFound={dialog.detailNotFound}
         outgoingLinks={dialog.linkedRefs.outgoing}
         outgoingHasMore={dialog.linkedRefs.outgoingHasMore}
@@ -671,7 +672,7 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
         incomingHasMore={dialog.linkedRefs.incomingHasMore}
         onOpenLinkedMemory={dialog.openDetail}
         supersedeCandidate={dialog.supersedeCandidate}
-        onAcceptSupersede={dialog.acceptSupersede}
+        onAcceptSupersede={readOnly ? undefined : dialog.acceptSupersede}
         supersedeAccepting={dialog.supersedeAccepting}
         supersedeError={dialog.supersedeError}
       />
@@ -815,7 +816,7 @@ export function MemoriesTabPanel({ contextId, recallOnly = false }: MemoriesTabP
           memories={items}
           loading={loading}
           onView={handleView}
-          onDelete={handleDelete}
+          onDelete={readOnly ? undefined : handleDelete}
           page={page}
           pageSize={PAGE_SIZE}
           total={total}

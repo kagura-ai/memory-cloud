@@ -46,6 +46,13 @@ beforeEach(() => {
   });
 });
 
+it("keeps content readable while disabling mutation without callbacks", async () => {
+  render(<MemoryDetailDialog memory={makeRef()} open onOpenChange={vi.fn()} />);
+  expect(await screen.findByText("Sample body")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "delete" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "edit" })).toBeNull();
+});
+
 // ---------- Fixtures ---------------------------------------------------------
 
 function makeRef(overrides: Partial<MemoryReference> = {}): MemoryReference {

@@ -26,6 +26,18 @@ class SyncMemoryProof:
     event_id: int
     transaction: AsyncSessionTransaction | None
     memory_ids: frozenset[UUID]
+    preserved_ids: frozenset[UUID] = frozenset()
+
+
+def preserve_manual_tombstone(db: AsyncSession, event: ResourceEvent, memory: Memory) -> bool:
+    """A feed may retire search state, but cannot erase human-approved authored history."""
+    proof = db.info.get("sync_memory_proof")
+    return (
+        isinstance(proof, SyncMemoryProof)
+        and proof.transaction is db.get_transaction()
+        and proof.event_id == event.id
+        and memory.id in proof.preserved_ids
+    )
 
 
 def assert_sync_memory_ids(
@@ -111,11 +123,6 @@ async def assert_managed_memories(
     ).all()
     if len(summaries) > 20000 or sum(row[4] for row in summaries) > 2 * MAX_RUN_BYTES:
         raise ConflictError("Synchronization ownership check limit exceeded")
-    if any(
-        row[1] != str(context.created_by) or row[2] != 1 or row[3] != "resource_ingest"
-        for row in summaries
-    ):
-        raise ConflictError("Synchronization document was independently edited")
     if not summaries:
         return []
     # Reject foreign/oversized rows before loading any bodies into the worker.
@@ -128,6 +135,32 @@ async def assert_managed_memories(
             )
         ).all()
     )
+    from models.sync_installation import SyncInstallation
+    from models.sync_management import SyncManualRetirement
+    from services.sync_resume import memory_hash
+
+    retirements = (
+        await db.scalars(
+            select(SyncManualRetirement)
+            .join(SyncInstallation, SyncInstallation.id == SyncManualRetirement.installation_id)
+            .where(
+                SyncInstallation.context_id == context.id,
+                SyncInstallation.resource_pk == resource_pk,
+                SyncManualRetirement.memory_id.in_([memory.id for memory in memories]),
+            )
+        )
+    ).all()
+    proof_hashes = {
+        (proof.memory_id, proof.deleted_at, proof.memory_version, proof.content_hash)
+        for proof in retirements
+    }
+    approved = {
+        memory.id
+        for memory in memories
+        if memory.deleted_at is not None
+        and (memory.id, memory.deleted_at, memory.version, memory_hash(memory)) in proof_hashes
+    }
+    db.info["sync_approved_retirement_ids"] = frozenset(approved)
     pairs = list({(memory.resource_doc_id, memory.resource_version) for memory in memories})
     by_version = {}
     for start in range(0, len(pairs), 1000):
@@ -147,6 +180,8 @@ async def assert_managed_memories(
         ).all()
         by_version.update({(doc, version): payload for doc, version, payload in originals})
     for memory in memories:
+        if memory.id in approved:
+            continue
         try:
             payload = json.loads(memory.content or "null")
         except (ValueError, TypeError):
@@ -169,6 +204,10 @@ async def guard_sync_event(db: AsyncSession, event: ResourceEvent, context: Cont
     server receipt; a caller-supplied sync_run_id alone conveys no authority.
     The Resource/Context UPDATE locks also fence new Memory FK insertions.
     """
+    from services.sync_managed_guard import event_applicable
+
+    if not await event_applicable(db, event, context.id):
+        return False
     if not isinstance(event.event_metadata, dict) or "sync_run_id" not in event.event_metadata:
         return True
     db.info.pop("sync_memory_proof", None)
@@ -225,7 +264,10 @@ async def guard_sync_event(db: AsyncSession, event: ResourceEvent, context: Cont
         version=event.version if event.op == "delete" else None,
     )
     db.info["sync_memory_proof"] = SyncMemoryProof(
-        event.id, db.get_transaction(), frozenset(memory.id for memory in memories)
+        event.id,
+        db.get_transaction(),
+        frozenset(memory.id for memory in memories),
+        db.info.pop("sync_approved_retirement_ids", frozenset()),
     )
     return True
 

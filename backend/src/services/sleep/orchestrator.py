@@ -116,6 +116,9 @@ class SleepOrchestrator:
             return
 
         # Determine which phases to run based on sleep_mode
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(self.db, context_id)
         if sleep_mode == "edges_only":
             allowed_phases = EDGES_ONLY_PHASES
         elif sleep_mode == "suspended":

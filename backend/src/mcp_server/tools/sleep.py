@@ -918,6 +918,10 @@ async def handle_rollback_sleep_run(
             if refusal:
                 return refusal
 
+            from services.sync_managed_guard import assert_context_mutable
+
+            await assert_context_mutable(db, report.context_id)
+
             # #2547: after the context gate (a caller who cannot reach the
             # context learns nothing about the row) and before the status
             # check, so a failed or cancelled analysis row gets this answer too.

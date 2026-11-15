@@ -17,6 +17,9 @@ from utils.datetime import utcnow
 async def maintain_sync_runs(db: AsyncSession) -> None:
     """Periodic, bounded work; replay an undelivered wakeup after crashes/lost updates."""
     if not get_settings().sync_runs_enabled:
+        from services.sync_management import maintain_sync_management
+
+        await maintain_sync_management(db)
         return
     expired = list(
         (
@@ -122,6 +125,9 @@ async def maintain_sync_runs(db: AsyncSession) -> None:
         ):
             state.job_status, state.next_run_at = "queued", utcnow()
     await db.commit()
+    from services.sync_management import maintain_sync_management
+
+    await maintain_sync_management(db)
 
 
 async def hold_sync_index_receipt(db: AsyncSession, resource_pk: UUID, context_id: UUID) -> None:

@@ -225,6 +225,10 @@ async def restore_deleted_context(
 
     query = select(Context).where(Context.id == context_id)
     if not dry_run:
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(db, context_id)
+    if not dry_run:
         # Two restores of the same context must not both pass the checks.
         query = query.with_for_update()
     context = (await db.execute(query)).scalar_one_or_none()

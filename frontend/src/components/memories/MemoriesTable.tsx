@@ -28,7 +28,7 @@ interface MemoriesTableProps {
   // Optional: omit to hide the Edit icon. Same convention as MemoryDetailDialog
   // — passing nothing keeps the dialog honest (no ghost button).
   onEdit?: (memory: MemoryListItem) => void;
-  onDelete: (memory: MemoryListItem) => void;
+  onDelete?: (memory: MemoryListItem) => void;
   page: number;
   pageSize: number;
   total: number;
@@ -143,7 +143,8 @@ export function MemoriesTable({
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => onDelete(memory)}
+                      onClick={() => onDelete?.(memory)}
+                      disabled={!onDelete}
                       title={t("actionDelete")}
                       aria-label={t("actionDelete")}
                       className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"

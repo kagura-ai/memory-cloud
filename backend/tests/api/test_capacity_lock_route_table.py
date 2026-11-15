@@ -92,6 +92,35 @@ ROUTER_DEFAULTS: dict[str, str] = {
 
 # Layer 2 — content routers: every route named, no default.
 ROUTES: dict[tuple[str, str], str] = {
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/reconnect",
+    ): ALLOWED,
+    ("POST", "/api/v1/sync/installations/{installation_id}/resume-candidates"): BLOCKED,
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management",
+    ): ALLOWED,
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/stop",
+    ): ALLOWED,
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/finalize",
+    ): ALLOWED,
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/resume/preview",
+    ): ALLOWED,
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/resume/diff",
+    ): ALLOWED,
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/resume/confirm",
+    ): BLOCKED,
     ("GET", "/api/v1/sync/installations/{installation_id}/schema"): ALLOWED,
     ("POST", "/api/v1/sync/installations/{installation_id}/runs"): BLOCKED,
     (
@@ -304,6 +333,7 @@ ROUTES: dict[tuple[str, str], str] = {
 }
 
 CONTENT_ROUTERS = {
+    "sync_management",
     "sync_feeds",
     "sync_records",
     "me_workspaces",
@@ -344,6 +374,11 @@ CONTENT_ROUTERS = {
 # ContextService.create_context, AgentBootstrapService.resolve_context (#1954).
 SERVICE_GATED_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
+        ("POST", "/api/v1/sync/installations/{installation_id}/resume-candidates"),
+        (
+            "POST",
+            "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/resume/confirm",
+        ),
         # #2807: worker_target gates writes; human_feed_boundary gates human data access.
         ("POST", "/api/v1/sync/installations/{installation_id}/runs"),
         ("PUT", "/api/v1/sync/installations/{installation_id}/runs/{run_id}/chunks/{chunk_index}"),

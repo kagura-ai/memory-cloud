@@ -868,6 +868,9 @@ class ContextService:
             "resource_id",
             "sleep_mode",
         )
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(self.db, context.id)
         before_history = {field: getattr(context, field) for field in history_fields}
 
         if display_name is not None:
@@ -1222,6 +1225,11 @@ class ContextService:
         # it only ever brings the workspace closer to its context cap.
 
         # Same workspace required
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(self.db, target_context_id)
+        if delete_source:
+            await assert_context_mutable(self.db, source_context_id)
         if source.workspace_id != target.workspace_id:
             raise ValidationError("Source and target contexts must be in the same workspace.")
 
@@ -1605,6 +1613,10 @@ class ContextService:
         # Cannot delete default context
         if context.is_default:
             raise ValidationError("Cannot delete default context")
+
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(self.db, context.id)
 
         # Issue #85: Guard for non-HTTP callers (MCP tools call service directly)
         if context.is_locked:

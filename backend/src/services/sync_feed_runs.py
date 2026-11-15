@@ -70,6 +70,9 @@ async def editable(
     db: AsyncSession, authority: CredentialAuthority, row: SyncRun, feed: SyncFeed, fence: FeedFence
 ) -> None:
     """Bind every mutation to current schema, generation, config and baseline."""
+    from services.sync_managed_guard import service_mode
+
+    await service_mode(db, authority.installation)
     if row.state not in {"uploading", "prepared"} or utcnow() >= row.expires_at:
         raise ConflictError("Synchronization run is no longer editable")
     if (
@@ -90,6 +93,9 @@ async def create_run(
     db: AsyncSession, authority: CredentialAuthority, body: RunManifest
 ) -> SyncRun:
     """Stable operation identity survives retries, lost responses and new tokens."""
+    from services.sync_managed_guard import service_mode
+
+    await service_mode(db, authority.installation)
     feed = await feed_for(db, authority.installation.id, body.feed_id)
     manifest = body.model_dump(mode="json")
     request_hash = digest(manifest)

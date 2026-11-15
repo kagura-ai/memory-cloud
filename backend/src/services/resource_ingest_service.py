@@ -271,8 +271,10 @@ async def persist_events(
         get_connector_id_for_resource_pk,
         validate_connector_idempotency_key,
     )
+    from services.sync_managed_guard import assert_resource_mutable
     from utils.exceptions import ValidationError
 
+    await assert_resource_mutable(db, resource_pk)
     connector_id = await get_connector_id_for_resource_pk(db, resource_pk)
 
     result = IngestBatchResult()

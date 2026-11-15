@@ -984,6 +984,7 @@ from api.routes import (  # noqa: E402
     sleep_reports,  # Issue #179: Sleep Report admin UI
     sync_feeds,  # #2807: staged atomic feed synchronization
     sync_installations,  # #2802: workspace-owned synchronization controls
+    sync_management,  # #2808: durable feed/manual ownership transitions
     sync_records,  # #2807: explicitly scoped human projection
     sync_worker,  # #2806: installation-bound service credentials
     system,
@@ -1010,6 +1011,7 @@ app.include_router(me_workspaces.router, prefix="/api/v1")
 app.include_router(sync_installations.router, prefix="/api/v1")
 app.include_router(sync_worker.router, prefix="/api/v1")
 app.include_router(sync_feeds.router, prefix="/api/v1")
+app.include_router(sync_management.router, prefix="/api/v1")
 app.include_router(sync_records.router, prefix="/api/v1")
 
 # Manual OAuth refresh endpoint (Issue #515 - manual IdP re-sync)

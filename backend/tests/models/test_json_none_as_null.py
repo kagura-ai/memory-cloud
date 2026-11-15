@@ -93,6 +93,7 @@ def test_the_inventory_is_the_expected_one() -> None:
         "sync_chunks.records",
         "sync_records.payload",
         "sync_runs.diff",
+        "sync_resume_candidates.records",
         "users.totp_recovery_hashes",
         "workspace_connectors.channel_ids",
         "workspace_connectors.pii_guardrail_config",

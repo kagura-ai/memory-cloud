@@ -333,6 +333,9 @@ class FileStorageService:
             if ctx.workspace_id != workspace_id:
                 msg = "context_id does not belong to this workspace"
                 raise ValidationError(msg)
+            from services.sync_managed_guard import assert_context_mutable
+
+            await assert_context_mutable(self.db, context_id)
 
         # Enforce DB column limits at the service boundary so REST and MCP
         # share the same hard caps. Pydantic enforces these at REST via
@@ -603,6 +606,9 @@ class FileStorageService:
             )
 
         # Normalize caller sha256 to lowercase for symmetry with reserve_upload's
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(self.db, file.context_id)
         # canonicalization (Copilot review #574 finding). Without this, an SDK
         # that uppercases its claim would falsely trip the sha-mismatch guard
         # against the lowercase-stored reservation.
@@ -1049,6 +1055,9 @@ class FileStorageService:
             # suffices.
 
         # Reserved rows: ``reserve_upload`` already incremented the Redis
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(self.db, file.context_id)
         # counter, but no committed-bytes are tracked in
         # ``workspace_storage_usage`` yet. Release the reservation here
         # so a cancelled in-flight upload doesn't leave the workspace's
@@ -1158,6 +1167,9 @@ class FileStorageService:
         reservations and lingering ``failed`` rows go too, release their bytes, but
         are not counted — not a separate read a concurrent upload could make disagree.
         """
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(self.db, context_id)
         purged = await self.purge_live_context_files([context_id], deleted_at=deleted_at)
         return purged.visible, sum(purged.released.values())
 

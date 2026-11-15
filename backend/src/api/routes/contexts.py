@@ -44,6 +44,7 @@ from utils.exceptions import (
     ConflictError,
     ContextNotInAccessListError,
     FeatureNotAvailableError,
+    MemoryCloudException,
     NotFoundException,
     ValidationError,
 )
@@ -224,6 +225,10 @@ class ContextUpdate(BaseModel):
 
 class ContextResponse(TZAwareBaseModel):
     """Response model for context data."""
+
+    feed_management_mode: str | None = Field(
+        default=None, description="Feed ownership mode; display only"
+    )
 
     id: UUID = Field(..., description="Context UUID")
     workspace_id: UUID | None = Field(default=None, description="Workspace that owns this context")
@@ -442,6 +447,9 @@ async def list_contexts(
         }
 
     context_responses = []
+    from services.sync_managed_guard import management_modes
+
+    managed_modes = await management_modes(db, context_ids)
     linked_ids: frozenset[str] | None = None
     for context in contexts_list:
         # Issue #165: Privacy filtering
@@ -480,6 +488,7 @@ async def list_contexts(
                 resource_id=context.resource_id,  # Issue #238
                 is_locked=context.is_locked,  # Issue #85
                 writes_paused=context.id in writes_paused_ids,  # #1943
+                feed_management_mode=managed_modes.get(context.id),
                 sleep_mode=context.sleep_mode,
                 created_by=context.created_by,  # Issue #165
                 created_by_name=creator_names.get(context.created_by)
@@ -697,6 +706,10 @@ async def get_context(
     try:
         context = await service.get_context(user_id, context_id)
 
+        from services.sync_managed_guard import management_modes
+
+        managed_modes = await management_modes(db, [context.id])
+
         # Get creator name
         creator_name = None
         if context.created_by:
@@ -723,6 +736,7 @@ async def get_context(
             is_public=context.is_public,
             resource_id=context.resource_id,
             is_locked=context.is_locked,
+            feed_management_mode=managed_modes.get(context.id),
             sleep_mode=context.sleep_mode,
             created_by=context.created_by,
             created_by_name=creator_name,
@@ -1107,6 +1121,8 @@ async def update_context(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except MemoryCloudException:
+        raise
     except Exception as e:
         # Issue #271 Code Review H-2: Catch IntegrityError for resource_id duplication
         from sqlalchemy.exc import IntegrityError
@@ -1281,6 +1297,8 @@ async def delete_context(
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
+    except MemoryCloudException:
+        raise
     except Exception as e:
         if isinstance(e, ConflictError):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from e
