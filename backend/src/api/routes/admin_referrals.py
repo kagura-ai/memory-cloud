@@ -102,6 +102,7 @@ def _to_response(grant) -> AdminReferralGrantResponse:  # noqa: ANN001 - ORM row
 async def list_referral_grants(
     user: AdminUser,
     referrer_user_id: str | None = Query(default=None),
+    referred_user_id: str | None = Query(default=None),
     include_revoked: bool = Query(default=True),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -112,6 +113,8 @@ async def list_referral_grants(
     Args:
         user: Authenticated system admin.
         referrer_user_id: Restrict to a single inviter.
+        referred_user_id: Restrict to the grant a single user received
+            (#2836; exact, so at most one row).
         include_revoked: Include already-revoked rows (default true).
         limit: Page size.
         offset: Page offset.
@@ -123,6 +126,7 @@ async def list_referral_grants(
     service = ReferralService(db)
     rows, total = await service.list_grants(
         referrer_user_id=referrer_user_id,
+        referred_user_id=referred_user_id,
         include_revoked=include_revoked,
         limit=limit,
         offset=offset,

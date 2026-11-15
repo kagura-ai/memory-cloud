@@ -2342,6 +2342,12 @@ Its parameters, all optional and combined with AND:
 
 A value outside these rules answers `422` (`VAL-001`); nothing is clamped. `total` counts every row that matches the filters. Walking the pages with `offset` returns each row once while none is added; a row added meanwhile (an admin add, a redeemed closed-beta invite link) is the newest and moves the later rows down by one. Until v0.164.0 the route took no parameter and answered every row as a bare array.
 
+### Referral ledger
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/referrals` | The referral grants, newest first: `{"items", "total", "limit", "offset"}`. Filters, combined with AND: `referrer_user_id` (the grants a user earned by inviting others), `referred_user_id` (Issue #2836: the grant a user received; exact, and a user is referred at most once, so at most one row) and `include_revoked` (default `true`). `limit` 1 to 200 (default 50), `offset` from 0. The grant of an erased user is not found by `referred_user_id`. |
+
 ### Operations status
 
 | Endpoint | Purpose |

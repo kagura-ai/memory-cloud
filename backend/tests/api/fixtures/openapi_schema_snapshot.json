@@ -17004,6 +17004,21 @@
           },
           {
             "in": "query",
+            "name": "referred_user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
             "name": "include_revoked",
             "required": false,
             "schema": {
