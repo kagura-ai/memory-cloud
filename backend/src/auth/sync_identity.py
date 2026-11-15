@@ -38,11 +38,11 @@ class SyncPrincipal:
 
 
 async def load_sync_identity(
-    db: AsyncSession, token_hash: str, scope: str, *, lock: bool = False
+    db: AsyncSession, token_hash: str, scope: str, *, lock: bool = False, audit_context: bool = True
 ) -> SyncPrincipal:
     """Validate all authority scopes, optionally holding nonblocking shared locks."""
     stmt = (
-        select(OIDCToken, OIDCGrant, OIDCClient)
+        select(OIDCToken, OIDCGrant, OIDCClient, User.id)
         .select_from(OIDCToken)
         .join(OIDCGrant, OIDCGrant.id == OIDCToken.grant_id)
         .join(OIDCClient, OIDCClient.client_id == OIDCGrant.client_id)
@@ -58,10 +58,10 @@ async def load_sync_identity(
         if is_lock_not_available(exc):
             raise ConflictError("Identity authority is changing; retry") from exc
         raise
-    if row is None or any(item.revoked_at is not None for item in row):
+    if row is None or any(item.revoked_at is not None for item in row[:3]):
         raise HTTPException(401, "invalid_token", headers={"WWW-Authenticate": "Bearer"})
-    token, grant, client = row
-    if any(scope not in item.scope.split() for item in row):
+    token, grant, client = row[:3]
+    if any(scope not in item.scope.split() for item in row[:3]):
         raise HTTPException(
             403, "insufficient_scope", headers={"WWW-Authenticate": f'Bearer scope="{scope}"'}
         )
@@ -70,6 +70,15 @@ async def load_sync_identity(
         grant.user_id, client.client_id, token_hash, scope, min(expiry, grant.expires_at)
     )
     principal.assert_live()
+    from services.sync_audit import bind_actor, human_actor
+
+    if audit_context:
+        bind_actor(
+            human_actor(
+                principal.user_id, principal.client_id, account_id=row[3] if len(row) > 3 else None
+            ),
+            db,
+        )
     return principal
 
 

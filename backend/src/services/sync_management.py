@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.sync_identity import SyncPrincipal, load_sync_identity
 from auth.workspace_roles import ContextRole
 from config.settings import get_settings
-from models.auth import AuditLog, Context, User, Workspace
+from models.auth import Context, User, Workspace
 from models.management_schemas import digest
 from models.memory import Memory
 from models.resource import IndexerState, ResourceEvent
@@ -59,7 +59,9 @@ async def discard_pending_runs(db: AsyncSession, iid: UUID) -> None:
     )
 
 
-async def canonical_index_complete(db: AsyncSession, installation: SyncInstallation) -> bool:
+async def canonical_index_complete(
+    db: AsyncSession, installation: SyncInstallation, *, feed_id: UUID | None = None
+) -> bool:
     """Current rows/deletions prove completeness even when the latest run was a no-op."""
     context = await db.get(Context, installation.context_id)
     if context is None:
@@ -77,7 +79,11 @@ async def canonical_index_complete(db: AsyncSession, installation: SyncInstallat
         select(SyncRecord.id)
         .join(SyncFeed)
         .outerjoin(Memory, live)
-        .where(SyncFeed.installation_id == installation.id, SyncRecord.payload.is_not(None))
+        .where(
+            SyncFeed.installation_id == installation.id,
+            SyncRecord.payload.is_not(None),
+            *([SyncRecord.feed_id == feed_id] if feed_id is not None else []),
+        )
         .group_by(SyncRecord.id)
         .having(
             or_(
@@ -100,7 +106,11 @@ async def canonical_index_complete(db: AsyncSession, installation: SyncInstallat
         select(SyncRecord.id)
         .join(SyncFeed)
         .join(Memory, live)
-        .where(SyncFeed.installation_id == installation.id, SyncRecord.payload.is_(None))
+        .where(
+            SyncFeed.installation_id == installation.id,
+            SyncRecord.payload.is_(None),
+            *([SyncRecord.feed_id == feed_id] if feed_id is not None else []),
+        )
         .limit(1)
     )
     return invalid is None and deleted is None
@@ -203,17 +213,25 @@ def mode_view(row: SyncManagedTarget) -> dict:
 
 
 def audit_mode(
-    db: AsyncSession, installation: SyncInstallation, action: str, actor: str | None
+    db: AsyncSession,
+    installation: SyncInstallation,
+    action: str,
+    actor: str | None,
+    *,
+    target: SyncManagedTarget,
 ) -> None:
     """Attribute to the actual human or system, never to an impersonated owner."""
-    db.add(
-        AuditLog(
-            user_id=actor or "service:sync-management",
-            user_email="system:sync-management",
-            action="sync.management." + action,
-            resource=f"sync:{installation.id}",
-            user_metadata={"workspace_id": str(installation.workspace_id)},
-        )
+    from services.sync_audit import add_audit, current_actor
+
+    add_audit(
+        db,
+        "sync.management." + action,
+        current_actor(actor),
+        installation=installation,
+        mode=target.mode,
+        management_epoch=target.epoch,
+        stop_watermark=target.stop_event_id,
+        drain_generation=target.drain_generation,
     )
 
 
@@ -248,7 +266,7 @@ async def start_stopping(
     preview = await db.get(SyncResumePreview, installation.id)
     if preview is not None:
         await db.delete(preview)
-    audit_mode(db, installation, "stopping", actor)
+    audit_mode(db, installation, "stopping", actor, target=row)
     await db.flush()
     return row
 
@@ -298,7 +316,7 @@ async def finish_stopping(
     row.mode, row.event_floor, row.updated_at = "manual", row.stop_event_id, utcnow()
     row.epoch += 1
     context.sleep_mode = row.manual_sleep_mode
-    audit_mode(db, installation, "manual", actor)
+    audit_mode(db, installation, "manual", actor, target=row)
     await db.flush()
     return row
 

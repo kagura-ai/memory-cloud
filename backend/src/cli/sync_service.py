@@ -20,6 +20,18 @@ from models.public_mcp_domain import DOMAIN_SERVICE_ID  # noqa: E402
 from models.sync_installation import SyncService  # noqa: E402
 
 
+def _audit_service(db: Session, row: SyncService, action: str) -> None:
+    from services.sync_audit import AuditActor, add_audit
+
+    add_audit(
+        db,
+        action,
+        AuditActor("operator", "service:sync-service-operator", row.service_client_id),
+        service_id=row.service_id,
+        generation=row.generation,
+    )
+
+
 def register_service(
     db: Session, service_id: str, browser_client_id: str, service_client_id: str
 ) -> SyncService:
@@ -68,6 +80,7 @@ def register_service(
     )
     db.add(service)
     db.flush()
+    _audit_service(db, service, "sync.service.registered")
     return service
 
 
@@ -81,6 +94,7 @@ def set_service_enabled(db: Session, service_id: str, enabled: bool) -> SyncServ
     if service.enabled != enabled:
         service.enabled = enabled
         service.generation += 1
+        _audit_service(db, service, "sync.service.enabled" if enabled else "sync.service.disabled")
     return service
 
 

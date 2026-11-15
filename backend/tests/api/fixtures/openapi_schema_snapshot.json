@@ -181,6 +181,94 @@
         ],
         "type": "object"
       },
+      "ActivityEvent": {
+        "properties": {
+          "action": {},
+          "actor": {},
+          "at": {},
+          "authorization_id": {},
+          "context_id": {},
+          "correlation_id": {},
+          "drain_generation": {},
+          "endpoint_id": {},
+          "feed_id": {},
+          "generation": {},
+          "id": {},
+          "installation_id": {},
+          "key_id": {},
+          "management_epoch": {},
+          "manual_request_id": {},
+          "mode": {},
+          "operation_id": {},
+          "reason": {},
+          "requested_by_ref": {},
+          "resource_pk": {},
+          "run_id": {},
+          "service_id": {},
+          "stop_watermark": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "action",
+          "actor",
+          "at",
+          "authorization_id",
+          "context_id",
+          "correlation_id",
+          "drain_generation",
+          "endpoint_id",
+          "feed_id",
+          "generation",
+          "id",
+          "installation_id",
+          "key_id",
+          "management_epoch",
+          "manual_request_id",
+          "mode",
+          "operation_id",
+          "reason",
+          "requested_by_ref",
+          "resource_pk",
+          "run_id",
+          "service_id",
+          "stop_watermark",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "ActivityOverview": {
+        "properties": {
+          "allowance": {},
+          "as_of": {},
+          "contract_version": {},
+          "feed_count": {},
+          "generation": {},
+          "installation_id": {},
+          "management_epoch": {},
+          "management_mode": {},
+          "notification": {},
+          "record_count": {},
+          "state": {},
+          "stop_watermark": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "allowance",
+          "as_of",
+          "contract_version",
+          "feed_count",
+          "generation",
+          "installation_id",
+          "management_epoch",
+          "management_mode",
+          "notification",
+          "record_count",
+          "state",
+          "stop_watermark",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "AddContextMemberRequest": {
         "properties": {
           "extend_access_list": {
@@ -1271,6 +1359,21 @@
           "answered",
           "offered",
           "recorded"
+        ],
+        "type": "object"
+      },
+      "AuditActorView": {
+        "properties": {
+          "client_id": {},
+          "issuer": {},
+          "kind": {},
+          "subject_ref": {}
+        },
+        "required": [
+          "client_id",
+          "issuer",
+          "kind",
+          "subject_ref"
         ],
         "type": "object"
       },
@@ -4694,6 +4797,21 @@
         ],
         "type": "object"
       },
+      "EventPage": {
+        "properties": {
+          "as_of": {},
+          "items": {},
+          "next_before_id": {},
+          "retention_days": {}
+        },
+        "required": [
+          "as_of",
+          "items",
+          "next_before_id",
+          "retention_days"
+        ],
+        "type": "object"
+      },
       "ExploreHint": {
         "properties": {
           "memory_id": {
@@ -7031,6 +7149,21 @@
         ],
         "type": "object"
       },
+      "ManualRequestView": {
+        "properties": {
+          "expires_at": {},
+          "generation": {},
+          "operation_id": {},
+          "request_id": {}
+        },
+        "required": [
+          "expires_at",
+          "generation",
+          "operation_id",
+          "request_id"
+        ],
+        "type": "object"
+      },
       "McpNoticeCreateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -8059,6 +8192,21 @@
           "message",
           "new_value",
           "old_value"
+        ],
+        "type": "object"
+      },
+      "NotificationSignal": {
+        "properties": {
+          "dedupe_key": {},
+          "delivery_owner": {},
+          "reached": {},
+          "thresholds": {}
+        },
+        "required": [
+          "dedupe_key",
+          "delivery_owner",
+          "reached",
+          "thresholds"
         ],
         "type": "object"
       },
@@ -11876,6 +12024,99 @@
         ],
         "type": "object"
       },
+      "RunDetail": {
+        "properties": {
+          "accepted_at": {},
+          "as_of": {},
+          "changes": {},
+          "committed_at": {},
+          "declared_chunks": {},
+          "declared_records": {},
+          "expires_at": {},
+          "feed_id": {},
+          "manual_request_id": {},
+          "operation_id": {},
+          "origin": {},
+          "prepared_until": {},
+          "received_chunks": {},
+          "received_records": {},
+          "requires_approval": {},
+          "run_id": {},
+          "search": {},
+          "state": {}
+        },
+        "required": [
+          "accepted_at",
+          "as_of",
+          "changes",
+          "committed_at",
+          "declared_chunks",
+          "declared_records",
+          "expires_at",
+          "feed_id",
+          "manual_request_id",
+          "operation_id",
+          "origin",
+          "prepared_until",
+          "received_chunks",
+          "received_records",
+          "requires_approval",
+          "run_id",
+          "search",
+          "state"
+        ],
+        "type": "object"
+      },
+      "RunObservation": {
+        "properties": {
+          "accepted_at": {},
+          "changes": {},
+          "committed_at": {},
+          "declared_chunks": {},
+          "declared_records": {},
+          "expires_at": {},
+          "feed_id": {},
+          "manual_request_id": {},
+          "operation_id": {},
+          "origin": {},
+          "prepared_until": {},
+          "requires_approval": {},
+          "run_id": {},
+          "search": {},
+          "state": {}
+        },
+        "required": [
+          "accepted_at",
+          "changes",
+          "committed_at",
+          "declared_chunks",
+          "declared_records",
+          "expires_at",
+          "feed_id",
+          "manual_request_id",
+          "operation_id",
+          "origin",
+          "prepared_until",
+          "requires_approval",
+          "run_id",
+          "search",
+          "state"
+        ],
+        "type": "object"
+      },
+      "RunPage": {
+        "properties": {
+          "as_of": {},
+          "items": {},
+          "next_cursor": {}
+        },
+        "required": [
+          "as_of",
+          "items",
+          "next_cursor"
+        ],
+        "type": "object"
+      },
       "SchemaCreateRequest": {
         "properties": {
           "field_definitions": {
@@ -11921,6 +12162,16 @@
           "field_definitions",
           "resource_id",
           "schema_version"
+        ],
+        "type": "object"
+      },
+      "SearchObservation": {
+        "properties": {
+          "reason": {},
+          "state": {}
+        },
+        "required": [
+          "state"
         ],
         "type": "object"
       },
@@ -33514,6 +33765,17 @@
                     "format": "uuid",
                     "type": "string"
                   },
+                  "manual_request_id": {
+                    "anyOf": [
+                      {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "operation_id": {
                     "format": "uuid",
                     "type": "string"
@@ -38760,6 +39022,669 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SyncInstallationView"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity": {
+      "get": {
+        "operationId": "get_activity_api_v1_workspaces__workspace_id__sync_installations__installation_id__activity_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityOverview"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/events": {
+      "get": {
+        "operationId": "get_events_api_v1_workspaces__workspace_id__sync_installations__installation_id__activity_events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/requests": {
+      "post": {
+        "operationId": "request_sync_api_v1_workspaces__workspace_id__sync_installations__installation_id__activity_requests_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "operation_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "operation_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualRequestView"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/runs": {
+      "get": {
+        "operationId": "get_runs_api_v1_workspaces__workspace_id__sync_installations__installation_id__activity_runs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/runs/{run_id}": {
+      "get": {
+        "operationId": "get_run_api_v1_workspaces__workspace_id__sync_installations__installation_id__activity_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
                 }
               }
             }

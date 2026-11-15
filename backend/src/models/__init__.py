@@ -58,6 +58,7 @@ importlib.import_module("models.sync_installation")
 importlib.import_module("models.sync_credential")
 importlib.import_module("models.sync_feed")
 importlib.import_module("models.sync_management")
+importlib.import_module("models.sync_activity")
 
 __all__ = [
     "NeuralConfig",

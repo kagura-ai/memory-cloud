@@ -72,6 +72,7 @@ class RunManifest(StrictBody):
     snapshot_hash: Hash
     chunks: Annotated[StrictInt, Field(ge=0, le=1000)]
     records: Annotated[StrictInt, Field(ge=0, le=MAX_RECORDS)]
+    manual_request_id: UUID | None = None
 
 
 class FeedRecord(StrictBody):

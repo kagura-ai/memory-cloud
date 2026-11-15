@@ -985,6 +985,7 @@ from api.routes import (  # noqa: E402
     secrets,  # Issue #1128: zero-knowledge secret store
     share_keys,  # Issue #1027: context-scoped read-only TTL share key
     sleep_reports,  # Issue #179: Sleep Report admin UI
+    sync_activity,  # #2810: current-member metadata and trusted request provenance
     sync_feeds,  # #2807: staged atomic feed synchronization
     sync_installations,  # #2802: workspace-owned synchronization controls
     sync_management,  # #2808: durable feed/manual ownership transitions
@@ -1015,6 +1016,7 @@ app.include_router(sync_installations.router, prefix="/api/v1")
 app.include_router(sync_worker.router, prefix="/api/v1")
 app.include_router(sync_feeds.router, prefix="/api/v1")
 app.include_router(sync_management.router, prefix="/api/v1")
+app.include_router(sync_activity.router, prefix="/api/v1")
 app.include_router(sync_records.router, prefix="/api/v1")
 
 # Manual OAuth refresh endpoint (Issue #515 - manual IdP re-sync)

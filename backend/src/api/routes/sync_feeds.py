@@ -177,9 +177,9 @@ async def new_feed_run(installation_id: UUID, request: Request, token: Token, db
     body, _size = await bounded_body(request, RunManifest)
     async with worker(db, token, installation_id, "records:write", write=True) as (
         authority,
-        _fence,
+        fence,
     ):
-        result = runs.run_view(await runs.create_run(db, authority, body))
+        result = runs.run_view(await runs.create_run(db, authority, body, fence))
     return result
 
 

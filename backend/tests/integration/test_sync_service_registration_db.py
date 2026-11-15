@@ -3,10 +3,11 @@
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from cli.sync_service import register_service, set_service_enabled
+from models.auth import AuditLog
 from models.oidc import OIDCClient
 from models.sync_installation import SyncService
 from tests.integration.test_alembic_migrations import _sync_engine
@@ -37,6 +38,18 @@ def test_operator_binding_and_generation_are_idempotent_and_separate_from_oidc(a
             assert set_service_enabled(db, sid, False).generation == 2
             assert set_service_enabled(db, sid, False).generation == 2
             assert set_service_enabled(db, sid, True).generation == 3
+        with Session(engine) as db:
+            events = db.scalars(
+                select(AuditLog)
+                .where(AuditLog.resource == "sync-service:" + sid)
+                .order_by(AuditLog.id)
+            ).all()
+            assert [row.action for row in events] == [
+                "sync.service.registered",
+                "sync.service.disabled",
+                "sync.service.enabled",
+            ]
+            assert [row.user_metadata["generation"] for row in events] == [1, 2, 3]
         with pytest.raises(ValueError, match="immutable"), Session(engine) as db, db.begin():
             register_service(db, sid, other, worker)
         with pytest.raises(ValueError, match="OIDC login"), Session(engine) as db, db.begin():
@@ -47,4 +60,5 @@ def test_operator_binding_and_generation_are_idempotent_and_separate_from_oidc(a
         with Session(engine) as db, db.begin():
             db.execute(delete(SyncService).where(SyncService.service_id == sid))
             db.execute(delete(OIDCClient).where(OIDCClient.client_id.in_([browser, other])))
+            db.execute(delete(AuditLog).where(AuditLog.resource == "sync-service:" + sid))
         engine.dispose()
