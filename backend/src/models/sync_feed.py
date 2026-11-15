@@ -81,6 +81,12 @@ class SyncRun(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     committed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
+    @property
+    def manual_request_id(self) -> UUID | None:
+        """Immutable non-secret provenance survives finite request retention."""
+        value = self.manifest.get("manual_request_id")
+        return UUID(value) if isinstance(value, str) else None
+
 
 class SyncChunk(Base):
     """Finite staging content; immutable digest receipts survive payload purging."""

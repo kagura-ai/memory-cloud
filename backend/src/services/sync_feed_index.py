@@ -8,7 +8,6 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from models.memory import Memory
 from models.resource import IndexerState, Resource
 from models.sync_feed import SyncChunk, SyncFeed, SyncIndexOutbox, SyncRecord, SyncRun
 from utils.datetime import utcnow
@@ -16,7 +15,11 @@ from utils.datetime import utcnow
 
 async def maintain_sync_runs(db: AsyncSession) -> None:
     """Periodic, bounded work; replay an undelivered wakeup after crashes/lost updates."""
+    from services.sync_audit import prune_activity
+
+    await prune_activity(db)
     if not get_settings().sync_runs_enabled:
+        await db.commit()
         from services.sync_management import maintain_sync_management
 
         await maintain_sync_management(db)
@@ -152,68 +155,36 @@ async def index_status(db: AsyncSession, row: SyncRun, feed: SyncFeed) -> str:
         return "not_committed"
     if feed.revision != row.base_revision + 1:
         return "superseded"
-    outbox = await db.get(SyncIndexOutbox, row.id)
-    if outbox is None:
-        return "unchanged"
-    state = await db.scalar(
-        select(IndexerState).where(
-            IndexerState.resource_pk == outbox.resource_pk,
-            IndexerState.context_id == outbox.context_id,
-        )
-    )
-    if state is None or state.last_offset < outbox.last_event_id:
-        return "failed" if state is not None and state.job_status == "failed" else "pending"
-    resource = await db.get(Resource, outbox.resource_pk)
-    if resource is None:
+    from models.sync_installation import SyncInstallation
+    from services.sync_management import canonical_index_complete
+
+    installation = await db.get(SyncInstallation, feed.installation_id)
+    if installation is None:
         return "failed"
-    records = (
-        await db.scalars(
-            select(SyncRecord).where(SyncRecord.feed_id == feed.id, SyncRecord.payload.is_not(None))
-        )
-    ).all()
-    for start in range(0, len(records), 100):
-        batch = records[start : start + 100]
-        memories = (
-            await db.scalars(
-                select(Memory)
-                .where(
-                    Memory.context_id == outbox.context_id,
-                    Memory.resource_id == resource.resource_id,
-                    Memory.resource_doc_id.in_([item.doc_id for item in batch]),
-                    Memory.deleted_at.is_(None),
-                )
-                .limit(len(batch) + 1)
-            )
-        ).all()
-        by_doc = {memory.resource_doc_id: memory for memory in memories}
-        if (
-            len(memories) != len(batch)
-            or len(by_doc) != len(batch)
-            or any(
-                (
-                    by_doc[item.doc_id].resource_version != item.version
-                    or by_doc[item.doc_id].embedding_status != "success"
-                    or by_doc[item.doc_id].version != 1
-                    or by_doc[item.doc_id].source != "resource_ingest"
-                )
-                for item in batch
-            )
-        ):
-            return "failed"
-    deleted = [item["external_id"] for item in (row.diff or []) if item["op"] == "delete"]
-    if deleted:
-        count = await db.scalar(
-            select(func.count())
-            .select_from(Memory)
-            .join(SyncRecord, (Memory.resource_doc_id == SyncRecord.doc_id))
-            .where(
-                SyncRecord.feed_id == feed.id,
-                SyncRecord.external_id.in_(deleted),
-                Memory.context_id == outbox.context_id,
-                Memory.resource_id == resource.resource_id,
-                Memory.deleted_at.is_(None),
+    outbox = await db.get(SyncIndexOutbox, row.id)
+    watermark = (
+        outbox.last_event_id
+        if outbox is not None
+        else (
+            await db.scalar(
+                select(func.max(SyncRecord.last_event_id)).where(SyncRecord.feed_id == feed.id)
             )
         )
-        if count:
-            return "failed"
-    return "complete"
+        or 0
+    )
+    state = (
+        await db.execute(
+            select(IndexerState.last_offset, IndexerState.job_status).where(
+                IndexerState.resource_pk == installation.resource_pk,
+                IndexerState.context_id == installation.context_id,
+            )
+        )
+    ).first()
+    if watermark and (state is None or state.last_offset < watermark):
+        return "failed" if state is not None and state.job_status == "failed" else "pending"
+    # A shared job's historical/other-feed errors cannot override actual
+    # current canonical proof for this feed. Stop/drain retains its stricter
+    # context-wide failure barrier independently.
+    if not await canonical_index_complete(db, installation, feed_id=feed.id):
+        return "failed"
+    return "unchanged" if outbox is None else "complete"

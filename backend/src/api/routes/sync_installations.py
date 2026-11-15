@@ -70,7 +70,9 @@ class SyncControlRoute(APIRoute):
             response.headers.update({"Cache-Control": "no-store", "Pragma": "no-cache"})
             return response
 
-        return handler
+        from services.sync_audit import audited_http
+
+        return audited_http(handler)
 
 
 async def sync_control_enabled() -> None:

@@ -135,7 +135,7 @@ def _managed_target_guards_need_a_session(monkeypatch):
     """
     from unittest.mock import Mock
 
-    from services import sync_managed_guard, sync_management
+    from services import sync_audit, sync_managed_guard, sync_management
 
     real_maintenance = sync_management.maintain_sync_management
 
@@ -145,6 +145,14 @@ def _managed_target_guards_need_a_session(monkeypatch):
         return None
 
     monkeypatch.setattr(sync_management, "maintain_sync_management", guarded_maintenance)
+    real_prune = sync_audit.prune_activity
+
+    async def guarded_prune(db, **kwargs):
+        if isinstance(db, AsyncSession) and not isinstance(db, Mock):
+            return await real_prune(db, **kwargs)
+        return None
+
+    monkeypatch.setattr(sync_audit, "prune_activity", guarded_prune)
 
     for name in (
         "assert_context_mutable",

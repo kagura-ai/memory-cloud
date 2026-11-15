@@ -119,6 +119,15 @@ historical actor FKs become NULL on account erasure and installation/workspace
 deletion cascades the metadata. Resume bodies are raw, expire within 24 hours
 (candidates) or 15 minutes (previews), and are purged on replacement/consumption.
 
+Authenticated manual intent (`sync_manual_requests`) is operational attribution,
+not content or worker authority. It is valid for at most 15 minutes (bounded by
+the original human login) and retained for 90 days; user/token deletion sets its
+foreign keys to NULL. Workspace/installation deletion cascades it. A run keeps
+its non-sensitive request UUID in its immutable manifest after retention; no
+human credentials or raw user IDs are copied there. Versioned sync activity in
+`audit_logs` uses existing erasure-aware actor columns, never nested raw human
+identifiers, and has a 90-day protocol-specific retention window.
+
 Service credential clients/public signing keys, hashed access-token verifiers
 and assertion replay receipts (`sync_credential_clients`, `sync_signing_keys`,
 `sync_access_tokens`, `sync_assertion_uses`, #2806) are operational auth state.

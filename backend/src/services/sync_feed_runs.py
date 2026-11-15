@@ -7,6 +7,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.management_schemas import digest
+from models.sync_activity import SyncManualRun
 from models.sync_feed import SyncChunk, SyncFeed, SyncRecord, SyncRun
 from models.sync_feed_schemas import (
     MAX_RUN_BYTES,
@@ -87,17 +88,25 @@ async def editable(
     if schema is None or schema.schema_version != row.manifest["schema_version"]:
         raise ConflictError("Approved synchronization schema version changed")
     fence.deadlines.append(row.expires_at)
+    from services.sync_requests import validate_run_request
+
+    await validate_run_request(db, authority, row, fence)
 
 
 async def create_run(
-    db: AsyncSession, authority: CredentialAuthority, body: RunManifest
+    db: AsyncSession,
+    authority: CredentialAuthority,
+    body: RunManifest,
+    fence: FeedFence | None = None,
 ) -> SyncRun:
     """Stable operation identity survives retries, lost responses and new tokens."""
     from services.sync_managed_guard import service_mode
 
     await service_mode(db, authority.installation)
     feed = await feed_for(db, authority.installation.id, body.feed_id)
-    manifest = body.model_dump(mode="json")
+    manifest = body.model_dump(
+        mode="json", exclude={"manual_request_id"} if body.manual_request_id is None else set()
+    )
     request_hash = digest(manifest)
     old = await db.scalar(
         select(SyncRun).where(SyncRun.feed_id == feed.id, SyncRun.operation_id == body.operation_id)
@@ -131,6 +140,20 @@ async def create_run(
         raise ConflictError("Approved synchronization schema version changed")
     if pending is not None and pending >= 4:
         raise ConflictError("Too many active synchronization runs")
+    if body.manual_request_id is not None:
+        from services.sync_requests import validate_request
+
+        if fence is None:
+            raise RuntimeError("Manual provenance requires a transaction deadline fence")
+        await validate_request(db, authority, body.manual_request_id, fence=fence)
+        used = await db.scalar(
+            select(SyncManualRun.run_id).where(
+                SyncManualRun.request_id == body.manual_request_id,
+                SyncManualRun.feed_id == feed.id,
+            )
+        )
+        if used is not None:
+            raise ConflictError("Manual request already has a run for this feed")
     row = SyncRun(
         feed_id=feed.id,
         operation_id=body.operation_id,
@@ -143,6 +166,20 @@ async def create_run(
     )
     db.add(row)
     await db.flush()
+    if body.manual_request_id is not None:
+        db.add(SyncManualRun(run_id=row.id, request_id=body.manual_request_id, feed_id=feed.id))
+    from services.sync_audit import add_audit, service_actor
+
+    add_audit(
+        db,
+        "sync.run.accepted",
+        service_actor(authority),
+        installation=authority.installation,
+        feed_id=feed.id,
+        run_id=row.id,
+        operation_id=row.operation_id,
+        manual_request_id=row.manual_request_id,
+    )
     return row
 
 
@@ -281,6 +318,18 @@ async def prepare_run(
     row.approval_id = row.approved_by = row.approval_epoch = None
     row.state = "prepared"
     row.requires_approval = destructive(diff, previous_count)
+    from services.sync_audit import add_audit, service_actor
+
+    add_audit(
+        db,
+        "sync.run.prepared",
+        service_actor(authority),
+        installation=authority.installation,
+        feed_id=feed.id,
+        run_id=row.id,
+        operation_id=row.operation_id,
+        manual_request_id=row.manual_request_id,
+    )
     return row
 
 
@@ -294,8 +343,22 @@ async def abort_run(db: AsyncSession, authority: CredentialAuthority, rid: UUID)
     row, _feed = await run_for(db, authority, rid)
     if row.state == "committed":
         raise ConflictError("Synchronization run is already committed")
+    if row.state == "aborted":
+        return row
     row.state = "aborted"
     await clear_staging(db, row)
+    from services.sync_audit import add_audit, service_actor
+
+    add_audit(
+        db,
+        "sync.run.aborted",
+        service_actor(authority),
+        installation=authority.installation,
+        feed_id=row.feed_id,
+        run_id=row.id,
+        operation_id=row.operation_id,
+        manual_request_id=row.manual_request_id,
+    )
     return row
 
 
