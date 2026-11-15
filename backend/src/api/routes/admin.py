@@ -6,7 +6,7 @@ Issue #106: Refactored to use consolidated utilities
 """
 
 from datetime import datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
@@ -156,9 +156,14 @@ class UserListResponse(BaseModel):
 
 
 class RoleUpdateRequest(BaseModel):
-    """Request to update user role."""
+    """Request to update user role.
 
-    role: str
+    ``admin`` and ``user`` are the system roles the ``valid_role`` CHECK of
+    ``users`` allows; any other name answers 422 before a statement runs
+    (#2854).
+    """
+
+    role: Literal["admin", "user"]
 
 
 # ============================================================================
@@ -507,7 +512,7 @@ async def list_users(
 
 @router.get("/users/{user_id}/stats", response_model=UserStats)
 async def get_user_stats(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -599,7 +604,7 @@ async def get_user_stats(
 
 @router.get("/users/{user_id}")
 async def get_user_detail(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -841,6 +846,7 @@ async def update_user_role(
 ):
     """Update user role (Admin-only).
 
+    ``role`` is ``admin`` or ``user``; any other name answers 422 (#2854).
     Taking the admin role from an account answers 403 `ADMIN-001` when the
     account is the initial system administrator or the last remaining one,
     as `DELETE /api/v1/admin/system-admins/{user_id}` does (#2828). A caller
@@ -848,14 +854,6 @@ async def update_user_role(
     nothing.
     """
     admin_id = get_user_id(admin)
-
-    # Validate role
-    valid_roles = ["admin", "user", "read_only"]
-    if request.role not in valid_roles:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}",
-        )
 
     # Prevent self-demotion
     if admin_id == user_id and request.role != "admin":
@@ -913,7 +911,7 @@ async def update_user_role(
     response_model=UpdateWorkspaceSlotBonusResponse,
 )
 async def update_workspace_slot_bonus(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     request: UpdateWorkspaceSlotBonusRequest,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
@@ -1122,8 +1120,13 @@ class UserDeleteRequest(BaseModel):
     context_transfers overrides that choice for individual contexts.
     """
 
-    workspace_transfers: dict[UUID, str] = Field(default_factory=dict)
-    context_transfers: dict[UUID, str] = Field(default_factory=dict)
+    # The successor's user id; no stored id holds a NUL (#2857).
+    workspace_transfers: dict[UUID, Annotated[str, Field(pattern=NO_NUL_PATTERN)]] = Field(
+        default_factory=dict
+    )
+    context_transfers: dict[UUID, Annotated[str, Field(pattern=NO_NUL_PATTERN)]] = Field(
+        default_factory=dict
+    )
     delete_workspaces: list[UUID] = Field(
         default_factory=list,
         description=(
@@ -1138,7 +1141,7 @@ class UserDeleteRequest(BaseModel):
 
 @router.delete("/users/{user_id}")
 async def delete_user(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     request: UserDeleteRequest | None = None,
@@ -1177,6 +1180,7 @@ async def delete_user(
     from services.system_admin_service import SystemAdminService
     from services.user_deletion_service import (
         delete_user_rows,
+        deletion_users,
         finish_user_deletion,
         transfer_user_ownership,
     )
@@ -1185,11 +1189,22 @@ async def delete_user(
     if admin_id == user_id:
         raise AdminProtectionError("Cannot delete your own account", reason="self_deletion")
     service = SystemAdminService(db)
-    can_delete, reason = await service.can_delete_admin(user_id)
-    if not can_delete:
-        raise AdminProtectionError(reason, reason="admin_protected")
     request = request or UserDeleteRequest()
     try:
+        # #2855: the initial/last admin check, in the deletion's transaction
+        # and under the role-change lock. Its statement also takes every
+        # ``users`` row the transfer locks below, so those only strengthen
+        # rows already held. A refusal rolls back and releases the locks.
+        can_delete, reason = await service.can_delete_admin(
+            user_id,
+            also_lock=deletion_users(
+                user_id,
+                workspace_transfers=request.workspace_transfers,
+                context_transfers=request.context_transfers,
+            ),
+        )
+        if not can_delete:
+            raise AdminProtectionError(reason, reason="admin_protected")
         transferred = await transfer_user_ownership(
             db,
             user_id,
@@ -1285,12 +1300,13 @@ class AdminErasureRequestBody(BaseModel):
     """
 
     reason_code: AdminErasureReasonCode
-    reason_detail: str | None = None
+    # #2857: a NUL answers 422 (no stored text holds one).
+    reason_detail: Annotated[str | None, Field(pattern=NO_NUL_PATTERN)] = None
 
 
 @router.post("/users/{user_id}/erase")
 async def admin_force_erase_user(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     body: AdminErasureRequestBody,
     request: Request,
     admin: dict = Depends(require_admin),
@@ -1379,7 +1395,7 @@ class ForceTransferOwnershipRequest(BaseModel):
     justification is a red flag; it is recorded verbatim in the mandatory audit.
     """
 
-    target_user_id: str = Field(..., min_length=1, max_length=255)
+    target_user_id: str = Field(..., min_length=1, max_length=255, pattern=NO_NUL_PATTERN)
     reason: str = Field(
         ...,
         min_length=3,
@@ -1742,8 +1758,16 @@ async def _notify_force_transfer_best_effort(
 async def retry_failed_embeddings(
     user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    context_id: str | None = Query(None, description="Filter by context ID (UUID)"),
-    workspace_id: str | None = Query(None, description="Filter by workspace ID (UUID)"),
+    context_id: Annotated[
+        UUID | None,
+        BeforeValidator(_empty_is_absent),
+        Query(description="Filter by context ID (UUID)"),
+    ] = None,
+    workspace_id: Annotated[
+        UUID | None,
+        BeforeValidator(_empty_is_absent),
+        Query(description="Filter by workspace ID (UUID)"),
+    ] = None,
     include_erased: bool = Query(
         False, description="Explicitly restore scrubbed erased-author memories"
     ),
@@ -1753,8 +1777,6 @@ async def retry_failed_embeddings(
     Erased-author survivors are excluded by default. ``include_erased=true``
     explicitly restores them under their pseudonym with scrubbed details.
     """
-    from uuid import UUID as PyUUID
-
     from sqlalchemy import case, func, update
 
     # Require at least one filter to prevent accidental mass retry
@@ -1763,14 +1785,6 @@ async def retry_failed_embeddings(
             status_code=400,
             detail="At least one of context_id or workspace_id is required",
         )
-
-    # Validate UUID formats
-    for param_name, param_val in [("context_id", context_id), ("workspace_id", workspace_id)]:
-        if param_val:
-            try:
-                PyUUID(param_val)
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=f"Invalid {param_name} format") from e
 
     if include_erased:
         from db.point_writer_lock import hold_point_writer_lock
@@ -1819,8 +1833,8 @@ async def retry_failed_embeddings(
     logger.info(
         "admin_retry_failed_embeddings",
         reset_count=reset_count,
-        context_id=context_id,
-        workspace_id=workspace_id,
+        context_id=str(context_id) if context_id else None,
+        workspace_id=str(workspace_id) if workspace_id else None,
         admin_user_id=get_user_id(user),
     )
 
@@ -2292,7 +2306,7 @@ class ContextRecoveryRequest(BaseModel):
 
     context_id: str
     workspace_id: str | None = None
-    context_name: str | None = None
+    context_name: str | None = Field(None, pattern=NO_NUL_PATTERN)
     dry_run: bool = True
 
 

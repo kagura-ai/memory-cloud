@@ -34,6 +34,12 @@ from utils.exceptions import AdminProtectionError
 INITIAL_ADMIN_MESSAGE = (
     "Cannot demote the initial system administrator. This is a protected account."
 )
+# The rows the role-change lock takes: the admins that count and the target.
+LOCKED_ROWS = (
+    "WHERE users.role = 'admin' AND NOT (EXISTS (SELECT * FROM erasure_requests "
+    "WHERE erasure_requests.user_id = users.user_id AND erasure_requests.status IN "
+    "('pending', 'cooling_off', 'in_progress'))) OR users.user_id = '2002'"
+)
 LAST_ADMIN_MESSAGE = (
     "Cannot demote the last remaining system administrator. At least one admin must exist."
 )
@@ -158,13 +164,10 @@ def _assert_refused(response, session: MagicMock, message: str) -> None:
 # --- the initial admin -------------------------------------------------------
 
 
-@pytest.mark.parametrize("new_role", ["user", "read_only"])
-def test_put_moving_the_initial_admin_away_from_admin_is_403_admin_001(
-    serve, session_admin, new_role
-):
+def test_put_moving_the_initial_admin_away_from_admin_is_403_admin_001(serve, session_admin):
     initial = account("2002", "admin", initial=True)
     session = role_change_session(account("1001", "admin"), initial)
-    response = serve(session).put("/api/v1/admin/users/2002/role", json={"role": new_role})
+    response = serve(session).put("/api/v1/admin/users/2002/role", json={"role": "user"})
     _assert_refused(response, session, INITIAL_ADMIN_MESSAGE)
     assert initial.role == "admin"
 
@@ -199,7 +202,7 @@ def _take_admin_role(client: TestClient, route: str, user_id: str, headers: dict
     )
 
 
-ROUTES = ["PUT:user", "PUT:read_only", "DELETE"]
+ROUTES = ["PUT:user", "DELETE"]
 
 
 @pytest.mark.parametrize("route", ROUTES)
@@ -245,23 +248,19 @@ def test_the_last_admin_is_kept_for_an_operator_in_service_mode_on_both_routes(
     session.commit.assert_not_awaited()
 
 
-@pytest.mark.parametrize("new_role", ["user", "read_only"])
-def test_put_on_the_last_admin_is_403_admin_001_in_session_mode(serve, session_admin, new_role):
+def test_put_on_the_last_admin_is_403_admin_001_in_session_mode(serve, session_admin):
     last = account("2002", "admin")
     session = role_change_session(last, account("3003", "user"))
-    response = serve(session).put("/api/v1/admin/users/2002/role", json={"role": new_role})
+    response = serve(session).put("/api/v1/admin/users/2002/role", json={"role": "user"})
     _assert_refused(response, session, LAST_ADMIN_MESSAGE)
     assert last.role == "admin"
 
 
-@pytest.mark.parametrize("new_role", ["user", "read_only"])
-def test_put_on_the_last_admin_is_403_admin_001_for_an_operator_in_service_mode(
-    serve, operator, new_role
-):
+def test_put_on_the_last_admin_is_403_admin_001_for_an_operator_in_service_mode(serve, operator):
     last = account("2002", "admin")
     session = role_change_session(last)
     response = serve(session).put(
-        "/api/v1/admin/users/2002/role", json={"role": new_role}, headers=operator
+        "/api/v1/admin/users/2002/role", json={"role": "user"}, headers=operator
     )
     _assert_refused(response, session, LAST_ADMIN_MESSAGE)
     assert last.role == "admin"
@@ -303,9 +302,9 @@ def test_put_demotes_one_of_two_admins_and_refuses_the_one_left(serve, operator)
 
 @pytest.mark.parametrize(
     ("old_role", "new_role"),
-    [("user", "read_only"), ("read_only", "user"), ("user", "admin"), ("read_only", "admin")],
+    [("user", "user"), ("user", "admin")],
 )
-def test_changes_between_user_and_read_only_and_promotions_keep_their_audit_row(
+def test_a_plain_write_and_a_promotion_keep_their_audit_row(
     serve, session_admin, old_role, new_role
 ):
     target = account("2002", old_role)
@@ -334,10 +333,10 @@ def test_changes_between_user_and_read_only_and_promotions_keep_their_audit_row(
     session.commit.assert_awaited_once()
 
 
-@pytest.mark.parametrize("new_role", ["user", "read_only"])
 def test_demoting_a_non_initial_admin_while_another_admin_exists_keeps_its_audit_row(
-    serve, session_admin, new_role
+    serve, session_admin
 ):
+    new_role = "user"
     target = account("2002", "admin")
     session = role_change_session(account("1001", "admin", initial=True), target)
     response = serve(session).put("/api/v1/admin/users/2002/role", json={"role": new_role})
@@ -362,11 +361,18 @@ def test_self_demotion_is_refused_before_any_statement(serve, session_admin):
     assert session.statements == []
 
 
-def test_an_invalid_role_is_refused_before_any_statement(serve, session_admin):
-    session = role_change_session(account("2002", "user"))
-    response = serve(session).put("/api/v1/admin/users/2002/role", json={"role": "owner"})
-    assert response.status_code == 400
+@pytest.mark.parametrize("role", ["read_only", "owner", "Admin", "", None, 1])
+def test_an_invalid_role_is_422_before_any_statement(serve, session_admin, role):
+    # #2854: ``admin`` and ``user`` are the only system roles the
+    # ``valid_role`` CHECK of ``users`` allows.
+    target = account("2002", "user")
+    session = role_change_session(target)
+    response = serve(session).put("/api/v1/admin/users/2002/role", json={"role": role})
+    assert response.status_code == 422, response.text
     assert session.statements == []
+    assert target.role == "user"
+    session.add.assert_not_called()
+    session.commit.assert_not_awaited()
 
 
 def test_put_for_an_unknown_user_is_404_and_writes_nothing(serve, session_admin):
@@ -392,10 +398,10 @@ def test_both_routes_go_through_the_shared_check(serve, session_admin, monkeypat
     session = role_change_session(account("2002", "admin"), account("3003", "admin"))
     client = serve(session)
 
-    put = client.put("/api/v1/admin/users/2002/role", json={"role": "read_only"})
+    put = client.put("/api/v1/admin/users/2002/role", json={"role": "user"})
     demote = client.delete("/api/v1/admin/system-admins/2002")
 
-    assert calls == [("2002", "read_only"), ("2002", "user")]
+    assert calls == [("2002", "user"), ("2002", "user")]
     assert put.status_code == demote.status_code == 403
     assert put.json()["message"] == demote.json()["message"] == "refused by the shared check"
     # Neither route read or wrote a row on its own.
@@ -405,7 +411,7 @@ def test_both_routes_go_through_the_shared_check(serve, session_admin, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("new_role", ["admin", "user", "read_only"])
+@pytest.mark.parametrize("new_role", ["admin", "user"])
 async def test_the_lock_is_the_first_statement_of_every_role_change(new_role):
     session = role_change_session(account("1001", "admin"), account("2002", "user"))
     target = await SystemAdminService(session).lock_for_role_change("2002", new_role)
@@ -421,8 +427,9 @@ async def test_the_lock_statement_orders_by_user_id_and_takes_for_no_key_update(
     await SystemAdminService(session).lock_for_role_change("2002", "user")
     lock = session.statements[0]
     sql = " ".join(_sql(lock).split())
-    # The admin rows AND the target, in one statement.
-    assert "WHERE users.role = 'admin' OR users.user_id = '2002'" in sql
+    # The admin rows that count (none with an open erasure request, #2855)
+    # AND the target, in one statement.
+    assert LOCKED_ROWS in sql
     assert sql.endswith("ORDER BY users.user_id FOR NO KEY UPDATE")
     # A row the session already holds is refreshed from the locked read.
     assert lock.get_execution_options().get("populate_existing") is True

@@ -77,7 +77,7 @@ class RevokeRequest(BaseModel):
     ``workspace_slot_bonus``, where a non-negative delta is harmless).
     """
 
-    reason: str = Field(min_length=1, max_length=500)
+    reason: str = Field(min_length=1, max_length=500, pattern=NO_NUL_PATTERN)
 
 
 def _to_response(grant) -> AdminReferralGrantResponse:  # noqa: ANN001 - ORM row

@@ -260,8 +260,8 @@ class TestDemoteSystemAdmin:
 OPERATOR = {"user_id": "operator:ops@example.com", "email": "operator:ops@example.com"}
 
 # The two routes that take the admin role from an account (#2828). The role
-# PUT is tried with both roles it can move an admin to.
-ROUTES = ["put:user", "put:read_only", "demote"]
+# PUT moves an admin to ``user``, the only other system role (#2854).
+ROUTES = ["put:user", "demote"]
 
 
 async def _take_admin_role(db_session, route: str, user_id: str):

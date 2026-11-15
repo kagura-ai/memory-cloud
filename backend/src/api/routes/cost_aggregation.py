@@ -50,6 +50,8 @@ from services.cost_aggregation_service import (
 )
 from services.label_resolver import resolve_user_labels, resolve_workspace_names
 from services.permission_service import PermissionService
+from utils.exceptions import ValidationError
+from utils.query_bounds import NO_NUL_PATTERN
 
 # No router-level tags so each route picks its own group ("admin" vs
 # "workspaces") in the OpenAPI docs without duplicating "cost-aggregation".
@@ -160,6 +162,10 @@ def _parse_window(
             status_code=400,
             detail=f"Invalid period {period!r}; must be one of {list(VALID_PERIODS)}",
         )
+    # The window ends at the start of the day after ``to``; the last date
+    # there is has no day after it.
+    if to == date.max:
+        raise ValidationError("'to' is out of range", field="to")
     if from_ > to:
         raise HTTPException(
             status_code=400,
@@ -301,7 +307,9 @@ async def admin_cost_aggregation(
     from_: date = Query(..., alias="from", description="Inclusive lower-bound date"),
     to: date = Query(..., description="Inclusive upper-bound date"),
     workspace_id: UUID | None = Query(None, description="Filter to a single workspace"),
-    user_id: str | None = Query(None, description="Filter to a single user"),
+    user_id: str | None = Query(
+        None, pattern=NO_NUL_PATTERN, description="Filter to a single user"
+    ),
     source: str | None = Query(None, description=f"Filter by source: {list(COST_SOURCES)}"),
     paid_by: str | None = Query(
         None, description=f"Filter by billing classification: {list(SLEEP_REPORT_PAID_BY_VALUES)}"
@@ -356,7 +364,9 @@ async def workspace_cost_aggregation(
     period: str = Query("day", description="Aggregation period: day | week | month"),
     from_: date = Query(..., alias="from", description="Inclusive lower-bound date"),
     to: date = Query(..., description="Inclusive upper-bound date"),
-    user_id: str | None = Query(None, description="Filter to a single user"),
+    user_id: str | None = Query(
+        None, pattern=NO_NUL_PATTERN, description="Filter to a single user"
+    ),
     source: str | None = Query(None, description=f"Filter by source: {list(COST_SOURCES)}"),
     paid_by: str | None = Query(
         None, description=f"Filter by billing classification: {list(SLEEP_REPORT_PAID_BY_VALUES)}"

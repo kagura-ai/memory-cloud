@@ -3130,7 +3130,6 @@
         "roles": {
           "admin": "Admin",
           "user": "User",
-          "read_only": "Read-only",
           "owner": "Owner",
           "member": "Member",
           "viewer": "Viewer",

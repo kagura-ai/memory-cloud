@@ -12,6 +12,7 @@ NO_NUL_PATTERN = r"^[^\x00]*$"
 
 # INTEGER and BIGINT columns (ids, cursors).
 MAX_INT32 = 2**31 - 1
+MIN_BIGINT = -(2**63)
 MAX_BIGINT = 2**63 - 1
 
 # An OFFSET is a 64-bit integer.

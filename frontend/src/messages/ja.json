@@ -3130,7 +3130,6 @@
         "roles": {
           "admin": "管理者",
           "user": "ユーザー",
-          "read_only": "閲覧専用",
           "owner": "オーナー",
           "member": "メンバー",
           "viewer": "閲覧者",

@@ -50,9 +50,9 @@ def test_session_admin_role_change_is_audited(client, db, monkeypatch):
         return {"user_id": "1001", "email": "admin@example.com", "role": "admin"}
 
     app.dependency_overrides[get_current_user_optional] = _admin
-    response = client.put("/api/v1/admin/users/2002/role", json={"role": "read_only"})
+    response = client.put("/api/v1/admin/users/2002/role", json={"role": "admin"})
     assert response.status_code == 200, response.text
-    assert db.target.role == "read_only"
+    assert db.target.role == "admin"
     [row] = _audit_rows(db)
     assert row.action == "system_role_update"
     assert row.user_email == "admin@example.com"
@@ -62,7 +62,7 @@ def test_session_admin_role_change_is_audited(client, db, monkeypatch):
         "actor_user_id": "1001",
         "target_user_id": "2002",
         "old_role": "user",
-        "new_role": "read_only",
+        "new_role": "admin",
     }
     db.commit.assert_awaited_once()
 

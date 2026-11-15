@@ -31,6 +31,7 @@ from services.worker_app_identity import (
 from utils.datetime import to_utc_iso
 from utils.exceptions import ConflictError, MemoryCloudException, WorkerAppOperationError
 from utils.logger import get_logger
+from utils.query_bounds import NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -57,12 +58,12 @@ class WorkerAppAdminResponse(TZAwareBaseModel):
 class WorkerAppCreateRequest(BaseModel):
     platform: Platform
     app_key: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
-    display_name: str = Field(..., min_length=1, max_length=255)
+    display_name: str = Field(..., min_length=1, max_length=255, pattern=NO_NUL_PATTERN)
     signing_secret: str = Field(..., min_length=1, max_length=512)
 
 
 class WorkerAppUpdateRequest(BaseModel):
-    display_name: str | None = Field(None, min_length=1, max_length=255)
+    display_name: str | None = Field(None, min_length=1, max_length=255, pattern=NO_NUL_PATTERN)
     status: AppStatus | None = None
 
     @model_validator(mode="after")

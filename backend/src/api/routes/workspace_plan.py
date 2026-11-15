@@ -174,7 +174,7 @@ class PlanTierFeature(BaseModel):
 
 @router.get("/workspaces/{workspace_id}/plan", response_model=WorkspacePlanInfo)
 async def get_workspace_plan(
-    workspace_id: str,
+    workspace_id: UUID,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ):
@@ -184,7 +184,7 @@ async def get_workspace_plan(
 
     Returns current plan, usage stats, quotas, and upgrade/downgrade options.
     """
-    workspace_uuid = UUID(workspace_id)
+    workspace_uuid = workspace_id
 
     # Issue #246: Owner-only access
     perm_service = PermissionService(db)

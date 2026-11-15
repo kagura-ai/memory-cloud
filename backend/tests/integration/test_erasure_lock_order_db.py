@@ -14,7 +14,13 @@ identity-link lock and nothing is committed before step 3's commit.
 A transaction that needs two ``users`` rows locks both in ``user_id`` order in
 one statement (#2573), ``FOR NO KEY UPDATE`` when it changes no key: a ``FOR
 KEY SHARE`` holder, which may lock users rows in another order, never waits on
-it. A referral redemption holds the referrer's and the
+it. An admin-started deletion (``DELETE /admin/users/{id}``, and an admin
+erasure's transaction that inserts its request) takes as its first lock
+statement the admin rows and every ``users`` row it locks later, in
+``user_id`` order, ``FOR NO KEY UPDATE`` (``SystemAdminService.can_delete_admin``,
+#2855); its later ``users`` locks only strengthen rows it holds. An erasure's
+run takes no admin row: its open request makes the subject count as gone.
+A referral redemption holds the referrer's and the
 referee's ``users`` rows from its cap check, so it takes workspace rows
 ``NOWAIT`` too and answers 409 when one stays busy (#2443).
 A deletion of a ``users`` row clears the rows of the accounts it invited

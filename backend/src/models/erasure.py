@@ -42,6 +42,11 @@ STATUS_COMPLETE = "complete"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 
+# The open (not yet terminal) statuses: the ones the partial unique index
+# ``uq_erasure_one_active_per_user`` allows one of per user. An admin with an
+# open request does not count as a remaining admin (#2855).
+ACTIVE_STATUSES = (STATUS_PENDING, STATUS_COOLING_OFF, STATUS_IN_PROGRESS)
+
 VALID_STATUSES = frozenset(
     {
         STATUS_PENDING,

@@ -15,12 +15,15 @@ an ``audit_logs`` row naming the caller.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from collections.abc import Sequence
+from contextlib import aclosing
+from datetime import timedelta
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import Select, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
@@ -36,7 +39,7 @@ from services.sleep.reporter import SleepReporter
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import MemoryCloudException, NotFoundException
 from utils.logger import get_logger
-from utils.query_bounds import MAX_BIGINT, NO_NUL_PATTERN
+from utils.query_bounds import MAX_BIGINT, MIN_BIGINT, NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -49,6 +52,45 @@ target_router = APIRouter(prefix="/admin", tags=["admin-sleep"])
 
 # The ``audit_logs`` action of a run an admin or operator starts for a user.
 SLEEP_RUN_TRIGGER_AUDIT_ACTION = "sleep_run_trigger"
+
+# #2856: a ``running`` report that no transaction holds, that no batch of this
+# process runs and that was started longer ago than this is a run whose
+# process stopped. A live batch always has a report the guard of every
+# process counts as live: the row of the job that runs (held from its claim
+# to the commit that ends it), and, from that same commit on, the reports
+# still queued, whose ``started_at`` the commit sets to its own time. So the
+# bound only has to exceed the gap from a report's creation to its job's
+# first statement, and the gap between two jobs (the point deletes after a
+# commit, bounded, and the next session's connection), both seconds.
+SLEEP_RUN_STALE_AFTER = timedelta(minutes=15)
+# The ``error_message`` of a report whose run was interrupted (#2856).
+SLEEP_RUN_INTERRUPTED = "interrupted: the process running this sleep run stopped before it ended"
+
+# #2856: the batches this process runs, held strongly until they end (the loop
+# keeps tasks only weakly), and the ids of their reports.
+_IN_FLIGHT_BATCHES: set[asyncio.Task[None]] = set()
+_LIVE_REPORT_IDS: set[UUID] = set()
+# #2856: the one deadline a batch's cleanup shares, from its first step: the
+# cancelled job's rollback (or the invalidation of its connection) and the
+# close of the reports whose job did not return. A step the deadline cuts off
+# leaves its reports to the next admitted run's guard.
+SLEEP_BATCH_CLEANUP_SECONDS = 5.0
+# How long the shutdown step waits for the cancelled batches: above the
+# cleanup deadline, so a batch's cleanup ends before the database closes.
+MANUAL_SLEEP_SHUTDOWN_WAIT_SECONDS = 10.0
+
+
+class _CleanupDeadline:
+    """The deadline a batch's cleanup steps share, set by the first step that asks (#2856)."""
+
+    def __init__(self) -> None:
+        self._at: float | None = None
+
+    def at(self) -> float:
+        """The loop time by which the batch's cleanup ends."""
+        if self._at is None:
+            self._at = asyncio.get_running_loop().time() + SLEEP_BATCH_CLEANUP_SECONDS
+        return self._at
 
 
 # ============================================================================
@@ -89,22 +131,50 @@ async def _run_sleep_job(
     user_id: str,
     workspace_id: str,
     context_id: str,
+    *,
+    queued: Sequence[UUID] = (),
+    cleanup: _CleanupDeadline | None = None,
 ) -> None:
     """Execute sleep phases against a pre-created report.
 
     Opens its own DB session so the HTTP request handler is free to return
     as soon as the reports are committed. On exception, marks the report
     as ``failed`` so the UI never sees a perpetually-running row.
+
+    The first statement locks the report row (``FOR NO KEY UPDATE``), and the
+    run's one transaction holds it to the end: a held row is how the run
+    guard of every process tells a live run from an interrupted one (#2856).
+    The phases run in a savepoint, so a run that raises is marked ``failed``
+    in that same transaction, and the commit that releases the row also sets
+    ``started_at`` of the batch's ``queued`` reports to now: at no instant is
+    the row released while the queued reports still carry an older time.
+    A report that is no longer ``running`` (a guard closed it) is not run.
+    A cancelled job rolls its session back, which releases the row, and
+    re-raises; ``_run_sleep_batch`` closes its report. The rollback takes its
+    time from the batch's ``cleanup`` deadline.
     """
     from db.base import get_db as _get_db
 
     async for db in _get_db():
         try:
-            report = await db.get(SleepReport, report_id)
+            report = (
+                await db.execute(
+                    select(SleepReport)
+                    .where(SleepReport.id == report_id)
+                    .with_for_update(key_share=True)
+                )
+            ).scalar_one_or_none()
             if report is None:
                 logger.error(
                     "manual_sleep_report_missing",
                     report_id=str(report_id),
+                )
+                return
+            if report.status != "running":
+                logger.warning(
+                    "manual_sleep_report_not_running",
+                    report_id=str(report_id),
+                    status=report.status,
                 )
                 return
 
@@ -117,12 +187,31 @@ async def _run_sleep_job(
             await db.flush()
 
             orchestrator = SleepOrchestrator(db)
-            await orchestrator.run(
-                user_id,
-                workspace_id,
-                context_id,
-                report=report,
-            )
+            phases = await db.begin_nested()
+            try:
+                await orchestrator.run(
+                    user_id,
+                    workspace_id,
+                    context_id,
+                    report=report,
+                )
+            except Exception as e:
+                logger.error(
+                    "manual_sleep_run_failed",
+                    report_id=str(report_id),
+                    user_id=user_id,
+                    context_id=context_id,
+                    error=str(e),
+                    exc_info=True,
+                )
+                await phases.rollback()
+                await db.refresh(report)
+                await SleepReporter(db).fail_report(report, str(e))
+                await _refresh_queued_reports(db, queued)
+                await db.commit()
+                return
+            await phases.commit()
+            await _refresh_queued_reports(db, queued)
             await db.commit()
             # #2565: the archived / merged rows' points, now that the
             # tombstones are committed. Never raises.
@@ -133,7 +222,15 @@ async def _run_sleep_job(
                 user_id=user_id,
                 context_id=context_id,
             )
+        except asyncio.CancelledError:
+            # The session holds the report's row: release it before the
+            # batch closes the report in a session of its own.
+            deadline = (cleanup or _CleanupDeadline()).at()
+            await _release_cancelled_session(db, report_id, deadline)
+            raise
         except Exception as e:
+            # The job's transaction itself failed (its commit, or the
+            # savepoint's rollback): close the report in a new one.
             await db.rollback()
             logger.error(
                 "manual_sleep_run_failed",
@@ -148,6 +245,7 @@ async def _run_sleep_job(
                 if report is not None and report.status == "running":
                     reporter = SleepReporter(db)
                     await reporter.fail_report(report, str(e))
+                    await _refresh_queued_reports(db, queued)
                     await db.commit()
             except Exception:
                 await db.rollback()
@@ -157,6 +255,105 @@ async def _run_sleep_job(
                     exc_info=True,
                 )
         return
+
+
+async def _refresh_queued_reports(db: AsyncSession, queued: Sequence[UUID]) -> None:
+    """Set ``started_at`` of a batch's still-queued reports to now, in ``db``'s transaction (#2856).
+
+    Called just before the commit that releases the running job's row, so
+    the queued reports are fresh for the run guard from that instant on. A
+    report a guard already closed is left as it is.
+    """
+    if not queued:
+        return
+    await db.execute(
+        update(SleepReport)
+        .where(SleepReport.id.in_(queued), SleepReport.status == "running")
+        .values(started_at=utcnow())
+        .execution_options(synchronize_session=False)
+    )
+
+
+def _held_running_reports(*conditions: Any) -> Select[SleepReport]:
+    """The ``running`` reports matching ``conditions`` that no other transaction holds.
+
+    Locked ``FOR NO KEY UPDATE SKIP LOCKED`` in id order: the rows come back
+    held by the caller's transaction, and a row a live job holds is left out.
+    """
+    return (
+        select(SleepReport)
+        .where(SleepReport.status == "running", *conditions)
+        .order_by(SleepReport.id)
+        .with_for_update(key_share=True, skip_locked=True)
+    )
+
+
+async def _release_cancelled_session(db: AsyncSession, report_id: UUID, deadline: float) -> None:
+    """Roll back a cancelled job's session, or invalidate it, by ``deadline``; never raises an error."""
+    try:
+        async with asyncio.timeout_at(deadline):
+            await db.rollback()
+        return
+    except Exception as e:  # noqa: BLE001 - the connection is dropped instead
+        logger.warning(
+            "manual_sleep_cancelled_rollback_failed",
+            report_id=str(report_id),
+            error_class=type(e).__name__,
+        )
+    try:
+        async with asyncio.timeout_at(deadline):
+            await db.invalidate()
+    except Exception as e:  # noqa: BLE001 - best effort; the server ends the transaction
+        logger.warning(
+            "manual_sleep_cancelled_invalidate_failed",
+            report_id=str(report_id),
+            error_class=type(e).__name__,
+        )
+
+
+async def _close_interrupted_reports(report_ids: list[UUID], deadline: float) -> None:
+    """Mark the ``running`` reports of jobs that did not return as interrupted (#2856).
+
+    In a session of its own, on the rows no other transaction holds, the
+    whole write ending by ``deadline``. Logs and never raises an error; a
+    cancellation is re-raised. A report it misses is closed by the next
+    admitted run's guard.
+    """
+    from db.base import get_db as _get_db
+
+    async def _close() -> int:
+        async with aclosing(_get_db()) as sessions:
+            async for db in sessions:
+                await db.execute(text("SET LOCAL lock_timeout = '2s'"))
+                held = (
+                    (await db.execute(_held_running_reports(SleepReport.id.in_(report_ids))))
+                    .scalars()
+                    .all()
+                )
+                reporter = SleepReporter(db)
+                for report in held:
+                    await reporter.fail_report(report, SLEEP_RUN_INTERRUPTED)
+                await db.commit()
+                return len(held)
+        return 0
+
+    try:
+        async with asyncio.timeout_at(deadline):
+            closed = await _close()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the next admitted run's guard closes them
+        logger.error(
+            "manual_sleep_interrupted_close_failed",
+            report_ids=[str(report_id) for report_id in report_ids],
+            error_class=type(e).__name__,
+        )
+        return
+    logger.warning(
+        "manual_sleep_reports_interrupted",
+        report_ids=[str(report_id) for report_id in report_ids],
+        closed=closed,
+    )
 
 
 async def _run_sleep_batch(
@@ -170,9 +367,62 @@ async def _run_sleep_batch(
     of contexts saturate the connection pool (``DB_POOL_SIZE`` +
     ``DB_MAX_OVERFLOW``, 15 connections by default, #1980) and starve the
     rest of the API.
+
+    The reports whose job has not returned when the batch ends (it was
+    cancelled, or an error escaped a job) are closed as interrupted (#2856).
+    The cancelled job's release and this close share one deadline,
+    ``SLEEP_BATCH_CLEANUP_SECONDS`` from the first of them.
     """
-    for report_id, workspace_id, context_id in jobs:
-        await _run_sleep_job(report_id, user_id, workspace_id, context_id)
+    pending = [report_id for report_id, _, _ in jobs]
+    cleanup = _CleanupDeadline()
+    try:
+        for index, (report_id, workspace_id, context_id) in enumerate(jobs):
+            queued = [queued_id for queued_id, _, _ in jobs[index + 1 :]]
+            await _run_sleep_job(
+                report_id, user_id, workspace_id, context_id, queued=queued, cleanup=cleanup
+            )
+            pending.remove(report_id)
+    finally:
+        if pending:
+            await _close_interrupted_reports(pending, cleanup.at())
+
+
+def _start_sleep_batch(jobs: list[tuple[UUID, str, str]], user_id: str) -> None:
+    """Start a batch in the background and track it until it ends (#2856).
+
+    Called right after the route's commit, with no ``await`` in between: from
+    then on the guard of this process sees the batch's reports as live.
+    """
+    report_ids = [report_id for report_id, _, _ in jobs]
+    _LIVE_REPORT_IDS.update(report_ids)
+    task = asyncio.create_task(_run_sleep_batch(jobs, user_id))
+    _IN_FLIGHT_BATCHES.add(task)
+
+    def _done(finished: asyncio.Task[Any]) -> None:
+        _IN_FLIGHT_BATCHES.discard(finished)
+        _LIVE_REPORT_IDS.difference_update(report_ids)
+        _log_background_task_result(finished)
+
+    task.add_done_callback(_done)
+
+
+async def stop_manual_sleep_runs(timeout: float = MANUAL_SLEEP_SHUTDOWN_WAIT_SECONDS) -> None:
+    """Cancel this process's manual Sleep batches and wait for them, bounded (#2856).
+
+    Called at shutdown, while the database is still open, so each cancelled
+    batch can close its reports. Never raises.
+    """
+    tasks = [task for task in _IN_FLIGHT_BATCHES if not task.done()]
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    _, still_running = await asyncio.wait(tasks, timeout=timeout)
+    logger.info(
+        "manual_sleep_runs_stopped",
+        cancelled=len(tasks),
+        still_running=len(still_running),
+    )
 
 
 def _log_background_task_result(task: asyncio.Task[Any]) -> None:
@@ -189,32 +439,62 @@ def _log_background_task_result(task: asyncio.Task[Any]) -> None:
 
 
 async def _raise_if_sleep_running(db: AsyncSession, user_id: str) -> None:
-    """Refuse with 409 ``SLEEP-002`` while ``user_id`` has a running report.
+    """Refuse with 409 ``SLEEP-002`` while ``user_id`` has a live running report.
 
     The one concurrency guard of the manual triggers: the own-account route
     passes the caller, the target-user route (#2838) the user it runs for.
 
-    Oldest-first so the returned running_report_id is deterministic: in a
-    multi-context batch several reports can share status='running', and
-    the oldest is the most likely to be currently executing — which is
-    the most useful target for the UI's "view running report" link.
+    #2856: a ``running`` report is live while another transaction holds its
+    row (a job holds it from its first statement to its end), while a batch
+    of this process runs it, or for ``SLEEP_RUN_STALE_AFTER`` after its
+    ``started_at`` (a queued report's is moved to each commit of a job of its
+    batch, ``_run_sleep_job``). A report that is none of these was left by a process that
+    stopped: the guard marks it ``failed`` (``SLEEP_RUN_INTERRUPTED``) in the
+    caller's transaction, whose commit also creates the new report, so a user
+    never has two ``running`` reports. The rows it closes stay locked by that
+    transaction, so a second request at the same time sees them held and
+    answers 409.
+
+    The 409 names the oldest live report: in a multi-context batch several
+    reports can share status='running', and the oldest is the most likely to
+    be currently executing, the most useful target for the UI's "view running
+    report" link. With no running report at all, two simultaneous requests
+    can still both be admitted.
     """
-    running_stmt = (
-        select(SleepReport.id, SleepReport.started_at)
-        .where(SleepReport.user_id == user_id)
-        .where(SleepReport.status == "running")
-        .order_by(SleepReport.started_at.asc())
-        .limit(1)
+    held = (await db.execute(_held_running_reports(SleepReport.user_id == user_id))).scalars().all()
+    held_ids = {report.id for report in held}
+    running = (
+        (
+            await db.execute(
+                select(SleepReport)
+                .where(SleepReport.user_id == user_id, SleepReport.status == "running")
+                .order_by(SleepReport.started_at, SleepReport.id)
+            )
+        )
+        .scalars()
+        .all()
     )
-    running_row = (await db.execute(running_stmt)).first()
-    if running_row is not None:
-        running_report_id, started_at = running_row
-        raise MemoryCloudException(
-            message="A sleep run is already in progress for this user.",
-            status_code=409,
-            error_code="SLEEP-002",
-            running_report_id=str(running_report_id),
-            started_at=to_utc_iso(started_at),
+    stale_before = utcnow() - SLEEP_RUN_STALE_AFTER
+    for report in running:
+        if (
+            report.id not in held_ids
+            or report.id in _LIVE_REPORT_IDS
+            or report.started_at > stale_before
+        ):
+            raise MemoryCloudException(
+                message="A sleep run is already in progress for this user.",
+                status_code=409,
+                error_code="SLEEP-002",
+                running_report_id=str(report.id),
+                started_at=to_utc_iso(report.started_at),
+            )
+    reporter = SleepReporter(db)
+    for report in held:
+        await reporter.fail_report(report, SLEEP_RUN_INTERRUPTED)
+        logger.warning(
+            "manual_sleep_report_interrupted",
+            report_id=str(report.id),
+            user_id=user_id,
         )
 
 
@@ -267,6 +547,9 @@ async def trigger_sleep_run(
         409 ``SLEEP-002`` if this user already has a sleep run
         with ``status='running'`` — the response body includes
         ``running_report_id`` and ``started_at`` so the UI can link to it.
+        A running report that no process is running and that was started
+        more than 15 minutes ago no longer counts: it is marked ``failed``
+        as interrupted and the new run is admitted.
         404 ``SLEEP-003`` if no eligible contexts match.
 
     Phase 1 limitation:
@@ -323,8 +606,7 @@ async def trigger_sleep_run(
     # batch task (which opens its own DB session).
     await db.commit()
 
-    task = asyncio.create_task(_run_sleep_batch(created, user_id))
-    task.add_done_callback(_log_background_task_result)
+    _start_sleep_batch(created, user_id)
 
     logger.info(
         "manual_sleep_run_scheduled",
@@ -402,7 +684,7 @@ _UNDO_ERROR_STATUS = {
     },
 )
 async def undo_merge(
-    action_id: int,
+    action_id: Annotated[int, Path(ge=MIN_BIGINT, le=MAX_BIGINT)],
     admin: AdminAccountUser,
     db: AsyncSession = Depends(get_db),
 ) -> UndoMergeResponse:
@@ -506,7 +788,10 @@ async def trigger_sleep_run_for_user(
         404 ``RES-001`` for an unknown user.
         409 ``SLEEP-002`` while the target user has a running report, with
         ``running_report_id`` and ``started_at``. Best-effort under
-        concurrent requests, like the own-account trigger.
+        concurrent requests, like the own-account trigger. A running report
+        that no process is running and that was started more than 15 minutes
+        ago no longer counts: it is marked ``failed`` as interrupted and the
+        new run is admitted.
         404 ``SLEEP-003`` when the context is not eligible; one message for
         every cause.
 
@@ -579,8 +864,7 @@ async def trigger_sleep_run_for_user(
     )
     await db.commit()
 
-    task = asyncio.create_task(_run_sleep_batch([(report.id, workspace_id, context_id)], user_id))
-    task.add_done_callback(_log_background_task_result)
+    _start_sleep_batch([(report.id, workspace_id, context_id)], user_id)
 
     logger.info(
         "target_sleep_run_scheduled",

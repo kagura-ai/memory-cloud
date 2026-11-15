@@ -45,7 +45,7 @@ class TestConnectorGrantFeatureWarning:
         plan_workspace: dict,
     ) -> None:
         result = await update_workspace_quotas(
-            workspace_id=plan_workspace["workspace_id"],
+            workspace_id=plan_workspace["ws_uuid"],
             request=UpdateAddonRequest(addon_connector_bonus=2),
             admin_user=mock_admin(),
             db=db_session,
@@ -76,7 +76,7 @@ class TestConnectorGrantFeatureWarning:
         plan_workspace: dict,
     ) -> None:
         result = await update_workspace_quotas(
-            workspace_id=plan_workspace["workspace_id"],
+            workspace_id=plan_workspace["ws_uuid"],
             request=UpdateAddonRequest(addon_connector_bonus=1),
             admin_user=mock_admin(),
             db=db_session,
@@ -91,7 +91,7 @@ class TestConnectorGrantFeatureWarning:
         plan_workspace: dict,
     ) -> None:
         result = await update_workspace_quotas(
-            workspace_id=plan_workspace["workspace_id"],
+            workspace_id=plan_workspace["ws_uuid"],
             request=UpdateAddonRequest(addon_memory_bonus=10_000),
             admin_user=mock_admin(),
             db=db_session,
@@ -113,7 +113,7 @@ class TestHistoryRetentionGrant:
         from api.routes.admin_plans import get_workspace_quotas
 
         result = await update_workspace_quotas(
-            workspace_id=plan_workspace["workspace_id"],
+            workspace_id=plan_workspace["ws_uuid"],
             request=UpdateAddonRequest(addon_history_retention_days_bonus=275),
             admin_user=mock_admin(),
             db=db_session,

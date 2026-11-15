@@ -75,7 +75,7 @@ class TestUpdateWorkspacePlan:
     ) -> None:
         with pytest.raises(HTTPException) as exc_info:
             await update_workspace_plan(
-                workspace_id=soft_deleted_workspace["workspace_id"],
+                workspace_id=UUID(soft_deleted_workspace["workspace_id"]),
                 request=AdminUpdatePlanRequest(plan_name="basic", reason="test"),
                 admin_user=mock_admin(),
                 db=db_session,
@@ -118,7 +118,7 @@ class TestUpdateWorkspaceQuotas:
     ) -> None:
         with pytest.raises(HTTPException) as exc_info:
             await update_workspace_quotas(
-                workspace_id=soft_deleted_workspace["workspace_id"],
+                workspace_id=UUID(soft_deleted_workspace["workspace_id"]),
                 request=UpdateAddonRequest(),
                 admin_user=mock_admin(),
                 db=db_session,
@@ -140,7 +140,7 @@ class TestUpdateWorkspaceSpendCap:
     ) -> None:
         with pytest.raises(HTTPException) as exc_info:
             await update_workspace_spend_cap(
-                workspace_id=soft_deleted_workspace["workspace_id"],
+                workspace_id=UUID(soft_deleted_workspace["workspace_id"]),
                 request=UpdateSpendCapRequest(),
                 admin_user=mock_admin(),
                 db=db_session,

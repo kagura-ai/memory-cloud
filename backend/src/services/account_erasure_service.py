@@ -148,6 +148,7 @@ from models.auth import (
     WorkspaceMember,
 )
 from models.erasure import (
+    ACTIVE_STATUSES,
     FAILURE_AFTER_POSTGRES_COMMIT,
     FAILURE_PREFIX_BILLING_CONTRACT,
     FAILURE_PREFIX_LOCK_CONFLICT,
@@ -1149,6 +1150,10 @@ class AccountErasureService:
             raise InitialAdminCannotBeErasedError()
 
         # Cannot delete the last remaining admin (mirrors SystemAdminService).
+        # #2855: the check (under the role-change lock) and the insert of the
+        # request row are one transaction, committed below. From that commit
+        # on the open request makes every role change, deletion and erasure
+        # count the subject as gone, so the run itself holds no admin row.
         admin_service = SystemAdminService(self.db)
         can_delete, reason = await admin_service.can_delete_admin(target_user_id)
         if not can_delete:
@@ -3525,7 +3530,7 @@ class AccountErasureService:
             select(ErasureRequest)
             .where(
                 ErasureRequest.user_id == user_id,
-                ErasureRequest.status.in_([STATUS_PENDING, STATUS_COOLING_OFF, STATUS_IN_PROGRESS]),
+                ErasureRequest.status.in_(ACTIVE_STATUSES),
             )
             .order_by(ErasureRequest.requested_at.desc())
             .limit(1)

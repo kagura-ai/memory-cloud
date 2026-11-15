@@ -113,7 +113,11 @@ class SleepReporterService:
         stmt = select(SleepReport)
         if conditions:
             stmt = stmt.where(*conditions)
-        stmt = stmt.order_by(SleepReport.started_at.desc()).limit(limit).offset(offset)
+        # ``id`` breaks ties of ``started_at`` so ``offset`` pages never repeat
+        # or skip a row (#2858).
+        stmt = (
+            stmt.order_by(SleepReport.started_at.desc(), SleepReport.id).limit(limit).offset(offset)
+        )
 
         count_result = await self.db.execute(count_stmt)
         total = count_result.scalar() or 0
