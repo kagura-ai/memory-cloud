@@ -56,6 +56,8 @@ feature-development time, not discovered at export time.
 | `resource_events` | Ingested raw source events |
 | `sync_records` | Canonical approved product/FAQ fields and their feed provenance |
 | `sync_chunks` | Temporary raw staging; bodies are cleared on commit, abort and expiry |
+| `sync_resume_candidates` | Strict source snapshots for explicit manual-to-feed resume; finite lifetime |
+| `sync_resume_previews` | Finite human diff: authored summaries, exact hashes and approved public fields |
 | `resource_schemas` | User-registered resource schemas |
 
 Also raw: **declared edges** — links the user explicitly created via
@@ -108,6 +110,14 @@ Synchronization service registration (`sync_services`), bounded owner consent
 worker credentials, product/FAQ bodies or learned signal and do not enter raw
 exports. Historical approver identity is nullable and cleared on account
 deletion; workspace deletion cascades consent and installation records.
+
+Managed-target ownership/barriers (`sync_managed_targets`), immutable mode
+operation receipts (`sync_mode_operations`) and exact approved tombstone proofs
+(`sync_manual_retirements`) are operational state. Ownership rows survive feature
+disablement and physical target loss, matching retained installation bindings;
+historical actor FKs become NULL on account erasure and installation/workspace
+deletion cascades the metadata. Resume bodies are raw, expire within 24 hours
+(candidates) or 15 minutes (previews), and are purged on replacement/consumption.
 
 Service credential clients/public signing keys, hashed access-token verifiers
 and assertion replay receipts (`sync_credential_clients`, `sync_signing_keys`,

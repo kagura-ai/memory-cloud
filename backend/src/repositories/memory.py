@@ -216,6 +216,9 @@ class MemoryRepository(BaseRepository[Memory]):
         Returns:
             Created memory
         """
+        from services.sync_managed_guard import assert_memory_mutable
+
+        await assert_memory_mutable(self.db, memory)
         self.db.add(memory)
         await self.db.flush()
         await self.db.refresh(memory)
@@ -246,6 +249,9 @@ class MemoryRepository(BaseRepository[Memory]):
         # in-session object BEFORE calling update() — the SELECT here
         # autoflushes that change, and a default-filtered fetch would then
         # miss its own row and break soft-delete (#1316 refactor).
+        from services.sync_managed_guard import assert_memory_mutable
+
+        await assert_memory_mutable(self.db, memory)
         existing = await self.get(id, include_deleted=True)
         if not existing:
             raise NotFoundException("Memory", str(id))
@@ -278,9 +284,16 @@ class MemoryRepository(BaseRepository[Memory]):
         # rows after the retention window — a default-filtered fetch would
         # make the purge a silent no-op and retention/erasure would never
         # physically happen (#1316 review sweep).
-        memory = await self.get(id, include_deleted=True)
+        with self.db.no_autoflush:
+            memory = await self.get(id, include_deleted=True)
         if not memory:
             return False
+
+        # Physical retention/erasure of an existing tombstone remains possible.
+        if memory.deleted_at is None:
+            from services.sync_managed_guard import assert_memory_mutable
+
+            await assert_memory_mutable(self.db, memory)
 
         await self.db.delete(memory)
         await self.db.flush()
@@ -312,6 +325,12 @@ class MemoryRepository(BaseRepository[Memory]):
             (idempotent — a second stamp must not move ``deleted_at`` and
             shorten the retention window), or excluded by ``only_if``.
         """
+        from services.sync_managed_guard import assert_memory_mutable
+
+        with self.db.no_autoflush:
+            memory = await self.get(memory_id, include_deleted=True)
+        if memory is not None:
+            await assert_memory_mutable(self.db, memory)
         stmt = update(Memory).where(Memory.id == memory_id, Memory.deleted_at.is_(None))
         if only_if is not None:
             stmt = stmt.where(only_if)

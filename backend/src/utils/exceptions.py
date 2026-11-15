@@ -1933,6 +1933,20 @@ class ManagementRequestTooLargeError(MemoryCloudException):
         super().__init__("Management request exceeds limit", status_code=413, error_code="MGMT-001")
 
 
+class ManagedDataLockedError(MemoryCloudException):
+    """Authorized callers must finish the feed stop barrier before editing data."""
+
+    log_level: ClassVar[Literal["error", "warning"]] = "warning"
+
+    def __init__(self, mode: str) -> None:
+        super().__init__(
+            "This data is feed-managed. Finish switching to manual operation before editing or deleting it.",
+            status_code=409,
+            error_code="SYNC-LOCKED",
+            management_mode=mode,
+        )
+
+
 class SyncProtocolError(MemoryCloudException):
     """Canonical exception with the isolated sync protocol's fixed wire errors."""
 

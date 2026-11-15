@@ -290,6 +290,9 @@ async def _repoint_payloads(
     failed: list[UUID] = []
     skipped: list[UUID] = []
     for context_id in context_ids:
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(db, context_id)
         collection = await resolve_collection_name(db, context_id)
         memories = [
             (row.id, row.embedding_status)
@@ -550,6 +553,11 @@ async def transfer_context_creator(
         .order_by(Context.created_at, Context.id)
     )
     contexts = list((await db.execute(stmt)).scalars().all())
+    if not dry_run:
+        from services.sync_managed_guard import assert_context_mutable
+
+        for context_id in sorted((context.id for context in contexts), key=str):
+            await assert_context_mutable(db, context_id)
 
     result = TransferResult(
         from_user_id=from_user_id,
@@ -648,6 +656,10 @@ async def transfer_context_creator(
 
     if dry_run:
         return result
+    from services.sync_managed_guard import assert_context_mutable
+
+    for context_id in sorted(repair_scope, key=str):
+        await assert_context_mutable(db, context_id)
     swept = bool(repair_scope) and bool(result.repair_moved or result.repair_edges.total)
     if swept:
         if result.repair_moved:

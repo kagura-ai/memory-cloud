@@ -81,6 +81,9 @@ async def commit_run(
         if digest(body.model_dump(mode="json")) != row.commit_hash:
             raise ConflictError("Commit identity was used with different content")
         return row
+    from services.sync_managed_guard import service_mode
+
+    await service_mode(db, authority.installation, publish=True)
     await editable(db, authority, row, feed, fence)
     if (
         row.state != "prepared"

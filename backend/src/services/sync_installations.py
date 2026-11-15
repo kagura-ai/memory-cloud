@@ -278,6 +278,11 @@ async def activate_installation(
                 generation=1,
             )
             db.add(row)
+            await db.flush()
+            if get_settings().sync_managed_enabled:
+                from services.sync_management import enroll
+
+                await enroll(db, row)
             approval.used_at = utcnow()
             audit_sync(db, authority, "sync.installation.activated", row.id)
             await db.flush()
@@ -318,8 +323,18 @@ async def unlink_installation(
         if row is None or row.id != installation_id:
             raise NotFoundException("Synchronization installation")
         if row.state != "revoked":
+            from services.sync_managed_guard import target_fence
+            from services.sync_management import start_stopping
+
+            managed = await target_fence(db, row.context_id)
+            old_generation = row.generation
+            if managed.state is not None:
+                await start_stopping(db, row, "unlinked", actor=principal.user_id)
             row.state, row.revoked_at = "revoked", utcnow()
-            row.generation += 1
+            if row.generation == old_generation:
+                row.generation += 1
+                if managed.mode is not None:
+                    managed.mode.generation = row.generation
             audit_sync(db, authority, "sync.installation.revoked", row.id)
         result = await installation_view(db, row)
         await db.commit()

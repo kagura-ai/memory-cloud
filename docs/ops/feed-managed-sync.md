@@ -1,0 +1,148 @@
+# Feed ownership and safe manual operation
+
+This opt-in protocol extends [staged feed synchronization](staged-feed-sync.md).
+Apply `f51_2808_managed_sync` after the existing, unchanged
+`f50_2807_merge_sync_heads`. `SYNC_MANAGED_ENABLED` defaults to false.
+All persisted ownership fences remain enforced when this switch is false.
+All application instances must run the new writer/indexer code before enabling
+the switch; quiesce old workers and generic writers during enrollment. Never
+roll an old application binary back over enrolled targets. A schema downgrade
+removes ownership evidence and requires quiescing writers and explicit release
+approval; disabling a flag is not permission to edit managed content.
+
+## States and authority
+
+`SyncInstallation.state` controls service authentication; it is separate from
+`SyncManagedTarget.mode`:
+
+| Mode | Generic REST/MCP/UI content writes | Service uploads | Source publication |
+| --- | --- | --- | --- |
+| `feed` | Refused with HTTP 409 `SYNC-LOCKED` | Allowed with current paid authority | Allowed at current generation |
+| `stopping` | Refused | Refused | Refused; only accepted old-generation events drain |
+| `manual` | Normal current KMC permissions | Bounded resume-candidate uploads only | Explicit current human confirmation only |
+
+Pausing a client, a service, an installation, or a failed fetch never unlocks
+content. Context identity/schema, ordinary memory creation/edit/deletion/moves,
+manual ingestion, restore, rollback, Sleep and generic embedding rewrites share
+the fence. Managed contexts use Sleep `skip`; the prior setting is restored on
+manual entry. Access counters and erasure/retention remain separate lifecycle
+operations. No caller-controlled bypass or owner impersonation exists.
+
+An absent ownership row is conservatively treated as `feed` while the flag is
+enabled. New installations enroll automatically; the first source/control
+mutation enrolls an existing retained target. Status is read-only. Before an
+ownership row exists, the indexer holds pending events without advancing its
+cursor until enrollment. For a pre-barrier revoked installation, enrollment
+drains the actual committed receipt generation rather than its already-advanced
+revocation generation. Multiple historical generations require operator
+reconciliation. Drain ordinary non-feed ingestion before rollout; enrollment
+refuses that backlog so accepted ordinary writes are never silently discarded.
+Persisted ownership also survives physical target loss, preventing generic
+admin recovery from recreating a feed-owned target while the flag is disabled.
+
+Before an operator disables the switch, enroll all legacy targets that must stay fenced.
+Run enrollment under the Workspace lock using `services.sync_management.enroll`;
+it does not create or rebind a resource/context/endpoint.
+
+Every ordinary target writer and index batch takes a transaction-scoped shared
+PostgreSQL advisory lock on `sync-management:<context UUID>`, even before an
+ownership row exists. Transitions/enrollment take that lock exclusively using
+`pg_try_advisory_xact_lock`. Conflicts return 409 for retry rather than waiting
+with opposing locks. Multiple contexts are fenced in UUID order. Control/service
+operations serialize at Workspace first, with authority/target locks NOWAIT;
+generic writers take the target fence before side effects. Index batches retain
+the shared fence through vectors and SQL commit. Existing orphan-safe, globally
+fenced point cleanup runs after commit and cannot delete a current manual point.
+
+## Human control contract
+
+Base: `/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management`.
+Only the registered service's explicit KMC OIDC human token is accepted. Current
+membership, seat/reach/context grants and Editor rights are checked on every
+mutation. `GET` status uses `workspaces:read`; controls use `integrations:manage`.
+Session/API keys and service bearer tokens do not become human control grants.
+All outcomes are private/no-store. Foreign targets are uniformly not found.
+
+| Method and suffix | Body / query | Result |
+| --- | --- | --- |
+| `GET` | None | Mode, epoch, installation generation, stop watermark/reason |
+| `POST /stop` | `operation_id` UUID | Durable `stopping`; abort unfinished runs and advance generation once |
+| `POST /finalize` | `operation_id` UUID | `manual` only after writer exclusion and complete indexing |
+| `POST /resume/preview` | None | Preview UUID, diff hash, retire/publish counts, finite deadline |
+| `GET /resume/diff` | `preview_id`, `offset` (0–20,000), `limit` (1–100) | Exact current human's paginated diff |
+| `POST /resume/confirm` | `operation_id`, `preview_id`, `diff_hash` | Atomic new generation and `feed` publication |
+| `POST /reconnect` | `operation_id`, fresh owner `authorization_id` | Same retained target, active authentication, still `manual` |
+
+Operation receipts bind the real principal, action and exact body. Repeating an
+operation returns its original result without advancing generation again;
+reusing its UUID with a different request is a conflict. Current authority is
+still required on retries. Reconnect also requires current canonical owner
+authority, fresh unconsumed owner consent for the same application/service,
+current service registration and paid rights. Old activation replay never
+reactivates a revoked installation.
+
+## Stop, crash recovery and entitlement loss
+
+The first stop snapshots the accepted event watermark and drain generation,
+increments installation generation, aborts/purges unfinished staging and records
+`stopping` in one transaction. New service credentials cannot publish while
+stopping; old credentials/runs cannot commit after this transaction.
+
+Finalization takes the exclusive target fence. It requires the index cursor to
+reach the watermark, no recorded failed event through that point, and the latest
+canonical feed rows' actual indexed/deletion postconditions to agree. Advancing
+a cursor alone cannot unlock. The transaction then sets `manual`, advances the
+mode epoch, records the manual event floor and restores the saved Sleep mode.
+If a process dies, a vector operation fails, quota/capacity holds indexing, or
+an event needs repair, the lock remains `stopping`. Repair/retry the existing
+index runbook; never clear ownership metadata to force progress. A Free-plan
+suspension can require restoring the plan/capacity before canonical drain.
+
+Unlink and authoritative entitlement removal use this same barrier while
+retaining data and all target UUIDs. Periodic run maintenance also detects
+clock expiry and retries stopping targets. The paid commit guard denies writes
+at the exact entitlement deadline even before the next maintenance tick.
+Credential/temporary service disablement retains the lock. The public endpoint
+is retained; stopping/status do not require a live service credential or paid
+access, while resuming does. Revoking publication does not grant data editing.
+
+## Resume snapshot and publication
+
+With current paid service credentials, upload/prepare ordinary strict runs in
+manual mode, then `POST /api/v1/sync/installations/{id}/resume-candidates` with
+`{"run_id":"..."}`. Pinning closes/clears the upload, freeing its normal
+four-run staging slot. One active candidate per feed is retained, with a
+24-hour maximum lifetime. Replacement/consumption/expiry purges its payload.
+The full candidate set is bounded to 20 configured feeds, 10,000 records and
+20 MiB per installation. Every configured feed, including an empty one, must
+have a fresh candidate at current service/client/installation generation,
+mode epoch, source/config and approved schema version.
+
+The Editor's preview binds the complete current manual rows, pending-event
+watermark, candidate identities/manifests, canonical revisions, ownership epoch
+and mode generation. Manual ingestion must be fully indexed first. There is
+one replaceable preview per installation with a 15-minute deadline. Each page
+and confirmation recheck normal per-row read/write permissions. The diff names
+manual rows to retire (IDs, summaries, hashes) and strict public fields to
+publish; arbitrary manual bodies never become public source fields. Inspect
+the named memories in KMC before confirming when their full text is needed.
+Any manual edit, source replacement, configuration/schema/generation/ownership
+change, expiry or permission loss invalidates consent and requires a new preview.
+
+Confirmation is one paid, real-human-authorized SQL transaction, with final
+token/candidate/preview deadlines checked at commit. It retires current manual
+content, preserving tombstones, revisions and the actual actor, queues durable
+orphan-safe vector cleanup, stores exact tombstone proofs, and publishes all
+approved feed snapshots with new monotonically increasing resource versions,
+real run/outbox receipts and a new installation generation. It reuses exactly
+the resource/context/endpoint. There is no half-committed resuming state: a
+crash rolls back to manual. Old source events and pre-confirmation manual
+events cannot overwrite the new generation. Exact approved manual tombstones
+remain history until ordinary retention; later indexers cannot broadly take
+ownership of unrelated/manual-edited rows.
+
+The synchronous confirmation is deliberately bounded: 10,000 live manual rows,
+20,000 history rows and 40 MiB of row data; at most 20,000 relevant canonical
+identities per feed. Oversized/manual-foreign snapshots fail without mutation.
+Export/archive or reduce history through normal KMC lifecycle operations before
+retrying. Source acceptance and asynchronous search indexing remain distinct.

@@ -143,6 +143,7 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "sync_worker": Guarded(services=("services.sync_credentials",)),
     "sync_feeds": Guarded(services=("services.sync_credentials",)),
     "sync_records": NONE,  # Human RBAC/explicit OIDC scope; no paid worker grant.
+    "sync_management": Guarded(services=("services.sync_resume",)),
     "system_admins": NONE,
     "users": NONE,
     "well_known": NONE,
@@ -252,6 +253,8 @@ PAID_INTEGRATION_SYMBOLS: dict[str, str] = {
     # paid_integration_write, entered before any write or row lock.
     "services.sync_installations": GUARDED,
     "services.sync_credentials": GUARDED,
+    "services.sync_resume": GUARDED,
+    "services.sync_management": DISPLAY_ONLY,
 }
 
 # Kinds of use the scan reports.

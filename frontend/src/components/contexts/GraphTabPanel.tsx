@@ -47,6 +47,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 interface GraphTabPanelProps {
   contextId: string;
+  readOnly?: boolean;
 }
 
 const GRAPH_LIMIT_NODES = 200;
@@ -84,7 +85,7 @@ interface SelectedEdge {
   y: number;
 }
 
-export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
+export function GraphTabPanel({ contextId, readOnly = false }: GraphTabPanelProps) {
   const t = useTranslations("contextDetail.memoriesPanel.recall");
   const [mode, setMode] = useState("graph");
   return (
@@ -93,12 +94,12 @@ export function GraphTabPanel({ contextId }: GraphTabPanelProps) {
         <ToggleGroupItem value="graph">{t("modeGraph")}</ToggleGroupItem>
         <ToggleGroupItem value="recall">{t("modeRecall")}</ToggleGroupItem>
       </ToggleGroup>
-      {mode === "graph" ? <GraphCanvas contextId={contextId} /> : <MemoriesTabPanel contextId={contextId} recallOnly />}
+      {mode === "graph" ? <GraphCanvas contextId={contextId} readOnly={readOnly} /> : <MemoriesTabPanel contextId={contextId} recallOnly readOnly={readOnly} />}
     </div>
   );
 }
 
-function GraphCanvas({ contextId }: GraphTabPanelProps) {
+function GraphCanvas({ contextId, readOnly = false }: GraphTabPanelProps) {
   const t = useTranslations("contexts");
   const tMem = useTranslations("contextDetail.memoriesPanel");
   const { toast } = useToast();
@@ -350,8 +351,8 @@ function GraphCanvas({ contextId }: GraphTabPanelProps) {
         memory={dialog.hydrated}
         open={dialog.detailOpen}
         onOpenChange={dialog.handleDetailOpenChange}
-        onEdit={dialog.hydrated ? dialog.handleDetailEdit : undefined}
-        onDelete={dialog.handleDetailDelete}
+        onEdit={!readOnly && dialog.hydrated ? dialog.handleDetailEdit : undefined}
+        onDelete={readOnly ? undefined : dialog.handleDetailDelete}
         notFound={dialog.detailNotFound}
         outgoingLinks={dialog.linkedRefs.outgoing}
         outgoingHasMore={dialog.linkedRefs.outgoingHasMore}
@@ -359,7 +360,7 @@ function GraphCanvas({ contextId }: GraphTabPanelProps) {
         incomingHasMore={dialog.linkedRefs.incomingHasMore}
         onOpenLinkedMemory={dialog.openDetail}
         supersedeCandidate={dialog.supersedeCandidate}
-        onAcceptSupersede={dialog.acceptSupersede}
+        onAcceptSupersede={readOnly ? undefined : dialog.acceptSupersede}
         supersedeAccepting={dialog.supersedeAccepting}
         supersedeError={dialog.supersedeError}
       />

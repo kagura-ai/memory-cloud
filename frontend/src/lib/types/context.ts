@@ -20,6 +20,7 @@ export interface Context {
   is_private: boolean; // Issue #165: Privacy control (shared/private)
   is_public: boolean; // Issue #238: Public context flag (external access)
   is_locked: boolean; // Issue #85: Lock flag (prevent deletion)
+  feed_management_mode?: "feed" | "stopping" | "manual" | null;
   writes_paused?: boolean; // #1943: no writable slot on the plan (reads keep working)
   sleep_mode: SleepMode;
   resource_id: string | null; // Issue #238: Resource-backed context

@@ -3801,6 +3801,11 @@
     }
   },
   "contextDetail": {
+    "feedManaged": {
+      "title": "Managed by a feed",
+      "description": "Edit content in the connected service. To edit it here, switch to manual operation there and wait for synchronization to finish stopping.",
+      "stopping": "Synchronization is stopping. Editing stays locked until all accepted changes have finished indexing."
+    },
     "switchWorkspace": {
       "title": "This context belongs to another workspace",
       "message": "Switch to its workspace to open this context.",

@@ -546,6 +546,9 @@ async def reembed_context(
         raise ValueError("batch_size must be >= 1")
 
     started_at = utcnow()
+    from services.sync_managed_guard import assert_context_mutable
+
+    await assert_context_mutable(db, plan.context_id)
     await ensure_kagura_memories_collection(plan.target_dimensions, plan.target_collection)
     service = embedding_service or EmbeddingService(
         db, model=plan.target_model, dimensions=plan.target_dimensions
@@ -1091,6 +1094,9 @@ async def switch_context_embedding(
     if requeue_since is not None:
         requeue_since = to_naive_utc(requeue_since)
 
+    from services.sync_managed_guard import assert_context_mutable
+
+    await assert_context_mutable(db, context_id)
     if not await wait_for_point_writers(db, timeout_seconds=POINT_WRITER_WAIT_SECONDS):
         raise EmbeddingSwitchBusyError("Point writers are still active" + _ROUTE_UNCHANGED)
     previous_model, previous_dimensions = await resolve_context_embedding(db, context_id)

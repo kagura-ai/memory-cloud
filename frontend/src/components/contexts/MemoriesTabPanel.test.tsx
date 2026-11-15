@@ -136,6 +136,16 @@ afterEach(() => {
 
 // ---------- Tests ------------------------------------------------------------
 
+it("keeps a managed memory readable and prevents detail and bulk mutation", async () => {
+  mockSearchParams.current = new URLSearchParams(`memoryId=${TARGET_ID}`);
+  mockReferenceMemory.mockResolvedValue(makeRef());
+  render(<MemoriesTabPanel contextId="ctx-1" readOnly />);
+  expect(await screen.findByText("Hydrated body")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "delete" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "edit" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "open" })).toBeNull();
+});
+
 describe("MemoriesTabPanel — deep-link hydration (Issue #434)", () => {
   it("auto-opens the detail dialog when ?memoryId= is present on mount", async () => {
     mockSearchParams.current = new URLSearchParams(`memoryId=${TARGET_ID}`);
