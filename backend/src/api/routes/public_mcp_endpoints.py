@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import WorkspaceOwner
 from config.constants import RESOURCE_ID_MAX_LENGTH, RESOURCE_ID_PATTERN
 from db.base import get_db
+from mcp_server.public.domains import public_domains_enabled
 from mcp_server.public.publication import check_publishable, load_serving_endpoint
 from models.api_base import TZAwareBaseModel
 from models.public_mcp import (
@@ -32,6 +33,7 @@ from models.public_mcp import (
 )
 from models.public_usage_budget import PublicUsageBudgetStatus
 from services.operation_history_writer import record_operation
+from services.public_mcp_domains import owner_actor, release_domains_of_endpoint
 from services.public_usage_budget import read_public_usage_budget
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
@@ -287,7 +289,12 @@ async def unpublish_public_mcp_endpoint(
     resource_id: str = ResourceSlug,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Unpublish: the address answers 404 from the next request on."""
+    """Unpublish: the address answers 404 from the next request on.
+
+    #2809: with custom domains switched on, every domain of this publication
+    is released in the same transaction (claims deleted, holders released
+    with the cooldown), so a republish never inherits an alias.
+    """
     user_id, workspace_id = owner
     row = await _live_endpoint(db, workspace_id, resource_id)
     if row is None:
@@ -306,6 +313,8 @@ async def unpublish_public_mcp_endpoint(
         event_key=f"public-mcp-unpublished:{row.public_id}",
     )
     await db.flush()
+    if public_domains_enabled():
+        await release_domains_of_endpoint(db, row.id, await owner_actor(db, user_id))
     logger.info(
         "public_mcp_endpoint_unpublished",
         user_id=user_id,

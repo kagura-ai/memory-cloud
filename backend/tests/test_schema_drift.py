@@ -106,6 +106,7 @@ _MODEL_MODULES: tuple[str, ...] = (
     "models.sync_feed",
     "models.operation_history",
     "models.operations_status",
+    "models.public_mcp_domain",
     "models.public_mcp_usage",
     "models.referral",
     "models.resource",

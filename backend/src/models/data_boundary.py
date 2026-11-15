@@ -111,6 +111,11 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # context is served at which opaque address, the owner-approved public
         # text and who published / unpublished it. Publication plumbing.
         "public_mcp_endpoints",
+        # Verified custom domains of public MCP endpoints (#2809): a host name,
+        # its workspace and publication ids, the proof token and the check and
+        # lease state. No person column, no foreign key (released by the
+        # maintenance job after a workspace's hard delete). Never exported.
+        "public_mcp_domains",
         # Public MCP usage telemetry (#2678): one row per anonymous public
         # tools/call plus gap rows, keyed by endpoint identity and opaque HMAC
         # doc keys; no user id, no content. The doc-key map resolves a key to

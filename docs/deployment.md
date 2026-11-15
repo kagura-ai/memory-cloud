@@ -730,7 +730,9 @@ Operator notes:
   no-DDL `f50_2807_merge_sync_heads`. This also keeps `f48_2805`'s foreign-key
   lock on `workspaces` out of the transaction where `f48_2807` takes foreign-key
   locks on `users`, `resources`, `resource_events`, `contexts` and
-  `sync_installations`.
+  `sync_installations`. From v0.164.0 the last step also runs
+  `f51_2809_public_mcp_domains` after the merge node; its new table has no
+  foreign key, and it locks no existing table.
   (With two steps, `f45_2806_sync_credentials` would run in the same
   transaction as `f46_2803` and take its locks on `workspaces` there; with
   three, ending in `alembic upgrade head`, `f48_2805` would; with four,
@@ -4205,6 +4207,129 @@ Fixed caps (not settings): request body 64 KiB, no JSON-RPC batches, `recall` qu
 
 Every request re-checks the publication with one indexed query (nothing is cached): an unpublished endpoint, a context that is no longer public or no longer bound to the resource, a removed resource or a deleted workspace answers the same `404` from the next request on, including on a session opened before. A workspace whose plan pauses public serving, or that is over its capacity, answers `503` with no details. The Origin allow-list of `/mcp` (`MCP_ALLOWED_ORIGINS`) and `MCP_REQUIRE_MIRRORED_HEADERS` apply unchanged. One log line `public_mcp_call` per `tools/call` records the endpoint, resource, tool, outcome and duration (no query text, memory id, session id or address).
 
+## Public MCP custom domains — Issue #2809
+
+A workspace owner can serve a published public MCP endpoint under a host name
+they control, as `https://<host>/mcp`, after proving control of the name with
+a DNS TXT record. The alias serves the same endpoint, sessions, limits, usage
+budget and usage events as `/mcp/public/<public_id>`. Contract (states, DNS
+records, Host rules, right and lease, cooldown, limits, owner API, permission
+call, job, CLI, data lifecycle, log events):
+[Public MCP custom domains](public-mcp-domains.md). The reference proxy part
+(Caddy, on-demand certificates, shipped commented out):
+[`terraform/single-server/README.md`, "Custom domains (optional)"](../terraform/single-server/README.md#custom-domains-optional).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MCP_PUBLIC_DOMAINS_ENABLED` | `false` | Operator switch. Off: no statement on `public_mcp_domains`, the owner routes (`/api/v1/resources/{resource_id}/public-mcp/domains…`) and the permission call answer `404`, no job is registered, and **the application applies no Host rule**. On: the Host guard (below) applies, and `MCP_PUBLIC_DOMAINS_ROUTING_TARGET` must be set (start-up refuses otherwise). Allowed while `MCP_PUBLIC_ENDPOINTS_ENABLED` is off: every alias then answers `404`. |
+| `MCP_PUBLIC_DOMAINS_AUTHORITY` | `entitlement` | Who has the right to custom domains: `entitlement` = the workspace's paid integration license `public-mcp-domains` (with tier `promax` and a current Max window, [Paid integration entitlements](ops/paid-integration-entitlements.md)); `operator` = every canonical workspace owner, no publisher needed. |
+| `MCP_PUBLIC_DOMAINS_ROUTING_TARGET` | *(empty)* | The host name owners point their name at (CNAME target), for example `mcp-domains.example.com`. Must be a host name outside the special-use suffixes. Never claimable. |
+| `MCP_PUBLIC_DOMAINS_APP_HOSTS` | *(empty)* | Further names the application is reached under, comma-separated: `name` = that host, `.name` = that host and every name under it. An entry is a bare host name of two or more labels, with no scheme and no port (a zone entry too: `.default.svc`, not `.svc`); any other entry refuses start-up. Added to the hosts of `FRONTEND_URL`, `API_URL`, `OIDC_ISSUER` and `KMC_MCP_URL`. Never claimable. |
+| `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` | *(empty)* | Names never claimable, nor any name under them, comma-separated. Refused on the request path from the first request after a restart; the next check suspends a domain under them (`reserved`). |
+| `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | `0`–`2160`. Hours a released name stays closed to other workspaces (the releasing workspace may take it back at once). |
+| `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | `1`–`50`. Domains (`pending`, `active`, `suspended`) per workspace; one per publication in any case. |
+
+A malformed host name in the routing target, an application host or a
+reserved suffix stops the process at start-up; the message names the
+variable, never the value.
+
+**The Host guard.** While the switch is on, a request whose `Host` is neither
+an application host nor an internal shape (no `Host`, an address literal, a
+single label such as `api-blue`, or a name under `localhost`, `local`,
+`internal`, `invalid`, `test`, `example`, `home`, `lan`, `corp` or
+`home.arpa`) reaches only the public transport on `/mcp` and `/mcp/`, as an
+alias; every other path answers `404` without a session, rate-limit,
+request-logging or CORS step, and a WebSocket is closed. More than one `Host`
+header is refused with `400`. `X-Forwarded-Host` and `Forwarded` are never
+read. At start-up the log line `public_mcp_domains_application_hosts` names
+the application hosts (a warning when the list is empty).
+
+**Before switching on:**
+
+1. Run the migration first: `alembic upgrade head` runs
+   `f51_2809_public_mcp_domains` (it follows the merge revision
+   `f50_2807_merge_sync_heads`) **before** `MCP_PUBLIC_DOMAINS_ENABLED=true`. The revision creates one new,
+   empty table and its indexes, with no foreign key and no statement on any
+   existing table: it locks no existing table. Its
+   downgrade, and every downgrade to a revision below it, drops the table and
+   every binding with it: take the alias routing out of the proxy and switch
+   the feature off first.
+2. List in `MCP_PUBLIC_DOMAINS_APP_HOSTS` every name the API is reached under
+   that the four URL settings do not already name (internal service names
+   with dots included): once the switch is on, such a Host is treated as an
+   alias candidate and answers `404` outside `/mcp`.
+3. Put your own registrable domain and sibling hosts in
+   `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES`.
+4. Create the routing target record (it must reach the TLS proxy directly) and
+   set `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`.
+5. Check that the API container's resolver configuration (`/etc/resolv.conf`)
+   reaches a recursive resolver you trust. The application reads DNS through
+   it only, with no cache of its own, and does not validate DNSSEC. The new
+   runtime dependency `dnspython` is in the image.
+6. Confirm that a scheduler leader runs (`SCHEDULER_LEADER_ENABLED` in at least
+   one process) and, after switching on, that `public_mcp_domain_maintenance`
+   appears in the [operations status](#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768).
+   **Without a running scheduler leader every alias stops when its 72-hour
+   lease passes, under either authority.**
+7. Under `entitlement`, publish the `public-mcp-domains` license for the
+   workspaces that have the right.
+8. Switch the feature on, **then** enable alias routing at the proxy.
+
+**The proxy's duties.** Certificates for customer names, and routing them, are
+the proxy's: it asks
+`GET /internal/public-mcp-domains/tls-permission?domain=<name>` (no
+credential, on the internal network under an internal Host such as
+`http://api-blue:8080`; `200` only for an active alias, `404` otherwise, `503`
+when it cannot answer within 3 s or 4 such lookups already run in the
+process) before it obtains a certificate, keeps `/internal/*` off the
+internet, routes only `/mcp` and `/mcp/` on alias names, forwards `Host`
+unchanged, refuses a request whose `Host` differs from the TLS server name,
+and removes `Cookie` and `Authorization` upstream and `Set-Cookie`
+downstream. The query of the permission call is replaced with
+`domain=[REDACTED]` in every API log line.
+
+**The job.** `public_mcp_domain_maintenance` (every 15 minutes and once at
+scheduler start, only while the switch is on) deletes expired claims and
+cooled-down released rows, releases domains whose workspace or publication is
+gone, and re-checks every held domain about once an hour: each completed
+check renews a 72-hour lease of an active domain whose right is active, and a
+lost proof, an ended right or a reserved name suspends it. A run takes at
+most 120 s of checks, 200 rows; its integer counts are in the job status.
+
+**Operator command** (where the API runs; works while the switch is off):
+
+```bash
+python -m src.cli.public_mcp_domains list [--state S] [--workspace <workspace-id>]
+python -m src.cli.public_mcp_domains show (--domain-id <id> | --hostname <name>)
+python -m src.cli.public_mcp_domains release --domain-id <id>                  # plan
+python -m src.cli.public_mcp_domains release --domain-id <id> --apply --yes    # release with the cooldown
+python -m src.cli.public_mcp_domains release --domain-id <id> --skip-cooldown --apply --yes  # delete the row
+```
+
+Each change is audited as `cli:public-mcp-domains`. Host names go to the
+terminal only.
+
+**Stopping and rolling back.** Take the alias routing out of the proxy
+**first**, **then** switch the feature off (`MCP_PUBLIC_DOMAINS_ENABLED=false`)
+or roll back to a release without it. While the switch is off, and on a
+release without the feature, the application applies no Host rule: a request
+under an alias name that still reaches it is treated like any other host, and
+on `/mcp` that is the authenticated transport (401 with a sign-in challenge).
+The other ways to stop aliases:
+
+- one name or one zone, at once and reversibly: add it to
+  `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` and restart;
+- one name for good: the operator CLI's `release`
+  (`python -m src.cli.public_mcp_domains release --domain-id <id>` shows the
+  plan, `--apply --yes` acts);
+- every alias while the proxy still routes alias names: keep
+  `MCP_PUBLIC_DOMAINS_ENABLED=true` and set
+  `MCP_PUBLIC_ENDPOINTS_ENABLED=false` (this stops the fixed addresses too).
+
+While the switch is off no job runs: the host names of released rows stay
+until you remove them with the CLI or switch the feature on again, and no
+lease is renewed.
+
 ## Public MCP usage events — Issue #2678
 
 Each completed `tools/call` on a public MCP endpoint is also stored as a privacy-minimised **usage event** (tool, outcome, duration, opaque document keys; no query text, session id, address or client identifier). Schema, loss bounds, retention and the export cursor: [Public MCP usage events](public-mcp-usage-events.md).
@@ -4528,7 +4653,7 @@ runs, so re-subscribing resumes everything with no further action.
 | `max_connectors` | connector ingest (`FEAT-001`), worker dispatch (`GET /workers/config` answers the not-ready 404, so the worker skips the team), indexing, and the connector's own write key (`api_keys.connector_id`, named `connector:{id}`) — it fails verification (`401`) like a revoked key while the seats are `0` ([#1944](https://github.com/kagura-ai/memory-cloud/issues/1944)), so a worker still holding it cannot `remember` around the pause (a `401` together with the API log line `api_key_rejected_connectors_suspended` is this pause, not a revoked key; no re-issue is needed) | the connector, its token and its key |
 | `max_resource_tokens` | ingest on ordinary resource tokens (REST and MCP `ingest_events`, `FEAT-001`), indexing | the tokens and resources |
 | `sleep_enabled_contexts_limit` | Sleep's LLM phases (nightly and admin-triggered); a `full` context still runs the non-LLM retention purges | each context's `sleep_mode` |
-| `public_calls_per_day` | anonymous public `search` / `info` answer `429` (`api_public_daily`), as bound keys and signed-in callers already did | `is_public` and bound keys |
+| `public_calls_per_day` | public `search` / `info` without a bound key answer `429` (`api_public_daily`); a request that carries a session cookie is one of these, because the route does not read the session ([#2823](https://github.com/kagura-ai/memory-cloud/issues/2823)). On `search` a bound key is refused by its zero per-key bucket; on `info` it gets the same `429` | `is_public` and bound keys |
 | `max_members_per_workspace` below the member count ([#1943](https://github.com/kagura-ai/memory-cloud/issues/1943)) | the members without a seat are refused (`403` `FEAT-001`, `feature: members`) after membership and role — seats go to the owner first, then the earliest joined; a non-member keeps its usual refusal. A member without a seat is refused on their own private context too ([#1957](https://github.com/kagura-ai/memory-cloud/issues/1957)) | every membership row; the owner can remove members or upgrade, and the members list marks `seat_paused` |
 | `max_contexts_per_workspace` below the live context count ([#1943](https://github.com/kagura-ai/memory-cloud/issues/1943)) | content writes into the contexts beyond the oldest N (`remember`, updates, agent state, edges, uploads, feedback) are refused (`403` `FEAT-001`, `feature: contexts`); reads, listing, export, delete and metadata updates keep working | every context; the contexts list marks `writes_paused`, and deleting an older context frees its slot — and, since [#1960](https://github.com/kagura-ai/memory-cloud/issues/1960), its files and their storage (restorable with the context for 6 days, one day short of the file GC); `DELETE /api/v1/contexts/{id}/files` clears a context's files without deleting it |
 

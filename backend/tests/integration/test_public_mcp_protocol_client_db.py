@@ -307,3 +307,90 @@ async def test_usage_budget_is_shared_by_both_eras_and_every_endpoint(
             assert json.loads(text_body)["error"] == "usage_budget_exhausted"
 
     assert await used() == 3
+
+
+async def test_sdk_client_on_a_verified_custom_domain_both_eras(published, monkeypatch) -> None:
+    """#2809: the SDK client against ``http://<alias>/mcp`` gets the same endpoint
+    as on its fixed address, in the session era and in the stateless era."""
+    from datetime import timedelta
+
+    from mcp.client.session import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    from sqlalchemy import select
+
+    from api.main import app
+    from models.public_mcp_domain import PublicMcpDomain
+    from utils.datetime import utcnow
+
+    settings = get_settings()
+    for name, value in {
+        "mcp_public_endpoints_enabled": True,
+        "mcp_public_domains_enabled": True,
+        "mcp_public_domains_routing_target": "edge.example.net",
+        "frontend_url": "https://app.example.com",
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    factory = published["factory"]
+    alias = f"sdk-{uuid4().hex[:10]}.example.org"
+    async with factory() as s:
+        endpoint = await s.scalar(
+            select(PublicMcpEndpoint).where(PublicMcpEndpoint.public_id == published["public_id"])
+        )
+        now = utcnow()
+        s.add(
+            PublicMcpDomain(
+                hostname=alias,
+                workspace_id=endpoint.workspace_id,
+                endpoint_id=endpoint.id,
+                state="active",
+                verification_token="a" * 64,
+                serve_until=now + timedelta(hours=72),
+                verified_at=now,
+                proof_ok_at=now,
+            )
+        )
+        await s.commit()
+
+    async def _db() -> AsyncIterator[AsyncSession]:
+        async with factory() as s:
+            yield s
+
+    counts: dict[str, int] = {}
+
+    async def incr(key: str, amount: int, ttl: int | None = None) -> int:
+        counts[key] = counts.get(key, 0) + amount
+        return counts[key]
+
+    search = AsyncMock(return_value=[{"id": str(published["faq"]), "score": 0.77}])
+    try:
+        with (
+            patch("db.base.get_db", new=_db),
+            patch("mcp_server.public.limits.incrby_counter", new=incr),
+            patch("services.search_service.SearchService.hybrid_search", new=search),
+        ):
+            async with httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app), base_url=f"http://{alias}"
+            ) as http_client:
+                async with (
+                    streamable_http_client(
+                        f"http://{alias}/mcp", http_client=http_client
+                    ) as streams,
+                    ClientSession(streams[0], streams[1]) as session,
+                ):
+                    init = await session.initialize()
+                    assert init.server_info.name == "kagura-memory-cloud-public"
+                    assert "Help center FAQ" in (init.instructions or "")
+                    info = await session.call_tool("get_context_info", {})
+                    assert not info.is_error
+                    payload = json.loads(info.content[0].text)
+                    assert payload["endpoint"]["public_id"] == published["public_id"]
+
+                body, headers = _modern_call("get_context_info", 7)
+                response = await http_client.post(f"http://{alias}/mcp", json=body, headers=headers)
+                assert response.status_code == 200
+                text_body = response.json()["result"]["content"][0]["text"]
+                assert json.loads(text_body)["endpoint"]["public_id"] == published["public_id"]
+    finally:
+        async with factory() as s:
+            await s.execute(delete(PublicMcpDomain).where(PublicMcpDomain.hostname == alias))
+            await s.commit()

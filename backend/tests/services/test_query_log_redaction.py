@@ -178,7 +178,6 @@ async def test_public_search_log_has_no_raw_query():
         await public_search(
             context_id=context_id,
             request=PublicSearchRequest(query=SECRET_QUERY, limit=7),
-            user=None,
             api_key=None,
             db=db,
         )
@@ -187,7 +186,8 @@ async def test_public_search_log_has_no_raw_query():
     assert entry["log_level"] == "info"
     assert entry["context_id"] == context_id
     assert entry["limit"] == 7
-    assert entry["has_user"] is False
+    assert entry["has_bound_key"] is False
+    assert "has_user" not in entry  # #2823: the route does not read the session
     _assert_redacted(entry, SECRET_QUERY)
 
 

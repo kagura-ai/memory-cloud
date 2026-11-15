@@ -16,7 +16,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import APIKeyManager, VerifiedKey
-from auth.dependencies import get_api_key, get_current_user_optional
+from auth.dependencies import get_api_key
 from config.plan_tiers import get_plan_tier
 from db.base import get_db
 from db.redis import incrby_counter
@@ -104,31 +104,26 @@ class PublicSearchResponse(BaseModel):
 
 async def check_public_search_rate_limit(
     context_id: UUID,
-    user_id: str | None,
     limit_per_minute: int = 50,
 ) -> bool:
-    """Check rate limit for public search API.
+    """Count an anonymous search in the context's shared per-minute bucket.
+
+    Every search without a public-bound key is anonymous here, whether or
+    not the request carries a session cookie (#2823).
 
     Args:
         context_id: Context ID
-        user_id: User ID (None for anonymous/public token)
-        limit_per_minute: Rate limit (default: 50/min for public, unlimited for workspace members)
+        limit_per_minute: Rate limit (default: 50/min per context)
 
     Returns:
         ``True`` when the bucket counted the request; ``False`` when Redis
         could not be read (the bucket fails open, and the caller decides:
         a search charged to the public usage budget is refused then, #2805).
-        A workspace member is not counted here (``False``).
 
     Raises:
         RateLimitError: If rate limit exceeded
     """
-    # Skip rate limit check for authenticated workspace members
-    if user_id:
-        logger.debug("rate_limit_skipped_for_workspace_member", user_id=user_id)
-        return False
-
-    # Apply rate limit for anonymous/public token access. ``incrby_counter``
+    # ``incrby_counter``
     # post-checks the TTL via ``TTL`` and sets ``EXPIRE`` whenever absent —
     # avoiding the race in the older ``increment_counter`` where two
     # concurrent first-increments could leave the key with no TTL (counter
@@ -402,7 +397,6 @@ async def _resolve_public_attribution(
 async def public_search(
     context_id: UUID,
     request: PublicSearchRequest,
-    user: dict | None = Depends(get_current_user_optional),
     api_key: str | None = Depends(get_api_key),
     db: AsyncSession = Depends(get_db),
 ):
@@ -415,21 +409,23 @@ async def public_search(
     callers don't accidentally route their primary credentials through a
     public path. Anonymous access continues to work without any header.
 
+    The route does not read the session (#2823): a request with a session
+    cookie is served, counted and refused exactly like one without it.
+
     Authentication:
-        - Workspace member session (authenticated access, no rate limit)
         - Public-bound API key (#626) — per-key rate limit, audit-attributed
-        - Anonymous access (rate limited to 50 req/min per context, shared)
+        - Anonymous access, session cookie or not (rate limited to 50
+          req/min per context, shared)
 
     Rate Limits:
         - Anonymous access: 50 requests/minute per context (shared bucket)
         - Public-bound key: per-key bucket from workspace plan tier
           (``bound_public_calls_per_minute``)
-        - Workspace members: No limit (uses normal workspace quota)
         - Public usage budget (#2805, when MCP_PUBLIC_USAGE_BUDGET_ENABLED
           is on): an anonymous search of a context with a live public MCP
           publication is charged to the workspace's seven-day budget, shared
           with its public MCP endpoints (docs/public-usage-budget.md).
-          Members and bound keys are never charged.
+          Bound keys are never charged.
 
     Request:
         POST /api/v1/public/{context_id}/search
@@ -496,7 +492,6 @@ async def public_search(
         context_id=context_id,
         **query_log_fields(request.query),  # #1721 (Directory 1.D): no query text
         limit=request.limit,
-        has_user=user is not None,
         has_bound_key=bound_key is not None,
         bound_key_id=bound_key.id if bound_key else None,
     )
@@ -513,33 +508,13 @@ async def public_search(
         # blocked while the public flag is off.
         raise AuthorizationError("This context is not public")
 
-    # SECURITY: For authenticated users, verify workspace boundary
-    # Issue #268: Workspace boundary violation prevention
-    # Authenticated users can only search public contexts in their own workspace
-    # Anonymous users can search any public context (rate limited)
-    # Public-bound keys (#626) are exempt — the binding itself IS the
-    # authorization, and the IDOR check above already ensured the key
-    # belongs to this exact context.
-    if user is not None and bound_key is None:
-        current_workspace_id = user.get("current_workspace_id")
-
-        # Authenticated user must have workspace selected
-        if not current_workspace_id:
-            raise HTTPException(
-                status_code=400, detail="No workspace selected. Please select an workspace first."
-            )
-
-        # Verify context belongs to user's current workspace
-        if context.workspace_id != current_workspace_id:
-            raise AuthorizationError(
-                message="This public context belongs to a different workspace. Please switch workspaces or use anonymous access."
-            )
-
-    # 3. Rate limit dispatch by principal type.
+    # 3. Rate limit dispatch: a public-bound key, or anonymous (#2823: a
+    # session cookie does not change the principal on this route).
     # The Workspace fetch is deferred to after this gate so a flood of
     # 429-bound anonymous requests don't burn a DB lookup each. Bound-key
-    # path needs the plan tier (so it fetches workspace inline); other
-    # paths fetch lazily below, only on requests that survive the bucket.
+    # path needs the plan tier (so it fetches workspace inline); the
+    # anonymous path fetches lazily below, only on requests that survive
+    # the bucket.
     workspace: Workspace | None = None
     anonymous_bucket_counted = False
     if bound_key is not None:
@@ -551,12 +526,10 @@ async def public_search(
             )
         plan = get_plan_tier(workspace.plan_name or "free")
         await check_bound_key_rate_limit(bound_key.id, plan.bound_public_calls_per_minute)
-    elif user is None:
-        # Anonymous shared bucket — existing behavior preserved.
-        # Workspace lookup is deferred to step 4 below: under abuse, a
-        # 429 returns BEFORE any Workspace SELECT.
-        anonymous_bucket_counted = await check_public_search_rate_limit(context_id, None)
-    # else: workspace member session → no rate limit (existing behavior).
+    else:
+        # Anonymous shared bucket. Workspace lookup is deferred to step 4
+        # below: under abuse, a 429 returns BEFORE any Workspace SELECT.
+        anonymous_bucket_counted = await check_public_search_rate_limit(context_id)
 
     # 4. Resolve workspace lazily if not already fetched above. Required
     # for the embedding-service caller user_id (search_user_id).
@@ -571,41 +544,30 @@ async def public_search(
     # #1939: anonymous serving pauses when the owner's plan has no public
     # allowance (it fell back to Free) — after the anonymous bucket, so a
     # flood is still refused before this lookup. The bound-key path is
-    # already refused on such a plan (zero per-key bucket), and signed-in
-    # callers are metered by the daily-quota middleware on their own plan
-    # (``api_public_daily``, refused at a zero allowance), so this gate only
+    # already refused on such a plan (zero per-key bucket), so this gate only
     # has to cover anonymous callers.
-    if user is None and bound_key is None:
+    if bound_key is None:
         ensure_public_serving_allowed(workspace)
 
     # #1941: a workspace over its Free capacity pauses search, public reads
     # included. Placed after the rate buckets and on the already-loaded
     # Workspace, so a 429 flood costs no lock read. Order with the plan-pause
     # gate (#1939): plan pause (anonymous) first, then this capacity check.
-    # A member session sees the numbers; an anonymous or bound-key reader is
-    # never a member, so it gets the redacted refusal.
-    if user is not None and bound_key is None:
-        await ensure_not_capacity_locked(db, workspace, user_id=user.get("user_id"))
-    else:
-        await ensure_not_capacity_locked(db, workspace, outsider=True)
+    # Every caller of this route is an outsider (anonymous or bound key), so
+    # it gets the redacted refusal.
+    await ensure_not_capacity_locked(db, workspace, outsider=True)
 
     # #2805: an anonymous search of a context with a live public MCP
     # publication spends the workspace's public usage budget, like a public
     # tools/call. After the bucket, the plan pause and the capacity check;
     # before the search, so a search that fails afterwards stays counted.
-    # Members and bound keys are never charged.
-    if user is None and bound_key is None:
+    # Bound keys are never charged.
+    if bound_key is None:
         await _charge_public_usage_budget(db, context, bucket_counted=anonymous_bucket_counted)
 
     # 5. Hoist usage-log attribution + caller id once so the success and
     # error paths below share one definition.
-    log_user_id: str = (
-        str(bound_key.user_id)
-        if bound_key is not None
-        else str(user.get("user_id", "anonymous"))
-        if user
-        else "anonymous"
-    )
+    log_user_id: str = str(bound_key.user_id) if bound_key is not None else "anonymous"
     log_attribution = {
         "context_id": str(context_id),
         "workspace_id": str(context.workspace_id),
@@ -619,9 +581,9 @@ async def public_search(
         owner_id = workspace.owner_user_id
         search_user_id: str = str(owner_id) if owner_id is not None else "system"
 
-        # Reranking is permitted for workspace members (existing behavior) and
-        # for attributed bound-key callers (#626); anonymous traffic stays
-        # rerank-disabled to avoid exposing rerank cost to unbounded callers.
+        # Reranking is permitted for attributed bound-key callers (#626) only;
+        # anonymous traffic (session cookie or not) stays rerank-disabled to
+        # keep rerank cost off unbounded callers.
         degradation: dict[str, Any] = {}
         results = await search_service.hybrid_search(
             query=request.query,
@@ -629,7 +591,7 @@ async def public_search(
             workspace_id=str(context.workspace_id),
             context_id=str(context_id),
             k=request.limit,
-            use_rerank=request.use_rerank and (user is not None or bound_key is not None),
+            use_rerank=request.use_rerank and bound_key is not None,
             search_mode=request.search_mode,
             degradation=degradation,
         )

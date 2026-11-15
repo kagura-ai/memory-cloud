@@ -182,6 +182,42 @@ approval and any existing installation with plain reads and then enters
 unless `SYNC_INTEGRATIONS_ENABLED=true`. Token issuance and sync commit
 consumers are added by their later implementation tasks.
 
+The second consumer is verified custom domains of public MCP endpoints (#2809,
+[public-mcp-domains.md](../public-mcp-domains.md)) while
+`MCP_PUBLIC_DOMAINS_ENABLED=true` and `MCP_PUBLIC_DOMAINS_AUTHORITY=entitlement`
+(the default authority; under `operator` every canonical owner has the right
+and no license is read):
+
+- The right is the license with the **reserved service id
+  `public-mcp-domains`**, published in `services` like any other service, plus
+  the usual `promax` tier and Max window. Max alone grants nothing, and a sync
+  add-on's license is another row. `python -m src.cli.sync_service register`
+  refuses this id ("Invalid service ID"), so no sync service can share the
+  license row.
+- `services.public_mcp_domains.domain_write` is the only code that names the
+  service. A claim (`POST /api/v1/resources/{resource_id}/public-mcp/domains`),
+  an activation (verify of a `pending` domain) and every check of a held
+  domain (owner verify and the scheduler job `public_mcp_domain_maintenance`)
+  commit their plain reads and then enter
+  `paid_integration_write(db, workspace_id, "public-mcp-domains")`. A refusal
+  at entry or at the final re-check answers the owner `403`
+  `public_mcp_domain_not_entitled`; for a check it suspends an `active` domain
+  (`right_ended`) in a second, ordinary transaction. Each check takes the
+  Workspace row lock briefly; many domains of one workspace serialise on it.
+- The anonymous request path and the proxy's permission call never call the
+  entitlement service. They read the domain's lease, which every completed
+  check under the right sets to at most 72 hours ahead and never past the
+  earlier end of the Max window and the license window.
+- **Termination.** A window that ends on schedule stops the alias at its end.
+  An earlier withdrawal (a snapshot without the license, `max_access: null`,
+  or a tier below `promax`) reaches the alias at the domain's next check, within
+  about 75 minutes, or at once when the owner calls verify: the domain becomes
+  `suspended(right_ended)` and its alias answers `404`. The name stays held for
+  30 days, so a renewed right reinstates it at the next check; then it is
+  released with the reassignment cooldown. The publication, its fixed address,
+  its data and the usage budget are untouched. Without a running scheduler
+  leader every alias stops when its lease passes.
+
 `backend/tests/api/test_paid_integration_route_table.py` enforces the boundary:
 
 - **Router table** (`PAID_INTEGRATION_ROUTERS`): every router module that serves

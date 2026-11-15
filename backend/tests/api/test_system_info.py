@@ -251,3 +251,14 @@ def test_chatgpt_app_url_refuses_anything_but_an_https_url_with_a_host(
     monkeypatch.delenv("CHATGPT_APP_URL", raising=False)
     with pytest.raises(ValidationError, match="CHATGPT_APP_URL"):
         Settings(_env_file=None, chatgpt_app_url=value)
+
+
+def test_system_info_exposes_the_public_mcp_domains_switch(info_with) -> None:
+    """#2809: features.public_mcp_domains is MCP_PUBLIC_DOMAINS_ENABLED, default off."""
+    assert info_with().json()["features"]["public_mcp_domains"] is False
+    on = info_with(
+        mcp_public_domains_enabled=True,
+        mcp_public_domains_routing_target="edge.example.net",
+    ).json()
+    assert on["features"]["public_mcp_domains"] is True
+    assert "edge.example.net" not in str(on)

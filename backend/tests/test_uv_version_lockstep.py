@@ -11,8 +11,9 @@ higher lock ``revision``, which the pinned uv still reads.
 
 The sites are:
 
-1. ``astral-sh/setup-uv`` ``version:`` in ``.github/workflows/ci.yml`` and
-   ``.github/workflows/eval-nightly.yml`` (every occurrence),
+1. ``astral-sh/setup-uv`` ``version:`` in ``.github/workflows/ci.yml``,
+   ``.github/workflows/eval-nightly.yml`` and
+   ``.github/workflows/migration-head.yml`` (every occurrence),
 2. the ``ghcr.io/astral-sh/uv:<version>`` image stage in ``backend/Dockerfile``,
 3. the ``UV_REQUIRED="<version>"`` the standalone installer pins in ``setup.sh``.
 
@@ -43,7 +44,11 @@ pytestmark = pytest.mark.skipif(
     reason="not a repository checkout (e.g. tests mounted into the api container)",
 )
 
-_WORKFLOWS = [".github/workflows/ci.yml", ".github/workflows/eval-nightly.yml"]
+_WORKFLOWS = [
+    ".github/workflows/ci.yml",
+    ".github/workflows/eval-nightly.yml",
+    ".github/workflows/migration-head.yml",
+]
 _INSTALL_SITES = [*_WORKFLOWS, "backend/Dockerfile", "setup.sh"]
 
 _DOCKER_UV_IMAGE = re.compile(r"ghcr\.io/astral-sh/uv:([0-9][^\s/]*)")

@@ -24,6 +24,7 @@ from config.google_connected_apps import (
     parse_verification_tokens as parse_google_connected_apps_verification_tokens,
 )
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
+from utils.public_hostname import is_reserved_special_use, normalize_hostname
 from utils.recall_projection import RECALL_DEFAULT_FULL, RECALL_MAX_FULL
 
 if TYPE_CHECKING:
@@ -1360,6 +1361,119 @@ class Settings(BaseSettings):
         default=False,
         description="Record a daily session HMAC and the unverified client family",
     )
+
+    # #2809: verified custom domains of public MCP endpoints
+    # (docs/public-mcp-domains.md). Off by default: no statement runs on
+    # ``public_mcp_domains``, the owner routes and the permission endpoint
+    # answer 404, and the application applies no Host rule. On: a request
+    # whose Host is neither an application host nor an internal shape is
+    # served only as an alias on ``/mcp`` (everything else 404). The routing
+    # target is the name customers point their host at. APP_HOSTS adds names
+    # the API is reached under (``name`` = that host, ``.name`` = that host and
+    # every name under it); RESERVED_SUFFIXES are never claimable and refused
+    # on the request path from the first request after a restart.
+    mcp_public_domains_enabled: bool = Field(
+        default=False,
+        description="Serve verified custom domains as aliases of public MCP endpoints",
+    )
+    mcp_public_domains_authority: Literal["entitlement", "operator"] = Field(
+        default="entitlement",
+        description=(
+            "Who grants the custom-domain right: the published paid integration license "
+            "(entitlement) or every canonical workspace owner (operator)"
+        ),
+    )
+    mcp_public_domains_routing_target: str = Field(
+        default="",
+        description="Host name customers point their custom domain at (CNAME target)",
+    )
+    mcp_public_domains_app_hosts: str = Field(
+        default="",
+        description=(
+            "Extra host names the application is reached under (comma-separated; "
+            "a leading dot covers the name and every name under it)"
+        ),
+    )
+    mcp_public_domains_reserved_suffixes: str = Field(
+        default="",
+        description="Host names never claimable as custom domains, nor any name under them",
+    )
+    mcp_public_domains_reassign_cooldown_hours: int = Field(
+        default=168,
+        ge=0,
+        le=2160,
+        description="Hours a released custom domain stays closed to other workspaces",
+    )
+    mcp_public_domains_max_per_workspace: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description="Custom domains (pending, active or suspended) per workspace",
+    )
+
+    @field_validator("mcp_public_domains_authority", mode="before")
+    @classmethod
+    def _trim_public_domains_authority(cls, value: Any) -> Any:
+        """Trim and lower-case the value; the ``Literal`` does the refusing."""
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("mcp_public_domains_routing_target")
+    @classmethod
+    def _check_public_domains_routing_target(cls, value: str) -> str:
+        """Empty, or a host name outside the special-use suffixes (normalised)."""
+        if not value.strip():
+            return ""
+        name = normalize_hostname(value)
+        if name is None or is_reserved_special_use(name):
+            raise ValueError(
+                "MCP_PUBLIC_DOMAINS_ROUTING_TARGET must be a DNS host name (no scheme, "
+                "port or wildcard) outside the special-use suffixes"
+            )
+        return name
+
+    @field_validator("mcp_public_domains_app_hosts")
+    @classmethod
+    def _check_public_domains_app_hosts(cls, value: str) -> str:
+        """Every entry a host name, optionally with a leading dot (normalised)."""
+        entries: list[str] = []
+        for raw in value.split(","):
+            entry = raw.strip()
+            if not entry:
+                continue
+            zone = entry.startswith(".")
+            name = normalize_hostname(entry[1:] if zone else entry)
+            if name is None:
+                raise ValueError(
+                    "MCP_PUBLIC_DOMAINS_APP_HOSTS entries must be host names, "
+                    "optionally with a leading dot"
+                )
+            entries.append(f".{name}" if zone else name)
+        return ",".join(entries)
+
+    @field_validator("mcp_public_domains_reserved_suffixes")
+    @classmethod
+    def _check_public_domains_reserved_suffixes(cls, value: str) -> str:
+        """Every entry a host name (normalised)."""
+        entries: list[str] = []
+        for raw in value.split(","):
+            entry = raw.strip()
+            if not entry:
+                continue
+            name = normalize_hostname(entry)
+            if name is None:
+                raise ValueError("MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES entries must be host names")
+            entries.append(name)
+        return ",".join(entries)
+
+    @model_validator(mode="after")
+    def _public_domains_need_a_routing_target(self) -> "Settings":
+        """Switching custom domains on needs the name customers point at."""
+        if self.mcp_public_domains_enabled and not self.mcp_public_domains_routing_target:
+            raise ValueError(
+                "MCP_PUBLIC_DOMAINS_ENABLED=true needs MCP_PUBLIC_DOMAINS_ROUTING_TARGET"
+            )
+        return self
+
     deployment_id: str = Field(
         default="default",
         pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$",

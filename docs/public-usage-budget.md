@@ -91,18 +91,22 @@ request, never anything the client sends (not the address, a header, the
 session id, `?tools=`, `clientInfo` or a network address).
 
 Every `/mcp/public/{public_id}` of the workspace counts against the same
-budget: both protocol eras, every `?tools=` view, the endpoint of a sync
-installation (an ordinary public endpoint), and the anonymous REST search
-below. The stored period is untouched by republish (a new endpoint id),
+budget: both protocol eras, every `?tools=` view, a verified custom domain of
+the endpoint (#2809), the endpoint of a sync installation (an ordinary public
+endpoint), and the anonymous REST search below. The stored period is untouched by republish (a new endpoint id),
 unpublish, a slug change, sync unlink, owner transfer, a plan change, add-on
-or entitlement cancellation, soft delete and restore; only a hard delete of
-the workspace removes it.
+or entitlement cancellation, soft delete and restore, and adding, verifying,
+removing, suspending, releasing or reassigning a custom domain; only a hard
+delete of the workspace removes it.
 
-**Rule for verified domain aliases (#2809):** an alias must resolve to the
-same serving endpoint and enter the public MCP transport and its `tools/call`
-dispatch unchanged. The budget has no address or domain dimension, the
-per-minute bucket stays keyed by the endpoint id, and an alias must not add a
-per-domain counter or allowance.
+**Verified custom domains (#2809):** an alias `https://<host>/mcp`
+([Public MCP custom domains](public-mcp-domains.md)) resolves to the same
+serving endpoint as `/mcp/public/{public_id}` and enters the public MCP
+transport and its `tools/call` dispatch unchanged. Calls through the alias and
+through the fixed address count against the same budget of the same
+workspace. The budget has no address or domain dimension, the per-minute
+bucket stays keyed by the endpoint id, and there is no per-domain counter or
+allowance.
 
 ## What does not count, and why that opens no anonymous bypass
 
@@ -122,9 +126,10 @@ Exempt (the authenticated control-UI read projection):
 - the authenticated `/mcp` tools (member token; the workspace's daily MCP
   quota applies there);
 - share-key recall;
-- REST public search with a public-bound API key. A request that carries a
-  signed-in session is not charged either: the route checks it against the
-  session's workspace before the per-minute bucket and the budget.
+- REST public search with a public-bound API key. A signed-in session is no
+  credential there: the route does not read the session cookie, so a request
+  that carries one is served, counted and charged like an anonymous one
+  (#2823).
 
 Not counted and still served when the budget is exhausted: `initialize`,
 `tools/list`, `ping`, `server/discover`, `GET /api/v1/public/{context_id}/info`,
@@ -156,9 +161,9 @@ is refused with the existing body
 
 ### Anonymous REST search
 
-`POST /api/v1/public/{context_id}/search` without a signed-in session and
-without a bound key, on a context with a live public MCP publication, while
-the budget is on:
+`POST /api/v1/public/{context_id}/search` without a bound key (a session
+cookie changes nothing, #2823), on a context with a live public MCP
+publication, while the budget is on:
 
 | Status | `error` | Header | When |
 |---|---|---|---|
@@ -279,7 +284,13 @@ v0.162.0 in [Sync service credentials](ops/sync-service-credentials.md): they
 first revert `f49_2817` (no-op) and `f48_2805`. From the combined head,
 these operations also unmerge `f50_2807` and remove the staged-feed tables;
 stop new runs and back those tables up first (see
-[staged-feed rollback](ops/staged-feed-sync.md#retention-and-rollback)). Turn
+[staged-feed rollback](ops/staged-feed-sync.md#retention-and-rollback)).
+From v0.164.0, before all of these, they revert
+`f51_2809_public_mcp_domains`, which drops `public_mcp_domains` with every
+custom domain binding: take the alias routing out of the proxy and switch
+`MCP_PUBLIC_DOMAINS_ENABLED` off first (see
+[Public MCP custom domains](public-mcp-domains.md), "Stopping and rolling
+back"). Turn
 `MCP_PUBLIC_USAGE_BUDGET_ENABLED` off before any of them (see "Deploy order"
 for what the switch does without the table); the table comes back only with
 `alembic upgrade head`. After a downgrade that reverted

@@ -122,6 +122,9 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("application_starting", version=app.version)
     _log_system_admin_mode()
+    from mcp_server.public.domains import log_application_hosts
+
+    log_application_hosts()  # #2809: the hosts kept for the application (switch on)
 
     # Fail-closed: refuse to boot if OAuth endpoint overrides (E2E test-IdP
     # harness, #937) are active in production — they would redirect token
@@ -664,6 +667,18 @@ from api.middleware.correlation import CorrelationMiddleware  # noqa: E402
 app.add_middleware(CorrelationMiddleware)
 logger.info("correlation_middleware_registered")
 
+# Host guard of verified custom domains (#2809). Added LAST so that it wraps
+# every middleware above: a request under a Host that is neither the
+# application's nor an internal caller's reaches only the public MCP transport
+# (on /mcp) or a 404, never the session, rate-limit, logging, correlation or
+# CORS layers. While MCP_PUBLIC_DOMAINS_ENABLED is off it applies no Host rule.
+# Execution order (outermost→inner): HostGuard → Correlation → RequestLogger
+# → RateLimit → Session → CORS → Route handler. Keep this the last add_middleware.
+from api.middleware.public_mcp_domain_host import PublicMcpDomainHostGuard  # noqa: E402
+
+app.add_middleware(PublicMcpDomainHostGuard)
+logger.info("public_mcp_domain_host_guard_registered")
+
 
 # ============================================================================
 # Exception Handlers
@@ -929,6 +944,7 @@ from api.routes import (  # noqa: E402
     graph,
     internal_billing,  # Issue #954: billing-service entitlement push (/internal)
     internal_integrations,  # #2798: finite paid-integration rights (/internal)
+    internal_public_mcp_domains,  # #2809: TLS permission call for custom domains (/internal)
     internal_sync_installations,  # #2802: recorded-consent paid activation
     invitations,
     management_grants,
@@ -952,6 +968,7 @@ from api.routes import (  # noqa: E402
     passkeys,
     password,  # Issue #1678: self-service password endpoints
     provider_link_confirm,  # Issue #2786: connect a provider after an email confirmation
+    public_mcp_domains,  # #2809: verified custom domains of a public MCP endpoint
     public_mcp_endpoints,  # Issue #2675: publish a resource as a public MCP endpoint
     public_mcp_usage,  # Issue #2678: public MCP usage health
     public_search,  # Issue #238: Public Search API
@@ -1157,6 +1174,9 @@ app.include_router(resources.router, prefix="/api/v1")
 # Public MCP endpoint publication (Issue #2675 - owner-only, metadata)
 app.include_router(public_mcp_endpoints.router, prefix="/api/v1")
 
+# Verified custom domains of a public MCP endpoint (#2809 - owner-only, 404 while off)
+app.include_router(public_mcp_domains.router, prefix="/api/v1")
+
 # Public MCP usage event health (Issue #2678 - owner-only)
 app.include_router(public_mcp_usage.router, prefix="/api/v1")
 
@@ -1185,6 +1205,10 @@ app.include_router(worker_apps.router, prefix="/api/v1")
 app.include_router(internal_billing.router)
 app.include_router(internal_integrations.router)
 app.include_router(internal_sync_installations.router)
+# #2809: a proxy's certificate permission call for verified custom domains. No
+# credential and no dependency; reachable under application or internal Hosts
+# only (the Host guard answers 404 for /internal under any other Host).
+app.include_router(internal_public_mcp_domains.router)
 # Issue #1093: owner-only billing handoff token. Public surface (/api/v1/billing),
 # session-auth + owner-only, Stripe-agnostic — always mounted (unlike the
 # BILLING_ENABLED-gated Stripe plugin); fail-closed (503) when the signing key is unset.

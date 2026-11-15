@@ -47,6 +47,7 @@ _WS = "00000000-0000-0000-0000-000000000001"
         ("backfill_deleted_context_files", []),
         ("restore_context", [_WS]),
         ("public_usage_budget", ["reset", _WS]),
+        ("public_mcp_domains", ["release", "--domain-id", _WS]),
         ("transfer_context_creator", ["--from", "a", "--to", "b", "--workspace", _WS]),
         ("sweep_orphan_vectors", []),
         ("reprocess_erasures", ["--all"]),

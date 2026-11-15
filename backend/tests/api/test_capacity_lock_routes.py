@@ -432,7 +432,7 @@ class TestAgentBootstrap:
 
 
 class TestPublicSearch:
-    async def _call(self, *, user, bound_key=None, order=None):
+    async def _call(self, *, bound_key=None, order=None):
         from api.routes import public_search as ps
 
         ws_id = uuid4()
@@ -472,7 +472,6 @@ class TestPublicSearch:
             await ps.public_search(
                 context_id=ctx.id,
                 request=ps.PublicSearchRequest(query="q"),
-                user=user if user is None else {**user, "current_workspace_id": ws_id},
                 api_key="k" if bound_key else None,
                 db=db,
             )
@@ -480,14 +479,10 @@ class TestPublicSearch:
         return ensure, workspace, order
 
     @pytest.mark.asyncio
-    async def test_a_member_session_sees_the_numbers(self) -> None:
-        ensure, workspace, _ = await self._call(user={"user_id": "u1"})
-        assert ensure.await_args.args[1] is workspace
-        assert ensure.await_args.kwargs == {"user_id": "u1"}
-
-    @pytest.mark.asyncio
     async def test_an_anonymous_reader_is_an_outsider_checked_after_its_bucket(self) -> None:
-        ensure, workspace, order = await self._call(user=None)
+        # #2823: the route does not read the session, so a signed-in request
+        # is this reader too (``test_public_search_session_record.py``).
+        ensure, workspace, order = await self._call()
         # The loaded Workspace is passed (no second lookup), after the
         # anonymous bucket and the workspace load.
         assert ensure.await_args.args[1] is workspace
@@ -496,7 +491,7 @@ class TestPublicSearch:
 
     @pytest.mark.asyncio
     async def test_a_bound_key_reader_is_an_outsider(self) -> None:
-        ensure, _, order = await self._call(user=None, bound_key=SimpleNamespace(id=7))
+        ensure, _, order = await self._call(bound_key=SimpleNamespace(id=7))
         assert ensure.await_args.kwargs == {"outsider": True}
         assert order == ["workspace_loaded", "capacity"]
 
