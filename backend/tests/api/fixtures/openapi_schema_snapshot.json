@@ -1166,6 +1166,44 @@
         ],
         "type": "object"
       },
+      "AuditLogEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {},
+          "created_at": {},
+          "id": {},
+          "metadata": {},
+          "new_value": {},
+          "old_value": {},
+          "resource": {},
+          "user_email": {},
+          "user_id": {}
+        },
+        "required": [
+          "action",
+          "created_at",
+          "id",
+          "metadata",
+          "new_value",
+          "old_value",
+          "resource",
+          "user_email",
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "AuditLogListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {},
+          "next_before_id": {}
+        },
+        "required": [
+          "entries",
+          "next_before_id"
+        ],
+        "type": "object"
+      },
       "AuditVerifyResponse": {
         "properties": {
           "broken_at": {
@@ -15503,6 +15541,182 @@
         },
         "tags": [
           "well-known"
+        ]
+      }
+    },
+    "/api/v1/admin/audit-logs": {
+      "get": {
+        "operationId": "list_audit_logs_api_v1_admin_audit_logs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "enum": [
+                      "system_role_update",
+                      "system_admin_promote",
+                      "system_admin_demote",
+                      "workspace_slot_bonus_update",
+                      "referral_grant_revoke",
+                      "workspace_ownership_force_transfer",
+                      "workspace_ownership_transfer",
+                      "workspace_purged",
+                      "account_erasure",
+                      "context_restore",
+                      "bm25_drift_reveal_terms",
+                      "mcp_notice.created",
+                      "mcp_notice.withdrawn",
+                      "signup_blocked",
+                      "signup_admitted",
+                      "beta_invite.redeemed"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_email",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "resource",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLogListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
         ]
       }
     },

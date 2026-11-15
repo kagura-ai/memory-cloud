@@ -2334,6 +2334,47 @@ A request:
 | `retry` | `{"attempts", "step", "error_class", "last_attempt_at", "embeddings_requeued"}` for a request that was rescheduled (`503 ERASURE-007`, a lock conflict) or whose embeddings were re-queued; null otherwise. A key the request does not have is null. |
 | `failure_kind` | For a `failed` request, one of `after_postgres_commit` (the account is erased in Postgres; a later step failed or was interrupted), `billing_contract_active`, `workspace_transfer_required`, `vector_store_unavailable`, `lock_conflict` or `other`. Null for every other status. |
 
+### Audit log
+
+Issue #2835. Read-only: the `audit_logs` rows that admin actions and sign-up decisions write. The route answers a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route. Reading writes no audit row.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/audit-logs` | The rows of the actions listed below, newest first (`id` descending): `{"entries": [...], "next_before_id": <id or null>}`. |
+
+Query parameters, all optional and combined with AND. A value outside these rules is a `422`:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `action` | Repeatable. Each value must be one of the actions listed below. Without it the route returns every listed action. |
+| `user_id`, `user_email`, `resource` | 1-255 characters, compared exactly with the stored value (no trimming, no case folding, no wildcard). |
+| `from`, `to` | Bounds on `created_at`: `from` inclusive, `to` exclusive. ISO 8601 with a zone (`2026-11-15T09:00:00Z`; percent-encode the `+` of an offset as `%2B`). A value without a zone, and `from` later than `to`, are refused. |
+| `limit` | 1 to 100 (default 50). |
+| `before_id` | Cursor, 1 or more: rows with a smaller `id`. Pass the previous answer's `next_before_id`; it is `null` on the last page. |
+
+An entry: `{"id", "created_at", "action", "user_id", "user_email", "resource", "old_value", "new_value", "metadata"}`. `created_at` is UTC with its zone. `user_id`, `user_email` and `resource` are answered as stored, so after an account erasure a row shows what the erasure left (pseudonyms). In `service` mode a writer stores the actor as `operator:<address>`. What the three columns mean depends on the action:
+
+| `action` | `user_id` | `user_email` | `resource` | `metadata` keys |
+|----------|-----------|--------------|------------|-----------------|
+| `system_role_update` | the actor | the actor | `user:<target id>` | `actor_user_id`, `target_user_id`, `old_role`, `new_role` |
+| `system_admin_promote`, `system_admin_demote` | the target | the actor | `user:<target address>` | `promoted_by`, `is_initial_admin` / `demoted_by`, `was_initial_admin` |
+| `workspace_slot_bonus_update` | the actor | the actor | `user:<target address>` | `actor_user_id`, `target_user_id`, `before_value`, `after_value`, `delta`, `reason` |
+| `referral_grant_revoke` | the actor | the actor | `referral_grant:<id>` | `actor_user_id`, `referrer_user_id`, `referred_user_id`, `referrer_bonus_memories`, `referred_bonus_memories`, `reason` |
+| `workspace_ownership_force_transfer` | the actor | the actor | `workspace:<id>` | `break_glass`, `reason`, `previous_owner_id`, `new_owner_id`, `ownership_epoch`, `target_was_member`, `self_transfer`; with dual control also `dual_control`, `force_transfer_request_id`, `initiated_by_user_id`, `initiated_by_email`, `approved_by_user_id` |
+| `workspace_ownership_transfer` | the actor: the owner handing on, an admin or a CLI run | the actor | `workspace:<id>` | `previous_owner_id`, `new_owner_id`, `ownership_epoch` |
+| `workspace_purged` | the actor or the owner | the actor | `workspace:<id>` | `previous_owner_id`, `soft_deleted`, `contexts`, `memories`, `billing_contract_active` |
+| `account_erasure` | the subject's pseudonym | the pseudonym of the subject's address | `user_pseudonym:<prefix>` | `request_id`, `is_self_service`, `initiated_by`, `reason_code` |
+| `context_restore` | the actor | the actor | `context:<id>` | `workspace_id`, `name`, `renamed_from`, `deleted_at`, `deleted_by`, `memories_restored`, `memories_left_deleted`, `files_restored`, `file_bytes_restored` |
+| `bm25_drift_reveal_terms` | the actor | the actor | `bm25_drift_log:<id>` | `outcome`, `context_id`, `reason`, `num_terms_resolved`, `num_terms_total` |
+| `mcp_notice.created`, `mcp_notice.withdrawn` | the actor | the actor | `mcp_notice:<id>` | `text_chars`; a create also `starts_at`, `expires_at`, `plans` |
+| `signup_blocked` | the subject | `oauth-callback` | `signup_gate:<provider>` | `provider` |
+| `signup_admitted` | the subject | the sign-up path | `signup_gate:<provider>` | `provider`, `admission`, `invitations` (each `id`, `workspace_id`, `invited_by`), `invitation_count` |
+| `beta_invite.redeemed` | the subject | `email-signup` or `oauth-callback` | `beta_invite:<id>` | `provider`, `inviter_user_id`, `allowlist_entry_id` |
+
+- `old_value` and `new_value` are the stored values for `system_role_update`, `system_admin_promote`, `system_admin_demote`, `workspace_slot_bonus_update` and `referral_grant_revoke` (roles and numbers), and `null` for every other action.
+- `metadata` holds the keys of the table that the row has, each as stored when it is a string, a number, a boolean or null (`plans` a list of strings, `invitations` a list of objects with the three keys named). It is `null` for a row that stores none.
+- Rows of other actions (a user's own account events, member and workspace events, system and CLI events) are not part of this read; asking for one with `action` is a `422`. Plan changes have their own read, `GET /api/v1/admin/plans/audit`.
+
 ### Service notices over MCP
 
 Issue #2762. The notices delivered once per opted-in user in the MCP `bootstrap` reply ([Service notices over MCP](#service-notices-over-mcp)). The routes follow `SYSTEM_ADMIN_MODE` like every system-admin route (a service operator may call them) and work while `MCP_NOTICES_ENABLED` is off, so a notice can be prepared first. There is no edit and no delete: a correction is withdraw + create. Every create and withdraw writes an audit row (`mcp_notice.created` / `mcp_notice.withdrawn`, the actor, the SHA-256 of the text, never the text; a create also `plans`) and a WARNING log line `mcp_notice_created` / `mcp_notice_withdrawn` with the actor, the id and the character count (a create also `plans`).
