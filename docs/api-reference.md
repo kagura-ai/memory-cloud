@@ -2323,6 +2323,25 @@ A value outside these rules (a `limit` of 0 or 501, a negative `offset`, an unkn
 
 `addon_records` (Issue #2829) are the workspace's active add-on records, the rows its add-on limits are computed from: `{"id", "addon_type", "source", "quantity", "bonus", "active_from", "active_until", "created_at", "created_by"}`, ordered by `addon_type`, then `source` (`admin_grant` or `stripe`). `bonus` is `quantity` times the unit value of the add-on type, so the sum of `bonus` per add-on type is the `expected_value` of `GET /api/v1/admin/plans/addon-cache-consistency`. `active_until` is `null` for a record with no end; a record that has expired or starts later is not listed. A later admin grant changes only `quantity`, so `created_by` names who first granted it. A billing push that carries add-ons sets the workspace's add-on values directly and writes no record.
 
+### Signup allowlist
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/signup-gate/allowlist` | The signup allowlist, one page at a time (Issue #2831): `{"items", "total", "limit", "offset"}`, newest first (`created_at` descending, then `id`). Each item is `{"id", "provider", "subject_id", "subject_label", "github_user_id", "github_username", "source", "state", "added_by_user_id", "created_at"}`. |
+
+Its parameters, all optional and combined with AND:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `limit` | Page size, 1 to 200 (default 50). |
+| `offset` | Rows to skip, from 0 (default 0). |
+| `search` | A case-insensitive substring of `subject_label`, at most 255 characters. It is trimmed and an empty value means no filter; `\`, `%` and `_` match literally. `subject_id` and the legacy `github_*` fields are not searched. |
+| `provider` | Exact: `github`, `google` or `email`. |
+| `source` | Exact: `manual`, `github_sponsors` or `beta_invite`. |
+| `state` | Exact: `active`, `grace` or `revoked`. |
+
+A value outside these rules answers `422` (`VAL-001`); nothing is clamped. `total` counts every row that matches the filters. Walking the pages with `offset` returns each row once while none is added; a row added meanwhile (an admin add, a redeemed closed-beta invite link) is the newest and moves the later rows down by one. Until v0.164.0 the route took no parameter and answered every row as a bare array.
+
 ### Operations status
 
 | Endpoint | Purpose |

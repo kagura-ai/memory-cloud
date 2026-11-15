@@ -3556,7 +3556,12 @@
         "grace": "Grace period",
         "revoked": "Revoked"
       },
-      "githubUserId": "(id: {id})"
+      "githubUserId": "(id: {id})",
+      "pagination": {
+        "showing": "Showing {from}-{to} of {total}",
+        "previous": "Previous",
+        "next": "Next"
+      }
     }
   },
   "resourceTokens": {

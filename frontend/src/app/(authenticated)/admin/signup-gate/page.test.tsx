@@ -8,6 +8,8 @@
  *   updates the table; confirmation on delete.
  * - Error handling: load failure renders ErrorBanner; user-action failure
  *   surfaces a destructive toast.
+ * - Paging (#2831): the list is read one page at a time from the server
+ *   (`{items, total, limit, offset}`); add and remove re-read the page.
  */
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -134,12 +136,31 @@ const sampleEntry = {
   added_by_user_id: "admin1",
 };
 
+const PAGE_SIZE = 50;
+
+/** The list route's answer (#2831) for one page of `items`. */
+function page(
+  items: Array<Record<string, unknown>>,
+  total: number = items.length,
+  offset: number = 0,
+) {
+  return { items, total, limit: PAGE_SIZE, offset };
+}
+
+function entries(count: number, start: number = 0) {
+  return Array.from({ length: count }, (_, index) => ({
+    ...sampleEntry,
+    id: `entry-${start + index}`,
+    github_username: `user-${start + index}`,
+  }));
+}
+
 function primeHappyPath(
   config = baseConfig,
   allowlist: Array<typeof sampleEntry> = [],
 ) {
   mockGetConfig.mockResolvedValue(config);
-  mockListAllowlist.mockResolvedValue(allowlist);
+  mockListAllowlist.mockResolvedValue(page(allowlist));
 }
 
 // ---------- Tests ----------------------------------------------------------
@@ -157,6 +178,10 @@ describe("AdminSignupGatePage", () => {
     await waitFor(() => {
       expect(mockGetConfig).toHaveBeenCalledTimes(1);
       expect(mockListAllowlist).toHaveBeenCalledTimes(1);
+    });
+    expect(mockListAllowlist).toHaveBeenCalledWith({
+      limit: PAGE_SIZE,
+      offset: 0,
     });
 
     expect(screen.getByText("admin.signupGate.title")).toBeInTheDocument();
@@ -192,7 +217,11 @@ describe("AdminSignupGatePage", () => {
   it("adds a user to the allowlist via the form", async () => {
     initialTab = "allowlist";
     primeHappyPath();
-    mockAddEntry.mockResolvedValue(sampleEntry);
+    // The list is re-read from the server after the add.
+    mockAddEntry.mockImplementation(async () => {
+      mockListAllowlist.mockResolvedValue(page([sampleEntry]));
+      return sampleEntry;
+    });
 
     render(<AdminSignupGatePage />);
 
@@ -216,6 +245,11 @@ describe("AdminSignupGatePage", () => {
       });
     });
     await screen.findByText(/octocat/);
+    expect(mockListAllowlist).toHaveBeenCalledTimes(2);
+    expect(mockListAllowlist).toHaveBeenLastCalledWith({
+      limit: PAGE_SIZE,
+      offset: 0,
+    });
   });
 
   it("adds a Google entry when the provider is switched to Google", async () => {
@@ -232,7 +266,10 @@ describe("AdminSignupGatePage", () => {
       subject_id: "google-sub-1",
       subject_label: "alice@example.com",
     };
-    mockAddEntry.mockResolvedValue(googleEntry);
+    mockAddEntry.mockImplementation(async () => {
+      mockListAllowlist.mockResolvedValue(page([googleEntry]));
+      return googleEntry;
+    });
 
     render(<AdminSignupGatePage />);
 
@@ -288,7 +325,9 @@ describe("AdminSignupGatePage", () => {
   it("removes an entry after confirmation", async () => {
     initialTab = "allowlist";
     primeHappyPath(baseConfig, [sampleEntry]);
-    mockRemoveEntry.mockResolvedValue(undefined);
+    mockRemoveEntry.mockImplementation(async () => {
+      mockListAllowlist.mockResolvedValue(page([]));
+    });
     const confirmMock = vi.fn(() => true);
     vi.stubGlobal("confirm", confirmMock);
 
@@ -306,26 +345,169 @@ describe("AdminSignupGatePage", () => {
         expect(mockRemoveEntry).toHaveBeenCalledWith("entry-1");
       });
       expect(confirmMock).toHaveBeenCalled();
+      // The page is re-read; the empty state replaces the table.
+      await screen.findByText("admin.signupGate.allowlistEmpty");
+      expect(screen.queryByText(/octocat/)).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
+  it("reads the next and the previous page from the server", async () => {
+    initialTab = "allowlist";
+    mockGetConfig.mockResolvedValue(baseConfig);
+    mockListAllowlist.mockImplementation(
+      async ({ offset }: { offset: number }) =>
+        page(entries(offset === 100 ? 20 : PAGE_SIZE, offset), 120, offset),
+    );
+
+    render(<AdminSignupGatePage />);
+
+    await screen.findByText("user-0");
+    expect(
+      screen.getByText(
+        'admin.signupGate.pagination.showing:{"from":1,"to":50,"total":120}',
+      ),
+    ).toBeInTheDocument();
+    const previous = screen.getByRole("button", {
+      name: /admin\.signupGate\.pagination\.previous/,
+    });
+    const next = screen.getByRole("button", {
+      name: /admin\.signupGate\.pagination\.next/,
+    });
+    expect(previous).toBeDisabled();
+
+    fireEvent.click(next);
+    await screen.findByText("user-50");
+    expect(mockListAllowlist).toHaveBeenLastCalledWith({
+      limit: PAGE_SIZE,
+      offset: 50,
+    });
+    expect(screen.queryByText("user-0")).toBeNull();
+
+    fireEvent.click(next);
+    await screen.findByText("user-100");
+    expect(
+      screen.getByText(
+        'admin.signupGate.pagination.showing:{"from":101,"to":120,"total":120}',
+      ),
+    ).toBeInTheDocument();
+    expect(next).toBeDisabled();
+
+    fireEvent.click(previous);
+    await screen.findByText("user-50");
+    expect(mockListAllowlist).toHaveBeenLastCalledWith({
+      limit: PAGE_SIZE,
+      offset: 50,
+    });
+  });
+
+  it("shows no pager when the list is empty", async () => {
+    initialTab = "allowlist";
+    primeHappyPath();
+
+    render(<AdminSignupGatePage />);
+
+    await screen.findByText("admin.signupGate.allowlistEmpty");
+    expect(
+      screen.queryByRole("button", {
+        name: /admin\.signupGate\.pagination\.next/,
+      }),
+    ).toBeNull();
+  });
+
+  it("steps back a page when the last row of a later page is removed", async () => {
+    initialTab = "allowlist";
+    mockGetConfig.mockResolvedValue(baseConfig);
+    let total = 51;
+    mockListAllowlist.mockImplementation(
+      async ({ offset }: { offset: number }) =>
+        page(
+          entries(Math.max(0, Math.min(PAGE_SIZE, total - offset)), offset),
+          total,
+          offset,
+        ),
+    );
+    mockRemoveEntry.mockImplementation(async () => {
+      total = 50;
+    });
+    vi.stubGlobal(
+      "confirm",
+      vi.fn(() => true),
+    );
+
+    try {
+      render(<AdminSignupGatePage />);
+      await screen.findByText("user-0");
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: /admin\.signupGate\.pagination\.next/,
+        }),
+      );
+      await screen.findByText("user-50");
+
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: /admin\.signupGate\.removeAllowlistEntry/,
+        }),
+      );
+
+      await waitFor(() => {
+        expect(mockRemoveEntry).toHaveBeenCalledWith("entry-50");
+      });
+      await screen.findByText("user-49");
+      expect(mockListAllowlist).toHaveBeenLastCalledWith({
+        limit: PAGE_SIZE,
+        offset: 0,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("renders an ErrorBanner, not a toast, when a page fails to load", async () => {
+    initialTab = "allowlist";
+    mockGetConfig.mockResolvedValue(baseConfig);
+    mockListAllowlist.mockImplementation(
+      async ({ offset }: { offset: number }) => {
+        if (offset > 0) throw new Error("page two is down");
+        return page(entries(PAGE_SIZE), 120, 0);
+      },
+    );
+
+    render(<AdminSignupGatePage />);
+    await screen.findByText("user-0");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /admin\.signupGate\.pagination\.next/,
+      }),
+    );
+
+    await screen.findByText("page two is down");
+    expect(mockToast).not.toHaveBeenCalled();
+    // The add form stays usable.
+    expect(
+      screen.getByPlaceholderText("admin.signupGate.addUsername"),
+    ).toBeInTheDocument();
+  });
+
   it("labels an email sign-up row (#1734) and its beta-invite source", async () => {
     initialTab = "allowlist";
     mockGetConfig.mockResolvedValue(baseConfig);
-    mockListAllowlist.mockResolvedValue([
-      {
-        ...sampleEntry,
-        id: "entry-email",
-        provider: "email",
-        subject_id: "email:00000000-0000-4000-8000-000000000000",
-        subject_label: "new@example.com",
-        github_user_id: "email:legacy",
-        github_username: "new@example.com",
-        source: "beta_invite",
-      },
-    ]);
+    mockListAllowlist.mockResolvedValue(
+      page([
+        {
+          ...sampleEntry,
+          id: "entry-email",
+          provider: "email",
+          subject_id: "email:00000000-0000-4000-8000-000000000000",
+          subject_label: "new@example.com",
+          github_user_id: "email:legacy",
+          github_username: "new@example.com",
+          source: "beta_invite",
+        },
+      ]),
+    );
 
     render(<AdminSignupGatePage />);
 
