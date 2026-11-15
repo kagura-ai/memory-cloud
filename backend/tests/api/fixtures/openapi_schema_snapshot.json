@@ -12661,6 +12661,54 @@
         ],
         "type": "object"
       },
+      "SyncConfigurationV1": {
+        "additionalProperties": false,
+        "properties": {
+          "assertion_audience": {
+            "const": "issuer",
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "human_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "protocol": {
+            "const": "kmc.sync.v1",
+            "type": "string"
+          },
+          "schema_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "schema_version": {
+            "maximum": 1.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "service_scope": {
+            "const": "resource.sync",
+            "type": "string"
+          }
+        },
+        "required": [
+          "assertion_audience",
+          "capabilities",
+          "human_scopes",
+          "protocol",
+          "schema_hash",
+          "schema_version",
+          "service_scope"
+        ],
+        "type": "object"
+      },
       "SyncControlError": {
         "properties": {
           "error": {
@@ -15613,6 +15661,25 @@
             }
           },
           "404": {}
+        },
+        "tags": [
+          "well-known"
+        ]
+      }
+    },
+    "/.well-known/kmc-sync-configuration": {
+      "get": {
+        "operationId": "sync_configuration_document__well_known_kmc_sync_configuration_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncConfigurationV1"
+                }
+              }
+            }
+          }
         },
         "tags": [
           "well-known"
