@@ -464,7 +464,7 @@ class TestDeletedContexts:
             for label, sentinel in world.sentinels.items():
                 assert sentinel not in raw, label
                 assert sentinel.lower() not in raw.lower(), label
-            assert "people.example" not in raw
+            assert "@people" not in raw
             for item in response.json()["items"]:
                 assert set(item) == ITEM_KEYS
 
@@ -494,3 +494,99 @@ async def test_the_read_writes_no_audit_row_and_changes_no_row(
         await _list(client, workspace_id=str(world.live_ws))
         await _list(client, limit=500)
     assert await _counts(db_session, world.live_ws) == before
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def lookalikes(db_session: AsyncSession) -> AsyncIterator[SimpleNamespace]:
+    """Deleted contexts beside rows that look like a refusal of the restore and are none.
+
+    - ``twin_a`` / ``twin_b``: two deleted contexts with one name and one
+      ``resource_id``; a deleted context takes neither.
+    - ``elsewhere``: its name is held by a live context of another workspace.
+    - ``blank``: an empty ``resource_id``, which a live context has too; the
+      restore reads an empty value as no resource.
+    - ``twin_a`` holds one tombstone and one live memory.
+    """
+    tag = uuid4().hex[:8]
+    owner = f"owner-{tag}"
+    home = Workspace(id=uuid4(), name=f"home-{tag}", owner_user_id=owner)
+    away = Workspace(id=uuid4(), name=f"away-{tag}", owner_user_id=owner)
+    db_session.add_all([home, away])
+    await db_session.flush()
+    now = utcnow().replace(microsecond=0)
+
+    def context(workspace: Workspace, name: str, *, hours: int | None = None, **cols) -> Context:
+        row = Context(
+            id=uuid4(),
+            workspace_id=workspace.id,
+            name=name,
+            created_by=owner,
+            is_private=False,
+            deleted_at=now - timedelta(hours=hours) if hours is not None else None,
+            deleted_by=owner if hours is not None else None,
+            **cols,
+        )
+        db_session.add(row)
+        return row
+
+    rows = {
+        "twin_a": context(home, f"twin-{tag}", hours=1, resource_id=f"twin-resource-{tag}"),
+        "twin_b": context(home, f"twin-{tag}", hours=2, resource_id=f"twin-resource-{tag}"),
+        "elsewhere": context(home, f"elsewhere-{tag}", hours=3),
+        "blank": context(home, f"blank-{tag}", hours=4, resource_id=""),
+    }
+    context(away, f"elsewhere-{tag}")
+    context(away, f"blank-holder-{tag}", resource_id="")
+    await db_session.flush()
+    for deleted in (True, False):
+        db_session.add(
+            Memory(
+                id=uuid4(),
+                user_id=owner,
+                workspace_id=home.id,
+                context_id=rows["twin_a"].id,
+                summary="summary",
+                content="content",
+                type="note",
+                client="pytest",
+                embedding_status="success",
+                deleted_at=rows["twin_a"].deleted_at if deleted else None,
+                deleted_by=owner if deleted else None,
+            )
+        )
+    await db_session.commit()
+    ids = {key: row.id for key, row in rows.items()}
+    workspace_ids = [home.id, away.id]
+
+    yield SimpleNamespace(home=home.id, ids=ids)
+
+    await db_session.rollback()
+    await db_session.execute(delete(Memory).where(Memory.workspace_id.in_(workspace_ids)))
+    await db_session.execute(delete(Context).where(Context.workspace_id.in_(workspace_ids)))
+    await db_session.execute(delete(Workspace).where(Workspace.id.in_(workspace_ids)))
+    await db_session.commit()
+
+
+async def test_rows_that_only_look_like_a_refusal_set_no_flag_and_add_no_memory(
+    lookalikes, maker
+) -> None:
+    async with _client(maker, PRINCIPALS["service"]) as client:
+        body = await _list(client, workspace_id=str(lookalikes.home))
+        rows = {item["context_id"]: item for item in body["items"]}
+        plans = {}
+        for key, context_id in lookalikes.ids.items():
+            dry_run = await client.post(
+                f"/api/v1/admin/contexts/{context_id}/restore", json={"dry_run": True}
+            )
+            assert dry_run.status_code == 200, (key, dry_run.text)
+            plans[key] = dry_run.json()
+
+    assert body["total"] == 4
+    for key, context_id in lookalikes.ids.items():
+        row = rows[str(context_id)]
+        assert (row["name_taken"], row["resource_taken"]) == (False, False), key
+        assert row["deleted_memories"] == (
+            plans[key]["memories_restored"] + plans[key]["memories_left_deleted"]
+        ), key
+    # The tombstone, not the live memory beside it.
+    assert rows[str(lookalikes.ids["twin_a"])]["deleted_memories"] == 1
