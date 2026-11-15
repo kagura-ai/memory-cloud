@@ -149,6 +149,10 @@ from models.auth import (
 )
 from models.erasure import (
     FAILURE_AFTER_POSTGRES_COMMIT,
+    FAILURE_PREFIX_BILLING_CONTRACT,
+    FAILURE_PREFIX_LOCK_CONFLICT,
+    FAILURE_PREFIX_VECTOR_STORE,
+    FAILURE_PREFIX_WORKSPACE_TRANSFER,
     INTERRUPTED_AFTER_POSTGRES_COMMIT,
     NOTE_PSEUDONYMIZED_KEY,
     NOTE_USER_ROW_ABSENT,
@@ -286,7 +290,7 @@ _RETRY_KEY = "retry"
 LOCK_CONFLICT_ERROR_CLASS = "LockNotAvailable"
 DEADLOCK_ERROR_CLASS = "DeadlockDetected"
 # the ``failure_reason`` prefix once the budget is spent on lock conflicts
-LOCK_CONFLICT_GAVE_UP = "lock_conflict after "
+LOCK_CONFLICT_GAVE_UP = FAILURE_PREFIX_LOCK_CONFLICT
 
 # #2418: a NOWAIT workspace lock that loses to a short holder (a memory
 # create keeps its workspace row locked from its quota check until it
@@ -1678,7 +1682,7 @@ class AccountErasureService:
                         scheduled_for=utcnow() + VECTOR_STORE_RETRY_DELAY,
                         error_class=type(exc).__name__,
                     ) from exc
-                vector_store_gave_up = f"vector_store_unavailable after {attempt} attempts: {exc}"
+                vector_store_gave_up = f"{FAILURE_PREFIX_VECTOR_STORE}{attempt} attempts: {exc}"
                 raise
 
             # #2418: steps 2 and 3 hold the subject's ``users`` row and take the
@@ -1906,7 +1910,8 @@ class AccountErasureService:
                     .values(
                         status=STATUS_FAILED,
                         failure_reason=(
-                            f"billing_contract_active: workspace_ids={','.join(exc.details['workspace_ids'])}. "
+                            f"{FAILURE_PREFIX_BILLING_CONTRACT}"
+                            f"workspace_ids={','.join(exc.details['workspace_ids'])}. "
                             "Cancel the subscription and wait for the contract period to end, "
                             "then create a new erasure request."
                         )[:1000],
@@ -1959,7 +1964,8 @@ class AccountErasureService:
                     .values(
                         status=STATUS_FAILED,
                         failure_reason=(
-                            f"workspace_transfer_required: workspace_id={exc.details.get('workspace_id')} "
+                            f"{FAILURE_PREFIX_WORKSPACE_TRANSFER}"
+                            f"workspace_id={exc.details.get('workspace_id')} "
                             f"member_count={exc.details.get('member_count')}. "
                             "Promote another member to admin (or remove members), then create a new erasure request."
                         )[:1000],

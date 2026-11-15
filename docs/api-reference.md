@@ -2364,6 +2364,69 @@ The response (`schema_version: 1`) has `as_of`, `overdue_grace_seconds`, `schedu
 
 No user, workspace or context identifier, email address, memory text or exception message is part of the response. See [Operations status](deployment.md#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768) for the meaning of each field, the probe setting and what to alert on.
 
+### Erasure requests
+
+Issue #2834. Read-only: where an account erasure stands after it was requested. Both routes answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route. Neither writes a row.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/erasure-requests` | A page of requests, newest `requested_at` first, then by `request_id`: `{"items", "total", "limit", "offset"}`. Filters, combined with AND: `status` (`pending`, `cooling_off`, `in_progress`, `complete`, `failed` or `cancelled`), `user_id` (1-255 characters without a NUL, compared exactly with the stored value) and `is_self_service` (`true` / `false`). `limit` 1-200 (default 50), `offset` from 0 (at most 2^63 - 1). A value outside these is a `422`. `total` counts the requests that match the filters. |
+| `GET /api/v1/admin/erasure-requests/{request_id}` | One request, with the same fields. `404 RES-001` for an unknown id, `422` for an id that is not a UUID. |
+
+A request:
+
+| Field | Meaning |
+|-------|---------|
+| `request_id` | The request's id, as `POST /api/v1/admin/users/{user_id}/erase` answered it. |
+| `user_id` | As stored: the subject's id until the erasure completes, the subject's pseudonym afterwards (also on a request that failed after its Postgres step). The `user_id` filter therefore finds a completed request by its pseudonym, not by the id the account had. |
+| `status` | One of the six statuses above. |
+| `is_self_service`, `reason_code` | Who asked (the member, or an admin on the member's behalf) and the reason code given. |
+| `initiated_by` | As stored: the admin's user id, `operator:<address>` for a request made in `service` mode, or the subject for a self-service request (pseudonymized with it). |
+| `requested_at`, `confirmed_at`, `scheduled_for`, `started_at`, `completed_at`, `cancelled_at` | Times with their zone; null when the step did not happen. `scheduled_for` is when the sweep runs a `cooling_off` request next. |
+| `retry` | `{"attempts", "step", "error_class", "last_attempt_at", "embeddings_requeued"}` for a request that was rescheduled (`503 ERASURE-007`, a lock conflict) or whose embeddings were re-queued; null otherwise. A key the request does not have is null. |
+| `failure_kind` | For a `failed` request, one of `after_postgres_commit` (the account is erased in Postgres; a later step failed or was interrupted), `billing_contract_active`, `workspace_transfer_required`, `vector_store_unavailable`, `lock_conflict` or `other`. Null for every other status. |
+
+### Audit log
+
+Issue #2835. Read-only: the `audit_logs` rows that admin actions and sign-up decisions write. The route answers a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route. Reading writes no audit row.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/audit-logs` | The rows of the actions listed below, newest first (`id` descending): `{"entries": [...], "next_before_id": <id or null>}`. |
+
+Query parameters, all optional and combined with AND. A value outside these rules is a `422`:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `action` | Repeatable. Each value must be one of the actions listed below. Without it the route returns every listed action. |
+| `user_id`, `user_email`, `resource` | 1-255 characters without a NUL, compared exactly with the stored value (no trimming, no case folding, no wildcard). |
+| `from`, `to` | Bounds on `created_at`: `from` inclusive, `to` exclusive. ISO 8601 with a zone (`2026-11-15T09:00:00Z`; percent-encode the `+` of an offset as `%2B`). A value without a zone, a time whose UTC value is outside the years 1 to 9999, and `from` later than `to`, are refused. |
+| `limit` | 1 to 100 (default 50). |
+| `before_id` | Cursor, 1 to 2147483647: rows with a smaller `id`. Pass the previous answer's `next_before_id`; it is `null` on the last page. |
+
+An entry: `{"id", "created_at", "action", "user_id", "user_email", "resource", "old_value", "new_value", "metadata"}`. `created_at` is UTC with its zone. `user_id`, `user_email` and `resource` are answered as stored, so after an account erasure a row shows what the erasure left (pseudonyms). In `service` mode a writer stores the actor as `operator:<address>`. What the three columns mean depends on the action:
+
+| `action` | `user_id` | `user_email` | `resource` | `metadata` keys |
+|----------|-----------|--------------|------------|-----------------|
+| `system_role_update` | the actor | the actor | `user:<target id>` | `actor_user_id`, `target_user_id`, `old_role`, `new_role` |
+| `system_admin_promote`, `system_admin_demote` | the target | the actor | `user:<target address>` | `promoted_by`, `is_initial_admin` / `demoted_by`, `was_initial_admin` |
+| `workspace_slot_bonus_update` | the actor | the actor | `user:<target address>` | `actor_user_id`, `target_user_id`, `before_value`, `after_value`, `delta`, `reason` |
+| `referral_grant_revoke` | the actor | the actor | `referral_grant:<id>` | `actor_user_id`, `referrer_user_id`, `referred_user_id`, `referrer_bonus_memories`, `referred_bonus_memories`, `reason` |
+| `workspace_ownership_force_transfer` | the actor | the actor | `workspace:<id>` | `break_glass`, `reason`, `previous_owner_id`, `new_owner_id`, `ownership_epoch`, `target_was_member`, `self_transfer`; with dual control also `dual_control`, `force_transfer_request_id`, `initiated_by_user_id`, `initiated_by_email`, `approved_by_user_id` |
+| `workspace_ownership_transfer` | the actor: the owner handing on, an admin or a CLI run | the actor | `workspace:<id>` | `previous_owner_id`, `new_owner_id`, `ownership_epoch` |
+| `workspace_purged` | the actor or the owner | the actor | `workspace:<id>` | `previous_owner_id`, `soft_deleted`, `contexts`, `memories`, `billing_contract_active` |
+| `account_erasure` | the subject's pseudonym | the pseudonym of the subject's address | `user_pseudonym:<prefix>` | `request_id`, `is_self_service`, `initiated_by`, `reason_code` |
+| `context_restore` | the actor | the actor | `context:<id>` | `workspace_id`, `name`, `renamed_from`, `deleted_at`, `deleted_by`, `memories_restored`, `memories_left_deleted`, `files_restored`, `file_bytes_restored` |
+| `bm25_drift_reveal_terms` | the actor | the actor | `bm25_drift_log:<id>` | `outcome`, `context_id`, `reason`, `num_terms_resolved`, `num_terms_total` |
+| `mcp_notice.created`, `mcp_notice.withdrawn` | the actor | the actor | `mcp_notice:<id>` | `text_chars`; a create also `starts_at`, `expires_at`, `plans` |
+| `signup_blocked` | the subject | `oauth-callback` | `signup_gate:<provider>` | `provider` |
+| `signup_admitted` | the subject | the sign-up path | `signup_gate:<provider>` | `provider`, `admission`, `invitations` (each `id`, `workspace_id`, `invited_by`), `invitation_count` |
+| `beta_invite.redeemed` | the subject | `email-signup` or `oauth-callback` | `beta_invite:<id>` | `provider`, `inviter_user_id`, `allowlist_entry_id` |
+
+- `old_value` and `new_value` are the stored values for `system_role_update`, `system_admin_promote`, `system_admin_demote`, `workspace_slot_bonus_update` and `referral_grant_revoke` (roles and numbers), and `null` for every other action.
+- `metadata` holds the keys of the table that the row has, each as stored when it is a string, a number, a boolean or null (`plans` a list of strings, `invitations` a list of objects with the three keys named). It is `null` for a row that stores none.
+- Rows of other actions (a user's own account events, member and workspace events, system and CLI events) are not part of this read; asking for one with `action` is a `422`. Plan changes have their own read, `GET /api/v1/admin/plans/audit`.
+
 ### Service notices over MCP
 
 Issue #2762. The notices delivered once per opted-in user in the MCP `bootstrap` reply ([Service notices over MCP](#service-notices-over-mcp)). The routes follow `SYSTEM_ADMIN_MODE` like every system-admin route (a service operator may call them) and work while `MCP_NOTICES_ENABLED` is off, so a notice can be prepared first. There is no edit and no delete: a correction is withdraw + create. Every create and withdraw writes an audit row (`mcp_notice.created` / `mcp_notice.withdrawn`, the actor, the SHA-256 of the text, never the text; a create also `plans`) and a WARNING log line `mcp_notice_created` / `mcp_notice_withdrawn` with the actor, the id and the character count (a create also `plans`).
@@ -2432,6 +2495,12 @@ Read-only view of the deployment's environment-backed settings, behind the admin
 | `GET /api/v1/config`              | The **effective** value of each key (what the running process uses), as `{key, value, category, description, is_sensitive, read_only}`. `read_only` is `true` for every key. Any authenticated caller; the `hosted` category (BYOK / cost-display / plan-page flags, managed LLM lane, reranker defaults and endpoint) is returned to system admins only. Credentials embedded in a URL value are always masked (`https://***@host`). |
 | `GET /api/v1/config/schema`       | Display metadata per key (type, description, `requires_restart`, impact, examples). |
 | `PUT /api/v1/config/{key}`, `POST /api/v1/config/batch` | Always refused with `409` `CFG-002` (`details.keys` lists the refused keys); a batch is refused as a whole. Change the environment and restart/redeploy instead. |
+| `GET /api/v1/admin/environment` | The same settings for an administrator (#2837): a session admin in `session`, a service operator in `service`, `404` in `off`, like every system-admin route. No query parameter. `{"configs": [...], "embedding_models": {...}}`, described below. |
+
+`GET /api/v1/admin/environment` answers the values of the process that serves the request. Processes of one deployment can run with different environments (a `service` process beside public ones), so the answer describes that process only.
+
+- `configs`: every key of the four categories (`embedding`, `search`, `system`, `hosted`), in that order, as `{"key", "category", "value", "type", "description", "requires_restart"}`. `value` is the effective value; `type`, `description` and `requires_restart` come from the key's schema entry and are null for a key without one. Credentials embedded in a URL inside any string value are masked (`https://***@host`). A key whose value is not answered carries the string `***MASKED***` as its `value`, whatever it is set to; every key of today's categories is answered.
+- `embedding_models`: `{"default_model", "offered": [{"name", "dimensions", "provider"}]}`, the models the deployment offers (`EMBEDDING_MODEL_ALLOWLIST`) and its default. The route does not report whether a provider is reachable: it reads no stored key and calls no endpoint.
 
 Rows written to the `config_overrides` table by earlier versions were never read by any runtime consumer; they are ignored.
 

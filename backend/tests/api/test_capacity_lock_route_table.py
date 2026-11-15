@@ -33,6 +33,9 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "api.main": NOT_APPLICABLE,
     "fastapi.applications": NOT_APPLICABLE,  # /docs, /redoc
     "admin": NOT_APPLICABLE,
+    "admin_audit_logs": NOT_APPLICABLE,  # #2835: audit rows, no memory content
+    "admin_environment": NOT_APPLICABLE,  # #2837: process settings, no workspace data
+    "admin_erasure_requests": NOT_APPLICABLE,  # #2834: request rows, no memory content
     "admin_mcp_notices": NOT_APPLICABLE,  # #2762: deployment-wide notices, no workspace data
     "admin_memory_health": NOT_APPLICABLE,
     "admin_neural": NOT_APPLICABLE,

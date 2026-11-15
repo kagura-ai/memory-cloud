@@ -1274,6 +1274,44 @@
         ],
         "type": "object"
       },
+      "AuditLogEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {},
+          "created_at": {},
+          "id": {},
+          "metadata": {},
+          "new_value": {},
+          "old_value": {},
+          "resource": {},
+          "user_email": {},
+          "user_id": {}
+        },
+        "required": [
+          "action",
+          "created_at",
+          "id",
+          "metadata",
+          "new_value",
+          "old_value",
+          "resource",
+          "user_email",
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "AuditLogListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {},
+          "next_before_id": {}
+        },
+        "required": [
+          "entries",
+          "next_before_id"
+        ],
+        "type": "object"
+      },
       "AuditVerifyResponse": {
         "properties": {
           "broken_at": {
@@ -4394,6 +4432,50 @@
         ],
         "type": "object"
       },
+      "EnvironmentConfigItem": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {},
+          "description": {},
+          "key": {},
+          "requires_restart": {},
+          "type": {},
+          "value": {}
+        },
+        "required": [
+          "category",
+          "description",
+          "key",
+          "requires_restart",
+          "type",
+          "value"
+        ],
+        "type": "object"
+      },
+      "EnvironmentEmbeddingModels": {
+        "additionalProperties": false,
+        "properties": {
+          "default_model": {},
+          "offered": {}
+        },
+        "required": [
+          "default_model",
+          "offered"
+        ],
+        "type": "object"
+      },
+      "EnvironmentResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "configs": {},
+          "embedding_models": {}
+        },
+        "required": [
+          "configs",
+          "embedding_models"
+        ],
+        "type": "object"
+      },
       "ErasureConfirmRequest": {
         "properties": {
           "password": {
@@ -4429,6 +4511,58 @@
         ],
         "type": "object"
       },
+      "ErasureRequestItem": {
+        "additionalProperties": false,
+        "properties": {
+          "cancelled_at": {},
+          "completed_at": {},
+          "confirmed_at": {},
+          "failure_kind": {},
+          "initiated_by": {},
+          "is_self_service": {},
+          "reason_code": {},
+          "request_id": {},
+          "requested_at": {},
+          "retry": {},
+          "scheduled_for": {},
+          "started_at": {},
+          "status": {},
+          "user_id": {}
+        },
+        "required": [
+          "cancelled_at",
+          "completed_at",
+          "confirmed_at",
+          "failure_kind",
+          "initiated_by",
+          "is_self_service",
+          "reason_code",
+          "request_id",
+          "requested_at",
+          "retry",
+          "scheduled_for",
+          "started_at",
+          "status",
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "ErasureRequestListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {},
+          "limit": {},
+          "offset": {},
+          "total": {}
+        },
+        "required": [
+          "items",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "type": "object"
+      },
       "ErasureRequestStateResponse": {
         "properties": {
           "cancelled_at": {},
@@ -4447,6 +4581,24 @@
           "request_id",
           "requested_at",
           "status"
+        ],
+        "type": "object"
+      },
+      "ErasureRetry": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {},
+          "embeddings_requeued": {},
+          "error_class": {},
+          "last_attempt_at": {},
+          "step": {}
+        },
+        "required": [
+          "attempts",
+          "embeddings_requeued",
+          "error_class",
+          "last_attempt_at",
+          "step"
         ],
         "type": "object"
       },
@@ -8247,6 +8399,20 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "OfferedEmbeddingModel": {
+        "additionalProperties": false,
+        "properties": {
+          "dimensions": {},
+          "name": {},
+          "provider": {}
+        },
+        "required": [
+          "dimensions",
+          "name",
+          "provider"
+        ],
         "type": "object"
       },
       "OpenAIKeyStatusResponse": {
@@ -15642,6 +15808,186 @@
         ]
       }
     },
+    "/api/v1/admin/audit-logs": {
+      "get": {
+        "operationId": "list_audit_logs_api_v1_admin_audit_logs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "enum": [
+                      "system_role_update",
+                      "system_admin_promote",
+                      "system_admin_demote",
+                      "workspace_slot_bonus_update",
+                      "referral_grant_revoke",
+                      "workspace_ownership_force_transfer",
+                      "workspace_ownership_transfer",
+                      "workspace_purged",
+                      "account_erasure",
+                      "context_restore",
+                      "bm25_drift_reveal_terms",
+                      "mcp_notice.created",
+                      "mcp_notice.withdrawn",
+                      "signup_blocked",
+                      "signup_admitted",
+                      "beta_invite.redeemed"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_email",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "resource",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 2147483647,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLogListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/bm25-drift": {
       "get": {
         "operationId": "list_drift_logs_api_v1_admin_bm25_drift_get",
@@ -16108,6 +16454,173 @@
               }
             }
           },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/environment": {
+      "get": {
+        "operationId": "get_environment_api_v1_admin_environment_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/erasure-requests": {
+      "get": {
+        "operationId": "list_erasure_requests_api_v1_admin_erasure_requests_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "pending",
+                    "cooling_off",
+                    "in_progress",
+                    "complete",
+                    "failed",
+                    "cancelled"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "is_self_service",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErasureRequestListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/erasure-requests/{request_id}": {
+      "get": {
+        "operationId": "get_erasure_request_api_v1_admin_erasure_requests__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErasureRequestItem"
+                }
+              }
+            }
+          },
+          "404": {},
           "422": {
             "content": {
               "application/json": {
