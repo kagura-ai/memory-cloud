@@ -276,12 +276,16 @@ drops the table: counts and periods are lost and every workspace starts a
 fresh period at its next counted call. So does every downgrade to a revision
 below `f48_2805_public_usage_budgets`, including the per-branch downgrades of
 v0.162.0 in [Sync service credentials](ops/sync-service-credentials.md): they
-first revert `f49_2817` (no-op) and `f48_2805`. Turn
+first revert `f49_2817` (no-op) and `f48_2805`. From the combined head,
+these operations also unmerge `f50_2807` and remove the staged-feed tables;
+stop new runs and back those tables up first (see
+[staged-feed rollback](ops/staged-feed-sync.md#retention-and-rollback)). Turn
 `MCP_PUBLIC_USAGE_BUDGET_ENABLED` off before any of them (see "Deploy order"
 for what the switch does without the table); the table comes back only with
 `alembic upgrade head`. After a downgrade that reverted
 `f46_2803_admission_record`, run `alembic upgrade
-f47_2819_merge_sync_credentials` first and then `alembic upgrade head`.
+f47_2819_merge_sync_credentials` first, then `alembic upgrade
+f49_2817_clear_allowlist_adders`, then `alembic upgrade head`.
 
 ## Log events
 

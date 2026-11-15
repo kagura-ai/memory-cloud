@@ -18,6 +18,11 @@ merge `f50_2807_merge_sync_heads` joins the feed migration with
 migration). Either deployed parent, their common ancestor or both parent
 markers can upgrade normally; do not stamp or renumber existing revisions.
 The merge itself rewrites no tables, counters, period boundaries or feed data.
+For a live database at `f47` or the sync-only branch, first run
+`alembic upgrade f49_2817_clear_allowlist_adders` and commit, then upgrade head.
+This separates the public-budget and staged-feed foreign-key locks; older
+installations should follow the staged upgrade recipe in
+[deployment.md](../deployment.md#how-each-account-was-admitted-issue-2803).
 
 The browser client must explicitly register and request `sync.records:read` to
 read managed bodies. Existing grants and `workspaces:read` do not gain data
