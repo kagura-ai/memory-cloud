@@ -140,6 +140,8 @@ async def test_walking_the_pages_returns_every_action_once_in_id_order(maker, wo
             if not body["actions"]:
                 break
             seen.extend(action["id"] for action in body["actions"])
+            # A walk that never reaches the end fails here instead of looping.
+            assert len(seen) <= ACTIONS_OF_THE_RUN
             offset += limit
 
     assert seen == world.action_ids
