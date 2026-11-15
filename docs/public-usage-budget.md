@@ -285,7 +285,12 @@ first revert `f49_2817` (no-op) and `f48_2805`. From the combined head,
 these operations also unmerge `f50_2807` and remove the staged-feed tables;
 stop new runs and back those tables up first (see
 [staged-feed rollback](ops/staged-feed-sync.md#retention-and-rollback)).
-From v0.164.0, before all of these, they revert
+From v0.164.0, before all of these, they unmerge the head
+`f52_2808_merge_feed_domains` and revert both revisions it joins:
+`f51_2808_managed_sync`, which drops the five managed-feed tables (the
+v0.164.0 application cannot write content or list Contexts without
+`sync_managed_targets`, so stop it first; see
+[Feed ownership and safe manual operation](ops/feed-managed-sync.md)), and
 `f51_2809_public_mcp_domains`, which drops `public_mcp_domains` with every
 custom domain binding: take the alias routing out of the proxy and switch
 `MCP_PUBLIC_DOMAINS_ENABLED` off first (see

@@ -20,6 +20,11 @@ markers can upgrade normally; do not stamp or renumber existing revisions.
 The merge itself rewrites no tables, counters, period boundaries or feed data.
 For a live database at `f47` or the sync-only branch, first run
 `alembic upgrade f49_2817_clear_allowlist_adders` and commit, then upgrade head.
+From v0.164.0 `alembic upgrade head` continues past the merge to
+`f51_2809_public_mcp_domains`, `f51_2808_managed_sync` (its foreign keys take
+locks on `sync_installations`, `users` and `memories`, and on the feed tables
+`sync_feeds` and `sync_runs`) and the no-op merge
+`f52_2808_merge_feed_domains`, the single head.
 This separates the public-budget and staged-feed foreign-key locks; older
 installations should follow the staged upgrade recipe in
 [deployment.md](../deployment.md#how-each-account-was-admitted-issue-2803).
@@ -190,8 +195,16 @@ ancestor also affects the public-budget branch and must be planned for both
 features; it is not a feed-only rollback. Prefer disabling the sync flag when
 only staged-feed admission needs to stop.
 
-From v0.164.0, `f51_2809_public_mcp_domains` follows the merge node, so every
-downgrade from the combined head, these included, first reverts it and drops
+From v0.164.0, `f51_2808_managed_sync` and `f51_2809_public_mcp_domains` both
+follow the merge node, and the no-op merge `f52_2808_merge_feed_domains` joins
+them as the single head. A plain downgrade from the combined head to the merge
+node and every downgrade below it, these included, first unmerges `f52_2808`
+and reverts both. It
+drops the five managed-feed tables, whose foreign keys reference `sync_feeds`
+and `sync_runs`: the ownership rows are lost, and the v0.164.0 application
+cannot write content or list Contexts without `sync_managed_targets`, so stop
+it first (see [Feed ownership and safe manual operation](feed-managed-sync.md)).
+It also drops
 `public_mcp_domains` with every custom domain binding: take the alias routing
 out of the proxy and switch `MCP_PUBLIC_DOMAINS_ENABLED` off first (see
 [Public MCP custom domains](../public-mcp-domains.md), "Stopping and rolling
