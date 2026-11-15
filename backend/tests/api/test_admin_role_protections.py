@@ -13,11 +13,13 @@ two-session behaviour is in
 
 from __future__ import annotations
 
+import json
 import secrets
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import structlog
 from fastapi.testclient import TestClient
 from sqlalchemy.dialects import postgresql
 
@@ -186,7 +188,61 @@ def test_put_keeping_the_initial_admin_an_admin_is_not_refused(serve, session_ad
     assert response.status_code == 200, response.text
 
 
+def _take_admin_role(client: TestClient, route: str, user_id: str, headers: dict):
+    """Ask one of the two routes to take the admin role from ``user_id``."""
+    if route == "DELETE":
+        return client.delete(f"/api/v1/admin/system-admins/{user_id}", headers=headers)
+    return client.put(
+        f"/api/v1/admin/users/{user_id}/role",
+        json={"role": route.removeprefix("PUT:")},
+        headers=headers,
+    )
+
+
+ROUTES = ["PUT:user", "PUT:read_only", "DELETE"]
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_the_initial_admin_is_kept_for_an_operator_in_service_mode_on_both_routes(
+    serve, operator, route
+):
+    initial = account("2002", "admin", initial=True)
+    session = role_change_session(account("1001", "admin"), initial)
+    response = _take_admin_role(serve(session), route, "2002", operator)
+    assert response.status_code == 403, response.text
+    assert response.json()["error"] == "ADMIN-001"
+    assert response.json()["message"] == INITIAL_ADMIN_MESSAGE
+    assert initial.role == "admin"
+    session.add.assert_not_called()
+    session.commit.assert_not_awaited()
+
+
+def test_the_initial_admin_who_is_also_the_last_admin_is_answered_as_the_initial_admin(
+    serve, operator
+):
+    session = role_change_session(account("2002", "admin", initial=True))
+    for route in ROUTES:
+        response = _take_admin_role(serve(session), route, "2002", operator)
+        assert response.status_code == 403
+        assert response.json()["message"] == INITIAL_ADMIN_MESSAGE
+
+
 # --- the last admin ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_the_last_admin_is_kept_for_an_operator_in_service_mode_on_both_routes(
+    serve, operator, route
+):
+    last = account("2002", "admin")
+    session = role_change_session(last, account("3003", "user"))
+    response = _take_admin_role(serve(session), route, "2002", operator)
+    assert response.status_code == 403, response.text
+    assert response.json()["error"] == "ADMIN-001"
+    assert response.json()["message"] == LAST_ADMIN_MESSAGE
+    assert last.role == "admin"
+    session.add.assert_not_called()
+    session.commit.assert_not_awaited()
 
 
 @pytest.mark.parametrize("new_role", ["user", "read_only"])
@@ -400,6 +456,32 @@ async def test_the_shared_check_reads_no_system_admin_mode(monkeypatch):
 async def test_the_shared_check_returns_none_for_an_unknown_user():
     session = role_change_session(account("1001", "admin"))
     assert await SystemAdminService(session).lock_for_role_change("2002", "user") is None
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize(
+    ("initial", "reason", "admins"),
+    [(True, "initial_admin_protected", 2), (False, "last_admin_protected", 1)],
+)
+def test_the_refusal_log_line_names_the_account_by_id_and_holds_no_address(
+    serve, operator, route, initial, reason, admins
+):
+    rows = [account("2002", "admin", initial=initial)]
+    if initial:
+        rows.append(account("1001", "admin"))
+    with structlog.testing.capture_logs() as events:
+        response = _take_admin_role(serve(role_change_session(*rows)), route, "2002", operator)
+    assert response.status_code == 403
+    [line] = [event for event in events if event["event"] == "demote_system_admin_blocked"]
+    assert line == {
+        "event": "demote_system_admin_blocked",
+        "log_level": "warning",
+        "user_id": "2002",
+        "reason": reason,
+        "admin_count": admins,
+    }
+    # The target's address (``2002@example.com``) is in no field of the line.
+    assert "@" not in json.dumps(line, default=str)
 
 
 # --- the demote route --------------------------------------------------------

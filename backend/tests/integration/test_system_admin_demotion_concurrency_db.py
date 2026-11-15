@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.routes.admin import RoleUpdateRequest, update_user_role
 from api.routes.system_admins import demote_system_admin
 from models.auth import AuditLog, User
-from utils.exceptions import AdminProtectionError, NotFoundException
+from utils.exceptions import AdminProtectionError, BadRequestError, NotFoundException
 
 # A service-mode operator: no users row, so no self-demotion check matches.
 OPERATOR = {"user_id": "operator:ops@example.com", "email": "operator:ops@example.com"}
@@ -193,6 +193,115 @@ async def test_two_demotions_of_the_last_two_admins_leave_one_admin(
     # went through left an audit row.
     assert await _admin_ids(db_session) == [second_target]
     assert await _role_audit_targets(db_session) == [first_target]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_route", ["PUT", "DELETE"])
+@pytest.mark.parametrize("second_route", ["PUT", "DELETE"])
+async def test_a_second_demotion_of_the_same_admin_reads_the_role_the_first_one_stored(
+    db_session, admins, first_route, second_route
+):
+    ids = await admins(3)
+    target = ids[1]
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    gap, resume, started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    second_pid = None
+
+    async def first():
+        async with maker() as db:
+            commit = db.commit
+
+            async def paused_commit():
+                gap.set()
+                await asyncio.wait_for(resume.wait(), 15)
+                await commit()
+
+            db.commit = paused_commit
+            return await _demote(first_route, db, target)
+
+    async def second():
+        nonlocal second_pid
+        async with maker() as db:
+            second_pid = await db.scalar(text("SELECT pg_backend_pid()"))
+            started.set()
+            return await _demote(second_route, db, target)
+
+    tasks = []
+    try:
+        one = asyncio.create_task(first())
+        tasks.append(one)
+        await asyncio.wait_for(gap.wait(), 15)
+        two = asyncio.create_task(second())
+        tasks.append(two)
+        await asyncio.wait_for(started.wait(), 15)
+        await asyncio.wait_for(wait_for_block(maker, second_pid), 5)
+        assert not two.done()
+        resume.set()
+        await asyncio.wait_for(one, 15)
+        if second_route == "DELETE":
+            # The account is no admin any more: the demote route's own answer.
+            with pytest.raises(BadRequestError) as not_admin:
+                await asyncio.wait_for(two, 15)
+            assert not_admin.value.error_code == "REQ-102"
+        else:
+            # A plain write of the role the account already has.
+            answer = await asyncio.wait_for(two, 15)
+            assert answer["new_role"] == "user"
+    finally:
+        resume.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert await _admin_ids(db_session) == [ids[0], ids[2]]
+    roles = (
+        await db_session.execute(
+            select(AuditLog.action, AuditLog.old_value_hash, AuditLog.new_value_hash)
+            .where(AuditLog.action.in_(ROLE_ACTIONS), AuditLog.user_email == OPERATOR["email"])
+            .order_by(AuditLog.id)
+        )
+    ).all()
+    first_action = "system_role_update" if first_route == "PUT" else "system_admin_demote"
+    expected = [(first_action, "admin", "user")]
+    if second_route == "PUT":
+        # Its audit row carries the role read under the lock, not ``admin``.
+        expected.append(("system_role_update", "user", "user"))
+    assert [tuple(row) for row in roles] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["PUT", "DELETE"])
+async def test_a_role_the_session_read_before_the_lock_is_read_again_under_it(
+    db_session, admins, route
+):
+    """The session's own copy of the row is stale by the time it takes the lock."""
+    ids = await admins(3)
+    target = ids[1]
+    maker = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    async with maker() as stale, maker() as other:
+        loaded = await stale.scalar(select(User).where(User.user_id == target))
+        assert loaded.role == "admin"
+        await other.execute(update(User).where(User.user_id == target).values(role="user"))
+        await other.commit()
+
+        if route == "DELETE":
+            with pytest.raises(BadRequestError) as not_admin:
+                await _demote(route, stale, target)
+            assert not_admin.value.error_code == "REQ-102"
+            await stale.rollback()
+        else:
+            await _demote(route, stale, target)
+
+    assert await _admin_ids(db_session) == [ids[0], ids[2]]
+    roles = (
+        await db_session.execute(
+            select(AuditLog.old_value_hash, AuditLog.new_value_hash).where(
+                AuditLog.action.in_(ROLE_ACTIONS), AuditLog.user_email == OPERATOR["email"]
+            )
+        )
+    ).all()
+    assert [tuple(row) for row in roles] == ([] if route == "DELETE" else [("user", "user")])
 
 
 @pytest.mark.asyncio

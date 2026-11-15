@@ -453,6 +453,23 @@ class TestCanDeleteAdmin:
         assert "last" in reason.lower()
 
     @pytest.mark.asyncio
+    async def test_the_two_refusals_keep_their_exact_answers(
+        self, db_session, fixture_admin, fixture_regular
+    ):
+        # #2828 only respelled the admin predicate of the count.
+        service = SystemAdminService(db_session)
+        assert await service.can_delete_admin(fixture_admin.user_id) == (
+            False,
+            "Cannot delete the initial system administrator",
+        )
+        fixture_admin.is_initial_admin = False
+        await db_session.flush()
+        assert await service.can_delete_admin(fixture_admin.user_id) == (
+            False,
+            "Cannot delete the last remaining system administrator",
+        )
+
+    @pytest.mark.asyncio
     async def test_allowed_when_multiple_admins(
         self, db_session, fixture_admin, fixture_second_admin
     ):
