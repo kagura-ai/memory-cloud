@@ -34,6 +34,7 @@ pytestmark = pytest.mark.asyncio
 
 ADMIN = "/api/v1/admin"
 MAX_BIGINT = 2**63 - 1
+MIN_BIGINT = -(2**63)
 # Every character a stored text may hold but a NUL: a line break, a percent
 # sign (no wildcard), a space and a non-ASCII letter.
 OTHER_TEXT = "a\nb% cé"
@@ -142,17 +143,19 @@ async def test_admin_plan_writes_take_a_typed_workspace_id(db_session: AsyncSess
                 json={"plan_name": "basic", "reason": "a\u0000b"},
             )
         )
-        plan = await client.put(
-            f"{ADMIN}/plans/workspaces/{str(workspace_id).upper()}/plan",
-            json={"plan_name": "basic", "reason": OTHER_TEXT},
-        )
-        quotas = await client.put(
-            f"{ADMIN}/plans/workspaces/{workspace_id}/quotas", json={"addon_memory_bonus": 10000}
-        )
-        cap = await client.put(
-            f"{ADMIN}/plans/workspaces/{workspace_id}/spend-cap",
-            json={"embedding_daily_cap_usd": 1},
-        )
+        with structlog.testing.capture_logs() as events:
+            plan = await client.put(
+                f"{ADMIN}/plans/workspaces/{str(workspace_id).upper()}/plan",
+                json={"plan_name": "basic", "reason": OTHER_TEXT},
+            )
+            quotas = await client.put(
+                f"{ADMIN}/plans/workspaces/{workspace_id}/quotas",
+                json={"addon_memory_bonus": 10000},
+            )
+            cap = await client.put(
+                f"{ADMIN}/plans/workspaces/{workspace_id}/spend-cap",
+                json={"embedding_daily_cap_usd": 1},
+            )
         unknown = await client.put(
             f"{ADMIN}/plans/workspaces/{uuid4()}/plan", json={"plan_name": "pro"}
         )
@@ -161,6 +164,18 @@ async def test_admin_plan_writes_take_a_typed_workspace_id(db_session: AsyncSess
     assert quotas.status_code == 200, quotas.text
     assert cap.status_code == 200, cap.text
     assert unknown.status_code == 404, unknown.text
+    # The typed id is logged as its text, as when it was a ``str``.
+    logged = {
+        event["event"]: event["workspace_id"]
+        for event in events
+        if event["event"]
+        in ("admin_plan_changed", "workspace_addon_updated", "workspace_spend_cap_updated")
+    }
+    assert logged == {
+        "admin_plan_changed": str(workspace_id),
+        "workspace_addon_updated": str(workspace_id),
+        "workspace_spend_cap_updated": str(workspace_id),
+    }
     db_session.expire_all()
     stored = await db_session.scalar(select(Workspace).where(Workspace.id == workspace_id))
     assert stored is not None and stored.plan_name == "basic"
@@ -200,12 +215,18 @@ async def test_bm25_drift_takes_the_last_64_bit_offset_and_id(db_session: AsyncS
     async with admin_http(db_session) as client:
         _refused(await client.get(f"{ADMIN}/bm25-drift?offset={MAX_BIGINT + 1}"))
         _refused(await client.get(f"{ADMIN}/bm25-drift/{MAX_BIGINT + 1}"))
+        _refused(await client.get(f"{ADMIN}/bm25-drift/{MIN_BIGINT - 1}"))
         page = await client.get(f"{ADMIN}/bm25-drift?offset={MAX_BIGINT}")
         row = await client.get(f"{ADMIN}/bm25-drift/{MAX_BIGINT}")
+        # Every id down to the first BIGINT still reaches the statement.
+        first = await client.get(f"{ADMIN}/bm25-drift/{MIN_BIGINT}")
+        negative = await client.get(f"{ADMIN}/bm25-drift/-1")
 
     assert page.status_code == 200, page.text
     assert page.json()["rows"] == []
     assert row.status_code == 404, row.text
+    assert first.status_code == 404, first.text
+    assert negative.status_code == 404, negative.text
 
 
 async def test_undo_merge_takes_the_last_64_bit_action_id(db_session: AsyncSession) -> None:
@@ -215,9 +236,14 @@ async def test_undo_merge_takes_the_last_64_bit_action_id(db_session: AsyncSessi
     principal = {"user_id": admin.user_id, "email": admin.email, "role": "admin"}
     async with admin_http(db_session, principal) as client:
         _refused(await client.post(f"{ADMIN}/sleep/actions/{MAX_BIGINT + 1}/undo-merge"))
+        _refused(await client.post(f"{ADMIN}/sleep/actions/{MIN_BIGINT - 1}/undo-merge"))
         last = await client.post(f"{ADMIN}/sleep/actions/{MAX_BIGINT}/undo-merge")
+        first = await client.post(f"{ADMIN}/sleep/actions/{MIN_BIGINT}/undo-merge")
+        zero = await client.post(f"{ADMIN}/sleep/actions/0/undo-merge")
 
     assert last.status_code == 404, last.text
+    assert first.status_code == 404, first.text
+    assert zero.status_code == 404, zero.text
 
 
 async def test_promotion_takes_every_id_without_a_nul(db_session: AsyncSession) -> None:
@@ -311,6 +337,67 @@ async def test_workspace_texts_and_member_ids_take_everything_but_a_nul(
     # A member row may name an account id that holds any other character.
     assert added.status_code == 201, added.text
     assert added.json()["user_id"] == OTHER_TEXT
+
+
+async def test_a_new_workspace_takes_every_text_without_a_nul(db_session: AsyncSession) -> None:
+    creator = make_user(name="Creator")
+    db_session.add(creator)
+    await db_session.commit()
+    creator_id = creator.user_id
+
+    async def _owned() -> int:
+        db_session.expire_all()
+        rows = await db_session.scalars(
+            select(Workspace).where(Workspace.owner_user_id == creator_id)
+        )
+        return len(rows.all())
+
+    async with owner_http(db_session, creator_id) as client:
+        for field in (
+            "name",
+            "description",
+            "default_context_summary",
+            "default_context_usage_guide",
+        ):
+            _refused(await client.post("/api/v1/workspaces", json={"name": "n", field: "a\u0000b"}))
+        assert await _owned() == 0
+        created = await client.post(
+            "/api/v1/workspaces",
+            json={
+                "name": OTHER_TEXT,
+                "description": OTHER_TEXT,
+                "default_context_summary": OTHER_TEXT,
+                "default_context_usage_guide": OTHER_TEXT,
+            },
+        )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["name"] == OTHER_TEXT
+    assert created.json()["description"] == OTHER_TEXT
+    assert await _owned() == 1
+
+
+async def test_context_member_ids_take_everything_but_a_nul(db_session: AsyncSession) -> None:
+    owner, member, _, context_id = await _owned_workspace(db_session)
+    base = f"/api/v1/contexts/{context_id}/members"
+    async with owner_http(db_session, owner) as client:
+        _refused(await client.post(base, json={"user_id": f"{member}\u0000", "role": "viewer"}))
+        _refused(await client.put(f"{base}/{member}%00", json={"role": "viewer"}))
+        _refused(await client.delete(f"{base}/{member}%00"))
+        added = await client.post(
+            base, json={"user_id": member, "role": "viewer", "extend_access_list": True}
+        )
+        updated = await client.put(f"{base}/{member}", json={"role": "editor"})
+        missing_put = await client.put(f"{base}/{OTHER_PATH}", json={"role": "viewer"})
+        missing_delete = await client.delete(f"{base}/{OTHER_PATH}")
+        removed = await client.delete(f"{base}/{member}")
+
+    assert added.status_code == 201, added.text
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["role"] == "editor"
+    assert missing_put.status_code == 404, missing_put.text
+    assert missing_delete.status_code == 404, missing_delete.text
+    assert removed.status_code == 204, removed.text
 
 
 async def test_a_timeline_takes_every_window_whose_first_day_is_a_date(

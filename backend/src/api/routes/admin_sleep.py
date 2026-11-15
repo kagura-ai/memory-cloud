@@ -39,7 +39,7 @@ from services.sleep.reporter import SleepReporter
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import MemoryCloudException, NotFoundException
 from utils.logger import get_logger
-from utils.query_bounds import MAX_BIGINT, NO_NUL_PATTERN
+from utils.query_bounds import MAX_BIGINT, MIN_BIGINT, NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -684,7 +684,7 @@ _UNDO_ERROR_STATUS = {
     },
 )
 async def undo_merge(
-    action_id: Annotated[int, Path(le=MAX_BIGINT)],
+    action_id: Annotated[int, Path(ge=MIN_BIGINT, le=MAX_BIGINT)],
     admin: AdminAccountUser,
     db: AsyncSession = Depends(get_db),
 ) -> UndoMergeResponse:

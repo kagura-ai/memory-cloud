@@ -1120,8 +1120,13 @@ class UserDeleteRequest(BaseModel):
     context_transfers overrides that choice for individual contexts.
     """
 
-    workspace_transfers: dict[UUID, str] = Field(default_factory=dict)
-    context_transfers: dict[UUID, str] = Field(default_factory=dict)
+    # The successor's user id; no stored id holds a NUL (#2857).
+    workspace_transfers: dict[UUID, Annotated[str, Field(pattern=NO_NUL_PATTERN)]] = Field(
+        default_factory=dict
+    )
+    context_transfers: dict[UUID, Annotated[str, Field(pattern=NO_NUL_PATTERN)]] = Field(
+        default_factory=dict
+    )
     delete_workspaces: list[UUID] = Field(
         default_factory=list,
         description=(
@@ -1828,8 +1833,8 @@ async def retry_failed_embeddings(
     logger.info(
         "admin_retry_failed_embeddings",
         reset_count=reset_count,
-        context_id=context_id,
-        workspace_id=workspace_id,
+        context_id=str(context_id) if context_id else None,
+        workspace_id=str(workspace_id) if workspace_id else None,
         admin_user_id=get_user_id(user),
     )
 

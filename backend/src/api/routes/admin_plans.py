@@ -739,7 +739,7 @@ async def update_workspace_plan(
         if chunks_deactivated:
             logger.info(
                 "content_chunks_deactivated_by_plan",
-                workspace_id=workspace_id,
+                workspace_id=str(workspace_id),
                 old_plan=old_plan,
                 new_plan=request.plan_name,
                 count=len(chunks_deactivated),
@@ -754,7 +754,7 @@ async def update_workspace_plan(
         if selector_deactivated:
             logger.info(
                 "llm_selector_deactivated_by_plan",
-                workspace_id=workspace_id,
+                workspace_id=str(workspace_id),
                 old_plan=old_plan,
                 new_plan=request.plan_name,
                 count=len(selector_deactivated),
@@ -766,7 +766,7 @@ async def update_workspace_plan(
         logger.info(
             "admin_plan_changed",
             admin_user=admin_user["user_id"],
-            workspace_id=workspace_id,
+            workspace_id=str(workspace_id),
             old_plan=old_plan,
             new_plan=request.plan_name,
             reason=request.reason,
@@ -1580,7 +1580,7 @@ async def update_workspace_quotas(
 
     logger.info(
         "workspace_addon_updated",
-        workspace_id=workspace_id,
+        workspace_id=str(workspace_id),
         admin_user=admin_user["user_id"],
         changes=audit_changes,
     )
@@ -1591,7 +1591,7 @@ async def update_workspace_quotas(
     if warnings:
         logger.warning(
             "workspace_addon_feature_missing",
-            workspace_id=workspace_id,
+            workspace_id=str(workspace_id),
             plan=workspace.plan_name,
             warnings=warnings,
             admin_user=admin_user["user_id"],
@@ -1694,7 +1694,7 @@ async def update_workspace_spend_cap(
 
         logger.info(
             "workspace_spend_cap_updated",
-            workspace_id=workspace_id,
+            workspace_id=str(workspace_id),
             admin_user=admin_user["user_id"],
             changes={
                 "embedding_daily_cap_usd": (f"{old_daily} -> {request.embedding_daily_cap_usd}"),

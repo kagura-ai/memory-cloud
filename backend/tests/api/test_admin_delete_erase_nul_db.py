@@ -102,6 +102,19 @@ async def test_a_nul_in_reason_detail_is_422_and_creates_no_request(world) -> No
     assert await _state(maker, target) == (1, 0)
 
 
+@pytest.mark.parametrize("field", ["workspace_transfers", "context_transfers"])
+async def test_a_nul_in_a_successor_id_is_422_and_deletes_nothing(world, field) -> None:
+    client, maker, target = world
+    response = await client.request(
+        "DELETE",
+        f"/api/v1/admin/users/{quote(target, safe='')}",
+        json={field: {str(uuid4()): "successor\x00"}},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["error"] == "VAL-001"
+    assert await _state(maker, target) == (1, 0)
+
+
 async def test_a_user_id_with_another_control_character_is_still_deleted(world) -> None:
     client, maker, target = world
     response = await client.delete(f"/api/v1/admin/users/{quote(target, safe='')}")

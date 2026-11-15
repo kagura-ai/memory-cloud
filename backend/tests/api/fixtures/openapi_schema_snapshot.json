@@ -281,6 +281,7 @@
           },
           "user_id": {
             "minLength": 1,
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           }
         },
@@ -14166,6 +14167,7 @@
         "properties": {
           "context_transfers": {
             "additionalProperties": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             },
             "propertyNames": {
@@ -14182,6 +14184,7 @@
           },
           "workspace_transfers": {
             "additionalProperties": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             },
             "propertyNames": {
@@ -15450,6 +15453,7 @@
             "anyOf": [
               {
                 "maxLength": 2000,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -15461,6 +15465,7 @@
             "anyOf": [
               {
                 "maxLength": 2000,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -15472,6 +15477,7 @@
             "anyOf": [
               {
                 "maxLength": 1000,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -15482,6 +15488,7 @@
           "name": {
             "maxLength": 255,
             "minLength": 1,
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           },
           "openai_api_key": {
@@ -16597,6 +16604,7 @@
             "required": true,
             "schema": {
               "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
               "type": "integer"
             }
           }
@@ -16636,6 +16644,7 @@
             "required": true,
             "schema": {
               "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
               "type": "integer"
             }
           }
@@ -19067,6 +19076,7 @@
             "required": true,
             "schema": {
               "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
               "type": "integer"
             }
           }
@@ -25690,6 +25700,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }
@@ -25727,6 +25738,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }

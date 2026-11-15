@@ -11,10 +11,10 @@ Each context maps to a separate Qdrant collection for memory isolation.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, cast
+from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +49,7 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.query_bounds import NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -1337,10 +1338,14 @@ class ContextMemberResponse(BaseModel):
         from_attributes = True
 
 
+# A member's account id in a path; no stored id holds a NUL (#2857).
+ContextMemberUserId = Annotated[str, Path(pattern=NO_NUL_PATTERN)]
+
+
 class AddContextMemberRequest(BaseModel):
     """Request model for adding context member."""
 
-    user_id: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1, pattern=NO_NUL_PATTERN)
     role: str = Field(..., pattern=r"^(owner|editor|viewer)$")
     extend_access_list: bool = Field(
         False,
@@ -1753,7 +1758,7 @@ async def add_context_member(
 @router.put("/{context_id}/members/{user_id}", response_model=ContextMemberResponse)
 async def update_context_member_role(
     context_id: UUID,
-    user_id: str,
+    user_id: ContextMemberUserId,
     body: UpdateContextMemberRoleRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -1852,7 +1857,7 @@ async def update_context_member_role(
 )
 async def remove_context_member(
     context_id: UUID,
-    user_id: str,
+    user_id: ContextMemberUserId,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):

@@ -31,7 +31,7 @@ from services.bm25_drift.psi_calculator import PsiStatus
 from services.context_routing import resolve_collection_name
 from utils.exceptions import RedisError
 from utils.logger import get_logger
-from utils.query_bounds import MAX_BIGINT, MAX_OFFSET
+from utils.query_bounds import MAX_BIGINT, MAX_OFFSET, MIN_BIGINT
 from utils.sparse_vector import hash_token
 from utils.tokenizer import tokenize_for_search
 
@@ -198,7 +198,7 @@ async def list_drift_logs(
 
 @router.get("/{row_id}", response_model=Bm25DriftDetailResponse)
 async def get_drift_log_detail(
-    row_id: Annotated[int, Path(le=MAX_BIGINT)],
+    row_id: Annotated[int, Path(ge=MIN_BIGINT, le=MAX_BIGINT)],
     _admin: dict = Depends(require_admin),  # noqa: ARG001 - access guard only
     db: AsyncSession = Depends(get_db),
 ) -> Bm25DriftDetailResponse:
@@ -418,7 +418,7 @@ async def _write_reveal_audit(
 
 @router.post("/{row_id}/reveal-terms", response_model=Bm25DriftRevealResponse)
 async def reveal_drift_terms(
-    row_id: Annotated[int, Path(le=MAX_BIGINT)],
+    row_id: Annotated[int, Path(ge=MIN_BIGINT, le=MAX_BIGINT)],
     body: Bm25DriftRevealRequest,
     admin: AdminUser,
     db: AsyncSession = Depends(get_db),

@@ -34,6 +34,8 @@ CONTEXT = uuid4()
 OWNER = "owner-2857"
 PAST_BIGINT = 2**63
 PAST_INT32 = 2**31
+# One below the first BIGINT.
+BELOW_BIGINT = -(2**63) - 1
 # The value under test is ``{value}``; a NUL is added where the value is text.
 NUL = "%00"
 
@@ -56,6 +58,8 @@ REFUSED = [
         f"{ADMIN}/contexts/recover",
         {"context_id": str(CONTEXT), "context_name": "{value}\u0000"},
     ),
+    ("DELETE", f"{ADMIN}/users/{OWNER}", {"workspace_transfers": {str(uuid4()): "{value}\u0000"}}),
+    ("DELETE", f"{ADMIN}/users/{OWNER}", {"context_transfers": {str(uuid4()): "{value}\u0000"}}),
     # admin_plans.py
     ("PUT", f"{ADMIN}/plans/workspaces/{{value}}/plan", {"plan_name": "pro"}),
     ("PUT", f"{ADMIN}/plans/workspaces/{{value}}{NUL}/plan", {"plan_name": "pro"}),
@@ -73,14 +77,22 @@ REFUSED = [
     ("PUT", f"{ADMIN}/neural-config/top_m_edges", {"value": "{value}\u0000"}),
     # bm25_drift.py
     ("GET", f"{ADMIN}/bm25-drift?offset={PAST_BIGINT}&_={{value}}", None),
+    ("GET", f"{ADMIN}/bm25-drift?offset=-1&_={{value}}", None),
     ("GET", f"{ADMIN}/bm25-drift/{PAST_BIGINT}?_={{value}}", None),
+    ("GET", f"{ADMIN}/bm25-drift/{BELOW_BIGINT}?_={{value}}", None),
     (
         "POST",
         f"{ADMIN}/bm25-drift/{PAST_BIGINT}/reveal-terms",
         {"reason": "a reason long enough {value}"},
     ),
+    (
+        "POST",
+        f"{ADMIN}/bm25-drift/{BELOW_BIGINT}/reveal-terms",
+        {"reason": "a reason long enough {value}"},
+    ),
     # admin_sleep.py
     ("POST", f"{ADMIN}/sleep/actions/{PAST_BIGINT}/undo-merge?_={{value}}", None),
+    ("POST", f"{ADMIN}/sleep/actions/{BELOW_BIGINT}/undo-merge?_={{value}}", None),
     # system_admins.py
     ("POST", f"{ADMIN}/system-admins", {"user_id": "{value}\u0000"}),
     # admin_referrals.py
@@ -150,6 +162,15 @@ REFUSED = [
     # sleep_reports.py
     ("GET", f"{WORKSPACE}/sleep-reports?user_id={{value}}{NUL}", None),
     ("GET", f"{WORKSPACE}/sleep-reports?offset={PAST_BIGINT}&_={{value}}", None),
+    ("GET", f"{WORKSPACE}/sleep-reports?offset=-1&_={{value}}", None),
+    # contexts.py
+    (
+        "POST",
+        f"/api/v1/contexts/{CONTEXT}/members",
+        {"user_id": "{value}\u0000", "role": "viewer"},
+    ),
+    ("PUT", f"/api/v1/contexts/{CONTEXT}/members/{{value}}{NUL}", {"role": "viewer"}),
+    ("DELETE", f"/api/v1/contexts/{CONTEXT}/members/{{value}}{NUL}", None),
 ]
 
 
@@ -285,6 +306,26 @@ def test_a_refused_value_writes_no_log_line_that_holds_it(client, session, metho
         assert value not in _beside_the_path(events)
 
 
+@pytest.mark.parametrize(
+    "field", ["name", "description", "default_context_summary", "default_context_usage_guide"]
+)
+def test_a_nul_in_a_new_workspace_text_is_refused_before_any_statement(client, session, field):
+    """``POST /workspaces``: the body is refused by its declaration, before the
+    creation lock or the owner lookup (both of which answer with no row here)."""
+    value = f"refused{secrets.token_hex(6)}"
+    body = {"name": "n", field: f"{value}\u0000"}
+    with structlog.testing.capture_logs() as events:
+        response = client.post("/api/v1/workspaces", json=body)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"] == "VAL-001"
+    assert "Request validation failed" in response.text
+    assert value not in response.text
+    assert session.statements == []
+    session.add.assert_not_called()
+    assert value not in json.dumps(events, default=str)
+
+
 def test_retry_failed_answers_a_bad_id_as_the_new_reads_do(client, session):
     for query in ("context_id=not-a-uuid", "workspace_id=a%00b"):
         response = client.post(f"{ADMIN}/embedding/retry-failed?{query}")
@@ -293,6 +334,20 @@ def test_retry_failed_answers_a_bad_id_as_the_new_reads_do(client, session):
     # An empty value is still no filter, and no filter at all is still a 400.
     assert client.post(f"{ADMIN}/embedding/retry-failed?context_id=").status_code == 400
     assert session.statements == []
+
+
+def test_a_typed_id_is_logged_as_the_text_it_was_before(client, session):
+    """A path or query id typed ``UUID`` is logged as its text, as when it was a ``str``."""
+    workspace_id, context_id = uuid4(), uuid4()
+    with structlog.testing.capture_logs() as events:
+        response = client.post(
+            f"{ADMIN}/embedding/retry-failed?workspace_id={workspace_id}&context_id={context_id}"
+        )
+    assert response.status_code == 200, response.text
+    [logged] = [e for e in events if e["event"] == "admin_retry_failed_embeddings"]
+    assert logged["workspace_id"] == str(workspace_id)
+    assert logged["context_id"] == str(context_id)
+    assert type(logged["workspace_id"]) is str and type(logged["context_id"]) is str
 
 
 @pytest.mark.parametrize(
@@ -321,6 +376,11 @@ SYNC_REFUSED = [
     (
         "GET",
         f"{WORKSPACE}/sync-installations/{uuid4()}/activity/events?before_id={PAST_INT32}",
+        None,
+    ),
+    (
+        "GET",
+        f"{WORKSPACE}/sync-installations/{uuid4()}/activity/events?before_id=-1",
         None,
     ),
     (

@@ -69,15 +69,22 @@ class WorkspaceCreate(BaseModel):
     Issue #276: Slug removed - not used for routing, simplified UX.
     """
 
-    name: str = Field(..., min_length=1, max_length=255)
+    # #2857: no stored text holds a NUL.
+    name: str = Field(..., min_length=1, max_length=255, pattern=NO_NUL_PATTERN)
     openai_api_key: str | None = Field(None, pattern=r"^sk-[A-Za-z0-9_-]+$", min_length=20)
-    description: str | None = Field(None, max_length=WORKSPACE_DESCRIPTION_MAX_LENGTH)
+    description: str | None = Field(
+        None, max_length=WORKSPACE_DESCRIPTION_MAX_LENGTH, pattern=NO_NUL_PATTERN
+    )
     # Issue #169: Default context settings
     default_context_name: str | None = Field(None, pattern=r"^[a-z0-9_-]+$", max_length=100)
     # #1193: same caps as every other Context.summary/usage_guide write path
     # (single source of truth in config.constants).
-    default_context_summary: str | None = Field(None, max_length=CONTEXT_SUMMARY_MAX_LENGTH)
-    default_context_usage_guide: str | None = Field(None, max_length=CONTEXT_USAGE_GUIDE_MAX_LENGTH)
+    default_context_summary: str | None = Field(
+        None, max_length=CONTEXT_SUMMARY_MAX_LENGTH, pattern=NO_NUL_PATTERN
+    )
+    default_context_usage_guide: str | None = Field(
+        None, max_length=CONTEXT_USAGE_GUIDE_MAX_LENGTH, pattern=NO_NUL_PATTERN
+    )
     # #1517: derived from the registry rather than a hardcoded pair, which
     # listed only the two OpenAI models. A deployment that serves a self-hosted
     # model (e.g. qwen3-embedding:4b) otherwise had no value a BYOK caller could
