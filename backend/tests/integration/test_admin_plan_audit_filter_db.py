@@ -157,3 +157,27 @@ async def test_without_the_new_parameters_the_newest_rows_of_all_workspaces_are_
     assert len(entries) <= 100
     assert [entry["reason"] for entry in entries[:3]] == ["c", "b", "a"]
     assert [entry["reason"] for entry in limited.json()] == ["c", "b"]
+
+
+async def test_default_page_is_100_rows_and_500_is_the_largest(db_session: AsyncSession) -> None:
+    """Rows dated before anything else, so they never lead the unfiltered log
+    another test reads."""
+    workspace = await _workspace(db_session)
+    base = datetime(1998, 1, 1)
+    db_session.add_all(
+        [_change(workspace, base + timedelta(minutes=index), f"n-{index}") for index in range(101)]
+    )
+    await db_session.commit()
+
+    async with admin_http(db_session) as client:
+        default = await client.get(AUDIT, params={"workspace_id": str(workspace.id)})
+        largest = await client.get(AUDIT, params={"workspace_id": str(workspace.id), "limit": 500})
+        rest = await client.get(AUDIT, params={"workspace_id": str(workspace.id), "offset": 100})
+
+    assert default.status_code == 200, default.text
+    assert [entry["reason"] for entry in default.json()] == [
+        f"n-{index}" for index in range(100, 0, -1)
+    ]
+    assert largest.status_code == 200, largest.text
+    assert len(largest.json()) == 101
+    assert [entry["reason"] for entry in rest.json()] == ["n-0"]
