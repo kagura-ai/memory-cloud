@@ -571,11 +571,10 @@ gcloud compute firewall-rules create <name_prefix>-allow-public-https \
   --source-ranges 0.0.0.0/0 --target-tags <name_prefix>-vm
 ```
 
-What it exposes: the **main site's origin past the CDN**. Anyone who knows the
-VM's address can now reach the main site directly (with the origin
-certificate, which public clients do not trust, but a client that skips
-verification gets the whole application) without Cloudflare's edge in front.
-Delete the rule when you disable the feature
+What it exposes: the **main site's origin past the CDN**. The rule admits
+direct connections to the VM on 443, so the main site also answers there
+without the CDN in front of it (with its origin certificate, which is not
+publicly trusted). Delete the rule when you disable the feature
 (`gcloud compute firewall-rules delete <name_prefix>-allow-public-https`).
 
 **Enabling** (on the VM, in `terraform/single-server`):

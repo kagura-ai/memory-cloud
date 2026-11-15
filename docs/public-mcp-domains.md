@@ -196,7 +196,9 @@ The not-published body is
 statement (endpoint not revoked; context live, public, not private and still
 bound to the resource; workspace not deleted) joined to the domain row of the
 same endpoint **and** workspace, with `state = 'active'` and
-`serve_until` after the database clock. Both return the same serving endpoint,
+`serve_until` after the database clock. A name that is no longer claimable
+(reserved since its domain was activated) resolves nothing, before any
+statement, whatever its row says. Both return the same serving endpoint,
 so from there on the two entries are one: the session principal, the
 per-minute buckets (keyed by the endpoint id), the [usage budget](public-usage-budget.md)
 (keyed by the workspace), the [usage events](public-mcp-usage-events.md) and
@@ -401,7 +403,7 @@ again (with a new token).
 |---|---|
 | `state` | `pending`, `active` or `suspended` |
 | `suspended_reason` | `proof_lost`, `right_ended`, `reserved`, or `null` |
-| `serving` | whether the alias answers right now (the alias statement resolves this domain) |
+| `serving` | whether the alias answers right now (the alias statement resolves this domain and the name is still claimable; a plan pause or capacity lock, answered `503`, does not change it) |
 | `verification` | the TXT record to publish |
 | `routing.target` | `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`; `routing.status` is `ok`, `mismatch`, `unresolved` or `null` before the first check |
 | `last_check` | result (`ok`, `missing`, `unavailable`) and time of the last recorded check, `null` before it |
@@ -430,9 +432,10 @@ another workspace.
 | `429` | `RATE-001` (`Retry-After` header, `details.retry_after`, `details.limit`) | over 20 verify calls per hour or 6 activation attempts per day |
 | `503` | `public_mcp_domain_verification_unavailable` | the lookup was indeterminate, or a counter could not be read |
 
-A request body that fails validation (no `hostname`, or one over 255
-characters) gets the generic request-validation `422`, without
-`Cache-Control: no-store`.
+A request that fails validation (a body with no `hostname`, an empty one or
+one over 255 characters; a `domain_id` that is not a UUID; a `resource_id`
+outside the slug pattern or over its length limit) gets the generic
+request-validation `422`, without `Cache-Control: no-store`.
 
 ### Capability
 
