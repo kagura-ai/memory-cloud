@@ -6,13 +6,22 @@ and OpenAI Apps SDK requirements.
 
 import os
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from auth.mcp_resource import mcp_resource_identifier
 from auth.mcp_scopes import ALL_ADVERTISED_SCOPES
 from config.settings import get_settings
+from models.sync_contract import SyncConfigurationV1
+from services.sync_contract import sync_configuration
 
 router = APIRouter(tags=["well-known"])
+
+
+@router.get("/kmc-sync-configuration", response_model=SyncConfigurationV1)
+async def sync_configuration_document(response: Response) -> SyncConfigurationV1:
+    """Publish non-authorizing compiled/configured support, independent of release version."""
+    response.headers.update({"Cache-Control": "no-store", "Pragma": "no-cache"})
+    return sync_configuration(get_settings())
 
 
 @router.get("/oauth-protected-resource/mcp")
