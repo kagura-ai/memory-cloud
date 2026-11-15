@@ -2296,6 +2296,19 @@ For `beta_invite`:
 
 For every other value the three fields are null. The invite's label (the inviter's private note) is never part of a response, a log line or an audit row. Neither filter value is written to the application's structured log lines or audit rows; the request line itself (the API's uvicorn access log and a reverse proxy's access log) records the query string, as for any admin URL that names a user.
 
+### Workspace plans
+
+The plan and add-on reads under `/api/v1/admin/plans`. They answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/plans/workspaces` | The live workspaces with their plan: each row is `{"id", "name", "plan_name", "owner_user_id", "owner_name", "owner_email", "total_memories", "memory_limit", "mcp_calls_per_day", "mcp_calls_per_week", "entitlement_source"}`. |
+| `GET /api/v1/admin/plans/workspaces/{workspace_id}/quotas` | One workspace's limits: `base`, `addon`, `effective`, `usage`, `spend_cap`, its `entitlement_source` and its `addon_records`. |
+
+`entitlement_source` (Issue #2829) says who owns the workspace's plan: `admin_grant` (the default, and what `PUT /api/v1/admin/plans/workspaces/{workspace_id}/plan` sets) or `external_billing` (what a billing push sets). Only an `external_billing` workspace counts as under a running contract or can be capacity-locked.
+
+`addon_records` (Issue #2829) are the workspace's active add-on records, the rows its add-on limits are computed from: `{"id", "addon_type", "source", "quantity", "bonus", "active_from", "active_until", "created_at", "created_by"}`, ordered by `addon_type`, then `source` (`admin_grant` or `stripe`). `bonus` is `quantity` times the unit value of the add-on type, so the sum of `bonus` per add-on type is the `expected_value` of `GET /api/v1/admin/plans/addon-cache-consistency`. `active_until` is `null` for a record with no end; a record that has expired or starts later is not listed. A later admin grant changes only `quantity`, so `created_by` names who first granted it. A billing push that carries add-ons sets the workspace's add-on values directly and writes no record.
+
 ### Operations status
 
 | Endpoint | Purpose |

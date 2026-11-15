@@ -264,6 +264,58 @@
         ],
         "type": "object"
       },
+      "AddonRecord": {
+        "properties": {
+          "active_from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "active_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "format": "date-time"
+          },
+          "addon_type": {
+            "type": "string"
+          },
+          "bonus": {
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "active_from",
+          "addon_type",
+          "bonus",
+          "created_at",
+          "created_by",
+          "id",
+          "quantity",
+          "source"
+        ],
+        "type": "object"
+      },
       "AddonValues": {
         "properties": {
           "analysis_bonus": {
@@ -421,6 +473,9 @@
       },
       "AdminWorkspacePlanInfo": {
         "properties": {
+          "entitlement_source": {
+            "type": "string"
+          },
           "id": {
             "type": "string"
           },
@@ -467,6 +522,7 @@
           }
         },
         "required": [
+          "entitlement_source",
           "id",
           "mcp_calls_per_day",
           "mcp_calls_per_week",
@@ -15030,11 +15086,20 @@
           "addon": {
             "$ref": "#/components/schemas/AddonValues"
           },
+          "addon_records": {
+            "items": {
+              "$ref": "#/components/schemas/AddonRecord"
+            },
+            "type": "array"
+          },
           "base": {
             "$ref": "#/components/schemas/QuotaBreakdown"
           },
           "effective": {
             "$ref": "#/components/schemas/QuotaBreakdown"
+          },
+          "entitlement_source": {
+            "type": "string"
           },
           "plan_name": {
             "type": "string"
@@ -15063,6 +15128,7 @@
           "addon",
           "base",
           "effective",
+          "entitlement_source",
           "plan_name",
           "usage",
           "workspace_id",

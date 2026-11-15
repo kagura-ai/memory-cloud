@@ -77,6 +77,8 @@ class AdminWorkspacePlanInfo(BaseModel):
     memory_limit: int
     mcp_calls_per_day: int
     mcp_calls_per_week: int
+    # #2829: who owns the plan, ``admin_grant`` or ``external_billing``.
+    entitlement_source: str
 
 
 class AdminUpdatePlanRequest(BaseModel):
@@ -177,17 +179,50 @@ class SpendCapValues(BaseModel):
     current_monthly_usd: float = 0.0
 
 
+class AddonRecord(BaseModel):
+    """One active add-on record of a workspace (#2829).
+
+    The rows the add-on limits are computed from: ``bonus`` is
+    ``quantity`` times the unit value of ``addon_type``. A later admin grant
+    changes only ``quantity``, so ``created_by`` names who first granted it.
+    """
+
+    id: int
+    addon_type: str
+    source: str
+    quantity: int
+    bonus: int
+    active_from: str = Field(
+        description="Start of the record's window (ISO 8601 with explicit UTC)",
+        json_schema_extra={"format": "date-time"},
+    )
+    active_until: str | None = Field(
+        None,
+        description="End of the record's window (ISO 8601 with explicit UTC); null = no end",
+        json_schema_extra={"format": "date-time"},
+    )
+    created_at: str = Field(
+        description="Creation time (ISO 8601 with explicit UTC)",
+        json_schema_extra={"format": "date-time"},
+    )
+    created_by: str
+
+
 class WorkspaceQuotaDetail(BaseModel):
     """Detailed quota breakdown for a workspace."""
 
     workspace_id: str
     workspace_name: str
     plan_name: str
+    # #2829: who owns the plan, ``admin_grant`` or ``external_billing``.
+    entitlement_source: str
     base: QuotaBreakdown
     addon: AddonValues
     effective: QuotaBreakdown
     usage: UsageValues
     spend_cap: SpendCapValues | None = None  # Issue #709
+    # #2829: the active add-on rows, ordered by ``addon_type`` then ``source``.
+    addon_records: list[AddonRecord] = Field(default_factory=list)
 
 
 class UpdateAddonRequest(BaseModel):
@@ -396,6 +431,7 @@ async def list_workspaces_with_plans(
                     memory_limit=workspace.effective_memory_limit,
                     mcp_calls_per_day=workspace.effective_mcp_calls_per_day,
                     mcp_calls_per_week=workspace.effective_mcp_calls_per_week,
+                    entitlement_source=workspace.entitlement_source,
                 )
             )
 
@@ -854,10 +890,39 @@ async def get_workspace_quotas(
             current_monthly_usd=float(current_monthly),
         )
 
+        # #2829: the active add-on rows, by the window the recalculation
+        # (``AddonCalculatorService.recalculate_workspace_bonuses``) and the
+        # drift check use. At most one row per add-on type and source.
+        now = utcnow()
+        addon_rows = await db.execute(
+            select(WorkspaceAddon)
+            .where(
+                WorkspaceAddon.workspace_id == ws_uuid,
+                WorkspaceAddon.active_from <= now,
+                (WorkspaceAddon.active_until.is_(None) | (WorkspaceAddon.active_until > now)),
+            )
+            .order_by(WorkspaceAddon.addon_type, WorkspaceAddon.source, WorkspaceAddon.id)
+        )
+        addon_records = [
+            AddonRecord(
+                id=row.id,
+                addon_type=row.addon_type,
+                source=row.source,
+                quantity=row.quantity,
+                bonus=row.quantity * ADDON_UNIT_VALUES[row.addon_type],
+                active_from=to_utc_iso(row.active_from) or "",
+                active_until=to_utc_iso(row.active_until),
+                created_at=to_utc_iso(row.created_at) or "",
+                created_by=row.created_by,
+            )
+            for row in addon_rows.scalars().all()
+        ]
+
         return WorkspaceQuotaDetail(
             workspace_id=workspace_id,
             workspace_name=workspace.name,
             plan_name=workspace.plan_name,
+            entitlement_source=workspace.entitlement_source,
             base=QuotaBreakdown(
                 # #801: read the plan tier, not the per-workspace cache column.
                 # Every sibling field below reads plan_tier.*; memory_limit was the
@@ -919,6 +984,7 @@ async def get_workspace_quotas(
                 members=member_count,
             ),
             spend_cap=spend_cap_payload,
+            addon_records=addon_records,
         )
 
 
