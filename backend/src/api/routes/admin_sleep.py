@@ -70,9 +70,27 @@ SLEEP_RUN_INTERRUPTED = "interrupted: the process running this sleep run stopped
 # keeps tasks only weakly), and the ids of their reports.
 _IN_FLIGHT_BATCHES: set[asyncio.Task[None]] = set()
 _LIVE_REPORT_IDS: set[UUID] = set()
-# Upper bounds on the writes a cancelled job and batch still make (#2856).
-_CANCELLED_SESSION_RELEASE_SECONDS = 5.0
-_INTERRUPTED_CLOSE_SECONDS = 5.0
+# #2856: the one deadline a batch's cleanup shares, from its first step: the
+# cancelled job's rollback (or the invalidation of its connection) and the
+# close of the reports whose job did not return. A step the deadline cuts off
+# leaves its reports to the next admitted run's guard.
+SLEEP_BATCH_CLEANUP_SECONDS = 5.0
+# How long the shutdown step waits for the cancelled batches: above the
+# cleanup deadline, so a batch's cleanup ends before the database closes.
+MANUAL_SLEEP_SHUTDOWN_WAIT_SECONDS = 10.0
+
+
+class _CleanupDeadline:
+    """The deadline a batch's cleanup steps share, set by the first step that asks (#2856)."""
+
+    def __init__(self) -> None:
+        self._at: float | None = None
+
+    def at(self) -> float:
+        """The loop time by which the batch's cleanup ends."""
+        if self._at is None:
+            self._at = asyncio.get_running_loop().time() + SLEEP_BATCH_CLEANUP_SECONDS
+        return self._at
 
 
 # ============================================================================
@@ -115,6 +133,7 @@ async def _run_sleep_job(
     context_id: str,
     *,
     queued: Sequence[UUID] = (),
+    cleanup: _CleanupDeadline | None = None,
 ) -> None:
     """Execute sleep phases against a pre-created report.
 
@@ -131,7 +150,8 @@ async def _run_sleep_job(
     the row released while the queued reports still carry an older time.
     A report that is no longer ``running`` (a guard closed it) is not run.
     A cancelled job rolls its session back, which releases the row, and
-    re-raises; ``_run_sleep_batch`` closes its report.
+    re-raises; ``_run_sleep_batch`` closes its report. The rollback takes its
+    time from the batch's ``cleanup`` deadline.
     """
     from db.base import get_db as _get_db
 
@@ -205,7 +225,8 @@ async def _run_sleep_job(
         except asyncio.CancelledError:
             # The session holds the report's row: release it before the
             # batch closes the report in a session of its own.
-            await _release_cancelled_session(db, report_id)
+            deadline = (cleanup or _CleanupDeadline()).at()
+            await _release_cancelled_session(db, report_id, deadline)
             raise
         except Exception as e:
             # The job's transaction itself failed (its commit, or the
@@ -267,10 +288,10 @@ def _held_running_reports(*conditions: Any) -> Select[SleepReport]:
     )
 
 
-async def _release_cancelled_session(db: AsyncSession, report_id: UUID) -> None:
-    """Roll back a cancelled job's session, or invalidate it; bounded, never raises an error."""
+async def _release_cancelled_session(db: AsyncSession, report_id: UUID, deadline: float) -> None:
+    """Roll back a cancelled job's session, or invalidate it, by ``deadline``; never raises an error."""
     try:
-        async with asyncio.timeout(_CANCELLED_SESSION_RELEASE_SECONDS):
+        async with asyncio.timeout_at(deadline):
             await db.rollback()
         return
     except Exception as e:  # noqa: BLE001 - the connection is dropped instead
@@ -280,7 +301,7 @@ async def _release_cancelled_session(db: AsyncSession, report_id: UUID) -> None:
             error_class=type(e).__name__,
         )
     try:
-        async with asyncio.timeout(_CANCELLED_SESSION_RELEASE_SECONDS):
+        async with asyncio.timeout_at(deadline):
             await db.invalidate()
     except Exception as e:  # noqa: BLE001 - best effort; the server ends the transaction
         logger.warning(
@@ -290,12 +311,13 @@ async def _release_cancelled_session(db: AsyncSession, report_id: UUID) -> None:
         )
 
 
-async def _close_interrupted_reports(report_ids: list[UUID]) -> None:
+async def _close_interrupted_reports(report_ids: list[UUID], deadline: float) -> None:
     """Mark the ``running`` reports of jobs that did not return as interrupted (#2856).
 
     In a session of its own, on the rows no other transaction holds, the
-    whole write bounded. Logs and never raises an error; a cancellation is
-    re-raised. A report it misses is closed by the next admitted run's guard.
+    whole write ending by ``deadline``. Logs and never raises an error; a
+    cancellation is re-raised. A report it misses is closed by the next
+    admitted run's guard.
     """
     from db.base import get_db as _get_db
 
@@ -316,7 +338,8 @@ async def _close_interrupted_reports(report_ids: list[UUID]) -> None:
         return 0
 
     try:
-        closed = await asyncio.wait_for(_close(), timeout=_INTERRUPTED_CLOSE_SECONDS)
+        async with asyncio.timeout_at(deadline):
+            closed = await _close()
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 - the next admitted run's guard closes them
@@ -347,16 +370,21 @@ async def _run_sleep_batch(
 
     The reports whose job has not returned when the batch ends (it was
     cancelled, or an error escaped a job) are closed as interrupted (#2856).
+    The cancelled job's release and this close share one deadline,
+    ``SLEEP_BATCH_CLEANUP_SECONDS`` from the first of them.
     """
     pending = [report_id for report_id, _, _ in jobs]
+    cleanup = _CleanupDeadline()
     try:
         for index, (report_id, workspace_id, context_id) in enumerate(jobs):
             queued = [queued_id for queued_id, _, _ in jobs[index + 1 :]]
-            await _run_sleep_job(report_id, user_id, workspace_id, context_id, queued=queued)
+            await _run_sleep_job(
+                report_id, user_id, workspace_id, context_id, queued=queued, cleanup=cleanup
+            )
             pending.remove(report_id)
     finally:
         if pending:
-            await _close_interrupted_reports(pending)
+            await _close_interrupted_reports(pending, cleanup.at())
 
 
 def _start_sleep_batch(jobs: list[tuple[UUID, str, str]], user_id: str) -> None:
@@ -378,7 +406,7 @@ def _start_sleep_batch(jobs: list[tuple[UUID, str, str]], user_id: str) -> None:
     task.add_done_callback(_done)
 
 
-async def stop_manual_sleep_runs(timeout: float = 10.0) -> None:
+async def stop_manual_sleep_runs(timeout: float = MANUAL_SLEEP_SHUTDOWN_WAIT_SECONDS) -> None:
     """Cancel this process's manual Sleep batches and wait for them, bounded (#2856).
 
     Called at shutdown, while the database is still open, so each cancelled

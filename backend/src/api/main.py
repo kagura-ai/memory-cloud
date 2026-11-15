@@ -298,9 +298,11 @@ async def lifespan(app: FastAPI):
 
     # Cancel this process's manual Sleep runs while the database is still
     # open, so each closes its reports as interrupted (#2856).
+    # The wait (MANUAL_SLEEP_SHUTDOWN_WAIT_SECONDS) exceeds the batches' own
+    # cleanup deadline (SLEEP_BATCH_CLEANUP_SECONDS).
     from api.routes.admin_sleep import stop_manual_sleep_runs
 
-    await stop_manual_sleep_runs(timeout=10.0)
+    await stop_manual_sleep_runs()
 
     # Stop the leader loop and scheduler, release the leader lock (#1980).
     # Before close_db(): the lock connection belongs to the engine's pool.

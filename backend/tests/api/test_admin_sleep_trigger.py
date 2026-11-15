@@ -326,3 +326,78 @@ class TestLifespanStopsManualSleepRuns:
             < awaited.index("_close_qdrant_on_shutdown")
             < awaited.index("close_db")
         )
+
+
+class TestBatchCleanupDeadline:
+    """#2856: a cancelled batch's cleanup steps share one deadline, and the
+    shutdown step waits longer than that deadline."""
+
+    def test_the_shutdown_wait_exceeds_the_batch_cleanup_deadline(self):
+        import ast
+        import inspect
+        from pathlib import Path
+
+        assert (
+            admin_sleep.MANUAL_SLEEP_SHUTDOWN_WAIT_SECONDS
+            >= admin_sleep.SLEEP_BATCH_CLEANUP_SECONDS + 2.0
+        )
+        default = inspect.signature(admin_sleep.stop_manual_sleep_runs).parameters["timeout"]
+        assert default.default == admin_sleep.MANUAL_SLEEP_SHUTDOWN_WAIT_SECONDS
+
+        # main.py's lifespan relies on that default: no wait of its own.
+        src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        calls = [
+            node
+            for node in ast.walk(ast.parse(src))
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "stop_manual_sleep_runs"
+        ]
+        assert len(calls) == 1
+        assert calls[0].args == [] and calls[0].keywords == []
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_batch_whose_every_step_hangs_ends_by_the_one_deadline(
+        self, monkeypatch
+    ):
+        """Claim, rollback, invalidate and close all hang: the batch still ends
+        within ``SLEEP_BATCH_CLEANUP_SECONDS`` of its cancellation, not one
+        bound per step."""
+        import asyncio
+
+        monkeypatch.setattr(admin_sleep, "SLEEP_BATCH_CLEANUP_SECONDS", 0.3)
+        entered = asyncio.Event()
+        calls: list[str] = []
+
+        class HangingSession:
+            async def _hang(self, name: str) -> None:
+                calls.append(name)
+                entered.set()
+                await asyncio.Event().wait()
+
+            async def execute(self, *_args, **_kwargs):
+                await self._hang("execute")
+
+            async def rollback(self) -> None:
+                await self._hang("rollback")
+
+            async def invalidate(self) -> None:
+                await self._hang("invalidate")
+
+        async def hanging_get_db():
+            yield HangingSession()
+
+        monkeypatch.setattr("db.base.get_db", hanging_get_db)
+        jobs = [(uuid4(), "ws", "ctx"), (uuid4(), "ws", "ctx")]
+        task = asyncio.create_task(admin_sleep._run_sleep_batch(jobs, "user-1"))
+        await entered.wait()
+
+        loop = asyncio.get_running_loop()
+        cancelled_at = loop.time()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5.0)
+        took = loop.time() - cancelled_at
+
+        assert calls == ["execute", "rollback", "invalidate", "execute"]
+        assert took < 0.3 + 0.5, took
