@@ -196,7 +196,34 @@ gh release create vX.Y.Z --verify-tag --title "vX.Y.Z" --generate-notes --notes-
 
 `--verify-tag` refuses to create the release if the tag is not on the remote yet.
 
-### 12. Close the milestone
+### 12. Hand the deploy notes to kagura-devops
+
+Production is deployed from the kagura-devops repository, by a different session. Its deploy skill (`kdo-deploying-memory-cloud`) looks for two things this step writes; without them (v0.164.0, kagura-devops#415) the deploying session rebuilds the migration order and the rollback notes from the CHANGELOG. Both come from the CHANGELOG entry's `### Notes` (migrations, settings, operator notes): nothing here is new information, only a copy where the deploy reads it. Never put a production value, a host name of a customer or a secret in either: the kagura-devops context is shared and its issues are read by every operator.
+
+1. **The tracking issue** in kagura-devops (example: kagura-devops#410):
+
+   ```bash
+   gh issue create -R kagura-ai/kagura-devops \
+     --title "Deploy memory-cloud vX.Y.Z: <migrations or 'no migration'>, <the one-line consequence for the operator>" \
+     --body-file deploy-notes.md
+   ```
+
+   `deploy-notes.md` has these sections, each from the CHANGELOG: the release link and the tag commit; **Before the deploy** (new settings and their defaults, what to check on the callers, anything that must happen before or after this version); **During the deploy (migrations)** (every revision with what it creates or rewrites, which existing tables it locks, the upgrade recipe from the previous release and from the one before it — `alembic upgrade head` when that is all — and whether `deploy.sh`'s single `upgrade head` is enough or the steps are needed); **After the deploy (checks)** (`alembic current`'s head, the routes and fields that show the release); **Rollback** (whether an application-only rollback is safe, which downgrades lose data, that `downgrade -1` is refused at a merge revision); **Later, on the owner's go** (every switch that stays off and what enabling it needs).
+
+2. **The handoff memory** in the kagura-devops Memory Cloud context (`list_contexts(name_contains="kagura-devops")` gives the id; `remember`):
+
+   - `type`: `handoff`
+   - `summary`: `Handoff: deploy memory-cloud vX.Y.Z (tag on <short sha>), tracked in kagura-devops#<N>. <the upgrade recipe in one sentence>. <the switches that stay off>.`
+   - `content`: `Why:` (the one fact that makes the recipe what it is, e.g. which revision holds which lock) then `How to apply:` (one line per operator action, the checks, the rollback rule)
+   - `context_summary`: `Read before deploying memory-cloud vX.Y.Z to production. Full notes are in kagura-devops#<N>. Mark done after the deploy is verified.`
+   - `tags`: `category:handoff`, `category:deploy`, `status:open`, `release:vX.Y.Z`, `repo:memory-cloud`, `issue:#<N>` (the kagura-devops issue), plus `tool:alembic` when there is a migration
+   - `importance`: 0.8
+
+   The deploying session reads it with `recall(filters={"tags": ["vX.Y.Z", "release:vX.Y.Z"]})`, so the `release:` tag is what makes it findable; it swaps `status:open` for `status:done` after the deploy.
+
+Nothing here touches production: the deploy itself, its timing and the switches are the owner's, in kagura-devops.
+
+### 13. Close the milestone
 
 ```bash
 gh api -X PATCH repos/{owner}/{repo}/milestones/<number> -f state=closed
@@ -204,7 +231,7 @@ gh api -X PATCH repos/{owner}/{repo}/milestones/<number> -f state=closed
 
 (`<number>` from the precondition query in step 1.)
 
-### 13. Upload coverage
+### 14. Upload coverage
 
 ```bash
 make coverage-upload
@@ -219,7 +246,7 @@ so the checkout must be at the tagged commit or the report attaches to the wrong
 
 Requires `CODECOV_TOKEN` (read from `.env.local`, or export it).
 
-### 14. Report
+### 15. Report
 
 Print:
 - the new version and the GitHub Release URL,
