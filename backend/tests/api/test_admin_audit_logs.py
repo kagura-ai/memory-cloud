@@ -44,6 +44,9 @@ LISTED = {
     "signup_blocked",
     "signup_admitted",
     "beta_invite.redeemed",
+    # #2838: an operator reads back its own Sleep run and merge undo.
+    "sleep_run_trigger",
+    "sleep_merge_undo",
 }
 PLAIN = {
     "system_role_update",
@@ -118,6 +121,16 @@ METADATA_KEYS = {
     "signup_blocked": {"provider"},
     "signup_admitted": {"provider", "admission", "invitations", "invitation_count"},
     "beta_invite.redeemed": {"provider", "inviter_user_id", "allowlist_entry_id"},
+    "sleep_run_trigger": {"target_user_id", "workspace_id", "context_id", "report_id"},
+    "sleep_merge_undo": {
+        "target_user_id",
+        "workspace_id",
+        "context_id",
+        "report_id",
+        "action_id",
+        "restored_memory_id",
+        "winner_id",
+    },
 }
 ENTRY_KEYS = {
     "id",
@@ -266,18 +279,36 @@ def _in_list(where: str) -> set[str]:
 # --- the allow-list ------------------------------------------------------------------
 
 
-def test_the_allow_list_is_the_sixteen_actions() -> None:
+def test_the_allow_list_is_the_eighteen_actions() -> None:
     from api.routes import admin_audit_logs as module
 
     assert isinstance(module.AUDIT_LOG_ACTIONS, frozenset)
     assert module.AUDIT_LOG_ACTIONS == LISTED
-    assert len(LISTED) == 16
+    assert len(LISTED) == 18
     assert module.PLAIN_VALUE_ACTIONS == PLAIN
     assert {action: set(keys) for action, keys in module.AUDIT_METADATA_KEYS.items()} == (
         METADATA_KEYS
     )
     assert set(module.AUDIT_METADATA_KEYS) == module.AUDIT_LOG_ACTIONS
     assert "deleted_data_summary" not in module.AUDIT_METADATA_KEYS["account_erasure"]
+
+
+def test_the_two_sleep_actions_are_the_ones_their_writers_name() -> None:
+    """#2838: the read lists the actions by the writers' own constants."""
+    from api.routes import admin_audit_logs as module
+    from api.routes.admin_sleep import SLEEP_RUN_TRIGGER_AUDIT_ACTION
+    from services.sleep.undo import SLEEP_MERGE_UNDO_AUDIT_ACTION
+
+    assert SLEEP_RUN_TRIGGER_AUDIT_ACTION == "sleep_run_trigger"
+    assert SLEEP_MERGE_UNDO_AUDIT_ACTION == "sleep_merge_undo"
+    for action in (SLEEP_RUN_TRIGGER_AUDIT_ACTION, SLEEP_MERGE_UNDO_AUDIT_ACTION):
+        assert action in module.AUDIT_LOG_ACTIONS
+        # Their value columns are empty: ids in the metadata only.
+        assert action not in module.PLAIN_VALUE_ACTIONS
+    run_keys = module.AUDIT_METADATA_KEYS[SLEEP_RUN_TRIGGER_AUDIT_ACTION]
+    undo_keys = module.AUDIT_METADATA_KEYS[SLEEP_MERGE_UNDO_AUDIT_ACTION]
+    assert undo_keys - run_keys == {"action_id", "restored_memory_id", "winner_id"}
+    assert run_keys < undo_keys
 
 
 def test_the_openapi_description_names_every_action_and_its_columns() -> None:

@@ -262,6 +262,36 @@ STORED: dict[str, tuple[str, str, str, str | None, str | None, dict[str, Any]]] 
         "0a" * 32,
         {"provider": "email", "inviter_user_id": "local:bob", "allowlist_entry_id": 31},
     ),
+    # #2838: the rows of the two target-user Sleep routes; ids only.
+    "sleep_run_trigger": (
+        "operator:ops@example.com",
+        "operator:ops@example.com",
+        "context:1b2c3d4e-0000-4000-8000-000000000042",
+        None,
+        None,
+        {
+            "target_user_id": "local:alice",
+            "workspace_id": "5d5b1c50-4c6b-4f0e-8a41-3f0f6a7f3c02",
+            "context_id": "1b2c3d4e-0000-4000-8000-000000000042",
+            "report_id": "7e6d5c4b-0000-4000-8000-000000000011",
+        },
+    ),
+    "sleep_merge_undo": (
+        "1001",
+        "admin@example.com",
+        "sleep_report:7e6d5c4b-0000-4000-8000-000000000011",
+        None,
+        None,
+        {
+            "target_user_id": "local:alice",
+            "workspace_id": "5d5b1c50-4c6b-4f0e-8a41-3f0f6a7f3c02",
+            "context_id": "1b2c3d4e-0000-4000-8000-000000000042",
+            "report_id": "7e6d5c4b-0000-4000-8000-000000000011",
+            "action_id": 4711,
+            "restored_memory_id": "3a2b1c0d-0000-4000-8000-000000000021",
+            "winner_id": None,
+        },
+    ),
 }
 
 

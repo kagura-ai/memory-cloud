@@ -535,7 +535,7 @@ add-ons, allowlist entries, erasure and force-transfer requests, worker apps).
 every mode. A Sleep run started for a user and a merge undone in a user's report
 write `sleep_run_trigger` and `sleep_merge_undo` audit rows (the caller as actor;
 the target user, workspace, context, report, action and memory ids in the
-metadata, and no text). The report's own `undo_merge` action, which workspace
+metadata, and no text); `GET /api/v1/admin/audit-logs` returns both. The report's own `undo_merge` action, which workspace
 members can read, records an operator as `operator` without the address. The
 customer-visible operation history stores an operator's action
 without an actor id (`principal_kind = operator`, shown as "Service operator").

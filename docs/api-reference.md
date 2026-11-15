@@ -2484,6 +2484,8 @@ An entry: `{"id", "created_at", "action", "user_id", "user_email", "resource", "
 | `signup_blocked` | the subject | `oauth-callback` | `signup_gate:<provider>` | `provider` |
 | `signup_admitted` | the subject | the sign-up path | `signup_gate:<provider>` | `provider`, `admission`, `invitations` (each `id`, `workspace_id`, `invited_by`), `invitation_count` |
 | `beta_invite.redeemed` | the subject | `email-signup` or `oauth-callback` | `beta_invite:<id>` | `provider`, `inviter_user_id`, `allowlist_entry_id` |
+| `sleep_run_trigger` | the actor | the actor | `context:<id>` | `target_user_id`, `workspace_id`, `context_id`, `report_id` |
+| `sleep_merge_undo` | the actor | the actor | `sleep_report:<id>` | `target_user_id`, `workspace_id`, `context_id`, `report_id`, `action_id`, `restored_memory_id`, `winner_id` |
 
 - `old_value` and `new_value` are the stored values for `system_role_update`, `system_admin_promote`, `system_admin_demote`, `workspace_slot_bonus_update` and `referral_grant_revoke` (roles and numbers), and `null` for every other action.
 - `metadata` holds the keys of the table that the row has, each as stored when it is a string, a number, a boolean or null (`plans` a list of strings, `invitations` a list of objects with the three keys named). It is `null` for a row that stores none.
@@ -2528,13 +2530,13 @@ The rules, checked on create:
 - `409 SLEEP-002` with `details.running_report_id` and `details.started_at`: the target user has a running report (a running report of the caller does not count). Best-effort under concurrent calls.
 - `404 SLEEP-003` with `details.context_id`: the context is not eligible. Eligible means the context is live, its `sleep_mode` is not `skip` and the user has a live memory in it. Every cause answers the same message.
 
-The handler writes an `audit_logs` row in the report's commit: action `sleep_run_trigger`, the caller as actor (`operator:<address>` in `service` mode), resource `context:<context_id>`, metadata `{"target_user_id", "workspace_id", "context_id", "report_id"}`. The row records the request and stays when the run fails. A refusal writes nothing.
+The handler writes an `audit_logs` row in the report's commit: action `sleep_run_trigger`, the caller as actor (`operator:<address>` in `service` mode), resource `context:<context_id>`, metadata `{"target_user_id", "workspace_id", "context_id", "report_id"}`. The row records the request and stays when the run fails. A refusal writes nothing. The row is read back through `GET /api/v1/admin/audit-logs` (`action=sleep_run_trigger`, see [Audit log](#audit-log)).
 
 **Undo for a report** (`POST /api/v1/admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge`). The action is found by `action_id` and `report_id`, whoever the report belongs to. `404 SLEEP-UNDO-action_not_found` for an unknown action, an action of another report and an unknown report alike. Then the checks and answers of the own-account undo: `400 SLEEP-UNDO-not_a_merge`, `409 SLEEP-UNDO-already_restored`, `409 SLEEP-UNDO-edge_changed`, `409 SLEEP-UNDO-not_merge_deleted`, `410 SLEEP-UNDO-memory_purged`. A successful undo records:
 
 - an `undo_merge` action on the same report, whose `undone_by` is the caller's `user_id` for a session admin and the fixed string `operator` for a service operator (the report's actions are read by workspace members; an operator's address is recorded in `audit_logs` only);
 - the workspace's operation history event `sleep.undo` (without an actor for an operator);
-- an `audit_logs` row: action `sleep_merge_undo`, the caller as actor, resource `sleep_report:<report_id>`, metadata `{"target_user_id", "workspace_id", "context_id", "report_id", "action_id", "restored_memory_id", "winner_id"}`.
+- an `audit_logs` row: action `sleep_merge_undo`, the caller as actor, resource `sleep_report:<report_id>`, metadata `{"target_user_id", "workspace_id", "context_id", "report_id", "action_id", "restored_memory_id", "winner_id"}`, read back through `GET /api/v1/admin/audit-logs` (`action=sleep_merge_undo`).
 
 Neither route answers, logs or audits memory text, tags, a user's e-mail or name, or a context's name. The own-account undo writes no `audit_logs` row.
 

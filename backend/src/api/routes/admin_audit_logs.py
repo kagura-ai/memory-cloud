@@ -28,10 +28,12 @@ from pydantic import AwareDatetime, BeforeValidator, ConfigDict
 from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes.admin_sleep import SLEEP_RUN_TRIGGER_AUDIT_ACTION
 from auth.dependencies import AdminUser
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import AuditLog
+from services.sleep.undo import SLEEP_MERGE_UNDO_AUDIT_ACTION
 from utils.exceptions import ValidationError
 from utils.logger import get_logger
 from utils.query_bounds import MAX_INT32, NO_NUL_PATTERN
@@ -57,10 +59,19 @@ AuditLogAction = Literal[
     "signup_blocked",
     "signup_admitted",
     "beta_invite.redeemed",
+    # #2838: the run and the merge undo an admin or operator starts for a user
+    # (``SLEEP_RUN_TRIGGER_AUDIT_ACTION``, ``SLEEP_MERGE_UNDO_AUDIT_ACTION``).
+    "sleep_run_trigger",
+    "sleep_merge_undo",
 ]
 
 # The actions this route returns: admin actions and sign-up decisions.
 AUDIT_LOG_ACTIONS: frozenset[str] = frozenset(get_args(AuditLogAction))
+
+# The ids the two Sleep writers store; neither stores a value column.
+_SLEEP_RUN_KEYS: frozenset[str] = frozenset(
+    {"target_user_id", "workspace_id", "context_id", "report_id"}
+)
 
 # The actions whose writer stores plain values (roles, numbers) in
 # ``old_value_hash`` / ``new_value_hash``.
@@ -136,6 +147,9 @@ AUDIT_METADATA_KEYS: dict[str, frozenset[str]] = {
     "signup_blocked": frozenset({"provider"}),
     "signup_admitted": frozenset({"provider", "admission", "invitations", "invitation_count"}),
     "beta_invite.redeemed": frozenset({"provider", "inviter_user_id", "allowlist_entry_id"}),
+    SLEEP_RUN_TRIGGER_AUDIT_ACTION: _SLEEP_RUN_KEYS,
+    SLEEP_MERGE_UNDO_AUDIT_ACTION: _SLEEP_RUN_KEYS
+    | {"action_id", "restored_memory_id", "winner_id"},
 }
 
 # The two listed keys that hold a list.
@@ -355,6 +369,8 @@ async def list_audit_logs(
     | `signup_blocked` | the subject | `oauth-callback` | `signup_gate:<provider>` |
     | `signup_admitted` | the subject | the sign-up path | `signup_gate:<provider>` |
     | `beta_invite.redeemed` | the subject | `email-signup` or `oauth-callback` | `beta_invite:<id>` |
+    | `sleep_run_trigger` | the actor | the actor | `context:<id>` |
+    | `sleep_merge_undo` | the actor | the actor | `sleep_report:<id>` |
 
     `old_value` and `new_value` are answered for `system_role_update`,
     `system_admin_promote`, `system_admin_demote`,

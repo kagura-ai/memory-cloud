@@ -16225,7 +16225,9 @@
                       "mcp_notice.withdrawn",
                       "signup_blocked",
                       "signup_admitted",
-                      "beta_invite.redeemed"
+                      "beta_invite.redeemed",
+                      "sleep_run_trigger",
+                      "sleep_merge_undo"
                     ],
                     "type": "string"
                   },

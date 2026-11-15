@@ -51,7 +51,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.main import memory_cloud_exception_handler
-from api.routes import admin_sleep
+from api.routes import admin_audit_logs, admin_sleep
 from auth.dependencies import require_admin
 from auth.system_admin_mode import build_operator_principal
 from db.base import get_db
@@ -96,6 +96,8 @@ def _client(maker, principal: dict) -> httpx.AsyncClient:
     app.add_exception_handler(MemoryCloudException, memory_cloud_exception_handler)  # type: ignore[arg-type]
     app.include_router(admin_sleep.router, prefix="/api/v1")
     app.include_router(admin_sleep.target_router, prefix="/api/v1")
+    # The read of the rows the two routes write (#2835).
+    app.include_router(admin_audit_logs.router, prefix="/api/v1")
 
     async def _db() -> AsyncIterator[AsyncSession]:
         async with maker() as s:
@@ -918,6 +920,81 @@ async def test_a_workspace_over_its_capacity_still_allows_the_run_and_the_undo(
         assert (await _memory(check, world.memories["loser"])).deleted_at is None
         assert len(await _audit_rows(check, "sleep_run_trigger")) == 1
         assert len(await _audit_rows(check, "sleep_merge_undo")) == 1
+
+
+# ------------------------------------------- the rows, read back (#2835)
+
+
+@pytest.mark.parametrize("mode", ["service", "session"])
+async def test_the_run_and_the_undo_rows_are_read_back_through_the_audit_log_route(
+    maker, world, jobs, no_vector_store, mode
+):
+    """The caller reads its own Sleep actions through
+    ``GET /api/v1/admin/audit-logs``: the rows the real handlers wrote, with
+    the caller as actor and the ids the writers stored."""
+    principal = _principal(world, mode)
+    context_id = world.contexts["ok"]
+    report_id, action_id = world.reports["target"], world.actions["merge"]
+    audit_url = "/api/v1/admin/audit-logs"
+    async with _client(maker, principal) as client:
+        run = await client.post(_run_url(world.target), json={"context_id": str(context_id)})
+        undo = await client.post(_undo_url(report_id, action_id))
+        assert run.status_code == 202, run.text
+        assert undo.status_code == 200, undo.text
+        by_actor = await client.get(audit_url, params={"user_id": principal["user_id"]})
+        by_action = await client.get(
+            audit_url, params={"action": ["sleep_run_trigger", "sleep_merge_undo"]}
+        )
+        one_action = await client.get(audit_url, params={"action": "sleep_merge_undo"})
+        by_resource = await client.get(audit_url, params={"resource": f"context:{context_id}"})
+
+    for response in (by_actor, by_action, one_action, by_resource):
+        assert response.status_code == 200, response.text
+    async with maker() as check:
+        [run_row] = await _audit_rows(check, "sleep_run_trigger")
+        [undo_row] = await _audit_rows(check, "sleep_merge_undo")
+
+    # Newest first: the undo, then the run. Both name the caller as actor.
+    undo_entry, run_entry = by_action.json()["entries"]
+    assert [undo_entry["id"], run_entry["id"]] == [undo_row.id, run_row.id]
+    # Without ``action`` the two rows are among the caller's listed rows.
+    mine = [e for e in by_actor.json()["entries"] if e["id"] in (undo_row.id, run_row.id)]
+    assert mine == [undo_entry, run_entry]
+    assert one_action.json()["entries"] == [undo_entry]
+    assert by_resource.json()["entries"] == [run_entry]
+    for entry in (undo_entry, run_entry):
+        assert entry["user_id"] == principal["user_id"]
+        assert entry["user_email"] == principal["email"]
+        assert (entry["old_value"], entry["new_value"]) == (None, None)
+        assert entry["created_at"].endswith("Z")
+    if mode == "service":
+        assert run_entry["user_id"] == run_entry["user_email"] == f"operator:{OPERATOR_ADDRESS}"
+
+    assert run_entry["action"] == "sleep_run_trigger"
+    assert run_entry["resource"] == f"context:{context_id}"
+    assert run_entry["metadata"] == run_row.user_metadata
+    assert run_entry["metadata"] == {
+        "target_user_id": world.target,
+        "workspace_id": str(world.ws),
+        "context_id": str(context_id),
+        "report_id": run.json()["report_ids"][0],
+    }
+    assert undo_entry["action"] == "sleep_merge_undo"
+    assert undo_entry["resource"] == f"sleep_report:{report_id}"
+    assert undo_entry["metadata"] == undo_row.user_metadata
+    assert undo_entry["metadata"] == {
+        "target_user_id": world.target,
+        "workspace_id": str(world.ws),
+        "context_id": str(context_id),
+        "report_id": str(report_id),
+        "action_id": action_id,
+        "restored_memory_id": str(world.memories["loser"]),
+        "winner_id": str(world.memories["winner"]),
+    }
+    _assert_no_sentinel(world, by_actor.text, by_action.text, one_action.text, by_resource.text)
+    for response in (by_actor, by_action):
+        for name in ("ip_address", "user_agent"):
+            assert name not in response.text
 
 
 # ------------------------------------------- values the database refuses
