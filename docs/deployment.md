@@ -725,24 +725,24 @@ Operator notes:
   `alembic upgrade f49_2817_clear_allowlist_adders`, then
   `alembic upgrade head`. The third step runs only `f46_2803` and the no-DDL
   merge revision `f47_2819_merge_sync_credentials`, so `f46_2803` starts
-  holding no lock. The fourth step runs v0.163.0's revisions on their own
-  (`f48_2805_public_usage_budgets`, whose new table has a foreign key to
-  `workspaces`, and `f49_2817_clear_allowlist_adders`), so neither asks for
-  `workspaces` while `f46_2803` holds `users`. The last step runs
-  `f48_2807_sync_feed_runs`, whose new tables have foreign keys to `users`,
-  `resources`, `resource_events`, `contexts` and `sync_installations`, so it
-  does not ask for `users` while `f48_2805` holds `workspaces`. From v0.164.0
-  the last step also runs `f50_2809_public_mcp_domains` after it, whose new
-  table has no foreign key and which locks no existing table.
+  holding no lock. The fourth step commits the public-budget and allowlist
+  cleanup branch before the last step applies the staged-feed branch and
+  no-DDL `f50_2807_merge_sync_heads`. This also keeps `f48_2805`'s foreign-key
+  lock on `workspaces` out of the transaction where `f48_2807` takes foreign-key
+  locks on `users`, `resources`, `resource_events`, `contexts` and
+  `sync_installations`.
   (With two steps, `f45_2806_sync_credentials` would run in the same
   transaction as `f46_2803` and take its locks on `workspaces` there; with
   three, ending in `alembic upgrade head`, `f48_2805` would; with four,
-  `f48_2807` would run with `f48_2805`.) A database already at
-  `f47_2819_merge_sync_credentials` (v0.162.0) starts at the fourth step; one
-  at `f49_2817_clear_allowlist_adders` (v0.163.0) needs only
-  `alembic upgrade head`. `f48_2807_sync_feed_runs` alone can still meet the
-  same error when a request writes two of its five tables in one transaction
-  while it runs: nothing is applied then either, and a rerun is safe.
+  `f48_2807` could share a transaction with `f48_2805`.) From v0.162.0
+  (`f47_2819_merge_sync_credentials`), start at the fourth step. From
+  v0.163.0 (`f49_2817_clear_allowlist_adders`), only `alembic upgrade head`
+  is needed. A database that already applied the staged-feed branch directly
+  on `f47` can likewise upgrade the missing public-budget branch to `f49`
+  before upgrading head: existing revision IDs and data do not change.
+  A concurrent request can still conflict with an individual DDL migration;
+  on `deadlock detected` it rolls back and can be rerun, rather than being
+  retried automatically by `deploy.sh`.
 - A **downgrade loses the records** written at sign-up for good; a later
   upgrade rebuilds only what the evidence above still gives.
 

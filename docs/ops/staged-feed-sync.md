@@ -8,10 +8,21 @@ another target. Multiple product/FAQ feeds share the installation's Resource.
 ## Rollout and authority
 
 Apply `f48_2807_sync_feed_runs` before enabling `SYNC_RUNS_ENABLED=true` (default
-false). It follows `f49_2817_clear_allowlist_adders`: from v0.163.0,
-`alembic upgrade head` applies it. Existing OIDC, synchronization-control and service-credential switches
+false). Existing OIDC, synchronization-control and service-credential switches
 must also be enabled for worker calls. Register the browser and service clients
 using the existing [credential runbook](sync-service-credentials.md).
+
+In the combined application checkout, run `alembic upgrade head`. The no-op
+merge `f50_2807_merge_sync_heads` joins the feed migration with
+`f49_2817_clear_allowlist_adders` (which follows the public usage-budget
+migration). Either deployed parent, their common ancestor or both parent
+markers can upgrade normally; do not stamp or renumber existing revisions.
+The merge itself rewrites no tables, counters, period boundaries or feed data.
+For a live database at `f47` or the sync-only branch, first run
+`alembic upgrade f49_2817_clear_allowlist_adders` and commit, then upgrade head.
+This separates the public-budget and staged-feed foreign-key locks; older
+installations should follow the staged upgrade recipe in
+[deployment.md](../deployment.md#how-each-account-was-admitted-issue-2803).
 
 The browser client must explicitly register and request `sync.records:read` to
 read managed bodies. Existing grants and `workspaces:read` do not gain data
@@ -168,12 +179,13 @@ Canonical records and temporary chunks are raw user data; see
 cascades data; removing an approver clears historical user identity.
 
 To roll back deliberately, stop new runs, drain committed indexing receipts,
-disable the flag and back up feed canonical/staging tables first.
-`alembic downgrade f49_2817_clear_allowlist_adders` reverts
-`f48_2807_sync_feed_runs` and drops the five new tables; from v0.164.0 it
-first reverts `f50_2809_public_mcp_domains`, which follows it and drops
-`public_mcp_domains` with every custom domain binding (see
-[Public MCP custom domains](../public-mcp-domains.md), "Stopping and rolling
-back"); a downgrade to a lower revision reverts the earlier revisions too. It retains existing
+disable the flag and back up feed canonical/staging tables first. Downgrading
+f48 drops only the five new tables. It retains existing
 Resource/Context/endpoint/credential rows and already committed Resource events
 and Memories; downgrade does not reverse a published content change.
+
+Rolling back the merge node to either explicit parent only unmerges its version
+markers: both parents' schemas and data remain. Further downgrade to a shared
+ancestor also affects the public-budget branch and must be planned for both
+features; it is not a feed-only rollback. Prefer disabling the sync flag when
+only staged-feed admission needs to stop.
