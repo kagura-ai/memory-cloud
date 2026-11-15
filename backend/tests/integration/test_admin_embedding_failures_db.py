@@ -197,8 +197,9 @@ async def world(db_session: AsyncSession) -> AsyncIterator[SimpleNamespace]:
     # No context: its own group, in a workspace that has no row.
     memory(orphan_workspace, None, error="code-less failure", retries=MAX_EMBEDDING_RETRIES)
     memory(orphan_workspace, None, error=" CFG-001: a leading space is not the prefix")
-    # second workspace: erased rows only.
-    memory(second.id, erased_only, error="erased_author: dequeued", suppressed=True)
+    # second workspace: erased rows only. Its error reads as a configuration
+    # failure, and the row is still erased only.
+    memory(second.id, erased_only, error="CFG-001: no key", suppressed=True)
     await db_session.commit()
 
     workspace_ids = [first.id, second.id]
