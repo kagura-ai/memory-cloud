@@ -164,6 +164,27 @@ budget ([Public usage budget](../public-usage-budget.md), #2805) refuse it. The
 installation's endpoint is an ordinary public endpoint and shares that budget;
 unlink, re-activation and owner transfer leave the budget's period untouched.
 
+**Custom domains of the installation's endpoint (#2809).** Where the operator
+switched custom domains on, the canonical owner can serve the installation's
+standard endpoint under their own host name, as `https://<host>/mcp`, like any
+public endpoint ([Public MCP custom domains](../public-mcp-domains.md)). The
+alias resolves to the same endpoint: same tools, limits, budget and usage
+events. Two rights are separate and end separately:
+
+- **Ending the sync add-on** (its license removed, the installation unlinked)
+  leaves the endpoint published, so both its fixed address and its alias keep
+  serving, and its data is untouched.
+- **Ending the domain right** (the license `public-mcp-domains`, under
+  `MCP_PUBLIC_DOMAINS_AUTHORITY=entitlement`) suspends the alias at the
+  domain's next check; the fixed address, the installation and its data are
+  untouched.
+- **Unpublishing the endpoint** releases its custom domain in the same
+  transaction; a later publication gets no alias until the owner adds and
+  verifies the domain again.
+
+The sync service id can never be `public-mcp-domains`: `sync_service register`
+refuses that reserved id.
+
 ## Storage, downgrade and recovery
 
 `sync_services`, `sync_authorizations` and `sync_installations` are operational

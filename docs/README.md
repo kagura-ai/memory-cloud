@@ -34,6 +34,7 @@
 - [Resource Tokens Guide](resource-tokens-guide.md) — External data ingestion via resource tokens (the **Ingest** layer)
 - [Public MCP Usage Events](public-mcp-usage-events.md) — What a public read-only MCP endpoint records per tool call, loss bounds, retention and the commit-safe export cursor
 - [Public Usage Budget](public-usage-budget.md) — The workspace-wide seven-day budget of anonymous public calls: counting rules, period, refusals, owner read, outage policy and operator refill
+- [Public MCP Custom Domains](public-mcp-domains.md) — Verified custom domains as aliases of public MCP endpoints (`https://<host>/mcp`): states, DNS proof, Host rules, right and lease, owner API, permission call for a TLS proxy, job, CLI, switching on, stopping and rolling back
 - [Observability API](observability-api.md) — Internal read-only API for a self-hosted dashboard: scoped observation credentials, resources, indexer snapshots, usage and ingestion events, doc-key resolution
 - [Neural Memory Evaluation](neural-memory-evaluation.md) — Benchmark results, architecture decisions, known limitations (the **Enhance** layer evidence)
 - [Sleep Maintenance](sleep-maintenance.md) — Background 6-phase cleanup cycle, sleep_mode, observability, and rollback (the **Compile / Enhance** consolidation layer)

@@ -9239,6 +9239,117 @@
         ],
         "type": "object"
       },
+      "PublicMcpDomainCreate": {
+        "properties": {
+          "hostname": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "hostname"
+        ],
+        "type": "object"
+      },
+      "PublicMcpDomainLastCheck": {
+        "properties": {
+          "checked_at": {},
+          "result": {}
+        },
+        "type": "object"
+      },
+      "PublicMcpDomainList": {
+        "properties": {
+          "domains": {
+            "items": {
+              "$ref": "#/components/schemas/PublicMcpDomainResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "domains"
+        ],
+        "type": "object"
+      },
+      "PublicMcpDomainResponse": {
+        "properties": {
+          "created_at": {},
+          "domain_id": {},
+          "hostname": {},
+          "last_check": {},
+          "proof_missing_checks": {},
+          "proof_ok_at": {},
+          "routing": {},
+          "serve_until": {},
+          "serving": {},
+          "state": {},
+          "suspended_reason": {},
+          "url": {},
+          "verification": {},
+          "verified_at": {}
+        },
+        "required": [
+          "created_at",
+          "domain_id",
+          "hostname",
+          "last_check",
+          "proof_missing_checks",
+          "routing",
+          "serving",
+          "state",
+          "url",
+          "verification"
+        ],
+        "type": "object"
+      },
+      "PublicMcpDomainRouting": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ok",
+                  "mismatch",
+                  "unresolved"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "type": "object"
+      },
+      "PublicMcpDomainVerification": {
+        "properties": {
+          "record_name": {
+            "type": "string"
+          },
+          "record_type": {
+            "const": "TXT",
+            "default": "TXT",
+            "type": "string"
+          },
+          "record_value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_name",
+          "record_value"
+        ],
+        "type": "object"
+      },
       "PublicMcpEndpointCreate": {
         "properties": {
           "public_description": {
@@ -30956,6 +31067,248 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PublicMcpEndpointResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resources"
+        ]
+      }
+    },
+    "/api/v1/resources/{resource_id}/public-mcp/domains": {
+      "get": {
+        "operationId": "list_public_mcp_domains_api_v1_resources__resource_id__public_mcp_domains_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "pattern": "^[a-z0-9_-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicMcpDomainList"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resources"
+        ]
+      },
+      "post": {
+        "operationId": "add_public_mcp_domain_api_v1_resources__resource_id__public_mcp_domains_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "pattern": "^[a-z0-9_-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicMcpDomainCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicMcpDomainResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resources"
+        ]
+      }
+    },
+    "/api/v1/resources/{resource_id}/public-mcp/domains/{domain_id}": {
+      "delete": {
+        "operationId": "remove_public_mcp_domain_api_v1_resources__resource_id__public_mcp_domains__domain_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "pattern": "^[a-z0-9_-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "domain_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resources"
+        ]
+      }
+    },
+    "/api/v1/resources/{resource_id}/public-mcp/domains/{domain_id}/verify": {
+      "post": {
+        "operationId": "verify_public_mcp_domain_api_v1_resources__resource_id__public_mcp_domains__domain_id__verify_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "pattern": "^[a-z0-9_-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "domain_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicMcpDomainResponse"
                 }
               }
             }

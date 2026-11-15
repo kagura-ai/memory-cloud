@@ -26,6 +26,7 @@ _COMMANDS = {
     "file_scan": ["status"],
     "restore_context": [_UUID],
     "public_usage_budget": ["reset", _UUID],
+    "public_mcp_domains": ["release", "--domain-id", _UUID],
     "sweep_orphan_vectors": [],
     "transfer_context_creator": ["--from", "local:x", "--to", _UUID, "--workspace", _UUID],
     "reprocess_erasures": ["--all"],

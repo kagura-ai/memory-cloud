@@ -256,6 +256,8 @@ def _enable_every_conditional_job(monkeypatch: pytest.MonkeyPatch, *, sleep: boo
         "tasks.operations_probe_tasks.get_settings",
         lambda: Settings(_env_file=None, operations_probe_interval_seconds=300),
     )
+    # #2809: registered only while MCP_PUBLIC_DOMAINS_ENABLED is on.
+    monkeypatch.setattr("tasks.public_mcp_domain_tasks.public_domains_enabled", lambda: True)
 
 
 @pytest.mark.parametrize("sleep", [True, False])
@@ -280,6 +282,7 @@ def test_every_registered_job_has_a_registration(
     assert ("sleep_maintenance" in ids) is sleep
     assert ("consolidation" in ids) is (not sleep)
     assert {"operations_lane_snapshot", "operations_probe"} <= ids
+    assert "public_mcp_domain_maintenance" in ids
     # #565: registered whether or not FILE_SCAN_ENABLED is on.
     assert {"file_scan_sweeper", "file_quarantine_expiry"} <= ids
     for reg in regs:

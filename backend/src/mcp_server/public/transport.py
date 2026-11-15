@@ -5,13 +5,28 @@ sessions and stateless 2026-07-28 requests — without authentication: it never
 reads ``Authorization`` or ``Cookie`` and never challenges. A client that
 sends an owner key gets the same public answers as anyone else.
 
-Per request, in this order: Origin check (the same allow-list as ``/mcp``),
-kill switch, address shape, then ``load_serving_endpoint`` (one query, no
-cache) before any session or dispatch logic. Every "not served" case — switch
-off, unknown or malformed id, unpublished, context no longer public — is one
-404 body. A workspace whose plan pauses public serving, or that is over its
-capacity, gets a bare 503. Then the method (GET 405, DELETE ends the session),
-a bounded body, no batches, and the era split.
+Two entries reach it, exactly one per request (#2809):
+
+- the fixed address: ``scope["public_endpoint_public_id"]``, set by the
+  ``/mcp/public/{public_id}`` route;
+- a verified custom domain: ``scope["public_endpoint_alias_host"]``, the
+  normalised Host name set by ``PublicMcpDomainHostGuard`` for ``/mcp`` under
+  a foreign Host, served only while ``MCP_PUBLIC_DOMAINS_ENABLED`` is on.
+
+Both keys, neither, or a path other than ``/mcp/public/`` is the 404.
+
+Per request, in this order: Origin check (the same allow-list as ``/mcp``; on
+the alias entry the refusal is logged without the Origin value), kill switch,
+address shape, then ``load_serving_endpoint`` or
+``load_serving_endpoint_for_alias`` (one query, no cache) before any session
+or dispatch logic. Both loaders return the same ``ServingEndpoint``, so from
+there on the entries are identical: one session principal, one set of
+buckets, one budget, the same usage events. Every "not served" case — switch
+off, unknown or malformed id, unpublished, context no longer public, an alias
+that is not active or whose lease passed — is one 404 body. A workspace whose
+plan pauses public serving, or that is over its capacity, gets a bare 503.
+Then the method (GET 405, DELETE ends the session), a bounded body, no
+batches, and the era split.
 
 The JSON-RPC helpers are the main server's; tool calls go through
 ``dispatch.call_public_tool`` only.
@@ -29,6 +44,7 @@ from starlette.types import Receive, Scope, Send
 from config.constants import APP_VERSION
 from mcp_server.public.definitions import public_tool_definitions, public_tool_view
 from mcp_server.public.dispatch import call_public_tool
+from mcp_server.public.domains import public_domains_enabled
 from mcp_server.public.limits import (
     PUBLIC_MAX_REQUEST_BYTES,
     check_public_rate_limit,
@@ -36,6 +52,7 @@ from mcp_server.public.limits import (
 from mcp_server.public.publication import (
     ServingEndpoint,
     load_serving_endpoint,
+    load_serving_endpoint_for_alias,
     public_endpoints_enabled,
     serving_paused,
 )
@@ -83,6 +100,9 @@ NOT_PUBLISHED_BODY = {
     "error_description": "No public MCP endpoint is published at this address.",
 }
 _PUBLIC_ID_RE = re.compile(public_id_pattern(PublicIdPrefix.PUBLIC_MCP))
+# The two address keys of the scope; exactly one is present per request.
+PUBLIC_ID_SCOPE_KEY = "public_endpoint_public_id"
+ALIAS_HOST_SCOPE_KEY = "public_endpoint_alias_host"
 _PAUSED_RETRY_AFTER_SECONDS = 300
 _CONTROL_METHODS = frozenset({"initialize", "tools/list", "ping", "server/discover"})
 
@@ -110,6 +130,21 @@ def _public_discover(endpoint: ServingEndpoint) -> dict[str, Any]:
         "ttlMs": TOOLS_LIST_TTL_MS,
         "_meta": {SERVER_INFO_META_KEY: PUBLIC_SERVER_INFO},
     }
+
+
+def _address(scope: Scope, is_alias: bool) -> str | None:
+    """The one address of the request (public id or alias host), or ``None`` for the 404."""
+    if not public_endpoints_enabled() or scope.get("path") != "/mcp/public/":
+        return None
+    if is_alias:
+        alias = scope[ALIAS_HOST_SCOPE_KEY]
+        if PUBLIC_ID_SCOPE_KEY in scope or not public_domains_enabled():
+            return None
+        return alias if isinstance(alias, str) and alias else None
+    public_id = scope.get(PUBLIC_ID_SCOPE_KEY)
+    if not isinstance(public_id, str) or _PUBLIC_ID_RE.fullmatch(public_id) is None:
+        return None
+    return public_id
 
 
 async def _send_not_published(send: Send) -> None:
@@ -153,6 +188,19 @@ async def _load(public_id: str) -> tuple[ServingEndpoint | None, bool]:
     return None, False  # pragma: no cover - get_db always yields
 
 
+async def _load_alias(hostname: str) -> tuple[ServingEndpoint | None, bool]:
+    """``(endpoint, paused)`` for a custom domain, from one short-lived session."""
+    from db.base import get_db
+
+    async with contextlib.aclosing(get_db()) as sessions:
+        async for db in sessions:
+            endpoint = await load_serving_endpoint_for_alias(db, hostname)
+            if endpoint is None:
+                return None, False
+            return endpoint, await serving_paused(db, endpoint)
+    return None, False  # pragma: no cover - get_db always yields
+
+
 async def _read_bounded_body(scope: Scope, receive: Receive) -> bytes | None:
     """The request body, or ``None`` when it exceeds ``PUBLIC_MAX_REQUEST_BYTES``."""
     for name, value in scope.get("headers", []):
@@ -180,28 +228,26 @@ async def _read_bounded_body(scope: Scope, receive: Receive) -> bytes | None:
 
 
 async def public_mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
-    """ASGI entry for ``/mcp/public/{public_id}``.
+    """ASGI entry for ``/mcp/public/{public_id}`` and for custom domains.
 
-    ``scope["public_endpoint_public_id"]`` carries the address segment;
-    ``scope["path"]`` is ``/mcp/public/`` for the endpoint itself.
+    ``scope["public_endpoint_public_id"]`` carries the address segment of the
+    fixed address, ``scope["public_endpoint_alias_host"]`` the normalised
+    custom domain (exactly one of them); ``scope["path"]`` is
+    ``/mcp/public/`` for the endpoint itself.
     """
     if scope.get("type") != "http":
         return
     headers: dict[bytes, bytes] = {k.lower(): v for k, v in scope.get("headers", [])}
-    if await _reject_disallowed_origin(headers, send):
+    is_alias = ALIAS_HOST_SCOPE_KEY in scope
+    if await _reject_disallowed_origin(headers, send, log_origin=not is_alias):
         return
-    public_id = scope.get("public_endpoint_public_id")
-    if (
-        not public_endpoints_enabled()
-        or not isinstance(public_id, str)
-        or _PUBLIC_ID_RE.fullmatch(public_id) is None
-        or scope.get("path") != "/mcp/public/"
-    ):
+    address = _address(scope, is_alias)
+    if address is None:
         await _send_not_published(send)
         return
 
     try:
-        endpoint, paused = await _load(public_id)
+        endpoint, paused = await (_load_alias(address) if is_alias else _load(address))
     except Exception as exc:
         logger.error("public_mcp_endpoint_lookup_failed", error_type=type(exc).__name__)
         await _send_transport_failure(send, exc, body=None, era="legacy")

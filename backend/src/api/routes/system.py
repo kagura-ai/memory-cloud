@@ -197,6 +197,10 @@ async def system_info():
             # gate is on, for Google / GitHub as for email; invitation pages
             # read the invitation preview's ``email_signup_available``.
             "open_registration": settings.allow_registration,
+            # #2809: default-off. When true, owners may bind verified custom
+            # domains to their public MCP endpoints (the domain routes 404
+            # otherwise). Availability only, never the deployment's hosts.
+            "public_mcp_domains": settings.mcp_public_domains_enabled,
             # Issue #2786: whether a sign-in that ends at email_in_use may have
             # mailed a confirmation link to an email sign-up account. Per
             # deployment, never per account: the login page words its hint

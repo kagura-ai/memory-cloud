@@ -1,0 +1,53 @@
+name: Migration head
+
+# A pull request's CI runs on the tree the branch had at its last push. Two
+# pull requests that each add an alembic revision are both green and still
+# leave main with two heads once both are merged, and `alembic upgrade head`
+# then stops (#2819, #2825). This job runs the head test on main itself after
+# every push that touches the revisions, so a second head is a failed run on
+# the merge commit within minutes, not something found at the next deploy.
+# It does not replace the test in CI: a pull request still runs it on its own
+# tree. backend/tests/ci/test_migration_head_workflow.py pins the shape of
+# this file.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/alembic/**"
+      - ".github/workflows/migration-head.yml"
+  workflow_dispatch:
+
+# The job reads the repository and writes nothing.
+permissions:
+  contents: read
+
+jobs:
+  single-head:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+
+      # The same pinned uv and cache key as ci.yml
+      # (backend/tests/test_uv_version_lockstep.py enforces the pin).
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.11.19"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      # The revisions import from src/, so the test needs the runtime tree.
+      - name: Install dependencies
+        run: |
+          cd backend
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      # Needs no database: it reads the revision files only.
+      - name: One alembic head
+        run: cd backend && pytest tests/test_migration_head.py -v --no-cov -p no:cacheprovider

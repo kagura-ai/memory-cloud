@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.client_registration import reserve_client_id  # noqa: E402
 from models.oidc import OIDCClient  # noqa: E402
+from models.public_mcp_domain import DOMAIN_SERVICE_ID  # noqa: E402
 from models.sync_installation import SyncService  # noqa: E402
 
 
@@ -23,7 +24,12 @@ def register_service(
     db: Session, service_id: str, browser_client_id: str, service_client_id: str
 ) -> SyncService:
     """Create an immutable binding; identical registration is an idempotent no-op."""
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", service_id):
+    # #2809: the custom domain license id is reserved; a sync service under
+    # it would share that license row.
+    if (
+        not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", service_id)
+        or service_id == DOMAIN_SERVICE_ID
+    ):
         raise ValueError("Invalid service ID")
     if (
         any(

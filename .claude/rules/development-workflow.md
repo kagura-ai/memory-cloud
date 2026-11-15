@@ -88,3 +88,8 @@ decisions and features.
 - Squash merge to `main`
 - Delete branch after merge
 - Never skip review before merge
+- A PR that adds an alembic revision: merge `main` into the branch right before
+  merging and confirm `alembic heads` prints one head. CI ran on the tree the
+  branch had at its last push, so two green PRs can still leave `main` with two
+  heads (#2819, #2825). The `Migration head` workflow checks `main` after such
+  a merge; a red run there is fixed before anything else merges.

@@ -8,7 +8,9 @@ in-memory counter, and the data handlers are fakes except
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import logging
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -632,3 +634,177 @@ async def test_credentials_on_the_public_path_are_charged_like_anyone(
     for call in charge.await_args_list:
         assert call.args == (client.endpoint.workspace_id,)
         assert call.kwargs == {"limit": 5}
+
+
+# ----------------------------------------------------------------------------
+# #2809: the alias entry (a verified custom domain, set by the Host guard)
+# ----------------------------------------------------------------------------
+
+ALIAS = "alias.example.org"
+
+
+async def _call_scope(
+    payload: Any, keys: dict[str, Any], *, headers: dict[bytes, bytes] | None = None, **scope: Any
+) -> _Recorder:
+    body = json.dumps(payload).encode()
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    full = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp/public/",
+        "query_string": b"",
+        "headers": list((headers or {}).items()),
+        **keys,
+        **scope,
+    }
+    send = _Recorder()
+    await pt.public_mcp_asgi_app(full, receive, send)
+    return send
+
+
+@pytest.fixture
+def alias(client: _Client, monkeypatch) -> AsyncMock:
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_enabled", True)
+    load_alias = AsyncMock(return_value=(client.endpoint, False))
+    monkeypatch.setattr(pt, "_load_alias", load_alias)
+    return load_alias
+
+
+async def test_alias_entry_serves_the_endpoint(client: _Client, alias: AsyncMock) -> None:
+    send = await _call_scope(_rpc("initialize"), {"public_endpoint_alias_host": ALIAS})
+    assert send.status == 200, send.raw
+    assert send.body["result"]["serverInfo"]["name"] == "kagura-memory-cloud-public"
+    _no_challenge(send)
+    alias.assert_awaited_once_with(ALIAS)
+    pt._load.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "keys",
+    [
+        {},
+        {"public_endpoint_alias_host": ALIAS, "public_endpoint_public_id": "pmcp_" + "A" * 22},
+        {"public_endpoint_alias_host": None},
+        {"public_endpoint_alias_host": b"alias.example.org"},
+        {"public_endpoint_alias_host": ""},
+    ],
+)
+async def test_exactly_one_address_key(client: _Client, alias: AsyncMock, keys) -> None:
+    send = await _call_scope(_rpc("initialize"), keys)
+    assert send.status == 404
+    assert send.body == NOT_PUBLISHED
+    alias.assert_not_awaited()
+    pt._load.assert_not_awaited()
+
+
+async def test_alias_entry_only_at_the_endpoint_path(client: _Client, alias: AsyncMock) -> None:
+    for path in ("/mcp/public/messages", "/mcp/", "/mcp"):
+        send = await _call_scope(
+            _rpc("initialize"), {"public_endpoint_alias_host": ALIAS}, path=path
+        )
+        assert send.status == 404, path
+        assert send.body == NOT_PUBLISHED
+    alias.assert_not_awaited()
+
+
+@pytest.mark.parametrize("switch", ["mcp_public_domains_enabled", "mcp_public_endpoints_enabled"])
+async def test_alias_entry_needs_both_switches(
+    client: _Client, alias: AsyncMock, monkeypatch, switch
+) -> None:
+    monkeypatch.setattr(get_settings(), switch, False)
+    send = await _call_scope(_rpc("initialize"), {"public_endpoint_alias_host": ALIAS})
+    assert send.status == 404
+    assert send.body == NOT_PUBLISHED
+    alias.assert_not_awaited()
+
+
+async def test_alias_not_served_paused_and_failing(client: _Client, alias: AsyncMock) -> None:
+    keys = {"public_endpoint_alias_host": ALIAS}
+    alias.return_value = (None, False)
+    send = await _call_scope(_rpc("initialize"), keys)
+    assert send.status == 404
+    assert send.body == NOT_PUBLISHED
+
+    alias.return_value = (client.endpoint, True)
+    send = await _call_scope(_rpc("tools/call", name="recall", arguments={}), keys)
+    assert send.status == 503
+    assert send.body == {"error": "temporarily_unavailable"}
+
+    alias.side_effect = ConnectionError("db down at host-1")
+    send = await _call_scope(_rpc("initialize"), keys)
+    assert send.status == 503
+    assert "host-1" not in send.raw.decode()
+    _no_challenge(send)
+
+
+async def test_a_session_and_the_buckets_are_shared_by_both_entries(
+    client: _Client, alias: AsyncMock, monkeypatch, counters
+) -> None:
+    records: list[Any] = []
+    monkeypatch.setattr(dispatch, "record_public_call", records.append)
+    keys = {"public_endpoint_alias_host": ALIAS}
+
+    session = await _initialize(client)
+    send = await _call_scope(_rpc("tools/list"), keys, headers=session)
+    assert send.status == 200
+    assert send.headers[b"mcp-session-id"] == session[b"mcp-session-id"]
+    fixed_keys = set(counters)
+
+    send = await _call_scope(
+        _rpc("tools/call", name="recall", arguments={"query": "q"}), keys, headers=session
+    )
+    assert send.status == 200
+    send = await client.call(
+        _rpc("tools/call", name="recall", arguments={"query": "q"}), headers=session
+    )
+    assert send.status == 200
+    assert all(key.startswith(f"public_mcp:{client.endpoint.id}:") for key in counters)
+    assert fixed_keys <= set(counters)
+
+    assert len(records) == 2
+    volatile = {"duration_ms", "started_at"}
+    first, second = (
+        {k: v for k, v in dataclasses.asdict(r).items() if k not in volatile} for r in records
+    )
+    assert first == second
+
+
+async def test_disallowed_origin_on_the_alias_entry_logs_no_origin(
+    client: _Client, alias: AsyncMock, caplog
+) -> None:
+    from structlog.testing import capture_logs
+
+    origin = b"https://origin-value-7f3a.example.net"
+    caplog.set_level(logging.DEBUG)
+    with capture_logs() as events:
+        send = await _call_scope(
+            _rpc("initialize"), {"public_endpoint_alias_host": ALIAS}, headers={b"origin": origin}
+        )
+    assert send.status == 403
+    alias.assert_not_awaited()
+    lines = [record.getMessage() for record in caplog.records]
+    assert "MCP request refused: Origin is not allowed" in lines
+    for text in (repr(lines), repr(events)):
+        assert "origin-value-7f3a" not in text
+        assert ALIAS not in text
+
+
+async def test_disallowed_origin_on_the_fixed_address_logs_as_before(
+    client: _Client, caplog
+) -> None:
+    caplog.set_level(logging.WARNING, logger="mcp_server.transport")
+    send = await client.call(
+        _rpc("initialize"), headers={b"origin": b"https://origin-value-7f3a.example.net"}
+    )
+    assert send.status == 403
+    assert [record.getMessage() for record in caplog.records] == [
+        "MCP request refused: Origin 'https://origin-value-7f3a.example.net' is not allowed"
+    ]

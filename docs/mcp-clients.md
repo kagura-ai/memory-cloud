@@ -14,6 +14,7 @@ Every client below takes one of two endpoint URLs — same server, same credenti
 | **Default context** (the client works in one context) | `…/mcp?context=<context_id>` — tools called without `context_id` run in it. Or set it on the credential instead (below) |
 | **Pinned to one workspace** (OAuth client, several workspaces) | `…/mcp/w/{workspace_id}` — takes the same query parameters |
 | **Public read-only dataset** (anyone, no sign-in) | `…/mcp/public/pmcp_…` — see [Public read-only endpoint](#public-read-only-endpoint-no-sign-in) |
+| **Public read-only dataset under the owner's domain** | `https://<custom host>/mcp` — see [Public read-only endpoint](#public-read-only-endpoint-no-sign-in) |
 
 A default context can come from three places, so a client that cannot edit its URL (or whose OAuth token is stored per URL) does not have to: `?context=` on the URL, a default set on the **API key** (key management on the Credentials & Integrations page, or `PATCH /api/v1/config/api-keys/{key_id}`), or a default set on the **app's OAuth grant** (picked on the consent page when you authorize the app, or changed later with `PUT /api/v1/me/oauth/grants/{client_id}/default-context`). Precedence: an explicit `context_id` > `?context=` > the key's or the app's default > an agent-bound key's default binding > none.
 
@@ -444,6 +445,7 @@ https://your-domain.com/mcp/public/pmcp_<22 characters>
 - **Claude (claude.ai / Desktop):** add a custom connector with that URL and no authentication.
 - **ChatGPT (developer mode):** add a connector with that Server URL and authentication "No authentication".
 - **Claude Code:** `claude mcp add --transport http acme-catalog https://your-domain.com/mcp/public/pmcp_…`
+- **Under the owner's own domain** ([#2809](https://github.com/kagura-ai/memory-cloud/issues/2809)): when the operator allows custom domains and the owner has verified one, the same endpoint also answers at `https://<custom host>/mcp`, for example `https://mcp.example.org/mcp` (also with `?tools=`). It is the same endpoint — the same tools, sessions, limits and budget — so either URL works; use the host name exactly as the owner gives it (lower case). Only `/mcp` is served under that host: every other path answers `404`. When the owner removes the domain, or it stops being verified, it answers `404` like an unpublished endpoint ([Public MCP custom domains](public-mcp-domains.md)).
 - Any Streamable HTTP client works: both the `initialize` handshake and stateless MCP 2026-07-28 requests are served, and the server never answers with an authentication challenge.
 
 The endpoint lists exactly five read-only tools, all bound to the one published dataset, so no `context_id` is needed: `get_context_info` (the dataset's public name, description and usage guide — call it first), `recall` (search), `reference` (an entry's full text, paged with `content_offset`), `explore` (related entries) and `list_tags` (categories for `recall`'s `tags` filter). Response fields: [MCP Tools › Public endpoint tools](mcp-tools.md#public-endpoint-tools).

@@ -189,3 +189,10 @@ markers: both parents' schemas and data remain. Further downgrade to a shared
 ancestor also affects the public-budget branch and must be planned for both
 features; it is not a feed-only rollback. Prefer disabling the sync flag when
 only staged-feed admission needs to stop.
+
+From v0.164.0, `f51_2809_public_mcp_domains` follows the merge node, so every
+downgrade from the combined head, these included, first reverts it and drops
+`public_mcp_domains` with every custom domain binding: take the alias routing
+out of the proxy and switch `MCP_PUBLIC_DOMAINS_ENABLED` off first (see
+[Public MCP custom domains](../public-mcp-domains.md), "Stopping and rolling
+back").

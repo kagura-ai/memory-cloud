@@ -100,6 +100,8 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "graph": NONE,
     "internal_billing": NONE,
     "internal_integrations": NONE,  # publisher, consumes no rights
+    # #2809: the certificate permission call reads the domain row's lease only
+    "internal_public_mcp_domains": NONE,
     # Trusted billing activation (#2802): activate_installation enters
     # paid_integration_write; the consent pre-check is a plain read.
     "internal_sync_installations": Guarded(services=("services.sync_installations",)),
@@ -125,6 +127,9 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "passkeys": NONE,
     "password": NONE,
     "provider_link_confirm": NONE,
+    # #2809: attach, activation and every check commit through
+    # services.public_mcp_domains.domain_write (paid_integration_write).
+    "public_mcp_domains": Guarded(services=("services.public_mcp_domains",)),
     "public_mcp_endpoints": NONE,
     "public_mcp_usage": NONE,
     "public_search": NONE,
@@ -255,6 +260,9 @@ PAID_INTEGRATION_SYMBOLS: dict[str, str] = {
     "services.sync_credentials": GUARDED,
     "services.sync_resume": GUARDED,
     "services.sync_management": DISPLAY_ONLY,
+    # #2809: domain_write enters paid_integration_write for the reserved
+    # service id public-mcp-domains, as the transaction's first row lock.
+    "services.public_mcp_domains": GUARDED,
 }
 
 # Kinds of use the scan reports.

@@ -2,7 +2,12 @@
 
 This opt-in protocol extends [staged feed synchronization](staged-feed-sync.md).
 Apply `f51_2808_managed_sync` after the existing, unchanged
-`f50_2807_merge_sync_heads`. `SYNC_MANAGED_ENABLED` defaults to false.
+`f50_2807_merge_sync_heads`. The no-op `f52_2808_merge_feed_domains` joins it
+with the parallel `f51_2809_public_mcp_domains` history; `alembic upgrade head`
+applies both parents and preserves installations, ownership fences and domain
+bindings. Unmerging f52 restores both parent markers without deleting data;
+downgrading either parent itself removes that parent's tables and data.
+`SYNC_MANAGED_ENABLED` defaults to false.
 All persisted ownership fences remain enforced when this switch is false.
 All application instances must run the new writer/indexer code before enabling
 the switch; quiesce old workers and generic writers during enrollment. Never
