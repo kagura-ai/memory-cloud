@@ -21,7 +21,7 @@ from tests.integration.test_alembic_migrations import (
 )
 from utils.datetime import utcnow
 
-PARENT = "f49_2817_clear_allowlist_adders"
+PARENT = "f47_2819_merge_sync_credentials"
 REVISION = "f48_2807_sync_feed_runs"
 TABLES = {"sync_feeds", "sync_runs", "sync_chunks", "sync_records", "sync_index_outbox"}
 
