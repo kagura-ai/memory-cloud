@@ -1099,6 +1099,8 @@ app.include_router(analyses.router, prefix="/api/v1")
 
 # Admin Sleep trigger (Issue #247 - Manual Sleep Maintenance trigger)
 app.include_router(admin_sleep.router, prefix="/api/v1")
+# The same run and merge undo for a target user (Issue #2838)
+app.include_router(admin_sleep.target_router, prefix="/api/v1")
 
 # Consolidated memory-health report (Issue #1211); session users since #2764,
 # the admin path is a deprecated alias for one release.

@@ -193,12 +193,20 @@ Every phase writes individual change records to `sleep_actions` during execution
 | `GET /admin/sleep-reports`                  | List reports with filters (`status`, `source`, `context_id`, `user_id`, `workspace_id`) and pagination. `source` is `sleep`, `analysis` or `all` (default) (#2219). `workspace_id` narrows the list to one workspace (#2844). |
 | `GET /admin/sleep-reports/{report_id}`      | Report detail with the full action audit log. `?include_actions=false` answers the report's own row with `actions: []` and the run's `action_count` (#2842). |
 | `GET /admin/sleep-reports/{report_id}/actions` | The report's actions in pages (`limit` 1-500, default 50; `offset`), in `id` order: `{actions, total, limit, offset}` (#2842). |
+| `POST /admin/sleep/run`                     | Manual run for the calling admin's own contexts (own-account: refused for a service operator). |
+| `POST /admin/users/{user_id}/sleep/run`     | Manual run for a named user's context, body `{"context_id"}` (#2838). |
+| `POST /admin/sleep/actions/{action_id}/undo-merge` | Undo one merge of the calling admin's own report (own-account). |
+| `POST /admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge` | Undo one merge of a named report (#2838). |
 
 A run can record many actions (one per created edge, one per merge), and a merge action's `details` hold the first characters of the merged memory's summary. A caller that needs only the report reads it with `include_actions=false`; a caller that shows the actions reads them page by page. The in-app report pages keep reading the full answer.
 
 Every report carries `workspace_name` beside `workspace_id` (#2844): the name of a live workspace, `null` for a soft-deleted or missing one and for a report without a workspace id.
 
-All three admin endpoints require `Depends(require_admin)`.
+All of these require `Depends(require_admin)`. The two own-account routes refuse an operator principal (`403 SYSADMIN-004`).
+
+### Manual run for a user (#2838)
+
+`POST /admin/users/{user_id}/sleep/run` starts, in the background, the run the scheduled sweep would start for `(user_id, the context's workspace, context_id)`: the report's `user_id` is the target user, and the run applies the workspace's Sleep state itself. The context must be live, have a `sleep_mode` other than `skip` and hold a live memory of that user (`404 SLEEP-003` otherwise; `404 RES-001` for an unknown user; `409 SLEEP-002` while that user has a running report). The request is recorded as an `audit_logs` row (`sleep_run_trigger`) with the caller as actor and the target user, workspace, context and report ids, committed with the report.
 
 ### Report status values
 
@@ -225,6 +233,8 @@ Sleep does not move a memory's `version` ([#2043](https://github.com/kagura-ai/m
 ### Per-merge undo (#1209)
 
 `rollback_sleep_run` reverses a whole run; the correction loop for a single bad merge is `POST /admin/sleep/actions/{action_id}/undo-merge` — it restores just that merge's loser (row **and** Qdrant vector) and appends an `undo_merge` action to the same report, so the merge's full history (merge → undo) reads out of one audit log. Self-scoped like the manual trigger. Error contract: `400` the action is not a dedup merge, `404` unknown/unowned action, `409` already restored (or deleted by something other than sleep), `410` the loser was purged by the Sleep retention window (`sleep_merge_retention_days`) or the platform cleanup sweep (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`) — reversibility is bounded by whichever window is shorter, and both bounds are named, never silent.
+
+`POST /admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge` (#2838) is the same undo for a named report, for a system admin and a service operator: the action is found by its id and the report id, whoever the report belongs to, and an action that is not in that report answers `404`. The error contract after that is the one above. The `undo_merge` action's `undone_by` is the caller's id, or `operator` for a service operator, and an `audit_logs` row (`sleep_merge_undo`) names the caller with the report, action and memory ids.
 
 ## Admin UI
 

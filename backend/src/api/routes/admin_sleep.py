@@ -3,8 +3,13 @@
 Admin-only endpoint for manually triggering Sleep Maintenance runs, used
 for dogfooding and verification loops after config changes (issue #247).
 
-Phase 1 scope: self-scoped (runs only for the calling admin's own
-user_id). Phase 2 will expand to cross-user/workspace runs with audit log.
+``router`` is self-scoped: its two routes run Sleep and undo a merge for the
+calling admin's own account, and refuse an operator principal.
+
+``target_router`` (#2838) holds the same two actions for a target user: a run
+for a named user's context and the undo of a merge of a named report. Both
+take ``require_admin``, so a service operator can call them, and both write
+an ``audit_logs`` row naming the caller.
 """
 
 from __future__ import annotations
@@ -13,26 +18,39 @@ import asyncio
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Path, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
-from auth.dependencies import AdminAccountUser
+from auth.dependencies import AdminAccountUser, AdminUser
+from auth.system_admin_mode import is_operator_principal
 from config.constants import TOMBSTONE_PURGER_CLAUSE
 from db.base import get_db
-from models.auth import Context
+from models.auth import AuditLog, Context, User
+from models.memory import Memory
 from models.sleep import SleepReport
 from services.sleep.orchestrator import SleepOrchestrator
 from services.sleep.reporter import SleepReporter
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import MemoryCloudException
+from utils.exceptions import MemoryCloudException, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/admin/sleep", tags=["admin-sleep"])
+
+# #2838: the same two actions for a target user. A second router because the
+# paths sit under ``/admin/users`` and ``/admin/sleep-reports``; it stays in
+# this module so the route tables classify both routers alike.
+target_router = APIRouter(prefix="/admin", tags=["admin-sleep"])
+
+# The ``audit_logs`` action of a run an admin or operator starts for a user.
+SLEEP_RUN_TRIGGER_AUDIT_ACTION = "sleep_run_trigger"
+
+# ``sleep_actions.id`` is a BIGINT.
+_MAX_ACTION_ID = 2**63 - 1
 
 
 # ============================================================================
@@ -172,6 +190,36 @@ def _log_background_task_result(task: asyncio.Task[Any]) -> None:
         )
 
 
+async def _raise_if_sleep_running(db: AsyncSession, user_id: str) -> None:
+    """Refuse with 409 ``SLEEP-002`` while ``user_id`` has a running report.
+
+    The one concurrency guard of the manual triggers: the own-account route
+    passes the caller, the target-user route (#2838) the user it runs for.
+
+    Oldest-first so the returned running_report_id is deterministic: in a
+    multi-context batch several reports can share status='running', and
+    the oldest is the most likely to be currently executing — which is
+    the most useful target for the UI's "view running report" link.
+    """
+    running_stmt = (
+        select(SleepReport.id, SleepReport.started_at)
+        .where(SleepReport.user_id == user_id)
+        .where(SleepReport.status == "running")
+        .order_by(SleepReport.started_at.asc())
+        .limit(1)
+    )
+    running_row = (await db.execute(running_stmt)).first()
+    if running_row is not None:
+        running_report_id, started_at = running_row
+        raise MemoryCloudException(
+            message="A sleep run is already in progress for this user.",
+            status_code=409,
+            error_code="SLEEP-002",
+            running_report_id=str(running_report_id),
+            started_at=to_utc_iso(started_at),
+        )
+
+
 # ============================================================================
 # Endpoint
 # ============================================================================
@@ -240,27 +288,7 @@ async def trigger_sleep_run(
         )
 
     # ---- Concurrency guard --------------------------------------------------
-    # Oldest-first so the returned running_report_id is deterministic: in a
-    # multi-context batch several reports can share status='running', and
-    # the oldest is the most likely to be currently executing — which is
-    # the most useful target for the UI's "view running report" link.
-    running_stmt = (
-        select(SleepReport.id, SleepReport.started_at)
-        .where(SleepReport.user_id == user_id)
-        .where(SleepReport.status == "running")
-        .order_by(SleepReport.started_at.asc())
-        .limit(1)
-    )
-    running_row = (await db.execute(running_stmt)).first()
-    if running_row is not None:
-        running_report_id, started_at = running_row
-        raise MemoryCloudException(
-            message="A sleep run is already in progress for this user.",
-            status_code=409,
-            error_code="SLEEP-002",
-            running_report_id=str(running_report_id),
-            started_at=to_utc_iso(started_at),
-        )
+    await _raise_if_sleep_running(db, user_id)
 
     # ---- Resolve target contexts --------------------------------------------
     # Self-scoped: only contexts the admin created. Skipping soft-deleted
@@ -400,6 +428,228 @@ async def undo_merge(
 
     try:
         summary = await undo_merge_action(db, action_id, acting_user_id=user_id)
+    except UndoMergeError as exc:
+        raise MemoryCloudException(
+            message=exc.message,
+            status_code=_UNDO_ERROR_STATUS.get(exc.code, 400),
+            error_code=f"SLEEP-UNDO-{exc.code}",
+        ) from exc
+
+    return UndoMergeResponse(**summary)
+
+
+# ============================================================================
+# The same two actions for a target user (#2838)
+# ============================================================================
+
+
+class SleepRunForUserRequest(BaseModel):
+    """Body for POST /admin/users/{user_id}/sleep/run.
+
+    Attributes:
+        context_id: The context to run Sleep in. Required: one call schedules
+            one run.
+    """
+
+    context_id: UUID
+
+
+@target_router.post(
+    "/users/{user_id}/sleep/run",
+    response_model=SleepRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger Sleep Maintenance for a user's context",
+    responses={
+        404: {
+            "description": (
+                "``RES-001``: no such user. ``SLEEP-003``: the context is not "
+                "eligible (deleted, ``sleep_mode='skip'``, or without a live "
+                "memory of this user)."
+            )
+        },
+        409: {
+            "description": "A sleep run is already in progress for this user.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": "SLEEP-002",
+                        "message": "A sleep run is already in progress for this user.",
+                        "details": {
+                            "running_report_id": "00000000-0000-0000-0000-000000000000",
+                            "started_at": "2026-04-09T12:00:00Z",
+                        },
+                    }
+                }
+            },
+        },
+    },
+)
+async def trigger_sleep_run_for_user(
+    user_id: str,
+    request: SleepRunForUserRequest,
+    admin: AdminUser,
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """Run Sleep Maintenance once for ``user_id`` in one context (#2838).
+
+    For a system admin and, in ``service`` mode, an operator. The run is the
+    one the scheduled sweep would start for ``(user_id, the context's
+    workspace, context_id)``: the report's ``user_id`` is the target user, and
+    the run itself applies the workspace's Sleep state, as for the sweep.
+
+    Eligible: the context is live, its ``sleep_mode`` is not ``skip`` and the
+    user has a live memory in it.
+
+    Returns:
+        202 with ``{"report_ids": ["<uuid>"]}``. The phases run in the
+        background; read ``GET /admin/sleep-reports/{id}`` for progress.
+
+    Raises:
+        404 ``RES-001`` for an unknown user.
+        409 ``SLEEP-002`` while the target user has a running report, with
+        ``running_report_id`` and ``started_at``. Best-effort under
+        concurrent requests, like the own-account trigger.
+        404 ``SLEEP-003`` when the context is not eligible; one message for
+        every cause.
+
+    An ``audit_logs`` row (``sleep_run_trigger``) is written in the report's
+    commit: the caller as actor, and the target user, workspace, context and
+    report ids in its metadata. It records the request and stays when the run
+    fails.
+    """
+    actor_id = admin["user_id"]
+    actor_email = admin.get("email") or actor_id
+
+    # (a) The target account. The caller is never looked up: an operator
+    # principal has no users row.
+    target = (
+        await db.execute(select(User.user_id).where(User.user_id == user_id))
+    ).scalar_one_or_none()
+    if target is None:
+        raise NotFoundException("User")
+
+    # (b) A run of the TARGET user in progress.
+    await _raise_if_sleep_running(db, user_id)
+
+    # (c) Eligibility, in one statement: the live, non-skip context holding a
+    # live memory of the target user in the context's own workspace.
+    has_live_memory = (
+        select(Memory.id)
+        .where(
+            Memory.context_id == Context.id,
+            Memory.workspace_id == Context.workspace_id,
+            Memory.user_id == user_id,
+            Memory.deleted_at.is_(None),
+        )
+        .exists()
+    )
+    eligible = (
+        await db.execute(
+            select(Context.workspace_id, Context.id).where(
+                Context.id == request.context_id,
+                Context.deleted_at.is_(None),
+                Context.sleep_mode != "skip",
+                has_live_memory,
+            )
+        )
+    ).first()
+    if eligible is None:
+        raise MemoryCloudException(
+            message="This context is not eligible for a sleep run for this user.",
+            status_code=404,
+            error_code="SLEEP-003",
+            context_id=str(request.context_id),
+        )
+    workspace_id, context_id = str(eligible[0]), str(eligible[1])
+
+    # The report and its audit row become visible together, in one commit,
+    # before the job (which opens its own session) is scheduled.
+    report = await SleepReporter(db).create_report(user_id, workspace_id, context_id)
+    db.add(
+        AuditLog(
+            user_email=actor_email,
+            user_id=actor_id,
+            action=SLEEP_RUN_TRIGGER_AUDIT_ACTION,
+            resource=f"context:{context_id}",
+            user_metadata={
+                "target_user_id": user_id,
+                "workspace_id": workspace_id,
+                "context_id": context_id,
+                "report_id": str(report.id),
+            },
+        )
+    )
+    await db.commit()
+
+    task = asyncio.create_task(_run_sleep_batch([(report.id, workspace_id, context_id)], user_id))
+    task.add_done_callback(_log_background_task_result)
+
+    logger.info(
+        "target_sleep_run_scheduled",
+        target_user_id=user_id,
+        context_id=context_id,
+        report_id=str(report.id),
+        operator=is_operator_principal(admin),
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=SleepRunResponse(report_ids=[report.id]).model_dump(mode="json"),
+    )
+
+
+@target_router.post(
+    "/sleep-reports/{report_id}/actions/{action_id}/undo-merge",
+    response_model=UndoMergeResponse,
+    summary="Undo one dedup merge of a sleep report",
+    responses={
+        400: {"description": "The action is not a dedup merge."},
+        404: {"description": "No such action in this sleep report."},
+        409: {
+            "description": (
+                "Conflicts with current state: ``SLEEP-UNDO-already_restored``, "
+                "``SLEEP-UNDO-not_merge_deleted`` or ``SLEEP-UNDO-edge_changed``, "
+                "as on ``POST /admin/sleep/actions/{action_id}/undo-merge``."
+            )
+        },
+        410: {
+            "description": f"The merge loser was {TOMBSTONE_PURGER_CLAUSE} — no longer restorable."
+        },
+    },
+)
+async def undo_merge_for_report(
+    report_id: UUID,
+    admin: AdminUser,
+    action_id: int = Path(ge=1, le=_MAX_ACTION_ID),
+    db: AsyncSession = Depends(get_db),
+) -> UndoMergeResponse:
+    """Restore the loser of ONE dedup merge of a named sleep report (#2838).
+
+    For a system admin and, in ``service`` mode, an operator. The action is
+    found by ``action_id`` and ``report_id``, whoever the report belongs to;
+    an unknown action, an action of another report and an unknown report
+    answer the same 404 ``SLEEP-UNDO-action_not_found``. Every later check
+    and answer is the one of the own-account undo.
+
+    The undo is recorded as an ``undo_merge`` action on the report
+    (``undone_by`` is the caller's id, or ``operator`` for an operator) and
+    as an ``audit_logs`` row (``sleep_merge_undo``) with the caller as actor
+    and the report, action and memory ids in its metadata. The answer holds
+    ids only.
+    """
+    from services.sleep.undo import UndoMergeError, undo_merge_action
+
+    actor_id = admin["user_id"]
+    actor_email = admin.get("email") or actor_id
+
+    try:
+        summary = await undo_merge_action(
+            db,
+            action_id,
+            acting_user_id=actor_id,
+            target_report_id=report_id,
+            actor_email=actor_email,
+        )
     except UndoMergeError as exc:
         raise MemoryCloudException(
             message=exc.message,

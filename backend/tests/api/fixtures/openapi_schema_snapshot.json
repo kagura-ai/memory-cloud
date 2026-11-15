@@ -12217,6 +12217,18 @@
         ],
         "type": "object"
       },
+      "SleepRunForUserRequest": {
+        "properties": {
+          "context_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context_id"
+        ],
+        "type": "object"
+      },
       "SleepRunRequest": {
         "properties": {
           "context_id": {
@@ -17320,6 +17332,59 @@
         ]
       }
     },
+    "/api/v1/admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge": {
+      "post": {
+        "operationId": "undo_merge_for_report_api_v1_admin_sleep_reports__report_id__actions__action_id__undo_merge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "action_id",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UndoMergeResponse"
+                }
+              }
+            }
+          },
+          "400": {},
+          "404": {},
+          "409": {},
+          "410": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-sleep"
+        ]
+      }
+    },
     "/api/v1/admin/sleep/actions/{action_id}/undo-merge": {
       "post": {
         "operationId": "undo_merge_api_v1_admin_sleep_actions__action_id__undo_merge_post",
@@ -17844,6 +17909,60 @@
         },
         "tags": [
           "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{user_id}/sleep/run": {
+      "post": {
+        "operationId": "trigger_sleep_run_for_user_api_v1_admin_users__user_id__sleep_run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SleepRunForUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SleepRunResponse"
+                }
+              }
+            }
+          },
+          "404": {},
+          "409": {
+            "content": {
+              "application/json": {}
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-sleep"
         ]
       }
     },
