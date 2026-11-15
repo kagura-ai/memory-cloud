@@ -18153,6 +18153,7 @@
             "name": "workspace_id",
             "required": true,
             "schema": {
+              "format": "uuid",
               "type": "string"
             }
           }

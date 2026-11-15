@@ -936,21 +936,21 @@ async def get_addon_cache_consistency(
 
 @router.get("/workspaces/{workspace_id}/quotas", response_model=WorkspaceQuotaDetail)
 async def get_workspace_quotas(
-    workspace_id: str,
+    workspace_id: UUID,
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Get detailed quota breakdown for a workspace.
 
     Returns base plan limits, addon bonuses, effective totals, and current usage.
+    An id that is not a UUID answers 422; an unknown or soft-deleted
+    workspace answers 404.
     """
-    ws_uuid = UUID(workspace_id)
-
     async with db_transaction(db, "get_workspace_quotas", "Failed to get quota details"):
         # Get workspace
         result = await db.execute(
             select(Workspace).where(
-                Workspace.id == ws_uuid,
+                Workspace.id == workspace_id,
                 Workspace.deleted_at.is_(None),  # #687 / #681 pattern: soft-delete safe
             )
         )
@@ -962,15 +962,15 @@ async def get_workspace_quotas(
 
         # Get effective quotas
         effective_service = EffectiveQuotaService(db)
-        effective = await effective_service.get_effective_quotas(ws_uuid)
+        effective = await effective_service.get_effective_quotas(workspace_id)
 
         # Get usage: memories count (the shared workspace-scoped count, #1946)
-        memory_count = await count_live_memories(db, ws_uuid)
+        memory_count = await count_live_memories(db, workspace_id)
 
         # Get usage: context count (non-deleted only)
         context_count_result = await db.execute(
             select(func.count(Context.id)).where(
-                Context.workspace_id == ws_uuid,
+                Context.workspace_id == workspace_id,
                 Context.deleted_at.is_(None),
             )
         )
@@ -978,11 +978,13 @@ async def get_workspace_quotas(
 
         # Get usage: member count + pending invitations
         member_count_result = await db.execute(
-            select(func.count(WorkspaceMember.id)).where(WorkspaceMember.workspace_id == ws_uuid)
+            select(func.count(WorkspaceMember.id)).where(
+                WorkspaceMember.workspace_id == workspace_id
+            )
         )
         pending_invite_result = await db.execute(
             select(func.count(WorkspaceInvitation.id)).where(
-                WorkspaceInvitation.workspace_id == ws_uuid,
+                WorkspaceInvitation.workspace_id == workspace_id,
                 WorkspaceInvitation.accepted_at.is_(None),
                 WorkspaceInvitation.expires_at > func.now(),
             )
@@ -996,7 +998,7 @@ async def get_workspace_quotas(
         from services.embedding_spend_cap_service import EmbeddingSpendCapService
 
         spend_cap_svc = EmbeddingSpendCapService(db)
-        current_daily, current_monthly = await spend_cap_svc.get_current_spend(ws_uuid)
+        current_daily, current_monthly = await spend_cap_svc.get_current_spend(workspace_id)
         effective_daily = workspace.effective_embedding_daily_cap_usd
         effective_monthly = workspace.effective_embedding_monthly_cap_usd
         spend_cap_payload = SpendCapValues(
@@ -1027,7 +1029,7 @@ async def get_workspace_quotas(
         addon_rows = await db.execute(
             select(WorkspaceAddon)
             .where(
-                WorkspaceAddon.workspace_id == ws_uuid,
+                WorkspaceAddon.workspace_id == workspace_id,
                 WorkspaceAddon.active_from <= now,
                 (WorkspaceAddon.active_until.is_(None) | (WorkspaceAddon.active_until > now)),
             )
@@ -1049,7 +1051,7 @@ async def get_workspace_quotas(
         ]
 
         return WorkspaceQuotaDetail(
-            workspace_id=workspace_id,
+            workspace_id=str(workspace_id),
             workspace_name=workspace.name,
             plan_name=workspace.plan_name,
             entitlement_source=workspace.entitlement_source,

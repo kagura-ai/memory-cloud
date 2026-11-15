@@ -250,3 +250,20 @@ async def test_price_and_product_id_are_in_neither_answer(db_session: AsyncSessi
         assert str(price) not in response.text
         assert "purchase_price_cents" not in response.text
         assert "stripe_product_id" not in response.text
+
+
+async def test_quotas_read_answers_422_for_a_bad_id_and_404_for_an_unknown_one(
+    db_session: AsyncSession,
+) -> None:
+    workspace = await _workspace(db_session)
+    async with admin_http(db_session) as client:
+        bad = await client.get(f"{LIST}/not-a-uuid/quotas")
+        unknown = await client.get(f"{LIST}/{uuid4()}/quotas")
+        # The id is read as a UUID, so its other spellings name the same workspace.
+        spelled = await client.get(f"{LIST}/{str(workspace.id).replace('-', '').upper()}/quotas")
+
+    assert bad.status_code == 422, bad.text
+    assert bad.json()["error"] == "VAL-001"
+    assert unknown.status_code == 404, unknown.text
+    assert spelled.status_code == 200, spelled.text
+    assert spelled.json()["workspace_id"] == str(workspace.id)

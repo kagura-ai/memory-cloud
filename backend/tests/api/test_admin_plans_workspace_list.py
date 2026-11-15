@@ -83,6 +83,39 @@ def test_one_workspace_read_refuses_an_id_that_is_not_a_uuid(client: TestClient)
     assert response.json()["error"] == "VAL-001"
 
 
+@pytest.mark.parametrize("workspace_id", ["not-a-uuid", "a%00b", "123"])
+def test_quotas_read_refuses_an_id_that_is_not_a_uuid(client: TestClient, workspace_id) -> None:
+    """The quotas read answers as the one-workspace read beside it (#2829)."""
+    response = client.get(f"{LIST}/{workspace_id}/quotas")
+    assert response.status_code == 422, response.text
+    assert response.json()["error"] == "VAL-001"
+
+
+def test_quotas_read_for_an_unknown_workspace_is_still_404() -> None:
+    session = MagicMock()
+    no_row = MagicMock()
+    no_row.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=no_row)
+    session.rollback = AsyncMock()
+
+    async def _admin():
+        return dict(ADMIN)
+
+    async def _db():
+        yield session
+
+    app.dependency_overrides[require_admin] = _admin
+    app.dependency_overrides[get_db] = _db
+    try:
+        response = TestClient(app, raise_server_exceptions=False).get(
+            f"{LIST}/11111111-2222-4333-8444-555555555555/quotas"
+        )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 404, response.text
+    assert session.execute.await_count == 1
+
+
 def test_one_workspace_read_is_reachable_in_service_mode(monkeypatch) -> None:
     """An operator principal (no ``users`` row) reaches the handler: the 404 is
     the handler's own answer for a workspace the session does not find."""
