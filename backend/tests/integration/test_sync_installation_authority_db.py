@@ -273,3 +273,24 @@ async def test_original_owner_account_deletion_clears_identity_but_retains_activ
     assert (await http(store, "POST", "", billing=True, body=activation(approval))).json()[
         "installation_id"
     ] == result["installation_id"]
+
+
+@pytest.mark.parametrize("field", ["public_description", "public_usage_guide"])
+async def test_approval_text_takes_everything_but_a_nul(store, field):
+    # No stored text holds a NUL; any other character is kept (#2857).
+    refused = await http(
+        store, "POST", "sync-authorizations", body=approval_body(**{field: "a\u0000b"})
+    )
+    assert refused.status_code == 400 and refused.json() == {"error": "invalid_request"}
+    assert await targets(store) == (0, 0, 0)
+    kept = await http(
+        store, "POST", "sync-authorizations", body=approval_body(**{field: "a\nb% cé"})
+    )
+    assert kept.status_code == 201, kept.text
+    async with store.factory() as db:
+        row = await db.scalar(
+            select(SyncAuthorization).where(
+                SyncAuthorization.id == UUID(kept.json()["authorization_id"])
+            )
+        )
+    assert row is not None and getattr(row, field) == "a\nb% cé"

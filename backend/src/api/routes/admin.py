@@ -512,7 +512,7 @@ async def list_users(
 
 @router.get("/users/{user_id}/stats", response_model=UserStats)
 async def get_user_stats(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -604,7 +604,7 @@ async def get_user_stats(
 
 @router.get("/users/{user_id}")
 async def get_user_detail(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -911,7 +911,7 @@ async def update_user_role(
     response_model=UpdateWorkspaceSlotBonusResponse,
 )
 async def update_workspace_slot_bonus(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     request: UpdateWorkspaceSlotBonusRequest,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
@@ -1390,7 +1390,7 @@ class ForceTransferOwnershipRequest(BaseModel):
     justification is a red flag; it is recorded verbatim in the mandatory audit.
     """
 
-    target_user_id: str = Field(..., min_length=1, max_length=255)
+    target_user_id: str = Field(..., min_length=1, max_length=255, pattern=NO_NUL_PATTERN)
     reason: str = Field(
         ...,
         min_length=3,
@@ -1753,8 +1753,16 @@ async def _notify_force_transfer_best_effort(
 async def retry_failed_embeddings(
     user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    context_id: str | None = Query(None, description="Filter by context ID (UUID)"),
-    workspace_id: str | None = Query(None, description="Filter by workspace ID (UUID)"),
+    context_id: Annotated[
+        UUID | None,
+        BeforeValidator(_empty_is_absent),
+        Query(description="Filter by context ID (UUID)"),
+    ] = None,
+    workspace_id: Annotated[
+        UUID | None,
+        BeforeValidator(_empty_is_absent),
+        Query(description="Filter by workspace ID (UUID)"),
+    ] = None,
     include_erased: bool = Query(
         False, description="Explicitly restore scrubbed erased-author memories"
     ),
@@ -1764,8 +1772,6 @@ async def retry_failed_embeddings(
     Erased-author survivors are excluded by default. ``include_erased=true``
     explicitly restores them under their pseudonym with scrubbed details.
     """
-    from uuid import UUID as PyUUID
-
     from sqlalchemy import case, func, update
 
     # Require at least one filter to prevent accidental mass retry
@@ -1774,14 +1780,6 @@ async def retry_failed_embeddings(
             status_code=400,
             detail="At least one of context_id or workspace_id is required",
         )
-
-    # Validate UUID formats
-    for param_name, param_val in [("context_id", context_id), ("workspace_id", workspace_id)]:
-        if param_val:
-            try:
-                PyUUID(param_val)
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=f"Invalid {param_name} format") from e
 
     if include_erased:
         from db.point_writer_lock import hold_point_writer_lock
@@ -2303,7 +2301,7 @@ class ContextRecoveryRequest(BaseModel):
 
     context_id: str
     workspace_id: str | None = None
-    context_name: str | None = None
+    context_name: str | None = Field(None, pattern=NO_NUL_PATTERN)
     dry_run: bool = True
 
 

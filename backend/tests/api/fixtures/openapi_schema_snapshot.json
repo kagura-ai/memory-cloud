@@ -312,6 +312,7 @@
           },
           "user_id": {
             "minLength": 1,
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           }
         },
@@ -547,6 +548,7 @@
           "reason": {
             "anyOf": [
               {
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -2827,6 +2829,7 @@
           "context_name": {
             "anyOf": [
               {
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -3559,6 +3562,7 @@
           "name": {
             "maxLength": 100,
             "minLength": 1,
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           }
         },
@@ -5450,6 +5454,7 @@
           "target_user_id": {
             "maxLength": 255,
             "minLength": 1,
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           }
         },
@@ -8165,6 +8170,7 @@
       "NeuralConfigUpdateRequest": {
         "properties": {
           "value": {
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           }
         },
@@ -9637,6 +9643,7 @@
       "PromoteToSystemAdminRequest": {
         "properties": {
           "user_id": {
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           }
         },
@@ -11991,6 +11998,7 @@
           "reason": {
             "maxLength": 500,
             "minLength": 1,
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           }
         },
@@ -13104,6 +13112,7 @@
             "anyOf": [
               {
                 "maxLength": 2000,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -13120,6 +13129,7 @@
             "anyOf": [
               {
                 "maxLength": 4000,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -13534,6 +13544,7 @@
           "target_user_id": {
             "maxLength": 255,
             "minLength": 1,
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           }
         },
@@ -14540,6 +14551,7 @@
           "display_name": {
             "maxLength": 255,
             "minLength": 1,
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           },
           "platform": {
@@ -14590,6 +14602,7 @@
               {
                 "maxLength": 255,
                 "minLength": 1,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -16046,6 +16059,7 @@
           "description": {
             "anyOf": [
               {
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -16058,6 +16072,7 @@
               {
                 "maxLength": 255,
                 "minLength": 1,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -16472,6 +16487,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }
@@ -16580,6 +16596,7 @@
             "name": "row_id",
             "required": true,
             "schema": {
+              "maximum": 9223372036854775807,
               "type": "integer"
             }
           }
@@ -16618,6 +16635,7 @@
             "name": "row_id",
             "required": true,
             "schema": {
+              "maximum": 9223372036854775807,
               "type": "integer"
             }
           }
@@ -16902,6 +16920,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -17061,6 +17080,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "format": "uuid",
                   "type": "string"
                 },
                 {
@@ -17076,6 +17096,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "format": "uuid",
                   "type": "string"
                 },
                 {
@@ -17693,6 +17714,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -17755,6 +17777,7 @@
             "name": "key",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }
@@ -17791,6 +17814,7 @@
             "name": "key",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }
@@ -17860,6 +17884,7 @@
             "schema": {
               "maxLength": 100,
               "minLength": 1,
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -18181,6 +18206,7 @@
             "name": "workspace_id",
             "required": true,
             "schema": {
+              "format": "uuid",
               "type": "string"
             }
           }
@@ -18264,6 +18290,7 @@
             "name": "workspace_id",
             "required": true,
             "schema": {
+              "format": "uuid",
               "type": "string"
             }
           }
@@ -18310,6 +18337,7 @@
             "name": "workspace_id",
             "required": true,
             "schema": {
+              "format": "uuid",
               "type": "string"
             }
           }
@@ -19038,6 +19066,7 @@
             "name": "action_id",
             "required": true,
             "schema": {
+              "maximum": 9223372036854775807,
               "type": "integer"
             }
           }
@@ -19460,6 +19489,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }
@@ -19648,6 +19678,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }
@@ -19686,6 +19717,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }
@@ -36713,6 +36745,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -37161,6 +37194,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37213,6 +37247,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37285,6 +37320,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37345,6 +37381,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37415,6 +37452,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37477,6 +37515,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37540,6 +37579,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37603,6 +37643,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37681,6 +37722,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37753,6 +37795,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37825,6 +37868,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37888,6 +37932,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -37951,6 +37996,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -38118,6 +38164,7 @@
             "schema": {
               "default": "",
               "maxLength": 120,
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -38172,6 +38219,7 @@
               "anyOf": [
                 {
                   "maxLength": 255,
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -38326,6 +38374,7 @@
             "name": "workspace_id",
             "required": true,
             "schema": {
+              "format": "uuid",
               "type": "string"
             }
           },
@@ -38400,6 +38449,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }
@@ -38456,6 +38506,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -39348,6 +39399,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maximum": 2147483647,
                   "minimum": 1,
                   "type": "integer"
                 },

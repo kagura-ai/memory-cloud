@@ -2379,7 +2379,7 @@ With both flags false the restore's dry run answers `200`. The answer holds no d
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/v1/admin/embedding/failures` | Where failed embeddings are, per workspace and context, in counts (#2832). Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
-| `POST /api/v1/admin/embedding/retry-failed` | Reset failed embeddings to `pending` for a `workspace_id`, a `context_id` or both (at least one). Answers `reset_count`. |
+| `POST /api/v1/admin/embedding/retry-failed` | Reset failed embeddings to `pending` for a `workspace_id`, a `context_id` or both (at least one; an empty value is no filter, and no filter is a `400`). Both are UUIDs: a value that is not one is a `422`, as on the read. Answers `reset_count`. |
 
 The read counts the rows the retry counts (`embedding_status = 'failed'`, not deleted), grouped by `workspace_id` and `context_id`; memories without a context are a group with `context_id: null`. Query: optional `workspace_id` and `context_id` (UUIDs), `limit` 1-500 (default 100), `offset` from 0 to 2^63-1; a value outside these answers `422`. Order: `failed` descending, then `workspace_id`, then `context_id`. Answer `{"total", "limit", "offset", "groups": [...]}`; `total` is the number of groups. A group:
 

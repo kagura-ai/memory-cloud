@@ -109,7 +109,7 @@ class AdminUpdatePlanRequest(BaseModel):
     """Request to update workspace plan tier."""
 
     plan_name: str = Field(..., description="Target tier; one of the registered plan keys")
-    reason: str | None = None
+    reason: str | None = Field(None, pattern=NO_NUL_PATTERN)
 
     @field_validator("plan_name")
     @classmethod
@@ -608,7 +608,7 @@ def _loses_feature(old_plan: str, new_plan: str, feature: str) -> bool:
 
 @router.put("/workspaces/{workspace_id}/plan")
 async def update_workspace_plan(
-    workspace_id: str,
+    workspace_id: UUID,
     request: AdminUpdatePlanRequest,
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
@@ -634,13 +634,11 @@ async def update_workspace_plan(
         404: Workspace not found
         422: Invalid plan tier
     """
-    from uuid import UUID
-
     async with db_transaction(db, "update_workspace_plan", "Failed to update workspace plan"):
         # Get workspace
         workspace_result = await db.execute(
             select(Workspace).where(
-                Workspace.id == UUID(workspace_id),
+                Workspace.id == workspace_id,
                 Workspace.deleted_at.is_(None),  # #687 / #681 pattern: soft-delete safe
             )
         )
@@ -696,7 +694,7 @@ async def update_workspace_plan(
             # Get all contexts for this workspace
             contexts_result = await db.execute(
                 select(Context).where(
-                    Context.workspace_id == UUID(workspace_id), Context.deleted_at.is_(None)
+                    Context.workspace_id == workspace_id, Context.deleted_at.is_(None)
                 )
             )
             contexts_list = contexts_result.scalars().all()
@@ -1336,7 +1334,7 @@ def _effective_for_guard(
 
 @router.put("/workspaces/{workspace_id}/quotas")
 async def update_workspace_quotas(
-    workspace_id: str,
+    workspace_id: UUID,
     request: UpdateAddonRequest,
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
@@ -1397,7 +1395,7 @@ async def update_workspace_quotas(
     the workspace is upgraded. ``warnings`` is always present (``[]`` when
     none apply).
     """
-    ws_uuid = UUID(workspace_id)
+    ws_uuid = workspace_id
     now = utcnow()
 
     # 1. Fetch + soft-delete-safe workspace lookup (#687 / #681 pattern).
@@ -1631,7 +1629,7 @@ def _reject_above_tier(
 
 @router.put("/workspaces/{workspace_id}/spend-cap")
 async def update_workspace_spend_cap(
-    workspace_id: str,
+    workspace_id: UUID,
     request: UpdateSpendCapRequest,
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
@@ -1650,7 +1648,7 @@ async def update_workspace_spend_cap(
     ``e16_709`` is the database-level backstop should the route validation
     ever be bypassed.
     """
-    ws_uuid = UUID(workspace_id)
+    ws_uuid = workspace_id
 
     async with db_transaction(db, "update_workspace_spend_cap", "Failed to update spend cap"):
         result = await db.execute(

@@ -400,13 +400,13 @@ async def workspace_list_sleep_reports(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
     status_filter: str | None = Query(None, alias="status"),
     source: SleepReportSourceFilter = Query(
         SLEEP_REPORT_SOURCE_ALL, description=_SOURCE_QUERY_DESCRIPTION
     ),
     context_id: UUID | None = Query(None),
-    user_id: str | None = Query(None),
+    user_id: str | None = Query(None, pattern=NO_NUL_PATTERN),
 ) -> SleepReportListResponse:
     """List Sleep Maintenance reports for a single workspace.
 

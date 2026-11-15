@@ -5,9 +5,10 @@ Issue #107: Move neural config from env vars to database with admin UI
 """
 
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,7 @@ from models.neural import NeuralConfig
 from neural.config import NeuralMemoryConfig
 from utils import db_transaction, get_user_id
 from utils.logger import get_logger
+from utils.query_bounds import NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -54,7 +56,7 @@ class NeuralConfigListResponse(BaseModel):
 class NeuralConfigUpdateRequest(BaseModel):
     """Update neural config request."""
 
-    value: str
+    value: str = Field(pattern=NO_NUL_PATTERN)
 
 
 class NeuralConfigUpdateResponse(BaseModel):
@@ -137,7 +139,7 @@ DEFAULT_VALUES: dict[str, str] = {
 async def list_neural_config(
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    category: str | None = None,
+    category: str | None = Query(None, pattern=NO_NUL_PATTERN),
 ) -> NeuralConfigListResponse:
     """List all neural config parameters.
 
@@ -191,7 +193,7 @@ async def list_neural_config(
 
 @router.get("/{key}", response_model=NeuralConfigItem)
 async def get_neural_config(
-    key: str,
+    key: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> NeuralConfigItem:
@@ -223,7 +225,7 @@ async def get_neural_config(
 
 @router.put("/{key}", response_model=NeuralConfigUpdateResponse)
 async def update_neural_config(
-    key: str,
+    key: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     request: NeuralConfigUpdateRequest,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),

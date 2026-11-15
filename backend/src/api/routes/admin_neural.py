@@ -44,6 +44,7 @@ from neural.config import NeuralMemoryConfig
 from tasks.neural_calibration import enqueue_recalibration_dedup
 from utils import get_user_id
 from utils.logger import get_logger
+from utils.query_bounds import NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -84,7 +85,7 @@ class RecalibrateResponse(BaseModel):
 )
 async def recalibrate(
     current_user: AdminUser,
-    model: str = Query(..., min_length=1, max_length=_MODEL_NAME_MAX_LEN),
+    model: str = Query(..., min_length=1, max_length=_MODEL_NAME_MAX_LEN, pattern=NO_NUL_PATTERN),
     dimensions: int = Query(..., ge=1, le=65536),
 ) -> RecalibrateResponse:
     """Enqueue a deduped model-global calibration job.

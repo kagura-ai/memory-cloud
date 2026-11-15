@@ -106,7 +106,7 @@ class TestAdminGrantSurvivesRecalc:
         ws_uuid = pro_workspace["ws_uuid"]
 
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_memory_bonus=20000),
             admin_user=mock_admin(),
             db=db_session,
@@ -134,7 +134,7 @@ class TestAdminGrantSurvivesRecalc:
         ws_uuid = pro_workspace["ws_uuid"]
 
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_memory_bonus=30000),
             admin_user=mock_admin(),
             db=db_session,
@@ -164,7 +164,7 @@ class TestEffectiveQuotaReflection:
         before = await EffectiveQuotaService(db_session).get_effective_quotas(ws_uuid)
 
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_memory_bonus=50000),
             admin_user=mock_admin(),
             db=db_session,
@@ -187,7 +187,7 @@ class TestAddonInvariant:
         ws_uuid = pro_workspace["ws_uuid"]
 
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(
                 addon_memory_bonus=10000,
                 addon_mcp_quota_bonus=5000,
@@ -229,7 +229,7 @@ class TestAddonInvariant:
 
         # Admin layers an additional grant on top.
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_memory_bonus=50000),  # 30000 stripe + 20000 admin
             admin_user=mock_admin(),
             db=db_session,
@@ -273,7 +273,7 @@ class TestStripeFloorReject:
 
         with pytest.raises(HTTPException) as exc_info:
             await update_workspace_quotas(
-                workspace_id=str(ws_uuid),
+                workspace_id=ws_uuid,
                 request=_zero_legacy_request(addon_memory_bonus=10000),  # < 30000 floor
                 admin_user=mock_admin(),
                 db=db_session,
@@ -295,7 +295,7 @@ class TestDivisibilityReject:
         # extra_storage unit_value=100MB; 250 is not a multiple
         with pytest.raises(HTTPException) as exc_info:
             await update_workspace_quotas(
-                workspace_id=str(ws_uuid),
+                workspace_id=ws_uuid,
                 request=_zero_legacy_request(addon_storage_bonus_mb=250),
                 admin_user=mock_admin(),
                 db=db_session,
@@ -320,7 +320,7 @@ class TestPersistentOverflowGuard:
 
         # Grant 5 extra sleep contexts (effective = pro_base 3 + 5 = 8)
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_sleep_contexts_bonus=5),
             admin_user=mock_admin(),
             db=db_session,
@@ -344,7 +344,7 @@ class TestPersistentOverflowGuard:
         # Attempt to reduce bonus to 0 → effective drops to 3 < 5 usage → 400
         with pytest.raises(HTTPException) as exc_info:
             await update_workspace_quotas(
-                workspace_id=str(ws_uuid),
+                workspace_id=ws_uuid,
                 request=_zero_legacy_request(addon_sleep_contexts_bonus=0),
                 admin_user=mock_admin(),
                 db=db_session,
@@ -368,7 +368,7 @@ class TestNoTouchSemantics:
 
         # Establish a non-zero baseline on a new (optional) field
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_storage_bonus_mb=500),
             admin_user=mock_admin(),
             db=db_session,
@@ -381,7 +381,7 @@ class TestNoTouchSemantics:
 
         # Second call: only touch the legacy 5 fields. Storage should NOT change.
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_memory_bonus=10000),
             admin_user=mock_admin(),
             db=db_session,
@@ -402,7 +402,7 @@ class TestGetResponseShape:
         ws_uuid = pro_workspace["ws_uuid"]
 
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(
                 addon_memory_bonus=10000,
                 addon_mcp_quota_bonus=5000,
@@ -450,7 +450,7 @@ class TestGetResponseShape:
         ws_uuid = pro_workspace["ws_uuid"]
 
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(
                 addon_storage_bonus_mb=200,
                 addon_rest_quota_bonus=1000,
@@ -503,7 +503,7 @@ class TestAlwaysFireOverflowGuard:
         # the same bonus value AFTER the contexts exist — pre-fix the
         # guard skipped; post-fix it fires.
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_sleep_contexts_bonus=5),
             admin_user=mock_admin(),
             db=db_session,
@@ -539,7 +539,7 @@ class TestAlwaysFireOverflowGuard:
         # Usage=9, requested=5 (same as old), effective=8. 9 > 8 → 400.
         with pytest.raises(HTTPException) as exc_info:
             await update_workspace_quotas(
-                workspace_id=str(ws_uuid),
+                workspace_id=ws_uuid,
                 request=_zero_legacy_request(addon_sleep_contexts_bonus=5),
                 admin_user=mock_admin(),
                 db=db_session,
@@ -572,7 +572,7 @@ class TestUpsertPreservesActiveUntilAndCreatedBy:
             "role": "admin",
         }
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_memory_bonus=10000),
             admin_user=original_admin,
             db=db_session,
@@ -600,7 +600,7 @@ class TestUpsertPreservesActiveUntilAndCreatedBy:
         # have wiped active_until → None AND overwritten created_by → 'admin_B'.
         # Post-fix both fields are preserved.
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=_zero_legacy_request(addon_memory_bonus=20000),
             admin_user={
                 "user_id": "admin_B_later",
@@ -639,7 +639,7 @@ class TestSkipRecalcOnEmptyMutations:
         # Post-fix: validation produces zero grants_to_apply, mutation pass
         # is a no-op, recalc is skipped — no admin_grant rows created.
         await update_workspace_quotas(
-            workspace_id=str(ws_uuid),
+            workspace_id=ws_uuid,
             request=UpdateAddonRequest(),  # all 9 None
             admin_user=mock_admin(),
             db=db_session,
