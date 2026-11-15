@@ -4144,6 +4144,54 @@
         ],
         "type": "object"
       },
+      "EmbeddingFailureGroup": {
+        "additionalProperties": false,
+        "properties": {
+          "capped": {},
+          "configuration": {},
+          "context_id": {},
+          "context_name": {},
+          "erased": {},
+          "failed": {},
+          "newest_attempt_at": {},
+          "oldest_attempt_at": {},
+          "other": {},
+          "stalled": {},
+          "workspace_id": {},
+          "workspace_name": {}
+        },
+        "required": [
+          "capped",
+          "configuration",
+          "context_id",
+          "context_name",
+          "erased",
+          "failed",
+          "newest_attempt_at",
+          "oldest_attempt_at",
+          "other",
+          "stalled",
+          "workspace_id",
+          "workspace_name"
+        ],
+        "type": "object"
+      },
+      "EmbeddingFailureListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "groups": {},
+          "limit": {},
+          "offset": {},
+          "total": {}
+        },
+        "required": [
+          "groups",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "type": "object"
+      },
       "EmbeddingModelInfo": {
         "properties": {
           "available": {
@@ -15973,6 +16021,89 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CostAggregationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/embedding/failures": {
+      "get": {
+        "operationId": "list_embedding_failures_api_v1_admin_embedding_failures_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "context_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbeddingFailureListResponse"
                 }
               }
             }

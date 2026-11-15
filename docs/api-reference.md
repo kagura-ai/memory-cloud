@@ -2320,6 +2320,29 @@ Answer `{"items": [...], "total", "limit", "offset"}`; `total` counts the filter
 
 With both flags false the restore's dry run answers `200`. The answer holds no description, summary or usage guide of the context, no memory text and no email address; a context of a deleted workspace is not listed, because the restore always refuses it. See [Restoring a deleted context](deployment.md#restoring-a-deleted-context--issue-1804).
 
+### Failed embeddings
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/embedding/failures` | Where failed embeddings are, per workspace and context, in counts (#2832). Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
+| `POST /api/v1/admin/embedding/retry-failed` | Reset failed embeddings to `pending` for a `workspace_id`, a `context_id` or both (at least one). Answers `reset_count`. |
+
+The read counts the rows the retry counts (`embedding_status = 'failed'`, not deleted), grouped by `workspace_id` and `context_id`; memories without a context are a group with `context_id: null`. Query: optional `workspace_id` and `context_id` (UUIDs), `limit` 1-500 (default 100), `offset` from 0; a value outside these answers `422`. Order: `failed` descending, then `workspace_id`, then `context_id`. Answer `{"total", "limit", "offset", "groups": [...]}`; `total` is the number of groups. A group:
+
+| Field | Value |
+|-------|-------|
+| `workspace_id`, `workspace_name` | the workspace; the name is null when it has no row |
+| `context_id`, `context_name` | the context, both null for memories without one |
+| `failed` | failed rows that are not an erased author's: what the retry resets without `include_erased` |
+| `stalled` | the part of `failed` with no retry left (`embedding_retry_count >= 3`): nothing retries it on its own, only the retry route starts it again |
+| `capped` | the part of `failed` refused by the embedding spend cap (`QUOTA-002`) |
+| `configuration` | the part of `failed` that failed on configuration (`CFG-*`, `FEAT-*`: no credential, no plan feature, an unreachable self-hosted endpoint). The sweep retries these without bound, so a reset changes nothing until the configuration does; the same holds for `capped` and the cap |
+| `other` | the rest of `failed` (a provider or input failure, and rows failed before the code prefix existed) |
+| `erased` | failed rows of an erased author, kept out of the queue. `failed + erased` is what the retry resets with `include_erased=true` |
+| `oldest_attempt_at`, `newest_attempt_at` | the earliest and latest embedding attempt among the group's rows, null when none has one |
+
+`failed = capped + configuration + other`. The answer holds no memory id, summary, content, tag, author id or stored error text: the error is answered as a class only. The deployment-wide totals are in [Operations status](#operations-status) (`embedding_failed_retryable`, `embedding_failed_stalled`).
+
 ### Operations status
 
 | Endpoint | Purpose |

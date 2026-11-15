@@ -1688,6 +1688,180 @@ async def retry_failed_embeddings(
     return {"status": "success", "reset_count": reset_count}
 
 
+class EmbeddingFailureGroup(TZAwareBaseModel):
+    """Failed embeddings of one workspace and context, in counts (#2832).
+
+    No memory id, text, tag, author or stored error: the error is answered
+    as a class only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: UUID
+    workspace_name: str | None = Field(description="Null when the workspace has no row")
+    context_id: UUID | None = Field(description="Null for memories without a context")
+    context_name: str | None = Field(description="Null without a context, or when it has no row")
+    failed: int = Field(
+        description=(
+            "Failed rows that are not an erased author's: what "
+            "`POST /api/v1/admin/embedding/retry-failed` resets without `include_erased`"
+        )
+    )
+    stalled: int = Field(
+        description="The part of `failed` with no retry left: nothing retries it on its own"
+    )
+    capped: int = Field(description="The part of `failed` refused by the embedding spend cap")
+    configuration: int = Field(
+        description=(
+            "The part of `failed` that failed on configuration (no credential, no plan "
+            "feature, an unreachable self-hosted endpoint); retried without bound"
+        )
+    )
+    other: int = Field(description="The rest of `failed`")
+    erased: int = Field(
+        description=(
+            "Failed rows of an erased author, kept out of the queue. `failed + erased` "
+            "is what the retry resets with `include_erased=true`"
+        )
+    )
+    oldest_attempt_at: datetime | None = Field(
+        description="The earliest embedding attempt among the group's rows, or null"
+    )
+    newest_attempt_at: datetime | None = Field(
+        description="The latest embedding attempt among the group's rows, or null"
+    )
+
+
+class EmbeddingFailureListResponse(TZAwareBaseModel):
+    """A page of failed-embedding groups; `total` is the number of groups."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int
+    limit: int
+    offset: int
+    groups: list[EmbeddingFailureGroup]
+
+
+@router.get("/embedding/failures", response_model=EmbeddingFailureListResponse)
+async def list_embedding_failures(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    workspace_id: UUID | None = Query(None, description="Only this workspace"),
+    context_id: UUID | None = Query(None, description="Only this context"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> EmbeddingFailureListResponse:
+    """Where failed embeddings are, per workspace and context (#2832).
+
+    Counts the rows `POST /api/v1/admin/embedding/retry-failed` counts
+    (`embedding_status = 'failed'`, not deleted), grouped by workspace and
+    context; memories without a context are a group of their own. Groups come
+    by `failed` descending, then workspace, then context; `total` is the
+    number of groups.
+
+    `failed` is split into `capped`, `configuration` and `other` by the code
+    the failure stored, and `stalled` is its part with no retry left.
+    Resetting a `capped` or `configuration` row changes nothing until the cap
+    or the configuration does; a `stalled` row only starts again through the
+    retry route.
+
+    Counts, names and two times only. Read only: no row changes and no audit
+    row is written.
+    """
+    from services.memory_service import embedding_failure_class_clauses
+
+    erased, capped, configuration, stalled = embedding_failure_class_clauses()
+    # The retry route's own rows.
+    filters = [Memory.embedding_status == "failed", Memory.deleted_at.is_(None)]
+    if workspace_id is not None:
+        filters.append(Memory.workspace_id == workspace_id)
+    if context_id is not None:
+        filters.append(Memory.context_id == context_id)
+
+    failed_count = func.count().filter(~erased).label("failed")
+    grouped = (
+        select(
+            Memory.workspace_id,
+            Memory.context_id,
+            failed_count,
+            func.count().filter(stalled, ~erased).label("stalled"),
+            func.count().filter(capped, ~erased).label("capped"),
+            func.count().filter(configuration, ~erased).label("configuration"),
+            func.count().filter(erased).label("erased"),
+            func.min(Memory.embedding_attempted_at).label("oldest_attempt_at"),
+            func.max(Memory.embedding_attempted_at).label("newest_attempt_at"),
+        )
+        .where(*filters)
+        .group_by(Memory.workspace_id, Memory.context_id)
+    )
+
+    total = (
+        await db.execute(
+            select(func.count()).select_from(
+                select(Memory.workspace_id, Memory.context_id)
+                .where(*filters)
+                .group_by(Memory.workspace_id, Memory.context_id)
+                .subquery()
+            )
+        )
+    ).scalar_one()
+    rows = (
+        await db.execute(
+            grouped.order_by(failed_count.desc(), Memory.workspace_id, Memory.context_id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    # The name lookups bind the page's ids only (at most ``limit`` each).
+    workspace_names: dict[UUID, str] = {}
+    context_names: dict[UUID, str] = {}
+    workspace_ids = {row.workspace_id for row in rows}
+    context_ids = {row.context_id for row in rows if row.context_id is not None}
+    if workspace_ids:
+        found = await db.execute(
+            select(Workspace.id, Workspace.name).where(Workspace.id.in_(workspace_ids))
+        )
+        workspace_names = {row.id: row.name for row in found.all()}
+    if context_ids:
+        found = await db.execute(
+            select(Context.id, Context.name).where(Context.id.in_(context_ids))
+        )
+        context_names = {row.id: row.name for row in found.all()}
+
+    groups = [
+        EmbeddingFailureGroup(
+            workspace_id=row.workspace_id,
+            workspace_name=workspace_names.get(row.workspace_id),
+            context_id=row.context_id,
+            context_name=context_names.get(row.context_id) if row.context_id else None,
+            failed=row.failed,
+            stalled=row.stalled,
+            capped=row.capped,
+            configuration=row.configuration,
+            other=row.failed - row.capped - row.configuration,
+            erased=row.erased,
+            oldest_attempt_at=row.oldest_attempt_at,
+            newest_attempt_at=row.newest_attempt_at,
+        )
+        for row in rows
+    ]
+
+    logger.info(
+        "admin_embedding_failures_listed",
+        actor=get_user_id(admin),
+        count=len(groups),
+        total=total,
+        limit=limit,
+        offset=offset,
+        workspace_filter=workspace_id is not None,
+        context_filter=context_id is not None,
+    )
+
+    return EmbeddingFailureListResponse(total=total, limit=limit, offset=offset, groups=groups)
+
+
 # ============================================================================
 # Context Restore from soft-deleted rows (Issue #1804)
 # ============================================================================

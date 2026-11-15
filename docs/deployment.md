@@ -5914,7 +5914,7 @@ drain it.
 |---|---|---|
 | `embedding_pending` / `embedding_processing` | Memories waiting for, or in, their embedding | `sweep_pending_embeddings` |
 | `embedding_failed_retryable` | Failed embeddings with retries left | `sweep_pending_embeddings` |
-| `embedding_failed_stalled` | Failed embeddings with no retries left (not searchable) | people: `POST /api/v1/admin/embedding/retry-failed` |
+| `embedding_failed_stalled` | Failed embeddings with no retries left (not searchable) | people: `GET /api/v1/admin/embedding/failures` says which workspaces and contexts hold them and why (#2832), `POST /api/v1/admin/embedding/retry-failed` resets them |
 | `deferred_point_deletes` | Vector deletes waiting for their drain | `drain_deferred_point_deletes` |
 | `erasure_pending` | Account erasures awaiting the user's confirmation | people |
 | `erasure_cooling_off` / `erasure_cooling_off_due` | Erasures in their cooling-off period / past it | `sweep_pending_erasures` |
