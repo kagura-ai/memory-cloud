@@ -4208,6 +4208,54 @@
         ],
         "type": "object"
       },
+      "EmbeddingCalibrationItem": {
+        "additionalProperties": false,
+        "properties": {
+          "dimensions": {},
+          "expired": {},
+          "kind": {},
+          "model_name": {},
+          "p25": {},
+          "p50": {},
+          "p75": {},
+          "p90": {},
+          "p95": {},
+          "p99": {},
+          "sample_size": {},
+          "sampled_at": {},
+          "threshold": {},
+          "valid_until": {}
+        },
+        "required": [
+          "dimensions",
+          "expired",
+          "kind",
+          "model_name",
+          "p25",
+          "p50",
+          "p75",
+          "p90",
+          "p95",
+          "p99",
+          "sample_size",
+          "sampled_at",
+          "threshold",
+          "valid_until"
+        ],
+        "type": "object"
+      },
+      "EmbeddingCalibrationListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "calibrations": {},
+          "knn_seed_override": {}
+        },
+        "required": [
+          "calibrations",
+          "knn_seed_override"
+        ],
+        "type": "object"
+      },
       "EmbeddingModelInfo": {
         "properties": {
           "available": {
@@ -12084,6 +12132,32 @@
         ],
         "type": "object"
       },
+      "SleepActionListResponse": {
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/SleepActionItem"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "actions",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "type": "object"
+      },
       "SleepContextsUsage": {
         "properties": {
           "addon_bonus": {
@@ -12133,7 +12207,8 @@
           "status": {},
           "user_email": {},
           "user_id": {},
-          "workspace_id": {}
+          "workspace_id": {},
+          "workspace_name": {}
         },
         "required": [
           "completed_at",
@@ -12228,7 +12303,8 @@
           "status": {},
           "user_email": {},
           "user_id": {},
-          "workspace_id": {}
+          "workspace_id": {},
+          "workspace_name": {}
         },
         "required": [
           "completed_at",
@@ -12246,6 +12322,18 @@
           "status",
           "user_id",
           "workspace_id"
+        ],
+        "type": "object"
+      },
+      "SleepRunForUserRequest": {
+        "properties": {
+          "context_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context_id"
         ],
         "type": "object"
       },
@@ -16489,6 +16577,25 @@
         ]
       }
     },
+    "/api/v1/admin/neural/calibrations": {
+      "get": {
+        "operationId": "list_calibrations_api_v1_admin_neural_calibrations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbeddingCalibrationListResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-neural"
+        ]
+      }
+    },
     "/api/v1/admin/neural/recalibrate": {
       "post": {
         "operationId": "recalibrate_api_v1_admin_neural_recalibrate_post",
@@ -17398,6 +17505,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }
@@ -17454,6 +17562,23 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
                   "type": "string"
                 },
                 {
@@ -17500,6 +17625,15 @@
               "format": "uuid",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "include_actions",
+            "required": false,
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -17524,6 +17658,120 @@
         },
         "tags": [
           "sleep-reports"
+        ]
+      }
+    },
+    "/api/v1/admin/sleep-reports/{report_id}/actions": {
+      "get": {
+        "operationId": "list_sleep_report_actions_api_v1_admin_sleep_reports__report_id__actions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SleepActionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "sleep-reports"
+        ]
+      }
+    },
+    "/api/v1/admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge": {
+      "post": {
+        "operationId": "undo_merge_for_report_api_v1_admin_sleep_reports__report_id__actions__action_id__undo_merge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "action_id",
+            "required": true,
+            "schema": {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UndoMergeResponse"
+                }
+              }
+            }
+          },
+          "400": {},
+          "404": {},
+          "409": {},
+          "410": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-sleep"
         ]
       }
     },
@@ -18051,6 +18299,61 @@
         },
         "tags": [
           "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/users/{user_id}/sleep/run": {
+      "post": {
+        "operationId": "trigger_sleep_run_for_user_api_v1_admin_users__user_id__sleep_run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[^\\x00]*$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SleepRunForUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SleepRunResponse"
+                }
+              }
+            }
+          },
+          "404": {},
+          "409": {
+            "content": {
+              "application/json": {}
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-sleep"
         ]
       }
     },

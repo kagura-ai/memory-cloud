@@ -266,8 +266,8 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `REQ-102` | `BadRequestError` — services/system_admin_service.py:184 | 400 | User is not a system admin. ✅ **#992 Phase 2**: re-namespaced from `ADMIN-102` → `REQ-102` (same rationale). |
 | `REQ-103` | `BadRequestError` — api/routes/admin.py (`POST /admin/contexts/recover`) | 400 | The request's `workspace_id` names another workspace than the existing context's (#1963). |
 | `SLEEP-001` | `MemoryCloudException` — api/routes/admin_sleep.py:234 | 500 | Admin user id missing from session (defensive). ✅ **#992 Phase 2**: renamed from snake_case `admin_user_id_missing` to the `NAMESPACE-NNN` convention. |
-| `SLEEP-002` | `MemoryCloudException` — api/routes/admin_sleep.py:255 | 409 | A sleep run is already in progress for this user. ✅ **#992 Phase 2**: renamed from `sleep_run_in_progress`. |
-| `SLEEP-003` | `MemoryCloudException` — api/routes/admin_sleep.py:278 | 404 | No eligible contexts for sleep maintenance. ✅ **#992 Phase 2**: renamed from `sleep_target_not_found`. |
+| `SLEEP-002` | `MemoryCloudException` — api/routes/admin_sleep.py (`_raise_if_sleep_running`) | 409 | A sleep run is already in progress for this user: the caller on `POST /admin/sleep/run`, the target user on `POST /admin/users/{user_id}/sleep/run` (#2838). ✅ **#992 Phase 2**: renamed from `sleep_run_in_progress`. |
+| `SLEEP-003` | `MemoryCloudException` — api/routes/admin_sleep.py | 404 | No eligible contexts for sleep maintenance; on `POST /admin/users/{user_id}/sleep/run` (#2838), the named context is not eligible for that user. ✅ **#992 Phase 2**: renamed from `sleep_target_not_found`. |
 
 ### C. MCP-only codes assigned via `error_code` variable — `backend/src/mcp_server/tools/resource.py`
 

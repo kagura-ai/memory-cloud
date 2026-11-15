@@ -2262,7 +2262,7 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 
 - `session` (default): a session cookie of a user with `role=admin`; `401` without a session, `403` (`HTTP-403`) otherwise. Unchanged.
 - `off`: every such route answers `404` with the unknown-path body (`HTTP-404`), whatever the caller sends, and is left out of the OpenAPI document.
-- `service`: only an operator console. Send `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` and `X-Operator-Email: <address of the person acting>`; a session cookie is ignored. Errors, in this order: `404` outside `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS`, `503 SYSADMIN-001` (credential not configured), `401 SYSADMIN-002` (credential missing, another scheme, wrong, or sent in two `Authorization` headers even when the first one is valid; `WWW-Authenticate: Bearer`), `400 SYSADMIN-003` (`X-Operator-Email` missing, repeated or not a plain address), `403 SYSADMIN-004` (a route that acts on the caller's own account: `POST /admin/sleep/run`, `POST /admin/sleep/actions/{action_id}/undo-merge`, `GET /admin/memory-health`, and `POST /admin/contexts/recover` with `dry_run=false`). Writes record the actor as `operator:<address>`.
+- `service`: only an operator console. Send `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` and `X-Operator-Email: <address of the person acting>`; a session cookie is ignored. Errors, in this order: `404` outside `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS`, `503 SYSADMIN-001` (credential not configured), `401 SYSADMIN-002` (credential missing, another scheme, wrong, or sent in two `Authorization` headers even when the first one is valid; `WWW-Authenticate: Bearer`), `400 SYSADMIN-003` (`X-Operator-Email` missing, repeated or not a plain address), `403 SYSADMIN-004` (a route that acts on the caller's own account: `POST /admin/sleep/run`, `POST /admin/sleep/actions/{action_id}/undo-merge`, `GET /admin/memory-health`, and `POST /admin/contexts/recover` with `dry_run=false`; for Sleep an operator calls the target-user routes of #2838 instead, see [Sleep Maintenance](#sleep-maintenance)). Writes record the actor as `operator:<address>`.
 
 `PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
 
@@ -2389,8 +2389,31 @@ The rules, checked on create:
 
 | Endpoint                                         | Purpose                                                       |
 |--------------------------------------------------|---------------------------------------------------------------|
-| `GET /api/v1/admin/sleep-reports`                | List reports with filters (`status`, `source`, `context_id`, `user_id`) and pagination. `source` is `sleep` (Sleep runs), `analysis` (Memory Analysis spend rows) or `all` (default); each row carries its `source` (#2219). |
-| `GET /api/v1/admin/sleep-reports/{report_id}`    | Fetch a single report with per-phase results and the full action audit log. |
+| `GET /api/v1/admin/sleep-reports`                | List reports with filters (`status`, `source`, `context_id`, `user_id`, `workspace_id`) and pagination. `source` is `sleep` (Sleep runs), `analysis` (Memory Analysis spend rows) or `all` (default); each row carries its `source` (#2219). `workspace_id` (#2844) answers only the reports whose stored workspace id is that UUID, ANDed with the other filters, and `total` counts only those; a value that is not a UUID is a `422`, an id with no report answers an empty list, and a report without a workspace id never matches. |
+| `GET /api/v1/admin/sleep-reports/{report_id}`    | Fetch a single report with per-phase results and the full action audit log: `{"report", "actions", "action_count"}`. `?include_actions=false` (#2842) answers `actions: []` and reads no action; `action_count` is still the run's number of actions. |
+| `GET /api/v1/admin/sleep-reports/{report_id}/actions` | One page of a report's actions (#2842): `{"actions", "total", "limit", "offset"}`. `limit` 1-500 (default 50) and `offset` from 0 to 2^63-1; a value outside is a `422`, as is a `report_id` that is not a UUID. Actions come in `id` order (the order the run recorded them, so a running report's new actions land on later pages) and carry the fields of the detail route's actions. `total` equals the detail route's `action_count`. An unknown report is a `404` on both routes. Read only. |
+| `POST /api/v1/admin/sleep/run` | Run Sleep for the calling admin's own contexts. Body `{"context_id"?}`. `202 {"report_ids": [...]}`; `409 SLEEP-002` while the caller has a running report; `404 SLEEP-003` when no context is eligible. Own-account: a service operator gets `403 SYSADMIN-004`. |
+| `POST /api/v1/admin/sleep/actions/{action_id}/undo-merge` | Undo one dedup merge of the calling admin's own report. Own-account: a service operator gets `403 SYSADMIN-004`. |
+| `POST /api/v1/admin/users/{user_id}/sleep/run` | Run Sleep once for a named user's context (#2838). Body `{"context_id": "<uuid>"}` (required, `422` without it). `202 {"report_ids": ["<uuid>"]}`: one report, whose `user_id` is the target user. A session admin and a service operator may call it. |
+| `POST /api/v1/admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge` | Undo one dedup merge of a named sleep report (#2838). No body. `200 {"restored_memory_id", "winner_id", "report_id", "undone_action_id"}` (ids only). A session admin and a service operator may call it. |
+
+**Run for a user** (`POST /api/v1/admin/users/{user_id}/sleep/run`). The run is the one the scheduled sweep starts for `(user_id, the context's workspace, context_id)`, in the background; the run itself applies the workspace's Sleep state, as for the sweep. Checks, in this order:
+
+- `404 RES-001`: no account with this `user_id`.
+- `409 SLEEP-002` with `details.running_report_id` and `details.started_at`: the target user has a running report (a running report of the caller does not count). Best-effort under concurrent calls.
+- `404 SLEEP-003` with `details.context_id`: the context is not eligible. Eligible means the context is live, its `sleep_mode` is not `skip` and the user has a live memory in it. Every cause answers the same message.
+
+The handler writes an `audit_logs` row in the report's commit: action `sleep_run_trigger`, the caller as actor (`operator:<address>` in `service` mode), resource `context:<context_id>`, metadata `{"target_user_id", "workspace_id", "context_id", "report_id"}`. The row records the request and stays when the run fails. A refusal writes nothing.
+
+**Undo for a report** (`POST /api/v1/admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge`). The action is found by `action_id` and `report_id`, whoever the report belongs to. `404 SLEEP-UNDO-action_not_found` for an unknown action, an action of another report and an unknown report alike. Then the checks and answers of the own-account undo: `400 SLEEP-UNDO-not_a_merge`, `409 SLEEP-UNDO-already_restored`, `409 SLEEP-UNDO-edge_changed`, `409 SLEEP-UNDO-not_merge_deleted`, `410 SLEEP-UNDO-memory_purged`. A successful undo records:
+
+- an `undo_merge` action on the same report, whose `undone_by` is the caller's `user_id` for a session admin and the fixed string `operator` for a service operator (the report's actions are read by workspace members; an operator's address is recorded in `audit_logs` only);
+- the workspace's operation history event `sleep.undo` (without an actor for an operator);
+- an `audit_logs` row: action `sleep_merge_undo`, the caller as actor, resource `sleep_report:<report_id>`, metadata `{"target_user_id", "workspace_id", "context_id", "report_id", "action_id", "restored_memory_id", "winner_id"}`.
+
+Neither route answers, logs or audits memory text, tags, a user's e-mail or name, or a context's name. The own-account undo writes no `audit_logs` row.
+
+Each report, in the list rows and in the detail's `report`, carries `workspace_name` next to `workspace_id` (#2844): the workspace's name while it is live, `null` for a soft-deleted or missing workspace and for a report without a workspace id. One query resolves the names of a response; nothing else about the workspace (owner, members, plan) is answered. The workspace-scoped routes (`GET /api/v1/workspaces/{workspace_id}/sleep-reports` and its detail) share the model and fill it the same way.
 
 See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `sleep_mode`, and rollback semantics.
 
@@ -2415,6 +2438,39 @@ Rows written to the `config_overrides` table by earlier versions were never read
 ### Neural Config
 
 Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, reranker weights) are persisted in `neural_config` and exposed under `/api/v1/admin/neural-config`. The fields are editable from the admin UI's Neural Config page.
+
+### Embedding calibrations
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/v1/admin/neural/recalibrate?model=&dimensions=` | Start a model-global calibration for one embedding model and dimensions. Always `202` with `accepted` (`false` when a run for the pair is already in flight) and an echo of the pair. The answer does not say what the run wrote: read the rows below. |
+| `GET /api/v1/admin/neural/calibrations` | The model-global calibration rows (#2845). Read only, no parameters, no paging: at most two rows (`knn_seed`, `edge_gate`) per model and dimensions. Follows `SYSTEM_ADMIN_MODE` like every system-admin route (a service operator may call it). |
+
+```json
+{
+  "knn_seed_override": null,
+  "calibrations": [
+    {
+      "model_name": "text-embedding-3-small",
+      "dimensions": 512,
+      "kind": "knn_seed",
+      "p25": 0.41, "p50": 0.48, "p75": 0.55, "p90": 0.63, "p95": 0.67, "p99": 0.74,
+      "sample_size": 10000,
+      "sampled_at": "2026-11-01T03:00:00Z",
+      "valid_until": "2026-12-01T03:00:00Z",
+      "expired": false,
+      "threshold": 0.63
+    }
+  ]
+}
+```
+
+- `calibrations` is ordered by `model_name`, `dimensions`, `kind`. A pair that was never calibrated, or whose last run wrote nothing (no context uses the pair, or the sample was too small), has no row. A successful run replaces the pair's rows, so `sampled_at` tells when the values were computed.
+- `kind`: `knn_seed` is the top-k neighbour distribution behind the k-NN seed edges written on ingest; `edge_gate` is the random-pair distribution behind the co-activation edge gate.
+- `expired`: `valid_until` has passed. An expired row is still used at runtime.
+- `threshold` is computed with the config of the process that answers (its `neural_config` values at that moment): for `knn_seed`, the larger of the row's `knn_seed_min_percentile` percentile and `knn_seed_min_similarity_floor`; for `edge_gate`, the larger of its `min_similarity_for_edge_percentile` percentile and `min_similarity_for_edge_floor`. Another process with a different config can give another value for the same row.
+- `knn_seed_override` is `knn_seed_min_similarity`, or `null`. When it is set, it is the seeding threshold and the `knn_seed` rows are not used.
+- The read starts no calibration, also for an expired row. Per-context rows are never answered, and the answer holds no row id and no context, workspace, memory or user identifier.
 
 ### Worker App Identities
 

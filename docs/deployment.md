@@ -515,13 +515,22 @@ included) `401 SYSADMIN-002` with `WWW-Authenticate: Bearer`, bad operator
 address `400 SYSADMIN-003`. Routes that act on the caller's own account
 (`POST /admin/sleep/run`, `POST /admin/sleep/actions/{id}/undo-merge`, the
 deprecated `GET /admin/memory-health`) and applying `POST /admin/contexts/recover`
-(`dry_run=false`) answer `403 SYSADMIN-004` to an operator.
+(`dry_run=false`) answer `403 SYSADMIN-004` to an operator. For Sleep an
+operator has its own two routes (#2838): `POST /admin/users/{user_id}/sleep/run`
+runs Sleep for a named user's context, and
+`POST /admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge` undoes one
+merge of a named report.
 
 **What an operator leaves behind.** Admin writes store the operator as
 `operator:<address>` wherever they store an actor (audit rows, plan changes,
 add-ons, allowlist entries, erasure and force-transfer requests, worker apps).
 `PUT /admin/users/{id}/role` now writes a `system_role_update` audit row in
-every mode. The customer-visible operation history stores an operator's action
+every mode. A Sleep run started for a user and a merge undone in a user's report
+write `sleep_run_trigger` and `sleep_merge_undo` audit rows (the caller as actor;
+the target user, workspace, context, report, action and memory ids in the
+metadata, and no text). The report's own `undo_merge` action, which workspace
+members can read, records an operator as `operator` without the address. The
+customer-visible operation history stores an operator's action
 without an actor id (`principal_kind = operator`, shown as "Service operator").
 These are operator accountability records: erasing a product account, even one
 with the same address, does not rewrite them. On a force transfer, the four-eyes
@@ -2253,6 +2262,11 @@ DEBUG. Once the gate is crossed, `knn_seed_uncalibrated_embedder` already
 reports the case that matters, and below D3 the event would fire on every
 ingest of a fresh deployment. To see them, set `LOG_LEVEL=debug` for a while,
 then set it back.
+
+Whether an embedder has a calibration row, how old it is and the threshold it
+gives can be read without the log or the database:
+`GET /api/v1/admin/neural/calibrations` (#2845,
+[Embedding calibrations](api-reference.md#embedding-calibrations)).
 
 ## Tag Co-Occurrence Cold-Start Seeding (Issue #223)
 
