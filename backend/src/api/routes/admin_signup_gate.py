@@ -25,12 +25,10 @@ from utils.github_user import GitHubUserNotFound
 from utils.google_user import GoogleUserNotFound, resolve_google_sub_by_email
 from utils.list_search import search_validator
 from utils.logger import get_logger
+from utils.query_bounds import MAX_OFFSET
 
 logger = get_logger(__name__)
 
-# What the database takes: an OFFSET is a 64-bit integer. A larger value is a
-# 422, never a statement.
-_MAX_OFFSET = 2**63 - 1
 
 router = APIRouter(prefix="/admin/signup-gate", tags=["admin-signup-gate"])
 
@@ -232,7 +230,7 @@ async def list_allowlist(
     user: AdminUser,
     db: AsyncSession = Depends(get_db),
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0, le=_MAX_OFFSET)] = 0,
+    offset: Annotated[int, Query(ge=0, le=MAX_OFFSET)] = 0,
     search: Annotated[
         str | None,
         AfterValidator(search_validator(255)),

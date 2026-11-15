@@ -34,6 +34,7 @@ from models.api_base import TZAwareBaseModel
 from models.auth import AuditLog
 from utils.exceptions import ValidationError
 from utils.logger import get_logger
+from utils.query_bounds import MAX_INT32, NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -141,11 +142,6 @@ AUDIT_METADATA_KEYS: dict[str, frozenset[str]] = {
 _PLANS_KEY = "plans"
 _INVITATIONS_KEY = "invitations"
 _INVITATION_KEYS = ("id", "workspace_id", "invited_by")
-
-# What the database takes: no stored text holds a NUL, and ``audit_logs.id``
-# is a 32-bit integer. A value outside these is a 422, never a statement.
-_NO_NUL = r"^[^\x00]*$"
-_MAX_ID = 2**31 - 1
 
 
 class AuditLogEntry(TZAwareBaseModel):
@@ -302,21 +298,21 @@ async def list_audit_logs(
         default=None,
         min_length=1,
         max_length=255,
-        pattern=_NO_NUL,
+        pattern=NO_NUL_PATTERN,
         description="Exact match on the stored value.",
     ),
     user_email: str | None = Query(
         default=None,
         min_length=1,
         max_length=255,
-        pattern=_NO_NUL,
+        pattern=NO_NUL_PATTERN,
         description="Exact match on the stored value.",
     ),
     resource: str | None = Query(
         default=None,
         min_length=1,
         max_length=255,
-        pattern=_NO_NUL,
+        pattern=NO_NUL_PATTERN,
         description="Exact match on the stored value.",
     ),
     from_: ZonedDatetime | None = Query(
@@ -329,7 +325,7 @@ async def list_audit_logs(
     ),
     limit: int = Query(default=50, ge=1, le=100),
     before_id: int | None = Query(
-        default=None, ge=1, le=_MAX_ID, description="Cursor: rows with a smaller `id`."
+        default=None, ge=1, le=MAX_INT32, description="Cursor: rows with a smaller `id`."
     ),
     db: AsyncSession = Depends(get_db),
 ) -> AuditLogListResponse:

@@ -36,6 +36,7 @@ from services.sleep.reporter import SleepReporter
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import MemoryCloudException, NotFoundException
 from utils.logger import get_logger
+from utils.query_bounds import MAX_BIGINT, NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -48,12 +49,6 @@ target_router = APIRouter(prefix="/admin", tags=["admin-sleep"])
 
 # The ``audit_logs`` action of a run an admin or operator starts for a user.
 SLEEP_RUN_TRIGGER_AUDIT_ACTION = "sleep_run_trigger"
-
-# ``sleep_actions.id`` is a BIGINT.
-_MAX_ACTION_ID = 2**63 - 1
-
-# No stored user id holds a NUL: such a path value is a 422, never a statement.
-_NO_NUL = r"^[^\x00]*$"
 
 
 # ============================================================================
@@ -490,7 +485,7 @@ class SleepRunForUserRequest(BaseModel):
 async def trigger_sleep_run_for_user(
     request: SleepRunForUserRequest,
     admin: AdminUser,
-    user_id: str = Path(pattern=_NO_NUL),
+    user_id: str = Path(pattern=NO_NUL_PATTERN),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Run Sleep Maintenance once for ``user_id`` in one context (#2838).
@@ -623,7 +618,7 @@ async def trigger_sleep_run_for_user(
 async def undo_merge_for_report(
     report_id: UUID,
     admin: AdminUser,
-    action_id: int = Path(ge=1, le=_MAX_ACTION_ID),
+    action_id: int = Path(ge=1, le=MAX_BIGINT),
     db: AsyncSession = Depends(get_db),
 ) -> UndoMergeResponse:
     """Restore the loser of ONE dedup merge of a named sleep report (#2838).

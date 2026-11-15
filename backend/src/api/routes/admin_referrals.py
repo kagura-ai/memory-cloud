@@ -36,13 +36,10 @@ from models.auth import AuditLog
 from services.referral_service import ReferralService
 from utils.db_helpers import db_transaction
 from utils.logger import get_logger
+from utils.query_bounds import MAX_OFFSET, NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
-# What the database takes: no stored text holds a NUL, and an OFFSET is a
-# 64-bit integer. A value outside these is a 422, never a statement.
-_NO_NUL = r"^[^\x00]*$"
-_MAX_OFFSET = 2**63 - 1
 
 router = APIRouter(prefix="/admin/referrals", tags=["admin-referrals"])
 
@@ -106,11 +103,11 @@ def _to_response(grant) -> AdminReferralGrantResponse:  # noqa: ANN001 - ORM row
 @router.get("", response_model=AdminReferralListResponse)
 async def list_referral_grants(
     user: AdminUser,
-    referrer_user_id: str | None = Query(default=None, pattern=_NO_NUL),
-    referred_user_id: str | None = Query(default=None, pattern=_NO_NUL),
+    referrer_user_id: str | None = Query(default=None, pattern=NO_NUL_PATTERN),
+    referred_user_id: str | None = Query(default=None, pattern=NO_NUL_PATTERN),
     include_revoked: bool = Query(default=True),
     limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
+    offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
     db: AsyncSession = Depends(get_db),
 ) -> AdminReferralListResponse:
     """List referral grants, newest first.

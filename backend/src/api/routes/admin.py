@@ -64,15 +64,11 @@ from utils.plan_resolver import (
     get_user_workspace_cap_summary,
     resolve_workspace_cap,
 )
+from utils.query_bounds import MAX_OFFSET, NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-
-# What the database takes: no stored text holds a NUL, and an OFFSET is a
-# 64-bit integer. A value outside these is a 422, never a statement.
-_NO_NUL = r"^[^\x00]*$"
-_MAX_OFFSET = 2**63 - 1
 
 
 # ============================================================================
@@ -357,7 +353,7 @@ async def list_users(
     admitted_via: AdmittedVia | None = Query(None),
     invited_by: str | None = Query(None, min_length=1, max_length=255),
     # Issue #2843: the one account with this exact id.
-    user_id: str | None = Query(None, min_length=1, max_length=255, pattern=_NO_NUL),
+    user_id: str | None = Query(None, min_length=1, max_length=255, pattern=NO_NUL_PATTERN),
 ):
     """List all users with their memory statistics.
 
@@ -826,7 +822,7 @@ async def get_user_detail(
 
 @router.put("/users/{user_id}/role")
 async def update_user_role(
-    user_id: Annotated[str, Path(pattern=_NO_NUL)],
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     request: RoleUpdateRequest,
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
@@ -1612,7 +1608,7 @@ async def list_force_transfer_requests(
     ),
     workspace_id: UUID | None = Query(None, description="Only requests for this workspace"),
     limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0, le=_MAX_OFFSET),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
 ) -> ForceTransferRequestListResponse:
     """List ownership force-transfer requests (#2846).
 
@@ -1881,7 +1877,7 @@ async def list_embedding_failures(
     workspace_id: UUID | None = Query(None, description="Only this workspace"),
     context_id: UUID | None = Query(None, description="Only this context"),
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0, le=_MAX_OFFSET),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
 ) -> EmbeddingFailureListResponse:
     """Where failed embeddings are, per workspace and context (#2832).
 
@@ -2137,18 +2133,18 @@ async def list_deleted_contexts(
         None,
         min_length=1,
         max_length=255,
-        pattern=_NO_NUL,
+        pattern=NO_NUL_PATTERN,
         description="Only contexts this user id created (exact)",
     ),
     deleted_by: str | None = Query(
         None,
         min_length=1,
         max_length=255,
-        pattern=_NO_NUL,
+        pattern=NO_NUL_PATTERN,
         description="Only contexts with this stored `deleted_by` (exact)",
     ),
     limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0, le=_MAX_OFFSET),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
 ) -> DeletedContextListResponse:
     """List soft-deleted contexts, to find the one to restore (#2833).
 

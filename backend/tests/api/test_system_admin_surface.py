@@ -36,7 +36,7 @@ from config.settings import get_settings
 from db.base import get_db
 from utils.exceptions import MemoryCloudException
 
-# Every (method, path) behind require_admin today (58). A new admin route must
+# Every (method, path) behind require_admin today (70). A new admin route must
 # be added here on purpose: it then follows SYSTEM_ADMIN_MODE automatically.
 ADMIN_SURFACE = frozenset(
     {

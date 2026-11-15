@@ -25,13 +25,11 @@ from models.schemas import (
 from services.system_admin_service import SystemAdminService
 from utils.datetime import utcnow
 from utils.logger import get_logger
+from utils.query_bounds import NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin/system-admins", tags=["system-admins"])
-
-# No stored id holds a NUL: such a value is a 422, never a statement.
-_NO_NUL = r"^[^\x00]*$"
 
 
 async def _get_user_stats(db: AsyncSession, user_id: str) -> int:
@@ -198,7 +196,7 @@ async def promote_to_system_admin(
 
 @router.delete("/{user_id}")
 async def demote_system_admin(
-    user_id: Annotated[str, Path(pattern=_NO_NUL)],
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     current_user: AdminUser,
     db: AsyncSession = Depends(get_db),
 ):
