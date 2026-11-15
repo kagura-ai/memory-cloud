@@ -196,20 +196,27 @@ the no-DDL merge node. Existing revision IDs and data remain intact. Downgrading
 only the merge node restores both parent markers and keeps both schemas; removing
 the credential tables is a separate downgrade governed by the precautions above:
 `alembic downgrade f45_2806_sync_credentials@f44_2802_sync_installations`
-runs only the downgrades of the revisions above the merge node (from v0.163.0:
-`f49_2817_clear_allowlist_adders` and `f48_2805_public_usage_budgets`), the
+runs only the downgrades of the revisions above the merge node
+(`f48_2807_sync_feed_runs`, `f49_2817_clear_allowlist_adders` and
+`f48_2805_public_usage_budgets`), the
 merge node's and the credential revision's, and leaves
 `f46_2803_admission_record` applied. Do **not** use a plain
 `alembic downgrade f44_2802_sync_installations` for that: from the merged head it
 reverts both branches, so it also drops the admission records (for good) and
 the notice plans, or stops at the notice-plan downgrade guard. To remove only
 the admission record, use `alembic downgrade f45_2800_mcp_notice_plans`
-(it, too, first reverts `f49_2817` and `f48_2805`).
+(it, too, first reverts `f48_2807`, `f49_2817` and `f48_2805`).
 To undo just the merge, name either immediate parent explicitly; relative `-1`
 is ambiguous at a merge point. For example, from this merge revision use
-`make migrate-down revision=f46_2803_admission_record` (at head, `f49_2817`
-and `f48_2805` are reverted first); both parent schemas
+`make migrate-down revision=f46_2803_admission_record` (at head, `f48_2807`,
+`f49_2817` and `f48_2805` are reverted first); both parent schemas
 remain, and `alembic upgrade head` rejoins them.
+
+`f48_2807_sync_feed_runs` follows `f49_2817_clear_allowlist_adders`, so every
+downgrade below `f49_2817`, these per-branch ones included, first reverts
+`f48_2807` and drops the five staged feed tables with their records: stop new
+runs and back those tables up first (see
+[staged feed synchronization](staged-feed-sync.md), "Retention and rollback").
 
 From v0.163.0, every downgrade below `f48_2805_public_usage_budgets`, these
 per-branch ones included, first runs `f49_2817` (no-op) and `f48_2805`, which
@@ -221,7 +228,8 @@ the public MCP owner routes answer `503 DB-002`. The table comes back only with
 [Public usage budget](../public-usage-budget.md)). After a downgrade that
 reverted `f46_2803_admission_record` (`alembic downgrade
 f45_2800_mcp_notice_plans`, or a plain downgrade to `f44_2802_sync_installations`
-or lower), run `alembic upgrade f47_2819_merge_sync_credentials` first and then
-`alembic upgrade head`, so that `f46_2803` does not share a transaction with
-`f48_2805` (see "How each account was admitted" in
+or lower), run `alembic upgrade f47_2819_merge_sync_credentials` first, then
+`alembic upgrade f49_2817_clear_allowlist_adders`, then `alembic upgrade head`,
+so that `f46_2803` does not share a transaction with `f48_2805`, nor `f48_2805`
+with `f48_2807` (see "How each account was admitted" in
 [deployment.md](../deployment.md)).

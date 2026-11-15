@@ -1,4 +1,11 @@
-"""Atomic staged product/FAQ snapshots and durable indexing handoff (#2807)."""
+"""Atomic staged product/FAQ snapshots and durable indexing handoff (#2807).
+
+This revision follows ``f49_2817_clear_allowlist_adders`` (#2825). Before any
+release it briefly followed ``f47_2819_merge_sync_credentials``; a development
+database that ran it from there is stamped at this revision without
+``f48_2805`` and ``f49_2817``: recreate it, or downgrade it to ``f47`` with the
+older file and upgrade again.
+"""
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql as pg

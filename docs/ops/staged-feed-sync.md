@@ -8,7 +8,8 @@ another target. Multiple product/FAQ feeds share the installation's Resource.
 ## Rollout and authority
 
 Apply `f48_2807_sync_feed_runs` before enabling `SYNC_RUNS_ENABLED=true` (default
-false). Existing OIDC, synchronization-control and service-credential switches
+false). It follows `f49_2817_clear_allowlist_adders`: from v0.163.0,
+`alembic upgrade head` applies it. Existing OIDC, synchronization-control and service-credential switches
 must also be enabled for worker calls. Register the browser and service clients
 using the existing [credential runbook](sync-service-credentials.md).
 
@@ -167,7 +168,9 @@ Canonical records and temporary chunks are raw user data; see
 cascades data; removing an approver clears historical user identity.
 
 To roll back deliberately, stop new runs, drain committed indexing receipts,
-disable the flag and back up feed canonical/staging tables first. Downgrading
-f48 drops only the five new tables. It retains existing
+disable the flag and back up feed canonical/staging tables first.
+`alembic downgrade f49_2817_clear_allowlist_adders` reverts only
+`f48_2807_sync_feed_runs` and drops only the five new tables; a downgrade to a
+lower revision reverts the later revisions too. It retains existing
 Resource/Context/endpoint/credential rows and already committed Resource events
 and Memories; downgrade does not reverse a published content change.
