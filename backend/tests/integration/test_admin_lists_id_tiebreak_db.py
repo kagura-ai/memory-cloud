@@ -96,7 +96,10 @@ async def test_workspace_sleep_report_pages_share_the_order(db_session: AsyncSes
     ]
     # Another workspace's report at the same time never shows up.
     db_session.add_all(
-        [*reports, SleepReport(user_id="other", workspace_id=uuid4(), started_at=T0)]
+        [
+            *reports,
+            SleepReport(user_id="other", workspace_id=uuid4(), started_at=T0, status="completed"),
+        ]
     )
     await db_session.commit()
     expected = _expected([(r.started_at, r.id) for r in reports])
