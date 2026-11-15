@@ -15,8 +15,10 @@ container::
 ``--apply`` it marks a held (``active`` / ``suspended``) row ``released``
 with the reassignment cooldown, the way an owner's detach does, and deletes
 a ``pending`` row. ``--skip-cooldown`` deletes the row instead (a held one,
-or a ``released`` one still in its cooldown), so that another workspace can
-claim the name at once. Every change writes one audit row
+or a ``released`` one still in its cooldown). It deletes this row only: the
+name is free for another workspace once no other row of it is held or still
+cooling down (a workspace that detached a name twice leaves two ``released``
+rows), which ``show --hostname`` lists. Every change writes one audit row
 (``public_mcp_domain.released``, actor ``cli:public-mcp-domains``, the host
 name's digest only).
 
@@ -218,7 +220,10 @@ def _print_release(plan: ReleasePlan) -> None:
     if plan.action == "none":
         print("action        nothing to do (released; --skip-cooldown deletes it)")
     elif plan.action == "delete":
-        print("action        delete the row (the name is free at once)")
+        print(
+            "action        delete this row (other rows of the name may still hold it"
+            " or be cooling down: show --hostname)"
+        )
     else:
         print("action        release with the reassignment cooldown")
 
@@ -308,7 +313,7 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     release.add_argument(
         "--skip-cooldown",
         action="store_true",
-        help="delete the row instead: no cooldown for another workspace",
+        help="delete this row instead (other rows of the name: show --hostname)",
     )
     mode = release.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true", help="show what would change (default)")

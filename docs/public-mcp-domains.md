@@ -528,8 +528,11 @@ python -m src.cli.public_mcp_domains release --domain-id <id> --skip-cooldown --
 - `release` plans by default. With `--apply`: an `active` or `suspended` row
   is released with the reassignment cooldown, as an owner's remove does; a
   `pending` row is deleted; a `released` row is left alone. `--skip-cooldown`
-  deletes the row instead (also a `released` one still in its cooldown), so
-  the name is free for every workspace at once.
+  deletes the row instead (also a `released` one still in its cooldown). It
+  deletes this row only: another workspace can claim the name once no other
+  row of it is held or still in its cooldown. A workspace that detached a name,
+  took it back and detached it again leaves two `released` rows; check
+  `show --hostname` and run the command for each row that still holds the name.
 - Each change writes one audit row `public_mcp_domain.released` with reason
   `operator` and the actor `cli:public-mcp-domains`.
 - Exit codes: `0` ok, `1` error (no such domain), `2` usage (`--yes` without
@@ -545,7 +548,7 @@ python -m src.cli.public_mcp_domains release --domain-id <id> --skip-cooldown --
 | `MCP_PUBLIC_DOMAINS_ENABLED` | `false` | The switch. Off: no statement on `public_mcp_domains`, owner routes and permission call `404`, no job, **no Host rule**. On: needs `MCP_PUBLIC_DOMAINS_ROUTING_TARGET` (start-up refuses otherwise). Allowed without `MCP_PUBLIC_ENDPOINTS_ENABLED` (every alias then answers `404`). |
 | `MCP_PUBLIC_DOMAINS_AUTHORITY` | `entitlement` | Who has the right: `entitlement` (the license `public-mcp-domains`) or `operator` (every canonical owner). |
 | `MCP_PUBLIC_DOMAINS_ROUTING_TARGET` | *(empty)* | The name owners point their host at (CNAME target). A host name outside the special-use suffixes. Reserved for claims. |
-| `MCP_PUBLIC_DOMAINS_APP_HOSTS` | *(empty)* | Further names the application is reached under, comma-separated: `name` = that host, `.name` = that host and every name under it. Reserved for claims. |
+| `MCP_PUBLIC_DOMAINS_APP_HOSTS` | *(empty)* | Further names the application is reached under, comma-separated: `name` = that host, `.name` = that host and every name under it. An entry is a bare host name of two or more labels, with no scheme and no port (a zone entry too: `.default.svc`, not `.svc`); any other entry refuses start-up. Reserved for claims. |
 | `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` | *(empty)* | Names never claimable, nor any name under them, comma-separated (no leading dot). Refused on the request path from the first request after a restart, whatever the domain's row says; the next check suspends the domain (`reserved`). |
 | `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | Hours a released name stays closed to other workspaces (0–2160). |
 | `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | Domains (`pending`, `active`, `suspended`) per workspace (1–50). |
