@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.referral import ReferralGrant
 from models.sleep import SleepReport
+from services.sleep_reporter_service import SleepReporterService
 
 from ._admin_helpers import make_user
 from ._admin_http import admin_http
@@ -78,6 +79,38 @@ async def test_sleep_report_pages_return_each_row_once_with_ties_in_id_order(
 
     assert whole == expected
     assert len(set(whole)) == len(reports)
+
+
+async def test_workspace_sleep_report_pages_share_the_order(db_session: AsyncSession) -> None:
+    """``GET /api/v1/workspaces/{id}/sleep-reports`` reads the same query, scoped by workspace."""
+    workspace_id = uuid4()
+    reports = [
+        SleepReport(
+            id=uuid4(),
+            user_id=f"tiebreak-ws-{uuid4().hex[:8]}",
+            workspace_id=workspace_id,
+            started_at=at,
+            status="completed",
+        )
+        for at in TIMES
+    ]
+    # Another workspace's report at the same time never shows up.
+    db_session.add_all(
+        [*reports, SleepReport(user_id="other", workspace_id=uuid4(), started_at=T0)]
+    )
+    await db_session.commit()
+    expected = _expected([(r.started_at, r.id) for r in reports])
+
+    service = SleepReporterService(db_session)
+    for limit in (1, 2, 3, 4):
+        walked: list[str] = []
+        for offset in range(0, len(reports), limit):
+            page, total = await service.list_reports(
+                workspace_id=workspace_id, limit=limit, offset=offset
+            )
+            assert total == len(reports)
+            walked.extend(str(report.id) for report in page)
+        assert walked == expected, f"limit={limit}"
 
 
 async def test_referral_pages_return_each_row_once_with_ties_in_id_order(
