@@ -41,6 +41,7 @@ from models.schemas import (
     UserWorkspaceInfo,
 )
 from services.email_service import get_email_service
+from services.system_admin_service import SystemAdminService
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
@@ -812,7 +813,14 @@ async def update_user_role(
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update user role (Admin-only)."""
+    """Update user role (Admin-only).
+
+    Taking the admin role from an account answers 403 `ADMIN-001` when the
+    account is the initial system administrator or the last remaining one,
+    as `DELETE /api/v1/admin/system-admins/{user_id}` does (#2828). A caller
+    cannot change their own admin role either. A refused change writes
+    nothing.
+    """
     admin_id = get_user_id(admin)
 
     # Validate role
@@ -828,8 +836,10 @@ async def update_user_role(
         raise AdminProtectionError("Cannot change your own admin role", reason="self_demotion")
 
     async with db_transaction(db, "update_user_role", "Failed to update user role"):
-        result = await db.execute(select(User).where(User.user_id == user_id))
-        target_user = result.scalar_one_or_none()
+        # #2828: the lock, the fresh read and both admin protections (initial
+        # admin, last admin) of DELETE /admin/system-admins/{user_id}. A
+        # refusal is raised before any write and the transaction rolls back.
+        target_user = await SystemAdminService(db).lock_for_role_change(user_id, request.role)
 
         if not target_user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")

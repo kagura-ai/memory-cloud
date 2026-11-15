@@ -7,8 +7,6 @@ admin keeps its own id and address.
 from __future__ import annotations
 
 import secrets
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,18 +16,15 @@ from auth.dependencies import get_current_user_optional
 from config.settings import get_settings
 from db.base import get_db
 from models.auth import AuditLog
+from tests.api.test_admin_role_protections import account, role_change_session
 
 
 @pytest.fixture
 def db():
-    target = SimpleNamespace(user_id="2002", role="user")
-    result = MagicMock()
-    result.scalar_one_or_none.return_value = target
-    session = MagicMock()
-    session.execute = AsyncMock(return_value=result)
-    session.add = MagicMock()
-    session.commit = AsyncMock()
-    session.rollback = AsyncMock()
+    # #2828: the role PUT reads its target through the locked read of
+    # ``SystemAdminService.lock_for_role_change``.
+    target = account("2002", "user")
+    session = role_change_session(account("1001", "admin"), target)
     session.target = target
     return session
 

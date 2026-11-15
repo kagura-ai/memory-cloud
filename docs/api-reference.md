@@ -2266,6 +2266,8 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 
 `PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
 
+Two rules protect the accounts with `role=admin`, in every mode and on both routes that can take the role away (`PUT /api/v1/admin/users/{user_id}/role` with another role, and `DELETE /api/v1/admin/system-admins/{user_id}`) (#2828): the initial system administrator keeps the role, and so does the last remaining admin. Either answers `403 ADMIN-001` with the message naming the rule, changes nothing and writes no audit row. The check and the change are one transaction under a lock on the admin rows, so two demotions sent at once leave one admin: one succeeds, the other answers `403 ADMIN-001`. Promotion to `admin` and changes that take the admin role from nobody are not affected; a session admin still cannot change their own admin role.
+
 ### Users
 
 How each account was admitted (Issue #2803). Both routes answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route.

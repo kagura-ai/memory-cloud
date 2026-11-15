@@ -537,7 +537,9 @@ configuration category. The first account created on an empty database gets
 (as in `session`), so a fresh `off` deployment gets its first user from that
 first sign-up, from `ALLOW_REGISTRATION=true`, an allowlisted identity, or a
 CLI-created account. Accounts that already have `role=admin` keep it (the
-initial and last admin cannot be demoted); a process started without the
+initial and last admin cannot be demoted: `PUT /admin/users/{id}/role` and
+`DELETE /admin/system-admins/{id}` both answer `403 ADMIN-001`, in every mode,
+and two demotions at once still leave one admin, #2828); a process started without the
 setting serves them the session surface again, which is why the mode must be
 set on every process. Batch beta invites stay CLI-only in every mode
 ([Dated beta invite batches](#dated-beta-invite-batches)).
