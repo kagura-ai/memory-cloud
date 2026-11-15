@@ -47,6 +47,7 @@ ADMIN_SURFACE = frozenset(
         ("GET", "/api/v1/admin/bm25-drift"),
         ("GET", "/api/v1/admin/bm25-drift/{row_id}"),
         ("GET", "/api/v1/admin/cost-aggregation"),
+        ("GET", "/api/v1/admin/environment"),
         ("GET", "/api/v1/admin/erasure-requests"),
         ("GET", "/api/v1/admin/erasure-requests/{request_id}"),
         ("GET", "/api/v1/admin/force-transfer-requests/{request_id}"),

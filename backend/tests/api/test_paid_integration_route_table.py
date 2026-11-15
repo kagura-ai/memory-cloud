@@ -69,6 +69,7 @@ class Guarded:
 PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "admin": NONE,
     "admin_audit_logs": NONE,
+    "admin_environment": NONE,
     "admin_erasure_requests": NONE,
     "admin_mcp_notices": NONE,
     "admin_memory_health": NONE,

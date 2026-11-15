@@ -4276,6 +4276,50 @@
         ],
         "type": "object"
       },
+      "EnvironmentConfigItem": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {},
+          "description": {},
+          "key": {},
+          "requires_restart": {},
+          "type": {},
+          "value": {}
+        },
+        "required": [
+          "category",
+          "description",
+          "key",
+          "requires_restart",
+          "type",
+          "value"
+        ],
+        "type": "object"
+      },
+      "EnvironmentEmbeddingModels": {
+        "additionalProperties": false,
+        "properties": {
+          "default_model": {},
+          "offered": {}
+        },
+        "required": [
+          "default_model",
+          "offered"
+        ],
+        "type": "object"
+      },
+      "EnvironmentResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "configs": {},
+          "embedding_models": {}
+        },
+        "required": [
+          "configs",
+          "embedding_models"
+        ],
+        "type": "object"
+      },
       "ErasureConfirmRequest": {
         "properties": {
           "password": {
@@ -8199,6 +8243,20 @@
             "type": "integer"
           }
         },
+        "type": "object"
+      },
+      "OfferedEmbeddingModel": {
+        "additionalProperties": false,
+        "properties": {
+          "dimensions": {},
+          "name": {},
+          "provider": {}
+        },
+        "required": [
+          "dimensions",
+          "name",
+          "provider"
+        ],
         "type": "object"
       },
       "OpenAIKeyStatusResponse": {
@@ -16191,6 +16249,25 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/environment": {
+      "get": {
+        "operationId": "get_environment_api_v1_admin_environment_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvironmentResponse"
                 }
               }
             }

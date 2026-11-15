@@ -503,6 +503,13 @@ The console reads job runs, work queue backlogs and LLM lane health from
 needs no LLM key for it): see
 [Operations status](#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768).
 
+From v0.165.0 (#2837) the console reads the environment-backed settings from
+`GET /api/v1/admin/environment`, the `hosted` category included
+([Environment Console](api-reference.md#environment-console)). The values are
+those of the process that answers: in this setup the `service` process, so
+give it the same values as the public processes for the settings you want to
+read there.
+
 Each request of the console carries the credential and `X-Operator-Email`, the
 address of the person acting (exactly one header value; lower-cased; ASCII; at
 most 246 characters; local part `[a-z0-9._+-]`). memory-cloud trusts the

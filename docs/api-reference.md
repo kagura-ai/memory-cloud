@@ -2420,6 +2420,12 @@ Read-only view of the deployment's environment-backed settings, behind the admin
 | `GET /api/v1/config`              | The **effective** value of each key (what the running process uses), as `{key, value, category, description, is_sensitive, read_only}`. `read_only` is `true` for every key. Any authenticated caller; the `hosted` category (BYOK / cost-display / plan-page flags, managed LLM lane, reranker defaults and endpoint) is returned to system admins only. Credentials embedded in a URL value are always masked (`https://***@host`). |
 | `GET /api/v1/config/schema`       | Display metadata per key (type, description, `requires_restart`, impact, examples). |
 | `PUT /api/v1/config/{key}`, `POST /api/v1/config/batch` | Always refused with `409` `CFG-002` (`details.keys` lists the refused keys); a batch is refused as a whole. Change the environment and restart/redeploy instead. |
+| `GET /api/v1/admin/environment` | The same settings for an administrator (#2837): a session admin in `session`, a service operator in `service`, `404` in `off`, like every system-admin route. No query parameter. `{"configs": [...], "embedding_models": {...}}`, described below. |
+
+`GET /api/v1/admin/environment` answers the values of the process that serves the request. Processes of one deployment can run with different environments (a `service` process beside public ones), so the answer describes that process only.
+
+- `configs`: every key of the four categories (`embedding`, `search`, `system`, `hosted`), in that order, as `{"key", "category", "value", "type", "description", "requires_restart"}`. `value` is the effective value; `type`, `description` and `requires_restart` come from the key's schema entry and are null for a key without one. Credentials embedded in a URL inside any string value are masked (`https://***@host`). A key whose value is not answered carries the string `***MASKED***` as its `value`, whatever it is set to; every key of today's categories is answered.
+- `embedding_models`: `{"default_model", "offered": [{"name", "dimensions", "provider"}]}`, the models the deployment offers (`EMBEDDING_MODEL_ALLOWLIST`) and its default. The route does not report whether a provider is reachable: it reads no stored key and calls no endpoint.
 
 Rows written to the `config_overrides` table by earlier versions were never read by any runtime consumer; they are ignored.
 

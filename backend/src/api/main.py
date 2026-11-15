@@ -915,6 +915,7 @@ for _exc_cls in (
 from api.routes import (  # noqa: E402
     admin,
     admin_audit_logs,  # Issue #2835: admin read of the audit log
+    admin_environment,  # Issue #2837: admin read of the effective environment settings
     admin_erasure_requests,  # Issue #2834: admin reads of erasure requests
     admin_mcp_notices,  # Issue #2762: service notices over MCP (create/list/withdraw)
     admin_memory_health,  # Issue #2764: deprecated alias of memory_health
@@ -1135,6 +1136,9 @@ app.include_router(admin_erasure_requests.router, prefix="/api/v1")
 
 # Admin read of the audit log: admin actions and sign-up decisions (Issue #2835)
 app.include_router(admin_audit_logs.router, prefix="/api/v1")
+
+# Admin read of the effective environment settings (Issue #2837)
+app.include_router(admin_environment.router, prefix="/api/v1")
 
 # BM25 IDF Drift admin (Issue #343 - cron disabled by default until v0.14.0)
 app.include_router(bm25_drift.router, prefix="/api/v1")
