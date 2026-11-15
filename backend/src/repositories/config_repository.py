@@ -212,6 +212,9 @@ class ContextSearchConfigRepository:
             raise ValueError(error_msg)
 
         # Update fields
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(self.db, context_id)
         backfill_queued: int | None = None
         update_dict = update_data.model_dump(exclude_unset=True)
         # The flags as committed, under the row lock: the caller loaded this

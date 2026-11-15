@@ -57,7 +57,7 @@ interface MemoryDetailDialogProps {
   // Optional: omit to hide the Edit button entirely. Passing `undefined`
   // keeps the dialog honest — no ghost button when edit is unavailable.
   onEdit?: () => void;
-  onDelete: () => void;
+  onDelete?: () => void;
   // Issue #434: when ``referenceMemory`` rejects on a deep-link path, the
   // panel sets ``notFound=true`` so we render an EmptyState body instead of
   // closing or toasting. ``memory`` is null in this state.
@@ -535,7 +535,7 @@ export function MemoryDetailDialog({
               {t("edit")}
             </Button>
           )}
-          <Button variant="destructive" onClick={onDelete}>
+          <Button variant="destructive" onClick={onDelete} disabled={!onDelete}>
             <Trash2 className="h-4 w-4 mr-2" />
             {t("delete")}
           </Button>

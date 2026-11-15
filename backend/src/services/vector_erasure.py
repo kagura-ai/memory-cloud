@@ -75,6 +75,9 @@ async def capture_vector_erasure(
 
 async def embedding_author_current(db: AsyncSession, memory: EmbeddingAuthor) -> bool:
     """Fresh scalar lookup: ORM identity-map state cannot authorize a write."""
+    from services.sync_managed_guard import assert_vector_memory_mutable
+
+    await assert_vector_memory_mutable(db, memory.id)
     async with db.begin_nested():
         current = await db.scalar(
             select(Memory.id).where(

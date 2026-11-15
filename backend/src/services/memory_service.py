@@ -1247,6 +1247,9 @@ class MemoryService:
             # One query for every context, deduplicated per workspace (#1941).
             await ensure_contexts_not_capacity_locked(self.db, context_ids, user_id=user_id)
         if write_context_id is not None:
+            from services.sync_managed_guard import assert_context_mutable
+
+            await assert_context_mutable(self.db, write_context_id)
             await plan_seats.ensure_context_writable(self.db, write_context_id)
 
     async def remember(
@@ -2676,11 +2679,17 @@ class MemoryService:
             NotFoundException: the row was hard-deleted, or (without
                 ``include_deleted``) forgotten, since the authorized read.
         """
-        memory = await self.memory_repo.get(
-            memory_id, include_deleted=include_deleted, for_update=True
-        )
+        from services.sync_managed_guard import assert_memory_mutable
+
+        with self.db.no_autoflush:
+            memory = await self.memory_repo.get(
+                memory_id, include_deleted=include_deleted, for_update=True
+            )
         if not memory:
             raise NotFoundException("Memory", str(memory_id))
+        # No mutation/autoflush precedes the target fence. Its advisory lock
+        # is nonblocking, so a transition holding the opposite order retries.
+        await assert_memory_mutable(self.db, memory)
         return memory
 
     async def _update_load_authorized(
@@ -7978,6 +7987,9 @@ class MemoryService:
 
         if not ids:
             return [], []
+        from services.sync_managed_guard import assert_context_mutable
+
+        await assert_context_mutable(self.db, context_id)
         deleted_at = utcnow()
         provenance = current_provenance()
         rows = (
@@ -8603,6 +8615,17 @@ class MemoryService:
         for memory in old_memories:
             # Skip if already promoted or high importance
             if memory.scope == "persistent" or memory.importance >= 0.7:
+                continue
+
+            from services.sync_managed_guard import assert_memory_mutable
+            from utils.exceptions import ConflictError, ManagedDataLockedError
+
+            try:
+                await assert_memory_mutable(self.db, memory)
+            except (ConflictError, ManagedDataLockedError):
+                # Source ownership is not working-memory TTL. Leave protected
+                # or transitioning targets for their own lifecycle, and let
+                # unrelated ordinary contexts continue their normal retention.
                 continue
 
             # Delete from PostgreSQL

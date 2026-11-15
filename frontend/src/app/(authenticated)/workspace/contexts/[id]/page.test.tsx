@@ -161,6 +161,15 @@ afterEach(() => {
 
 // ---------- Tests ------------------------------------------------------------
 
+it.each(["feed", "stopping"])("explains %s management and disables context settings", async (mode) => {
+  setupWithRole("owner", "settings");
+  mockGetContext.mockResolvedValue({ ...makeContext(), feed_management_mode: mode });
+  render(<ContextDetailPage />);
+  expect(await screen.findByText("feedManaged.title")).toBeInTheDocument();
+  expect(screen.getByText(mode === "stopping" ? "feedManaged.stopping" : "feedManaged.description")).toBeInTheDocument();
+  expect(screen.getByTestId("settings-panel").closest("fieldset")).toBeDisabled();
+});
+
 describe("ContextDetailPage tab visibility (#398)", () => {
   it.each(["owner", "admin"] as const)(
     "shows all four tabs for %s",

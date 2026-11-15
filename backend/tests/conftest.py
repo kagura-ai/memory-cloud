@@ -126,6 +126,57 @@ def _capacity_gate_needs_a_session(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _managed_target_guards_need_a_session(monkeypatch):
+    """Service doubles have no ownership database; actual sessions exercise the new SQL.
+
+    Match the capacity fixture above: do not consume a scripted unrelated
+    query sequence in hundreds of old service-unit tests. No production bypass
+    is installed; the ownership/concurrency tests use actual PostgreSQL sessions.
+    """
+    from unittest.mock import Mock
+
+    from services import sync_managed_guard, sync_management
+
+    real_maintenance = sync_management.maintain_sync_management
+
+    async def guarded_maintenance(db):
+        if isinstance(db, AsyncSession) and not isinstance(db, Mock):
+            return await real_maintenance(db)
+        return None
+
+    monkeypatch.setattr(sync_management, "maintain_sync_management", guarded_maintenance)
+
+    for name in (
+        "assert_context_mutable",
+        "assert_memory_mutable",
+        "assert_resource_mutable",
+        "assert_vector_memory_mutable",
+    ):
+        real = getattr(sync_managed_guard, name)
+
+        async def guarded(db, *args, _real=real, **kwargs):
+            if isinstance(db, AsyncSession) and not isinstance(db, Mock):
+                return await _real(db, *args, **kwargs)
+            return None
+
+        monkeypatch.setattr(sync_managed_guard, name, guarded)
+    for name, default in (
+        ("target_fence", sync_managed_guard.TargetFence(None, None, None)),
+        ("service_mode", sync_managed_guard.TargetFence(None, None, None)),
+        ("event_applicable", True),
+        ("management_modes", {}),
+    ):
+        real = getattr(sync_managed_guard, name)
+
+        async def guarded_result(db, *args, _real=real, _default=default, **kwargs):
+            if isinstance(db, AsyncSession) and not isinstance(db, Mock):
+                return await _real(db, *args, **kwargs)
+            return _default
+
+        monkeypatch.setattr(sync_managed_guard, name, guarded_result)
+
+
+@pytest.fixture(autouse=True)
 def _recall_post_commit_writes_need_a_session(monkeypatch):
     """Run recall's post-commit writes only against a real session (#1985).
 

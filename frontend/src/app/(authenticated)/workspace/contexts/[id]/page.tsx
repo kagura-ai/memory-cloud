@@ -319,6 +319,13 @@ function ScopedContextDetail() {
         }
       />
 
+      {(context.feed_management_mode === "feed" || context.feed_management_mode === "stopping") && (
+        <Alert className="mb-4">
+          <Lock className="h-4 w-4" />
+          <AlertTitle>{t("feedManaged.title")}</AlertTitle>
+          <AlertDescription>{t(context.feed_management_mode === "stopping" ? "feedManaged.stopping" : "feedManaged.description")}</AlertDescription>
+        </Alert>
+      )}
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
@@ -348,7 +355,7 @@ function ScopedContextDetail() {
         {canSeeAdminTabs ? (
           <>
             <TabsContent value="memories">
-              <MemoriesTabPanel contextId={contextId} />
+              <MemoriesTabPanel contextId={contextId} readOnly={context.feed_management_mode === "feed" || context.feed_management_mode === "stopping"} />
             </TabsContent>
 
             <TabsContent value="connections">
@@ -356,10 +363,11 @@ function ScopedContextDetail() {
             </TabsContent>
 
             <TabsContent value="graph">
-              <GraphTabPanel contextId={contextId} />
+              <GraphTabPanel contextId={contextId} readOnly={context.feed_management_mode === "feed" || context.feed_management_mode === "stopping"} />
             </TabsContent>
 
             <TabsContent value="settings">
+              <fieldset disabled={context.feed_management_mode === "feed" || context.feed_management_mode === "stopping"}>
               <SettingsTabPanel
                 contextId={contextId}
                 context={context}
@@ -367,6 +375,7 @@ function ScopedContextDetail() {
               />
               <Separator className="my-8" />
               <SearchSettingsSection contextId={contextId} />
+              </fieldset>
               {!context.is_private && (
                 <>
                   <Separator className="my-8" />
@@ -374,7 +383,9 @@ function ScopedContextDetail() {
                 </>
               )}
               <Separator className="my-8" />
+              <fieldset disabled={context.feed_management_mode === "feed" || context.feed_management_mode === "stopping"}>
               <ProtectionSection context={context} />
+              </fieldset>
             </TabsContent>
           </>
         ) : (

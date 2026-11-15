@@ -373,6 +373,9 @@ async def undo_merge_action(
             f"Sleep action {action_id} not found or not owned by you.",
         )
     action, report = row
+    from services.sync_managed_guard import assert_context_mutable
+
+    await assert_context_mutable(db, report.context_id)
 
     if action.action_type != "merge" or action.phase != "dedup_merge":
         raise UndoMergeError(

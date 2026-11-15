@@ -6,6 +6,7 @@ Database URL is read from DATABASE_URL environment variable
 """
 
 import asyncio
+import importlib
 import logging
 from logging.config import fileConfig
 
@@ -44,6 +45,9 @@ from db.migration_helpers import (
     migration_lock_timeout,
     reapply_migration_lock_timeout,
 )
+
+# Model registration is an explicit import side effect for autogeneration.
+importlib.import_module("models.sync_management")
 
 # The production secret guard (#2225, #2239): under ENVIRONMENT=production a
 # development-default or short secret stops the migration here, before any
