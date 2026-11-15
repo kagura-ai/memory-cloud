@@ -147,4 +147,15 @@ async def test_rollout_disable_is_a_consumer_stop_even_with_a_live_old_token(tar
     monkeypatch.setattr(well_known.get_settings(), "sync_runs_enabled", False)
     with pytest.raises(SyncContractUnsupported):
         require_sync_contract(await configuration(target))
+    assert "sync.activity.v1" not in (await configuration(target))["capabilities"]
+    assert (await service(target, "GET", "schema")).status_code == 404
+    assert (await human(target, "GET", "activity")).status_code == 404
+
+
+async def test_worker_credential_shutdown_keeps_human_diagnostics_advertised(target, monkeypatch):
+    monkeypatch.setattr(well_known.get_settings(), "sync_credentials_enabled", False)
+    metadata = await configuration(target)
+    assert "sync.credentials.v1" not in metadata["capabilities"]
+    assert "sync.activity.v1" in metadata["capabilities"]
+    assert (await human(target, "GET", "activity")).status_code == 200
     assert (await service(target, "GET", "schema")).status_code == 404

@@ -28,7 +28,7 @@ advertise no enabled capabilities. A release version is never evidence of suppor
 | `sync.credentials.v1` | Installations, `SYNC_CREDENTIALS_ENABLED` |
 | `sync.feeds.v1` | Credentials, `SYNC_RUNS_ENABLED` |
 | `sync.managed.v1` | Feeds, `SYNC_MANAGED_ENABLED` |
-| `sync.activity.v1` | Installations, `SYNC_OBSERVABILITY_ENABLED` |
+| `sync.activity.v1` | Installations, `SYNC_RUNS_ENABLED`, `SYNC_OBSERVABILITY_ENABLED` |
 | `public.budget.v1` | Public MCP, `MCP_PUBLIC_USAGE_BUDGET_ENABLED` |
 | `public.domains.v1` | Public budget, `MCP_PUBLIC_DOMAINS_ENABLED` |
 
@@ -83,7 +83,10 @@ does not turn OIDC human credentials into memory REST/MCP credentials.
 `backend/tests/fixtures/sync-contract-v1.json` is synthetic consumer material:
 the full enabled document plus strict product and FAQ uploads. The schema hash
 is frozen against `models.sync_feed_schemas.SCHEMA_HASH`; changes to the public
-field contract require an intentional consumer compatibility update. Existing
+field contract require an intentional consumer compatibility update. This
+document's schema version identifies the wire profile; each run still uses
+the current installation schema/configuration revisions returned by its own
+schema and feed endpoints. Metadata never overrides those live revisions. Existing
 full-snapshot, exact diff/approval, bounded body, idempotency and asynchronous
 indexing contracts are unchanged. A successful canonical commit does not mean
 search reflection has completed; poll the documented state rather than replaying.

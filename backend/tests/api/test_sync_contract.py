@@ -151,7 +151,7 @@ def test_schema_fixture_uses_actual_approved_product_and_faq_shapes():
             },
         ),
         ("sync_credentials_enabled", {"sync.credentials.v1", "sync.feeds.v1", "sync.managed.v1"}),
-        ("sync_runs_enabled", {"sync.feeds.v1", "sync.managed.v1"}),
+        ("sync_runs_enabled", {"sync.feeds.v1", "sync.managed.v1", "sync.activity.v1"}),
         (
             "mcp_public_endpoints_enabled",
             {

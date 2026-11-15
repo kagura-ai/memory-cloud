@@ -41,7 +41,9 @@ def sync_configuration(settings: Settings) -> SyncConfigurationV1:
         "sync.credentials.v1": credentials,
         "sync.feeds.v1": feeds,
         "sync.managed.v1": feeds and settings.sync_managed_enabled,
-        "sync.activity.v1": controls and settings.sync_observability_enabled,
+        "sync.activity.v1": (
+            controls and settings.sync_runs_enabled and settings.sync_observability_enabled
+        ),
         "public.mcp.v1": public,
         "public.budget.v1": budget,
         "public.domains.v1": budget and settings.mcp_public_domains_enabled,
