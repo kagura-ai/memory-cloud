@@ -353,3 +353,25 @@ async def test_search_text_is_not_logged_and_no_row_is_written(db_session: Async
     assert call.kwargs["search_length"] == len(sentinel)
     # A read: the session holds nothing to write.
     assert not db_session.new and not db_session.dirty and not db_session.deleted
+
+
+async def test_the_largest_allowed_values_are_accepted(db_session: AsyncSession) -> None:
+    """The bounds are inclusive: 500 rows, a 255-character search and owner id."""
+    owner = await _owner(db_session)
+    name = f"{uuid4().hex}-".ljust(255, "n")
+    db_session.add(_workspace(owner, name))
+    await db_session.commit()
+
+    async with admin_http(db_session) as client:
+        widest = await client.get(LIST, params={"limit": 500, "search": name})
+        smallest = await client.get(LIST, params={"limit": 1, "owner_user_id": owner.user_id})
+        longest_owner = await client.get(LIST, params={"owner_user_id": "u" * 255})
+
+    assert widest.status_code == 200, widest.text
+    assert widest.json()["limit"] == 500
+    assert [item["name"] for item in widest.json()["items"]] == [name]
+    assert widest.json()["total"] == 1
+    assert smallest.status_code == 200, smallest.text
+    assert len(smallest.json()["items"]) == 1
+    assert longest_owner.status_code == 200, longest_owner.text
+    assert longest_owner.json() == {"items": [], "total": 0, "limit": 50, "offset": 0}

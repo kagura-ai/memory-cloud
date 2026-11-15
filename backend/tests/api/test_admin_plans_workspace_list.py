@@ -9,7 +9,7 @@ row.
 from __future__ import annotations
 
 import secrets
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -65,6 +65,16 @@ def test_list_refuses_a_bad_value_with_422(client: TestClient, params: dict) -> 
     for value in params.values():
         if len(value) > 3:
             assert value not in response.text
+
+
+def test_a_refused_search_is_not_logged(client: TestClient) -> None:
+    sentinel = "refused-search-sentinel"
+    with patch("api.main.logger") as logger:
+        response = client.get(LIST, params={"search": f"{sentinel}\x00"})
+    assert response.status_code == 422, response.text
+    assert logger.mock_calls
+    assert sentinel not in repr(logger.mock_calls)
+    assert sentinel not in response.text
 
 
 def test_one_workspace_read_refuses_an_id_that_is_not_a_uuid(client: TestClient) -> None:
