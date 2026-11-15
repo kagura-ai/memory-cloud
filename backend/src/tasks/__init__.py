@@ -16,6 +16,8 @@ Implements scheduled tasks for:
 - Expired operation history purge (daily 05:10 UTC) — Issue #2739
 - Operations status: LLM lane snapshot (every 5 minutes) and the opt-in
   LLM lane probe — Issue #2768
+- Public MCP custom domains: checks and housekeeping (every 15 minutes,
+  only while MCP_PUBLIC_DOMAINS_ENABLED is on) — Issue #2809
 
 Every job above is leader-only: one process of the deployment runs the
 scheduler (``scheduler_leader``, Issue #1980) and adds them with
@@ -53,6 +55,7 @@ from .known_device_tasks import schedule_known_device_tasks
 from .neural_tasks import schedule_neural_tasks
 from .operation_history_tasks import schedule_operation_history_tasks
 from .operations_probe_tasks import schedule_operations_probe_tasks
+from .public_mcp_domain_tasks import schedule_public_mcp_domain_tasks
 from .public_mcp_usage_tasks import schedule_public_mcp_usage_tasks
 from .referral_tasks import schedule_referral_tasks
 from .resource_indexer_job import schedule_resource_indexer_jobs
@@ -89,6 +92,7 @@ def register_scheduled_jobs(scheduler: AsyncIOScheduler) -> None:
     schedule_public_mcp_usage_tasks(scheduler)
     schedule_operation_history_tasks(scheduler)
     schedule_operations_probe_tasks(scheduler)
+    schedule_public_mcp_domain_tasks(scheduler)
     # Keep last: the recorder snapshots every job registered above (#2768).
     attach_job_run_recorder(scheduler)
 
@@ -117,4 +121,5 @@ __all__ = [
     "schedule_public_mcp_usage_tasks",
     "schedule_operation_history_tasks",
     "schedule_operations_probe_tasks",
+    "schedule_public_mcp_domain_tasks",
 ]
