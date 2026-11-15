@@ -251,6 +251,7 @@ class TestRunQueuedIndexers:
         result.scalars.return_value.all.return_value = []
         db = MagicMock()
         db.execute = AsyncMock(return_value=result)
+        db.commit = AsyncMock()
 
         with patch("tasks.resource_indexer_job.get_db", _mock_get_db(db)):
             await run_queued_indexers()
@@ -435,6 +436,7 @@ class TestRunQueuedIndexers:
         """A failure in the SELECT path is caught (job must not escape to APScheduler)."""
         db = MagicMock()
         db.execute = AsyncMock(side_effect=RuntimeError("db gone"))
+        db.commit = AsyncMock()
 
         with (
             patch("tasks.resource_indexer_job.get_db", _mock_get_db(db)),
