@@ -804,7 +804,9 @@ class ReferralService:
             await self.db.scalars(
                 select(ReferralGrant)
                 .where(*filters)
-                .order_by(ReferralGrant.granted_at.desc())
+                # ``id`` breaks ties of ``granted_at`` so ``offset`` pages
+                # never repeat or skip a row (#2858).
+                .order_by(ReferralGrant.granted_at.desc(), ReferralGrant.id)
                 .limit(limit)
                 .offset(offset)
             )

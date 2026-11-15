@@ -6,7 +6,10 @@ vector, not anonymous.
 """
 
 import asyncio
+import gc
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -1643,6 +1646,31 @@ class TestRepointedRowDropsItsStrayPoints:
         assert indexer._repointed == []
 
 
+# How long a test waits for a stalled drain to be cut off before it fails
+# instead of hanging. Far below the production bound
+# (``RETIRED_POINT_DELETE_TIMEOUT_SECONDS``, 2.0 s), so a drain that ignored
+# the bound a test patched in would fail here too.
+DRAIN_CUT_OFF_GUARD_SECONDS = 1.0
+
+
+@asynccontextmanager
+async def _cut_off_within(seconds: float) -> AsyncIterator[None]:
+    """Fail with ``TimeoutError`` if the block takes longer than ``seconds`` (#2859).
+
+    Automatic garbage collection is paused inside the block: late in the full
+    suite the heap holds millions of objects and one full collection can take
+    longer than a second, which is the test process pausing, not the drain.
+    """
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        async with asyncio.timeout(seconds):
+            yield
+    finally:
+        if collecting:
+            gc.enable()
+
+
 def _drain_session(order: list[str], *, shared=(), lookup_error=None):
     """A stand-in for ``isolated_session(db)``: the drain's own session (#2248)."""
     session = AsyncMock()
@@ -1900,12 +1928,20 @@ class TestOldVersionCleanupDrainsStrays:
 
         self.points.side_effect = _stall
 
-        started = time.monotonic()
         with patch("services.resource_indexer.RETIRED_POINT_DELETE_TIMEOUT_SECONDS", 0.05):
-            metrics, log = await self._process(indexer)
-        elapsed = time.monotonic() - started
+            async with _cut_off_within(DRAIN_CUT_OFF_GUARD_SECONDS):
+                metrics, log = await self._process(indexer)
 
-        assert elapsed < 2.0
+        # The drain was cut off by the bound patched in above, not by the
+        # production value (#2859).
+        timed_out = [
+            c
+            for c in log.warning.call_args_list
+            if c.args[0] == "old_version_point_drain_timed_out"
+        ]
+        assert [c.kwargs for c in timed_out] == [
+            {"timeout_seconds": 0.05, "points_dropped": 0, "points_left": 1}
+        ]
         assert metrics.errors == 0
         assert metrics.batch_committed is True
         # No drain commit: the cancelled session closes, which ends its
@@ -1914,17 +1950,6 @@ class TestOldVersionCleanupDrainsStrays:
         session_cm = self.isolated.return_value
         session_cm.__aexit__.assert_awaited_once()
         assert session_cm.__aexit__.await_args.args[0] is asyncio.CancelledError
-        timed_out = [
-            c
-            for c in log.warning.call_args_list
-            if c.args[0] == "old_version_point_drain_timed_out"
-        ]
-        assert len(timed_out) == 1
-        assert timed_out[0].kwargs == {
-            "timeout_seconds": 0.05,
-            "points_dropped": 0,
-            "points_left": 1,
-        }
         warned = [c.args[0] for c in log.warning.call_args_list]
         assert "old_version_point_lookup_failed" not in warned
         assert indexer._retired == []
@@ -1957,10 +1982,9 @@ class TestRetiredPointDrainIsBounded:
             patch("services.resource_indexer.RETIRED_POINT_DELETE_TIMEOUT_SECONDS", timeout),
             patch("services.resource_indexer.logger") as log,
         ):
-            started = time.monotonic()
-            await indexer._drop_retired_points()
-            elapsed = time.monotonic() - started
-        return order, isolated.return_value, log, elapsed
+            async with _cut_off_within(DRAIN_CUT_OFF_GUARD_SECONDS):
+                await indexer._drop_retired_points()
+        return order, isolated.return_value, log
 
     @pytest.mark.asyncio
     async def test_the_normal_path_deletes_every_collection_and_commits(self):
@@ -1970,7 +1994,7 @@ class TestRetiredPointDrainIsBounded:
         async def _delete(ids, collection):
             deleted.append((list(ids), collection))
 
-        order, session_cm, log, _ = await self._drain(rows, _delete)
+        order, session_cm, log = await self._drain(rows, _delete)
 
         assert deleted == [
             ([str(rows[0].version_point)], "kagura_memories"),
@@ -1993,9 +2017,8 @@ class TestRetiredPointDrainIsBounded:
                 await asyncio.Event().wait()
             deleted.extend(ids)
 
-        order, session_cm, log, elapsed = await self._drain(rows, _delete, timeout=0.05)
+        order, session_cm, log = await self._drain(rows, _delete, timeout=0.05)
 
-        assert elapsed < 2.0
         assert deleted == [str(rows[0].version_point)]
         assert order == ["lookup"]
         assert session_cm.__aexit__.await_args.args[0] is asyncio.CancelledError
@@ -2015,7 +2038,7 @@ class TestRetiredPointDrainIsBounded:
         async def _stall(_ids, _collection):
             await asyncio.Event().wait()
 
-        _, _, log, _ = await self._drain(rows, _stall, timeout=0.05, shared=[rows[0].version_point])
+        _, _, log = await self._drain(rows, _stall, timeout=0.05, shared=[rows[0].version_point])
 
         timed_out = [
             c
@@ -2034,7 +2057,7 @@ class TestRetiredPointDrainIsBounded:
         rows = _retired_rows("kagura_memories")
         delete = AsyncMock()
 
-        _, _, log, _ = await self._drain(rows, delete, lookup_error=TimeoutError())
+        _, _, log = await self._drain(rows, delete, lookup_error=TimeoutError())
 
         delete.assert_not_awaited()
         warned = [(c.args[0], c.kwargs) for c in log.warning.call_args_list]
