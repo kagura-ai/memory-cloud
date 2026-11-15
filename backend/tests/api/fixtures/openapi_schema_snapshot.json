@@ -16601,6 +16601,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }
@@ -16693,6 +16694,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }
@@ -16736,6 +16738,7 @@
                 {
                   "maxLength": 255,
                   "minLength": 1,
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -16994,6 +16997,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -17009,6 +17013,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -17043,6 +17048,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }
@@ -17143,6 +17149,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }

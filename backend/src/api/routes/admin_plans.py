@@ -57,6 +57,11 @@ from utils.plan_resolver import tier_owned_workspace_cap
 
 logger = get_logger(__name__)
 
+# What the database takes: no stored text holds a NUL, and an OFFSET is a
+# 64-bit integer. A value outside these is a 422, never a statement.
+_NO_NUL = r"^[^\x00]*$"
+_MAX_OFFSET = 2**63 - 1
+
 router = APIRouter(prefix="/admin/plans", tags=["admin-plans"])
 
 
@@ -454,7 +459,7 @@ async def list_workspaces_with_plans(
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=_MAX_OFFSET),
     search: Annotated[
         str | None,
         AfterValidator(search_validator(255)),
@@ -468,7 +473,7 @@ async def list_workspaces_with_plans(
         AfterValidator(_known_plan_filter),
         Query(description="Exact plan key"),
     ] = None,
-    owner_user_id: str | None = Query(None, min_length=1, max_length=255),
+    owner_user_id: str | None = Query(None, min_length=1, max_length=255, pattern=_NO_NUL),
 ) -> AdminWorkspaceListResponse:
     """List the live workspaces with plan info and usage, one page at a time.
 
@@ -784,7 +789,7 @@ async def get_plan_change_audit(
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Annotated[int, Query(ge=0, le=_MAX_OFFSET)] = 0,
     workspace_id: Annotated[UUID | None, Query()] = None,
 ):
     """Get plan change audit log.
