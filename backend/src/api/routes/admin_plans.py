@@ -783,17 +783,24 @@ async def update_workspace_plan(
 async def get_plan_change_audit(
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    limit: int = 100,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    workspace_id: Annotated[UUID | None, Query()] = None,
 ):
     """Get plan change audit log.
 
     Admin-only endpoint.
 
     Args:
-        limit: Maximum entries to return (default: 100)
+        limit: Maximum entries to return, 1 to 500 (default: 100)
+        offset: Entries to skip (#2830; default: 0)
+        workspace_id: Only this workspace's changes (#2830); a soft-deleted
+            workspace's included
 
     Returns:
-        List of plan change audit entries
+        List of plan change audit entries, newest first (``changed_at``, then
+        ``id``, both descending). A caller pages until a page holds fewer
+        entries than ``limit``.
     """
     async with db_transaction(db, "get_plan_audit", "Failed to get audit log"):
         # Get audit entries with workspace names and user names.
@@ -801,12 +808,17 @@ async def get_plan_change_audit(
         # The audit log records historical plan changes; entries for workspaces
         # that have since been soft-deleted must remain visible so admins can
         # reconcile past billing / plan transitions.
-        audit_result = await db.execute(
+        stmt = (
             select(PlanChange, Workspace.name, User.name, User.email)
             .join(Workspace, PlanChange.workspace_id == Workspace.id)
             .outerjoin(User, PlanChange.changed_by == User.user_id)
-            .order_by(PlanChange.changed_at.desc())
+        )
+        if workspace_id is not None:
+            stmt = stmt.where(PlanChange.workspace_id == workspace_id)
+        audit_result = await db.execute(
+            stmt.order_by(PlanChange.changed_at.desc(), PlanChange.id.desc())
             .limit(limit)
+            .offset(offset)
         )
 
         entries = []

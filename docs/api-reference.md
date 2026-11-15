@@ -2305,8 +2305,9 @@ The plan and add-on reads under `/api/v1/admin/plans`. They answer a session adm
 | `GET /api/v1/admin/plans/workspaces` | The live workspaces with their plan, one page at a time (Issue #2841): `{"items", "total", "limit", "offset"}`. Each item is `{"id", "name", "plan_name", "owner_user_id", "owner_name", "owner_email", "total_memories", "memory_limit", "mcp_calls_per_day", "mcp_calls_per_week", "entitlement_source"}`. |
 | `GET /api/v1/admin/plans/workspaces/{workspace_id}` | One live workspace, as the list's item for it (Issue #2841). `404` (`RES-001`, "Workspace not found") for an unknown or soft-deleted workspace; `422` for an id that is not a UUID. |
 | `GET /api/v1/admin/plans/workspaces/{workspace_id}/quotas` | One workspace's limits: `base`, `addon`, `effective`, `usage`, `spend_cap`, its `entitlement_source` and its `addon_records`. |
+| `GET /api/v1/admin/plans/audit` | The plan changes made through the admin plan route, newest first, as a bare array of `{"id", "workspace_id", "workspace_name", "old_plan", "new_plan", "changed_by", "changed_by_name", "changed_by_email", "changed_at", "reason"}`. Parameters (Issue #2830): `workspace_id` (a UUID: only that workspace's changes, a soft-deleted workspace's included; an id with no change answers `[]`), `limit` (1 to 500, default 100) and `offset` (from 0). The order is `changed_at` descending, then `id` descending; page until a page holds fewer entries than `limit`. A value outside these rules answers `422` (`VAL-001`). |
 
-The list's parameters, all optional and combined with AND:
+The workspace list's parameters, all optional and combined with AND:
 
 | Parameter | Meaning |
 |-----------|---------|
