@@ -135,7 +135,16 @@ def _managed_target_guards_need_a_session(monkeypatch):
     """
     from unittest.mock import Mock
 
-    from services import sync_managed_guard
+    from services import sync_managed_guard, sync_management
+
+    real_maintenance = sync_management.maintain_sync_management
+
+    async def guarded_maintenance(db):
+        if isinstance(db, AsyncSession) and not isinstance(db, Mock):
+            return await real_maintenance(db)
+        return None
+
+    monkeypatch.setattr(sync_management, "maintain_sync_management", guarded_maintenance)
 
     for name in (
         "assert_context_mutable",

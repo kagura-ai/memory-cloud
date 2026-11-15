@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from api.routes import sync_management as routes
 from models.auth import Context, Workspace
 from models.deferred_point_delete import DeferredPointDelete
-from models.memory import Memory, MemoryRevision
+from models.memory import GraphMemory, Memory, MemoryRevision
 from models.resource import IndexerState, ResourceEvent, ResourceSchema
 from models.sync_feed import SyncRun
 from models.sync_installation import SyncInstallation
@@ -942,8 +942,9 @@ async def test_legacy_ordinary_backlog_is_not_silently_acknowledged_or_enrolled(
         assert await db.get(SyncManagedTarget, feeds.iid) is None
 
 
+@pytest.mark.parametrize("entrypoint", ["service", "legacy_task"])
 async def test_working_retention_skips_managed_data_and_cleans_ordinary_context(
-    managed, monkeypatch
+    managed, monkeypatch, entrypoint
 ):
     from services.memory_service import MemoryService
     from utils.datetime import utcnow
@@ -979,13 +980,38 @@ async def test_working_retention_skips_managed_data_and_cleans_ordinary_context(
         )
         await MemoryRepository(db).create(ordinary)
         ordinary_id = ordinary.id
+        if entrypoint == "legacy_task":
+            db.add(GraphMemory(user_id=managed.store.users["owner"], graph_data={}))
         await db.commit()
-        service_instance = MemoryService(db)
-        service_instance._queue_forgotten_points = AsyncMock(return_value=[])
-        service_instance.delete_forgotten_points = AsyncMock()
-        assert (
-            await service_instance.cleanup_old_working_memories(managed.store.users["owner"]) == 1
-        )
+        if entrypoint == "service":
+            service_instance = MemoryService(db)
+            service_instance._queue_forgotten_points = AsyncMock(return_value=[])
+            service_instance.delete_forgotten_points = AsyncMock()
+            assert (
+                await service_instance.cleanup_old_working_memories(managed.store.users["owner"])
+                == 1
+            )
+        else:
+            from tasks import neural_tasks
+
+            async def session_source():
+                yield db
+
+            monkeypatch.setattr(neural_tasks, "get_db", session_source)
+            monkeypatch.setattr(
+                MemoryService, "_queue_forgotten_points", AsyncMock(return_value=[])
+            )
+            monkeypatch.setattr(MemoryService, "delete_forgotten_points", AsyncMock())
+            monkeypatch.setenv("SLEEP_ENABLED", "false")
+            try:
+                result = await neural_tasks.consolidation_task()
+                assert result["deleted"] >= 1, result
+            finally:
+                await db.rollback()
+                await db.execute(
+                    delete(GraphMemory).where(GraphMemory.user_id == managed.store.users["owner"])
+                )
+                await db.commit()
     async with managed.factory() as db:
         assert await db.get(Memory, source_id) is not None
         assert await db.get(Memory, ordinary_id) is None
