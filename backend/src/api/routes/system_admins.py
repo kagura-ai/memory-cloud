@@ -8,7 +8,9 @@ Endpoints:
 - DELETE /api/v1/admin/system-admins/{user_id} - Demote system admin
 """
 
-from fastapi import APIRouter, Depends
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Path
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +29,9 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin/system-admins", tags=["system-admins"])
+
+# No stored id holds a NUL: such a value is a 422, never a statement.
+_NO_NUL = r"^[^\x00]*$"
 
 
 async def _get_user_stats(db: AsyncSession, user_id: str) -> int:
@@ -193,7 +198,7 @@ async def promote_to_system_admin(
 
 @router.delete("/{user_id}")
 async def demote_system_admin(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=_NO_NUL)],
     current_user: AdminUser,
     db: AsyncSession = Depends(get_db),
 ):

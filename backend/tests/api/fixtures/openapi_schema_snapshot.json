@@ -3732,6 +3732,50 @@
         ],
         "type": "object"
       },
+      "DeletedContextItem": {
+        "additionalProperties": false,
+        "properties": {
+          "context_id": {},
+          "created_by": {},
+          "deleted_at": {},
+          "deleted_by": {},
+          "deleted_memories": {},
+          "name": {},
+          "name_taken": {},
+          "resource_taken": {},
+          "workspace_id": {},
+          "workspace_name": {}
+        },
+        "required": [
+          "context_id",
+          "created_by",
+          "deleted_at",
+          "deleted_by",
+          "deleted_memories",
+          "name",
+          "name_taken",
+          "resource_taken",
+          "workspace_id",
+          "workspace_name"
+        ],
+        "type": "object"
+      },
+      "DeletedContextListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {},
+          "limit": {},
+          "offset": {},
+          "total": {}
+        },
+        "required": [
+          "items",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "type": "object"
+      },
       "DeviceAuthorizationResponse": {
         "properties": {
           "device_code": {},
@@ -4291,6 +4335,54 @@
         "required": [
           "calibrations",
           "knn_seed_override"
+        ],
+        "type": "object"
+      },
+      "EmbeddingFailureGroup": {
+        "additionalProperties": false,
+        "properties": {
+          "capped": {},
+          "configuration": {},
+          "context_id": {},
+          "context_name": {},
+          "erased": {},
+          "failed": {},
+          "newest_attempt_at": {},
+          "oldest_attempt_at": {},
+          "other": {},
+          "stalled": {},
+          "workspace_id": {},
+          "workspace_name": {}
+        },
+        "required": [
+          "capped",
+          "configuration",
+          "context_id",
+          "context_name",
+          "erased",
+          "failed",
+          "newest_attempt_at",
+          "oldest_attempt_at",
+          "other",
+          "stalled",
+          "workspace_id",
+          "workspace_name"
+        ],
+        "type": "object"
+      },
+      "EmbeddingFailureListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "groups": {},
+          "limit": {},
+          "offset": {},
+          "total": {}
+        },
+        "required": [
+          "groups",
+          "limit",
+          "offset",
+          "total"
         ],
         "type": "object"
       },
@@ -5245,6 +5337,52 @@
         "required": [
           "reason",
           "target_user_id"
+        ],
+        "type": "object"
+      },
+      "ForceTransferRequestItem": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {},
+          "decided_at": {},
+          "decided_by_user_id": {},
+          "initiated_by_email": {},
+          "initiated_by_user_id": {},
+          "ownership_epoch_at_initiation": {},
+          "reason": {},
+          "request_id": {},
+          "status": {},
+          "target_user_id": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "created_at",
+          "decided_at",
+          "decided_by_user_id",
+          "initiated_by_email",
+          "initiated_by_user_id",
+          "ownership_epoch_at_initiation",
+          "reason",
+          "request_id",
+          "status",
+          "target_user_id",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "ForceTransferRequestListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {},
+          "limit": {},
+          "offset": {},
+          "total": {}
+        },
+        "required": [
+          "items",
+          "limit",
+          "offset",
+          "total"
         ],
         "type": "object"
       },
@@ -16194,6 +16332,110 @@
         ]
       }
     },
+    "/api/v1/admin/contexts/deleted": {
+      "get": {
+        "operationId": "list_deleted_contexts_api_v1_admin_contexts_deleted_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "deleted_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedContextListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/contexts/recover": {
       "post": {
         "operationId": "recover_context_api_v1_admin_contexts_recover_post",
@@ -16380,6 +16622,90 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CostAggregationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/embedding/failures": {
+      "get": {
+        "operationId": "list_embedding_failures_api_v1_admin_embedding_failures_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "context_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbeddingFailureListResponse"
                 }
               }
             }
@@ -16621,6 +16947,95 @@
             }
           },
           "404": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/force-transfer-requests": {
+      "get": {
+        "operationId": "list_force_transfer_requests_api_v1_admin_force_transfer_requests_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "pending",
+                    "approved",
+                    "cancelled",
+                    "superseded"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 9223372036854775807,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForceTransferRequestListResponse"
+                }
+              }
+            }
+          },
           "422": {
             "content": {
               "application/json": {
@@ -18437,6 +18852,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }
@@ -18600,6 +19016,24 @@
                 {
                   "maxLength": 255,
                   "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -18778,6 +19212,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }

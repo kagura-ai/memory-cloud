@@ -553,7 +553,9 @@ configuration category. The first account created on an empty database gets
 (as in `session`), so a fresh `off` deployment gets its first user from that
 first sign-up, from `ALLOW_REGISTRATION=true`, an allowlisted identity, or a
 CLI-created account. Accounts that already have `role=admin` keep it (the
-initial and last admin cannot be demoted); a process started without the
+initial and last admin cannot be demoted: `PUT /admin/users/{id}/role` and
+`DELETE /admin/system-admins/{id}` both answer `403 ADMIN-001`, in every mode,
+and two demotions at once still leave one admin, #2828); a process started without the
 setting serves them the session surface again, which is why the mode must be
 set on every process. Batch beta invites stay CLI-only in every mode
 ([Dated beta invite batches](#dated-beta-invite-batches)).
@@ -3676,6 +3678,15 @@ another name). The restore is recorded in the audit log (`context_restore`),
 under the admin for the endpoint and under `--actor` for the command (default
 `cli:<OS user>`).
 
+To find the id, `GET /api/v1/admin/contexts/deleted` (#2833) lists the
+soft-deleted contexts of live workspaces, newest deletion first, with optional
+`workspace_id`, `created_by` and `deleted_by` filters. Each row has the
+context's id and name, its workspace, who created and deleted it,
+`deleted_memories` (the rows a restore still has; `0` after the purge) and
+two flags, `name_taken` and `resource_taken`: with both false the dry run
+answers `200`, with either true `409` (`name_taken` is solved with `new_name`).
+See [Deleted contexts](api-reference.md#deleted-contexts).
+
 **What comes back.** The context row, and the memories its deletion
 soft-deleted: they are live again and marked `pending`, and the embedding sweep
 rebuilds their vectors — about 2,400 memories an hour. Until a memory is
@@ -5928,13 +5939,13 @@ drain it.
 |---|---|---|
 | `embedding_pending` / `embedding_processing` | Memories waiting for, or in, their embedding | `sweep_pending_embeddings` |
 | `embedding_failed_retryable` | Failed embeddings with retries left | `sweep_pending_embeddings` |
-| `embedding_failed_stalled` | Failed embeddings with no retries left (not searchable) | people: `POST /api/v1/admin/embedding/retry-failed` |
+| `embedding_failed_stalled` | Failed embeddings with no retries left (not searchable) | people: `GET /api/v1/admin/embedding/failures` says which workspaces and contexts hold them and why (#2832), `POST /api/v1/admin/embedding/retry-failed` resets them |
 | `deferred_point_deletes` | Vector deletes waiting for their drain | `drain_deferred_point_deletes` |
 | `erasure_pending` | Account erasures awaiting the user's confirmation | people |
 | `erasure_cooling_off` / `erasure_cooling_off_due` | Erasures in their cooling-off period / past it | `sweep_pending_erasures` |
 | `erasure_in_progress` / `erasure_failed` | Erasures running / failed | `sweep_pending_erasures` / people |
 | `vector_erasure_jobs` | Vector payload erasures not yet complete | `sweep_pending_erasures` |
-| `force_transfer_requests_pending` | Ownership force transfers awaiting a second admin | people |
+| `force_transfer_requests_pending` | Ownership force transfers awaiting a second admin | people: `GET /api/v1/admin/force-transfer-requests?status=pending` lists them (#2846) |
 | `storage_object_deletions_due` | Stored objects due for deletion | `storage_object_deletion_sweeper` |
 | `file_reservations_expired` / `file_soft_deleted_due` | Abandoned upload reservations / deleted files past retention | `orphan_file_sweeper` / `soft_delete_file_gc` |
 | `files_awaiting_scan` / `files_unscanned` | Uploads due for their malware scan / files never scanned (listed while `FILE_SCAN_ENABLED` is on) | `file_scan_sweeper` |

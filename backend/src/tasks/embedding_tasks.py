@@ -42,22 +42,19 @@ async def _log_unsearchable_backlog(db) -> None:
     These intentionally unindexed rows are excluded from failed/stalled provider
     counts and cannot raise this diagnostic alone.
     """
-    from sqlalchemy import func, or_
+    from sqlalchemy import func
 
-    from config.constants import MAX_EMBEDDING_RETRIES
     from models.memory import Memory
+    from services.memory_service import embedding_failure_class_clauses
 
-    erased = Memory.embedding_suppressed_at.is_not(None)
-    capped = Memory.embedding_error.like("QUOTA-002:%")
-    configuration = or_(Memory.embedding_error.like("CFG-%"), Memory.embedding_error.like("FEAT-%"))
+    # One definition of the classes, shared with the admin read (#2832).
+    erased, capped, configuration, stalled = embedding_failure_class_clauses()
     try:
         row = (
             await db.execute(
                 select(
                     func.count().label("unsearchable"),
-                    func.count()
-                    .filter(Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES, ~erased)
-                    .label("stalled"),
+                    func.count().filter(stalled, ~erased).label("stalled"),
                     func.count().filter(capped, ~erased).label("capped"),
                     func.count().filter(configuration, ~erased).label("configuration"),
                     func.count().filter(erased).label("erased"),

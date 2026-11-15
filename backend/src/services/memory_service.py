@@ -10826,6 +10826,41 @@ def embedding_reclaim_eligible_clause(stale_cutoff: datetime):
     )
 
 
+class EmbeddingFailureClasses(NamedTuple):
+    """SQLAlchemy clauses that sort a ``failed`` embedding into its class."""
+
+    erased: ColumnElement[bool]
+    capped: ColumnElement[bool]
+    configuration: ColumnElement[bool]
+    stalled: ColumnElement[bool]
+
+
+def embedding_failure_class_clauses() -> EmbeddingFailureClasses:
+    """How a ``failed`` embedding is classified, in one place (#2015 D6, #2832).
+
+    Read by the sweep's unsearchable-backlog diagnostic and by
+    ``GET /api/v1/admin/embedding/failures``, so the two cannot count
+    different rows. ``erased`` is the durable suppression marker, whatever the
+    error text; ``capped`` and ``configuration`` read the error code that
+    ``embedding_failure_values`` puts first (``QUOTA-002``; ``CFG-*`` /
+    ``FEAT-*``), so a row failed before the prefix existed is neither;
+    ``stalled`` is a row nothing retries on its own
+    (``embedding_retry_count >= MAX_EMBEDDING_RETRIES``). A reader that
+    counts provider failures combines each of the last three with ``~erased``.
+    """
+    from config.constants import MAX_EMBEDDING_RETRIES
+    from models.memory import Memory
+
+    return EmbeddingFailureClasses(
+        erased=Memory.embedding_suppressed_at.is_not(None),
+        capped=Memory.embedding_error.like("QUOTA-002:%"),
+        configuration=or_(
+            Memory.embedding_error.like("CFG-%"), Memory.embedding_error.like("FEAT-%")
+        ),
+        stalled=Memory.embedding_retry_count >= MAX_EMBEDDING_RETRIES,
+    )
+
+
 def embedding_reclaim_exhausted_clause(stale_cutoff: datetime):
     """SQLAlchemy clause: a stale ``processing`` row with no retry budget left (#2095).
 

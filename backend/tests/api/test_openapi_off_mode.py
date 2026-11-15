@@ -43,11 +43,13 @@ ADMIN_OPERATIONS = {
 def test_off_document_has_no_admin_operation(mode):
     mode("off")
     schema = app.openapi()
-    # #2762: + the three mcp-notices routes; #2841: + the one-workspace read;
-    # #2842: + the sleep report actions page; #2845: + the calibration read;
-    # #2838: + the target-user Sleep run and merge undo; #2834, #2835, #2837:
-    # + two erasure-request reads, the audit log, the environment
-    assert len(ADMIN_OPERATIONS) == 67
+    # #2762: + the three mcp-notices routes. v0.165.0: #2841 the one-workspace
+    # read; #2842 the sleep report actions page; #2845 the calibration read;
+    # #2838 the target-user Sleep run and merge undo; #2834, #2835, #2837 two
+    # erasure-request reads, the audit log, the environment; #2833, #2832,
+    # #2846 the deleted-contexts, failed-embeddings and
+    # force-transfer-requests lists
+    assert len(ADMIN_OPERATIONS) == 70
     assert not ADMIN_OPERATIONS & _operations(schema)
     assert "/api/v1/admin/users" not in schema["paths"]
     # Everything else stays.

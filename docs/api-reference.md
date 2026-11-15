@@ -2266,13 +2266,15 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 
 `PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
 
+Two rules protect the accounts with `role=admin`, in every mode and on both routes that can take the role away (`PUT /api/v1/admin/users/{user_id}/role` with another role, and `DELETE /api/v1/admin/system-admins/{user_id}`) (#2828): the initial system administrator keeps the role, and so does the last remaining admin. Either answers `403 ADMIN-001` with the message naming the rule, changes nothing and writes no audit row. The check and the change are one transaction under a lock on the admin rows, so two demotions sent at once leave one admin: one succeeds, the other answers `403 ADMIN-001`. Promotion to `admin` and changes that take the admin role from nobody are not affected; a session admin still cannot change their own admin role. On both routes a `user_id` that holds a NUL character answers `422`.
+
 ### Users
 
 How each account was admitted (Issue #2803). Both routes answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/v1/admin/users` | The user list. Each row carries `admitted_via`. Two filters, combined with the existing `search`, `role`, `workspace_id` and `plan`: `admitted_via=<value>` (one of the values below; anything else is a `422`) and `invited_by=<user_id>` (1-255 characters: the accounts admitted by an invite that user minted). `total` counts the users that match every filter, so it gives the number of accounts per channel and per inviter. |
+| `GET /api/v1/admin/users` | The user list. Each row carries `admitted_via`. Two filters, combined with the existing `search`, `role`, `workspace_id` and `plan`: `admitted_via=<value>` (one of the values below; anything else is a `422`) and `invited_by=<user_id>` (1-255 characters: the accounts admitted by an invite that user minted). `total` counts the users that match every filter, so it gives the number of accounts per channel and per inviter. `user_id=<user_id>` (1-255 characters, no NUL character, #2843) finds one account by its own id: the match is exact and case-sensitive, nothing is trimmed, and it is ANDed with the other filters. The answer is the same list shape with at most one row and `total` 0 or 1; an id that is no account answers `200` with `{"users": [], "total": 0}`, not `404`. It reads the row, its memory count and its owned-workspace cap only (plus the live workspaces with `include_workspaces=true`), so it is the light way to put an address and a name beside a bare user id. |
 | `GET /api/v1/admin/users/{user_id}` | The user detail. `admission` = `{"via", "invite_issuer", "invite_id", "invited_by"}`. |
 
 `admitted_via` is written once, by the code that creates the account, and never rewritten:
@@ -2347,6 +2349,66 @@ A value outside these rules answers `422` (`VAL-001`); nothing is clamped. `tota
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/v1/admin/referrals` | The referral grants, newest first: `{"items", "total", "limit", "offset"}`. Filters, combined with AND: `referrer_user_id` (the grants a user earned by inviting others), `referred_user_id` (Issue #2836: the grant a user received; exact, and a user is referred at most once, so at most one row) and `include_revoked` (default `true`). `limit` 1 to 200 (default 50), `offset` from 0 (at most 2^63 - 1). A user id with a NUL, like any value outside these, answers `422`. The grant of an erased user is not found by `referred_user_id`. |
+
+### Deleted contexts
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/contexts/deleted` | The soft-deleted contexts a restore can be asked for (#2833): the contexts with a deletion time whose workspace is not deleted. Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
+
+Query: `workspace_id` (UUID), `created_by` and `deleted_by` (1-255 characters without a NUL character, exact match on the stored value; `deleted_by` is a user id or `system:capacity-purge`), ANDed; `limit` 1-500 (default 50) and `offset` from 0 to 2^63-1. A value outside these answers `422`. Order: `deleted_at` newest first, then `id`.
+
+Answer `{"items": [...], "total", "limit", "offset"}`; `total` counts the filtered rows. An item:
+
+| Field | Value |
+|-------|-------|
+| `context_id`, `name` | the context |
+| `workspace_id`, `workspace_name` | its workspace |
+| `created_by`, `deleted_by` | the stored ids, or null |
+| `deleted_at` | UTC time of the deletion |
+| `deleted_memories` | the context's soft-deleted memory rows still held: `memories_restored + memories_left_deleted` of the restore's dry run. `0` once the tombstone purge removed them: the context is still listed, and a restore brings it back empty |
+| `name_taken` | a live context of the workspace has this name: `POST /api/v1/admin/contexts/{context_id}/restore` answers `409` without `new_name` |
+| `resource_taken` | the context has a `resource_id` and a live context serves it: the restore answers `409` |
+
+With both flags false the restore's dry run answers `200`. The answer holds no description, summary or usage guide of the context, no memory text and no email address; a context of a deleted workspace is not listed, because the restore always refuses it. See [Restoring a deleted context](deployment.md#restoring-a-deleted-context--issue-1804).
+
+### Failed embeddings
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/embedding/failures` | Where failed embeddings are, per workspace and context, in counts (#2832). Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
+| `POST /api/v1/admin/embedding/retry-failed` | Reset failed embeddings to `pending` for a `workspace_id`, a `context_id` or both (at least one). Answers `reset_count`. |
+
+The read counts the rows the retry counts (`embedding_status = 'failed'`, not deleted), grouped by `workspace_id` and `context_id`; memories without a context are a group with `context_id: null`. Query: optional `workspace_id` and `context_id` (UUIDs), `limit` 1-500 (default 100), `offset` from 0 to 2^63-1; a value outside these answers `422`. Order: `failed` descending, then `workspace_id`, then `context_id`. Answer `{"total", "limit", "offset", "groups": [...]}`; `total` is the number of groups. A group:
+
+| Field | Value |
+|-------|-------|
+| `workspace_id`, `workspace_name` | the workspace; the name is null when it has no row |
+| `context_id`, `context_name` | the context, both null for memories without one |
+| `failed` | failed rows that are not an erased author's: what the retry resets without `include_erased` |
+| `stalled` | the part of `failed` with no retry left (`embedding_retry_count >= 3`): nothing retries it on its own, only the retry route starts it again |
+| `capped` | the part of `failed` refused by the embedding spend cap (`QUOTA-002`) |
+| `configuration` | the part of `failed` that failed on configuration (`CFG-*`, `FEAT-*`: no credential, no plan feature, an unreachable self-hosted endpoint). The sweep retries these without bound, so a reset changes nothing until the configuration does; the same holds for `capped` and the cap |
+| `other` | the rest of `failed` (a provider or input failure, and rows failed before the code prefix existed) |
+| `erased` | failed rows of an erased author, kept out of the queue. `failed + erased` is what the retry resets with `include_erased=true` |
+| `oldest_attempt_at`, `newest_attempt_at` | the earliest and latest embedding attempt among the group's rows, null when none has one |
+
+`failed = capped + configuration + other`. The answer holds no memory id, summary, content, tag, author id or stored error text: the error is answered as a class only. The deployment-wide totals are in [Operations status](#operations-status) (`embedding_failed_retryable`, `embedding_failed_stalled`).
+
+### Ownership force-transfer requests
+
+With `REQUIRE_DUAL_CONTROL_FORCE_TRANSFER` on, `POST /api/v1/admin/workspaces/{workspace_id}/force-transfer-ownership` files a `pending` request (`202` with its `request_id`) that a second, different system admin approves or cancels.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/force-transfer-requests` | The requests, newest first, then by `id` (#2846), so the approver finds the ones that wait without being given an id. Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
+| `GET /api/v1/admin/force-transfer-requests/{request_id}` | One request. |
+
+Query of the list: `status` (`pending`, `approved`, `cancelled` or `superseded`) and `workspace_id` (UUID), both optional and ANDed; `limit` 1-500 (default 50) and `offset` from 0 to 2^63-1. A value outside these answers `422`. Answer `{"items": [...], "total", "limit", "offset"}`; `total` counts the filtered rows, and for `status=pending` it is the `force_transfer_requests_pending` count of [Operations status](#operations-status).
+
+An item has the fields of the read by id and no other: `request_id`, `workspace_id`, `target_user_id`, `reason` (the initiating admin's text), `status`, `initiated_by_user_id`, `initiated_by_email` (as stored: `operator:<address>` in `service` mode; the four-eyes check compares it), `ownership_epoch_at_initiation`, `created_at`, `decided_by_user_id`, `decided_at`. The deciding admin's address is not answered, and no name or address is looked up for the workspace, its owner or the target user.
+
+The list reads the request table alone. A request whose workspace was deleted is still listed, and stays `pending`: approving, cancelling and filing a new request all need the live workspace. Filing a request for a workspace marks its pending one `superseded`, so `?status=pending&workspace_id=<id>` shows first whether one is waiting.
 
 ### Operations status
 
