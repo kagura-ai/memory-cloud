@@ -420,6 +420,92 @@ async def test_a_report_closed_before_its_job_starts_is_not_run(maker, world, jo
     assert (after.status, after.started_at) == ("failed", before.started_at)
 
 
+@pytest.fixture
+def finishing_phases(monkeypatch) -> SimpleNamespace:
+    """The orchestrator, replaced: a run ends at once, completed or raising."""
+    state = SimpleNamespace(outcome="completed", runs=[])
+
+    class FakeOrchestrator:
+        def __init__(self, db: AsyncSession) -> None:
+            self.db = db
+
+        async def run(self, user_id, workspace_id, context_id, *, report) -> None:
+            state.runs.append(report.id)
+            report.consolidation_result = {"merged": 1}
+            await self.db.flush()
+            if state.outcome == "failed":
+                raise RuntimeError("phase failed")
+            report.status = "completed"
+            report.completed_at = utcnow()
+
+        async def delete_committed_points(self) -> None:
+            return None
+
+    monkeypatch.setattr(admin_sleep, "SleepOrchestrator", FakeOrchestrator)
+    return state
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+@pytest.mark.parametrize("route", ROUTES)
+async def test_a_queued_report_stays_live_between_two_jobs_of_an_old_batch(
+    maker, world, job_sessions, finishing_phases, route, outcome
+):
+    """Another process's guard, between two jobs of a batch created longer
+    ago than the bound, answers 409 and closes nothing (#2856).
+
+    The batch's reports are not in this test's live set (as on another
+    worker), and no job holds a row in the gap: only the queued report's
+    ``started_at``, set by the commit that released the first job's row,
+    keeps it live.
+    """
+    user_id = world.runner[route]
+    first = await _add_report(maker, world, user_id, age=STALE)
+    queued = await _add_report(maker, world, user_id, age=STALE)
+    finishing_phases.outcome = outcome
+    job_start = utcnow()
+
+    async with asyncio.timeout(WAIT_SECONDS):
+        await admin_sleep._run_sleep_job(
+            first, user_id, str(world.ws), str(world.ctx), queued=[queued]
+        )
+
+    rows = await _reports(maker, user_id)
+    assert rows[first].status == outcome
+    assert rows[queued].status == "running"
+    assert rows[queued].started_at >= job_start
+    assert not {first, queued} & admin_sleep._LIVE_REPORT_IDS
+
+    async with _client(maker, world.principal) as client:
+        response = await _post(client, world, route)
+
+    assert response.status_code == 409, response.text
+    assert response.json() == _conflict(rows[queued])
+    after = await _reports(maker, user_id)
+    assert set(after) == {first, queued}
+    assert after[queued].status == "running" and after[queued].error_message is None
+    assert finishing_phases.runs == [first]
+
+
+async def test_a_failed_run_is_closed_by_the_transaction_that_held_its_row(
+    maker, world, job_sessions, finishing_phases
+):
+    """The phases run in a savepoint: the failure is written before the row is
+    released, so the report keeps its claim time and the phases' writes are gone."""
+    report_id = await _add_report(maker, world, world.target, age=STALE)
+    finishing_phases.outcome = "failed"
+    job_start = utcnow()
+
+    async with asyncio.timeout(WAIT_SECONDS):
+        await admin_sleep._run_sleep_job(report_id, world.target, str(world.ws), str(world.ctx))
+
+    after = (await _reports(maker, world.target))[report_id]
+    assert after.status == "failed"
+    assert after.error_message == "phase failed"
+    assert after.completed_at is not None
+    assert after.started_at >= job_start
+    assert after.consolidation_result is None
+
+
 async def _wait_for_a_lock_wait(maker) -> None:
     """Return once some session of this database waits on a lock."""
     async with asyncio.timeout(WAIT_SECONDS):

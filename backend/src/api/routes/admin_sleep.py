@@ -15,6 +15,7 @@ an ``audit_logs`` row naming the caller.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from contextlib import aclosing
 from datetime import timedelta
 from typing import Annotated, Any
@@ -22,7 +23,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, status
 from pydantic import BaseModel
-from sqlalchemy import Select, select, text
+from sqlalchemy import Select, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
@@ -54,9 +55,13 @@ SLEEP_RUN_TRIGGER_AUDIT_ACTION = "sleep_run_trigger"
 
 # #2856: a ``running`` report that no transaction holds, that no batch of this
 # process runs and that was started longer ago than this is a run whose
-# process stopped. It only has to exceed the time a live batch leaves a report
-# unlocked: from its creation to its job's first statement, and between two
-# jobs of a batch.
+# process stopped. A live batch always has a report the guard of every
+# process counts as live: the row of the job that runs (held from its claim
+# to the commit that ends it), and, from that same commit on, the reports
+# still queued, whose ``started_at`` the commit sets to its own time. So the
+# bound only has to exceed the gap from a report's creation to its job's
+# first statement, and the gap between two jobs (the point deletes after a
+# commit, bounded, and the next session's connection), both seconds.
 SLEEP_RUN_STALE_AFTER = timedelta(minutes=15)
 # The ``error_message`` of a report whose run was interrupted (#2856).
 SLEEP_RUN_INTERRUPTED = "interrupted: the process running this sleep run stopped before it ended"
@@ -108,6 +113,8 @@ async def _run_sleep_job(
     user_id: str,
     workspace_id: str,
     context_id: str,
+    *,
+    queued: Sequence[UUID] = (),
 ) -> None:
     """Execute sleep phases against a pre-created report.
 
@@ -118,6 +125,10 @@ async def _run_sleep_job(
     The first statement locks the report row (``FOR NO KEY UPDATE``), and the
     run's one transaction holds it to the end: a held row is how the run
     guard of every process tells a live run from an interrupted one (#2856).
+    The phases run in a savepoint, so a run that raises is marked ``failed``
+    in that same transaction, and the commit that releases the row also sets
+    ``started_at`` of the batch's ``queued`` reports to now: at no instant is
+    the row released while the queued reports still carry an older time.
     A report that is no longer ``running`` (a guard closed it) is not run.
     A cancelled job rolls its session back, which releases the row, and
     re-raises; ``_run_sleep_batch`` closes its report.
@@ -156,12 +167,31 @@ async def _run_sleep_job(
             await db.flush()
 
             orchestrator = SleepOrchestrator(db)
-            await orchestrator.run(
-                user_id,
-                workspace_id,
-                context_id,
-                report=report,
-            )
+            phases = await db.begin_nested()
+            try:
+                await orchestrator.run(
+                    user_id,
+                    workspace_id,
+                    context_id,
+                    report=report,
+                )
+            except Exception as e:
+                logger.error(
+                    "manual_sleep_run_failed",
+                    report_id=str(report_id),
+                    user_id=user_id,
+                    context_id=context_id,
+                    error=str(e),
+                    exc_info=True,
+                )
+                await phases.rollback()
+                await db.refresh(report)
+                await SleepReporter(db).fail_report(report, str(e))
+                await _refresh_queued_reports(db, queued)
+                await db.commit()
+                return
+            await phases.commit()
+            await _refresh_queued_reports(db, queued)
             await db.commit()
             # #2565: the archived / merged rows' points, now that the
             # tombstones are committed. Never raises.
@@ -178,6 +208,8 @@ async def _run_sleep_job(
             await _release_cancelled_session(db, report_id)
             raise
         except Exception as e:
+            # The job's transaction itself failed (its commit, or the
+            # savepoint's rollback): close the report in a new one.
             await db.rollback()
             logger.error(
                 "manual_sleep_run_failed",
@@ -192,6 +224,7 @@ async def _run_sleep_job(
                 if report is not None and report.status == "running":
                     reporter = SleepReporter(db)
                     await reporter.fail_report(report, str(e))
+                    await _refresh_queued_reports(db, queued)
                     await db.commit()
             except Exception:
                 await db.rollback()
@@ -201,6 +234,23 @@ async def _run_sleep_job(
                     exc_info=True,
                 )
         return
+
+
+async def _refresh_queued_reports(db: AsyncSession, queued: Sequence[UUID]) -> None:
+    """Set ``started_at`` of a batch's still-queued reports to now, in ``db``'s transaction (#2856).
+
+    Called just before the commit that releases the running job's row, so
+    the queued reports are fresh for the run guard from that instant on. A
+    report a guard already closed is left as it is.
+    """
+    if not queued:
+        return
+    await db.execute(
+        update(SleepReport)
+        .where(SleepReport.id.in_(queued), SleepReport.status == "running")
+        .values(started_at=utcnow())
+        .execution_options(synchronize_session=False)
+    )
 
 
 def _held_running_reports(*conditions: Any) -> Select[SleepReport]:
@@ -300,8 +350,9 @@ async def _run_sleep_batch(
     """
     pending = [report_id for report_id, _, _ in jobs]
     try:
-        for report_id, workspace_id, context_id in jobs:
-            await _run_sleep_job(report_id, user_id, workspace_id, context_id)
+        for index, (report_id, workspace_id, context_id) in enumerate(jobs):
+            queued = [queued_id for queued_id, _, _ in jobs[index + 1 :]]
+            await _run_sleep_job(report_id, user_id, workspace_id, context_id, queued=queued)
             pending.remove(report_id)
     finally:
         if pending:
@@ -367,8 +418,9 @@ async def _raise_if_sleep_running(db: AsyncSession, user_id: str) -> None:
 
     #2856: a ``running`` report is live while another transaction holds its
     row (a job holds it from its first statement to its end), while a batch
-    of this process runs it, or for ``SLEEP_RUN_STALE_AFTER`` after it was
-    started. A report that is none of these was left by a process that
+    of this process runs it, or for ``SLEEP_RUN_STALE_AFTER`` after its
+    ``started_at`` (a queued report's is moved to each commit of a job of its
+    batch, ``_run_sleep_job``). A report that is none of these was left by a process that
     stopped: the guard marks it ``failed`` (``SLEEP_RUN_INTERRUPTED``) in the
     caller's transaction, whose commit also creates the new report, so a user
     never has two ``running`` reports. The rows it closes stay locked by that
