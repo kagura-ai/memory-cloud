@@ -1337,7 +1337,7 @@ The response, and each row of `GET /api/v1/workspace-connectors`, carries `unrou
 ### Anonymous access (no Authorization header)
 
 ```bash
-curl -X POST https://memory.kagura-ai.com/api/v1/public/CTX_UUID/search \
+curl -X POST https://memory.example.com/api/v1/public/CTX_UUID/search \
   -H "Content-Type: application/json" \
   -d '{"query": "What is Hebbian learning", "limit": 3}'
 ```
@@ -1349,7 +1349,7 @@ When the operator enables the public usage budget (`MCP_PUBLIC_USAGE_BUDGET_ENAB
 ### Attributed access (with public-bound API key)
 
 ```bash
-curl -X POST https://memory.kagura-ai.com/api/v1/public/CTX_UUID/search \
+curl -X POST https://memory.example.com/api/v1/public/CTX_UUID/search \
   -H "Authorization: Bearer kagura_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{"query": "What is Hebbian learning", "limit": 3}'
