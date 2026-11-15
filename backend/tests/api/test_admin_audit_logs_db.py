@@ -668,6 +668,35 @@ async def test_from_is_inclusive_and_to_exclusive_in_any_zone(world: World) -> N
     assert response.json()["entries"][0]["created_at"] == "2097-05-01T00:00:02Z"
 
 
+async def test_a_value_the_database_would_refuse_is_422_and_the_bounds_are_answered(
+    world: World,
+) -> None:
+    actor = "local:" + _token()
+    row_id = await world.seed("signup_blocked", user_id=actor)
+    for params in (
+        {"user_id": actor + "\x00"},
+        {"user_id": actor, "user_email": "oauth-callback\x00"},
+        {"user_id": actor, "resource": "\x00"},
+        {"user_id": actor, "before_id": 2147483648},
+        {"user_id": actor, "from": "0001-01-01T00:00:00+14:00"},
+        {"user_id": actor, "to": "9999-12-31T23:59:59-12:00"},
+    ):
+        refused = await world.get(params=params)
+        assert refused.status_code == 422, params
+        assert refused.json()["error"] == "VAL-001"
+        assert actor not in refused.text
+    # the bounds themselves reach the database and are answered
+    for params in (
+        {"before_id": 2147483647},
+        {"from": "0001-01-01T00:00:00Z", "to": "9999-12-31T23:59:59.999999Z"},
+        {"from": "0001-01-01T09:00:00+09:00"},
+    ):
+        answered = await world.get(params={"user_id": actor, **params})
+        assert answered.status_code == 200, params
+        assert [entry["id"] for entry in answered.json()["entries"]] == [row_id], params
+    world.assert_no_token(answered)
+
+
 async def test_the_read_writes_no_audit_row(world: World) -> None:
     await world.seed("signup_blocked")
 

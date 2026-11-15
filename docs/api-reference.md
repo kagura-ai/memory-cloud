@@ -2318,7 +2318,7 @@ Issue #2834. Read-only: where an account erasure stands after it was requested. 
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/v1/admin/erasure-requests` | A page of requests, newest `requested_at` first, then by `request_id`: `{"items", "total", "limit", "offset"}`. Filters, combined with AND: `status` (`pending`, `cooling_off`, `in_progress`, `complete`, `failed` or `cancelled`), `user_id` (1-255 characters, compared exactly with the stored value) and `is_self_service` (`true` / `false`). `limit` 1-200 (default 50), `offset` from 0. A value outside these is a `422`. `total` counts the requests that match the filters. |
+| `GET /api/v1/admin/erasure-requests` | A page of requests, newest `requested_at` first, then by `request_id`: `{"items", "total", "limit", "offset"}`. Filters, combined with AND: `status` (`pending`, `cooling_off`, `in_progress`, `complete`, `failed` or `cancelled`), `user_id` (1-255 characters without a NUL, compared exactly with the stored value) and `is_self_service` (`true` / `false`). `limit` 1-200 (default 50), `offset` from 0 (at most 2^63 - 1). A value outside these is a `422`. `total` counts the requests that match the filters. |
 | `GET /api/v1/admin/erasure-requests/{request_id}` | One request, with the same fields. `404 RES-001` for an unknown id, `422` for an id that is not a UUID. |
 
 A request:
@@ -2347,10 +2347,10 @@ Query parameters, all optional and combined with AND. A value outside these rule
 | Parameter | Meaning |
 |-----------|---------|
 | `action` | Repeatable. Each value must be one of the actions listed below. Without it the route returns every listed action. |
-| `user_id`, `user_email`, `resource` | 1-255 characters, compared exactly with the stored value (no trimming, no case folding, no wildcard). |
-| `from`, `to` | Bounds on `created_at`: `from` inclusive, `to` exclusive. ISO 8601 with a zone (`2026-11-15T09:00:00Z`; percent-encode the `+` of an offset as `%2B`). A value without a zone, and `from` later than `to`, are refused. |
+| `user_id`, `user_email`, `resource` | 1-255 characters without a NUL, compared exactly with the stored value (no trimming, no case folding, no wildcard). |
+| `from`, `to` | Bounds on `created_at`: `from` inclusive, `to` exclusive. ISO 8601 with a zone (`2026-11-15T09:00:00Z`; percent-encode the `+` of an offset as `%2B`). A value without a zone, a time whose UTC value is outside the years 1 to 9999, and `from` later than `to`, are refused. |
 | `limit` | 1 to 100 (default 50). |
-| `before_id` | Cursor, 1 or more: rows with a smaller `id`. Pass the previous answer's `next_before_id`; it is `null` on the last page. |
+| `before_id` | Cursor, 1 to 2147483647: rows with a smaller `id`. Pass the previous answer's `next_before_id`; it is `null` on the last page. |
 
 An entry: `{"id", "created_at", "action", "user_id", "user_email", "resource", "old_value", "new_value", "metadata"}`. `created_at` is UTC with its zone. `user_id`, `user_email` and `resource` are answered as stored, so after an account erasure a row shows what the erasure left (pseudonyms). In `service` mode a writer stores the actor as `operator:<address>`. What the three columns mean depends on the action:
 

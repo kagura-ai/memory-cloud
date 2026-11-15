@@ -473,14 +473,32 @@ def test_service_operator_is_answered_without_a_users_lookup(client, mode, sessi
         "limit=201",
         "limit=abc",
         "offset=-1",
+        # past what the database takes as an OFFSET
+        "offset=9223372036854775808",
+        "offset=99999999999999999999",
         "user_id=",
         "user_id=" + "a" * 256,
+        # a NUL is in no stored value and is refused before the statement
+        "user_id=local:a%00b",
+        "user_id=%00",
         "is_self_service=maybe",
     ],
+    ids=lambda q: q[:40],
 )
 def test_a_bad_query_value_is_422(admin, session, query) -> None:
     response = admin.get(f"{URL}?{query}")
     assert response.status_code == 422, response.text
+    assert response.json()["error"] == "VAL-001"
+    assert session.statements == []
+
+
+def test_a_refused_filter_value_is_not_echoed_or_logged(admin, session) -> None:
+    address = _token() + "@example.com"
+    with capture_logs() as logs:
+        response = admin.get(f"{URL}?user_id={address}%00&offset=9223372036854775808")
+    assert response.status_code == 422, response.text
+    assert address not in response.text
+    assert address not in repr(logs)
     assert session.statements == []
 
 
@@ -498,6 +516,10 @@ def test_the_limits_at_their_bounds_are_accepted(admin) -> None:
     assert (body["limit"], body["offset"]) == (200, 7)
     default = admin.get(URL).json()
     assert (default["limit"], default["offset"]) == (50, 0)
+    assert admin.get(f"{URL}?offset=9223372036854775807").status_code == 200
+    assert admin.get(f"{URL}?user_id={'a' * 255}").status_code == 200
+    # a stored id may hold any other character: a line break, a percent sign, a space
+    assert admin.get(f"{URL}?user_id=a%0Ab%25%20c").status_code == 200
 
 
 def test_an_id_that_is_not_a_uuid_is_422(admin, session) -> None:
@@ -597,6 +619,9 @@ def test_the_statements_select_named_columns_of_one_table(admin, session) -> Non
             "deleted_data_summary",
         }
         assert not names & NEVER_SELECTED
+    # the read by id asks for that id and nothing else
+    where = _sql(one).split("WHERE")[1]
+    assert where.split() == ["erasure_requests.id", "=", f"'{session.rows[0].id}'"]
     for statement in session.statements:
         for name in NEVER_SELECTED:
             assert name not in _sql(statement)

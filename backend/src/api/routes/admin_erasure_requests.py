@@ -49,6 +49,11 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 _RETRY_KEY = "retry"
 
+# What the database takes: no stored text holds a NUL, and an OFFSET is a
+# 64-bit integer. A value outside these is a 422, never a statement.
+_NO_NUL = r"^[^\x00]*$"
+_MAX_OFFSET = 2**63 - 1
+
 
 class ErasureRetry(TZAwareBaseModel):
     """The retry block of a request that was rescheduled or re-queued."""
@@ -195,6 +200,7 @@ async def list_erasure_requests(
         default=None,
         min_length=1,
         max_length=255,
+        pattern=_NO_NUL,
         description=(
             "Exact match on the stored `user_id`: the subject's id, or its pseudonym "
             "once the request completed."
@@ -202,7 +208,7 @@ async def list_erasure_requests(
     ),
     is_self_service: bool | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
     db: AsyncSession = Depends(get_db),
 ) -> ErasureRequestListResponse:
     """A page of erasure requests, newest request first (then by id).

@@ -250,6 +250,10 @@ def _sql(statement: Any) -> str:
     )
 
 
+def _sql_of(clause: Any) -> str:
+    return str(clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+
 def _where(statement: Any) -> str:
     return _sql(statement).split("WHERE")[1].split("ORDER BY")[0]
 
@@ -479,12 +483,23 @@ def test_service_operator_is_answered_without_a_users_lookup(client, mode, sessi
         "before_id=0",
         "before_id=-5",
         "before_id=abc",
+        # past the largest id the column holds
+        "before_id=2147483648",
+        "before_id=99999999999999999999",
         "user_id=",
         "user_id=" + "a" * 256,
         "user_email=",
         "user_email=" + "a" * 256,
         "resource=",
         "resource=" + "a" * 256,
+        # a NUL is in no stored value and is refused before the statement
+        "user_id=local:a%00b",
+        "user_email=a%00@example.com",
+        "resource=user:a%00",
+        # a time with no UTC value inside the calendar
+        "from=0001-01-01T00:00:00%2B14:00",
+        "to=9999-12-31T23:59:59-12:00",
+        "from=0001-01-01T00:00:00%2B00:01&to=2026-11-15T09:00:00Z",
         "from=2026-11-15T09:00:00",
         "from=2026-11-15",
         "from=1763197200",
@@ -513,7 +528,69 @@ def test_a_refused_value_is_not_echoed(admin) -> None:
         assert token not in response.text
 
 
+def test_a_refused_request_logs_no_filter_value(admin, session) -> None:
+    """A filter value beside a refused parameter reaches neither the statement nor a log line."""
+    actor, address, resource = "local:" + _token(), _token() + "@example.com", "user:" + _token()
+    filters = f"user_id={actor}&user_email={address}&resource={resource}"
+    for bad in (
+        "before_id=2147483648",
+        "from=0001-01-01T00:00:00%2B14:00",
+        "to=9999-12-31T23:59:59-12:00",
+        "from=2026-11-15T09:00:01Z&to=2026-11-15T09:00:00Z",
+        "limit=101",
+        "action=role_assign",
+    ):
+        with capture_logs() as logs:
+            response = admin.get(f"{URL}?{filters}&{bad}")
+        assert response.status_code == 422, bad
+        for value in (actor, address, resource):
+            assert value not in response.text, bad
+            assert value not in repr(logs), bad
+    with capture_logs() as logs:
+        response = admin.get(f"{URL}?user_email={address}%00")
+    assert response.status_code == 422
+    assert address not in response.text and address not in repr(logs)
+    assert session.statements == []
+
+
+def test_the_action_predicate_never_names_an_action_outside_the_allow_list() -> None:
+    """D2: the predicate is built in one place and holds the allow-list whatever it is handed."""
+    from api.routes.admin_audit_logs import _action_predicate
+
+    assert _in_list(_sql_of(_action_predicate(None))) == LISTED
+    mixed = _action_predicate(["signup_blocked", "terms.accepted", "role_assign"])
+    assert _in_list(_sql_of(mixed)) == {"signup_blocked"}
+    # only unlisted actions: a predicate that matches no row, never an absent one
+    nothing = _sql_of(_action_predicate(["terms.accepted"]))
+    assert "audit_logs.action IN" in nothing
+    assert "terms.accepted" not in nothing
+    for action in LISTED:
+        assert f"'{action}'" not in nothing
+
+
+def test_every_listed_action_is_one_a_writer_stores() -> None:
+    """The allow-list names actions the code writes: a renamed action turns this red."""
+    from pathlib import Path
+
+    import api.routes.admin_audit_logs as module
+
+    src = Path(module.__file__).resolve().parents[2]
+    sources = [
+        path.read_text(encoding="utf-8")
+        for path in sorted(src.rglob("*.py"))
+        if path != Path(module.__file__).resolve()
+    ]
+    for action in sorted(LISTED):
+        assert any(f'"{action}"' in text for text in sources), action
+
+
 def test_the_limits_at_their_bounds_are_accepted(admin, session) -> None:
+    assert admin.get(f"{URL}?before_id=2147483647").status_code == 200
+    extremes = "from=0001-01-01T00:00:00Z&to=9999-12-31T23:59:59.999999Z"
+    assert admin.get(f"{URL}?{extremes}").status_code == 200
+    # a stored value may hold any other character: a line break, a percent sign, a space
+    assert admin.get(f"{URL}?user_id=a%0Ab%25%20c").status_code == 200
+    session.statements.clear()
     assert admin.get(f"{URL}?limit=1&before_id=1").status_code == 200
     assert admin.get(f"{URL}?limit=100").status_code == 200
     assert admin.get(f"{URL}?user_id={'a' * 255}").status_code == 200

@@ -406,6 +406,30 @@ async def test_an_unknown_id_is_404_and_a_bad_one_422(world: World) -> None:
     assert (await world.get("?status=unknown")).status_code == 422
 
 
+async def test_a_value_the_database_would_refuse_is_422_and_the_bounds_are_answered(
+    world: World,
+) -> None:
+    row = await world.seed("pending")
+    for query in (
+        f"?user_id={row['user_id']}%00",
+        "?user_id=%00",
+        "?offset=9223372036854775808",
+    ):
+        refused = await world.get(query)
+        assert refused.status_code == 422, query
+        assert refused.json()["error"] == "VAL-001"
+        assert row["user_id"] not in refused.text
+    # the largest offset, and an id with characters a LIKE would read as wildcards
+    last = await world.get("?offset=9223372036854775807")
+    assert last.status_code == 200, last.text
+    assert last.json()["items"] == []
+    assert last.json()["total"] == await _count(world)
+    for value in ("%25", "_", row["user_id"][:-1] + "_", row["user_id"][:-1] + "%25"):
+        answered = await world.get(f"?user_id={value}")
+        assert answered.status_code == 200, value
+        assert answered.json()["total"] == 0, value
+
+
 async def test_an_operator_reads_in_service_mode(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:

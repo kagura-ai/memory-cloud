@@ -142,6 +142,11 @@ _PLANS_KEY = "plans"
 _INVITATIONS_KEY = "invitations"
 _INVITATION_KEYS = ("id", "workspace_id", "invited_by")
 
+# What the database takes: no stored text holds a NUL, and ``audit_logs.id``
+# is a 32-bit integer. A value outside these is a 422, never a statement.
+_NO_NUL = r"^[^\x00]*$"
+_MAX_ID = 2**31 - 1
+
 
 class AuditLogEntry(TZAwareBaseModel):
     """One audit row."""
@@ -218,12 +223,20 @@ def _action_predicate(asked: Collection[str] | None) -> ColumnElement[bool]:
 
 
 def _iso_8601(value: Any) -> Any:
-    """Read a query value as an ISO 8601 date and time (the zone is checked by the type)."""
+    """Read a query value as an ISO 8601 date and time (the zone is checked by the type).
+
+    A time whose UTC value falls outside the calendar (year 1 with a positive
+    offset, year 9999 with a negative one) is refused here: ``created_at`` is
+    compared in UTC.
+    """
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value)
-        except ValueError:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is not None:
+                parsed.astimezone(UTC)
+        except (ValueError, OverflowError):
             raise ValueError("an ISO 8601 date and time with a zone is required") from None
+        return parsed
     return value
 
 
@@ -286,13 +299,25 @@ async def list_audit_logs(
         default=None, description="Repeatable. Only the listed actions; another value is a 422."
     ),
     user_id: str | None = Query(
-        default=None, min_length=1, max_length=255, description="Exact match on the stored value."
+        default=None,
+        min_length=1,
+        max_length=255,
+        pattern=_NO_NUL,
+        description="Exact match on the stored value.",
     ),
     user_email: str | None = Query(
-        default=None, min_length=1, max_length=255, description="Exact match on the stored value."
+        default=None,
+        min_length=1,
+        max_length=255,
+        pattern=_NO_NUL,
+        description="Exact match on the stored value.",
     ),
     resource: str | None = Query(
-        default=None, min_length=1, max_length=255, description="Exact match on the stored value."
+        default=None,
+        min_length=1,
+        max_length=255,
+        pattern=_NO_NUL,
+        description="Exact match on the stored value.",
     ),
     from_: ZonedDatetime | None = Query(
         default=None,
@@ -304,7 +329,7 @@ async def list_audit_logs(
     ),
     limit: int = Query(default=50, ge=1, le=100),
     before_id: int | None = Query(
-        default=None, ge=1, description="Cursor: rows with a smaller `id`."
+        default=None, ge=1, le=_MAX_ID, description="Cursor: rows with a smaller `id`."
     ),
     db: AsyncSession = Depends(get_db),
 ) -> AuditLogListResponse:
