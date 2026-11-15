@@ -1136,7 +1136,7 @@ class UserDeleteRequest(BaseModel):
 
 @router.delete("/users/{user_id}")
 async def delete_user(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     admin: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     request: UserDeleteRequest | None = None,
@@ -1295,12 +1295,13 @@ class AdminErasureRequestBody(BaseModel):
     """
 
     reason_code: AdminErasureReasonCode
-    reason_detail: str | None = None
+    # #2857: a NUL answers 422 (no stored text holds one).
+    reason_detail: Annotated[str | None, Field(pattern=NO_NUL_PATTERN)] = None
 
 
 @router.post("/users/{user_id}/erase")
 async def admin_force_erase_user(
-    user_id: str,
+    user_id: Annotated[str, Path(pattern=NO_NUL_PATTERN)],
     body: AdminErasureRequestBody,
     request: Request,
     admin: dict = Depends(require_admin),

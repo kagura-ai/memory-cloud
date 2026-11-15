@@ -472,6 +472,7 @@
           "reason_detail": {
             "anyOf": [
               {
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -19408,6 +19409,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }
@@ -19494,6 +19496,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }
