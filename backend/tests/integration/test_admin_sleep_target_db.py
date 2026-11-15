@@ -46,7 +46,8 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.main import memory_cloud_exception_handler
@@ -54,7 +55,13 @@ from api.routes import admin_sleep
 from auth.dependencies import require_admin
 from auth.system_admin_mode import build_operator_principal
 from db.base import get_db
-from models.auth import AuditLog, Context, User, Workspace
+from models.auth import (
+    ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
+    AuditLog,
+    Context,
+    User,
+    Workspace,
+)
 from models.memory import (
     DELETED_BY_SLEEP_MERGE,
     EDGE_ORIGIN_SEMANTIC,
@@ -64,6 +71,7 @@ from models.memory import (
 )
 from models.operation_history import OperationHistory
 from models.sleep import SleepAction, SleepReport
+from services.capacity_lock import capacity_lock_state
 from utils.datetime import utcnow
 from utils.exceptions import MemoryCloudException
 
@@ -725,3 +733,188 @@ async def test_the_own_account_run_still_runs_for_the_caller_and_writes_no_audit
     assert report.context_id == own_context_id
     await asyncio.sleep(0)
     assert jobs[0][1] == world.admin
+
+
+async def test_the_own_account_routes_refuse_an_operator_and_write_nothing(
+    maker, world, jobs, no_vector_store
+):
+    async with _client(maker, OPERATOR) as client:
+        run = await client.post(
+            "/api/v1/admin/sleep/run", json={"context_id": str(world.contexts["ok"])}
+        )
+        undo = await client.post(f"/api/v1/admin/sleep/actions/{world.actions['merge']}/undo-merge")
+
+    assert (run.status_code, undo.status_code) == (403, 403)
+    assert run.json()["error"] == undo.json()["error"] == "SYSADMIN-004"
+    no_vector_store.assert_not_awaited()
+    async with maker() as check:
+        assert (await _memory(check, world.memories["loser"])).deleted_at is not None
+        assert await _undo_actions(check, world.reports["target"]) == []
+        for action in AUDIT_ACTIONS:
+            assert await _audit_rows(check, action) == []
+        running = await check.scalar(
+            select(func.count()).select_from(SleepReport).where(SleepReport.status == "running")
+        )
+    assert running == 0
+    await asyncio.sleep(0)
+    assert jobs == []
+
+
+# ------------------------------------------- one commit, on the real rows
+
+
+def _unwritable_actor(world) -> dict:
+    """A session admin whose address does not fit ``audit_logs.user_email``:
+    the audit row's INSERT fails, and with it the commit it belongs to."""
+    return {"user_id": world.admin, "email": f"{'a' * 300}@test.example", "role": "admin"}
+
+
+async def test_a_run_whose_audit_row_cannot_be_written_commits_no_report(maker, world, jobs):
+    """The report and its audit row share one commit: no report without the row."""
+    async with _client(maker, _unwritable_actor(world)) as client:
+        with pytest.raises(DBAPIError):
+            await client.post(
+                _run_url(world.target), json={"context_id": str(world.contexts["ok"])}
+            )
+
+    async with maker() as check:
+        assert await _reports_of(check, world.target) == []
+        assert await _audit_rows(check, "sleep_run_trigger") == []
+    await asyncio.sleep(0)
+    assert jobs == []
+
+
+@pytest.mark.parametrize("path", ["tombstone", "shadow"])
+async def test_an_undo_whose_audit_row_cannot_be_written_restores_nothing(
+    maker, world, no_vector_store, path
+):
+    """The restore and its audit row share one commit, on both success paths."""
+    action_id = world.actions["merge" if path == "tombstone" else "shadow"]
+    async with _client(maker, _unwritable_actor(world)) as client:
+        with pytest.raises(DBAPIError):
+            await client.post(_undo_url(world.reports["target"], action_id))
+
+    async with maker() as check:
+        loser = await _memory(check, world.memories["loser"])
+        edges = await check.scalar(
+            select(func.count())
+            .select_from(NeuralMemoryEdge)
+            .where(
+                NeuralMemoryEdge.src_id == world.memories["shadow_winner"],
+                NeuralMemoryEdge.dst_id == world.memories["shadow_loser"],
+            )
+        )
+        assert await _undo_actions(check, world.reports["target"]) == []
+        assert await _audit_rows(check, "sleep_merge_undo") == []
+        history = await check.scalar(
+            select(func.count())
+            .select_from(OperationHistory)
+            .where(OperationHistory.workspace_id == world.ws)
+        )
+    # Still merged away, and the shadow edge still there.
+    assert loser.deleted_at is not None and loser.deleted_by == DELETED_BY_SLEEP_MERGE
+    assert edges == 1
+    assert history == 0
+
+
+@pytest.mark.parametrize(
+    ("case", "status", "code"),
+    [("not_merge_deleted", 409, "not_merge_deleted"), ("purged", 410, "memory_purged")],
+)
+async def test_a_refused_undo_writes_no_audit_row_and_restores_nothing(
+    maker, world, no_vector_store, db_session: AsyncSession, case, status, code
+):
+    # A merge whose loser was deleted by something else, or is gone.
+    loser_id = world.memories["dead"] if case == "not_merge_deleted" else uuid4()
+    action = SleepAction(
+        report_id=world.reports["target"],
+        phase="dedup_merge",
+        action_type="merge",
+        memory_id=world.memories["winner"],
+        target_id=loser_id,
+        details={},
+    )
+    db_session.add(action)
+    await db_session.commit()
+
+    async with _client(maker, OPERATOR) as client:
+        response = await client.post(_undo_url(world.reports["target"], action.id))
+
+    assert response.status_code == status, response.text
+    assert response.json()["error"] == f"SLEEP-UNDO-{code}"
+    no_vector_store.assert_not_awaited()
+    async with maker() as check:
+        assert await _audit_rows(check, "sleep_merge_undo") == []
+        assert await _undo_actions(check, world.reports["target"]) == []
+        assert (await _memory(check, world.memories["dead"])).deleted_by == "user_delete"
+    _assert_no_sentinel(world, response.text)
+
+
+# ------------------------------------------------- operation history actor
+
+
+@pytest.mark.parametrize("mode", ["service", "session"])
+async def test_the_operation_history_event_never_stores_an_operator(
+    maker, world, no_vector_store, mode
+):
+    """An operator's undo is stored without an actor; a session admin's with
+    the admin's id. The operator's address is in ``audit_logs`` only."""
+    principal = _principal(world, mode)
+    async with _client(maker, principal) as client:
+        response = await client.post(_undo_url(world.reports["target"], world.actions["merge"]))
+
+    assert response.status_code == 200, response.text
+    async with maker() as check:
+        [event] = list(
+            (
+                await check.execute(
+                    select(OperationHistory).where(OperationHistory.workspace_id == world.ws)
+                )
+            ).scalars()
+        )
+    assert event.operation == "sleep.undo"
+    if mode == "service":
+        assert (event.actor_user_id, event.principal_kind) == (None, "operator")
+    else:
+        assert event.actor_user_id == world.admin
+    stored = {
+        column.name: getattr(event, column.name) for column in OperationHistory.__table__.columns
+    }
+    assert OPERATOR_ADDRESS not in json.dumps(stored, default=str)
+
+
+# ------------------------------------------- a workspace over its capacity
+
+
+async def test_a_workspace_over_its_capacity_still_allows_the_run_and_the_undo(
+    maker, world, jobs, no_vector_store, db_session: AsyncSession
+):
+    """The capacity lock is not checked here, as for the scheduled sweep and
+    the own-account routes: the run applies the workspace's Sleep state itself."""
+    await db_session.execute(
+        update(Workspace)
+        .where(Workspace.id == world.ws)
+        .values(plan_name="free", entitlement_source=ENTITLEMENT_SOURCE_EXTERNAL_BILLING)
+    )
+    await db_session.commit()
+
+    with patch.object(Workspace, "effective_memory_limit", property(lambda self: 1)):
+        async with maker() as check:
+            workspace = await check.get(Workspace, world.ws)
+            lock = await capacity_lock_state(check, workspace)
+        assert lock is not None and lock.over_memories > 0
+
+        async with _client(maker, OPERATOR) as client:
+            run = await client.post(
+                _run_url(world.target), json={"context_id": str(world.contexts["ok"])}
+            )
+            undo = await client.post(_undo_url(world.reports["target"], world.actions["merge"]))
+
+    assert run.status_code == 202, run.text
+    assert undo.status_code == 200, undo.text
+    async with maker() as check:
+        [report] = await _reports_of(check, world.target)
+        assert str(report.id) == run.json()["report_ids"][0]
+        assert (await _memory(check, world.memories["loser"])).deleted_at is None
+        assert len(await _audit_rows(check, "sleep_run_trigger")) == 1
+        assert len(await _audit_rows(check, "sleep_merge_undo")) == 1
