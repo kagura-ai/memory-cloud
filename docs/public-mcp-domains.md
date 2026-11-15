@@ -316,7 +316,9 @@ more than 6 names takes more than a day.
 
 Mounted under `/api/v1`. Every route answers `404` `RES-001` before any
 statement while `MCP_PUBLIC_DOMAINS_ENABLED` is off, and sends
-`Cache-Control: no-store` (refusals included). The workspace comes from the
+`Cache-Control: no-store` (refusals included), except the generic
+request-validation `422` of a request that fails validation (see "Errors").
+The workspace comes from the
 authenticated principal (session or owner API key), the publication from
 `(workspace, resource slug)`; every row query is scoped by the workspace and
 the publication.

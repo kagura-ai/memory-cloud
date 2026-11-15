@@ -7,8 +7,10 @@ A custom domain is an alias of the resource's live publication, served at
 DNS TXT record (``docs/public-mcp-domains.md``).
 
 Every route answers 404 before any statement while
-``MCP_PUBLIC_DOMAINS_ENABLED`` is off, and ``Cache-Control: no-store``
-always. The workspace comes from the authenticated principal and the
+``MCP_PUBLIC_DOMAINS_ENABLED`` is off, and ``Cache-Control: no-store`` on
+every answer except the generic request-validation 422 (a body, path or
+query that fails validation), which the global handler sends without it.
+The workspace comes from the authenticated principal and the
 publication from ``(workspace, resource slug)``; adding and verifying a
 domain need the workspace's canonical owner, reading and removing one any
 workspace owner. The states, limits and errors live in
@@ -52,7 +54,13 @@ ProofResultField = Literal["ok", "missing", "unavailable"]
 
 
 class _NoStoreRoute(APIRoute):
-    """``Cache-Control: no-store`` on every answer, refusals included."""
+    """``Cache-Control: no-store`` on every answer, refusals included.
+
+    The exception is the generic request-validation 422 (a body, path or
+    query that fails validation): it is raised before the endpoint runs, this
+    wrapper passes it through unchanged, and the global handler sends it
+    without the header.
+    """
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         """Wrap the handler: success and typed refusals carry the header."""
