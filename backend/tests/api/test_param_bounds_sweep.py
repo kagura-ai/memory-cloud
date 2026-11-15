@@ -428,3 +428,50 @@ def test_a_nul_model_name_is_refused_before_a_recalibration_is_queued(client, mo
     assert value not in json.dumps(events, default=str)
     # Any other model name is still queued.
     assert client.post(f"{ADMIN}/neural/recalibrate?dimensions=8&model=a%25b").status_code == 202
+
+
+ADMIN_REFUSED = [row for row in REFUSED if row[1].startswith(ADMIN)]
+# Own-account routes answer an operator 403 SYSADMIN-004 before the parameters.
+OWN_ACCOUNT = ("/undo-merge",)
+
+
+@pytest.mark.parametrize("mode", ["service", "off"])
+@pytest.mark.parametrize(
+    ("method", "url", "body"), ADMIN_REFUSED, ids=[f"{m} {u[-60:]}" for m, u, _ in ADMIN_REFUSED]
+)
+def test_an_admin_refusal_holds_in_service_mode_and_off_is_a_404(
+    session, monkeypatch, mode, method, url, body
+):
+    token = secrets.token_hex(32)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "system_admin_mode", mode)
+    monkeypatch.setattr(settings, "system_admin_service_token", token)
+    monkeypatch.setattr(settings, "system_admin_service_token_previous", "")
+    monkeypatch.setattr(settings, "system_admin_service_allowed_cidrs", "")
+
+    async def _db():
+        yield session
+
+    app.dependency_overrides[get_db] = _db
+    value = f"refused{secrets.token_hex(6)}"
+    payload = None if body is None else json.loads(json.dumps(body).replace("{value}", value))
+    try:
+        response = TestClient(app, raise_server_exceptions=False).request(
+            method,
+            url.replace("{value}", value),
+            json=payload,
+            headers={"Authorization": f"Bearer {token}", "X-Operator-Email": "ops@example.com"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert value not in response.text
+    assert session.statements == []
+    if mode == "off":
+        assert response.status_code == 404, response.text
+    elif any(part in url for part in OWN_ACCOUNT):
+        assert response.status_code == 403, response.text
+        assert response.json()["error"] == "SYSADMIN-004"
+    else:
+        assert response.status_code == 422, response.text
+        assert response.json()["error"] == "VAL-001"

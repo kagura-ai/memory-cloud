@@ -9,6 +9,7 @@ statements and log lines, are pinned in ``tests/api/test_param_bounds_sweep.py``
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
@@ -16,6 +17,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -448,3 +450,30 @@ async def test_cost_aggregation_takes_every_user_id_and_the_last_window_end(
     for response in answered:
         assert response.status_code == 200, response.text
         assert response.json()["rows"] == []
+
+
+async def test_a_refused_value_reaches_no_statement_and_no_log_line_on_postgres(
+    db_session: AsyncSession,
+) -> None:
+    """On a real database a value that reaches a statement fails there, and the
+    error line carries the statement's parameters. Refused by the parameter,
+    it reaches neither: no error line is written and no line holds the value."""
+    owner, _, workspace_id, _ = await _owned_workspace(db_session)
+    value = f"refused{uuid4().hex[:12]}"
+    base = f"/api/v1/workspaces/{workspace_id}"
+    with structlog.testing.capture_logs() as events:
+        async with admin_http(db_session) as client:
+            _refused(await client.get(f"{ADMIN}/users/{value}%00"))
+            _refused(await client.get(f"{ADMIN}/neural-config?category={value}%00"))
+        async with owner_http(db_session, owner) as client:
+            _refused(await client.get(f"{base}/sleep-reports?user_id={value}%00"))
+            _refused(await client.get(f"{base}/operation-history?actor={value}%00"))
+            _refused(await client.get(f"{base}/members/{value}%00/credentials"))
+
+    assert not any(event.get("log_level") in ("error", "critical") for event in events), events
+    assert not any(event.get("event") == "database_error" for event in events)
+    # A path value is part of the request path, which the access line names.
+    assert value not in json.dumps(
+        [{key: field for key, field in event.items() if key != "path"} for event in events],
+        default=str,
+    )
