@@ -51,9 +51,8 @@ async def _workspace(db_session: AsyncSession, plan_name: str = "pro") -> Worksp
 async def _list_row(client, workspace: Workspace) -> dict:
     response = await client.get(LIST, params={"owner_user_id": workspace.owner_user_id})
     assert response.status_code == 200, response.text
-    body = response.json()
-    rows = body["items"] if isinstance(body, dict) else body
-    (row,) = [row for row in rows if row["id"] == str(workspace.id)]
+    (row,) = response.json()["items"]
+    assert row["id"] == str(workspace.id)
     return row
 
 

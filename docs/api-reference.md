@@ -2302,8 +2302,21 @@ The plan and add-on reads under `/api/v1/admin/plans`. They answer a session adm
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/v1/admin/plans/workspaces` | The live workspaces with their plan: each row is `{"id", "name", "plan_name", "owner_user_id", "owner_name", "owner_email", "total_memories", "memory_limit", "mcp_calls_per_day", "mcp_calls_per_week", "entitlement_source"}`. |
+| `GET /api/v1/admin/plans/workspaces` | The live workspaces with their plan, one page at a time (Issue #2841): `{"items", "total", "limit", "offset"}`. Each item is `{"id", "name", "plan_name", "owner_user_id", "owner_name", "owner_email", "total_memories", "memory_limit", "mcp_calls_per_day", "mcp_calls_per_week", "entitlement_source"}`. |
+| `GET /api/v1/admin/plans/workspaces/{workspace_id}` | One live workspace, as the list's item for it (Issue #2841). `404` (`RES-001`, "Workspace not found") for an unknown or soft-deleted workspace; `422` for an id that is not a UUID. |
 | `GET /api/v1/admin/plans/workspaces/{workspace_id}/quotas` | One workspace's limits: `base`, `addon`, `effective`, `usage`, `spend_cap`, its `entitlement_source` and its `addon_records`. |
+
+The list's parameters, all optional and combined with AND:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `limit` | Page size, 1 to 500 (default 50). |
+| `offset` | Rows to skip, from 0 (default 0). |
+| `search` | A case-insensitive substring of the workspace name, at most 255 characters. It is trimmed and an empty value means no filter; `\`, `%` and `_` match literally. |
+| `plan` | Exact: one of the plan keys (`free`, `basic`, `pro`, `promax`). |
+| `owner_user_id` | Exact, 1 to 255 characters. |
+
+A value outside these rules (a `limit` of 0 or 501, a negative `offset`, an unknown `plan`, a `search` that is too long or holds a control character) answers `422` (`VAL-001`); nothing is clamped. The order is `created_at` ascending, then `id`, so walking the pages with `offset` returns each workspace once while none is added or removed. `total` counts every live workspace that matches the filters; soft-deleted workspaces are in neither `items` nor `total`. The `search` text is not written to the application's structured log lines. Until v0.164.0 the route took no parameter and answered every live workspace as a bare array.
 
 `entitlement_source` (Issue #2829) says who owns the workspace's plan: `admin_grant` (the default, and what `PUT /api/v1/admin/plans/workspaces/{workspace_id}/plan` sets) or `external_billing` (what a billing push sets). Only an `external_billing` workspace counts as under a running contract or can be capacity-locked.
 
