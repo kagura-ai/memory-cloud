@@ -5920,7 +5920,7 @@ drain it.
 | `erasure_cooling_off` / `erasure_cooling_off_due` | Erasures in their cooling-off period / past it | `sweep_pending_erasures` |
 | `erasure_in_progress` / `erasure_failed` | Erasures running / failed | `sweep_pending_erasures` / people |
 | `vector_erasure_jobs` | Vector payload erasures not yet complete | `sweep_pending_erasures` |
-| `force_transfer_requests_pending` | Ownership force transfers awaiting a second admin | people |
+| `force_transfer_requests_pending` | Ownership force transfers awaiting a second admin | people: `GET /api/v1/admin/force-transfer-requests?status=pending` lists them (#2846) |
 | `storage_object_deletions_due` | Stored objects due for deletion | `storage_object_deletion_sweeper` |
 | `file_reservations_expired` / `file_soft_deleted_due` | Abandoned upload reservations / deleted files past retention | `orphan_file_sweeper` / `soft_delete_file_gc` |
 | `files_awaiting_scan` / `files_unscanned` | Uploads due for their malware scan / files never scanned (listed while `FILE_SCAN_ENABLED` is on) | `file_scan_sweeper` |

@@ -2343,6 +2343,21 @@ The read counts the rows the retry counts (`embedding_status = 'failed'`, not de
 
 `failed = capped + configuration + other`. The answer holds no memory id, summary, content, tag, author id or stored error text: the error is answered as a class only. The deployment-wide totals are in [Operations status](#operations-status) (`embedding_failed_retryable`, `embedding_failed_stalled`).
 
+### Ownership force-transfer requests
+
+With `REQUIRE_DUAL_CONTROL_FORCE_TRANSFER` on, `POST /api/v1/admin/workspaces/{workspace_id}/force-transfer-ownership` files a `pending` request (`202` with its `request_id`) that a second, different system admin approves or cancels.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/force-transfer-requests` | The requests, newest first, then by `id` (#2846), so the approver finds the ones that wait without being given an id. Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
+| `GET /api/v1/admin/force-transfer-requests/{request_id}` | One request. |
+
+Query of the list: `status` (`pending`, `approved`, `cancelled` or `superseded`) and `workspace_id` (UUID), both optional and ANDed; `limit` 1-500 (default 50) and `offset` from 0. A value outside these answers `422`. Answer `{"items": [...], "total", "limit", "offset"}`; `total` counts the filtered rows, and for `status=pending` it is the `force_transfer_requests_pending` count of [Operations status](#operations-status).
+
+An item has the fields of the read by id and no other: `request_id`, `workspace_id`, `target_user_id`, `reason` (the initiating admin's text), `status`, `initiated_by_user_id`, `initiated_by_email` (as stored: `operator:<address>` in `service` mode; the four-eyes check compares it), `ownership_epoch_at_initiation`, `created_at`, `decided_by_user_id`, `decided_at`. The deciding admin's address is not answered, and no name or address is looked up for the workspace, its owner or the target user.
+
+The list reads the request table alone. A request whose workspace was deleted is still listed, and stays `pending`: approving, cancelling and filing a new request all need the live workspace. Filing a request for a workspace marks its pending one `superseded`, so `?status=pending&workspace_id=<id>` shows first whether one is waiting.
+
 ### Operations status
 
 | Endpoint | Purpose |

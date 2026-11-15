@@ -33,6 +33,7 @@ from models.auth import (
     Workspace,
     WorkspaceMember,
 )
+from models.auth import WorkspaceOwnershipForceTransferRequest as ForceTransferRequest
 from models.memory import Memory
 from models.schemas import (
     AdmissionInfo,
@@ -1557,6 +1558,131 @@ async def get_force_transfer_request(
         "decided_by_user_id": req.decided_by_user_id,
         "decided_at": to_utc_iso(req.decided_at) if req.decided_at else None,
     }
+
+
+ForceTransferRequestStatus = Literal["pending", "approved", "cancelled", "superseded"]
+
+
+class ForceTransferRequestItem(TZAwareBaseModel):
+    """One ownership force-transfer request: the eleven fields of the read by id.
+
+    ``decided_by_email`` is not part of it, and nothing is looked up for the
+    workspace, its owner or the target user.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID
+    workspace_id: UUID
+    target_user_id: str
+    reason: str = Field(description="The initiating admin's text")
+    status: ForceTransferRequestStatus
+    initiated_by_user_id: str
+    initiated_by_email: str = Field(
+        description="The initiator as stored: `operator:<address>` in `service` mode"
+    )
+    ownership_epoch_at_initiation: int
+    created_at: datetime
+    decided_by_user_id: str | None
+    decided_at: datetime | None
+
+
+class ForceTransferRequestListResponse(TZAwareBaseModel):
+    """A page of ownership force-transfer requests."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ForceTransferRequestItem]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/force-transfer-requests", response_model=ForceTransferRequestListResponse)
+async def list_force_transfer_requests(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    status_filter: ForceTransferRequestStatus | None = Query(
+        None, alias="status", description="Only requests in this state"
+    ),
+    workspace_id: UUID | None = Query(None, description="Only requests for this workspace"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> ForceTransferRequestListResponse:
+    """List ownership force-transfer requests (#2846).
+
+    Dual control (#1113) files a `pending` request that a second system admin
+    approves or cancels; this lists them, so the approver finds the requests
+    that wait. Newest first, then by id; `total` counts the filtered rows.
+    `status=pending` is the queue the operations status counts as
+    `force_transfer_requests_pending`.
+
+    The request table alone is read: a request whose workspace or target
+    user is gone is still listed. Each item has the fields of
+    `GET /api/v1/admin/force-transfer-requests/{request_id}`.
+
+    Read only: no row changes and no audit row is written.
+    """
+    filters = []
+    if status_filter is not None:
+        filters.append(ForceTransferRequest.status == status_filter)
+    if workspace_id is not None:
+        filters.append(ForceTransferRequest.workspace_id == workspace_id)
+
+    total = (
+        await db.execute(select(func.count()).select_from(ForceTransferRequest).where(*filters))
+    ).scalar_one()
+    rows = (
+        await db.execute(
+            select(
+                ForceTransferRequest.id,
+                ForceTransferRequest.workspace_id,
+                ForceTransferRequest.target_user_id,
+                ForceTransferRequest.reason,
+                ForceTransferRequest.status,
+                ForceTransferRequest.initiated_by_user_id,
+                ForceTransferRequest.initiated_by_email,
+                ForceTransferRequest.ownership_epoch_at_initiation,
+                ForceTransferRequest.created_at,
+                ForceTransferRequest.decided_by_user_id,
+                ForceTransferRequest.decided_at,
+            )
+            .where(*filters)
+            .order_by(ForceTransferRequest.created_at.desc(), ForceTransferRequest.id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    items = [
+        ForceTransferRequestItem(
+            request_id=row.id,
+            workspace_id=row.workspace_id,
+            target_user_id=row.target_user_id,
+            reason=row.reason,
+            status=row.status,
+            initiated_by_user_id=row.initiated_by_user_id,
+            initiated_by_email=row.initiated_by_email,
+            ownership_epoch_at_initiation=row.ownership_epoch_at_initiation,
+            created_at=row.created_at,
+            decided_by_user_id=row.decided_by_user_id,
+            decided_at=row.decided_at,
+        )
+        for row in rows
+    ]
+
+    logger.info(
+        "admin_force_transfer_requests_listed",
+        actor=get_user_id(admin),
+        count=len(items),
+        total=total,
+        limit=limit,
+        offset=offset,
+        status=status_filter,
+        workspace_filter=workspace_id is not None,
+    )
+
+    return ForceTransferRequestListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 async def _notify_force_transfer_best_effort(

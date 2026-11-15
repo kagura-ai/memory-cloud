@@ -5032,6 +5032,52 @@
         ],
         "type": "object"
       },
+      "ForceTransferRequestItem": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {},
+          "decided_at": {},
+          "decided_by_user_id": {},
+          "initiated_by_email": {},
+          "initiated_by_user_id": {},
+          "ownership_epoch_at_initiation": {},
+          "reason": {},
+          "request_id": {},
+          "status": {},
+          "target_user_id": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "created_at",
+          "decided_at",
+          "decided_by_user_id",
+          "initiated_by_email",
+          "initiated_by_user_id",
+          "ownership_epoch_at_initiation",
+          "reason",
+          "request_id",
+          "status",
+          "target_user_id",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "ForceTransferRequestListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {},
+          "limit": {},
+          "offset": {},
+          "total": {}
+        },
+        "required": [
+          "items",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "type": "object"
+      },
       "ForgetBulkRequest": {
         "properties": {
           "all": {
@@ -16174,6 +16220,94 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/force-transfer-requests": {
+      "get": {
+        "operationId": "list_force_transfer_requests_api_v1_admin_force_transfer_requests_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "pending",
+                    "approved",
+                    "cancelled",
+                    "superseded"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForceTransferRequestListResponse"
                 }
               }
             }

@@ -43,8 +43,9 @@ ADMIN_OPERATIONS = {
 def test_off_document_has_no_admin_operation(mode):
     mode("off")
     schema = app.openapi()
-    # #2833, #2832: + the deleted-contexts and the failed-embeddings lists
-    assert len(ADMIN_OPERATIONS) == 60
+    # #2833, #2832, #2846: + the deleted-contexts, failed-embeddings and
+    # force-transfer-requests lists
+    assert len(ADMIN_OPERATIONS) == 61
     assert not ADMIN_OPERATIONS & _operations(schema)
     assert "/api/v1/admin/users" not in schema["paths"]
     # Everything else stays.
