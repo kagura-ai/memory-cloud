@@ -4,7 +4,7 @@ Based on Issue #1 - API specifications.
 """
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -2604,12 +2604,23 @@ class CreateAPIKeyRequest(BaseModel):
     stored with ``workspace_id=NULL``.
     """
 
-    name: str = Field(..., min_length=1, max_length=100)  # APIKey.name is String(100)
+    # APIKey.name is String(100)
+    name: str = Field(..., min_length=1, max_length=100, pattern=NO_NUL_PATTERN)
     auto_hide_minutes: int = 10  # Auto-hide after 10 minutes (default)
     bound_context_id: str | None = None  # Issue #626
 
     # #1944: the ``connector:{id}`` prefix is reserved for connector keys (#1952).
     _name_not_reserved = field_validator("name")(reject_reserved_key_name)
+
+    @field_validator("auto_hide_minutes")
+    @classmethod
+    def _hide_time_is_a_time(cls, value: int) -> int:
+        """Refuse a delay whose hide time falls outside the calendar (years 1 to 9999)."""
+        try:
+            _ = datetime.now(UTC) + timedelta(minutes=value)
+        except OverflowError:
+            raise ValueError("auto_hide_minutes is out of range") from None
+        return value
 
     # Issue #1165: owner-provisioned mints REQUIRE an expiry (the route enforces
     # 400 if omitted for the programmatic path); session self-mint leaves it None

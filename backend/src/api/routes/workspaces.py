@@ -6,11 +6,12 @@ Provides REST API for workspace CRUD and member management.
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
+from pydantic import AfterValidator, BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,9 +46,10 @@ from services.plan_seats import seat_limit
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
 from utils.auth_helpers import get_user_id
-from utils.datetime import to_utc_iso
+from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
+from utils.query_bounds import NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -87,17 +89,39 @@ class WorkspaceCreate(BaseModel):
     )
 
 
+# A member's account id in a path; no stored id holds a NUL.
+MemberUserId = Annotated[str, Path(pattern=NO_NUL_PATTERN)]
+
+
+def _first_day_is_a_date(days: int) -> int:
+    """Refuse a ``days`` window whose first day falls outside the calendar.
+
+    A window starts ``days - 1`` days before today. A value above the route's
+    cap is clamped by the route, so only a value below 1 can move the first
+    day past the last date there is.
+    """
+    if days < 1:
+        try:
+            _ = utcnow().date() + timedelta(days=1 - days)
+        except OverflowError:
+            raise ValueError("days is out of range") from None
+    return days
+
+
+DaysWindow = Annotated[int, AfterValidator(_first_day_is_a_date)]
+
+
 class WorkspaceUpdate(BaseModel):
     """Request model for updating workspace.
 
     Issue #276: Slug removed.
     """
 
-    name: str | None = Field(None, min_length=1, max_length=255)
+    name: str | None = Field(None, min_length=1, max_length=255, pattern=NO_NUL_PATTERN)
     # #1743: capped in WorkspaceService.update_workspace, not here, so a
     # description stored before the cap can be saved back unchanged (the
     # settings form always resends it — the #1193 lesson).
-    description: str | None = None
+    description: str | None = Field(None, pattern=NO_NUL_PATTERN)
 
 
 class WorkspaceResponse(BaseModel):
@@ -345,7 +369,7 @@ _ALLOWED_CONTEXT_IDS_DESCRIPTION = (
 class AddMemberRequest(BaseModel):
     """Request model for adding member."""
 
-    user_id: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1, pattern=NO_NUL_PATTERN)
     role: str = Field(..., pattern=r"^(owner|admin|member|viewer)$")
     # #2326: optional, so a caller that sends no list keeps today's "not set"
     # row (unlike an invitation, which requires one for a member or viewer).
@@ -889,7 +913,7 @@ async def add_member(
 @router.put("/{workspace_id}/members/{user_id}", response_model=WorkspaceMemberResponse)
 async def update_member_role(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     body: UpdateMemberRoleRequest,
     current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
@@ -955,7 +979,7 @@ async def update_member_role(
 @router.put("/{workspace_id}/members/{user_id}/context-access")
 async def update_member_context_access(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     body: UpdateMemberContextAccessRequest,
     current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
@@ -1043,7 +1067,7 @@ class MemberContextAccessResponse(BaseModel):
 )
 async def get_member_context_access(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> MemberContextAccessResponse:
@@ -1099,7 +1123,7 @@ async def get_member_context_access(
 @router.delete("/{workspace_id}/members/{user_id}", status_code=204)
 async def remove_member(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ):
@@ -1265,7 +1289,7 @@ async def get_context_usage_timeline(
     workspace_id: UUID,
     context_id: UUID,
     request: Request,
-    days: int = 7,
+    days: DaysWindow = 7,
     db: AsyncSession = Depends(get_db),
 ) -> ContextUsageTimelineResponse:
     """Get time-series usage statistics for a specific context.
@@ -1308,7 +1332,7 @@ async def get_context_user_activity(
     workspace_id: UUID,
     context_id: UUID,
     request: Request,
-    days: int = 7,
+    days: DaysWindow = 7,
     db: AsyncSession = Depends(get_db),
 ) -> ContextUserActivityResponse:
     """Get per-user activity statistics for a specific context.
@@ -1345,7 +1369,7 @@ async def get_context_user_activity(
 async def get_workspace_memory_timeline(
     workspace_id: UUID,
     request: Request,
-    days: int = 30,
+    days: DaysWindow = 30,
     context_id: UUID | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> MemoryTimelineResponse:
@@ -1385,7 +1409,7 @@ async def get_context_public_api_stats(
     workspace_id: UUID,
     context_id: UUID,
     request: Request,
-    days: int = 7,
+    days: DaysWindow = 7,
     db: AsyncSession = Depends(get_db),
 ) -> PublicAPIStatsResponse:
     """Get Public API usage statistics for a public context.
@@ -1555,6 +1579,7 @@ class TransferOwnershipRequest(BaseModel):
         ...,
         min_length=1,
         max_length=255,
+        pattern=NO_NUL_PATTERN,
         description="User ID of an existing workspace member to promote to owner.",
     )
 

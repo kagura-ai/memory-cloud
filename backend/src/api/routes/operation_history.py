@@ -1,9 +1,11 @@
 """Read-only workspace operation history for entitled owners/admins (#2739)."""
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response
+from pydantic import AfterValidator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,8 +19,26 @@ from services.operation_history import read_history
 from services.operation_history_writer import OPERATIONS
 from services.permission_service import PermissionService
 from utils.exceptions import FeatureNotAvailableError, ValidationError
+from utils.query_bounds import NO_NUL_PATTERN
 
 router = APIRouter(tags=["workspaces"])
+
+
+def _utc_is_a_time(value: datetime | None) -> datetime | None:
+    """Refuse a time whose UTC value falls outside the calendar (years 1 to 9999).
+
+    ``occurred_at`` is compared in UTC. A time without a zone is refused by
+    the route with its own message.
+    """
+    if value is not None and value.tzinfo is not None:
+        try:
+            value.astimezone(UTC)
+        except OverflowError:
+            raise ValueError("the time is out of range") from None
+    return value
+
+
+TimeFilter = Annotated[datetime | None, AfterValidator(_utc_is_a_time)]
 
 
 class OperationHistoryItem(TZAwareBaseModel):
@@ -56,19 +76,19 @@ async def get_operation_history(
     user: SessionUser,
     response: Response,
     db: AsyncSession = Depends(get_db),
-    query: str = Query("", max_length=120),
+    query: str = Query("", max_length=120, pattern=NO_NUL_PATTERN),
     limit: int = Query(30, ge=1, le=100),
     cursor: str | None = Query(None, max_length=512),
     context_id: UUID | None = None,
-    actor: str | None = Query(None, max_length=255),
+    actor: str | None = Query(None, max_length=255, pattern=NO_NUL_PATTERN),
     agent_id: UUID | None = None,
     operation: str | None = Query(None, max_length=40),
     target_type: str | None = Query(
         None, pattern="^(memory|context|member|credential|integration|sleep)$"
     ),
     outcome: str | None = Query(None, pattern="^(success|failure|denied)$"),
-    since: datetime | None = None,
-    until: datetime | None = None,
+    since: TimeFilter = None,
+    until: TimeFilter = None,
 ) -> OperationHistoryPage:
     """Search safe identifiers/actor names/field names, never memory or credential contents.
 

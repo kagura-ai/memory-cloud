@@ -86,3 +86,12 @@ async def test_foreign_targets_and_service_tokens_do_not_become_member_inspectio
             token=activity.token,
         )
         assert response.status_code == 401
+
+
+async def test_event_cursor_takes_the_last_audit_id_and_refuses_the_next(activity):
+    # ``audit_logs.id`` is a 32-bit integer (#2857).
+    last = await human(activity, "GET", f"activity/events?before_id={2**31 - 1}")
+    assert last.status_code == 200, last.text
+    past = await human(activity, "GET", f"activity/events?before_id={2**31}")
+    assert past.status_code == 400
+    assert past.json() == {"error": "invalid_request"}

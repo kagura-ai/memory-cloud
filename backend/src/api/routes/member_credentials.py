@@ -14,7 +14,7 @@ Endpoints:
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,6 +53,7 @@ from utils.exceptions import (
 )
 from utils.logger import get_logger
 from utils.public_id import APIKeyPublicId, PublicIdPrefix, public_id_pattern
+from utils.query_bounds import NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -60,6 +61,9 @@ router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/members",
     tags=["member-credentials"],
 )
+
+# The member's account id in the path; no stored id holds a NUL.
+MemberUserId = Annotated[str, Path(pattern=NO_NUL_PATTERN)]
 
 
 # ============================================================================
@@ -335,7 +339,7 @@ async def _owner_provisioned_mint(
 @router.get("/{user_id}/credentials", response_model=MemberCredentialsResponse)
 async def get_member_credentials(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> MemberCredentialsResponse:
@@ -410,7 +414,7 @@ async def get_member_credentials(
 @router.post("/{user_id}/credentials/api-key/hide")
 async def hide_api_key(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -478,7 +482,7 @@ async def hide_api_key(
 )
 async def regenerate_api_key(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     request: Request,
     background_tasks: BackgroundTasks,
     user: SessionUser,
@@ -628,7 +632,7 @@ async def regenerate_api_key(
 )
 async def create_api_key(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     data: CreateAPIKeyRequest,
     request: Request,
     background_tasks: BackgroundTasks,
@@ -926,7 +930,7 @@ async def create_api_key(
 @router.delete("/{user_id}/credentials/api-key")
 async def delete_api_key(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -1000,7 +1004,7 @@ async def delete_api_key(
 @router.delete("/{user_id}/credentials/api-keys/{key_id}")
 async def delete_api_key_by_id(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     key_id: APIKeyPublicId,
     user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
@@ -1224,7 +1228,7 @@ async def delete_api_key_by_id(
 @router.post("/{user_id}/credentials/oauth/hide")
 async def hide_oauth_app(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -1283,7 +1287,7 @@ async def hide_oauth_app(
 )
 async def regenerate_oauth_secret(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     request: Request,
     background_tasks: BackgroundTasks,
     user: SessionUser,
@@ -1400,7 +1404,7 @@ async def regenerate_oauth_secret(
 @router.delete("/{user_id}/credentials/oauth")
 async def delete_oauth_app(
     workspace_id: UUID,
-    user_id: str,
+    user_id: MemberUserId,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:

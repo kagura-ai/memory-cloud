@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import ConfigDict, Field, field_validator
 
 from models.api_base import TZAwareBaseModel
+from utils.query_bounds import NO_NUL_PATTERN
 
 
 class SyncAuthorizationCreate(TZAwareBaseModel):
@@ -16,8 +17,8 @@ class SyncAuthorizationCreate(TZAwareBaseModel):
     request_id: UUID
     application_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
     public_name: str = Field(min_length=1, max_length=200)
-    public_description: str | None = Field(default=None, max_length=2000)
-    public_usage_guide: str | None = Field(default=None, max_length=4000)
+    public_description: str | None = Field(default=None, max_length=2000, pattern=NO_NUL_PATTERN)
+    public_usage_guide: str | None = Field(default=None, max_length=4000, pattern=NO_NUL_PATTERN)
 
     @field_validator("public_name")
     @classmethod

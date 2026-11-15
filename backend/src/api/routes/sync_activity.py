@@ -23,6 +23,7 @@ from models.sync_activity_schemas import (
 )
 from services import sync_activity as activity
 from services.sync_requests import create_request
+from utils.query_bounds import MAX_INT32
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/sync-installations/{installation_id}/activity",
@@ -81,7 +82,7 @@ async def get_events(
     principal: Reader,
     db: Database,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
-    before_id: Annotated[int | None, Query(ge=1)] = None,
+    before_id: Annotated[int | None, Query(ge=1, le=MAX_INT32)] = None,
 ) -> dict:
     """Read only protocol-v1 audit references; actor output is pseudonymized."""
     exact_query(request, {"limit", "before_id"})
