@@ -2367,6 +2367,39 @@ Rows written to the `config_overrides` table by earlier versions were never read
 
 Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, reranker weights) are persisted in `neural_config` and exposed under `/api/v1/admin/neural-config`. The fields are editable from the admin UI's Neural Config page.
 
+### Embedding calibrations
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/v1/admin/neural/recalibrate?model=&dimensions=` | Start a model-global calibration for one embedding model and dimensions. Always `202` with `accepted` (`false` when a run for the pair is already in flight) and an echo of the pair. The answer does not say what the run wrote: read the rows below. |
+| `GET /api/v1/admin/neural/calibrations` | The model-global calibration rows (#2845). Read only, no parameters, no paging: at most two rows (`knn_seed`, `edge_gate`) per model and dimensions. Follows `SYSTEM_ADMIN_MODE` like every system-admin route (a service operator may call it). |
+
+```json
+{
+  "knn_seed_override": null,
+  "calibrations": [
+    {
+      "model_name": "text-embedding-3-small",
+      "dimensions": 512,
+      "kind": "knn_seed",
+      "p25": 0.41, "p50": 0.48, "p75": 0.55, "p90": 0.63, "p95": 0.67, "p99": 0.74,
+      "sample_size": 10000,
+      "sampled_at": "2026-11-01T03:00:00Z",
+      "valid_until": "2026-12-01T03:00:00Z",
+      "expired": false,
+      "threshold": 0.63
+    }
+  ]
+}
+```
+
+- `calibrations` is ordered by `model_name`, `dimensions`, `kind`. A pair that was never calibrated, or whose last run wrote nothing (no context uses the pair, or the sample was too small), has no row. A successful run replaces the pair's rows, so `sampled_at` tells when the values were computed.
+- `kind`: `knn_seed` is the top-k neighbour distribution behind the k-NN seed edges written on ingest; `edge_gate` is the random-pair distribution behind the co-activation edge gate.
+- `expired`: `valid_until` has passed. An expired row is still used at runtime.
+- `threshold` is computed with the config of the process that answers (its `neural_config` values at that moment): for `knn_seed`, the larger of the row's `knn_seed_min_percentile` percentile and `knn_seed_min_similarity_floor`; for `edge_gate`, the larger of its `min_similarity_for_edge_percentile` percentile and `min_similarity_for_edge_floor`. Another process with a different config can give another value for the same row.
+- `knn_seed_override` is `knn_seed_min_similarity`, or `null`. When it is set, it is the seeding threshold and the `knn_seed` rows are not used.
+- The read starts no calibration, also for an expired row. Per-context rows are never answered, and the answer holds no row id and no context, workspace, memory or user identifier.
+
 ### Worker App Identities
 
 System-admin (`role=admin`) lifecycle API for platform worker app identities (Slack / Discord / Teams bridge apps) — [#1315](https://github.com/kagura-ai/memory-cloud/issues/1315). Signing secrets are **write-only**: responses expose `has_active_secret` and revision metadata, never the secret or its ciphertext. Lifecycle mutations emit post-commit audit log events ([#1339](https://github.com/kagura-ai/memory-cloud/issues/1339)).

@@ -2254,6 +2254,11 @@ reports the case that matters, and below D3 the event would fire on every
 ingest of a fresh deployment. To see them, set `LOG_LEVEL=debug` for a while,
 then set it back.
 
+Whether an embedder has a calibration row, how old it is and the threshold it
+gives can be read without the log or the database:
+`GET /api/v1/admin/neural/calibrations` (#2845,
+[Embedding calibrations](api-reference.md#embedding-calibrations)).
+
 ## Tag Co-Occurrence Cold-Start Seeding (Issue #223)
 
 Migration `b05_223_tag_cooccurrence` adds the schema; seeding fires

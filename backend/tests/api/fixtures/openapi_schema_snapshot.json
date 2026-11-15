@@ -4100,6 +4100,54 @@
         ],
         "type": "object"
       },
+      "EmbeddingCalibrationItem": {
+        "additionalProperties": false,
+        "properties": {
+          "dimensions": {},
+          "expired": {},
+          "kind": {},
+          "model_name": {},
+          "p25": {},
+          "p50": {},
+          "p75": {},
+          "p90": {},
+          "p95": {},
+          "p99": {},
+          "sample_size": {},
+          "sampled_at": {},
+          "threshold": {},
+          "valid_until": {}
+        },
+        "required": [
+          "dimensions",
+          "expired",
+          "kind",
+          "model_name",
+          "p25",
+          "p50",
+          "p75",
+          "p90",
+          "p95",
+          "p99",
+          "sample_size",
+          "sampled_at",
+          "threshold",
+          "valid_until"
+        ],
+        "type": "object"
+      },
+      "EmbeddingCalibrationListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "calibrations": {},
+          "knn_seed_override": {}
+        },
+        "required": [
+          "calibrations",
+          "knn_seed_override"
+        ],
+        "type": "object"
+      },
       "EmbeddingModelInfo": {
         "properties": {
           "available": {
@@ -16396,6 +16444,25 @@
         },
         "tags": [
           "neural-config"
+        ]
+      }
+    },
+    "/api/v1/admin/neural/calibrations": {
+      "get": {
+        "operationId": "list_calibrations_api_v1_admin_neural_calibrations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbeddingCalibrationListResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin-neural"
         ]
       }
     },

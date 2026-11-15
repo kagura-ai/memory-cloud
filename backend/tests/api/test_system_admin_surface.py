@@ -51,6 +51,7 @@ ADMIN_SURFACE = frozenset(
         ("GET", "/api/v1/admin/memory-health"),
         ("GET", "/api/v1/admin/neural-config"),
         ("GET", "/api/v1/admin/neural-config/{key}"),
+        ("GET", "/api/v1/admin/neural/calibrations"),
         ("GET", "/api/v1/admin/operations/status"),
         ("GET", "/api/v1/admin/plans/addon-cache-consistency"),
         ("GET", "/api/v1/admin/plans/audit"),
