@@ -1240,6 +1240,40 @@ Response: `{public_id, endpoint_path, resource_id, context_id, public_name, publ
 
 `usage_budget` ([#2805](https://github.com/kagura-ai/memory-cloud/issues/2805)) is the **workspace-wide** seven-day budget of anonymous public calls, the same on every endpoint of the workspace: `{state, limit, period_days, used, remaining, period_started_at, resets_at, period_seq, as_of}`. `state` is `disabled` (operator switch `MCP_PUBLIC_USAGE_BUDGET_ENABLED` off; the numbers and times are `null`), `idle` (no period runs; `used` 0), `active` or `exhausted` (`used >= limit`). It does not change `serving`. Contract: [Public usage budget](public-usage-budget.md).
 
+While custom domains are switched on (below), `DELETE` also releases the endpoint's custom domains in the same transaction: claims are deleted, held names are released with the reassignment cooldown. A republish gets no alias.
+
+### Custom domains of a public MCP endpoint
+
+Verified custom domains ([#2809](https://github.com/kagura-ai/memory-cloud/issues/2809)): an alias `https://<host>/mcp` that serves the same endpoint as its fixed address, after the owner proved control of the name with the DNS TXT record `_kagura-public-mcp.<host>` = `kagura-public-mcp-verification=<token>`. Every route answers `404` `RES-001` before any statement while the operator switch `MCP_PUBLIC_DOMAINS_ENABLED` is off, and sends `Cache-Control: no-store`. Contract (states, right, lease, cooldown, limits): [Public MCP custom domains](public-mcp-domains.md).
+
+| Endpoint | Who | Purpose |
+|---|---|---|
+| `GET /api/v1/resources/{resource_id}/public-mcp/domains` | workspace owner | `200` `{"domains": [domain, …]}`: the live endpoint's domains that are not released; `404` when the resource has no live endpoint |
+| `POST /api/v1/resources/{resource_id}/public-mcp/domains` | canonical owner | Add `{hostname}` (1–255 characters; ASCII, `xn--` A-labels for international names) → `201` domain in state `pending`, with the TXT record to publish |
+| `POST /api/v1/resources/{resource_id}/public-mcp/domains/{domain_id}/verify` | canonical owner | Look the records up now → `200` domain. A `pending` domain whose proof is found becomes `active` when the right is active and the name is free; an `active` or `suspended` one gets the periodic check's result |
+| `DELETE /api/v1/resources/{resource_id}/public-mcp/domains/{domain_id}` | workspace owner | Remove → `204`. A `pending` domain is deleted, a held one released with the cooldown; the alias answers `404` from the next request on |
+
+The **canonical owner** is the owner whose user id is the workspace's `owner_user_id`; another owner member can list and remove but gets `403` on add and verify.
+
+Domain: `{domain_id, hostname, url, state, suspended_reason, serving, verification: {record_type: "TXT", record_name, record_value}, routing: {target, status}, last_check: {result, checked_at}, proof_ok_at, proof_missing_checks, serve_until, created_at, verified_at}`. `state` is `pending`, `active` or `suspended`; `suspended_reason` `proof_lost`, `right_ended`, `reserved` or `null`; `serving` says whether the alias answers right now; `routing.status` (`ok`, `mismatch`, `unresolved`) is informational; `last_check.result` is `ok`, `missing` or `unavailable`; `serve_until` is the lease (the alias is served only before it).
+
+| Status | `error` | When |
+|---|---|---|
+| `404` | `RES-001` | switch off; no live endpoint for the resource; a `domain_id` that is not an open domain of this workspace and endpoint |
+| `403` | `public_mcp_domain_owner_required` | add or verify by an owner member who is not the canonical owner (no counter, no lookup) |
+| `403` | `public_mcp_domain_not_entitled` | `MCP_PUBLIC_DOMAINS_AUTHORITY=entitlement` and the workspace has no active `public-mcp-domains` right; on verify of an `active` domain it is suspended first |
+| `422` | `public_mcp_domain_hostname_not_allowed` | malformed or reserved name; one code and one message ("This host name cannot be used as a custom domain.") for both |
+| `409` | `public_mcp_domain_limit_reached` | the workspace already has `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` domains (`pending`, `active` or `suspended`) |
+| `409` | `public_mcp_domain_exists` | the endpoint already has a domain |
+| `409` | `public_mcp_endpoint_not_published` | the endpoint was unpublished or replaced during verify |
+| `409` | `public_mcp_domain_held` | another domain holds the name; answered only after the caller's own proof was found |
+| `409` | `public_mcp_domain_in_cooldown` | another workspace released the name recently; `details.available_after` (ISO UTC, `Z`); answered only after the caller's own proof was found |
+| `409` | `public_mcp_domain_changed` | the domain changed during the lookup; retry |
+| `429` | `RATE-001` | more than 20 verify calls per workspace per hour, or 6 activation attempts per workspace per day; `Retry-After` header, `details.retry_after`, `details.limit` = `verify_per_hour` or `activations_per_day` |
+| `503` | `public_mcp_domain_verification_unavailable` | the DNS lookup was indeterminate (nothing is written), or a limit counter could not be read |
+
+**Certificate permission call.** `GET /internal/public-mcp-domains/tls-permission?domain=<name>` is for a TLS proxy that obtains certificates on demand; it is not in the OpenAPI document and carries no credential, so it must stay unreachable from outside, like every `/internal` route (under a Host that is neither the application's nor an internal one the API itself answers `404` for `/internal`). It answers with an empty body: `200` when the name is an `active` alias with a current lease of a live endpoint and both `MCP_PUBLIC_DOMAINS_ENABLED` and `MCP_PUBLIC_ENDPOINTS_ENABLED` are on; `404` for anything else (either switch off, no or several `domain` values, a malformed, special-use, application or reserved name, a name that is not served); `503` when it cannot answer now (4 lookups already run in this process, the lookup takes over 3 s, or a database error), which a proxy reads as a refusal. Plan pause and capacity lock do not withdraw the permission. The query of this path is redacted in every log line.
+
 ### Observation credentials and the observability API
 
 Workspace owner only (session or owner API key) for the credential routes; the observability routes accept **only** an observation credential (`Authorization: Bearer kagura_obs_…`) and answer `404` while `OBSERVABILITY_API_ENABLED` is off ([#2679](https://github.com/kagura-ai/memory-cloud/issues/2679)). Bodies, cursors, limits and error codes: [Observability API](observability-api.md).
@@ -2055,6 +2089,7 @@ System information. Public (no authentication): the version plus non-sensitive d
     "email_signup": false,
     "open_registration": false,
     "provider_link_confirmation": false,
+    "public_mcp_domains": false,
     "reranking": true
   }
 }
@@ -2063,6 +2098,8 @@ System information. Public (no authentication): the version plus non-sensitive d
 `features.email_signup` is `ENABLE_EMAIL_SIGNUP` and `features.open_registration` is `ALLOW_REGISTRATION` as configured (it is ignored while the signup gate is on) — see [Email + password sign-up](#email--password-sign-up).
 
 `features.provider_link_confirmation` is `ENABLE_PROVIDER_LINK_CONFIRMATION` while a mail backend other than `logging` is configured: when true, a sign-in that ends at `email_in_use` may have mailed a confirmation link to an email sign-up account — see [Provider link confirmation](#provider-link-confirmation). It is per deployment and says nothing about any address.
+
+`features.public_mcp_domains` is `MCP_PUBLIC_DOMAINS_ENABLED`: when true, owners may bind verified custom domains to their public MCP endpoints ([#2809](https://github.com/kagura-ai/memory-cloud/issues/2809), [Custom domains of a public MCP endpoint](#custom-domains-of-a-public-mcp-endpoint)). It says nothing about the deployment's hosts.
 
 `search_defaults` are the reranker values and the content chunk flag (`DEFAULT_CONTENT_CHUNKS_ENABLED`) new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance). `announcement_consent_version` is the version of the announcement-email consent wording while `ANNOUNCEMENT_EMAILS_ENABLED` is on, `null` otherwise — see [Announcement-email consent](#announcement-email-consent). `chatgpt_app_url` is the deployment's `CHATGPT_APP_URL` (the public URL of its app in ChatGPT's app directory), or `null` when it is empty — see [ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760). `features.system_admin` is `true` only when this process serves the system-admin surface to signed-in admins (`SYSTEM_ADMIN_MODE=session`, the default); the web UI hides the admin menu and `/admin/*` otherwise (#2767, [Admin APIs](#admin-apis)).
 

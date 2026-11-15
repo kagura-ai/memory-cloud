@@ -91,18 +91,22 @@ request, never anything the client sends (not the address, a header, the
 session id, `?tools=`, `clientInfo` or a network address).
 
 Every `/mcp/public/{public_id}` of the workspace counts against the same
-budget: both protocol eras, every `?tools=` view, the endpoint of a sync
-installation (an ordinary public endpoint), and the anonymous REST search
-below. The stored period is untouched by republish (a new endpoint id),
+budget: both protocol eras, every `?tools=` view, a verified custom domain of
+the endpoint (#2809), the endpoint of a sync installation (an ordinary public
+endpoint), and the anonymous REST search below. The stored period is untouched by republish (a new endpoint id),
 unpublish, a slug change, sync unlink, owner transfer, a plan change, add-on
-or entitlement cancellation, soft delete and restore; only a hard delete of
-the workspace removes it.
+or entitlement cancellation, soft delete and restore, and adding, verifying,
+removing, suspending, releasing or reassigning a custom domain; only a hard
+delete of the workspace removes it.
 
-**Rule for verified domain aliases (#2809):** an alias must resolve to the
-same serving endpoint and enter the public MCP transport and its `tools/call`
-dispatch unchanged. The budget has no address or domain dimension, the
-per-minute bucket stays keyed by the endpoint id, and an alias must not add a
-per-domain counter or allowance.
+**Verified custom domains (#2809):** an alias `https://<host>/mcp`
+([Public MCP custom domains](public-mcp-domains.md)) resolves to the same
+serving endpoint as `/mcp/public/{public_id}` and enters the public MCP
+transport and its `tools/call` dispatch unchanged. Calls through the alias and
+through the fixed address count against the same budget of the same
+workspace. The budget has no address or domain dimension, the per-minute
+bucket stays keyed by the endpoint id, and there is no per-domain counter or
+allowance.
 
 ## What does not count, and why that opens no anonymous bypass
 
@@ -277,10 +281,13 @@ drops the table: counts and periods are lost and every workspace starts a
 fresh period at its next counted call. So does every downgrade to a revision
 below `f48_2805_public_usage_budgets`, including the per-branch downgrades of
 v0.162.0 in [Sync service credentials](ops/sync-service-credentials.md): they
-first revert `f49_2817` (no-op) and `f48_2805`. Turn
+first revert `f50_2809` (drops `public_mcp_domains`, see
+[Public MCP custom domains](public-mcp-domains.md)), `f49_2817` (no-op) and
+`f48_2805`. Turn
 `MCP_PUBLIC_USAGE_BUDGET_ENABLED` off before any of them (see "Deploy order"
-for what the switch does without the table); the table comes back only with
-`alembic upgrade head`. After a downgrade that reverted
+for what the switch does without the table), and `MCP_PUBLIC_DOMAINS_ENABLED`
+too, after the alias routing is out of the proxy (that page's "Stopping and
+rolling back"); the tables come back only with `alembic upgrade head`. After a downgrade that reverted
 `f46_2803_admission_record`, run `alembic upgrade
 f47_2819_merge_sync_credentials` first and then `alembic upgrade head`.
 

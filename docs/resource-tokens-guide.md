@@ -231,6 +231,36 @@ curl "$KAGURA/api/v1/resources/products/public-mcp/usage-health" -H "Authorizati
 #    "writer": {"enabled": true, "queue_depth": 0, …, "process_local": true}, "retention_days": 90}
 ```
 
+**Your own domain** ([#2809](https://github.com/kagura-ai/memory-cloud/issues/2809)): when the operator switches custom domains on (`MCP_PUBLIC_DOMAINS_ENABLED`; `GET /api/v1/system/info` then reports `features.public_mcp_domains: true`), the published endpoint can also answer at `https://<your host>/mcp`, for example `https://mcp.example.org/mcp`. The alias serves the same endpoint as the fixed address: same tools, limits and usage budget. Adding and verifying a domain needs the workspace's canonical owner (the owner the workspace belongs to); on a deployment that sells it, the workspace also needs the custom-domain right. One domain per published endpoint, a few per workspace (default 3).
+
+```bash
+# 1. Add the host name → 201, state "pending", with the TXT record to publish
+curl -X POST "$KAGURA/api/v1/resources/products/public-mcp/domains" \
+  -H "Authorization: Bearer kagura_{owner_key}" -H "Content-Type: application/json" \
+  -d '{"hostname": "mcp.example.org"}'
+# → {"domain_id": "…", "hostname": "mcp.example.org", "url": "https://mcp.example.org/mcp", "state": "pending",
+#    "verification": {"record_type": "TXT", "record_name": "_kagura-public-mcp.mcp.example.org",
+#                     "record_value": "kagura-public-mcp-verification=…"},
+#    "routing": {"target": "mcp-domains.example.com", "status": null}, "serving": false, …}
+
+# 2. In your DNS: publish that TXT record, and a CNAME from mcp.example.org to routing.target.
+
+# 3. Verify → 200; "state": "active" and "serving": true once the record is found
+curl -X POST "$KAGURA/api/v1/resources/products/public-mcp/domains/<domain_id>/verify" \
+  -H "Authorization: Bearer kagura_{owner_key}"
+
+curl "$KAGURA/api/v1/resources/products/public-mcp/domains" -H "Authorization: Bearer kagura_{owner_key}"       # list
+curl -X DELETE "$KAGURA/api/v1/resources/products/public-mcp/domains/<domain_id>" \
+  -H "Authorization: Bearer kagura_{owner_key}"                                                             # remove → 204
+```
+
+- **Keep the TXT record published.** The server re-checks it about once an hour; after 3 confirmed absences and 72 hours since it was last seen the domain is `suspended` (`suspended_reason: "proof_lost"`) and the alias answers `404`. Publishing the record again reinstates it at the next check (or at once with verify), within 30 days; after that the name is released.
+- A verify that finds no record leaves the domain `pending` (`last_check.result: "missing"`); DNS changes can take a while to be visible. When the lookup cannot be answered the call is `503`: retry later. Verify is limited to 20 calls per workspace per hour and 6 activation attempts per day (`429` with `Retry-After`). An unverified domain is deleted after 7 days.
+- `routing.status` (`ok`, `mismatch`, `unresolved`) only tells you whether the name points at the target; it never stops the alias.
+- If another domain already holds the name, verify answers `409` `public_mcp_domain_held` once your own record was found; a name another workspace removed recently answers `409` `public_mcp_domain_in_cooldown` with `details.available_after` (default 7 days after the release).
+- Removing the domain, or unpublishing the endpoint, ends the alias from the next request. Publishing again gives a new endpoint without a domain: add it again (with a new TXT value).
+- Give clients the name exactly as the API returns it (lower case). All fields and errors: [API Reference › Custom domains of a public MCP endpoint](api-reference.md#custom-domains-of-a-public-mcp-endpoint); the full contract: [Public MCP custom domains](public-mcp-domains.md).
+
 ## Resource Tokens vs API Keys
 
 | | API Key | Resource Token | Observation credential |
