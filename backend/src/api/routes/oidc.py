@@ -252,6 +252,7 @@ async def authorize(request: Request) -> Response:
                         "profile": "Read your display name and profile picture",
                         "workspaces:read": "Read your workspace memberships and permissions",
                         "integrations:manage": "Manage integrations within your current KMC permissions",
+                        "sync.records:read": "Read approved synchronized product and FAQ records within your current KMC permissions",
                     }
                     scope_items = "".join(
                         f"<li>{html.escape(descriptions[scope])}</li>"

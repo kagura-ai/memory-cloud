@@ -27,7 +27,9 @@ from models.auth import User
 from models.oidc import OIDCAuthorizationCode, OIDCClient, OIDCGrant, OIDCToken
 from utils.datetime import utcnow
 
-IDENTITY_SCOPES = frozenset({"openid", "profile", "workspaces:read", "integrations:manage"})
+IDENTITY_SCOPES = frozenset(
+    {"openid", "profile", "workspaces:read", "integrations:manage", "sync.records:read"}
+)
 TOKEN_AUTH_METHODS = ["client_secret_basic", "client_secret_post"]
 
 

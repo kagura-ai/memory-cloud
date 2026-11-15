@@ -87,3 +87,11 @@ async def sync_reader(
 ) -> SyncPrincipal:
     """Read metadata with the existing isolated workspace inspection scope."""
     return await load_sync_identity(db, credential_hash(token), "workspaces:read")
+
+
+async def sync_records_reader(
+    token: Annotated[str, Depends(identity_access_token)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SyncPrincipal:
+    """Explicit data-read consent; workspace membership scope never implies it."""
+    return await load_sync_identity(db, credential_hash(token), "sync.records:read")

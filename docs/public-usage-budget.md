@@ -281,15 +281,16 @@ drops the table: counts and periods are lost and every workspace starts a
 fresh period at its next counted call. So does every downgrade to a revision
 below `f48_2805_public_usage_budgets`, including the per-branch downgrades of
 v0.162.0 in [Sync service credentials](ops/sync-service-credentials.md): they
-first revert `f50_2809` (drops `public_mcp_domains`, see
-[Public MCP custom domains](public-mcp-domains.md)), `f49_2817` (no-op) and
-`f48_2805`. Turn
+first revert `f50_2809` (drops `public_mcp_domains` with every binding, see
+[Public MCP custom domains](public-mcp-domains.md)), `f48_2807_sync_feed_runs`
+(which drops the staged feed tables), `f49_2817` (no-op) and `f48_2805`. Turn
 `MCP_PUBLIC_USAGE_BUDGET_ENABLED` off before any of them (see "Deploy order"
 for what the switch does without the table), and `MCP_PUBLIC_DOMAINS_ENABLED`
 too, after the alias routing is out of the proxy (that page's "Stopping and
-rolling back"); the tables come back only with `alembic upgrade head`. After a downgrade that reverted
-`f46_2803_admission_record`, run `alembic upgrade
-f47_2819_merge_sync_credentials` first and then `alembic upgrade head`.
+rolling back"); the tables come back only with `alembic upgrade head`. After
+a downgrade that reverted `f46_2803_admission_record`, run `alembic upgrade
+f47_2819_merge_sync_credentials` first, then `alembic upgrade
+f49_2817_clear_allowlist_adders`, then `alembic upgrade head`.
 
 ## Log events
 

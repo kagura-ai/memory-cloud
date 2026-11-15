@@ -38,8 +38,10 @@ async def check_oidc_rate_limit(request: Request) -> Response | None:
         operation = path.rsplit("/", 1)[-1]
     elif path == "/api/v1/me/workspaces":
         operation = "workspace-list"
-    elif path.startswith("/api/v1/sync/installations/") and len(path.split("/")) == 6:
+    elif path.startswith("/api/v1/sync/installations/"):
         operation = "sync-service"
+    elif path.startswith("/api/v1/workspaces/") and "/sync-installations/" in path:
+        operation = "sync-human"
     elif (
         path.startswith("/api/v1/me/workspaces/")
         and path.endswith("/access")

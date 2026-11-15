@@ -12,8 +12,8 @@ behaviour: an explicit ``None`` is JSON ``null``, an omitted value is ``{}``.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -35,6 +35,8 @@ from models.public_mcp_usage import PublicMcpUsageEvent
 from models.resource import IndexerState, Resource, ResourceEvent, WorkspaceConnector
 from models.schemas import RememberRequest
 from models.sleep import SleepAction, SleepReport
+from models.sync_feed import SyncChunk, SyncFeed, SyncRecord, SyncRun
+from models.sync_installation import SyncInstallation, SyncService
 from services.memory_service import MemoryService
 from services.quota_service import DailyReservation
 from services.secret_store_service import SecretStoreService
@@ -50,6 +52,9 @@ class Scope:
     report: SleepReport
     # one per connector: ``resource_pk`` is unique on workspace_connectors
     spare_resources: list[Resource]
+    sync_feed: SyncFeed = field(init=False)
+    sync_runs: list[SyncRun] = field(init=False)
+    sync_event: ResourceEvent = field(init=False)
 
 
 async def _scope(db) -> Scope:
@@ -87,6 +92,55 @@ async def _scope(db) -> Scope:
     return Scope(owner, ws, ctx, resource, report, spare)
 
 
+async def _sync_parents(db, scope: Scope) -> None:
+    # Metadata parents only: these cases test JSON storage, not sync admission.
+    sid = "jn-sync-" + uuid4().hex
+    db.add(
+        SyncService(
+            service_id=sid, browser_client_id=sid + "-browser", service_client_id=sid + "-worker"
+        )
+    )
+    await db.flush()
+    installation = SyncInstallation(
+        workspace_id=scope.ws.id,
+        service_id=sid,
+        service_client_id=sid + "-worker",
+        authorization_id=uuid4(),
+        application_id="json-null-case",
+        operations=["records:write"],
+        resource_pk=scope.resource.id,
+        resource_id=scope.resource.resource_id,
+        context_id=scope.ctx.id,
+        endpoint_id=uuid4(),
+    )
+    db.add(installation)
+    await db.flush()
+    feed = SyncFeed(id=uuid4(), installation_id=installation.id, kind="faq", config_hash="0" * 64)
+    db.add(feed)
+    await db.flush()
+    runs = [
+        SyncRun(
+            feed_id=feed.id,
+            operation_id=uuid4(),
+            request_hash="1" * 64,
+            manifest={},
+            generations=[1, 1, 1],
+            base_revision=0,
+            expires_at=utcnow() + timedelta(days=1),
+        )
+        for _ in range(2)
+    ]
+    event = ResourceEvent(
+        resource_pk=scope.resource.id,
+        resource_id=scope.resource.resource_id,
+        op="delete",
+        doc_id="json-null-parent",
+    )
+    db.add_all([*runs, event])
+    await db.flush()
+    scope.sync_feed, scope.sync_runs, scope.sync_event = feed, runs, event
+
+
 def _memory(s: Scope, **col: Any) -> Memory:
     return Memory(
         user_id=s.owner,
@@ -103,6 +157,52 @@ def _memory(s: Scope, **col: Any) -> Memory:
 # (table, column, attribute, factory, the table accepts UPDATE)
 Factory = Callable[[Scope, dict[str, Any]], Any]
 CASES: list[tuple[str, str, str, Factory, bool]] = [
+    (
+        "sync_runs",
+        "diff",
+        "diff",
+        lambda s, c: SyncRun(
+            feed_id=s.sync_feed.id,
+            operation_id=uuid4(),
+            request_hash="2" * 64,
+            manifest={},
+            generations=[1, 1, 1],
+            base_revision=0,
+            expires_at=utcnow() + timedelta(days=1),
+            **c,
+        ),
+        True,
+    ),
+    (
+        "sync_chunks",
+        "records",
+        "records",
+        # Each fixture run has exactly one chunk, so its run_id selects one row.
+        lambda s, c: SyncChunk(
+            run_id=s.sync_runs.pop().id,
+            chunk_index=0,
+            digest="3" * 64,
+            byte_count=100,
+            record_count=1,
+            **c,
+        ),
+        True,
+    ),
+    (
+        "sync_records",
+        "payload",
+        "payload",
+        lambda s, c: SyncRecord(
+            feed_id=s.sync_feed.id,
+            resource_pk=s.resource.id,
+            external_id=uuid4().hex,
+            doc_id=uuid4().hex,
+            version=1,
+            last_event_id=s.sync_event.id,
+            **c,
+        ),
+        True,
+    ),
     (
         "users",
         "totp_recovery_hashes",
@@ -301,7 +401,7 @@ CASES: list[tuple[str, str, str, Factory, bool]] = [
 ]
 
 # Tables whose primary key is not ``id``.
-_PRIMARY_KEY = {"scheduled_job_status": "job_id"}
+_PRIMARY_KEY = {"scheduled_job_status": "job_id", "sync_chunks": "run_id"}
 
 
 def _row_id(table: str, row: Any) -> Any:
@@ -331,6 +431,8 @@ async def _stored(db, table: str, column: str, row_id: Any) -> tuple[bool, str |
 )
 async def test_none_is_stored_as_sql_null(db_session, table, column, attr, factory, updatable):
     scope = await _scope(db_session)
+    if table in {"sync_runs", "sync_chunks", "sync_records"}:
+        await _sync_parents(db_session, scope)
 
     explicit = factory(scope, {attr: None})
     omitted = factory(scope, {})
