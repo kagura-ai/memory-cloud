@@ -8,9 +8,11 @@ row and the target (and, for the delete, every ``users`` row the deletion
 locks later), in ``user_id`` order, ``FOR NO KEY UPDATE``, and the admin
 count is read after it. The lock is held to the deletion's commit, so a
 deletion and a demotion, or two deletions, run one after the other and the
-second one counts what the first committed. An erasure checks once when it is
-requested (early answer, no request row) and again when it runs, in the
-transaction that deletes the account.
+second one counts what the first committed. An erasure checks in the
+transaction that inserts its request row; from that commit on, an account with
+an open erasure request does not count as a remaining admin, and its run holds
+no admin row: other role changes, deletions and logins do not wait on it. A
+request that ends ``failed`` or ``cancelled`` makes the account count again.
 
 Each test drives real Postgres sessions and waits on ``pg_blocking_pids``
 before it releases the paused one.
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
@@ -33,9 +36,14 @@ import services.user_deletion_service as deletion_module
 from api.routes.admin import UserDeleteRequest, delete_user
 from models.auth import AuditLog, User, Workspace
 from models.erasure import (
+    REASON_SELF_SERVICE,
     REASON_USER_REQUEST_VIA_SUPPORT,
+    STATUS_CANCELLED,
     STATUS_COMPLETE,
+    STATUS_COOLING_OFF,
     STATUS_FAILED,
+    STATUS_IN_PROGRESS,
+    STATUS_PENDING,
     ErasureRequest,
 )
 from services.account_erasure_service import AccountErasureService
@@ -325,22 +333,53 @@ async def test_two_deletes_of_the_last_two_admins_leave_one_admin(accounts, firs
 # --- an erasure and a demotion ------------------------------------------------
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("route", DEMOTE_ROUTES)
-async def test_a_demotion_waits_on_the_running_erasure_of_the_other_admin(accounts, route):
-    erased, demoted = await _two_admins(accounts, "lower_user_id")
+@asynccontextmanager
+async def erasure_in_step_one(maker, user_id: str) -> AsyncIterator[asyncio.Task]:
+    """An admin erasure of ``user_id`` whose request row is committed and
+    whose run is paused in its first step (the vector store), with the
+    subject's ``users`` row held ``FOR UPDATE`` by the run."""
+    import services.vector_erasure as vector_module
 
-    # The erasure's first commit is its request row; the second is the
-    # Postgres step's, with the account deleted and the locks held.
-    erasure, demotion = await race(
-        accounts.maker, erasure_of(erased), demotion_of(route, demoted), first_commit=2
-    )
+    holding, release = asyncio.Event(), asyncio.Event()
+    original = vector_module.delete_subject_points
 
-    assert _ok(erasure).status == STATUS_COMPLETE
-    _assert_demotion_refused(demotion)
-    assert await accounts.admin_ids() == [demoted]
-    assert not await accounts.exists(erased)
-    assert await accounts.role_audit_targets() == []
+    async def paused_step_one(db, subject: str) -> dict:
+        result = await original(db, subject)
+        holding.set()
+        await asyncio.wait_for(release.wait(), 30)
+        return result
+
+    async def erase():
+        async with maker() as db:
+            return await erasure_of(user_id)(db)
+
+    with patch.object(vector_module, "delete_subject_points", paused_step_one):
+        task = asyncio.create_task(erase())
+        try:
+            await asyncio.wait_for(holding.wait(), 15)
+            yield task
+            release.set()
+            await asyncio.wait_for(task, 30)
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+def other_admin_removal(operation: str, user_id: str) -> Operation:
+    """A demotion (either route) or a deletion of ``user_id``."""
+    return delete_of(user_id) if operation == "delete_user" else demotion_of(operation, user_id)
+
+
+def _assert_removal_refused(operation: str, outcome: Any) -> None:
+    if operation == "delete_user":
+        _assert_delete_refused(outcome)
+    else:
+        _assert_demotion_refused(outcome)
+
+
+REMOVALS = [*DEMOTE_ROUTES, "delete_user"]
 
 
 @pytest.mark.asyncio
@@ -362,45 +401,171 @@ async def test_an_erasure_requested_during_a_demotion_waits_and_is_refused(accou
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", DEMOTE_ROUTES)
-async def test_a_demotion_committed_before_the_erasure_runs_fails_the_request(accounts, route):
+async def test_a_demotion_during_the_erasure_check_waits_for_the_request_and_is_refused(
+    accounts, route
+):
+    """The check and the request row are one transaction: a demotion sent
+    between them waits for the commit, then counts the subject as gone."""
     erased, demoted = await _two_admins(accounts, "lower_user_id")
     maker = accounts.maker
-    requested, resume = asyncio.Event(), asyncio.Event()
-    original = AccountErasureService._execute
+    checked, resume, started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    demotion_pid = None
+    original = AccountErasureService._find_active_request
 
-    async def paused_execute(self, request, target):
-        # The request row is committed; its run has not started.
-        requested.set()
+    async def paused_lookup(self, user_id: str):
+        # After the admin check's lock and count, before the request row.
+        checked.set()
         await asyncio.wait_for(resume.wait(), 15)
-        return await original(self, request, target)
+        return await original(self, user_id)
 
     async def erase():
         async with maker() as db:
             return await erasure_of(erased)(db)
 
-    with patch.object(AccountErasureService, "_execute", paused_execute):
-        task = asyncio.create_task(erase())
+    async def demote():
+        nonlocal demotion_pid
+        async with maker() as db:
+            demotion_pid = await db.scalar(text("SELECT pg_backend_pid()"))
+            started.set()
+            return await _demote(route, db, demoted)
+
+    tasks: list[asyncio.Task] = []
+    with patch.object(AccountErasureService, "_find_active_request", paused_lookup):
         try:
-            await asyncio.wait_for(requested.wait(), 15)
-            async with maker() as db:
-                await asyncio.wait_for(_demote(route, db, demoted), 5)
+            erasure = asyncio.create_task(erase())
+            tasks.append(erasure)
+            await asyncio.wait_for(checked.wait(), 15)
+            demotion = asyncio.create_task(demote())
+            tasks.append(demotion)
+            await asyncio.wait_for(started.wait(), 15)
+            await asyncio.wait_for(wait_for_block(maker, demotion_pid), 5)
+            assert not demotion.done()
             resume.set()
-            with pytest.raises(ErasureForbiddenError) as refused:
-                await asyncio.wait_for(task, 30)
+            erased_answer, demoted_answer = await asyncio.wait_for(
+                asyncio.gather(erasure, demotion, return_exceptions=True), 30
+            )
         finally:
             resume.set()
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-    assert refused.value.status_code == 403
-    assert refused.value.error_code == "ERASURE-003"
-    assert refused.value.message == DELETE_LAST_ADMIN
-    [request] = await accounts.erasure_requests(erased)
-    assert request.status == STATUS_FAILED
-    assert request.failure_reason == DELETE_LAST_ADMIN
-    assert await accounts.exists(erased)
-    assert await accounts.admin_ids() == [erased]
+    assert _ok(erased_answer).status == STATUS_COMPLETE
+    _assert_demotion_refused(demoted_answer)
+    assert await accounts.admin_ids() == [demoted]
+    assert await accounts.role_audit_targets() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", REMOVALS)
+async def test_removing_the_other_admin_while_an_erasure_runs_is_refused_without_waiting(
+    accounts, operation
+):
+    erased, kept = await _two_admins(accounts, "lower_user_id")
+
+    async with erasure_in_step_one(accounts.maker, erased) as erasure:
+        async with accounts.maker() as db:
+            try:
+                outcome = await asyncio.wait_for(other_admin_removal(operation, kept)(db), 5)
+            except AdminProtectionError as refused:
+                outcome = refused
+        _assert_removal_refused(operation, outcome)
+
+    assert erasure.result().status == STATUS_COMPLETE
+    assert not await accounts.exists(erased)
+    assert await accounts.admin_ids() == [kept]
+    assert await accounts.role_audit_targets() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", DEMOTE_ROUTES)
+async def test_a_running_erasure_does_not_block_a_demotion_of_a_third_admin(accounts, route):
+    erased = await accounts.account("a-admin", admin=True)
+    kept = await accounts.account("b-admin", admin=True)
+    demoted = await accounts.account("c-admin", admin=True)
+
+    async with erasure_in_step_one(accounts.maker, erased) as erasure:
+        async with accounts.maker() as db:
+            await asyncio.wait_for(_demote(route, db, demoted), 5)
+
+    assert erasure.result().status == STATUS_COMPLETE
+    assert await accounts.admin_ids() == [kept]
+    assert await accounts.role_audit_targets() == [demoted]
+
+
+@pytest.mark.asyncio
+async def test_an_admin_login_does_not_wait_on_a_running_erasure(accounts):
+    erased = await accounts.account("a-admin", admin=True)
+    other = await accounts.account("b-admin", admin=True)
+
+    async with erasure_in_step_one(accounts.maker, erased):
+        async with accounts.maker() as db:
+            pid = await db.scalar(text("SELECT pg_backend_pid()"))
+            # What a login writes on the account's row.
+            login = asyncio.create_task(
+                db.execute(
+                    update(User).where(User.user_id == other).values(last_login_at=func.now())
+                )
+            )
+            await asyncio.wait_for(asyncio.shield(login), 5)
+            async with accounts.maker() as observer:
+                assert (
+                    await observer.scalar(
+                        text("SELECT cardinality(pg_blocking_pids(:pid))"), {"pid": pid}
+                    )
+                    == 0
+                )
+            await db.commit()
+
+    assert await accounts.admin_ids() == [other]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", REMOVALS)
+@pytest.mark.parametrize(
+    ("open_status", "self_service"),
+    [
+        (STATUS_PENDING, True),
+        (STATUS_COOLING_OFF, True),
+        (STATUS_COOLING_OFF, False),
+        (STATUS_IN_PROGRESS, False),
+    ],
+)
+@pytest.mark.parametrize("ended", [STATUS_FAILED, STATUS_CANCELLED])
+async def test_an_admin_counts_again_once_its_erasure_request_ends(
+    accounts, operation, open_status, self_service, ended
+):
+    under_erasure, other = await _two_admins(accounts, "lower_user_id")
+    accounts.db.add(
+        ErasureRequest(
+            user_id=under_erasure,
+            user_email_hash="0" * 64,
+            initiated_by=under_erasure if self_service else OPERATOR["user_id"],
+            is_self_service=self_service,
+            reason_code=REASON_SELF_SERVICE if self_service else REASON_USER_REQUEST_VIA_SUPPORT,
+            status=open_status,
+        )
+    )
+    await accounts.db.commit()
+
+    # While the request is open the account is not a remaining admin.
+    async with accounts.maker() as db:
+        try:
+            refused = await other_admin_removal(operation, other)(db)
+        except AdminProtectionError as error:
+            refused = error
+    _assert_removal_refused(operation, refused)
+    assert await accounts.admin_ids() == [under_erasure, other]
+
+    await accounts.db.execute(
+        update(ErasureRequest).where(ErasureRequest.user_id == under_erasure).values(status=ended)
+    )
+    await accounts.db.commit()
+
+    async with accounts.maker() as db:
+        _ok(await other_admin_removal(operation, other)(db))
+    assert await accounts.admin_ids() == [under_erasure]
 
 
 # --- what the count reads, and what the lock does not wait on -----------------
@@ -550,7 +715,7 @@ async def test_an_admin_delete_takes_the_admin_rows_and_its_users_rows_first(db_
 
 
 @pytest.mark.asyncio
-async def test_an_admin_erasure_takes_the_admin_rows_first_in_both_transactions(
+async def test_an_admin_erasure_locks_the_admin_rows_only_while_it_creates_its_request(
     db_session, accounts
 ):
     erased = await accounts.account("a-admin", admin=True)
@@ -562,18 +727,18 @@ async def test_an_admin_erasure_takes_the_admin_rows_first_in_both_transactions(
 
     _assert_global_order(trace)
     with_users = [tx for tx in trace.transactions if any(lock.kind == "users" for lock in tx)]
-    # The request (its check, then the request row) and the run (its check,
-    # then the guard's lock of the account, the link lock, the deletes).
-    assert len(with_users) >= 2
-    for transaction in with_users:
-        _first_lock_is_the_admin_rows_lock(transaction)
+    admin_locks = [tx for tx in with_users if any("users.role = " in lock.sql for lock in tx)]
+    # The request: the admin check's lock first, then the request row.
+    [request] = admin_locks
+    _first_lock_is_the_admin_rows_lock(request)
+    assert ("link", False) not in [(lock.kind, lock.nowait) for lock in request]
+    # The run: the guard's lock of the subject's row first, no admin row.
     [run] = [
         tx for tx in with_users if ("link", False) in [(lock.kind, lock.nowait) for lock in tx]
     ]
-    # Then the guard's lock of the account, a row the run already holds.
-    assert run[1].kind == "users"
-    assert "WHERE users.id = " in run[1].sql
-    assert run[1].sql.endswith("FOR UPDATE")
+    assert run[0].kind == "users"
+    assert "WHERE users.id = " in run[0].sql
+    assert run[0].sql.endswith("FOR UPDATE")
 
 
 @pytest.mark.asyncio

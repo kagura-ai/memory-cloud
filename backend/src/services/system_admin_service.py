@@ -20,12 +20,20 @@ Both rules are about ``users`` rows with ``role = 'admin'`` and hold in every
 ``can_delete_admin`` (#2855). Both decide under the same row lock: the admin
 rows and the target, in ``user_id`` order, ``FOR NO KEY UPDATE``, with the
 admin count read after it.
+
+An admin whose account has an open erasure request (``ACTIVE_STATUSES``,
+self-service or admin-started) does not count as a remaining admin, and its
+row is not part of the lock (#2855): an admin erasure decides under the lock
+in the transaction that inserts its request, and from that commit on every
+other decision counts the account as gone, while the run holds no admin row.
+A request that ends ``failed`` or ``cancelled`` makes the account count again.
 """
 
-from sqlalchemy import ColumnElement, Select, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import AuditLog, User
+from models.erasure import ACTIVE_STATUSES, ErasureRequest
 from utils.exceptions import AdminProtectionError, BadRequestError, NotFoundException
 from utils.logger import get_logger
 
@@ -40,16 +48,46 @@ def _is_admin_row() -> ColumnElement[bool]:
     return User.role == "admin"
 
 
+def _counted_admin_row() -> ColumnElement[bool]:
+    """The admin rows that count as remaining admins: no open erasure request.
+
+    An account being erased (any request in ``ACTIVE_STATUSES``) counts as
+    gone from its request's commit on (#2855).
+    """
+    under_erasure = exists().where(
+        ErasureRequest.user_id == User.user_id,
+        ErasureRequest.status.in_(ACTIVE_STATUSES),
+    )
+    return and_(_is_admin_row(), ~under_erasure)
+
+
+async def _admin_count(db: AsyncSession, user_id: str) -> int:
+    """The admins left to count for a decision about ``user_id``.
+
+    The target itself (when it is an admin) and every other admin that
+    counts (``_counted_admin_row``). A statement of its own, run after the
+    lock, so it reads what committed while the lock waited.
+    """
+    return (
+        await db.execute(
+            select(func.count())
+            .select_from(User)
+            .where(or_(_counted_admin_row(), and_(_is_admin_row(), User.user_id == user_id)))
+        )
+    ).scalar_one()
+
+
 def _admin_rows_lock(user_id: str, also_lock: ColumnElement[bool] | None = None) -> Select:
     """The one statement that locks what a system-role decision reads.
 
-    Every admin row, the target and the rows ``also_lock`` matches, in
-    ``user_id`` order, ``FOR NO KEY UPDATE`` (never ``FOR UPDATE``: a ``FOR
-    KEY SHARE`` holder of another account's row does not wait on it, and
-    nothing here waits on one). ``populate_existing``: a row the session
-    already holds is refreshed from the locked read.
+    Every admin row that counts (``_counted_admin_row``: not one under
+    erasure, whose run holds it), the target and the rows ``also_lock``
+    matches, in ``user_id`` order, ``FOR NO KEY UPDATE`` (never ``FOR
+    UPDATE``: a ``FOR KEY SHARE`` holder of another account's row does not
+    wait on it, and nothing here waits on one). ``populate_existing``: a row
+    the session already holds is refreshed from the locked read.
     """
-    conditions = [_is_admin_row(), User.user_id == user_id]
+    conditions = [_counted_admin_row(), User.user_id == user_id]
     if also_lock is not None:
         conditions.append(also_lock)
     return (
@@ -181,12 +219,13 @@ class SystemAdminService:
         never commits: the caller writes the role and its audit row and
         commits once, while the locks are held.
 
-        The first statement locks every admin row and the target, in
-        ``user_id`` order, ``FOR NO KEY UPDATE`` (the strength the role
-        ``UPDATE`` takes anyway). Two role changes therefore run one after
-        the other, and the second reads what the first committed. The admin
-        count is a statement of its own after the lock, so it sees a
-        promotion committed while this one waited.
+        The first statement locks every admin row that counts and the
+        target, in ``user_id`` order, ``FOR NO KEY UPDATE`` (the strength the
+        role ``UPDATE`` takes anyway). Two role changes therefore run one
+        after the other, and the second reads what the first committed. The
+        admin count is a statement of its own after the lock, so it sees a
+        promotion committed while this one waited. An admin with an open
+        erasure request is neither locked nor counted (#2855).
 
         The rules are about ``role = 'admin'`` rows and read no
         ``SYSTEM_ADMIN_MODE``: an operator in ``service`` mode is held by
@@ -210,9 +249,7 @@ class SystemAdminService:
             return None
 
         if target.role == "admin" and new_role != "admin":
-            admin_count = (
-                await self.db.execute(select(func.count()).select_from(User).where(_is_admin_row()))
-            ).scalar_one()
+            admin_count = await _admin_count(self.db, user_id)
 
             if target.is_initial_admin:
                 logger.warning(
@@ -319,13 +356,15 @@ class SystemAdminService:
         - Last remaining admin
 
         It decides under the lock of ``lock_for_role_change`` (#2855): its
-        first statement locks every admin row and the target, in ``user_id``
-        order, ``FOR NO KEY UPDATE``, and the admin count is a statement of
-        its own after it (a promotion committed while this waited counts).
-        The lock is taken for any target, admin or not, and is held until the
-        caller's transaction ends: the caller deletes or marks the account in
-        that transaction, so a deletion and a role change, or two deletions,
-        run one after the other. It writes nothing and never commits.
+        first statement locks every admin row that counts and the target, in
+        ``user_id`` order, ``FOR NO KEY UPDATE``, and the admin count is a
+        statement of its own after it (a promotion committed while this
+        waited counts; an admin with an open erasure request does not). The
+        lock is taken for any target, admin or not, and is held until the
+        caller's transaction ends: the caller deletes the account, or inserts
+        its erasure request, in that transaction, so a deletion and a role
+        change, or two deletions, run one after the other. It writes nothing
+        and never commits.
 
         A transaction's first lock statement must take every ``users`` row it
         locks later (the lock order of
@@ -364,9 +403,7 @@ class SystemAdminService:
             return False, "Cannot delete the initial system administrator"
 
         # Protection 2: Check if last admin (counted after the lock)
-        admin_count_stmt = select(func.count()).select_from(User).where(_is_admin_row())
-        admin_count_result = await self.db.execute(admin_count_stmt)
-        admin_count = admin_count_result.scalar()
+        admin_count = await _admin_count(self.db, user_id)
 
         if admin_count <= 1:
             logger.info(

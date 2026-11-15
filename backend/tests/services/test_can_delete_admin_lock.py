@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from models.auth import User
 from services.system_admin_service import SystemAdminService
-from tests.api.test_admin_role_protections import _sql, account, role_change_session
+from tests.api.test_admin_role_protections import LOCKED_ROWS, _sql, account, role_change_session
 
 INITIAL = (False, "Cannot delete the initial system administrator")
 LAST = (False, "Cannot delete the last remaining system administrator")
@@ -47,7 +47,7 @@ async def test_can_delete_admin_locks_first_for_any_target(role):
     session = role_change_session(account("1001", "admin"), account("2002", role))
     await SystemAdminService(session).can_delete_admin("2002")
     lock = _statements(session)[0]
-    assert "WHERE users.role = 'admin' OR users.user_id = '2002'" in lock
+    assert LOCKED_ROWS in lock
     assert lock.endswith("ORDER BY users.user_id FOR NO KEY UPDATE")
     assert session.statements[0].get_execution_options().get("populate_existing") is True
     session.add.assert_not_called()
@@ -61,7 +61,13 @@ async def test_can_delete_admin_counts_the_admins_after_the_lock():
     lock, count = _statements(session)
     assert "FOR NO KEY UPDATE" in lock
     assert count.startswith("SELECT count(*)")
-    assert "WHERE users.role = 'admin'" in count
+    # The target, and every other admin with no open erasure request.
+    assert count.endswith(
+        "WHERE users.role = 'admin' AND NOT (EXISTS (SELECT * FROM erasure_requests "
+        "WHERE erasure_requests.user_id = users.user_id AND erasure_requests.status IN "
+        "('pending', 'cooling_off', 'in_progress'))) "
+        "OR users.role = 'admin' AND users.user_id = '2002'"
+    ), count
     assert "FOR " not in count
 
 
@@ -72,7 +78,7 @@ async def test_can_delete_admin_locks_the_also_lock_rows_in_the_same_statement()
     await SystemAdminService(session).can_delete_admin("2002", also_lock=also)
     [lock] = _statements(session)
     assert (
-        "WHERE users.role = 'admin' OR users.user_id = '2002' OR users.user_id IN "
+        LOCKED_ROWS + " OR users.user_id IN "
         "(SELECT users.user_id FROM users WHERE users.email = 'successor@example.com')"
     ) in lock
     assert lock.endswith("ORDER BY users.user_id FOR NO KEY UPDATE")

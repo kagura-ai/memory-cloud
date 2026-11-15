@@ -34,6 +34,12 @@ from utils.exceptions import AdminProtectionError
 INITIAL_ADMIN_MESSAGE = (
     "Cannot demote the initial system administrator. This is a protected account."
 )
+# The rows the role-change lock takes: the admins that count and the target.
+LOCKED_ROWS = (
+    "WHERE users.role = 'admin' AND NOT (EXISTS (SELECT * FROM erasure_requests "
+    "WHERE erasure_requests.user_id = users.user_id AND erasure_requests.status IN "
+    "('pending', 'cooling_off', 'in_progress'))) OR users.user_id = '2002'"
+)
 LAST_ADMIN_MESSAGE = (
     "Cannot demote the last remaining system administrator. At least one admin must exist."
 )
@@ -421,8 +427,9 @@ async def test_the_lock_statement_orders_by_user_id_and_takes_for_no_key_update(
     await SystemAdminService(session).lock_for_role_change("2002", "user")
     lock = session.statements[0]
     sql = " ".join(_sql(lock).split())
-    # The admin rows AND the target, in one statement.
-    assert "WHERE users.role = 'admin' OR users.user_id = '2002'" in sql
+    # The admin rows that count (none with an open erasure request, #2855)
+    # AND the target, in one statement.
+    assert LOCKED_ROWS in sql
     assert sql.endswith("ORDER BY users.user_id FOR NO KEY UPDATE")
     # A row the session already holds is refreshed from the locked read.
     assert lock.get_execution_options().get("populate_existing") is True
