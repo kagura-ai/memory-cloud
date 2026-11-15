@@ -144,15 +144,30 @@ def created(monkeypatch, events) -> list[dict]:
     return made
 
 
+def _reports(rows: list) -> MagicMock:
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = rows
+    return result
+
+
 def _run_db(events, *, user=TARGET, running=None, eligible=True) -> tuple[AsyncMock, UUID, UUID]:
-    """Session mock for the run handler: user, running report, eligibility."""
+    """Session mock for the run handler: user, the guard's two reads, eligibility.
+
+    ``running`` is ``(id, started_at)`` of a running report another
+    transaction holds (#2856: the guard could not lock it, so it is live).
+    """
     workspace_id, context_id = uuid4(), uuid4()
     mock_db = AsyncMock()
     effects = [_scalar_one_or_none(user)]
     if user is not None:
-        effects.append(_first(running))
+        effects.append(_reports([]))
         if running is None:
+            effects.append(_reports([]))
             effects.append(_first((workspace_id, context_id) if eligible else None))
+        else:
+            report = MagicMock()
+            report.id, report.started_at = running
+            effects.append(_reports([report]))
     mock_db.execute.side_effect = effects
     mock_db.add = MagicMock(side_effect=lambda obj: events.append(("add", obj)))
     mock_db.commit.side_effect = lambda: events.append("commit")
@@ -230,16 +245,20 @@ class TestRunForTargetUser:
         response = client.post(RUN_URL, json={"context_id": str(context_id)})
 
         assert response.status_code == 202, response.text
-        assert mock_db.execute.await_count == 3
-        user_sql, running_sql, eligible_sql = (_sql(mock_db, i) for i in range(3))
+        assert mock_db.execute.await_count == 4
+        user_sql, held_sql, running_sql, eligible_sql = (_sql(mock_db, i) for i in range(4))
         # (a) the target's users row, by its id.
         assert "FROM users" in user_sql and "users.user_id =" in user_sql
         assert _bound(mock_db, 0) == [TARGET]
-        # (b) a running report of the target, never of the caller.
-        assert "sleep_reports.user_id =" in running_sql
-        assert "sleep_reports.status =" in running_sql
-        assert TARGET in _bound(mock_db, 1)
-        assert ADMIN_SESSION["user_id"] not in _bound(mock_db, 1)
+        # (b) the target's running reports, never the caller's: the ones this
+        # request can lock, then all of them (#2856).
+        assert "FOR NO KEY UPDATE SKIP LOCKED" in held_sql
+        assert "FOR " not in running_sql
+        for index, sql in ((1, held_sql), (2, running_sql)):
+            assert "sleep_reports.user_id =" in sql
+            assert "sleep_reports.status =" in sql
+            assert TARGET in _bound(mock_db, index)
+            assert ADMIN_SESSION["user_id"] not in _bound(mock_db, index)
         # (c) one statement: the live, non-skip context with a live memory of
         # the target in the context's own workspace.
         assert "contexts.id =" in eligible_sql
@@ -251,8 +270,8 @@ class TestRunForTargetUser:
         assert "memories.user_id =" in eligible_sql
         assert "memories.deleted_at IS NULL" in eligible_sql
         assert "contexts.created_by" not in eligible_sql
-        assert {TARGET, context_id, "skip"} <= set(_bound(mock_db, 2))
-        assert ADMIN_SESSION["user_id"] not in _bound(mock_db, 2)
+        assert {TARGET, context_id, "skip"} <= set(_bound(mock_db, 3))
+        assert ADMIN_SESSION["user_id"] not in _bound(mock_db, 3)
 
     def test_a_running_report_of_the_target_is_409(self, client, events, scheduled, created):
         running_id, started_at = uuid4(), datetime(2026, 4, 9, 11, 30, 0)
@@ -284,8 +303,9 @@ class TestRunForTargetUser:
         response = client.post(RUN_URL, json={"context_id": str(context_id)})
 
         assert response.status_code == 202, response.text
-        assert _bound(mock_db, 1).count(TARGET) == 1
-        assert ADMIN_SESSION["user_id"] not in _bound(mock_db, 1)
+        for index in (1, 2):
+            assert _bound(mock_db, index).count(TARGET) == 1
+            assert ADMIN_SESSION["user_id"] not in _bound(mock_db, index)
 
     def test_an_unknown_user_is_404_without_the_sleep_code(
         self, client, events, scheduled, created

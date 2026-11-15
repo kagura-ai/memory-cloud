@@ -76,6 +76,20 @@ def no_background_tasks(monkeypatch):
     return scheduled
 
 
+def _reports(rows: list) -> MagicMock:
+    """A result whose ``.scalars().all()`` is ``rows`` (the guard's two reads, #2856)."""
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = rows
+    return result
+
+
+def _running_report(report_id: UUID, started_at: datetime) -> MagicMock:
+    report = MagicMock()
+    report.id = report_id
+    report.started_at = started_at
+    return report
+
+
 def _patch_create_report(monkeypatch, report_ids: list[UUID]):
     """Replace SleepReporter.create_report so it yields stable UUIDs.
 
@@ -111,15 +125,13 @@ class TestTriggerSleepRun:
         new_report_id = uuid4()
 
         # DB execute sequence:
-        #   1. concurrency guard → no running report (.first() → None)
-        #   2. target contexts query → one eligible row (.all() → [(ws, ctx)])
-        running_result = MagicMock()
-        running_result.first.return_value = None
+        #   1-2. concurrency guard → no running report held, none running
+        #   3. target contexts query → one eligible row (.all() → [(ws, ctx)])
         target_result = MagicMock()
         target_result.all.return_value = [(workspace_id, context_id)]
 
         mock_db = AsyncMock()
-        mock_db.execute.side_effect = [running_result, target_result]
+        mock_db.execute.side_effect = [_reports([]), _reports([]), target_result]
 
         _install_overrides(mock_db)
         _patch_create_report(monkeypatch, [new_report_id])
@@ -142,11 +154,13 @@ class TestTriggerSleepRun:
         running_id = uuid4()
         started_at = datetime(2026, 4, 9, 11, 30, 0)
 
-        running_result = MagicMock()
-        running_result.first.return_value = (running_id, started_at)
-
+        # Not among the rows this request could lock: another transaction
+        # holds it, so it is live whatever its age (#2856).
         mock_db = AsyncMock()
-        mock_db.execute.side_effect = [running_result]
+        mock_db.execute.side_effect = [
+            _reports([]),
+            _reports([_running_report(running_id, started_at)]),
+        ]
 
         _install_overrides(mock_db)
 
@@ -168,13 +182,11 @@ class TestTriggerSleepRun:
         mock_db.commit.assert_not_awaited()
 
     def test_returns_404_when_no_eligible_contexts(self, client, no_background_tasks):
-        running_result = MagicMock()
-        running_result.first.return_value = None
         target_result = MagicMock()
         target_result.all.return_value = []  # admin has no eligible contexts
 
         mock_db = AsyncMock()
-        mock_db.execute.side_effect = [running_result, target_result]
+        mock_db.execute.side_effect = [_reports([]), _reports([]), target_result]
 
         _install_overrides(mock_db)
 
@@ -188,3 +200,64 @@ class TestTriggerSleepRun:
         assert body["error"] == "SLEEP-003"
         assert no_background_tasks == []
         mock_db.commit.assert_not_awaited()
+
+
+class TestBatchTaskTracking:
+    """#2856: a started batch is held strongly, and its reports count as live
+    for this process's guard, until the batch ends."""
+
+    @pytest.mark.asyncio
+    async def test_the_task_and_its_report_ids_are_tracked_while_it_runs(self, monkeypatch):
+        import asyncio
+
+        release = asyncio.Event()
+        seen: list[tuple[list, str]] = []
+
+        async def fake_batch(jobs, user_id):
+            seen.append((jobs, user_id))
+            await release.wait()
+
+        monkeypatch.setattr(admin_sleep, "_run_sleep_batch", fake_batch)
+        report_ids = [uuid4(), uuid4()]
+        jobs = [(report_id, "ws", "ctx") for report_id in report_ids]
+
+        admin_sleep._start_sleep_batch(jobs, "user-1")
+        [task] = [t for t in admin_sleep._IN_FLIGHT_BATCHES if not t.done()]
+        await asyncio.sleep(0)
+
+        assert seen == [(jobs, "user-1")]
+        assert set(report_ids) <= admin_sleep._LIVE_REPORT_IDS
+
+        release.set()
+        await task
+        await asyncio.sleep(0)  # the done callback runs on the next loop step
+
+        assert task not in admin_sleep._IN_FLIGHT_BATCHES
+        assert not set(report_ids) & admin_sleep._LIVE_REPORT_IDS
+
+    @pytest.mark.asyncio
+    async def test_a_crashed_batch_is_released_and_logged(self, monkeypatch):
+        import asyncio
+
+        from structlog.testing import capture_logs
+
+        async def crashing_batch(_jobs, _user_id):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(admin_sleep, "_run_sleep_batch", crashing_batch)
+        report_id = uuid4()
+
+        with capture_logs() as logs:
+            admin_sleep._start_sleep_batch([(report_id, "ws", "ctx")], "user-1")
+            [task] = [t for t in admin_sleep._IN_FLIGHT_BATCHES if not t.done()]
+            with pytest.raises(RuntimeError):
+                await task
+            await asyncio.sleep(0)
+
+        assert task not in admin_sleep._IN_FLIGHT_BATCHES
+        assert report_id not in admin_sleep._LIVE_REPORT_IDS
+        assert [e["event"] for e in logs] == ["manual_sleep_background_task_crashed"]
+
+    @pytest.mark.asyncio
+    async def test_shutdown_with_no_batch_does_nothing(self):
+        await admin_sleep.stop_manual_sleep_runs(timeout=0.1)

@@ -296,6 +296,12 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass  # expected: we cancelled it ourselves
 
+    # Cancel this process's manual Sleep runs while the database is still
+    # open, so each closes its reports as interrupted (#2856).
+    from api.routes.admin_sleep import stop_manual_sleep_runs
+
+    await stop_manual_sleep_runs(timeout=10.0)
+
     # Stop the leader loop and scheduler, release the leader lock (#1980).
     # Before close_db(): the lock connection belongs to the engine's pool.
     scheduler_leader = getattr(app.state, "scheduler_leader", None)
