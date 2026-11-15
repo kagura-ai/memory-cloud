@@ -52,6 +52,9 @@ SLEEP_RUN_TRIGGER_AUDIT_ACTION = "sleep_run_trigger"
 # ``sleep_actions.id`` is a BIGINT.
 _MAX_ACTION_ID = 2**63 - 1
 
+# No stored user id holds a NUL: such a path value is a 422, never a statement.
+_NO_NUL = r"^[^\x00]*$"
+
 
 # ============================================================================
 # Schemas
@@ -485,9 +488,9 @@ class SleepRunForUserRequest(BaseModel):
     },
 )
 async def trigger_sleep_run_for_user(
-    user_id: str,
     request: SleepRunForUserRequest,
     admin: AdminUser,
+    user_id: str = Path(pattern=_NO_NUL),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """Run Sleep Maintenance once for ``user_id`` in one context (#2838).

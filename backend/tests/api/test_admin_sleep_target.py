@@ -345,6 +345,27 @@ class TestRunForTargetUser:
         assert response.status_code == 422, response.text
         mock_db.execute.assert_not_awaited()
 
+    @pytest.mark.parametrize("suffix", ["%00", "%00tail"])
+    def test_a_user_id_the_database_would_refuse_is_422_and_is_not_echoed(
+        self, client, events, scheduled, created, suffix
+    ):
+        mock_db, _, context_id = _run_db(events)
+        _install(mock_db, OPERATOR)
+        user_id = f"local:{uuid4().hex}"
+
+        response = client.post(
+            f"/api/v1/admin/users/{user_id}{suffix}/sleep/run",
+            json={"context_id": str(context_id)},
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"] == "VAL-001"
+        # The answer names the parameter, never its value.
+        assert user_id not in response.text
+        mock_db.execute.assert_not_awaited()
+        assert events == [] and created == []
+        scheduled.assert_not_called()
+
     def test_the_log_line_names_ids_only_and_never_the_operators_address(
         self, client, events, scheduled, created
     ):

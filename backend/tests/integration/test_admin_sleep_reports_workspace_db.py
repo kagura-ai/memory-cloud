@@ -308,3 +308,23 @@ async def test_without_the_parameter_the_list_is_the_one_before(maker, world, mo
     assert response.json()["total"] == 5
     for row in response.json()["reports"]:
         assert UUID(row["id"])
+
+
+async def test_a_value_the_database_would_refuse_is_422_and_the_bounds_are_answered(maker, world):
+    for params in (
+        {"user_id": f"{world.u1}\x00"},
+        {"user_id": "\x00"},
+        {"offset": 2**63},
+    ):
+        refused = await _list(maker, "service", **params)
+        assert refused.status_code == 422, params
+
+    largest = await _list(maker, "service", user_id=world.u1, offset=2**63 - 1)
+    assert largest.status_code == 200, largest.text
+    assert largest.json()["reports"] == []
+    assert largest.json()["total"] == 5
+    # An id is matched exactly: a LIKE wildcard in it matches nothing.
+    for value in ("%", "_", world.u1[:-1] + "_", world.u1[:-1] + "%"):
+        answered = await _list(maker, "service", user_id=value)
+        assert answered.status_code == 200, value
+        assert answered.json()["total"] == 0, value

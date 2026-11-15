@@ -315,15 +315,39 @@ class TestActionsPage:
     @pytest.mark.parametrize("limit", [1, 500])
     def test_limit_bounds_are_accepted(self, client, limit):
         report_id = uuid4()
-        _install(self._db(report_id, [], 0))
+        mock_db = self._db(report_id, [], 0)
+        _install(mock_db)
 
         response = client.get(f"/api/v1/admin/sleep-reports/{report_id}/actions?limit={limit}")
 
         assert response.status_code == 200, response.text
         assert response.json()["limit"] == limit
+        # The page statement is bound to the asked limit itself, not a smaller one.
+        assert limit in set(_params(mock_db, 2).values())
+
+    def test_the_largest_offset_is_bound_as_asked(self, client):
+        report_id = uuid4()
+        mock_db = self._db(report_id, [], 0)
+        _install(mock_db)
+
+        response = client.get(f"/api/v1/admin/sleep-reports/{report_id}/actions?offset={2**63 - 1}")
+
+        assert response.status_code == 200, response.text
+        assert 2**63 - 1 in set(_params(mock_db, 2).values())
 
     @pytest.mark.parametrize(
-        "query", ["limit=0", "limit=501", "limit=-1", "limit=abc", "offset=-1", "offset=abc"]
+        "query",
+        [
+            "limit=0",
+            "limit=501",
+            "limit=-1",
+            "limit=abc",
+            "offset=-1",
+            "offset=abc",
+            # past what the database takes as an OFFSET
+            "offset=9223372036854775808",
+            "offset=99999999999999999999",
+        ],
     )
     def test_out_of_range_paging_is_422_not_clamped(self, client, query):
         mock_db = AsyncMock()

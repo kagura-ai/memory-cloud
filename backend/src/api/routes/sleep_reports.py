@@ -147,6 +147,12 @@ class SleepActionListResponse(BaseModel):
 
 _VALID_STATUSES = {"running", "completed", "degraded", "failed", "cancelled", "rolled_back"}
 
+# What the database takes on the admin reads: no stored text holds a NUL, and
+# an OFFSET is a 64-bit integer. A value outside these is a 422, never a
+# statement.
+_NO_NUL = r"^[^\x00]*$"
+_MAX_OFFSET = 2**63 - 1
+
 
 def _validate_status(status_filter: str | None) -> None:
     """Reject unknown status values with a 400 (not a 500)."""
@@ -199,13 +205,13 @@ async def list_sleep_reports(
     _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=_MAX_OFFSET),
     status_filter: str | None = Query(None, alias="status"),
     source: SleepReportSourceFilter = Query(
         SLEEP_REPORT_SOURCE_ALL, description=_SOURCE_QUERY_DESCRIPTION
     ),
     context_id: UUID | None = Query(None),
-    user_id: str | None = Query(None),
+    user_id: str | None = Query(None, pattern=_NO_NUL),
     workspace_id: UUID | None = Query(
         None,
         description=(
@@ -328,7 +334,7 @@ async def list_sleep_report_actions(
     _admin: dict = Depends(require_admin),  # noqa: ARG001 - FastAPI dep
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=_MAX_OFFSET),
 ) -> SleepActionListResponse:
     """Read one page of a report's action audit log (#2842).
 

@@ -17118,6 +17118,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }
@@ -17174,6 +17175,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -17302,6 +17304,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 9223372036854775807,
               "minimum": 0,
               "type": "integer"
             }
@@ -17921,6 +17924,7 @@
             "name": "user_id",
             "required": true,
             "schema": {
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           }

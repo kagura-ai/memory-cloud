@@ -741,6 +741,44 @@ class TestListSleepReportsWorkspaceFilter:
         assert response.status_code == 422
         mock_db.execute.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            # past what the database takes as an OFFSET
+            "offset=9223372036854775808",
+            "offset=99999999999999999999",
+            # a NUL is in no stored id and is refused before the statement
+            "user_id=local:a%00b",
+            "user_id=%00",
+        ],
+    )
+    def test_a_value_the_database_would_refuse_is_422(self, client, query):
+        mock_db = AsyncMock()
+        _install_overrides(mock_db)
+
+        response = client.get(f"/api/v1/admin/sleep-reports?{query}")
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"] == "VAL-001"
+        mock_db.execute.assert_not_awaited()
+
+    def test_a_refused_filter_value_is_not_echoed_or_logged(self, client):
+        from structlog.testing import capture_logs
+
+        mock_db = AsyncMock()
+        _install_overrides(mock_db)
+        user_id = f"local:{uuid4().hex}"
+
+        with capture_logs() as logs:
+            response = client.get(
+                f"/api/v1/admin/sleep-reports?user_id={user_id}%00&offset=9223372036854775808"
+            )
+
+        assert response.status_code == 422, response.text
+        assert user_id not in response.text
+        assert user_id not in repr(logs)
+        mock_db.execute.assert_not_awaited()
+
     def test_an_id_with_no_report_answers_an_empty_list(self, client):
         mock_db = self._db([], total=0)
         _install_overrides(mock_db)

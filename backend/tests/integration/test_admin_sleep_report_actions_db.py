@@ -246,3 +246,15 @@ async def test_the_reads_change_no_row(maker, world, db_session: AsyncSession):
         )
 
     assert await snapshot() == before
+
+
+async def test_an_offset_the_database_would_refuse_is_422_and_the_largest_is_answered(maker, world):
+    url = f"/api/v1/admin/sleep-reports/{world.report_id}/actions"
+    async with _client(maker, PRINCIPALS["service"]) as client:
+        refused = await client.get(url, params={"offset": 2**63})
+        largest = await client.get(url, params={"offset": 2**63 - 1})
+
+    assert refused.status_code == 422, refused.text
+    assert largest.status_code == 200, largest.text
+    assert largest.json()["actions"] == []
+    assert largest.json()["total"] == ACTIONS_OF_THE_RUN

@@ -918,3 +918,34 @@ async def test_a_workspace_over_its_capacity_still_allows_the_run_and_the_undo(
         assert (await _memory(check, world.memories["loser"])).deleted_at is None
         assert len(await _audit_rows(check, "sleep_run_trigger")) == 1
         assert len(await _audit_rows(check, "sleep_merge_undo")) == 1
+
+
+# ------------------------------------------- values the database refuses
+
+
+async def test_a_user_id_the_database_would_refuse_is_422_and_writes_nothing(maker, world, jobs):
+    body = {"context_id": str(world.contexts["ok"])}
+    async with _client(maker, OPERATOR) as client:
+        for user_id in (f"{world.target}%00", "%00"):
+            refused = await client.post(_run_url(user_id), json=body)
+            assert refused.status_code == 422, refused.text
+        # Any other character is an id like another: no such user.
+        unknown = await client.post(_run_url(f"{world.target}%25"), json=body)
+
+    assert unknown.status_code == 404, unknown.text
+    assert unknown.json()["error"] == "RES-001"
+    async with maker() as check:
+        assert await _reports_of(check, world.target) == []
+        assert await _audit_rows(check, "sleep_run_trigger") == []
+    await asyncio.sleep(0)
+    assert jobs == []
+
+
+async def test_the_largest_action_id_is_looked_up_and_not_found(maker, world, no_vector_store):
+    async with _client(maker, OPERATOR) as client:
+        largest = await client.post(_undo_url(world.reports["target"], 2**63 - 1))
+        refused = await client.post(_undo_url(world.reports["target"], 2**63))
+
+    assert largest.status_code == 404, largest.text
+    assert largest.json()["error"] == "SLEEP-UNDO-action_not_found"
+    assert refused.status_code == 422, refused.text
