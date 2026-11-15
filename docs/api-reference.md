@@ -2268,6 +2268,8 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 
 Two rules protect the accounts with `role=admin`, in every mode and on both routes that can take the role away (`PUT /api/v1/admin/users/{user_id}/role` with another role, and `DELETE /api/v1/admin/system-admins/{user_id}`) (#2828): the initial system administrator keeps the role, and so does the last remaining admin. Either answers `403 ADMIN-001` with the message naming the rule, changes nothing and writes no audit row. The check and the change are one transaction under a lock on the admin rows, so two demotions sent at once leave one admin: one succeeds, the other answers `403 ADMIN-001`. Promotion to `admin` and changes that take the admin role from nobody are not affected. On the role PUT a session admin still cannot change their own admin role; the demote route has no such check. On both routes a `user_id` that holds a NUL character answers `422`.
 
+The deletion of an admin account (`DELETE /api/v1/admin/users/{user_id}` and `POST /api/v1/admin/users/{user_id}/erase`) checks the same two rules under the same lock, in the transaction that deletes the account (#2855): a deletion and a demotion, or two deletions, sent at once leave one admin, and the refused request answers as before (`403 ADMIN-001` for the delete, `403 ERASURE-004` / `403 ERASURE-003` for the erasure) and changes nothing. An erasure checks again when it runs; refused then, its request is `failed` with the reason and the account is kept.
+
 ### Users
 
 How each account was admitted (Issue #2803). Both routes answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route.

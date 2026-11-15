@@ -1634,6 +1634,18 @@ class AccountErasureService:
 
         step = "postgres"
         try:
+            # #2855: an admin-started erasure checks the initial/last admin
+            # rule again here, under the role-change lock (the admin rows and
+            # the subject, ``user_id`` order, ``FOR NO KEY UPDATE``), held to
+            # the Postgres step's commit. The check of ``admin_force_erase``
+            # answers early; its lock ends at the request row's commit. A
+            # refusal fails the request with the reason.
+            if not request.is_self_service:
+                can_delete, reason = await SystemAdminService(self.db).can_delete_admin(
+                    target.user_id
+                )
+                if not can_delete:
+                    raise ErasureForbiddenError(reason)
             # #2362: re-read after the sweep's unlocked snapshot, before any
             # external delete. Lock the exact account row, never a new same-sub
             # registration. No request lock yet: requests are locked last.

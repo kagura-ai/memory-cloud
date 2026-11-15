@@ -1175,6 +1175,7 @@ async def delete_user(
     from services.system_admin_service import SystemAdminService
     from services.user_deletion_service import (
         delete_user_rows,
+        deletion_users,
         finish_user_deletion,
         transfer_user_ownership,
     )
@@ -1183,11 +1184,22 @@ async def delete_user(
     if admin_id == user_id:
         raise AdminProtectionError("Cannot delete your own account", reason="self_deletion")
     service = SystemAdminService(db)
-    can_delete, reason = await service.can_delete_admin(user_id)
-    if not can_delete:
-        raise AdminProtectionError(reason, reason="admin_protected")
     request = request or UserDeleteRequest()
     try:
+        # #2855: the initial/last admin check, in the deletion's transaction
+        # and under the role-change lock. Its statement also takes every
+        # ``users`` row the transfer locks below, so those only strengthen
+        # rows already held. A refusal rolls back and releases the locks.
+        can_delete, reason = await service.can_delete_admin(
+            user_id,
+            also_lock=deletion_users(
+                user_id,
+                workspace_transfers=request.workspace_transfers,
+                context_transfers=request.context_transfers,
+            ),
+        )
+        if not can_delete:
+            raise AdminProtectionError(reason, reason="admin_protected")
         transferred = await transfer_user_ownership(
             db,
             user_id,

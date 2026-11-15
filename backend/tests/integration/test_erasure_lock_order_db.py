@@ -14,7 +14,11 @@ identity-link lock and nothing is committed before step 3's commit.
 A transaction that needs two ``users`` rows locks both in ``user_id`` order in
 one statement (#2573), ``FOR NO KEY UPDATE`` when it changes no key: a ``FOR
 KEY SHARE`` holder, which may lock users rows in another order, never waits on
-it. A referral redemption holds the referrer's and the
+it. An admin-started deletion (``DELETE /admin/users/{id}``, an admin erasure's
+run) takes as its first lock statement every admin row and every ``users`` row
+it locks later, in ``user_id`` order, ``FOR NO KEY UPDATE``
+(``SystemAdminService.can_delete_admin``, #2855); its later ``users`` locks only
+strengthen rows it holds. A referral redemption holds the referrer's and the
 referee's ``users`` rows from its cap check, so it takes workspace rows
 ``NOWAIT`` too and answers 409 when one stays busy (#2443).
 A deletion of a ``users`` row clears the rows of the accounts it invited
@@ -30,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -187,6 +191,28 @@ def _external_stores_stubbed():
         patch("services.erasure_details.update_memory_payload_in_qdrant", AsyncMock()),
     ):
         yield
+
+
+@asynccontextmanager
+async def _no_admin_rows(db):
+    """Admin rows other tests left behind set aside (role ``user``), restored after.
+
+    An admin-started erasure holds every admin row from its run's first
+    statement to its Postgres commit (#2855), so a second admin-started
+    erasure waits for the first one's whole run while any admin row exists.
+    """
+    await db.rollback()
+    others = list((await db.execute(select(User.user_id).where(User.role == "admin"))).scalars())
+    if others:
+        await db.execute(update(User).where(User.user_id.in_(others)).values(role="user"))
+        await db.commit()
+    try:
+        yield
+    finally:
+        if others:
+            await db.rollback()
+            await db.execute(update(User).where(User.user_id.in_(others)).values(role="admin"))
+            await db.commit()
 
 
 async def _cancel_all(tasks: list[asyncio.Task]) -> None:
@@ -651,7 +677,8 @@ async def test_a_workspace_handed_to_the_subject_during_step_one_is_handed_on(
     """Two erasures: A's hands W to S (the lowest-id admin) while S's run is
     in step 1. S's step 2 reads the workspaces S owns under the identity-link
     lock, so it hands W on to B instead of deleting it with S's sole-owned
-    ones: W stays, with M's context and memory."""
+    ones: W stays, with M's context and memory. With no admin row: A's
+    erasure would otherwise wait on the admin rows S's run holds (#2855)."""
     world = connector_world
     first = await world.user("handover-a-owner")
     subject = await world.user("handover-b-subject")
@@ -678,26 +705,27 @@ async def test_a_workspace_handed_to_the_subject_during_step_one_is_handed_on(
         return result
 
     tasks: list[asyncio.Task] = []
-    with (
-        _external_stores_stubbed(),
-        patch.object(vector_module, "delete_subject_points", paused_step_one),
-    ):
-        try:
-            erasing = asyncio.create_task(_force_erase(maker, subject))
-            tasks.append(erasing)
-            await asyncio.wait_for(holding.wait(), 15)
-            # the other erasure runs to its commit while S is in step 1
-            first_result = await asyncio.wait_for(_force_erase(maker, first), 30)
-            between = await db_session.scalar(
-                select(Workspace.owner_user_id)
-                .where(Workspace.id == ws_id)
-                .execution_options(populate_existing=True)
-            )
-            release.set()
-            erasure_result = await asyncio.wait_for(erasing, 30)
-        finally:
-            release.set()
-            await _cancel_all(tasks)
+    async with _no_admin_rows(db_session):
+        with (
+            _external_stores_stubbed(),
+            patch.object(vector_module, "delete_subject_points", paused_step_one),
+        ):
+            try:
+                erasing = asyncio.create_task(_force_erase(maker, subject))
+                tasks.append(erasing)
+                await asyncio.wait_for(holding.wait(), 15)
+                # the other erasure runs to its commit while S is in step 1
+                first_result = await asyncio.wait_for(_force_erase(maker, first), 30)
+                between = await db_session.scalar(
+                    select(Workspace.owner_user_id)
+                    .where(Workspace.id == ws_id)
+                    .execution_options(populate_existing=True)
+                )
+                release.set()
+                erasure_result = await asyncio.wait_for(erasing, 30)
+            finally:
+                release.set()
+                await _cancel_all(tasks)
 
     assert first_result.status == "complete"
     assert between == subject
@@ -3241,6 +3269,13 @@ async def test_an_erasure_clears_its_invitees_right_after_the_subjects_row(
 
     _assert_global_order(trace)
     step_two = next(tx for tx in trace.kinds() if ("link", False) in tx)
-    assert step_two[:3] == [("users", False), ("users", True), ("users_dml", False)], step_two
+    # #2855: the admin rows and the subject's (``can_delete_admin``), then the
+    # subject's row again (the guard), then the invitees.
+    assert step_two[:4] == [
+        ("users", False),
+        ("users", False),
+        ("users", True),
+        ("users_dml", False),
+    ], step_two
     assert step_two.index(("users", True)) < step_two.index(("link", False))
     assert await _admitted_by(db_session, invitee) is None

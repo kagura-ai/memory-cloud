@@ -249,6 +249,34 @@ async def lock_deletion_users(db: AsyncSession, user_id: str) -> set[str]:
     return locked
 
 
+def deletion_users(
+    user_id: str,
+    *,
+    workspace_transfers: dict[UUID, str],
+    context_transfers: dict[UUID, str],
+) -> ColumnElement[bool]:
+    """The ``users`` rows an admin deletion of ``user_id`` locks.
+
+    The subject, the successors the request names and the owners the
+    subject's connector write targets go to (#2420). ``transfer_user_ownership``
+    locks them ``FOR UPDATE``; ``DELETE /admin/users/{id}`` passes the same
+    rows to ``SystemAdminService.can_delete_admin`` first (#2855), so the
+    transaction's first lock statement takes all of them, in ``user_id``
+    order, with the admin rows.
+    """
+    successors = set(workspace_transfers.values()) | set(context_transfers.values())
+    # The owners the user's connector write targets go to (#2420) are locked
+    # with the successors: none can then be deleted or hand its workspace on
+    # (an ownership transfer takes FOR KEY SHARE on the owner's row) before
+    # this commits. Checked against the owners read in the transfer.
+    target_owners = (
+        select(Workspace.owner_user_id)
+        .join(Context, Context.workspace_id == Workspace.id)
+        .where(Context.created_by == user_id, Context.id.in_(connector_write_target_ids()))
+    )
+    return or_(User.user_id.in_(successors | {user_id}), User.user_id.in_(target_owners))
+
+
 async def transfer_user_ownership(
     db: AsyncSession,
     user_id: str,
@@ -291,21 +319,18 @@ async def transfer_user_ownership(
     which also carries what the admin's successor picker shows.
     """
     successors = set(workspace_transfers.values()) | set(context_transfers.values())
-    # The owners the user's connector write targets go to (#2420) are locked
-    # with the successors: none can then be deleted or hand its workspace on
-    # (an ownership transfer takes FOR KEY SHARE on the owner's row) before
-    # this commits. Checked against the owners read below.
-    target_owners = (
-        select(Workspace.owner_user_id)
-        .join(Context, Context.workspace_id == Workspace.id)
-        .where(Context.created_by == user_id, Context.id.in_(connector_write_target_ids()))
-    )
+    # ``deletion_users``: the subject, the successors and the connector
+    # write targets' owners (#2420).
     users = set(
         (
             await db.execute(
                 select(User.user_id)
                 .where(
-                    or_(User.user_id.in_(successors | {user_id}), User.user_id.in_(target_owners))
+                    deletion_users(
+                        user_id,
+                        workspace_transfers=workspace_transfers,
+                        context_transfers=context_transfers,
+                    )
                 )
                 .order_by(User.user_id)
                 .with_for_update()

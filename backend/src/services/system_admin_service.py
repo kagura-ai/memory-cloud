@@ -15,10 +15,14 @@ Protection Rules:
 Both rules are about ``users`` rows with ``role = 'admin'`` and hold in every
 ``SYSTEM_ADMIN_MODE``. Every role change (``PUT /admin/users/{id}/role`` and
 ``DELETE /admin/system-admins/{id}``) goes through ``lock_for_role_change``
-(#2828), which decides under a row lock.
+(#2828), and every admin-started deletion of an account (``DELETE
+/admin/users/{id}``, ``POST /admin/users/{id}/erase``) through
+``can_delete_admin`` (#2855). Both decide under the same row lock: the admin
+rows and the target, in ``user_id`` order, ``FOR NO KEY UPDATE``, with the
+admin count read after it.
 """
 
-from sqlalchemy import ColumnElement, func, or_, select
+from sqlalchemy import ColumnElement, Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import AuditLog, User
@@ -34,6 +38,27 @@ def _is_admin_row() -> ColumnElement[bool]:
     Written once, for the list, the lock and the counts.
     """
     return User.role == "admin"
+
+
+def _admin_rows_lock(user_id: str, also_lock: ColumnElement[bool] | None = None) -> Select:
+    """The one statement that locks what a system-role decision reads.
+
+    Every admin row, the target and the rows ``also_lock`` matches, in
+    ``user_id`` order, ``FOR NO KEY UPDATE`` (never ``FOR UPDATE``: a ``FOR
+    KEY SHARE`` holder of another account's row does not wait on it, and
+    nothing here waits on one). ``populate_existing``: a row the session
+    already holds is refreshed from the locked read.
+    """
+    conditions = [_is_admin_row(), User.user_id == user_id]
+    if also_lock is not None:
+        conditions.append(also_lock)
+    return (
+        select(User)
+        .where(or_(*conditions))
+        .order_by(User.user_id)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
 
 
 class SystemAdminService:
@@ -179,19 +204,7 @@ class SystemAdminService:
             AdminProtectionError: 403 ``ADMIN-001`` when the change takes the
                 admin role from the initial admin or from the last admin.
         """
-        locked = (
-            (
-                await self.db.execute(
-                    select(User)
-                    .where(or_(_is_admin_row(), User.user_id == user_id))
-                    .order_by(User.user_id)
-                    .with_for_update(key_share=True)
-                    .execution_options(populate_existing=True)
-                )
-            )
-            .scalars()
-            .all()
-        )
+        locked = (await self.db.execute(_admin_rows_lock(user_id))).scalars().all()
         target = next((row for row in locked if row.user_id == user_id), None)
         if target is None:
             return None
@@ -296,19 +309,39 @@ class SystemAdminService:
 
         return user
 
-    async def can_delete_admin(self, user_id: str) -> tuple[bool, str]:
-        """Check if system admin can be deleted.
+    async def can_delete_admin(
+        self, user_id: str, *, also_lock: ColumnElement[bool] | None = None
+    ) -> tuple[bool, str]:
+        """Check if system admin can be deleted, under the role-change lock.
 
         This method checks both protection rules:
         - is_initial_admin flag
         - Last remaining admin
 
+        It decides under the lock of ``lock_for_role_change`` (#2855): its
+        first statement locks every admin row and the target, in ``user_id``
+        order, ``FOR NO KEY UPDATE``, and the admin count is a statement of
+        its own after it (a promotion committed while this waited counts).
+        The lock is taken for any target, admin or not, and is held until the
+        caller's transaction ends: the caller deletes or marks the account in
+        that transaction, so a deletion and a role change, or two deletions,
+        run one after the other. It writes nothing and never commits.
+
+        A transaction's first lock statement must take every ``users`` row it
+        locks later (the lock order of
+        ``tests/integration/test_erasure_lock_order_db.py``): ``also_lock``
+        names those rows, so a later statement only strengthens a row the
+        transaction already holds.
+
         Args:
             user_id: OAuth2 user_id to check
+            also_lock: The other ``users`` rows the caller's transaction
+                locks later, locked in the same statement.
 
         Returns:
             Tuple of (can_delete, reason)
-            - (True, "") if deletion is allowed
+            - (True, "") if deletion is allowed (also for a non-admin or an
+              unknown id)
             - (False, "reason") if deletion is blocked
 
         Example:
@@ -316,10 +349,8 @@ class SystemAdminService:
             >>> if not can_delete:
             ...     print(f"Cannot delete: {reason}")
         """
-        # Get user
-        stmt = select(User).where(User.user_id == user_id)
-        result = await self.db.execute(stmt)
-        user = result.scalar_one_or_none()
+        locked = (await self.db.execute(_admin_rows_lock(user_id, also_lock))).scalars().all()
+        user = next((row for row in locked if row.user_id == user_id), None)
 
         if not user or user.role != "admin":
             # Not an admin, deletion is allowed (handled by regular user deletion logic)
@@ -332,7 +363,7 @@ class SystemAdminService:
             )
             return False, "Cannot delete the initial system administrator"
 
-        # Protection 2: Check if last admin
+        # Protection 2: Check if last admin (counted after the lock)
         admin_count_stmt = select(func.count()).select_from(User).where(_is_admin_row())
         admin_count_result = await self.db.execute(admin_count_stmt)
         admin_count = admin_count_result.scalar()
