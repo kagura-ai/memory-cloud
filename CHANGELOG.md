@@ -4,6 +4,42 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.166.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.166.0) — 2026-11-15
+
+Follow-ups to v0.165.0's admin API:
+- The initial-admin and last-admin rules now hold when an admin account is deleted or erased while roles change.
+- A manual Sleep run that a process stop interrupted no longer blocks later runs.
+- Admin and workspace routes answer `422` for values the database cannot take, instead of a server error.
+- Two admin lists page with a unique tiebreak.
+
+No migration, no new setting.
+
+### Changed
+- **The role route takes `admin` or `user` only** ([#2854](https://github.com/kagura-ai/memory-cloud/issues/2854)): `PUT /api/v1/admin/users/{user_id}/role` answers `422` for any other role name and changes nothing. Before, `read_only` answered a `500` and other unknown names a `400`. `read_only` is not a system role. The admin users pages offer and label only `admin` and `user`.
+
+### Fixed
+- **Deleting or erasing an admin while roles change** ([#2855](https://github.com/kagura-ai/memory-cloud/issues/2855)):
+  - Deleting an admin account and requesting its erasure check the initial-admin and last-admin rules under the same row lock as a role change, and count the admins after the lock. A deletion and a demotion sent at the same time, or two deletions of the last two admins, leave one admin. One request succeeds and the other answers its usual `403`.
+  - An account with an open erasure request (`pending`, `cooling_off` or `in_progress`) no longer counts as a remaining admin. It counts again when the request ends `failed` or `cancelled`.
+  - An erasure holds the admin rows only while it creates its request. Logins and role changes do not wait on a running erasure.
+- **An interrupted manual Sleep run no longer blocks** ([#2856](https://github.com/kagura-ai/memory-cloud/issues/2856)):
+  - A `running` report that no process runs any more, and that started more than 15 minutes ago, is marked `failed` (`interrupted: …`) when the next run for that user is requested. The new run is then admitted.
+  - A run in progress still answers `409` `SLEEP-002`, naming the oldest live report.
+  - A cancelled run closes its reports. On shutdown, the API cancels its manual Sleep runs and waits up to 10 seconds for them.
+  - The reports still waiting in a multi-context run stay live between two of its jobs. They are no longer closed as stale by a request that another API process answers.
+- **`422` for values the database cannot take** ([#2857](https://github.com/kagura-ai/memory-cloud/issues/2857)): the admin, workspace and context-member routes answer `422` before any statement runs. Before, these were a `500` or `503`, and the error log line could hold the value. The values are:
+  - a NUL character in a text, path or body value, including the successor ids of an account deletion and the text fields of `POST /api/v1/workspaces`;
+  - an integer outside its column's range, negative values included;
+  - a path id that is not a UUID (the admin plan, quota and spend-cap routes, `GET /api/v1/workspaces/{workspace_id}/plan`);
+  - a time window or delay outside the years 1 to 9999, including `to=9999-12-31` on both cost-aggregation routes.
+
+  `POST /api/v1/admin/embedding/retry-failed` answers `422` instead of `400` for an id that is not a UUID. The sync routes keep their fixed `400` `invalid_request`. Every value accepted before still works.
+- **Unique tiebreak on admin lists** ([#2858](https://github.com/kagura-ai/memory-cloud/issues/2858)): `GET /api/v1/admin/sleep-reports`, the workspace sleep-report list and `GET /api/v1/admin/referrals` order rows that share a time by `id`. Paging with `offset` no longer repeats or skips such rows, and rows with different times keep their order.
+- **Indexer test** ([#2859](https://github.com/kagura-ai/memory-cloud/issues/2859)): the stalled-drain test checks the cut-off by its behaviour, instead of a wall-clock bound that a garbage-collection pause on CI could exceed.
+
+### Notes
+- No migration, no new setting, no operator action.
+
 ## [v0.165.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.165.0) — 2026-11-15
 
 Admin API for an operator console that calls it in `service` mode: the initial-admin and last-admin protections now hold on the role route too, fifteen read-only admin routes and filters are added, and an operator can run Sleep and undo a merge for a named user. Two admin lists change their answer from a bare array to a page (see "Migration"). Also: an activity API for workspace sync installations (run history, search reflection, audit events, the usage allowance) and manual sync requests bound to the signed-in person who asked, off by default, and a public configuration document that lists the sync capabilities a deployment has switched on. One migration (`f53_2810_sync_activity`, two new tables) and one new setting (`SYNC_OBSERVABILITY_ENABLED=false`).
