@@ -55,6 +55,10 @@ class SleepReportSummary(TZAwareBaseModel):
     id: UUID
     user_id: str
     workspace_id: UUID | None
+    # #2844: the workspace's name, resolved per response like ``context_name``.
+    # None for a report without a workspace id and for a workspace that is
+    # soft-deleted or gone (the cost aggregation rows have the same rule).
+    workspace_name: str | None = None
     context_id: UUID | None
     context_name: str | None = None
     # #1201: email of the user whose partition this run belongs to. Sleep runs
@@ -153,6 +157,18 @@ def _validate_status(status_filter: str | None) -> None:
         )
 
 
+async def _attach_workspace_names(service: SleepReporterService, reports: list[Any]) -> None:
+    """Set ``workspace_name`` on each report of one response (#2844).
+
+    One query for the whole response, none when no report has a workspace id.
+    Only live workspaces resolve: the others keep ``None``.
+    """
+    workspace_ids = {r.workspace_id for r in reports if r.workspace_id is not None}
+    names = await service.resolve_workspace_names(workspace_ids)
+    for r in reports:
+        r.workspace_name = names.get(r.workspace_id) if r.workspace_id is not None else None
+
+
 def _raise_report_not_found(report_id: UUID) -> NoReturn:
     """The admin routes' one answer for a report id with no row."""
     raise HTTPException(
@@ -190,16 +206,24 @@ async def list_sleep_reports(
     ),
     context_id: UUID | None = Query(None),
     user_id: str | None = Query(None),
+    workspace_id: UUID | None = Query(
+        None,
+        description=(
+            "Only reports whose stored ``workspace_id`` is this id (#2844). "
+            "ANDed with the other filters; a report without a workspace id never matches."
+        ),
+    ),
 ) -> SleepReportListResponse:
     """List Sleep Maintenance reports with filters and pagination.
 
-    Admin-only. Filterable by status, source, context_id, user_id.
-    Sorted by started_at DESC.
+    Admin-only. Filterable by status, source, context_id, user_id,
+    workspace_id. Sorted by started_at DESC.
     """
     _validate_status(status_filter)
 
     service = SleepReporterService(db)
     reports, total = await service.list_reports(
+        workspace_id=workspace_id,
         status_filter=status_filter,
         context_id=context_id,
         user_id=user_id,
@@ -213,6 +237,9 @@ async def list_sleep_reports(
     ctx_map = await service.resolve_context_names(context_ids)  # type: ignore[arg-type]
     for r in reports:
         r.context_name = ctx_map.get(r.context_id) if r.context_id else None  # type: ignore[attr-defined]
+
+    # #2844: one query names the workspaces of the page.
+    await _attach_workspace_names(service, reports)
 
     # #1201: batch-resolve user_id → email so same-named contexts on different
     # partitions are distinguishable. None → the frontend falls back to a
@@ -277,6 +304,7 @@ async def get_sleep_report_detail(
 
     report.context_name = context_name  # type: ignore[attr-defined]
     report.context_deleted = context_deleted  # type: ignore[attr-defined]
+    await _attach_workspace_names(service, [report])  # #2844
     # #1201: resolve the owning user's email (None → frontend fallback).
     uid_map = await service.resolve_user_labels({report.user_id})
     report.user_email = uid_map.get(report.user_id)  # type: ignore[attr-defined]
@@ -414,6 +442,9 @@ async def workspace_list_sleep_reports(
     for r in reports:
         r.context_name = ctx_map.get(r.context_id) if r.context_id else None  # type: ignore[attr-defined]
 
+    # #2844: one query names the workspaces of the page.
+    await _attach_workspace_names(service, reports)
+
     # #1201: batch-resolve user_id → email so same-named contexts on different
     # partitions are distinguishable. None → the frontend falls back to a
     # shortened user_id. #1882: current members of this workspace only — a
@@ -473,6 +504,7 @@ async def workspace_get_sleep_report_detail(
 
     report.context_name = context_name  # type: ignore[attr-defined]
     report.context_deleted = context_deleted  # type: ignore[attr-defined]
+    await _attach_workspace_names(service, [report])  # #2844
     # #1201: resolve the owning user's email (None → frontend fallback).
     # #1882: only while that user is still a member of this workspace.
     uid_map = await service.resolve_user_labels({report.user_id}, member_of=workspace_id)

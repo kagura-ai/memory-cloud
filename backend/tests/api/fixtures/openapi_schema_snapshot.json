@@ -12051,7 +12051,8 @@
           "status": {},
           "user_email": {},
           "user_id": {},
-          "workspace_id": {}
+          "workspace_id": {},
+          "workspace_name": {}
         },
         "required": [
           "completed_at",
@@ -12146,7 +12147,8 @@
           "status": {},
           "user_email": {},
           "user_id": {},
-          "workspace_id": {}
+          "workspace_id": {},
+          "workspace_name": {}
         },
         "required": [
           "completed_at",
@@ -17093,6 +17095,22 @@
             "schema": {
               "anyOf": [
                 {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
                   "type": "string"
                 },
                 {

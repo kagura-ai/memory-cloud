@@ -190,11 +190,13 @@ Every phase writes individual change records to `sleep_actions` during execution
 
 | Endpoint                                    | Purpose                                                   |
 |---------------------------------------------|-----------------------------------------------------------|
-| `GET /admin/sleep-reports`                  | List reports with filters (`status`, `source`, `context_id`, `user_id`) and pagination. `source` is `sleep`, `analysis` or `all` (default) (#2219). |
+| `GET /admin/sleep-reports`                  | List reports with filters (`status`, `source`, `context_id`, `user_id`, `workspace_id`) and pagination. `source` is `sleep`, `analysis` or `all` (default) (#2219). `workspace_id` narrows the list to one workspace (#2844). |
 | `GET /admin/sleep-reports/{report_id}`      | Report detail with the full action audit log. `?include_actions=false` answers the report's own row with `actions: []` and the run's `action_count` (#2842). |
 | `GET /admin/sleep-reports/{report_id}/actions` | The report's actions in pages (`limit` 1-500, default 50; `offset`), in `id` order: `{actions, total, limit, offset}` (#2842). |
 
 A run can record many actions (one per created edge, one per merge), and a merge action's `details` hold the first characters of the merged memory's summary. A caller that needs only the report reads it with `include_actions=false`; a caller that shows the actions reads them page by page. The in-app report pages keep reading the full answer.
+
+Every report carries `workspace_name` beside `workspace_id` (#2844): the name of a live workspace, `null` for a soft-deleted or missing one and for a report without a workspace id.
 
 All three admin endpoints require `Depends(require_admin)`.
 

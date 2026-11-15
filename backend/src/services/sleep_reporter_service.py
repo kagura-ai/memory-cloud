@@ -26,7 +26,7 @@ from models.sleep import (
     SleepAction,
     SleepReport,
 )
-from services.label_resolver import resolve_user_labels
+from services.label_resolver import resolve_user_labels, resolve_workspace_names
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -269,6 +269,20 @@ class SleepReporterService:
         if ctx_deleted_at is not None:
             return None, True
         return ctx_display_name or ctx_name, False
+
+    # ------------------------------------------------------------------
+    # Workspace name resolution helper (#2844)
+    # ------------------------------------------------------------------
+
+    async def resolve_workspace_names(self, workspace_ids: set[UUID]) -> dict[UUID, str]:
+        """Batch-resolve ``workspace_id → name`` for Sleep report rows.
+
+        Delegates to ``services.label_resolver.resolve_workspace_names``
+        (#1861), which the cost-aggregation routes share. One query, none for
+        an empty set; a soft-deleted or missing workspace is left out, so its
+        reports answer ``workspace_name: null``.
+        """
+        return await resolve_workspace_names(self.db, workspace_ids)
 
     # ------------------------------------------------------------------
     # User identity resolution helper (#1201)
