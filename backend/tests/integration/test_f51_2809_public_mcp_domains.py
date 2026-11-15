@@ -23,9 +23,9 @@ from tests.integration.test_alembic_migrations import (
     _upgrade_to,
 )
 
-REVISION = "f50_2809_public_mcp_domains"
+REVISION = "f51_2809_public_mcp_domains"
 _PATH = (
-    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "f50_2809_public_mcp_domains.py"
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "f51_2809_public_mcp_domains.py"
 )
 
 _EXPECTED_COLUMNS = {
@@ -63,7 +63,7 @@ _EXPECTED_CHECKS = {
 
 
 def _module():
-    spec = importlib.util.spec_from_file_location("f50_2809", _PATH)
+    spec = importlib.util.spec_from_file_location("f51_2809", _PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -108,16 +108,16 @@ def _refused(engine, statement: str, params: dict | None = None) -> None:
         conn.execute(text(statement), params or {})
 
 
-def test_f50_metadata() -> None:
+def test_f51_metadata() -> None:
     module = _module()
     assert module.revision == REVISION
-    assert module.down_revision == "f48_2807_sync_feed_runs"
+    assert module.down_revision == "f50_2807_merge_sync_heads"
     source = _PATH.read_text(encoding="utf-8")
     assert "from src" not in source and "import src" not in source
     assert "ForeignKey" not in source
 
 
-def test_f50_creates_the_table_and_downgrades_cleanly() -> None:
+def test_f51_creates_the_table_and_downgrades_cleanly() -> None:
     prior = _module().down_revision
     _reset_alembic_state()
     engine = _sync_engine()

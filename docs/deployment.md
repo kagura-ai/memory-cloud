@@ -730,7 +730,9 @@ Operator notes:
   no-DDL `f50_2807_merge_sync_heads`. This also keeps `f48_2805`'s foreign-key
   lock on `workspaces` out of the transaction where `f48_2807` takes foreign-key
   locks on `users`, `resources`, `resource_events`, `contexts` and
-  `sync_installations`.
+  `sync_installations`. From v0.164.0 the last step also runs
+  `f51_2809_public_mcp_domains` after the merge node; its new table has no
+  foreign key, and it locks no existing table.
   (With two steps, `f45_2806_sync_credentials` would run in the same
   transaction as `f46_2803` and take its locks on `workspaces` there; with
   three, ending in `alembic upgrade head`, `f48_2805` would; with four,
@@ -4245,8 +4247,8 @@ the application hosts (a warning when the list is empty).
 **Before switching on:**
 
 1. Run the migration first: `alembic upgrade head` runs
-   `f50_2809_public_mcp_domains` (it follows `f48_2807_sync_feed_runs`)
-   **before** `MCP_PUBLIC_DOMAINS_ENABLED=true`. The revision creates one new,
+   `f51_2809_public_mcp_domains` (it follows the merge revision
+   `f50_2807_merge_sync_heads`) **before** `MCP_PUBLIC_DOMAINS_ENABLED=true`. The revision creates one new,
    empty table and its indexes, with no foreign key and no statement on any
    existing table: it locks no existing table. Its
    downgrade, and every downgrade to a revision below it, drops the table and

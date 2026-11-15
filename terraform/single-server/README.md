@@ -540,7 +540,7 @@ marker lines.
 **Before you enable it:**
 
 1. Deploy a release that contains the feature (`./scripts/deploy.sh` runs the
-   migration `f50_2809_public_mcp_domains`; the revision creates one new table
+   migration `f51_2809_public_mcp_domains`; the revision creates one new table
    and locks no existing one).
 2. Create the **routing target** record: one name in your zone, for example
    `mcp-domains.example.com`, an `A` record with the VM's `vm_external_ip`,

@@ -14,8 +14,8 @@ domain per publication.
 Downgrade drops the table and every binding with it: every alias stops
 being served and every claim, proof state and cooldown is lost.
 
-Revision ID: f50_2809_public_mcp_domains
-Revises: f48_2807_sync_feed_runs
+Revision ID: f51_2809_public_mcp_domains
+Revises: f50_2807_merge_sync_heads
 """
 
 import sqlalchemy as sa
@@ -23,8 +23,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "f50_2809_public_mcp_domains"
-down_revision: str | None = "f48_2807_sync_feed_runs"
+revision: str = "f51_2809_public_mcp_domains"
+down_revision: str | None = "f50_2807_merge_sync_heads"
 branch_labels: str | None = None
 depends_on: str | None = None
 

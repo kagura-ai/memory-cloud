@@ -284,7 +284,13 @@ v0.162.0 in [Sync service credentials](ops/sync-service-credentials.md): they
 first revert `f49_2817` (no-op) and `f48_2805`. From the combined head,
 these operations also unmerge `f50_2807` and remove the staged-feed tables;
 stop new runs and back those tables up first (see
-[staged-feed rollback](ops/staged-feed-sync.md#retention-and-rollback)). Turn
+[staged-feed rollback](ops/staged-feed-sync.md#retention-and-rollback)).
+From v0.164.0, before all of these, they revert
+`f51_2809_public_mcp_domains`, which drops `public_mcp_domains` with every
+custom domain binding: take the alias routing out of the proxy and switch
+`MCP_PUBLIC_DOMAINS_ENABLED` off first (see
+[Public MCP custom domains](public-mcp-domains.md), "Stopping and rolling
+back"). Turn
 `MCP_PUBLIC_USAGE_BUDGET_ENABLED` off before any of them (see "Deploy order"
 for what the switch does without the table); the table comes back only with
 `alembic upgrade head`. After a downgrade that reverted

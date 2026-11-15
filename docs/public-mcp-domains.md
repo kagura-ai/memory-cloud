@@ -566,10 +566,10 @@ concurrent lookups per process and 3 s.
 ## Before switching on
 
 1. **Run the migration first.** `alembic upgrade head` runs
-   `f50_2809_public_mcp_domains` (it follows `f48_2807_sync_feed_runs`): one
-   new, empty table and its indexes. It has no foreign key and no statement on
-   any existing table, so it locks no existing table. Run it before
-   `MCP_PUBLIC_DOMAINS_ENABLED=true`.
+   `f51_2809_public_mcp_domains` (it follows the merge revision
+   `f50_2807_merge_sync_heads`): one new, empty table and its indexes. It has
+   no foreign key and no statement on any existing table, so it locks no
+   existing table. Run it before `MCP_PUBLIC_DOMAINS_ENABLED=true`.
 2. **Application hosts.** Once the switch is on, a request under a Host that is
    neither an application host nor an internal shape is treated as an alias
    candidate: everything but `/mcp` answers `404`. List every name the API is
@@ -622,9 +622,10 @@ While the switch is off no job runs: host names of released rows stay until
 the operator removes them with the CLI or switches the feature on again, and
 no lease is renewed (an alias whose lease passed meanwhile serves again only
 after its first check). The migration's downgrade drops the table and every
-binding with it; so does every downgrade to a revision below it, from
-`alembic downgrade f48_2807_sync_feed_runs` (which reverts `f50_2809` alone)
-down. Switch the feature off, after the proxy step above, before any of them.
+binding with it: `alembic downgrade f50_2807_merge_sync_heads` reverts
+`f51_2809` alone and drops `public_mcp_domains` with every binding, and every
+downgrade to a lower revision does so first. Switch the feature off, after the
+proxy step above, before any of them.
 
 ## What the application does not guarantee
 
