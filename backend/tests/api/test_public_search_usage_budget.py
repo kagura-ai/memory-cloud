@@ -1,11 +1,12 @@
 """Anonymous REST public search shares the public usage budget (#2805).
 
-When the operator switch is on, an anonymous search (no member session, no
-bound key) of a context with a live public MCP publication is charged to the
-context's workspace after its per-minute bucket, the plan pause and the
-capacity check, and before the search runs. Members and bound keys are never
+When the operator switch is on, an anonymous search (no bound key; a session
+cookie changes nothing, #2823) of a context with a live public MCP publication
+is charged to the context's workspace after its per-minute bucket, the plan
+pause and the capacity check, and before the search runs. Bound keys are never
 charged; a context without a live publication is not counted (the older REST
-feature); with the switch off nothing changes.
+feature); with the switch off nothing changes. The route behind the real
+session middleware is in ``test_public_search_session_record.py``.
 """
 
 from __future__ import annotations
@@ -85,15 +86,12 @@ class _Rig:
         self,
         *,
         plan: str = "pro",
-        user: dict | None = None,
         api_key: str | None = None,
         bound_key=None,
         capacity=None,
     ):
         db, context = _db(plan)
         self.db, self.context = db, context
-        if user is not None and "current_workspace_id" not in user:
-            user = {**user, "current_workspace_id": context.workspace_id}
         with (
             patch.object(route, "check_public_search_rate_limit", self.bucket),
             patch.object(route, "check_pre_auth_rate_limit", AsyncMock()),
@@ -109,7 +107,6 @@ class _Rig:
             return await public_search(
                 context_id=context.id,
                 request=PublicSearchRequest(query="q", limit=3),
-                user=user,
                 api_key=api_key,
                 db=db,
             )
@@ -228,13 +225,13 @@ async def test_unreadable_bucket_without_a_publication_still_fails_open() -> Non
     rig.charge.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_member_session_is_never_charged() -> None:
-    rig = _Rig()
-    await _reaches_search(rig, user={"user_id": "owner"})
-    rig.charge.assert_not_awaited()
-    rig.published.assert_not_awaited()
-    assert rig.limit_reads == 0
+def test_a_session_changes_nothing() -> None:
+    """The handler takes no session parameter: a signed-in request is anonymous."""
+    import inspect
+
+    params = inspect.signature(public_search).parameters
+    assert "user" not in params
+    assert set(params) == {"context_id", "request", "api_key", "db"}
 
 
 @pytest.mark.asyncio
@@ -279,9 +276,9 @@ async def test_bucket_reports_whether_it_counted(monkeypatch) -> None:
     from db.redis import RedisError
 
     monkeypatch.setattr(route, "incrby_counter", AsyncMock(return_value=1))
-    assert await route.check_public_search_rate_limit(uuid4(), None) is True
+    assert await route.check_public_search_rate_limit(uuid4()) is True
     monkeypatch.setattr(route, "incrby_counter", AsyncMock(side_effect=RedisError("down")))
-    assert await route.check_public_search_rate_limit(uuid4(), None) is False
+    assert await route.check_public_search_rate_limit(uuid4()) is False
     monkeypatch.setattr(route, "incrby_counter", AsyncMock(return_value=51))
     with pytest.raises(RateLimitError):
-        await route.check_public_search_rate_limit(uuid4(), None)
+        await route.check_public_search_rate_limit(uuid4())
