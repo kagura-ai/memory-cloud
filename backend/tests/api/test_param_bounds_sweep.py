@@ -381,3 +381,50 @@ def test_the_largest_sync_event_cursor_reaches_the_route(client, session, monkey
         f"{WORKSPACE}/sync-installations/{uuid4()}/activity/events?before_id={PAST_INT32 - 1}"
     )
     assert response.json() != {"error": "invalid_request"}
+
+
+# cost_aggregation.py and admin_neural.py: the same filters on both cost
+# routes (a NUL in ``user_id``; a ``to`` whose next day is past the last date
+# there is, since the window ends the day after ``to``), and a NUL model name.
+COST_WINDOW = "period=day&from=2026-01-01&to=2026-01-02"
+COST_REFUSED = [
+    f"{{route}}?{COST_WINDOW}&user_id={{value}}{NUL}",
+    "{route}?period=day&from=9999-12-31&to=9999-12-31&_={value}",
+]
+COST_ROUTES = [f"{ADMIN}/cost-aggregation", f"{WORKSPACE}/cost-aggregation"]
+
+
+@pytest.mark.parametrize("route", COST_ROUTES)
+@pytest.mark.parametrize("url", COST_REFUSED)
+def test_a_cost_filter_the_database_cannot_take_is_a_422_before_any_statement(
+    client, session, monkeypatch, route, url
+):
+    monkeypatch.setattr(get_settings(), "enable_byok", True)
+    monkeypatch.setattr(get_settings(), "enable_cost_display", True)
+    value = f"refused{secrets.token_hex(6)}"
+    with structlog.testing.capture_logs() as events:
+        response = _request(client, "GET", url.replace("{route}", route), None, value)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"] == "VAL-001"
+    assert value not in response.text
+    assert session.statements == []
+    assert value not in json.dumps(events, default=str)
+    assert not any(event.get("event") == "database_error" for event in events)
+
+
+def test_a_nul_model_name_is_refused_before_a_recalibration_is_queued(client, monkeypatch):
+    import api.routes.admin_neural as admin_neural
+
+    queued = AsyncMock(return_value=True)
+    monkeypatch.setattr(admin_neural, "enqueue_recalibration_dedup", queued)
+    value = f"refused{secrets.token_hex(6)}"
+    with structlog.testing.capture_logs() as events:
+        response = client.post(f"{ADMIN}/neural/recalibrate?dimensions=8&model={value}{NUL}")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"] == "VAL-001"
+    queued.assert_not_awaited()
+    assert value not in json.dumps(events, default=str)
+    # Any other model name is still queued.
+    assert client.post(f"{ADMIN}/neural/recalibrate?dimensions=8&model=a%25b").status_code == 202

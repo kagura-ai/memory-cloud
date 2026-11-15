@@ -417,3 +417,34 @@ async def test_workspace_sleep_reports_take_the_last_offset_and_every_user_id(
     assert last.json()["reports"] == []
     assert other.status_code == 200, other.text
     assert other.json()["total"] == 0
+
+
+async def test_cost_aggregation_takes_every_user_id_and_the_last_window_end(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "enable_byok", True)
+    monkeypatch.setattr(get_settings(), "enable_cost_display", True)
+    owner, _, workspace_id, _ = await _owned_workspace(db_session)
+    window = "period=day&from=2026-01-01&to=2026-01-02"
+    # The last ``to`` whose next day is a date ends the window at the last day there is.
+    last = "period=day&from=9999-12-30&to=9999-12-30"
+    beyond = "period=day&from=9999-12-31&to=9999-12-31"
+    admin_url = f"{ADMIN}/cost-aggregation"
+    workspace_url = f"/api/v1/workspaces/{workspace_id}/cost-aggregation"
+    answered: list[httpx.Response] = []
+    async with admin_http(db_session) as client:
+        _refused(await client.get(f"{admin_url}?{window}&user_id={owner}%00"))
+        _refused(await client.get(f"{admin_url}?{beyond}"))
+        answered.append(await client.get(f"{admin_url}?{window}&user_id={OTHER_PATH}"))
+        answered.append(await client.get(f"{admin_url}?{last}"))
+    async with owner_http(db_session, owner) as client:
+        _refused(await client.get(f"{workspace_url}?{window}&user_id={owner}%00"))
+        _refused(await client.get(f"{workspace_url}?{beyond}"))
+        answered.append(await client.get(f"{workspace_url}?{window}&user_id={OTHER_PATH}"))
+        answered.append(await client.get(f"{workspace_url}?{last}"))
+
+    for response in answered:
+        assert response.status_code == 200, response.text
+        assert response.json()["rows"] == []

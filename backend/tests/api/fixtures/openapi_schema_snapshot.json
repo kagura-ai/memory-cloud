@@ -16915,6 +16915,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
@@ -17878,6 +17879,7 @@
             "schema": {
               "maxLength": 100,
               "minLength": 1,
+              "pattern": "^[^\\x00]*$",
               "type": "string"
             }
           },
@@ -36736,6 +36738,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^[^\\x00]*$",
                   "type": "string"
                 },
                 {
