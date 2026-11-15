@@ -34,7 +34,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -418,6 +418,102 @@ async def test_a_report_closed_before_its_job_starts_is_not_run(maker, world, jo
     assert phases.runs == []
     after = (await _reports(maker, world.target))[report_id]
     assert (after.status, after.started_at) == ("failed", before.started_at)
+
+
+async def _wait_for_a_lock_wait(maker) -> None:
+    """Return once some session of this database waits on a lock."""
+    async with asyncio.timeout(WAIT_SECONDS):
+        while True:
+            async with maker() as s:
+                waiting = (
+                    await s.execute(
+                        text(
+                            "SELECT count(*) FROM pg_stat_activity "
+                            "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                        )
+                    )
+                ).scalar_one()
+            if waiting:
+                return
+            await asyncio.sleep(0.05)
+
+
+async def test_a_report_closed_while_its_job_waits_for_the_claim_is_not_run(
+    maker, world, job_sessions, phases
+):
+    """The claim locks the row before it reads the status (#2856).
+
+    A guard that holds the report while it closes it makes the job wait; once
+    the close commits, the job reads ``failed`` and does not run. A claim
+    that read the status without the lock would see ``running`` and run.
+    """
+    report_id = await _add_report(maker, world, world.target, age=STALE)
+    async with maker() as holder:
+        report = (
+            await holder.execute(
+                select(SleepReport)
+                .where(SleepReport.id == report_id)
+                .with_for_update(key_share=True)
+            )
+        ).scalar_one()
+        job = asyncio.create_task(
+            admin_sleep._run_sleep_job(report_id, world.target, str(world.ws), str(world.ctx))
+        )
+        try:
+            await _wait_for_a_lock_wait(maker)
+            report.status = "failed"
+            report.error_message = admin_sleep.SLEEP_RUN_INTERRUPTED
+            await holder.commit()
+        finally:
+            phases.release.set()
+            async with asyncio.timeout(WAIT_SECONDS):
+                await job
+
+    assert phases.runs == []
+    assert (await _reports(maker, world.target))[report_id].status == "failed"
+
+
+@pytest.mark.parametrize("route", ROUTES)
+async def test_the_409_names_the_oldest_live_report(maker, world, jobs, route):
+    user_id = world.runner[route]
+    newer = await _add_report(maker, world, user_id, age=timedelta(minutes=1))
+    oldest = await _add_report(maker, world, user_id, age=timedelta(minutes=5))
+    rows = await _reports(maker, user_id)
+
+    async with _client(maker, world.principal) as client:
+        response = await _post(client, world, route)
+
+    assert response.status_code == 409, response.text
+    assert response.json() == _conflict(rows[oldest])
+    assert newer in rows
+    assert jobs == []
+
+
+async def test_the_409_names_the_lowest_id_among_reports_started_at_once(maker, world, jobs):
+    started_at = utcnow() - timedelta(minutes=2)
+    low, high = sorted((uuid4(), uuid4()), key=str)
+    async with maker() as s:
+        # The higher id first, so the table's own order is not the answer.
+        for report_id in (high, low):
+            s.add(
+                SleepReport(
+                    id=report_id,
+                    user_id=world.admin,
+                    workspace_id=world.ws,
+                    context_id=world.ctx,
+                    status="running",
+                    started_at=started_at,
+                )
+            )
+            await s.flush()
+        await s.commit()
+    rows = await _reports(maker, world.admin)
+
+    async with _client(maker, world.principal) as client:
+        response = await _post(client, world, "own")
+
+    assert response.status_code == 409, response.text
+    assert response.json() == _conflict(rows[low])
 
 
 @pytest.mark.parametrize("stop", ["cancel", "shutdown"])

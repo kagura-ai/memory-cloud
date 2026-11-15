@@ -261,3 +261,68 @@ class TestBatchTaskTracking:
     @pytest.mark.asyncio
     async def test_shutdown_with_no_batch_does_nothing(self):
         await admin_sleep.stop_manual_sleep_runs(timeout=0.1)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_a_running_batch_and_waits_for_it(self, monkeypatch):
+        import asyncio
+
+        started, finished = asyncio.Event(), []
+
+        async def endless_batch(_jobs, _user_id):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finished.append("finally")
+
+        monkeypatch.setattr(admin_sleep, "_run_sleep_batch", endless_batch)
+        report_id = uuid4()
+        admin_sleep._start_sleep_batch([(report_id, "ws", "ctx")], "user-1")
+        [task] = [t for t in admin_sleep._IN_FLIGHT_BATCHES if not t.done()]
+        await started.wait()
+
+        await admin_sleep.stop_manual_sleep_runs(timeout=1.0)
+
+        # The batch was cancelled and had run its cleanup before the step returned.
+        assert task.cancelled()
+        assert finished == ["finally"]
+        await asyncio.sleep(0)
+        assert task not in admin_sleep._IN_FLIGHT_BATCHES
+        assert report_id not in admin_sleep._LIVE_REPORT_IDS
+
+
+class TestLifespanStopsManualSleepRuns:
+    def test_shutdown_stops_the_runs_before_redis_qdrant_and_the_db_close(self):
+        """Awaited calls after ``yield`` in ``lifespan()``, read from the AST (#2856).
+
+        The cancelled batches close their reports in a database session of
+        their own, so the stop step runs while the database is still open.
+        """
+        import ast
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        lifespan = next(
+            node
+            for node in ast.walk(ast.parse(src))
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "lifespan"
+        )
+        yield_line = next(n.lineno for n in ast.walk(lifespan) if isinstance(n, ast.Yield))
+        awaited = [
+            ast.unparse(node.value.func)
+            for node in sorted(
+                (n for n in ast.walk(lifespan) if isinstance(n, ast.Await)),
+                key=lambda n: (n.lineno, n.col_offset),
+            )
+            if node.lineno > yield_line and isinstance(node.value, ast.Call)
+        ]
+
+        assert awaited.count("stop_manual_sleep_runs") == 1
+        assert (
+            awaited.index("stop_manual_sleep_runs")
+            < awaited.index("_close_redis_on_shutdown")
+            < awaited.index("_close_qdrant_on_shutdown")
+            < awaited.index("close_db")
+        )
