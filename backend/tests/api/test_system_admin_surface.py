@@ -45,6 +45,7 @@ ADMIN_SURFACE = frozenset(
         ("DELETE", "/api/v1/admin/users/{user_id}"),
         ("GET", "/api/v1/admin/bm25-drift"),
         ("GET", "/api/v1/admin/bm25-drift/{row_id}"),
+        ("GET", "/api/v1/admin/contexts/deleted"),
         ("GET", "/api/v1/admin/cost-aggregation"),
         ("GET", "/api/v1/admin/force-transfer-requests/{request_id}"),
         ("GET", "/api/v1/admin/mcp-notices"),

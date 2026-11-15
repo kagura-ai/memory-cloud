@@ -2298,6 +2298,28 @@ For `beta_invite`:
 
 For every other value the three fields are null. The invite's label (the inviter's private note) is never part of a response, a log line or an audit row. Neither filter value is written to the application's structured log lines or audit rows; the request line itself (the API's uvicorn access log and a reverse proxy's access log) records the query string, as for any admin URL that names a user.
 
+### Deleted contexts
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/contexts/deleted` | The soft-deleted contexts a restore can be asked for (#2833): the contexts with a deletion time whose workspace is not deleted. Read only, no audit row. A session admin in `session`, a service operator in `service`, `404` in `off`. |
+
+Query: `workspace_id` (UUID), `created_by` and `deleted_by` (1-255 characters, exact match on the stored value; `deleted_by` is a user id or `system:capacity-purge`), ANDed; `limit` 1-500 (default 50) and `offset` from 0. A value outside these answers `422`. Order: `deleted_at` newest first, then `id`.
+
+Answer `{"items": [...], "total", "limit", "offset"}`; `total` counts the filtered rows. An item:
+
+| Field | Value |
+|-------|-------|
+| `context_id`, `name` | the context |
+| `workspace_id`, `workspace_name` | its workspace |
+| `created_by`, `deleted_by` | the stored ids, or null |
+| `deleted_at` | UTC time of the deletion |
+| `deleted_memories` | the context's soft-deleted memory rows still held: `memories_restored + memories_left_deleted` of the restore's dry run. `0` once the tombstone purge removed them: the context is still listed, and a restore brings it back empty |
+| `name_taken` | a live context of the workspace has this name: `POST /api/v1/admin/contexts/{context_id}/restore` answers `409` without `new_name` |
+| `resource_taken` | the context has a `resource_id` and a live context serves it: the restore answers `409` |
+
+With both flags false the restore's dry run answers `200`. The answer holds no description, summary or usage guide of the context, no memory text and no email address; a context of a deleted workspace is not listed, because the restore always refuses it. See [Restoring a deleted context](deployment.md#restoring-a-deleted-context--issue-1804).
+
 ### Operations status
 
 | Endpoint | Purpose |

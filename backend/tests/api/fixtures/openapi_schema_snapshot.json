@@ -3586,6 +3586,50 @@
         ],
         "type": "object"
       },
+      "DeletedContextItem": {
+        "additionalProperties": false,
+        "properties": {
+          "context_id": {},
+          "created_by": {},
+          "deleted_at": {},
+          "deleted_by": {},
+          "deleted_memories": {},
+          "name": {},
+          "name_taken": {},
+          "resource_taken": {},
+          "workspace_id": {},
+          "workspace_name": {}
+        },
+        "required": [
+          "context_id",
+          "created_by",
+          "deleted_at",
+          "deleted_by",
+          "deleted_memories",
+          "name",
+          "name_taken",
+          "resource_taken",
+          "workspace_id",
+          "workspace_name"
+        ],
+        "type": "object"
+      },
+      "DeletedContextListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {},
+          "limit": {},
+          "offset": {},
+          "total": {}
+        },
+        "required": [
+          "items",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "type": "object"
+      },
       "DeviceAuthorizationResponse": {
         "properties": {
           "device_code": {},
@@ -15639,6 +15683,107 @@
         },
         "tags": [
           "bm25-drift"
+        ]
+      }
+    },
+    "/api/v1/admin/contexts/deleted": {
+      "get": {
+        "operationId": "list_deleted_contexts_api_v1_admin_contexts_deleted_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "deleted_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedContextListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
         ]
       }
     },

@@ -10,11 +10,12 @@ from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select, text, update
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import and_, exists, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from auth.admission import AdmittedVia, InviteIssuer
 from auth.dependencies import require_admin
@@ -1766,6 +1767,201 @@ async def restore_context(
         warnings=result.warnings,
         dry_run=result.dry_run,
     )
+
+
+# ============================================================================
+# Soft-deleted contexts, for the restore above (Issue #2833)
+# ============================================================================
+
+
+class DeletedContextItem(TZAwareBaseModel):
+    """One soft-deleted context the restore can be asked for.
+
+    Ids, the name and what the restore's dry run would answer. No other
+    column of the context, no memory column and no ``users`` column.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    context_id: UUID
+    name: str
+    workspace_id: UUID
+    workspace_name: str
+    created_by: str | None = Field(description="The stored creator id, or null")
+    deleted_at: datetime
+    deleted_by: str | None = Field(
+        description="The stored value: a user id, `system:capacity-purge`, or null"
+    )
+    deleted_memories: int = Field(
+        description=(
+            "The context's soft-deleted memory rows still held: the dry run's "
+            "`memories_restored + memories_left_deleted`. 0 once the tombstone "
+            "sweep removed them (a restore then brings back an empty context)."
+        )
+    )
+    name_taken: bool = Field(
+        description=(
+            "A live context of the workspace has this name: the restore answers "
+            "409 without `new_name`"
+        )
+    )
+    resource_taken: bool = Field(
+        description=(
+            "The context has a `resource_id` and a live context serves it: the restore answers 409"
+        )
+    )
+
+
+class DeletedContextListResponse(TZAwareBaseModel):
+    """A page of soft-deleted contexts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[DeletedContextItem]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/contexts/deleted", response_model=DeletedContextListResponse)
+async def list_deleted_contexts(
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    workspace_id: UUID | None = Query(None, description="Only contexts of this workspace"),
+    created_by: str | None = Query(
+        None, min_length=1, max_length=255, description="Only contexts this user id created (exact)"
+    ),
+    deleted_by: str | None = Query(
+        None,
+        min_length=1,
+        max_length=255,
+        description="Only contexts with this stored `deleted_by` (exact)",
+    ),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> DeletedContextListResponse:
+    """List soft-deleted contexts, to find the one to restore (#2833).
+
+    The contexts with a deletion time whose workspace is not deleted (the
+    restore always refuses a context of a deleted workspace), newest deletion
+    first, then by id. `total` counts the filtered rows. The filters are
+    exact matches, ANDed.
+
+    Each row says what `POST /api/v1/admin/contexts/{context_id}/restore`
+    would meet: `deleted_memories`, `name_taken` and `resource_taken`. With
+    both flags false its dry run answers 200; with either true, 409.
+
+    Read only: no row changes and no audit row is written.
+    """
+    filters = [Context.deleted_at.is_not(None), Workspace.deleted_at.is_(None)]
+    if workspace_id is not None:
+        filters.append(Context.workspace_id == workspace_id)
+    if created_by is not None:
+        filters.append(Context.created_by == created_by)
+    if deleted_by is not None:
+        filters.append(Context.deleted_by == deleted_by)
+
+    total = (
+        await db.execute(
+            select(func.count())
+            .select_from(Context)
+            .join(Workspace, Workspace.id == Context.workspace_id)
+            .where(*filters)
+        )
+    ).scalar_one()
+    rows = (
+        await db.execute(
+            select(
+                Context.id,
+                Context.name,
+                Context.workspace_id,
+                Workspace.name.label("workspace_name"),
+                Context.created_by,
+                Context.deleted_at,
+                Context.deleted_by,
+            )
+            .join(Workspace, Workspace.id == Context.workspace_id)
+            .where(*filters)
+            .order_by(Context.deleted_at.desc(), Context.id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+
+    # The lookups of the page bind its ids only (at most ``limit``).
+    page_ids = [row.id for row in rows]
+    deleted_memories: dict[UUID | None, int] = {}
+    taken: dict[UUID, tuple[bool, bool]] = {}
+    if page_ids:
+        # The rows the restore's dry run counts: the context's tombstones in
+        # its own workspace.
+        counted = await db.execute(
+            select(Memory.context_id, func.count())
+            .join(
+                Context,
+                and_(Context.id == Memory.context_id, Context.workspace_id == Memory.workspace_id),
+            )
+            .where(Memory.context_id.in_(page_ids), Memory.deleted_at.is_not(None))
+            .group_by(Memory.context_id)
+        )
+        deleted_memories = {context_id: int(count) for context_id, count in counted.all()}
+
+        # The two refusals of the restore that depend on live contexts. Only
+        # the booleans leave the database, never the ``resource_id``.
+        live = aliased(Context)
+        flags = await db.execute(
+            select(
+                Context.id,
+                exists()
+                .where(
+                    live.workspace_id == Context.workspace_id,
+                    live.name == Context.name,
+                    live.deleted_at.is_(None),
+                )
+                .label("name_taken"),
+                and_(
+                    func.coalesce(Context.resource_id, "") != "",
+                    exists().where(
+                        live.resource_id == Context.resource_id,
+                        live.deleted_at.is_(None),
+                    ),
+                ).label("resource_taken"),
+            ).where(Context.id.in_(page_ids))
+        )
+        taken = {
+            context_id: (bool(name_taken), bool(resource_taken))
+            for context_id, name_taken, resource_taken in flags.all()
+        }
+
+    items = [
+        DeletedContextItem(
+            context_id=row.id,
+            name=row.name,
+            workspace_id=row.workspace_id,
+            workspace_name=row.workspace_name,
+            created_by=row.created_by,
+            deleted_at=row.deleted_at,
+            deleted_by=row.deleted_by,
+            deleted_memories=deleted_memories.get(row.id, 0),
+            name_taken=taken.get(row.id, (False, False))[0],
+            resource_taken=taken.get(row.id, (False, False))[1],
+        )
+        for row in rows
+    ]
+
+    logger.info(
+        "admin_deleted_contexts_listed",
+        actor=get_user_id(admin),
+        count=len(items),
+        total=total,
+        limit=limit,
+        offset=offset,
+        workspace_filter=workspace_id is not None,
+        created_by_filter=created_by is not None,
+        deleted_by_filter=deleted_by is not None,
+    )
+
+    return DeletedContextListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 # ============================================================================

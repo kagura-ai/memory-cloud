@@ -3653,6 +3653,15 @@ another name). The restore is recorded in the audit log (`context_restore`),
 under the admin for the endpoint and under `--actor` for the command (default
 `cli:<OS user>`).
 
+To find the id, `GET /api/v1/admin/contexts/deleted` (#2833) lists the
+soft-deleted contexts of live workspaces, newest deletion first, with optional
+`workspace_id`, `created_by` and `deleted_by` filters. Each row has the
+context's id and name, its workspace, who created and deleted it,
+`deleted_memories` (the rows a restore still has; `0` after the purge) and
+two flags, `name_taken` and `resource_taken`: with both false the dry run
+answers `200`, with either true `409` (`name_taken` is solved with `new_name`).
+See [Deleted contexts](api-reference.md#deleted-contexts).
+
 **What comes back.** The context row, and the memories its deletion
 soft-deleted: they are live again and marked `pending`, and the embedding sweep
 rebuilds their vectors — about 2,400 memories an hour. Until a memory is
