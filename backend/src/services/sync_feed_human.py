@@ -72,6 +72,15 @@ async def configure_feed(
             if row.config_hash != body.config_hash:
                 row.config_hash = body.config_hash
                 row.config_version += 1
+        from services.sync_audit import add_audit, human_actor
+
+        add_audit(
+            db,
+            "sync.feed.configured",
+            human_actor(principal.user_id, principal.client_id),
+            installation=installation,
+            feed_id=row.id,
+        )
         await db.flush()
         await db.commit()
         return {
@@ -131,6 +140,17 @@ async def approve_diff(
         row.approval_id = row.approval_id or uuid4()
         row.approved_by, row.approval_epoch = principal.user_id, workspace.ownership_epoch
         fence.deadlines.extend([row.expires_at, row.prepared_until])
+        from services.sync_audit import add_audit, human_actor
+
+        add_audit(
+            db,
+            "sync.diff.approved",
+            human_actor(principal.user_id, principal.client_id),
+            installation=installation,
+            feed_id=feed.id,
+            run_id=row.id,
+            operation_id=row.operation_id,
+        )
         await db.flush()
         await db.commit()
         return {

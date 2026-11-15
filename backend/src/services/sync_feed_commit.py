@@ -210,4 +210,16 @@ async def commit_run(
     row.commit_hash = digest(body.model_dump(mode="json"))
     await clear_staging(db, row)
     await db.flush()
+    from services.sync_audit import add_audit, service_actor
+
+    add_audit(
+        db,
+        "sync.run.committed",
+        service_actor(authority),
+        installation=authority.installation,
+        feed_id=feed.id,
+        run_id=row.id,
+        operation_id=row.operation_id,
+        manual_request_id=row.manual_request_id,
+    )
     return row

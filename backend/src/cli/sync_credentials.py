@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.client_registration import reserve_client_id  # noqa: E402
 from auth.sync_service_jwt import key_fingerprint, public_key  # noqa: E402
-from models.auth import AuditLog  # noqa: E402
 from models.oidc import OIDCClient  # noqa: E402
 from models.sync_credential import (  # noqa: E402
     SyncAccessToken,
@@ -31,14 +30,28 @@ from utils.datetime import utcnow  # noqa: E402
 
 
 def _audit(db: Session, client_id: str, action: str, kid: str | None = None) -> None:
-    db.add(
-        AuditLog(
-            user_id="service:sync-credential-operator",
-            user_email="system:operator",
-            action=action,
-            resource="sync-client:" + client_id,
-            user_metadata={"kid": kid} if kid else {},
+    from services.sync_audit import AuditActor, add_audit
+
+    client = db.get(SyncCredentialClient, client_id)
+    if client is None:
+        raise ValueError("Service client was not found")
+    key_id = (
+        db.scalar(
+            select(SyncSigningKey.id).where(
+                SyncSigningKey.client_id == client_id,
+                SyncSigningKey.kid == kid,
+            )
         )
+        if kid
+        else None
+    )
+    add_audit(
+        db,
+        action,
+        AuditActor("operator", "service:sync-credential-operator", client_id),
+        service_id=client.service_id,
+        key_id=key_id,
+        generation=client.generation,
     )
 
 

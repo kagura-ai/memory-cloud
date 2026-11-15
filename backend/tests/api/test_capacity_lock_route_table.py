@@ -92,6 +92,27 @@ ROUTER_DEFAULTS: dict[str, str] = {
 
 # Layer 2 — content routers: every route named, no default.
 ROUTES: dict[tuple[str, str], str] = {
+    # #2810: metadata observations and human intent do not read/write memory bodies.
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity",
+    ): ALLOWED,
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/runs",
+    ): ALLOWED,
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/runs/{run_id}",
+    ): ALLOWED,
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/events",
+    ): ALLOWED,
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/requests",
+    ): ALLOWED,
     (
         "POST",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/reconnect",
@@ -333,6 +354,7 @@ ROUTES: dict[tuple[str, str], str] = {
 }
 
 CONTENT_ROUTERS = {
+    "sync_activity",
     "sync_management",
     "sync_feeds",
     "sync_records",

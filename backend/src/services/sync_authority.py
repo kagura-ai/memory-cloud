@@ -15,9 +15,9 @@ from sqlalchemy.orm import Session
 
 from auth.sync_identity import SyncPrincipal, load_sync_identity
 from auth.workspace_roles import WorkspaceRole
-from models.auth import AuditLog, User, Workspace, WorkspaceMember
+from models.auth import User, Workspace, WorkspaceMember
 from models.oidc import OIDCClient
-from models.sync_installation import SyncService
+from models.sync_installation import SyncInstallation, SyncService
 from services.permission_service import PermissionService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
@@ -158,15 +158,29 @@ async def registered_service(
     return service
 
 
-def audit_sync(db: AsyncSession, authority: SyncAuthority, action: str, target: UUID) -> None:
+def audit_sync(
+    db: AsyncSession,
+    authority: SyncAuthority,
+    action: str,
+    target: UUID,
+    *,
+    installation: SyncInstallation | None = None,
+    service_id: str | None = None,
+) -> None:
     """Use established erasure-aware audit storage; never record public text or credentials."""
-    human = authority.principal is not None
-    db.add(
-        AuditLog(
-            user_id=authority.owner.user_id if human else "service:billing-publisher",
-            user_email=authority.owner.email if human else "system:billing-publisher",
-            action=action,
-            resource=f"sync:{target}",
-            user_metadata={"workspace_id": str(authority.workspace.id)},
-        )
+    from services.sync_audit import AuditActor, add_audit, human_actor
+
+    actor = (
+        human_actor(authority.principal.user_id, authority.principal.client_id)
+        if authority.principal
+        else AuditActor("system", "service:billing-publisher")
+    )
+    add_audit(
+        db,
+        action,
+        actor,
+        installation=installation,
+        workspace_id=authority.workspace.id,
+        service_id=service_id,
+        authorization_id=target if installation is None else None,
     )

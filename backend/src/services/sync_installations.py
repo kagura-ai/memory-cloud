@@ -125,7 +125,13 @@ async def create_authorization(
             ).all()
             for old in pending:
                 old.revoked_at = now
-                audit_sync(db, authority, "sync.authorization.superseded", old.id)
+                audit_sync(
+                    db,
+                    authority,
+                    "sync.authorization.superseded",
+                    old.id,
+                    service_id=old.service_id,
+                )
             approval = SyncAuthorization(
                 id=uuid4(),
                 workspace_id=wid,
@@ -146,7 +152,13 @@ async def create_authorization(
                 expires_at=now + timedelta(seconds=get_settings().sync_authorization_ttl_seconds),
             )
             db.add(approval)
-            audit_sync(db, authority, "sync.authorization.created", approval.id)
+            audit_sync(
+                db,
+                authority,
+                "sync.authorization.created",
+                approval.id,
+                service_id=approval.service_id,
+            )
             await db.flush()
             result = authorization_view(approval)
         await db.commit()
@@ -163,7 +175,13 @@ async def revoke_authorization(
             raise ConflictError("Authorization was consumed; unlink the installation instead")
         if approval.revoked_at is None:
             approval.revoked_at = utcnow()
-            audit_sync(db, authority, "sync.authorization.revoked", approval.id)
+            audit_sync(
+                db,
+                authority,
+                "sync.authorization.revoked",
+                approval.id,
+                service_id=approval.service_id,
+            )
         result = authorization_view(approval)
         await db.commit()
         return result
@@ -284,7 +302,7 @@ async def activate_installation(
 
                 await enroll(db, row)
             approval.used_at = utcnow()
-            audit_sync(db, authority, "sync.installation.activated", row.id)
+            audit_sync(db, authority, "sync.installation.activated", row.id, installation=row)
             await db.flush()
             result = await installation_view(db, row)
         return result
@@ -335,7 +353,7 @@ async def unlink_installation(
                 row.generation += 1
                 if managed.mode is not None:
                     managed.mode.generation = row.generation
-            audit_sync(db, authority, "sync.installation.revoked", row.id)
+            audit_sync(db, authority, "sync.installation.revoked", row.id, installation=row)
         result = await installation_view(db, row)
         await db.commit()
         return result

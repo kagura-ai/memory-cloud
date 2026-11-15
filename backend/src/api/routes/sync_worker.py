@@ -52,7 +52,9 @@ class SyncWorkerRoute(APIRoute):
             response.headers.update(NO_STORE)
             return response
 
-        return handler
+        from services.sync_audit import audited_http
+
+        return audited_http(handler)
 
 
 class SyncWorkerInstallationView(BaseModel):

@@ -29,7 +29,7 @@ from auth.sync_service_jwt import (
 )
 from config.settings import get_settings
 from db.base import isolated_session
-from models.auth import AuditLog, Context
+from models.auth import Context
 from models.public_mcp import PublicMcpEndpoint
 from models.resource import Resource
 from models.sync_credential import (
@@ -350,20 +350,14 @@ async def _authority(
 
 
 def _audit(db: AsyncSession, authority: CredentialAuthority, action: str) -> None:
-    db.add(
-        AuditLog(
-            user_id="service:" + authority.client.client_id,
-            user_email="system:sync-client",
-            action=action,
-            resource="sync:" + str(authority.installation.id),
-            user_metadata={
-                "workspace_id": str(authority.installation.workspace_id),
-                "service_id": authority.service.service_id,
-                "client_id": authority.client.client_id,
-                "key_id": str(authority.key.id),
-                "generation": authority.installation.generation,
-            },
-        )
+    from services.sync_audit import add_audit, service_actor
+
+    add_audit(
+        db,
+        action,
+        service_actor(authority),
+        installation=authority.installation,
+        key_id=authority.key.id,
     )
 
 
@@ -547,6 +541,9 @@ async def sync_token_boundary(
             authority.token = token
             authority.token_snapshot = authority.token_identity()
             authority.check()
+            from services.sync_audit import bind_actor, service_actor
+
+            bind_actor(service_actor(authority), db, row)
             if operation not in token.operations:
                 raise SyncCredentialError("insufficient_scope", 403)
             yield authority

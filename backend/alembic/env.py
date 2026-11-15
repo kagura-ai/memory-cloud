@@ -48,6 +48,7 @@ from db.migration_helpers import (
 
 # Model registration is an explicit import side effect for autogeneration.
 importlib.import_module("models.sync_management")
+importlib.import_module("models.sync_activity")
 
 # The production secret guard (#2225, #2239): under ENVIRONMENT=production a
 # development-default or short secret stops the migration here, before any

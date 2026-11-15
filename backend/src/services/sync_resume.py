@@ -132,6 +132,18 @@ async def pin_candidate(
     row.state = "aborted"
     await clear_staging(db, row)
     await db.flush()
+    from services.sync_audit import add_audit, service_actor
+
+    add_audit(
+        db,
+        "sync.resume.candidate.created",
+        service_actor(authority),
+        installation=authority.installation,
+        feed_id=feed.id,
+        run_id=row.id,
+        operation_id=row.operation_id,
+        manual_request_id=row.manual_request_id,
+    )
     return {
         "candidate_id": str(rid),
         "active": True,
@@ -266,6 +278,13 @@ async def candidates(
             or row.manifest["schema_version"] != schema.schema_version
         ):
             raise ConflictError("Collect fresh resume candidates for every feed")
+        reference = row.manifest.get("manual_request_id")
+        if reference is not None:
+            from services.sync_requests import validate_manual_request
+
+            await validate_manual_request(
+                db, installation, service.browser_client_id, UUID(reference), fence=fence
+            )
         fence.deadlines.append(row.expires_at)
         result.append((feed, row))
     return result
@@ -666,6 +685,20 @@ async def confirm_resume(
             await retire_manual(db, installation, memories, principal.user_id)
             for feed, candidate in rows:
                 await publish_resumed_feed(db, installation, feed, candidate)
+                from services.sync_audit import add_audit, human_actor
+
+                add_audit(
+                    db,
+                    "sync.run.committed",
+                    human_actor(principal.user_id, principal.client_id),
+                    installation=installation,
+                    feed_id=feed.id,
+                    run_id=candidate.id,
+                    operation_id=UUID(candidate.manifest["operation_id"]),
+                    manual_request_id=UUID(candidate.manifest["manual_request_id"])
+                    if candidate.manifest.get("manual_request_id")
+                    else None,
+                )
             target.mode, target.generation, target.event_floor = (
                 "feed",
                 installation.generation,
@@ -676,7 +709,7 @@ async def confirm_resume(
             context = await db.get(Context, installation.context_id)
             assert context is not None
             target.manual_sleep_mode, context.sleep_mode = context.sleep_mode, "skip"
-            audit_mode(db, installation, "resumed", principal.user_id)
+            audit_mode(db, installation, "resumed", principal.user_id, target=target)
             result = mode_view(target)
             save_operation(db, iid, operation_id, "resume", request, principal.user_id, result)
             await db.delete(preview)
@@ -735,7 +768,9 @@ async def reconnect(
             installation.state, installation.revoked_at = "active", None
             installation.generation += 1
             target.generation, target.epoch = installation.generation, target.epoch + 1
-            audit_sync(db, authority, "sync.installation.reconnected", iid)
+            audit_sync(
+                db, authority, "sync.installation.reconnected", iid, installation=installation
+            )
             result = mode_view(target)
             save_operation(db, iid, operation_id, "reconnect", request, principal.user_id, result)
             return result
