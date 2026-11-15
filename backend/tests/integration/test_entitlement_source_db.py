@@ -63,7 +63,7 @@ async def test_admin_set_marks_admin_grant(db_session: AsyncSession, billed_work
     from api.routes.admin_plans import AdminUpdatePlanRequest, update_workspace_plan
 
     await update_workspace_plan(
-        workspace_id=billed_workspace["workspace_id"],
+        workspace_id=UUID(billed_workspace["workspace_id"]),
         request=AdminUpdatePlanRequest(plan_name="pro"),  # upgrade — no member cascade
         admin_user=mock_admin(),
         db=db_session,

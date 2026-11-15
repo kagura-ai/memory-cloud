@@ -187,7 +187,7 @@ async def test_the_admin_plan_change_reports_and_keeps_flags_and_points(
     await db_session.commit()
 
     result = await update_workspace_plan(
-        workspace_id=str(ws),
+        workspace_id=ws,
         request=AdminUpdatePlanRequest(plan_name="basic"),
         admin_user=mock_admin(),
         db=db_session,
@@ -206,7 +206,7 @@ async def test_the_admin_plan_change_reports_and_keeps_flags_and_points(
 
     # Upgrading back brings the context back with nothing to do.
     again = await update_workspace_plan(
-        workspace_id=str(ws),
+        workspace_id=ws,
         request=AdminUpdatePlanRequest(plan_name="pro"),
         admin_user=mock_admin(),
         db=db_session,

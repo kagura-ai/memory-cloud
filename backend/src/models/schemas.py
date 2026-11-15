@@ -25,6 +25,7 @@ from auth.connector_keys import reject_reserved_key_name
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from models.api_base import TZAwareBaseModel
 from utils.public_id import PublicIdPrefix, public_id_pattern
+from utils.query_bounds import NO_NUL_PATTERN
 from utils.user_prefs import LOCALE_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -2171,7 +2172,7 @@ class PromoteToSystemAdminRequest(BaseModel):
     Issue #166: System Admin promotion.
     """
 
-    user_id: str = Field(..., description="OAuth2 user_id to promote")
+    user_id: str = Field(..., pattern=NO_NUL_PATTERN, description="OAuth2 user_id to promote")
 
 
 class PromoteToSystemAdminResponse(BaseModel):

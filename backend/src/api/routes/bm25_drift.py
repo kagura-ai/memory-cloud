@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
 from sqlalchemy import func, select
@@ -31,6 +31,7 @@ from services.bm25_drift.psi_calculator import PsiStatus
 from services.context_routing import resolve_collection_name
 from utils.exceptions import RedisError
 from utils.logger import get_logger
+from utils.query_bounds import MAX_BIGINT, MAX_OFFSET
 from utils.sparse_vector import hash_token
 from utils.tokenizer import tokenize_for_search
 
@@ -139,7 +140,7 @@ async def list_drift_logs(
     _admin: dict = Depends(require_admin),  # noqa: ARG001 - access guard only
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_OFFSET),
     status_filter: str | None = Query(None, alias="status"),
     context_id: UUID | None = Query(None),
 ) -> Bm25DriftListResponse:
@@ -197,7 +198,7 @@ async def list_drift_logs(
 
 @router.get("/{row_id}", response_model=Bm25DriftDetailResponse)
 async def get_drift_log_detail(
-    row_id: int,
+    row_id: Annotated[int, Path(le=MAX_BIGINT)],
     _admin: dict = Depends(require_admin),  # noqa: ARG001 - access guard only
     db: AsyncSession = Depends(get_db),
 ) -> Bm25DriftDetailResponse:
@@ -417,7 +418,7 @@ async def _write_reveal_audit(
 
 @router.post("/{row_id}/reveal-terms", response_model=Bm25DriftRevealResponse)
 async def reveal_drift_terms(
-    row_id: int,
+    row_id: Annotated[int, Path(le=MAX_BIGINT)],
     body: Bm25DriftRevealRequest,
     admin: AdminUser,
     db: AsyncSession = Depends(get_db),

@@ -15,7 +15,7 @@ an ``audit_logs`` row naming the caller.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, status
@@ -402,7 +402,7 @@ _UNDO_ERROR_STATUS = {
     },
 )
 async def undo_merge(
-    action_id: int,
+    action_id: Annotated[int, Path(le=MAX_BIGINT)],
     admin: AdminAccountUser,
     db: AsyncSession = Depends(get_db),
 ) -> UndoMergeResponse:
