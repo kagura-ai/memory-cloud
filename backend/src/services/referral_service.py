@@ -772,6 +772,7 @@ class ReferralService:
         self,
         *,
         referrer_user_id: str | None = None,
+        referred_user_id: str | None = None,
         include_revoked: bool = True,
         limit: int = 50,
         offset: int = 0,
@@ -780,6 +781,9 @@ class ReferralService:
 
         Args:
             referrer_user_id: Restrict to one referrer (the admin filter).
+            referred_user_id: Restrict to the grant one user received (#2836).
+                A user is referred at most once, so at most one row; the
+                grant of an erased user (the column is NULL) is not found.
             include_revoked: When False, hide revoked rows.
             limit: Page size.
             offset: Page offset.
@@ -790,6 +794,8 @@ class ReferralService:
         filters = []
         if referrer_user_id is not None:
             filters.append(ReferralGrant.referrer_user_id == referrer_user_id)
+        if referred_user_id is not None:
+            filters.append(ReferralGrant.referred_user_id == referred_user_id)
         if not include_revoked:
             filters.append(ReferralGrant.revoked_at.is_(None))
 

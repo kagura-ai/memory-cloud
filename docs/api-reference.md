@@ -2296,6 +2296,58 @@ For `beta_invite`:
 
 For every other value the three fields are null. The invite's label (the inviter's private note) is never part of a response, a log line or an audit row. Neither filter value is written to the application's structured log lines or audit rows; the request line itself (the API's uvicorn access log and a reverse proxy's access log) records the query string, as for any admin URL that names a user.
 
+### Workspace plans
+
+The plan and add-on reads under `/api/v1/admin/plans`. They answer a session admin in `session` and a service operator in `service`, and `404` in `off`, like every system-admin route.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/plans/workspaces` | The live workspaces with their plan, one page at a time (Issue #2841): `{"items", "total", "limit", "offset"}`. Each item is `{"id", "name", "plan_name", "owner_user_id", "owner_name", "owner_email", "total_memories", "memory_limit", "mcp_calls_per_day", "mcp_calls_per_week", "entitlement_source"}`. |
+| `GET /api/v1/admin/plans/workspaces/{workspace_id}` | One live workspace, as the list's item for it (Issue #2841). `404` (`RES-001`, "Workspace not found") for an unknown or soft-deleted workspace; `422` for an id that is not a UUID. |
+| `GET /api/v1/admin/plans/workspaces/{workspace_id}/quotas` | One workspace's limits: `base`, `addon`, `effective`, `usage`, `spend_cap`, its `entitlement_source` and its `addon_records`. |
+| `GET /api/v1/admin/plans/audit` | The plan changes made through the admin plan route, newest first, as a bare array of `{"id", "workspace_id", "workspace_name", "old_plan", "new_plan", "changed_by", "changed_by_name", "changed_by_email", "changed_at", "reason"}`. Parameters (Issue #2830): `workspace_id` (a UUID: only that workspace's changes, a soft-deleted workspace's included; an id with no change answers `[]`), `limit` (1 to 500, default 100) and `offset` (from 0, at most 2^63 - 1). The order is `changed_at` descending, then `id` descending; page until a page holds fewer entries than `limit`. A value outside these rules answers `422` (`VAL-001`). |
+
+The workspace list's parameters, all optional and combined with AND:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `limit` | Page size, 1 to 500 (default 50). |
+| `offset` | Rows to skip, from 0 (default 0), at most 2^63 - 1. |
+| `search` | A case-insensitive substring of the workspace name, at most 255 characters. It is trimmed and an empty value means no filter; `\`, `%` and `_` match literally. |
+| `plan` | Exact: one of the plan keys (`free`, `basic`, `pro`, `promax`). |
+| `owner_user_id` | Exact, 1 to 255 characters without a NUL. |
+
+A value outside these rules (a `limit` of 0 or 501, a negative `offset`, an unknown `plan`, a `search` that is too long or holds a control character) answers `422` (`VAL-001`); nothing is clamped. The order is `created_at` ascending, then `id`, so walking the pages with `offset` returns each workspace once while none is added or removed. `total` counts every live workspace that matches the filters; soft-deleted workspaces are in neither `items` nor `total`. The `search` text is not written to the application's structured log lines. Until v0.164.0 the route took no parameter and answered every live workspace as a bare array.
+
+`entitlement_source` (Issue #2829) says who owns the workspace's plan: `admin_grant` (the default, and what `PUT /api/v1/admin/plans/workspaces/{workspace_id}/plan` sets) or `external_billing` (what a billing push sets). Only an `external_billing` workspace counts as under a running contract or can be capacity-locked.
+
+`addon_records` (Issue #2829) are the workspace's active add-on records, the rows its add-on limits are computed from: `{"id", "addon_type", "source", "quantity", "bonus", "active_from", "active_until", "created_at", "created_by"}`, ordered by `addon_type`, then `source` (`admin_grant` or `stripe`). `bonus` is `quantity` times the unit value of the add-on type, so the sum of `bonus` per add-on type is the `expected_value` of `GET /api/v1/admin/plans/addon-cache-consistency`. `active_until` is `null` for a record with no end; a record that has expired or starts later is not listed. A later admin grant changes only `quantity`, so `created_by` names who first granted it. A billing push that carries add-ons sets the workspace's add-on values directly and writes no record.
+
+### Signup allowlist
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/signup-gate/allowlist` | The signup allowlist, one page at a time (Issue #2831): `{"items", "total", "limit", "offset"}`, newest first (`created_at` descending, then `id`). Each item is `{"id", "provider", "subject_id", "subject_label", "github_user_id", "github_username", "source", "state", "added_by_user_id", "created_at"}`. |
+
+Its parameters, all optional and combined with AND:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `limit` | Page size, 1 to 200 (default 50). |
+| `offset` | Rows to skip, from 0 (default 0), at most 2^63 - 1. |
+| `search` | A case-insensitive substring of `subject_label`, at most 255 characters. It is trimmed and an empty value means no filter; `\`, `%` and `_` match literally. `subject_id` and the legacy `github_*` fields are not searched. |
+| `provider` | Exact: `github`, `google` or `email`. |
+| `source` | Exact: `manual`, `github_sponsors` or `beta_invite`. |
+| `state` | Exact: `active`, `grace` or `revoked`. |
+
+A value outside these rules answers `422` (`VAL-001`); nothing is clamped. `total` counts every row that matches the filters. Walking the pages with `offset` returns each row once while none is added; a row added meanwhile (an admin add, a redeemed closed-beta invite link) is the newest and moves the later rows down by one. Until v0.164.0 the route took no parameter and answered every row as a bare array.
+
+### Referral ledger
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/v1/admin/referrals` | The referral grants, newest first: `{"items", "total", "limit", "offset"}`. Filters, combined with AND: `referrer_user_id` (the grants a user earned by inviting others), `referred_user_id` (Issue #2836: the grant a user received; exact, and a user is referred at most once, so at most one row) and `include_revoked` (default `true`). `limit` 1 to 200 (default 50), `offset` from 0 (at most 2^63 - 1). A user id with a NUL, like any value outside these, answers `422`. The grant of an erased user is not found by `referred_user_id`. |
+
 ### Operations status
 
 | Endpoint | Purpose |

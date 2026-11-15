@@ -8,17 +8,21 @@
  * Two tabs:
  * - Settings: Enable toggle + Mode select (Sponsors/both disabled until Phase 2)
  * - Manual Allowlist: Add GitHub usernames (resolved to immutable numeric ID by
- *   the backend) and remove existing entries.
+ *   the backend) and remove existing entries. The list is read from the server
+ *   one page at a time (#2831); add and remove re-read the page.
  */
 
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Plus, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, Trash2 } from "lucide-react";
 
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
-import { LoadingState } from "@/components/common/LoadingState";
+import {
+  LoadingState,
+  TableLoadingState,
+} from "@/components/common/LoadingState";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -57,6 +61,9 @@ import {
 
 const TABS = ["settings", "allowlist"] as const;
 
+// Rows per allowlist page (the list route's default, #2831).
+const PAGE_SIZE = 50;
+
 export default function AdminSignupGatePage() {
   const t = useTranslations("admin.signupGate");
   const tCommon = useTranslations("admin.common");
@@ -64,9 +71,16 @@ export default function AdminSignupGatePage() {
   const [tab, setTab] = useTabParam("settings", "tab", TABS);
 
   const [config, setConfig] = useState<SignupGateConfig | null>(null);
+  // One page of the allowlist (#2831): `total` counts every entry, `offset`
+  // is where the shown page starts.
   const [allowlist, setAllowlist] = useState<SignupAllowlistEntry[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // A page change or a re-read after add / remove (the first load is `loading`).
+  const [listLoading, setListLoading] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
 
   const [provider, setProvider] = useState<SignupGateProvider>("github");
   // Single input bound to both username and email — the placeholder /
@@ -91,14 +105,38 @@ export default function AdminSignupGatePage() {
     try {
       const [cfg, list] = await Promise.all([
         getSignupGateConfig(),
-        listSignupAllowlist(),
+        listSignupAllowlist({ limit: PAGE_SIZE, offset: 0 }),
       ]);
       setConfig(cfg);
-      setAllowlist(list);
+      setAllowlist(list.items);
+      setTotal(list.total);
+      setOffset(0);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadPage(nextOffset: number): Promise<void> {
+    setListLoading(true);
+    setListError(null);
+    try {
+      let shown = nextOffset;
+      let list = await listSignupAllowlist({ limit: PAGE_SIZE, offset: shown });
+      // The page emptied (its last row was removed): show the last page
+      // that still has rows.
+      if (list.items.length === 0 && list.total > 0 && shown > 0) {
+        shown = Math.floor((list.total - 1) / PAGE_SIZE) * PAGE_SIZE;
+        list = await listSignupAllowlist({ limit: PAGE_SIZE, offset: shown });
+      }
+      setAllowlist(list.items);
+      setTotal(list.total);
+      setOffset(shown);
+    } catch (err) {
+      setListError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setListLoading(false);
     }
   }
 
@@ -140,14 +178,15 @@ export default function AdminSignupGatePage() {
       // Issue #655: route the payload by selected provider. Backend
       // validates shape (rejects email when provider=github and vice
       // versa) so the UI just trusts the user's selection.
-      const entry = await addSignupAllowlistEntry(
+      await addSignupAllowlistEntry(
         provider === "github"
           ? { provider: "github", github_username: trimmed }
           : { provider: "google", email: trimmed },
       );
-      setAllowlist((prev) => [entry, ...prev]);
       setUsername("");
       toast({ title: tCommon("success"), description: t("addSuccess") });
+      // The new entry is the newest: it leads the first page.
+      await loadPage(0);
     } catch (err) {
       const detail = err instanceof ApiError ? err.message : t("addError");
       toast({
@@ -175,7 +214,6 @@ export default function AdminSignupGatePage() {
     }
     try {
       await removeSignupAllowlistEntry(entry.id);
-      setAllowlist((prev) => prev.filter((e) => e.id !== entry.id));
       toast({ title: tCommon("success"), description: t("removeSuccess") });
     } catch (err) {
       const detail = err instanceof ApiError ? err.message : t("removeError");
@@ -184,8 +222,13 @@ export default function AdminSignupGatePage() {
         description: detail,
         variant: "destructive",
       });
+      return;
     }
+    await loadPage(offset);
   }
+
+  const hasPrevious = offset > 0;
+  const hasNext = offset + allowlist.length < total;
 
   return (
     <PageContainer>
@@ -284,7 +327,11 @@ export default function AdminSignupGatePage() {
               </Button>
             </form>
 
-            {allowlist.length === 0 ? (
+            {listError ? (
+              <ErrorBanner error={listError} />
+            ) : listLoading ? (
+              <TableLoadingState rows={5} />
+            ) : allowlist.length === 0 ? (
               <EmptyState
                 title={t("allowlistEmpty")}
                 description={t("allowlistEmptyHint")}
@@ -347,6 +394,40 @@ export default function AdminSignupGatePage() {
                   })}
                 </TableBody>
               </Table>
+            )}
+
+            {total > 0 && (
+              <div className="flex items-center justify-between">
+                <div className="text-sm text-muted-foreground">
+                  {t("pagination.showing", {
+                    from: offset + 1,
+                    to: offset + allowlist.length,
+                    total,
+                  })}
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!hasPrevious || listLoading}
+                    onClick={() =>
+                      void loadPage(Math.max(0, offset - PAGE_SIZE))
+                    }
+                  >
+                    <ChevronLeft className="h-4 w-4 mr-1" />
+                    {t("pagination.previous")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!hasNext || listLoading}
+                    onClick={() => void loadPage(offset + PAGE_SIZE)}
+                  >
+                    {t("pagination.next")}
+                    <ChevronRight className="h-4 w-4 ml-1" />
+                  </Button>
+                </div>
+              </div>
             )}
           </TabsContent>
         </Tabs>

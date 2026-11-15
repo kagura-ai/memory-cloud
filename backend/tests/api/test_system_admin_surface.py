@@ -56,6 +56,7 @@ ADMIN_SURFACE = frozenset(
         ("GET", "/api/v1/admin/plans/audit"),
         ("GET", "/api/v1/admin/plans/tiers"),
         ("GET", "/api/v1/admin/plans/workspaces"),
+        ("GET", "/api/v1/admin/plans/workspaces/{workspace_id}"),
         ("GET", "/api/v1/admin/plans/workspaces/{workspace_id}/quotas"),
         ("GET", "/api/v1/admin/referrals"),
         ("GET", "/api/v1/admin/signup-gate/allowlist"),

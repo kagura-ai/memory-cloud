@@ -203,19 +203,6 @@ export function userDeleteFailure(error: unknown): UserDeleteFailure {
     : { kind: "unknown" };
 }
 
-export interface WorkspacePlanInfo {
-  id: string;
-  name: string;
-  plan_name: string;
-  owner_user_id: string;
-  owner_name: string | null;
-  owner_email: string | null;
-  total_memories: number;
-  memory_limit: number;
-  mcp_calls_per_day: number;
-  mcp_calls_per_week: number;
-}
-
 export interface PlanChangeAuditEntry {
   id: number;
   workspace_id: string;
@@ -235,13 +222,6 @@ export interface PlanChangeAuditEntry {
 export interface UpdatePlanRequest {
   plan_name: PlanTier;
   reason?: string;
-}
-
-/**
- * List all workspaces with plan info (Admin only)
- */
-export async function getAdminWorkspaces(): Promise<WorkspacePlanInfo[]> {
-  return apiClient.get<WorkspacePlanInfo[]>("/api/v1/admin/plans/workspaces");
 }
 
 /**

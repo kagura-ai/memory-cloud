@@ -39,6 +39,11 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# What the database takes: no stored text holds a NUL, and an OFFSET is a
+# 64-bit integer. A value outside these is a 422, never a statement.
+_NO_NUL = r"^[^\x00]*$"
+_MAX_OFFSET = 2**63 - 1
+
 router = APIRouter(prefix="/admin/referrals", tags=["admin-referrals"])
 
 
@@ -101,10 +106,11 @@ def _to_response(grant) -> AdminReferralGrantResponse:  # noqa: ANN001 - ORM row
 @router.get("", response_model=AdminReferralListResponse)
 async def list_referral_grants(
     user: AdminUser,
-    referrer_user_id: str | None = Query(default=None),
+    referrer_user_id: str | None = Query(default=None, pattern=_NO_NUL),
+    referred_user_id: str | None = Query(default=None, pattern=_NO_NUL),
     include_revoked: bool = Query(default=True),
     limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
     db: AsyncSession = Depends(get_db),
 ) -> AdminReferralListResponse:
     """List referral grants, newest first.
@@ -112,6 +118,8 @@ async def list_referral_grants(
     Args:
         user: Authenticated system admin.
         referrer_user_id: Restrict to a single inviter.
+        referred_user_id: Restrict to the grant a single user received
+            (#2836; exact, so at most one row).
         include_revoked: Include already-revoked rows (default true).
         limit: Page size.
         offset: Page offset.
@@ -123,6 +131,7 @@ async def list_referral_grants(
     service = ReferralService(db)
     rows, total = await service.list_grants(
         referrer_user_id=referrer_user_id,
+        referred_user_id=referred_user_id,
         include_revoked=include_revoked,
         limit=limit,
         offset=offset,

@@ -488,6 +488,67 @@ class TestKillSwitch:
         response = client.get("/api/v1/admin/referrals")
         assert response.status_code == 200
 
+    def test_admin_ledger_passes_the_referred_user_filter_to_the_service(
+        self, client, monkeypatch
+    ) -> None:
+        """#2836: ``referred_user_id`` reaches ``list_grants``; absent, it is ``None``."""
+        service = AsyncMock(return_value=([], 0))
+        monkeypatch.setattr("services.referral_service.ReferralService.list_grants", service)
+
+        response = client.get(
+            "/api/v1/admin/referrals",
+            params={"referred_user_id": "u-referred", "referrer_user_id": "u-referrer"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"items": [], "total": 0, "limit": 50, "offset": 0}
+        service.assert_awaited_once_with(
+            referrer_user_id="u-referrer",
+            referred_user_id="u-referred",
+            include_revoked=True,
+            limit=50,
+            offset=0,
+        )
+
+        service.reset_mock()
+        assert client.get("/api/v1/admin/referrals").status_code == 200
+        service.assert_awaited_once_with(
+            referrer_user_id=None,
+            referred_user_id=None,
+            include_revoked=True,
+            limit=50,
+            offset=0,
+        )
+
+    def test_admin_ledger_filter_answers_an_operator_in_service_mode(self, monkeypatch) -> None:
+        """#2836: the filter works for an operator principal, which has no ``users`` row."""
+        import secrets
+
+        token = secrets.token_hex(32)
+        settings = get_settings()
+        monkeypatch.setattr(settings, "system_admin_mode", "service")
+        monkeypatch.setattr(settings, "system_admin_service_token", token)
+        monkeypatch.setattr(settings, "system_admin_service_token_previous", "")
+        monkeypatch.setattr(settings, "system_admin_service_allowed_cidrs", "")
+        service = AsyncMock(return_value=([_mock_grant()], 1))
+        monkeypatch.setattr("services.referral_service.ReferralService.list_grants", service)
+
+        async def _db():
+            yield MagicMock()
+
+        app.dependency_overrides[get_db] = _db
+        try:
+            response = TestClient(app, raise_server_exceptions=False).get(
+                "/api/v1/admin/referrals",
+                params={"referred_user_id": "u-referred"},
+                headers={"Authorization": f"Bearer {token}", "X-Operator-Email": "ops@example.com"},
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == 1
+        assert service.await_args.kwargs["referred_user_id"] == "u-referred"
+
     def test_disabled_404_is_indistinguishable_from_a_missing_route(
         self, client, monkeypatch
     ) -> None:

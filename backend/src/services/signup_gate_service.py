@@ -55,6 +55,7 @@ from services.beta_invite_service import BetaInviteService, lock_invite_issuer
 from utils.datetime import utcnow
 from utils.github_user import resolve_github_user_id
 from utils.hashing import hmac_sha256_hex
+from utils.list_search import LIKE_ESCAPE, substring_pattern
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -710,11 +711,58 @@ class SignupGateService:
     # Admin: allowlist
     # ------------------------------------------------------------------
 
-    async def list_allowlist(self) -> list[SignupAllowlistEntry]:
+    async def list_allowlist(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        search: str | None = None,
+        provider: str | None = None,
+        source: str | None = None,
+        state: str | None = None,
+    ) -> tuple[list[SignupAllowlistEntry], int]:
+        """One page of the allowlist, newest first, with the filtered total (#2831).
+
+        Args:
+            limit: Page size.
+            offset: Rows to skip.
+            search: A normalised search text (``utils.list_search``): a
+                case-insensitive literal substring of ``subject_label``.
+            provider: Exact ``provider``.
+            source: Exact ``source``.
+            state: Exact ``state``.
+
+        Returns:
+            ``(rows, total)``: the page ordered by ``created_at`` descending,
+            then ``id``, and the count of every row that matches the filters.
+        """
+        filters = []
+        if search is not None:
+            filters.append(
+                SignupAllowlistEntry.subject_label.ilike(
+                    substring_pattern(search), escape=LIKE_ESCAPE
+                )
+            )
+        if provider is not None:
+            filters.append(SignupAllowlistEntry.provider == provider)
+        if source is not None:
+            filters.append(SignupAllowlistEntry.source == source)
+        if state is not None:
+            filters.append(SignupAllowlistEntry.state == state)
+
+        total = (
+            await self.db.execute(
+                select(func.count()).select_from(SignupAllowlistEntry).where(*filters)
+            )
+        ).scalar_one()
         result = await self.db.execute(
-            select(SignupAllowlistEntry).order_by(SignupAllowlistEntry.created_at.desc())
+            select(SignupAllowlistEntry)
+            .where(*filters)
+            .order_by(SignupAllowlistEntry.created_at.desc(), SignupAllowlistEntry.id)
+            .limit(limit)
+            .offset(offset)
         )
-        return list(result.scalars().all())
+        return list(result.scalars().all()), int(total)
 
     async def add_to_allowlist(
         self, *, github_username: str, added_by_user_id: str

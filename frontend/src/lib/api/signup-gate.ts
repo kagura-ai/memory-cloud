@@ -77,9 +77,44 @@ export async function updateSignupGateConfig(
   );
 }
 
-export async function listSignupAllowlist(): Promise<SignupAllowlistEntry[]> {
-  return apiClient.get<SignupAllowlistEntry[]>(
-    "/api/v1/admin/signup-gate/allowlist",
+/**
+ * One page of the allowlist (#2831), newest first. `total` counts every row
+ * that matches the filters, not the page.
+ */
+export interface SignupAllowlistPage {
+  items: SignupAllowlistEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * Parameters of the allowlist list (#2831). `limit` is 1 to 200 (the server's
+ * default is 50); `search` is a case-insensitive substring of `subject_label`;
+ * the other filters are exact. The server refuses a bad value with 422.
+ */
+export interface SignupAllowlistListParams {
+  limit?: number;
+  offset?: number;
+  search?: string;
+  provider?: SignupAllowlistProvider;
+  source?: SignupAllowlistEntry["source"];
+  state?: SignupAllowlistEntry["state"];
+}
+
+export async function listSignupAllowlist(
+  params: SignupAllowlistListParams = {},
+): Promise<SignupAllowlistPage> {
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  if (params.search) query.set("search", params.search);
+  if (params.provider) query.set("provider", params.provider);
+  if (params.source) query.set("source", params.source);
+  if (params.state) query.set("state", params.state);
+  const suffix = query.toString();
+  return apiClient.get<SignupAllowlistPage>(
+    `/api/v1/admin/signup-gate/allowlist${suffix ? `?${suffix}` : ""}`,
   );
 }
 

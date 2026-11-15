@@ -11,11 +11,13 @@ Allows admins to:
 """
 
 import dataclasses
+from collections.abc import Sequence
 from decimal import Decimal
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -48,10 +50,17 @@ from services.llm_selector_policy import (
 from services.memory_counts import count_live_memories, live_memory_counts_by_workspace
 from utils import db_transaction
 from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import NotFoundException
+from utils.list_search import LIKE_ESCAPE, search_validator, substring_pattern
 from utils.logger import get_logger
 from utils.plan_resolver import tier_owned_workspace_cap
 
 logger = get_logger(__name__)
+
+# What the database takes: no stored text holds a NUL, and an OFFSET is a
+# 64-bit integer. A value outside these is a 422, never a statement.
+_NO_NUL = r"^[^\x00]*$"
+_MAX_OFFSET = 2**63 - 1
 
 router = APIRouter(prefix="/admin/plans", tags=["admin-plans"])
 
@@ -77,6 +86,26 @@ class AdminWorkspacePlanInfo(BaseModel):
     memory_limit: int
     mcp_calls_per_day: int
     mcp_calls_per_week: int
+    # #2829: who owns the plan, ``admin_grant`` or ``external_billing``.
+    entitlement_source: str
+
+
+class AdminWorkspaceListResponse(BaseModel):
+    """One page of the workspace list (#2841)."""
+
+    items: list[AdminWorkspacePlanInfo]
+    total: int
+    limit: int
+    offset: int
+
+
+class WorkspaceNotFoundError(NotFoundException):
+    """404 "Workspace not found": an expected refusal of a read (#2841)."""
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__("Workspace")
 
 
 class AdminUpdatePlanRequest(BaseModel):
@@ -177,17 +206,50 @@ class SpendCapValues(BaseModel):
     current_monthly_usd: float = 0.0
 
 
+class AddonRecord(BaseModel):
+    """One active add-on record of a workspace (#2829).
+
+    The rows the add-on limits are computed from: ``bonus`` is
+    ``quantity`` times the unit value of ``addon_type``. A later admin grant
+    changes only ``quantity``, so ``created_by`` names who first granted it.
+    """
+
+    id: int
+    addon_type: str
+    source: str
+    quantity: int
+    bonus: int
+    active_from: str = Field(
+        description="Start of the record's window (ISO 8601 with explicit UTC)",
+        json_schema_extra={"format": "date-time"},
+    )
+    active_until: str | None = Field(
+        None,
+        description="End of the record's window (ISO 8601 with explicit UTC); null = no end",
+        json_schema_extra={"format": "date-time"},
+    )
+    created_at: str = Field(
+        description="Creation time (ISO 8601 with explicit UTC)",
+        json_schema_extra={"format": "date-time"},
+    )
+    created_by: str
+
+
 class WorkspaceQuotaDetail(BaseModel):
     """Detailed quota breakdown for a workspace."""
 
     workspace_id: str
     workspace_name: str
     plan_name: str
+    # #2829: who owns the plan, ``admin_grant`` or ``external_billing``.
+    entitlement_source: str
     base: QuotaBreakdown
     addon: AddonValues
     effective: QuotaBreakdown
     usage: UsageValues
     spend_cap: SpendCapValues | None = None  # Issue #709
+    # #2829: the active add-on rows, ordered by ``addon_type`` then ``source``.
+    addon_records: list[AddonRecord] = Field(default_factory=list)
 
 
 class UpdateAddonRequest(BaseModel):
@@ -344,65 +406,160 @@ require_admin = auth_require_admin
 # ============================================================================
 
 
-@router.get("/workspaces", response_model=list[AdminWorkspacePlanInfo])
+def _known_plan_filter(value: str | None) -> str | None:
+    """Refuse a ``plan`` filter that is not a registered plan key (#2841)."""
+    if value is not None and value not in PLAN_TIERS:
+        raise ValueError(f"plan must be one of: {', '.join(PLAN_ORDER)}")
+    return value
+
+
+async def _workspace_plan_rows(
+    db: AsyncSession, workspaces: Sequence[Workspace]
+) -> list[AdminWorkspacePlanInfo]:
+    """The list rows of ``workspaces``, in their order (#2841).
+
+    Two lookups for the whole sequence, each bound to its workspaces only: the
+    owners (each owner once) and one grouped memory count (the shared
+    predicate, #1946).
+    """
+    if not workspaces:
+        return []
+    owner_ids = sorted({workspace.owner_user_id for workspace in workspaces})
+    owner_rows = await db.execute(
+        select(User.user_id, User.name, User.email).where(User.user_id.in_(owner_ids))
+    )
+    owners = {user_id: (name, email) for user_id, name, email in owner_rows.all()}
+    memory_counts = await live_memory_counts_by_workspace(
+        db, [workspace.id for workspace in workspaces]
+    )
+
+    rows = []
+    for workspace in workspaces:
+        owner_name, owner_email = owners.get(workspace.owner_user_id, (None, None))
+        rows.append(
+            AdminWorkspacePlanInfo(
+                id=str(workspace.id),
+                name=workspace.name,
+                plan_name=workspace.plan_name,
+                owner_user_id=workspace.owner_user_id,
+                owner_name=owner_name,
+                owner_email=owner_email,
+                total_memories=memory_counts.get(workspace.id, 0),
+                memory_limit=workspace.effective_memory_limit,
+                mcp_calls_per_day=workspace.effective_mcp_calls_per_day,
+                mcp_calls_per_week=workspace.effective_mcp_calls_per_week,
+                entitlement_source=workspace.entitlement_source,
+            )
+        )
+    return rows
+
+
+@router.get("/workspaces", response_model=AdminWorkspaceListResponse)
 async def list_workspaces_with_plans(
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-):
-    """List all workspaces with plan info and usage stats.
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=_MAX_OFFSET),
+    search: Annotated[
+        str | None,
+        AfterValidator(search_validator(255)),
+        Query(
+            description="Case-insensitive substring of the workspace name, at most "
+            "255 characters; trimmed, wildcards match literally",
+        ),
+    ] = None,
+    plan: Annotated[
+        str | None,
+        AfterValidator(_known_plan_filter),
+        Query(description="Exact plan key"),
+    ] = None,
+    owner_user_id: str | None = Query(None, min_length=1, max_length=255, pattern=_NO_NUL),
+) -> AdminWorkspaceListResponse:
+    """List the live workspaces with plan info and usage, one page at a time.
 
-    Admin-only endpoint - shows all workspaces in the system.
+    Admin-only endpoint (#2841). Soft-deleted workspaces are not listed.
+
+    Args:
+        limit: Page size, 1 to 500 (default 50).
+        offset: Rows to skip (from 0).
+        search: Case-insensitive substring of ``name``. Trimmed; empty means
+            no filter; ``\\``, ``%`` and ``_`` match literally.
+        plan: Exact plan key.
+        owner_user_id: Exact owner.
 
     Returns:
-        List of all workspaces with plan tiers and current usage
+        ``{items, total, limit, offset}``: the page, oldest workspace first
+        (``created_at``, then ``id``), and the count of every live workspace
+        that matches the filters.
     """
     async with db_transaction(db, "list_workspaces_with_plans", "Failed to list workspaces"):
-        # Get ALL workspaces (admin can see all)
-        workspaces_result = await db.execute(
-            select(Workspace).where(Workspace.deleted_at.is_(None)).order_by(Workspace.created_at)
+        filters = [Workspace.deleted_at.is_(None)]
+        if search is not None:
+            filters.append(Workspace.name.ilike(substring_pattern(search), escape=LIKE_ESCAPE))
+        if plan is not None:
+            filters.append(Workspace.plan_name == plan)
+        if owner_user_id is not None:
+            filters.append(Workspace.owner_user_id == owner_user_id)
+
+        total = (
+            await db.execute(select(func.count()).select_from(Workspace).where(*filters))
+        ).scalar_one()
+        page = await db.execute(
+            select(Workspace)
+            .where(*filters)
+            .order_by(Workspace.created_at, Workspace.id)
+            .limit(limit)
+            .offset(offset)
         )
-        workspaces = workspaces_result.scalars().all()
+        items = await _workspace_plan_rows(db, page.scalars().all())
 
-        # Get owner info for all workspaces
-        from models.auth import User
+        # The search text is what a person typed: log its presence and length only.
+        logger.info(
+            "admin_listed_workspaces",
+            admin_user=admin_user["user_id"],
+            count=len(items),
+            total=total,
+            limit=limit,
+            offset=offset,
+            search_given=search is not None,
+            search_length=len(search) if search is not None else 0,
+            plan=plan,
+            owner_filter=owner_user_id is not None,
+        )
+        return AdminWorkspaceListResponse(items=items, total=total, limit=limit, offset=offset)
 
-        owner_ids = [workspace.owner_user_id for workspace in workspaces]
-        if owner_ids:
-            users_result = await db.execute(select(User).where(User.user_id.in_(owner_ids)))
-            users = {u.user_id: u for u in users_result.scalars().all()}
-        else:
-            users = {}
 
-        workspace_infos = []
+@router.get("/workspaces/{workspace_id}", response_model=AdminWorkspacePlanInfo)
+async def get_workspace_with_plan(
+    workspace_id: UUID,
+    admin_user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> AdminWorkspacePlanInfo:
+    """Read one live workspace's list row (#2841).
 
-        # Avoid an N+1: one grouped memory count for every listed workspace
-        # (the shared predicate, #1946).
-        workspace_ids = [w.id for w in workspaces]
-        memory_counts_by_workspace = await live_memory_counts_by_workspace(db, workspace_ids)
+    Admin-only endpoint. Answers the values the list gives for the workspace.
 
-        for workspace in workspaces:
-            total_memories = memory_counts_by_workspace.get(workspace.id, 0)
-
-            owner = users.get(workspace.owner_user_id)
-            workspace_infos.append(
-                AdminWorkspacePlanInfo(
-                    id=str(workspace.id),
-                    name=workspace.name,
-                    plan_name=workspace.plan_name,
-                    owner_user_id=workspace.owner_user_id,
-                    owner_name=owner.name if owner else None,
-                    owner_email=owner.email if owner else None,
-                    total_memories=total_memories,
-                    memory_limit=workspace.effective_memory_limit,
-                    mcp_calls_per_day=workspace.effective_mcp_calls_per_day,
-                    mcp_calls_per_week=workspace.effective_mcp_calls_per_week,
+    Raises:
+        NotFoundException: Unknown or soft-deleted workspace (404).
+    """
+    async with db_transaction(db, "get_workspace_with_plan", "Failed to read workspace"):
+        workspace = (
+            await db.execute(
+                select(Workspace).where(
+                    Workspace.id == workspace_id,
+                    Workspace.deleted_at.is_(None),
                 )
             )
-
+        ).scalar_one_or_none()
+        if workspace is None:
+            raise WorkspaceNotFoundError
+        (row,) = await _workspace_plan_rows(db, [workspace])
         logger.info(
-            f"Admin listed {len(workspace_infos)} workspaces", admin_user=admin_user["user_id"]
+            "admin_read_workspace",
+            admin_user=admin_user["user_id"],
+            workspace_id=str(workspace_id),
         )
-        return workspace_infos
+        return row
 
 
 @router.get("/tiers", response_model=list[PlanTierInfo])
@@ -631,17 +788,24 @@ async def update_workspace_plan(
 async def get_plan_change_audit(
     admin_user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    limit: int = 100,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0, le=_MAX_OFFSET)] = 0,
+    workspace_id: Annotated[UUID | None, Query()] = None,
 ):
     """Get plan change audit log.
 
     Admin-only endpoint.
 
     Args:
-        limit: Maximum entries to return (default: 100)
+        limit: Maximum entries to return, 1 to 500 (default: 100)
+        offset: Entries to skip (#2830; default: 0)
+        workspace_id: Only this workspace's changes (#2830); a soft-deleted
+            workspace's included
 
     Returns:
-        List of plan change audit entries
+        List of plan change audit entries, newest first (``changed_at``, then
+        ``id``, both descending). A caller pages until a page holds fewer
+        entries than ``limit``.
     """
     async with db_transaction(db, "get_plan_audit", "Failed to get audit log"):
         # Get audit entries with workspace names and user names.
@@ -649,12 +813,17 @@ async def get_plan_change_audit(
         # The audit log records historical plan changes; entries for workspaces
         # that have since been soft-deleted must remain visible so admins can
         # reconcile past billing / plan transitions.
-        audit_result = await db.execute(
+        stmt = (
             select(PlanChange, Workspace.name, User.name, User.email)
             .join(Workspace, PlanChange.workspace_id == Workspace.id)
             .outerjoin(User, PlanChange.changed_by == User.user_id)
-            .order_by(PlanChange.changed_at.desc())
+        )
+        if workspace_id is not None:
+            stmt = stmt.where(PlanChange.workspace_id == workspace_id)
+        audit_result = await db.execute(
+            stmt.order_by(PlanChange.changed_at.desc(), PlanChange.id.desc())
             .limit(limit)
+            .offset(offset)
         )
 
         entries = []
@@ -854,10 +1023,39 @@ async def get_workspace_quotas(
             current_monthly_usd=float(current_monthly),
         )
 
+        # #2829: the active add-on rows, by the window the recalculation
+        # (``AddonCalculatorService.recalculate_workspace_bonuses``) and the
+        # drift check use. At most one row per add-on type and source.
+        now = utcnow()
+        addon_rows = await db.execute(
+            select(WorkspaceAddon)
+            .where(
+                WorkspaceAddon.workspace_id == ws_uuid,
+                WorkspaceAddon.active_from <= now,
+                (WorkspaceAddon.active_until.is_(None) | (WorkspaceAddon.active_until > now)),
+            )
+            .order_by(WorkspaceAddon.addon_type, WorkspaceAddon.source, WorkspaceAddon.id)
+        )
+        addon_records = [
+            AddonRecord(
+                id=row.id,
+                addon_type=row.addon_type,
+                source=row.source,
+                quantity=row.quantity,
+                bonus=row.quantity * ADDON_UNIT_VALUES[row.addon_type],
+                active_from=to_utc_iso(row.active_from) or "",
+                active_until=to_utc_iso(row.active_until),
+                created_at=to_utc_iso(row.created_at) or "",
+                created_by=row.created_by,
+            )
+            for row in addon_rows.scalars().all()
+        ]
+
         return WorkspaceQuotaDetail(
             workspace_id=workspace_id,
             workspace_name=workspace.name,
             plan_name=workspace.plan_name,
+            entitlement_source=workspace.entitlement_source,
             base=QuotaBreakdown(
                 # #801: read the plan tier, not the per-workspace cache column.
                 # Every sibling field below reads plan_tier.*; memory_limit was the
@@ -919,6 +1117,7 @@ async def get_workspace_quotas(
                 members=member_count,
             ),
             spend_cap=spend_cap_payload,
+            addon_records=addon_records,
         )
 
 
