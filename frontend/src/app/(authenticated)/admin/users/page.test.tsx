@@ -8,6 +8,9 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import en from "@/messages/en.json";
+import ja from "@/messages/ja.json";
+
 const mockGet = vi.fn();
 const mockPut = vi.fn();
 vi.mock("@/lib/api", () => ({
@@ -151,7 +154,7 @@ describe("AdminUsersPage system role change (#2854)", () => {
     await screen.findByText("Someone");
 
     openRowMenu(0);
-    fireEvent.click(await screen.findByText("Promote to System Admin"));
+    fireEvent.click(await screen.findByText("actions.promoteToAdmin"));
 
     expect(mockPut).toHaveBeenCalledTimes(1);
     expect(mockPut).toHaveBeenCalledWith("/api/v1/admin/users/u1/role", {
@@ -165,7 +168,7 @@ describe("AdminUsersPage system role change (#2854)", () => {
     await screen.findByText("Admin Two");
 
     openRowMenu(0);
-    fireEvent.click(await screen.findByText("Demote from System Admin"));
+    fireEvent.click(await screen.findByText("actions.demoteFromAdmin"));
 
     expect(mockPut).toHaveBeenCalledTimes(1);
     expect(mockPut).toHaveBeenCalledWith("/api/v1/admin/users/u2/role", {
@@ -178,8 +181,30 @@ describe("AdminUsersPage system role change (#2854)", () => {
     await screen.findByText("Someone");
 
     openRowMenu(0);
-    await screen.findByText("Promote to System Admin");
+    await screen.findByText("actions.promoteToAdmin");
 
     expect(screen.queryByText(/read.?only/i)).toBeNull();
+  });
+
+  it("takes the role labels from the messages", async () => {
+    mockGet.mockResolvedValue({ users: [USER, ADMIN], total: 2 });
+    render(<AdminUsersPage />);
+    await screen.findByText("Admin Two");
+
+    expect(screen.getByText("table.systemAdmin")).toBeTruthy();
+    expect(screen.getByText("table.userRole")).toBeTruthy();
+    for (const messages of [en, ja]) {
+      const { actions, table } = messages.admin.users;
+      for (const label of [
+        actions.promoteToAdmin,
+        actions.demoteFromAdmin,
+        table.systemAdmin,
+        table.userRole,
+      ]) {
+        expect(label).toBeTruthy();
+      }
+    }
+    expect(en.admin.users.actions.promoteToAdmin).toBe("Promote to System Admin");
+    expect(en.admin.users.actions.demoteFromAdmin).toBe("Demote from System Admin");
   });
 });

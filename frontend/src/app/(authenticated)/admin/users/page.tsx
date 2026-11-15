@@ -360,11 +360,11 @@ export default function AdminUsersPage() {
                               {user.role === "admin" ? (
                                 <Badge className="bg-red-100 text-red-800">
                                   <Shield className="h-3 w-3 mr-1" />
-                                  System Admin
+                                  {t("table.systemAdmin")}
                                 </Badge>
                               ) : (
                                 <Badge className="bg-blue-100 text-blue-800">
-                                  User
+                                  {t("table.userRole")}
                                 </Badge>
                               )}
                               {user.is_initial_admin && (
@@ -454,8 +454,8 @@ export default function AdminUsersPage() {
                                 >
                                   <Shield className="mr-2 h-4 w-4" />
                                   {user.role === "admin"
-                                    ? "Demote from System Admin"
-                                    : "Promote to System Admin"}
+                                    ? t("actions.demoteFromAdmin")
+                                    : t("actions.promoteToAdmin")}
                                 </DropdownMenuItem>
                                 <DropdownMenuItem
                                   onClick={(e) => {
