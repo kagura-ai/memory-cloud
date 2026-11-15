@@ -526,7 +526,10 @@ deprecated `GET /admin/memory-health`) and applying `POST /admin/contexts/recove
 operator has its own two routes (#2838): `POST /admin/users/{user_id}/sleep/run`
 runs Sleep for a named user's context, and
 `POST /admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge` undoes one
-merge of a named report.
+merge of a named report. The run executes inside the process that answers the
+request, with that process's LLM, embedding, vector-store and Sleep settings
+(the undo re-embeds the restored memory there too), so the `service` process
+needs the same settings as the public processes for these routes.
 
 **What an operator leaves behind.** Admin writes store the operator as
 `operator:<address>` wherever they store an actor (audit rows, plan changes,

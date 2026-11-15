@@ -206,7 +206,7 @@ All of these require `Depends(require_admin)`. The two own-account routes refuse
 
 ### Manual run for a user (#2838)
 
-`POST /admin/users/{user_id}/sleep/run` starts, in the background, the run the scheduled sweep would start for `(user_id, the context's workspace, context_id)`: the report's `user_id` is the target user, and the run applies the workspace's Sleep state itself. The context must be live, have a `sleep_mode` other than `skip` and hold a live memory of that user (`404 SLEEP-003` otherwise; `404 RES-001` for an unknown user; `409 SLEEP-002` while that user has a running report). The request is recorded as an `audit_logs` row (`sleep_run_trigger`) with the caller as actor and the target user, workspace, context and report ids, committed with the report.
+`POST /admin/users/{user_id}/sleep/run` starts, in the background, the run the scheduled sweep would start for `(user_id, the context's workspace, context_id)`: the report's `user_id` is the target user, and the run applies the workspace's Sleep state itself. The context must be live, have a `sleep_mode` other than `skip` and hold a live memory of that user (`404 SLEEP-003` otherwise; `404 RES-001` for an unknown user; `409 SLEEP-002` while that user has a running report). The request is recorded as an `audit_logs` row (`sleep_run_trigger`) with the caller as actor and the target user, workspace, context and report ids, committed with the report. The run executes inside the process that answers the request, with that process's LLM, embedding, vector-store and Sleep settings, so a `service` process (`SYSTEM_ADMIN_MODE=service`) needs the same settings as the public processes for this route.
 
 ### Report status values
 

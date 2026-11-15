@@ -2266,7 +2266,7 @@ The system-admin routes (`/api/v1/admin/*`, `PUT /api/v1/config/{key}`, `POST /a
 
 `PUT /api/v1/admin/users/{user_id}/role` writes a `system_role_update` audit row with the acting admin or operator (#2767).
 
-Two rules protect the accounts with `role=admin`, in every mode and on both routes that can take the role away (`PUT /api/v1/admin/users/{user_id}/role` with another role, and `DELETE /api/v1/admin/system-admins/{user_id}`) (#2828): the initial system administrator keeps the role, and so does the last remaining admin. Either answers `403 ADMIN-001` with the message naming the rule, changes nothing and writes no audit row. The check and the change are one transaction under a lock on the admin rows, so two demotions sent at once leave one admin: one succeeds, the other answers `403 ADMIN-001`. Promotion to `admin` and changes that take the admin role from nobody are not affected; a session admin still cannot change their own admin role. On both routes a `user_id` that holds a NUL character answers `422`.
+Two rules protect the accounts with `role=admin`, in every mode and on both routes that can take the role away (`PUT /api/v1/admin/users/{user_id}/role` with another role, and `DELETE /api/v1/admin/system-admins/{user_id}`) (#2828): the initial system administrator keeps the role, and so does the last remaining admin. Either answers `403 ADMIN-001` with the message naming the rule, changes nothing and writes no audit row. The check and the change are one transaction under a lock on the admin rows, so two demotions sent at once leave one admin: one succeeds, the other answers `403 ADMIN-001`. Promotion to `admin` and changes that take the admin role from nobody are not affected. On the role PUT a session admin still cannot change their own admin role; the demote route has no such check. On both routes a `user_id` that holds a NUL character answers `422`.
 
 ### Users
 
@@ -2524,7 +2524,7 @@ The rules, checked on create:
 | `POST /api/v1/admin/users/{user_id}/sleep/run` | Run Sleep once for a named user's context (#2838). Body `{"context_id": "<uuid>"}` (required, `422` without it). `202 {"report_ids": ["<uuid>"]}`: one report, whose `user_id` is the target user. A session admin and a service operator may call it. |
 | `POST /api/v1/admin/sleep-reports/{report_id}/actions/{action_id}/undo-merge` | Undo one dedup merge of a named sleep report (#2838). No body. `200 {"restored_memory_id", "winner_id", "report_id", "undone_action_id"}` (ids only). A session admin and a service operator may call it. |
 
-**Run for a user** (`POST /api/v1/admin/users/{user_id}/sleep/run`). The run is the one the scheduled sweep starts for `(user_id, the context's workspace, context_id)`, in the background; the run itself applies the workspace's Sleep state, as for the sweep. Checks, in this order:
+**Run for a user** (`POST /api/v1/admin/users/{user_id}/sleep/run`). The run is the one the scheduled sweep starts for `(user_id, the context's workspace, context_id)`, in the background; the run itself applies the workspace's Sleep state, as for the sweep. It executes inside the process that answers the request, with that process's LLM, embedding, vector-store and Sleep settings (as does the re-embedding of the undo below), so a `service` process needs the same settings as the public processes for these two routes. Checks, in this order:
 
 - `404 RES-001`: no account with this `user_id`.
 - `409 SLEEP-002` with `details.running_report_id` and `details.started_at`: the target user has a running report (a running report of the caller does not count). Best-effort under concurrent calls.
@@ -2538,7 +2538,7 @@ The handler writes an `audit_logs` row in the report's commit: action `sleep_run
 - the workspace's operation history event `sleep.undo` (without an actor for an operator);
 - an `audit_logs` row: action `sleep_merge_undo`, the caller as actor, resource `sleep_report:<report_id>`, metadata `{"target_user_id", "workspace_id", "context_id", "report_id", "action_id", "restored_memory_id", "winner_id"}`, read back through `GET /api/v1/admin/audit-logs` (`action=sleep_merge_undo`).
 
-Neither route answers, logs or audits memory text, tags, a user's e-mail or name, or a context's name. The own-account undo writes no `audit_logs` row.
+Neither route answers, logs or audits memory text, tags, the target user's e-mail or name, or a context's name; the audit row names the caller, as stated above. The own-account undo writes no `audit_logs` row.
 
 Each report, in the list rows and in the detail's `report`, carries `workspace_name` next to `workspace_id` (#2844): the workspace's name while it is live, `null` for a soft-deleted or missing workspace and for a report without a workspace id. One query resolves the names of a response; nothing else about the workspace (owner, members, plan) is answered. The workspace-scoped routes (`GET /api/v1/workspaces/{workspace_id}/sleep-reports` and its detail) share the model and fill it the same way.
 
@@ -2598,7 +2598,7 @@ Sleep and Neural Memory tuning knobs (LLM provider, budgets, per-phase toggles, 
 }
 ```
 
-- `calibrations` is ordered by `model_name`, `dimensions`, `kind`. A pair that was never calibrated, or whose last run wrote nothing (no context uses the pair, or the sample was too small), has no row. A successful run replaces the pair's rows, so `sampled_at` tells when the values were computed.
+- `calibrations` is ordered by `model_name`, `dimensions`, `kind`. A pair that was never calibrated has no row. A run that writes nothing (no context uses the pair, or the sample was too small) leaves the pair's earlier rows as they are. A successful run replaces the pair's rows, so `sampled_at` tells when the values were computed and whether a run wrote.
 - `kind`: `knn_seed` is the top-k neighbour distribution behind the k-NN seed edges written on ingest; `edge_gate` is the random-pair distribution behind the co-activation edge gate.
 - `expired`: `valid_until` has passed. An expired row is still used at runtime.
 - `threshold` is computed with the config of the process that answers (its `neural_config` values at that moment): for `knn_seed`, the larger of the row's `knn_seed_min_percentile` percentile and `knn_seed_min_similarity_floor`; for `edge_gate`, the larger of its `min_similarity_for_edge_percentile` percentile and `min_similarity_for_edge_floor`. Another process with a different config can give another value for the same row.
