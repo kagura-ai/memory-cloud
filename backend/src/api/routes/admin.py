@@ -172,12 +172,14 @@ def _apply_user_list_filters(
     plan: str | None,
     admitted_via: str | None = None,
     invited_by: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[Any, bool]:
     """Apply the admin user-list filters (#164), returning (stmt, joined).
 
     #2803: ``admitted_via`` and ``invited_by`` (the inviter's ``user_id``) are
     plain columns of ``users``: no join, so the DISTINCT flag and ``total``
-    are unaffected.
+    are unaffected. #2843: so is ``user_id``, the account's own id, compared
+    as given (exact, case-sensitive, nothing trimmed).
 
     ``WorkspaceMember.user_id`` is not a FK to ``User.user_id`` (it stores the
     OAuth ``sub`` claim as a plain string), so SQLAlchemy cannot infer the ON
@@ -209,6 +211,9 @@ def _apply_user_list_filters(
 
     if invited_by is not None:
         stmt = stmt.where(User.admitted_by_user_id == invited_by)
+
+    if user_id is not None:
+        stmt = stmt.where(User.user_id == user_id)
 
     join_filter_applied = workspace_id is not None or plan is not None
     if workspace_id:
@@ -344,6 +349,8 @@ async def list_users(
     # Issue #2803: how accounts were admitted, and who invited them.
     admitted_via: AdmittedVia | None = Query(None),
     invited_by: str | None = Query(None, min_length=1, max_length=255),
+    # Issue #2843: the one account with this exact id.
+    user_id: str | None = Query(None, min_length=1, max_length=255),
 ):
     """List all users with their memory statistics.
 
@@ -365,6 +372,9 @@ async def list_users(
         admitted_via: Only accounts admitted this way (#2803)
         invited_by: Only accounts admitted by an invite this user minted
             (``user_id``; user-minted invites only, #2803)
+        user_id: Only the account whose ``user_id`` is exactly this value
+            (case-sensitive, nothing trimmed; an unknown id is an empty
+            list with ``total`` 0, #2843)
 
     Returns:
         List of users with memory counts, storage usage, and optionally workspace info
@@ -378,6 +388,7 @@ async def list_users(
             plan=plan,
             admitted_via=admitted_via,
             invited_by=invited_by,
+            user_id=user_id,
         )
         # Deduplicate the user list / count when any JOIN-based filter is
         # active — see the helper's docstring for why total breaks without it.
