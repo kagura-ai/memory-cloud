@@ -1,9 +1,10 @@
 """Explicit human control of a retained workspace-owned synchronization target."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
+from pydantic import Field
 
 from api.routes.sync_feeds import Database, bounded_body, exact_query, json_body
 from api.routes.sync_installations import SYNC_RESPONSES, Manager, Reader, SyncControlRoute
@@ -24,6 +25,21 @@ class ModeCommand(StrictBody):
     """One immutable logical control operation."""
 
     operation_id: UUID
+
+
+class ModeExpectation(StrictBody):
+    """Exact public management snapshot confirmed by the requesting human."""
+
+    mode: Literal["feed", "stopping", "manual"]
+    epoch: Annotated[int, Field(strict=True, ge=1, le=2**53 - 1)]
+    generation: Annotated[int, Field(strict=True, ge=1, le=2**53 - 1)]
+    stop_event_id: Annotated[int, Field(strict=True, ge=0, le=2**53 - 1)]
+
+
+class GuardedModeCommand(ModeCommand):
+    """An optional atomic precondition; omission/null retain legacy semantics."""
+
+    expected: ModeExpectation | None = None
 
 
 class ResumeCommand(ModeCommand):
@@ -60,25 +76,38 @@ async def management_status(
     return await control_mode(db, workspace_id, installation_id, principal)
 
 
-@router.post("/stop", openapi_extra=json_body(ModeCommand))
+@router.post("/stop", openapi_extra=json_body(GuardedModeCommand))
 async def stop_sync_management(
     workspace_id: UUID, installation_id: UUID, request: Request, principal: Manager, db: Database
 ) -> dict:
     """Fence new work atomically; retain the editing lock until drain completes."""
     exact_query(request)
-    body, _ = await bounded_body(request, ModeCommand)
-    return await control_mode(db, workspace_id, installation_id, principal, body.operation_id)
+    body, _ = await bounded_body(request, GuardedModeCommand)
+    return await control_mode(
+        db,
+        workspace_id,
+        installation_id,
+        principal,
+        body.operation_id,
+        expected=body.expected.model_dump(mode="json") if body.expected is not None else None,
+    )
 
 
-@router.post("/finalize", openapi_extra=json_body(ModeCommand))
+@router.post("/finalize", openapi_extra=json_body(GuardedModeCommand))
 async def finalize_sync_management(
     workspace_id: UUID, installation_id: UUID, request: Request, principal: Manager, db: Database
 ) -> dict:
     """Unlock only with exclusive writer exclusion and successful canonical indexing."""
     exact_query(request)
-    body, _ = await bounded_body(request, ModeCommand)
+    body, _ = await bounded_body(request, GuardedModeCommand)
     return await control_mode(
-        db, workspace_id, installation_id, principal, body.operation_id, finalize=True
+        db,
+        workspace_id,
+        installation_id,
+        principal,
+        body.operation_id,
+        finalize=True,
+        expected=body.expected.model_dump(mode="json") if body.expected is not None else None,
     )
 
 
