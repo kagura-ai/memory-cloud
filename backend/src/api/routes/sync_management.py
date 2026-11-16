@@ -8,8 +8,10 @@ from fastapi import APIRouter, Depends, Query, Request
 from api.routes.sync_feeds import Database, bounded_body, exact_query, json_body
 from api.routes.sync_installations import SYNC_RESPONSES, Manager, Reader, SyncControlRoute
 from models.sync_feed_schemas import Hash, StrictBody
+from models.sync_resume_receipt_schemas import SyncResumeReceiptCommand, SyncResumeReceiptView
 from services.sync_management import control_mode, management_enabled
 from services.sync_resume import confirm_resume, reconnect, resume_diff, resume_preview
+from services.sync_resume_receipt import read_resume_receipt
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/sync-installations/{installation_id}/management",
@@ -37,6 +39,20 @@ class ReconnectCommand(ModeCommand):
     """Fresh current-owner consent for the same retained installation."""
 
     authorization_id: UUID
+
+
+@router.post(
+    "/resume/receipt",
+    response_model=SyncResumeReceiptView,
+    openapi_extra=json_body(SyncResumeReceiptCommand),
+)
+async def inspect_sync_resume_receipt(
+    workspace_id: UUID, installation_id: UUID, request: Request, principal: Manager, db: Database
+) -> SyncResumeReceiptView:
+    """Read an original outcome as current Editor, without replaying confirmation."""
+    exact_query(request)
+    body, _ = await bounded_body(request, SyncResumeReceiptCommand)
+    return await read_resume_receipt(db, workspace_id, installation_id, principal, body)
 
 
 @router.post("/reconnect", openapi_extra=json_body(ReconnectCommand))

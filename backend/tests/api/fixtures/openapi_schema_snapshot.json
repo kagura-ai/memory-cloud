@@ -13277,6 +13277,111 @@
         ],
         "type": "object"
       },
+      "SyncResumeModeReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "epoch": {
+            "maximum": 9007199254740991.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "generation": {
+            "maximum": 9007199254740991.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "mode": {
+            "const": "feed",
+            "type": "string"
+          },
+          "reason": {
+            "type": "null"
+          },
+          "stop_event_id": {
+            "maximum": 9007199254740991.0,
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "epoch",
+          "generation",
+          "mode",
+          "reason",
+          "stop_event_id"
+        ],
+        "type": "object"
+      },
+      "SyncResumeReceiptView": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "contract_version": {
+            "const": "sync-resume-receipt-v1",
+            "type": "string"
+          },
+          "diff_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "installation_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "operation_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "original_subject": {
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f]+$",
+            "type": "string"
+          },
+          "preview_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SyncResumeModeReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": {
+            "enum": [
+              "found",
+              "not_found",
+              "mismatch"
+            ],
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "as_of",
+          "contract_version",
+          "diff_hash",
+          "installation_id",
+          "operation_id",
+          "original_subject",
+          "preview_id",
+          "receipt",
+          "result",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "SyncWorkerError": {
         "properties": {
           "error": {
@@ -40794,6 +40899,159 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/resume/receipt": {
+      "post": {
+        "operationId": "inspect_sync_resume_receipt_api_v1_workspaces__workspace_id__sync_installations__installation_id__management_resume_receipt_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "diff_hash": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "operation_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "original_subject": {
+                    "maxLength": 255,
+                    "minLength": 1,
+                    "pattern": "^[^\\x00-\\x1f\\x7f]+$",
+                    "type": "string"
+                  },
+                  "preview_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "diff_hash",
+                  "operation_id",
+                  "original_subject",
+                  "preview_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncResumeReceiptView"
                 }
               }
             }

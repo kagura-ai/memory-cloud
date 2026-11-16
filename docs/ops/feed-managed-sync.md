@@ -76,7 +76,11 @@ All outcomes are private/no-store. Foreign targets are uniformly not found.
 | `POST /resume/preview` | None | Preview UUID, diff hash, retire/publish counts, finite deadline |
 | `GET /resume/diff` | `preview_id`, `offset` (0–20,000), `limit` (1–100) | Exact current human's paginated diff |
 | `POST /resume/confirm` | `operation_id`, `preview_id`, `diff_hash` | Atomic new generation and `feed` publication |
+| `POST /resume/receipt` | `operation_id`, `preview_id`, `diff_hash`, `original_subject` | Read-only, typed original outcome under fresh current Editor authority |
 | `POST /reconnect` | `operation_id`, fresh owner `authorization_id` | Same retained target, active authentication, still `manual` |
+
+See [read-only outcome recovery](resume-receipt-recovery.md) for the versioned
+receipt/absence contract and the additional conditions needed for safe abandonment.
 
 Operation receipts bind the real principal, action and exact body. Repeating an
 operation returns its original result without advancing generation again;
