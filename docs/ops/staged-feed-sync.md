@@ -200,6 +200,14 @@ proves a particular lost PUT succeeded. Do not replay an old unguarded body or
 invent a new operation identity as recovery. Public's new writers always use
 complete preconditions; legacy writers keep their documented unguarded behavior.
 
+A read that still shows the snapshot a lost guarded PUT was based on does not
+prove that the PUT will never apply. A delayed copy of it stays applicable for as
+long as that snapshot is current and the access token that sent it has not
+expired; there is no cancel operation. A PUT with the current `config_hash` does
+not increment `config_version`, so sending one does not invalidate an earlier
+guarded PUT with the same snapshot. Treat the outcome as unknown until the
+snapshot changes or that token's expiry has passed.
+
 ## Canonical projection and search reflection
 
 Human `GET /workspaces/{wid}/sync-installations/{iid}/records` returns only the
