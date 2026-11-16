@@ -73,7 +73,7 @@ operate feeds; only the current brand owner controls consent/contracts.
 | `/sync/installations/{iid}`, `/schema`, `/runs/*` | Installation-bound worker token; `schema:read`, `records:write`, `results:read` | [Credentials](sync-service-credentials.md), [feed protocol](staged-feed-sync.md) |
 | Human `/workspaces/{wid}/sync-installations/{iid}/records` and diff | `sync.records:read`, current Context read rights | [Feed protocol](staged-feed-sync.md) |
 | Human feed config/approval and `/management/*` | `integrations:manage`, current Editor; ownership where required | [Managed data](feed-managed-sync.md) |
-| Human `/activity`, `/activity/runs`, `/activity/events` | `workspaces:read`; manual requests additionally `integrations:manage` and current Editor | [Activity and audit](sync-activity.md) |
+| Human `/activity`, `/activity/feeds`, `/activity/runs`, `/activity/events` | `workspaces:read`; manual requests additionally `integrations:manage` and current Editor | [Activity and audit](sync-activity.md) |
 | Anonymous public MCP and verified aliases | Same workspace counter, per-minute protection, approved public target | [Budget](../public-usage-budget.md), [domains](../public-mcp-domains.md) |
 
 The service grant uses `resource.sync`, RS256 client assertions with exactly the
