@@ -158,6 +158,10 @@ ROUTES: dict[tuple[str, str], str] = {
         "POST",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/resume/confirm",
     ): BLOCKED,
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/resume/receipt",
+    ): ALLOWED,
     ("GET", "/api/v1/sync/installations/{installation_id}/schema"): ALLOWED,
     ("POST", "/api/v1/sync/installations/{installation_id}/runs"): BLOCKED,
     (
