@@ -158,6 +158,77 @@ async def test_aba_and_same_hash_cannot_disguise_a_stale_precondition(configured
     assert same.status_code == 200 and same.json()["config_version"] == 3
 
 
+async def test_guarded_update_of_an_absent_feed_requires_create_only_version(configured):
+    """An absent feed is observed as version 0; a nonzero expectation is stale, not a create."""
+    fid = uuid4()
+    for version in (1, 2):
+        response = await put(configured, fid=fid, snapshot=expected(config_version=version))
+        assert response.status_code == 409, response.text
+    async with configured.factory() as db:
+        assert await db.get(SyncFeed, fid) is None
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(
+                    AuditLog.action == "sync.feed.configured",
+                    AuditLog.user_metadata["feed_id"].as_string() == str(fid),
+                )
+            )
+            == 0
+        )
+
+
+async def test_feed_of_another_installation_is_not_found_and_never_changes(configured):
+    """A feed UUID from another workspace's installation is never read or reconfigured here."""
+    store = configured.store
+    foreign_iid, foreign_fid = uuid4(), uuid4()
+    async with configured.factory() as db:
+        db.add(
+            SyncInstallation(
+                id=foreign_iid,
+                workspace_id=store.other,
+                service_id=store.service_id,
+                service_client_id=store.service_id + "-worker",
+                authorization_id=uuid4(),
+                application_id="foreign-application",
+                operations=[],
+                resource_pk=uuid4(),
+                context_id=uuid4(),
+                endpoint_id=uuid4(),
+                resource_id="foreign-resource",
+            )
+        )
+        await db.flush()
+        db.add(
+            SyncFeed(
+                id=foreign_fid,
+                installation_id=foreign_iid,
+                kind="product",
+                config_hash="9" * 64,
+            )
+        )
+        await db.commit()
+    detail = await human(configured, "GET", f"activity/feeds/{foreign_fid}")
+    assert detail.status_code == 404, detail.text
+    assert "9" * 64 not in detail.text and str(foreign_iid) not in detail.text
+    page = await human(configured, "GET", "activity/feeds")
+    assert page.status_code == 200, page.text
+    assert [item["feed_id"] for item in page.json()["items"]] == [str(configured.fid)]
+    before = await saved(configured)
+    for snapshot in (None, expected(), expected(config_version=0)):
+        response = await put(configured, fid=foreign_fid, value="a", snapshot=snapshot)
+        assert response.status_code == 404, response.text
+    async with configured.factory() as db:
+        foreign = await db.get(SyncFeed, foreign_fid)
+        assert (foreign.installation_id, foreign.config_hash, foreign.config_version) == (
+            foreign_iid,
+            "9" * 64,
+            1,
+        )
+    assert await saved(configured) == before
+
+
 async def test_create_only_does_not_become_a_second_update(configured):
     assert (await put(configured, snapshot=expected(config_version=0))).status_code == 409
     fid = uuid4()
