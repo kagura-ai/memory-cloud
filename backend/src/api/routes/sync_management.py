@@ -1,10 +1,11 @@
 """Explicit human control of a retained workspace-owned synchronization target."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import Field
+from pydantic import Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from api.routes.sync_feeds import Database, bounded_body, exact_query, json_body
 from api.routes.sync_installations import SYNC_RESPONSES, Manager, Reader, SyncControlRoute
@@ -40,9 +41,18 @@ class ModeExpectation(StrictBody):
 
 
 class GuardedModeCommand(ModeCommand):
-    """An optional atomic precondition; omission/null retain legacy semantics."""
+    """An optional atomic precondition; only omission retains legacy semantics."""
 
-    expected: ModeExpectation | None = None
+    # SkipJsonSchema describes the accepted optional object, not the omission sentinel.
+    expected: ModeExpectation | SkipJsonSchema[None] = Field(default_factory=lambda: None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def explicit_null_is_not_omission(cls, value: Any) -> Any:
+        """A requested guard that is null must never silently become a legacy control."""
+        if isinstance(value, dict) and "expected" in value and value["expected"] is None:
+            raise ValueError("invalid_mode_precondition")
+        return value
 
 
 class ResumeCommand(ModeCommand):

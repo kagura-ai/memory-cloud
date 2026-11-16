@@ -218,6 +218,17 @@ def mode_view(row: SyncManagedTarget) -> dict:
     }
 
 
+def default_mode_view(installation: SyncInstallation) -> dict:
+    """The read-only projection of a retained target that has no ownership row yet."""
+    return {
+        "mode": "feed",
+        "epoch": 1,
+        "generation": installation.generation,
+        "stop_event_id": 0,
+        "reason": None,
+    }
+
+
 def audit_mode(
     db: AsyncSession,
     installation: SyncInstallation,
@@ -428,15 +439,7 @@ async def read_mode_access(
         )
         allowed = role in (ContextRole.EDITOR, ContextRole.OWNER)
         status = (
-            mode_view(current.mode)
-            if current.mode is not None
-            else {
-                "mode": "feed",
-                "epoch": 1,
-                "generation": installation.generation,
-                "stop_event_id": 0,
-                "reason": None,
-            }
+            mode_view(current.mode) if current.mode is not None else default_mode_view(installation)
         )
         target = await installation_view(db, installation)
         result = SyncModeAccess(
@@ -525,15 +528,10 @@ async def control_mode(
             if operation_id is None:
                 current = await target_fence(db, installation.context_id)
                 if current.mode is None:
-                    return {
-                        "mode": "feed",
-                        "epoch": 1,
-                        "generation": installation.generation,
-                        "stop_event_id": 0,
-                        "reason": None,
-                    }
+                    return default_mode_view(installation)
                 target = current.mode
             else:
+                enrollment_only = False
                 if expected is not None:
                     # Check before enrollment or transition side effects. The workspace
                     # and exclusive target fences also protect the following mutation.
@@ -541,12 +539,7 @@ async def control_mode(
                     observed = (
                         mode_view(current.mode)
                         if current.mode is not None
-                        else {
-                            "mode": "feed",
-                            "epoch": 1,
-                            "generation": installation.generation,
-                            "stop_event_id": 0,
-                        }
+                        else default_mode_view(installation)
                     )
                     snapshot = {
                         key: observed[key]
@@ -554,13 +547,19 @@ async def control_mode(
                     }
                     if digest(expected) != digest(snapshot):
                         raise ConflictError("Confirmed management state changed")
-                target = (
-                    await finish_stopping(db, installation, actor=principal.user_id)
-                    if finalize
-                    else await start_stopping(
+                    # The confirmed snapshot of an unenrolled target is a projection.
+                    # Enrollment can create a different real state (a target unlinked
+                    # before the barrier enrolls as stopping), so a guarded finalize
+                    # only enrolls; the client confirms the unlock against that state.
+                    enrollment_only = finalize and current.mode is None
+                if enrollment_only:
+                    target = (await enroll(db, installation)).mode
+                elif finalize:
+                    target = await finish_stopping(db, installation, actor=principal.user_id)
+                else:
+                    target = await start_stopping(
                         db, installation, "manual_request", actor=principal.user_id
                     )
-                )
             assert target is not None
             result = mode_view(target)
             if operation_id is not None:

@@ -218,13 +218,70 @@ async def test_exact_guarded_replay_is_historical_and_changed_guard_or_legacy_re
     assert await footprint(managed) == before
 
 
-async def test_legacy_omission_and_null_keep_their_original_operation_identity(managed):
+@pytest.mark.parametrize("action", ["stop", "finalize"])
+async def test_only_omission_keeps_legacy_identity_and_explicit_null_is_refused(managed, action):
+    if action == "finalize":
+        await management.stop(managed)
     body = {"operation_id": str(uuid4())}
-    first = await human(managed, "POST", "management/stop", body=body)
+    before = await footprint(managed)
+    refused = await human(managed, "POST", "management/" + action, body={**body, "expected": None})
+    assert refused.status_code == 400 and refused.json() == {"error": "invalid_request"}
+    assert refused.headers["cache-control"] == "no-store"
+    assert await footprint(managed) == before
+    first = await human(managed, "POST", "management/" + action, body=body)
     assert first.status_code == 200, first.text
-    same = await human(managed, "POST", "management/stop", body={**body, "expected": None})
+    same = await human(managed, "POST", "management/" + action, body=body)
     assert same.status_code == 200 and same.json() == first.json()
-    assert (await management.finalize(managed))["mode"] == "manual"
+
+
+async def revoked_unenrolled(subject):
+    """A legacy installation unlinked before the barrier: no SyncManagedTarget row yet."""
+    async with subject.factory() as db:
+        await db.delete(await db.get(SyncManagedTarget, subject.iid))
+        installation = await db.get(SyncInstallation, subject.iid)
+        installation.state, installation.revoked_at = "revoked", subject.store.clock.now
+        await db.commit()
+
+
+async def test_guarded_finalize_of_a_revoked_unenrolled_target_only_enrolls_and_replays(managed):
+    await revoked_unenrolled(managed)
+    projected = await expected_state(managed)
+    assert projected["mode"] == "feed" and projected["epoch"] == 1
+    body = {"operation_id": str(uuid4()), "expected": projected}
+    enrolled = await human(managed, "POST", "management/finalize", body=body)
+    assert enrolled.status_code == 200, enrolled.text
+    assert enrolled.json()["mode"] == "stopping"
+    assert enrolled.json()["reason"] == "legacy_unlinked"
+    actual = await expected_state(managed)
+    assert actual == {key: enrolled.json()[key] for key in actual}
+    async with managed.factory() as db:
+        assert (await db.get(SyncManagedTarget, managed.iid)).mode == "stopping"
+        assert (await db.get(Context, UUID(managed.target["context_id"]))).sleep_mode == "skip"
+    # An exact retry replays the enrollment receipt; it never continues to the unlock.
+    before = await footprint(managed)
+    replay = await human(managed, "POST", "management/finalize", body=body)
+    assert replay.status_code == 200 and replay.json() == enrolled.json(), replay.text
+    assert await footprint(managed) == before
+    private_conflict(
+        await human(managed, "POST", "management/finalize", body={**body, "expected": actual})
+    )
+    assert await footprint(managed) == before
+    # Confirming the real snapshot under a new operation finalizes.
+    finished = await human(
+        managed,
+        "POST",
+        "management/finalize",
+        body={"operation_id": str(uuid4()), "expected": actual},
+    )
+    assert finished.status_code == 200 and finished.json()["mode"] == "manual", finished.text
+
+
+async def test_legacy_finalize_of_a_revoked_unenrolled_target_keeps_its_unguarded_unlock(managed):
+    await revoked_unenrolled(managed)
+    result = await human(
+        managed, "POST", "management/finalize", body={"operation_id": str(uuid4())}
+    )
+    assert result.status_code == 200 and result.json()["mode"] == "manual", result.text
 
 
 @pytest.mark.parametrize("stale", [True, False])

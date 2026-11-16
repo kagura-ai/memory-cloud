@@ -94,12 +94,23 @@ returns the fixed private `409` without enrollment, successful transition audit,
 operation receipt, generation change or pending-run/chunk changes. Current human
 authorization and the finalize drain/indexing checks still apply.
 
+A target without an ownership row yet reports the projected default `feed`, epoch 1.
+A guarded finalize confirmed against that projection only enrolls the target and
+returns the enrolled state; it never unlocks in the same operation. A target unlinked
+before the ownership barrier enrolls as `stopping` (reason `legacy_unlinked`), so read
+status again and confirm the finalize against that state with a new operation UUID.
+An exact retry of the enrolling operation returns the same enrollment receipt.
+
 The operation UUID binds its action, real principal and complete request body.
 An exact retry returns its historical receipt before checking the current state;
 it does not stop a subsequently resumed generation. Changing the snapshot or
 switching a UUID between guarded and legacy bodies conflicts. Status must be read
-again to display current mode. Omission or explicit null keeps legacy unguarded
-behavior and the same legacy operation identity. Public's exact-confirmation
+again to display current mode. Only omission of `expected` keeps legacy unguarded
+behavior and the same legacy operation identity; an explicit `"expected": null` is
+rejected like any other malformed body. A status read that still shows the confirmed
+snapshot does not prove that an earlier guarded stop/finalize can no longer apply:
+it stays applicable until the snapshot changes or the request's token expires, and
+there is no cancel operation. Public's exact-confirmation
 controls must require a complete non-null snapshot and must never fall back to
 an unguarded command, including against an older server.
 
@@ -116,7 +127,9 @@ an unguarded command, including against an older server.
   bounded `reason`. All counters are integers in the JavaScript safe range.
 - `permissions`: `read: true` for this metadata, plus boolean `stop` and `finalize`
   calculated from the current Context Editor/Owner role. A Viewer gets metadata
-  with both mutation capabilities false. Workspace role alone is insufficient.
+  with both mutation capabilities false. A workspace member or viewer role alone is
+  insufficient; workspace owners and admins hold the Context Owner role on every
+  Context they can reach.
 
 This uses the same current identity, browser-client registration, membership,
 seat/reach and target fence as the management controls. It deliberately applies
