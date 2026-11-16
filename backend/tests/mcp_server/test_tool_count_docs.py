@@ -27,11 +27,11 @@ DOCS = REPO_ROOT / "docs"
 DATED_DIRS = frozenset({"api-surface-1.0", "design", "rfc"})
 
 # Pages that must keep stating a count: the patterns below rotting into
-# "matches nothing" would otherwise pass silently.
+# "matches nothing" would otherwise pass silently. The READMEs and
+# docs/api-reference.md stopped stating counts in #2864; any count they state
+# is still checked against the registry by
+# test_no_page_states_a_tool_count_the_registry_does_not_have.
 PAGES_WITH_TOTAL = (
-    "README.md",
-    "docs/README.md",
-    "docs/api-reference.md",
     "docs/architecture.md",
     "docs/concepts.md",
     "docs/mcp-clients.md",
@@ -39,7 +39,6 @@ PAGES_WITH_TOTAL = (
     "docs/remote-mcp-directory-scope.md",
 )
 PAGES_WITH_CORE = (
-    "README.md",
     "docs/mcp-clients.md",
     "docs/mcp-tools.md",
     "docs/remote-mcp-directory-scope.md",
