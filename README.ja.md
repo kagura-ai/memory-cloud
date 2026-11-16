@@ -168,19 +168,6 @@ MCP接続後、任意のプラグインでセッション管理と記憶操作�
 
 作業開始時は`/kagura-memory:session-start`、終了前は`/kagura-memory:session-summary`。日々の検索・保存・整理には`:recall`・`:remember`・`:maintain`を使えます。導入とフック設定は[MCPクライアント設定](docs/mcp-clients.md)、Codex向けは[専用のプラグイン設定](docs/getting-started.md#codex-cli)へ。
 
-| コマンド | 用途 |
-|---|---|
-| `/kagura-memory:setup` | MCP接続とプラグインを設定する。 |
-| `/kagura-memory:login` | Kaguraの接続にサインインし直す。 |
-| `/kagura-memory:session-start` | 保存した文脈を読み込み、前回の作業を再開する。 |
-| `/kagura-memory:session-summary` | セッションの決定と引き継ぎ事項を保存する。 |
-| `/kagura-memory:recall` | 保存した記憶を検索する。 |
-| `/kagura-memory:remember` | 指定した情報を記憶に保存する。 |
-| `/kagura-memory:maintain` | 古い情報や重複を確認して整理する。 |
-| `/kagura-memory:digest` | Claude Codeの会話記録から保存する知識を抽出する。 |
-| `/kagura-memory:smoke-test` | MCP接続と主要な操作を検証する。 |
-| `/kagura-memory:guide` | 接続状況と使い方を確認する。 |
-
 ## 仕組み
 
 ```text

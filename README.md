@@ -155,7 +155,7 @@ See the [benchmark reading guide](docs/benchmarks.md) for FC and LongMemEval res
 
 Start with `remember`, `recall`, and `reference`. Session tools such as `bootstrap` and `changes_since` help an agent pick up previous work. Use `update_memory` or supersession when a fact changes.
 
-Kagura Memory Cloud provides 72 MCP tools. The default `/mcp` endpoint lists the 21 core tools. Add `?profile=full` for the full catalog, or `?add_tools=explore` for graph exploration. Tool visibility and access permissions are separate; workspace and context roles still apply. See [tool profiles and roles](docs/mcp-tools.md#tool-profiles).
+The default `/mcp` endpoint lists the core tools. Add `?profile=full` for the full catalog, or `?add_tools=explore` for graph exploration. Tool visibility and access permissions are separate; workspace and context roles still apply. See [tool profiles and roles](docs/mcp-tools.md#tool-profiles).
 
 ### Getting started with Claude Code
 

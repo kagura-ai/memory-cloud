@@ -18,7 +18,7 @@ Kagura Memory Cloud gives people and AI agents shared, persistent memory through
 - [Core Concepts](concepts.md) — Workspace, Context, Memory, Neural Memory, MCP Tools
 - [MCP Client Setup](mcp-clients.md) — ChatGPT plugin and custom MCP, Claude, Codex, Cursor, Gemini, Muse, Grok, Microsoft 365 Copilot, CLI clients, and hooks
 - [Microsoft 365 Copilot](microsoft-365-copilot.md) — MCP profile, operator OAuth setup, and Microsoft registration
-- [MCP Tools Reference](mcp-tools.md) — All 72 tools, profiles, parameters, and required roles
+- [MCP Tools Reference](mcp-tools.md) — Tool profiles, parameters, and required roles
 
 ## Benchmarks & Evaluation
 
