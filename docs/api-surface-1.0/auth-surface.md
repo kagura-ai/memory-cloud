@@ -1,14 +1,21 @@
 # Auth / OAuth / DCR Surface — pre-1.0 surface enumeration
 
 > Issue: #622 — pre-1.0 public API surface enumeration and freeze
-> Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
-> Re-frozen after #993 (dead JWT path dropped; well-known metadata honesty fixes)
+> Frozen at: `<v1.0.0-rc1 commit — fill in when rc1 is tagged>`
+> Source of truth: `backend/tests/api/fixtures/openapi_schema_snapshot.json` (pinned by `backend/tests/api/test_openapi_schema_snapshot.py`). This markdown is human-readable commentary on that fixture: the OAuth / OIDC metadata the schema does not carry, token and credential shapes, and the experimental (satellite-facing) markings; where the two disagree, the fixture wins.
+> History: first enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (2026-06-12).
+> Changed by #993 (dead JWT path dropped; well-known metadata honesty fixes)
 
-> #2781 adds an optional, independent `/oidc` identity provider for explicitly
-> registered confidential web clients. Its RS256 ID tokens, JWKS and UserInfo
-> are described in [OIDC provider setup](../ops/oidc-provider.md). The historical
-> enumeration below describes the legacy MCP OAuth namespace; its clients,
-> credential storage, scopes and `/.well-known` metadata are unchanged.
+> Re-checked against main 6a940892 (2026-11-16, #622 freeze preparation): the
+> MCP OAuth scope catalogue, token shapes and `/.well-known` OAuth metadata
+> match what this file already recorded (#993, #1740, #1741, #2773; the field
+> counts of the two discovery headings were off by one and are corrected). The
+> only new well-known document is `/kmc-sync-configuration`. Everything else
+> added since is in
+> [Surfaces added since the enumeration](#surfaces-added-since-the-enumeration)
+> at the end, with the satellite-facing parts marked **experimental** (#622
+> owner decision 3: excluded from the 1.0 semver commitment, may change in a
+> MINOR release).
 
 Sources read in full: `backend/src/auth/mcp_scopes.py`,
 `backend/src/api/routes/well_known.py`, `backend/src/auth/oauth2_bearer.py`,
@@ -16,13 +23,21 @@ Sources read in full: `backend/src/auth/mcp_scopes.py`,
 `backend/src/auth/oauth2_server.py` (token-generation/grant sections),
 `backend/src/api/routes/oauth.py` (route decorators + DCR/token/introspect handlers),
 `backend/src/mcp_server/auth.py`. Enumeration is complete for the items below; no
-silent truncation.
+silent truncation. The 2026-11-16 re-check also read `mcp_server/tools/_scopes.py`,
+`auth/oauth_scope.py`, `auth/oidc_server.py`, `auth/oidc_bearer.py`,
+`auth/sync_service_jwt.py`, `auth/sync_bearer.py`, `auth/sync_identity.py`,
+`auth/share_keys.py`, `auth/oauth_browser.py`, `auth/observation_credentials.py`,
+`auth/system_admin_mode.py` and the route files cited in the last section
+(module docstrings, route decorators and auth dependencies, not every handler body).
 
 ---
 
 ## JWT claim shapes
 
-The legacy MCP OAuth surface issues **no JWT tokens**. Its credentials (OAuth2 access/refresh
+The legacy MCP OAuth surface issues **no JWT tokens**. (The two JWTs that exist
+since then belong to other surfaces: the RS256 ID tokens of the experimental
+`/oidc` identity provider and the RS256 client assertions sync clients sign; see
+the end of this file.) Its credentials (OAuth2 access/refresh
 tokens, API keys, resource tokens, browser sessions) is an **opaque random string**
 — they carry no claims; their attributes live in DB rows. The dashboard JWT module
 that previously lived at `auth/jwt.py` was dead code and was removed in #993 (§1).
@@ -88,13 +103,35 @@ Code comments mark these as point-in-time and explicitly **not security-bearing*
 - API key: `kagura_` + `token_urlsafe(32)` (`auth/api_keys.py`, `API_KEY_PREFIX`); SHA-256 hash stored. Variants: global, workspace-scoped, public-bound (`bound_context_id`, #626 — rejected outside `/api/v1/public/*`).
 - Resource token: `kagura_resource_` + `token_urlsafe(32)` (`auth/resource_tokens.py`); capability-typed, resource+workspace-scoped, hourly event quota.
 - Bearer disambiguation contract (`oauth2_bearer.is_oauth_bearer_token`): anything **not** starting with `kagura_` is treated as an OAuth token. The `kagura_` prefix is therefore itself frozen surface.
+- Credential prefixes in use at main 6a940892 (each verified where it is minted):
+
+  | Prefix | Credential | Minted in | Tier |
+  |---|---|---|---|
+  | `kagura_` | API key | `auth/api_keys.py` (`API_KEY_PREFIX`) | frozen |
+  | `kagura_sk_` | share key (#1027) | `auth/share_keys.py` (`SHARE_KEY_PREFIX`) | frozen |
+  | `kagura_resource_` | resource token | `auth/resource_tokens.py` (`RESOURCE_TOKEN_PREFIX`) | frozen |
+  | `kagura_obs_` | observation credential (#2679) | `auth/observation_credentials.py` (`OBSERVATION_KEY_PREFIX`) | experimental |
+  | `kmc_oidc_code_` / `kmc_oidc_at_` / `kmc_oidc_rt_` | OIDC provider code / access / refresh token (#2781) | `auth/oidc_server.py` | experimental |
+  | `kmc_sync_at_` | sync service token (#2815) | `services/sync_credentials.py` (`TOKEN_PATTERN`) | not decided (see the end of this file) |
+  | (none) | MCP OAuth access / refresh token | `auth/oauth2_server.py` | frozen |
+
+  The `kagura_*` credentials other than API keys never reach the API-key store
+  by accident: each is accepted only by its own dependency (share keys by
+  `get_share_key_principal`, resource tokens by `auth/resource_tokens.py`,
+  observation credentials by `get_observation_principal`). The `kmc_*` tokens
+  fall on the OAuth side of `is_oauth_bearer_token`, where they match no row;
+  they are accepted only by `auth/oidc_bearer.py` (`kmc_oidc_at_`) and
+  `auth/sync_bearer.py` (`kmc_sync_at_`).
 
 ---
 
 ## well-known metadata endpoints
 
 Router: `backend/src/api/routes/well_known.py`, mounted at prefix `/.well-known`
-(`api/main.py:588`). 5 endpoints total. `base_url` = `FRONTEND_URL` env;
+(`api/main.py`). 6 endpoints total (the sixth, `/kmc-sync-configuration`, is §6
+below). The experimental OIDC provider publishes its own discovery document at
+`/oidc/.well-known/openid-configuration`, outside this router (see the end of
+this file). `base_url` = `FRONTEND_URL` env;
 `mcp_base` = `FRONTEND_URL` + `MCP_BASE_PATH` (default `/mcp`).
 
 ### 1. `GET /.well-known/oauth-protected-resource/mcp`
@@ -121,7 +158,7 @@ the MCP Streamable HTTP endpoint. It replaced `mcp_sse_endpoint` in #1740: that
 field advertised `{mcp_base}/sse`, which has answered `410` since the SSE
 transport was removed (#248), so no client could use it.
 
-### 3. `GET /.well-known/openid-configuration` (OIDC Discovery) — 15 fields
+### 3. `GET /.well-known/openid-configuration` (OIDC Discovery) — 16 fields
 
 | Field | Value |
 |---|---|
@@ -144,13 +181,16 @@ transport was removed (#248), so no client could use it.
 
 ⚠ Missing OIDC-Discovery-REQUIRED fields `jwks_uri`, `userinfo_endpoint`,
 `id_token_signing_alg_values_supported` — and the server never issues an
-`id_token`. This is the #608 D5 "OIDC dishonesty", still open at this commit.
+`id_token`. This is the #608 D5 "OIDC dishonesty", still open at main 6a940892.
+The separate `/oidc` issuer (#2781, experimental) publishes `jwks_uri`,
+`userinfo_endpoint` and `id_token_signing_alg_values_supported` in its own
+document; this one is unchanged.
 ✓ `grant_types_supported` now advertises `urn:ietf:params:oauth:grant-type:device_code`
 and the doc adds `device_authorization_endpoint` (#993, RFC 8628 §4). The device grant
 is registered and live, and a `kagura-cli` public client is seeded for it (#624/#627);
 the advertised set now matches the real surface.
 
-### 4. `GET /.well-known/oauth-authorization-server` (RFC 8414) — 13 fields
+### 4. `GET /.well-known/oauth-authorization-server` (RFC 8414) — 14 fields
 
 Identical to openid-configuration **minus** `response_modes_supported` and
 `subject_types_supported` (the other fields and values match exactly), including the
@@ -163,6 +203,27 @@ Domain verification file for Google connected apps (#2773). `200`
 `GOOGLE_CONNECTED_APPS_VERIFICATION_TOKENS`, in the order configured), answered
 directly at that path with no redirect; `404` when the setting is empty. Not part
 of the OAuth discovery metadata.
+
+### 6. `GET /.well-known/kmc-sync-configuration` — 7 fields
+
+Sync wire-profile document (#2812/#2815), `response_model=SyncConfigurationV1`
+(`models/sync_contract.py`, `extra="forbid"`), built by
+`services/sync_contract.py:sync_configuration` from settings only;
+`Cache-Control: no-store`. Always answered (no 404 when the features are off;
+`capabilities` is then empty or partial).
+
+| Field | Value |
+|---|---|
+| `protocol` | `"kmc.sync.v1"` |
+| `schema_version` | `1` |
+| `schema_hash` | 64 lowercase hex characters |
+| `capabilities` | the enabled subset of `identity.oidc.v1`, `workspace.access.v1`, `sync.installations.v1`, `sync.credentials.v1`, `sync.feeds.v1`, `sync.managed.v1`, `sync.activity.v1`, `public.mcp.v1`, `public.budget.v1`, `public.domains.v1` |
+| `human_scopes` | list of OIDC scopes |
+| `service_scope` | `"resource.sync"` |
+| `assertion_audience` | `"issuer"` |
+
+Stability tier not decided (it describes the sync surface, see the end of this
+file).
 
 ---
 
@@ -182,8 +243,32 @@ Single source of truth: `backend/src/auth/mcp_scopes.py:ALL_ADVERTISED_SCOPES`
 
 **Enforcement matrix:** the per-scope × per-transport enforcement matrix is
 being completed as part of pre-1.0 hardening; it is tracked in the internal
-hardening ledger and this section will be re-frozen with the final matrix
-before v1.0.0-rc1.
+hardening ledger and this section is updated with the final matrix before
+v1.0.0-rc1. What the code enforces at main 6a940892:
+
+- REST (`auth/dependencies.py`): an OAuth access token needs `memory:read` for
+  GET/HEAD/OPTIONS and `memory:write` for every other method (fail closed);
+  membership test only, no hierarchy.
+- MCP `tools/call` (#1686, `mcp_server/tools/_scopes.py`): `memory:read` for a
+  tool whose `readOnlyHint` is true plus `recall` and `get_agent_bootstrap`,
+  `memory:write` for every other tool and for unknown names. A token whose
+  stored scope names no `memory:*` scope gets its client's registered
+  `memory:*` scopes, or the DCR default (`mcp_server/auth.py:granted_scopes`).
+  The refusal is HTTP 403 `insufficient_scope`; its challenge `scope` is the
+  granted scopes plus the required one. `initialize`, `tools/list`, `ping` and
+  `server/discover` are not scope-gated.
+- `memory:delete` and `memory:admin` are still required by no route and no
+  tool (#608 D3/D4 open); the consent page lists them as "delete" / "manage"
+  (`api/routes/oauth.py:_CONSENT_PERMISSION_KEYS`).
+- API keys, agent-bound keys and session cookies carry no OAuth scope and are
+  not scope-gated.
+
+The experimental OIDC provider has its own, disjoint scope set (`openid`,
+`profile`, `workspaces:read`, `integrations:manage`, `sync.records:read`, plus
+`resource.sync` for sync service clients); see the end of this file. The two
+sets share only the name `openid`; the clients, grants and token stores are
+separate, so an `/oidc` token is never accepted on `/mcp` or the memory API and
+an MCP OAuth token never on the routes that take an `/oidc` token.
 
 API keys and resource tokens are outside the scope system by design (role/RBAC
 and capability lanes respectively, per #608 D2).
@@ -232,7 +317,7 @@ RFC-discovery contract but same router/prefix):
 | `/clients/{client_id}` | GET, PUT, DELETE |
 | `/clients/{client_id}/hide` | POST (hide plaintext secret) |
 | `/clients/{client_id}/regenerate-secret` | POST |
-| `/providers` | GET (list IdP providers) |
+| `/providers` | GET (list IdP providers) — behind `require_admin`, so it follows `SYSTEM_ADMIN_MODE` (#2767) and is experimental with the other admin routes (see `rest-response-models.md`) |
 
 ✓ Resolved in #993: the canonical `/token` (no trailing slash — the form the
 well-known metadata advertises as `token_endpoint`) is now schema-visible, and the
@@ -243,7 +328,7 @@ well-known metadata advertises as `token_endpoint`) is now schema-visible, and t
 
 ## DCR_DEFAULT_SCOPE (#608) status
 
-Definition (`backend/src/auth/mcp_scopes.py:56-58`):
+Definition (`backend/src/auth/mcp_scopes.py`):
 
 ```python
 DCR_DEFAULT_SCOPES = tuple(s for s in ALL_ADVERTISED_SCOPES if s != "memory:admin")
@@ -251,8 +336,11 @@ DCR_DEFAULT_SCOPE  = " ".join(DCR_DEFAULT_SCOPES)
 # => "openid memory:read memory:write memory:delete offline_access"
 ```
 
-Applied in two places: `routes/oauth.py:764` (DCR fallback when client omits
-`scope`) and `models/auth.py:530` (`OAuth2Client.scope` column default).
+Applied in three places: `auth/oauth_scope.py:registration_scope` (DCR: a
+request without `scope`, or whose defined scopes include no `memory:*` scope,
+is registered with the default, keeping any `openid` / `offline_access` it asked
+for; #1686), the `scope` default of the dashboard client-create request model in
+`api/routes/oauth.py`, and `models/auth.py` (`OAuth2Client.scope` column default).
 `memory:admin` remains explicitly requestable via the DCR `scope` parameter and
 is still advertised in `scopes_supported`.
 
@@ -268,6 +356,187 @@ Caveats inherited from #608 that remain open at this commit:
   yet implemented (tracked for pre-1.0 hardening).
 - D4 (`memory:delete` semantics) and D5 (`openid`/`id_token`) remain open as
   designed in #608.
+
+---
+
+## Surfaces added since the enumeration
+
+Re-checked against main 6a940892 (2026-11-16). Routes are under `/api/v1`
+unless noted; their request / response models are in the OpenAPI snapshot,
+which stays the source of truth. Three tiers: **frozen** (part of the 1.0
+commitment like the sections above), **experimental** (#622 decision 3:
+satellite-facing, may change in a MINOR release) and **not decided** (flagged
+for the owner before rc1).
+
+### Browser sign-in and account credentials — frozen
+
+Session-cookie surfaces of the web UI (cookie `kagura_session`,
+`auth/session.py`; HttpOnly).
+
+- **Email + password sign-up** (#1734) — `api/routes/email_signup.py`,
+  `/auth/signup/email/request` (always `202`, same body), `/preview`,
+  `/complete` (sets the session cookie, answers `{"redirect_url"}`). The emailed
+  link is the credential. `ENABLE_EMAIL_SIGNUP=false` → every route `404`.
+- **Password login, reset and settings** (#1678) — `api/routes/auth.py`
+  `POST /auth/login` (`PasswordLoginRequest {login_id, password, accepted_terms?}`,
+  `login_id` = login id or verified email; `PasswordLoginResponse {success,
+  mfa_required, mfa_session_token?, redirect_url?}`); `api/routes/password.py`
+  `/auth/password/reset-request` (`202`), `/auth/password/reset`,
+  `/auth/password/setup`, and session-only `/me/password/setup-request`,
+  `/me/password/change`, `DELETE /me/password`.
+- **TOTP MFA** — `api/routes/mfa_settings.py` (session only):
+  `/auth/mfa/setup`, `/auth/mfa/enable`, `/auth/mfa/recovery-codes/regenerate`,
+  `/auth/mfa/disable`. Sign-in second step `POST /auth/mfa/verify`
+  (`api/routes/auth.py`, `MfaVerifyRequest {mfa_session_token, totp_code}`;
+  `totp_code` also takes a recovery code, `auth/recovery_codes.py`). The TOTP
+  secret is stored encrypted (`auth/totp.py`, `utils/encryption.py`).
+- **Passkeys** (#2645, discoverable, user-verified WebAuthn) —
+  `api/routes/passkeys.py`, `/auth/passkeys`: `GET ""`, `POST /proof/options`,
+  `POST /register/options`, `POST /register/verify`,
+  `POST /authenticate/options`, `POST /authenticate/verify`,
+  `PATCH /{key_id}`, `DELETE /{key_id}`.
+- **Provider link confirmation** (#2786) — `api/routes/provider_link_confirm.py`,
+  `/auth/link-confirm/preview` (consumes nothing, reports `same_browser`),
+  `/complete` (session cookie + `{"redirect_url"}`; `403 AUTH-310` in another
+  browser, `400 AUTH-301` unknown / expired / used link), `/cancel` (always
+  `204`). `ENABLE_PROVIDER_LINK_CONFIRMATION=false` → every route `404`.
+  The "established link" rule is `auth/provider_link.py`.
+- **OAuth browser nonce cookie** (#2786, #2791) — `auth/oauth_browser.py`.
+  `GET /auth/{google,github}/login` sets an HttpOnly nonce cookie,
+  `__Host-kagura_oauth_browser` when cookies are `Secure` (plain
+  `kagura_oauth_browser` over http), lifetime 20 minutes, and binds its digest
+  to the OAuth `state`. A callback opened in a browser that did not start the
+  sign-in creates nothing and redirects to `/login?error=oauth_other_browser`
+  (`api/routes/auth.py`, `_OAUTH_ERROR_REASONS` = `oauth_failed`,
+  `oauth_expired`, `provider_unlinked`, `oauth_other_browser`).
+- **Connected OAuth grants** — `api/routes/me_oauth_grants.py`
+  (`/me/oauth/grants`: `GET`, `PUT`, `DELETE`) and `api/routes/me_oauth.py`
+  (`POST /me/refresh-oauth`).
+
+### OAuth device code grant — frozen, unchanged
+
+Re-checked: the device routes, rate limits and token-response extras
+(`user_email`, `workspace_id`, `workspace_name`; `auth/oauth2_server.py`
+`DeviceAuthorizationGrant`) are as described above; tokens live 3600 s like the
+other two grants.
+
+### Share keys — frozen
+
+`auth/share_keys.py`, `kagura_sk_` + `token_urlsafe(32)`, SHA-256 hash stored,
+bound to one context, scope `memory:read` only, always expiring (default and
+maximum 30 days). Managed at `/config/share-keys` (`POST`, `GET`,
+`POST /{key_id}/revoke`, `key_id` = `skey_…`); accepted only by
+`get_share_key_principal` (`auth/dependencies.py`) on `POST /share/recall` and
+`GET /share/sessions` (`api/routes/share_keys.py`). See "Satellite-surface
+candidates" below for `/share/sessions`.
+
+### Resource tokens — frozen, unchanged
+
+`kagura_resource_` + `token_urlsafe(32)` (`auth/resource_tokens.py`), public id
+`rtok_…` (#1008), capability-typed, resource + workspace scoped.
+
+### Observation credentials — experimental (#2678, #2679)
+
+`auth/observation_credentials.py`: `kagura_obs_` + `token_urlsafe(32)`, public
+id `obsk_…`, SHA-256 hash stored, lifetime 1–365 days (default 90), rotation
+keeps the binding. Accepted only by `get_observation_principal` on
+`/observability/*`, and only when `OBSERVABILITY_API_ENABLED` is on and the
+caller is inside `OBSERVABILITY_API_ALLOWED_CIDRS` (else `404`); per-credential
+rate limit. Minted by a workspace owner at `/observation-credentials`. Routes
+and models: `rest-response-models.md` (experimental section).
+
+### System-admin service credential — experimental (#2767, #2851)
+
+With `SYSTEM_ADMIN_MODE=service` the admin routes take `Authorization: Bearer
+<SYSTEM_ADMIN_SERVICE_TOKEN>` (or a `SYSTEM_ADMIN_SERVICE_TOKEN_PREVIOUS`
+value) from `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS` plus one `X-Operator-Email`
+header, and serve an `operator:<address>` principal
+(`auth/system_admin_mode.py`, `auth/dependencies.py:require_admin`); errors
+`SYSADMIN-001`..`004`. The session cookie is ignored in that mode. Routes:
+`rest-response-models.md` (experimental section).
+
+### Identity-only OIDC provider — experimental (#2781, #2793, #2794)
+
+Mounted at `/oidc` (`api/routes/oidc.py`, not under `/api/v1`), `404` on every
+route unless `OIDC_ENABLED`. Clients are confidential web clients provisioned by
+an operator (`cli/oidc_client.py`), never by DCR; clients, grants and tokens
+live in their own tables (`models/oidc.py`), separate from MCP OAuth.
+
+- **Routes**: `GET /oidc/.well-known/openid-configuration`, `GET /oidc/jwks`
+  (public RSA parameters only), `GET|POST /oidc/authorize`, `POST /oidc/token`,
+  `GET /oidc/userinfo`, `POST /oidc/revoke`.
+- **Discovery fields**: `issuer`, `authorization_endpoint`, `token_endpoint`,
+  `jwks_uri`, `userinfo_endpoint`, `revocation_endpoint`,
+  `response_types_supported` `["code"]`, `response_modes_supported`
+  `["query"]`, `grant_types_supported` `["authorization_code",
+  "refresh_token"]` (+ `client_credentials` when sync credentials are on),
+  `subject_types_supported` `["public"]`, `id_token_signing_alg_values_supported`
+  `["RS256"]`, `token_endpoint_auth_methods_supported` `["client_secret_basic",
+  "client_secret_post"]` (+ `private_key_jwt` and
+  `token_endpoint_auth_signing_alg_values_supported` `["RS256"]` when sync
+  credentials are on), `revocation_endpoint_auth_methods_supported`,
+  `code_challenge_methods_supported` `["S256"]`, `scopes_supported`,
+  `claims_supported`.
+- **Scopes** (`auth/oidc_server.py:IDENTITY_SCOPES`): `openid` (required),
+  `profile`, `workspaces:read`, `integrations:manage`, `sync.records:read`;
+  `resource.sync` is the sync service scope. A request must stay within the
+  client's registered scope; PKCE S256 and a nonce (≤255 chars) are mandatory.
+- **Tokens**: code `kmc_oidc_code_…` (one use, client bound), access token
+  `kmc_oidc_at_…` (`expires_in` = min(300, the grant's remaining life)),
+  refresh token `kmc_oidc_rt_…`; only SHA-256 hashes are stored.
+- **ID token** (RS256, header `kid` = active key): `iss`, `sub` (the user's
+  `user_id`), `aud` (`[client_id]`), `iat`, `exp` (`iat` + 300), `nonce`,
+  `auth_time`, `at_hash`, and with `profile` `name` / `picture` when set.
+  UserInfo (`kmc_oidc_at_` bearer only) answers `sub` plus the same profile
+  claims (`auth/oidc_server.py:profile`).
+- **Bearer routes** (`auth/oidc_bearer.py`, `kmc_oidc_at_` only, scope
+  `workspaces:read`): `GET /me/workspaces` and
+  `GET /me/workspaces/{workspace_id}/access` (`api/routes/me_workspaces.py`,
+  #2794).
+
+### Sync service credentials — not decided
+
+Built on the OIDC provider and off unless `OIDC_ENABLED`,
+`SYNC_INTEGRATIONS_ENABLED` and `SYNC_CREDENTIALS_ENABLED` are all on.
+
+- **Client assertion** (`auth/sync_service_jwt.py`, #2806): RFC 7523
+  `private_key_jwt` at `POST /oidc/token` (`grant_type=client_credentials`,
+  `scope=resource.sync`, `client_assertion_type` =
+  `urn:ietf:params:oauth:client-assertion-type:jwt-bearer`). Header `alg` RS256,
+  `kid` 1–128 of `[A-Za-z0-9._-]`, `typ` absent / `JWT` /
+  `client-authentication+jwt`. Claims: exactly `iss` = `sub` = `client_id`,
+  `aud` = the issuer, integer `iat` / `exp` with `exp - iat` ≤ 60 s, optional
+  `nbf`, `jti` 16–128 of `[A-Za-z0-9._-]` (single use, stored as a hash).
+  Signing keys are locally registered RSA 2048–4096 public JWKs (no remote JWKS).
+- **Service token** (`services/sync_credentials.py`, #2815): `kmc_sync_at_` +
+  43 characters, `expires_in` 300, scope `resource.sync`, installation bound;
+  accepted only by `auth/sync_bearer.py:sync_service_token` on
+  `/sync/installations/{installation_id}` (`api/routes/sync_worker.py`) and the
+  run routes under `/sync/installations/{installation_id}/…`
+  (`api/routes/sync_feeds.py`).
+- **Human control routes** take an OIDC access token with
+  `integrations:manage`, `workspaces:read` or `sync.records:read`
+  (`auth/sync_identity.py`): `/workspaces/{workspace_id}/sync-authorizations`,
+  `/workspaces/{workspace_id}/sync-installations[/…]` (installations, records,
+  management, activity; `api/routes/sync_installations.py`,
+  `sync_records.py`, `sync_management.py`, `sync_activity.py` — the scope per
+  route in the last two is unverified).
+- Discovery: `/.well-known/kmc-sync-configuration` (§6 of the well-known section).
+
+Whether this surface is frozen, experimental with the OIDC provider it depends
+on, or satellite-facing is an owner decision before rc1.
+
+### Satellite-surface candidates — not decided
+
+Found while marking decision 3; they may exist only for a satellite, but the
+owner has not classified them:
+
+- `GET /share/sessions` (`api/routes/share_keys.py`, share-key auth): its
+  docstring (#1064) names "an external, observe-only dashboard" rendering live
+  agent status. Predates #2678 / #2679.
+- `GET /resources/{resource_id}/public-mcp/usage-health`
+  (`api/routes/public_mcp_usage.py`, `WorkspaceOwner`, #2678): owner-facing
+  health of the public MCP usage events the observability API exports.
 
 ---
 
