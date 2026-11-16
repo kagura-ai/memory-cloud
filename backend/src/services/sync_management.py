@@ -414,6 +414,7 @@ async def control_mode(
     operation_id: UUID | None = None,
     *,
     finalize: bool = False,
+    expected: dict | None = None,
 ) -> dict:
     """Read metadata or execute one idempotent stop/finalize command."""
     async with management_boundary(db, wid, iid, principal, write=operation_id is not None) as (
@@ -422,8 +423,9 @@ async def control_mode(
         _fence,
     ):
         action = "finalize" if finalize else "stop"
+        request = {"expected": expected} if expected is not None else {}
         receipt = (
-            await operation_receipt(db, iid, operation_id, action, {}, principal.user_id)
+            await operation_receipt(db, iid, operation_id, action, request, principal.user_id)
             if operation_id
             else None
         )
@@ -442,6 +444,26 @@ async def control_mode(
                     }
                 target = current.mode
             else:
+                if expected is not None:
+                    # Check before enrollment or transition side effects. The workspace
+                    # and exclusive target fences also protect the following mutation.
+                    current = await target_fence(db, installation.context_id, exclusive=True)
+                    observed = (
+                        mode_view(current.mode)
+                        if current.mode is not None
+                        else {
+                            "mode": "feed",
+                            "epoch": 1,
+                            "generation": installation.generation,
+                            "stop_event_id": 0,
+                        }
+                    )
+                    snapshot = {
+                        key: observed[key]
+                        for key in ("mode", "epoch", "generation", "stop_event_id")
+                    }
+                    if digest(expected) != digest(snapshot):
+                        raise ConflictError("Confirmed management state changed")
                 target = (
                     await finish_stopping(db, installation, actor=principal.user_id)
                     if finalize
@@ -452,7 +474,7 @@ async def control_mode(
             assert target is not None
             result = mode_view(target)
             if operation_id is not None:
-                save_operation(db, iid, operation_id, action, {}, principal.user_id, result)
+                save_operation(db, iid, operation_id, action, request, principal.user_id, result)
         await db.flush()
         await db.commit()
         return result

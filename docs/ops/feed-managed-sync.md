@@ -71,12 +71,32 @@ All outcomes are private/no-store. Foreign targets are uniformly not found.
 | Method and suffix | Body / query | Result |
 | --- | --- | --- |
 | `GET` | None | Mode, epoch, installation generation, stop watermark/reason |
-| `POST /stop` | `operation_id` UUID | Durable `stopping`; abort unfinished runs and advance generation once |
-| `POST /finalize` | `operation_id` UUID | `manual` only after writer exclusion and complete indexing |
+| `POST /stop` | `operation_id` UUID, optional `expected` snapshot | Durable `stopping`; abort unfinished runs and advance generation once |
+| `POST /finalize` | `operation_id` UUID, optional `expected` snapshot | `manual` only after writer exclusion and complete indexing |
 | `POST /resume/preview` | None | Preview UUID, diff hash, retire/publish counts, finite deadline |
 | `GET /resume/diff` | `preview_id`, `offset` (0–20,000), `limit` (1–100) | Exact current human's paginated diff |
 | `POST /resume/confirm` | `operation_id`, `preview_id`, `diff_hash` | Atomic new generation and `feed` publication |
 | `POST /reconnect` | `operation_id`, fresh owner `authorization_id` | Same retained target, active authentication, still `manual` |
+
+For stop/finalize, send the four fields from the confirmed `GET` status as
+`expected: {"mode":"feed","epoch":1,"generation":1,"stop_event_id":0}`.
+The entire object is required when present: mode is `feed`, `stopping` or `manual`;
+epoch/generation are positive integers, and stop_event_id is nonnegative. Numeric
+fields are bounded to JavaScript's safe integer range; booleans, partial objects,
+unknown fields and coercions are rejected. A first operation compares the snapshot
+under the same exclusive target and workspace locks as the transition. A mismatch
+returns the fixed private `409` without enrollment, successful transition audit,
+operation receipt, generation change or pending-run/chunk changes. Current human
+authorization and the finalize drain/indexing checks still apply.
+
+The operation UUID binds its action, real principal and complete request body.
+An exact retry returns its historical receipt before checking the current state;
+it does not stop a subsequently resumed generation. Changing the snapshot or
+switching a UUID between guarded and legacy bodies conflicts. Status must be read
+again to display current mode. Omission or explicit null keeps legacy unguarded
+behavior and the same legacy operation identity. Public's exact-confirmation
+controls must require a complete non-null snapshot and must never fall back to
+an unguarded command, including against an older server.
 
 Operation receipts bind the real principal, action and exact body. Repeating an
 operation returns its original result without advancing generation again;
