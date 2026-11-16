@@ -98,6 +98,14 @@ ROUTES: dict[tuple[str, str], str] = {
     # #2810: metadata observations and human intent do not read/write memory bodies.
     (
         "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/feeds",
+    ): ALLOWED,
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/feeds/{feed_id}",
+    ): ALLOWED,
+    (
+        "GET",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity",
     ): ALLOWED,
     (

@@ -133,6 +133,66 @@ escaping, separators `,` and `:`, and rejects non-finite numbers. It hashes the
 `external_id`/`fields` upload shape, not server-added fields or chunk wrappers.
 The implementation helper is `models.sync_feed_schemas.snapshot_digest`.
 
+## Current configuration and conditional updates
+
+Normal OIDC `workspaces:read` with current Viewer reach can inspect opaque
+configuration at
+`GET /api/v1/workspaces/{wid}/sync-installations/{iid}/activity/feeds` and
+`GET .../activity/feeds/{fid}`. These routes use the existing activity feature
+gate and diagnostic authority policy, including current browser-client, member,
+seat and Context reach checks. They do not request `sync.records:read`, retrieve
+source URLs or expose canonical bodies/diffs/credentials. Reads neither consume
+public MCP usage nor authorize a write/reconnect after revocation.
+
+The list contains at most20 `items`, each with `feed_id`, `kind`, `config_hash`,
+`config_version` and canonical `revision`. Both responses include `workspace_id`,
+`installation_id`, current `generation`, `schema_hash`, `schema_version` and
+`as_of`. The individual response flattens the requested feed fields into this
+snapshot. Schema hash/version are both null if absent; an incompatible existing
+schema is observed, never relabeled as the approved fixed schema. There are no
+query selectors. Unknown/duplicate selectors are400, inaccessible/foreign targets
+or an unknown individual feed are404, and concurrent state locks are409. Responses
+are no-store. A404 alone is not proof of permission to create a feed; use a
+successfully authorized list snapshot to establish the current absence.
+
+New clients must include a complete `expected` object in the human configuration
+PUT, copied from the original successful snapshot:
+
+```json
+{
+  "kind": "product",
+  "config_hash": "<new opaque source configuration sha256>",
+  "expected": {
+    "config_version": 1,
+    "generation": 1,
+    "schema_hash": "<observed schema sha256>",
+    "schema_version": 1
+  }
+}
+```
+
+Use `config_version: 0` only to assert that this exact feed does not yet exist.
+For an absent schema, both expected schema fields must be null. Config version is
+0–2,147,483,647; generation and a present schema version are1–2,147,483,647. Values
+are strict integers. Explicit null `expected`, missing bundle members, mismatched
+nullability and unexpected fields are400. All four values must match atomically
+under KMC's current-authority locks before schema/configuration/success-audit
+mutation. Stale create, generation/schema/config drift and ABA are409, even when
+the requested source hash currently matches. The same current hash and matching
+bundle retain their version; changing a configuration at the maximum version is
+409 rather than a database overflow. Current Editor and commit-time expiry checks
+still apply after matching. The ordinary two-field PUT remains a legacy,
+**unguarded** operation when `expected` is omitted; it is not safe to replay a
+stale intent. No caller acquires a wider role by supplying a precondition.
+
+After a lost reply or409, read current metadata and compare it with the user's
+current desired source settings and target/schema. Refreshing observations is
+not consent to replay an obsolete update. A current matching configuration can
+be reported as current state; there is no operation ID or receipt lookup that
+proves a particular lost PUT succeeded. Do not replay an old unguarded body or
+invent a new operation identity as recovery. Public's new writers always use
+complete preconditions; legacy writers keep their documented unguarded behavior.
+
 ## Canonical projection and search reflection
 
 Human `GET /workspaces/{wid}/sync-installations/{iid}/records` returns only the
