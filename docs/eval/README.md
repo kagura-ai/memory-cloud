@@ -1,5 +1,7 @@
 # Evaluation Documentation
 
+For public answer-quality results (FC, LongMemEval, and LoCoMo), start with the [benchmark reading guide](../benchmarks.md). This directory focuses on retrieval and component evaluation, which use different metrics.
+
 Index for offline-evaluation methodology in Kagura Memory Cloud. This area
 covers how we measure whether the system is **doing the right thing**, as
 distinct from **doing things at all** (production observability) or

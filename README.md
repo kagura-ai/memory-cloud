@@ -1,334 +1,204 @@
 <p align="center">
-  <a href="https://www.kagura-ai.com">
+  <a href="https://www.kagura-ai.com/">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/social-preview.png">
-      <img src="docs/assets/readme-banner.png" alt="Kagura Memory Cloud — adaptive memory for AI agents and teams, beyond RAG" width="820">
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/kagura-logo-dark.svg">
+      <img src="docs/assets/kagura-logo.svg" alt="Kagura AI" width="220">
     </picture>
   </a>
 </p>
 
+<h1 align="center">Kagura Memory Cloud</h1>
+
 <p align="center">
-  English · <a href="README.ja.md">日本語</a>
+  <strong>Your next AI conversation starts with what you already know.</strong><br>
+  Shared, persistent memory for people, teams, and AI agents.<br>
+  Open source · Self-hostable · MCP + REST API
+</p>
+
+<p align="center">English · <a href="README.ja.md">日本語</a></p>
+
+<p align="center">
+  <a href="https://chatgpt.com/plugins/plugin_asdk_app_6adacc9eaf5481919a85fad2aaa7aade"><strong>Open in ChatGPT</strong></a> ·
+  <a href="https://www.kagura-ai.com/waitlist/"><strong>Request a cloud invite</strong></a> ·
+  <a href="#quick-start"><strong>Self-host</strong></a> ·
+  <a href="docs/benchmarks.md">Benchmarks</a> ·
+  <a href="docs/README.md">Documentation</a>
 </p>
 
 <p align="center">
-  <strong>Adaptive memory for AI agents and teams</strong> — self-hosted, beyond RAG.<br>
-  An MCP server that gets smarter every time you search:<br>
-  hybrid search + a neural memory graph that learns which memories belong together.
-</p>
-
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 license"></a>
+  <a href="https://github.com/kagura-ai/memory-cloud/releases"><img src="https://img.shields.io/github/v/release/kagura-ai/memory-cloud" alt="Latest release"></a>
   <a href="https://github.com/kagura-ai/memory-cloud/actions/workflows/ci.yml"><img src="https://github.com/kagura-ai/memory-cloud/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://codecov.io/gh/kagura-ai/memory-cloud"><img src="https://codecov.io/gh/kagura-ai/memory-cloud/graph/badge.svg" alt="codecov"></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"></a>
-  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node.js-24+-green.svg" alt="Node.js 24+"></a>
-  <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-Streamable_HTTP-purple.svg" alt="MCP"></a>
-  <a href="https://safeskill.dev/scan/kagura-ai-memory-cloud"><img src="https://img.shields.io/badge/SafeSkill-90%2F100_Verified%20Safe-brightgreen" alt="SafeSkill 90/100"></a>
+  <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-Streamable_HTTP-purple.svg" alt="MCP over Streamable HTTP"></a>
 </p>
 
-<p align="center">
-  Works with Claude, ChatGPT, Gemini, Muse, and other MCP-compatible clients.<br>
-  <a href="https://github.com/kagura-ai/kagura-memory-python-sdk"><strong>Python SDK (KaguraClient, REST clients & FileIngestor)</strong></a>
-</p>
+## Keep the context. Change the conversation.
+
+> **OpenAI Plugin released:** [Kagura Memory Cloud is available in ChatGPT](https://chatgpt.com/plugins/plugin_asdk_app_6adacc9eaf5481919a85fad2aaa7aade). Add the plugin and sign in to Kagura to save and recall memories in your conversations. See [supported platforms](#supported-platforms) for the other ways to connect.
+
+You explained the project yesterday. Today you open a new chat, switch AI tools, or hand work to a teammate. The decisions and their reasons should come with you.
+
+**Kagura Memory Cloud gives your assistants a shared place to remember and recall that knowledge.** Save a decision in one session; retrieve it in another client connected to the same workspace and context. Browse, edit, and organize the memories in the web UI.
+
+It works with **ChatGPT, Claude, Codex, Cursor, Gemini, Muse, Grok, and Microsoft 365 Copilot**. Use the published ChatGPT plugin or connect a compatible client over MCP. Applications can also use the REST API or [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk).
+
+| When you… | Use shared memory to… |
+|---|---|
+| Resume a project | Recover decisions, constraints, and unresolved work. |
+| Switch AI assistants | Reuse the same project knowledge across tools. |
+| Work with a team | Share knowledge through workspace and context roles. |
+| Change a decision | Replace an outdated memory and retain its history. |
+| Build an agent | Retrieve relevant context without sending the entire conversation log. |
 
 <p align="center">
   <a href="https://www.kagura-ai.com/demo/terminal-en-cli-2x.mp4">
-    <img src="docs/assets/cli-demo.gif" alt="Claude Code CLI recalling from Kagura Memory over MCP" width="760">
-  </a>
-  <br>
-  <em>Claude Code CLI recalling memories from Kagura over MCP — <a href="https://www.kagura-ai.com/demo/terminal-en-cli-2x.mp4">▶ watch the demo</a></em>
+    <img src="docs/assets/cli-demo.gif" alt="Claude Code retrieving saved memories from Kagura Memory Cloud" width="760">
+  </a><br>
+  <em>See memory retrieval in action — <a href="https://www.kagura-ai.com/demo/terminal-en-cli-2x.mp4">watch the demo</a>.</em>
 </p>
 
-## Why Kagura Memory Cloud?
+## Quick start
 
-> **Your AI forgets everything after each conversation. Kagura fixes that — and gets smarter every time you search.**
+### Choose how to try it
 
-Most AI memory tools are just vector databases with a chat wrapper. Kagura is different — it implements the full **LLM Knowledge Base** pattern (Karpathy's [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)) at team scale:
-
-| Approach | Storage | Compounding | Scale |
-|---|---|---|---|
-| Vector DB / RAG | Embedded chunks | None — retrieve-only | Any |
-| Karpathy's LLM Wiki | Markdown files | LLM rewrites pages | Personal (~100 pages) |
-| **Kagura Memory Cloud** | **PostgreSQL + Qdrant + Neural graph** | **Hebbian + Sleep Maintenance** | **Team / org** |
-
-
-
-| Feature | Description |
-|---------|-------------|
-| **Adaptive Memory** | Every search automatically strengthens connections between related memories. The more you use it, the better `explore()` discovers hidden relationships. |
-| **Hybrid Search** | Semantic (OpenAI / self-hosted) + BM25 keyword — 96% top-1 accuracy |
-| **AI Reranking** | Self-hosted (Ollama/vLLM — local, free), Voyage AI, or Cohere — cross-encoder reranking for precision |
-| **Neural Memory Graph** | Hebbian learning builds a knowledge graph in the background. `explore()` traverses it for serendipitous discovery. |
-| **Agent Memory Substrate** | Beyond a knowledge store: delivery modes (pinned / time-triggered), a server-stamped trust boundary, an agent state lane, and a retrieval-feedback signal — the primitives an autonomous agent loop needs. |
-| **Agent Control Plane (preview)** | Workspace-scoped Agent Registry, subtractive context bindings, agent-bound member keys, lifecycle kill switches, and one-call session bootstrap. Introduced in v0.49.0. |
-| **72 MCP Tools** | Guide, Memory, Agent Substrate, Agent Control Plane, Neural edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings |
-| **Multi-Provider** | OpenAI or self-hosted (Ollama, vLLM — local, private, zero cost) for embeddings |
-| **Team Ready** | Workspaces, RBAC, context isolation, shared memory |
-| **Web UI** | Next.js dashboard — contexts, search settings, member management |
-| **5-Minute Setup** | `./setup.sh` and you're done |
-
-## Architecture
-
-```
-Workspace (team/org)
-├── Context A ("my-project")     ← like a folder
-│   ├── Memory 1                 ← 3-layer: summary / context / content
-│   ├── Memory 2
-│   └── Neural edges (Hebbian)   ← automatic connections
-├── Context B ("learning-notes")
-│   └── ...
-└── Members (Owner/Admin/Member/Viewer)
-```
-
-### LLM Knowledge Base — 5-Layer Implementation
-
-Karpathy's [LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) describes a 5-layer "living knowledge base" — beyond traditional RAG. Kagura implements all 5 layers at team scale:
-
-| Layer | Kagura Implementation | Difference from Karpathy's pattern |
+| | Start here | What you need |
 |---|---|---|
-| **Ingest** | REST `/api/v1/memory`, MCP `remember`, R2 file storage, resource tokens | + binary blobs, + multi-tenant |
-| **Compile** | **MCP-as-compile-API** — chat agent compiles via structured tool calls (`remember(summary, content, type, tags)`) + Sleep Maintenance for batch consolidation | Continuous micro-compile (not batch wiki rewrite) — schema-enforced output |
-| **Index** | Triple index: **BM25** (keyword) + **Qdrant** (semantic) + **Hebbian graph** (relational) — all auto-maintained | No manual `index.md` upkeep |
-| **Query** | Hybrid Search + AI Reranker + `explore` graph traversal | Beyond markdown grep — supports semantic + relational queries |
-| **Enhance** | **Hebbian learning** — every `recall()` strengthens edges between co-retrieved memories. Sleep Maintenance consolidates periodically. | Background graph evolution (zero LLM cost) vs LLM-driven page rewrites |
+| **Hosted Kagura AI** | [Request an invite](https://www.kagura-ai.com/waitlist/) · [Connect your AI client](https://www.kagura-ai.com/help/connect/) | An invited account and a compatible AI client. Cloud registration is currently invite-only. |
+| **Self-hosted Memory Cloud** | Run the setup below | Docker Compose, Python 3.11+, Bash, and an embedding provider. |
 
-**Compounding loop**: Currently explicit (user/agent calls `remember()` after synthesizing answers). Auto-write-back of synthesized answers is intentionally opt-in to keep noise low.
+### Supported platforms
 
+| Client | Start here |
+|---|---|
+| **ChatGPT — released OpenAI Plugin** | [Add Kagura Memory Cloud](https://chatgpt.com/plugins/plugin_asdk_app_6adacc9eaf5481919a85fad2aaa7aade), then sign in to your Kagura AI account. |
+| **Claude / Claude Desktop** | [Connect over remote MCP](docs/mcp-clients.md#claude-desktop--claude-chat-web) and sign in to Kagura. |
+| **Claude Code** | [Connect MCP](docs/mcp-clients.md#claude-code-recommended); add the optional plugin for session workflows. |
+| **Codex** | [Connect MCP and install the optional skill plugin](docs/getting-started.md#codex-cli). |
+| **Cursor** | [Add the MCP server in Cursor settings](docs/getting-started.md#cursor). |
+| **Gemini / Gemini CLI** | Use a [custom MCP connector](docs/mcp-clients.md#gemini-custom-mcp-connector) or the [CLI configuration](docs/mcp-clients.md#gemini-cli). |
+| **Muse** | [Add a remote MCP server](docs/mcp-clients.md#muse) and sign in to Kagura. |
+| **Grok / Grok Bot** | [Connect over remote MCP](docs/mcp-clients.md#grok--grok-bot) and sign in to Kagura. |
+| **Microsoft 365 Copilot** | [Connect through MCP and OAuth](docs/microsoft-365-copilot.md), with operator setup of the OAuth client and Microsoft registration. |
+| **Other MCP clients / your own apps** | Use [Streamable HTTP or the REST API](docs/mcp-clients.md#other-mcp-clients--rest-api). |
 
-### Adaptive Memory: Two Search Paths
+The published ChatGPT plugin connects to hosted Kagura AI and requires an account. For your own Memory Cloud deployment, use the [custom MCP connection instructions](docs/mcp-clients.md#chatgpt-desktop).
 
-Kagura separates **precision search** and **discovery** into two independent paths, each optimized for its purpose:
+### Run locally
 
-```
-recall()  ──→ Hybrid Search (semantic + BM25) ──→ [Reranker] ──→ Precise results
-                      │
-                      └──→ Hebbian Learning (background) ──→ Graph edges grow
-                                                                │
-explore() ──→ Graph Traversal (Neural Memory) ←─────────────────┘  Related discoveries
-```
-
-- **`recall()`** — Precision search. Hybrid (semantic 60% + BM25 40%) with optional AI reranking. Returns the most relevant memories.
-- **`explore()`** — Discovery. Traverses the Neural Memory graph to find related memories that keyword search would miss. Opt-in over MCP: `?add_tools=explore` or `?profile=full` on the URL lists it.
-- **Hebbian learning** — Every `recall()` silently strengthens edges between co-retrieved memories. No explicit training needed — the graph grows organically as you use the system.
-
-This separation is intentional: mixing graph signals into recall degrades precision ([validated via benchmarks](docs/neural-memory-evaluation.md)). Instead, each path does what it's best at.
-
-**Data isolation:** All data is filtered by `workspace_id → context_id → user_id`. Memories never leak across boundaries. Single Qdrant collection with payload filtering.
-
-**Tech stack:** FastAPI (async) · PostgreSQL · Qdrant · Redis · Next.js 16 · OAuth2 · MCP over Streamable HTTP
-
-**Vector backend:** Qdrant by default. A single-process self-hosted / CLI / edge deployment can instead run the embedded **LanceDB backend — "Kagura Lite" (preview)** with no separate Qdrant server (`KAGURA_VECTOR_BACKEND=lance`, `cd backend && uv sync --locked --extra lite`). Not for multi-worker / SaaS (LanceDB is single-writer). See [Deployment → Embedded Vector Backend](docs/deployment.md#embedded-vector-backend-kagura-lite-preview).
-
-## Quick Start
-
-### System Requirements
-
-|  | Minimum | Recommended |
-|--|---------|-------------|
-| CPU | 2 cores | 4+ cores |
-| RAM | 4 GB | 8+ GB |
-| Disk | 10 GB free | 20+ GB free |
-
-### Prerequisites
-
-- Docker & Docker Compose
-- Python 3.11+
-- Node.js 24+
-- OpenAI API key (for embeddings) — or a self-hosted inference server (e.g. Ollama) for local embeddings
-- OAuth2 credentials (optional — password + MFA login available without OAuth)
-
-### Setup
-
-**One-line setup:**
+On Linux, macOS, or Windows with WSL2, with Docker running:
 
 ```bash
 git clone https://github.com/kagura-ai/memory-cloud.git
 cd memory-cloud
-./setup.sh
+bash setup.sh
 ```
 
-**With Claude Code:**
+The interactive setup generates configuration secrets, installs the pinned Python dependencies and Kagura CLI, starts the services, runs migrations, and creates an admin account and MCP configuration. It uses `curl` if it needs to install `uv`. Node.js runs inside Docker; a host Node.js installation is only needed for frontend development.
 
-```bash
-git clone https://github.com/kagura-ai/memory-cloud.git
-cd memory-cloud
-claude   # then run /setup
+**Memory search needs embeddings:** configure an OpenAI API key or a reachable self-hosted embedding server. Google/GitHub sign-in is optional; the local admin can use a password and MFA. See the [setup guide](docs/getting-started.md) for manual steps and provider configuration.
+
+| Open | Purpose |
+|---|---|
+| [localhost:3000](http://localhost:3000) | Sign in and manage your memories. |
+| `http://localhost:8080/mcp` | Connect a local MCP client. |
+| [localhost:8080/redoc](http://localhost:8080/redoc) | Explore the running server's REST API. |
+
+The root Compose stack is for local development. For a public server, use the [deployment guide](docs/deployment.md).
+
+### Try your first memory
+
+1. In the web UI, create a context named **my-first-project**. A context groups memories for a project or topic.
+2. Connect your AI client using [MCP Client Setup](docs/mcp-clients.md). For Claude Code, setup generates a local `.mcp.json`; restart the client to load it. Other clients have their own configuration. Web-based clients need a reachable HTTPS server, rather than your machine's `localhost`.
+3. Ask the assistant:
+
+   > In Kagura's my-first-project context, remember: we chose PostgreSQL because the app needs transactions and relational queries.
+
+4. Open a **new conversation** with the connected client and ask:
+
+   > Search Kagura's my-first-project context. Which database did we choose, and why?
+
+Look for the saved memory in the web UI and a recall tool call in the new conversation. Then repeat the question in another client with access to the same context.
+
+Kagura stores what you or an integration explicitly saves. Connecting a client does not automatically import all of its past chats. Keep credentials out of memories and version control.
+
+## Benchmarks: accuracy and cost together
+
+How much history does an assistant need to answer well? Our [public benchmark report](https://www.kagura-ai.com/ja/benchmarks/) measures answer quality as well as cost.
+
+| LoCoMo, 472 questions across 3 conversations | KMC v0.152.0 | Full conversation input |
+|---|---:|---:|
+| Answer accuracy, strict grading | **84.2%** | 89.0% |
+| Memory tokens read at answer time | **80% fewer** | Baseline |
+| Answer-time model cost | **66% lower** | Baseline |
+
+These are developer-run, preregistered results from November 10, 2026, excluding adversarial questions. Costs exclude memory construction and service fees. The tradeoff includes lower accuracy than full-history input; these are not official full-dataset scores or a guarantee for your workload.
+
+A November 12 rerun of **v0.156.0** scored **91.3% with lenient grading / 83.7% with strict grading**. It reused the same conversations after tuning and was not preregistered. Keep it separate from the original run and its cost measurements.
+
+**Evaluation is ongoing.** We are running additional evaluations and working to improve memory retrieval and answer accuracy. The published results above reflect the tested versions and conditions.
+
+See the [benchmark reading guide](docs/benchmarks.md) for FC and LongMemEval results, comparison limits, and the distinction between answer accuracy and retrieval metrics. [English public report](https://www.kagura-ai.com/benchmarks/) · [日本語・LoCoMo詳細](https://www.kagura-ai.com/ja/benchmarks/)
+
+## What you get
+
+| Capability | How it helps |
+|---|---|
+| **Hybrid retrieval** | Semantic search + BM25 keyword matching, with optional reranking. |
+| **Memory you can maintain** | Update, supersede, inspect revisions, and remove outdated knowledge. |
+| **Session continuity** | Bootstrap a session with context, pinned notes, upcoming items, and recent changes. |
+| **Related-memory discovery** | Explore a graph of related memories; supported searches can strengthen associations. |
+| **Team controls** | Workspaces, private/shared contexts, roles, and scoped credentials. |
+| **Web management** | Search and edit memories, inspect history, manage members and integrations. |
+| **Your deployment choice** | Self-host the Apache-licensed server and choose your embedding provider. Model and infrastructure costs depend on that choice. |
+
+### MCP tools
+
+Start with `remember`, `recall`, and `reference`. Session tools such as `bootstrap` and `changes_since` help an agent pick up previous work. Use `update_memory` or supersession when a fact changes.
+
+The default `/mcp` endpoint lists the core tools. Add `?profile=full` for the full catalog, or `?add_tools=explore` for graph exploration. Tool visibility and access permissions are separate; workspace and context roles still apply. See [tool profiles and roles](docs/mcp-tools.md#tool-profiles).
+
+### Getting started with Claude Code
+
+Once MCP is connected, the optional plugin adds guided session and memory workflows. In Claude Code:
+
+```text
+/plugin marketplace add kagura-ai/memory-cloud
+/plugin install kagura-memory@kagura-memory-cloud
 ```
 
-**Step-by-step setup:**
+Use `/kagura-memory:session-start` when you return to a project and `/kagura-memory:session-summary` to save useful knowledge before leaving. `/kagura-memory:recall`, `:remember`, and `:maintain` support day-to-day use. Installation and hook configuration are covered in [MCP Client Setup](docs/mcp-clients.md); Codex users have a [separate plugin setup](docs/getting-started.md#codex-cli).
 
-```bash
-# 1. Clone
-git clone https://github.com/kagura-ai/memory-cloud.git
-cd memory-cloud
+## How it works
 
-# 2. Configure environment (generates secrets, prompts for API keys)
-(cd backend && python3 -m src.cli.setup_env)
-
-# 3. Start all services
-docker compose up -d
-
-# 4. Run migrations
-(cd backend && alembic upgrade head)
-
-# 5. Create admin account (interactive — sets password, MFA, API key, embedding provider)
-(cd backend && python3 -m src.cli.create_admin)
-
-# Backend API:  http://localhost:8080
-# Frontend UI:  http://localhost:3000
-# API docs:     http://localhost:8080/redoc
+```text
+People and AI clients  ── MCP / REST ──  Kagura Memory Cloud
+                                       ├─ Workspace → contexts → memories
+                                       ├─ PostgreSQL: records, keywords, graph
+                                       ├─ Qdrant: semantic retrieval
+                                       └─ Web UI: browse, edit, share
 ```
 
-**`.env.local` settings** (auto-configured by `setup_env`):
+`recall` finds relevant memories through hybrid search. `explore` follows relationships for discovery. Keeping these paths separate lets you choose direct retrieval or related knowledge. Background [Sleep Maintenance](docs/sleep-maintenance.md) consolidates memory according to configuration.
 
-| Setting | Required | Description |
-|---------|----------|-------------|
-| `API_KEY_SECRET` | **Yes** | Secret for API key encryption (auto-generated) |
-| `AUDIT_HMAC_KEY` / `AUDIT_PSEUDO_SALT` | Production | Audit-log HMAC key and erasure salt (auto-generated) |
-| `OPENAI_API_KEY` | **Yes**\* | OpenAI API key for embeddings |
-| `SELF_HOSTED_BASE_URL` | No | Self-hosted backend URL (default: `http://localhost:11434`) |
-| `EMBEDDING_PROVIDER` | No | `openai` (default) or `self_hosted` |
-| `GOOGLE_CLIENT_ID/SECRET` | No | Google OAuth2 login (optional — password login available) |
-| `GITHUB_CLIENT_ID/SECRET` | No | GitHub OAuth2 login (optional) |
-
-\* Either `OPENAI_API_KEY` or a running self-hosted inference server (e.g. Ollama) is required for memory features.
-
-### Admin CLI
-
-| Command | Purpose |
-|---------|---------|
-| `python3 -m src.cli.setup_env` | Generate secrets + configure `.env.local` (run before Docker) |
-| `python3 -m src.cli.create_admin` | Create admin + workspace + API key + `.mcp.json` + embedding setup |
-| `python3 -m src.cli.reset_password` | Reset password and/or MFA |
-| `python3 -m src.cli.delete_admin` | Delete admin (for re-creation) |
-| `python3 -m src.cli.transfer_context_creator` | Move contexts created by one user to another (CLI admin → OAuth account, see docs/deployment.md) |
-
-> Run from `backend/` directory. Docker API container must be running.
-
-<details>
-<summary>Platform-specific notes</summary>
-
-- **WSL (Windows)**: Install Docker Desktop for Windows and enable WSL integration
-- **macOS**: Install Docker Desktop for Mac. `brew install python@3.11 node`
-- **Linux (Ubuntu/Debian)**: `sudo apt install docker.io docker-compose-v2 python3.11 nodejs npm`
-- **GCP (Production)**: Set production values in `.env.local` (`DATABASE_URL`, `QDRANT_URL`, `ENVIRONMENT=production`, `CORS_ORIGINS`) and private values for `API_KEY_SECRET`, `AUDIT_HMAC_KEY`, `AUDIT_PSEUDO_SALT` (`openssl rand -hex 32`) — the API refuses to start on the defaults or `.env.example` placeholders
-- **Frontend env vars**: Copy `frontend/.env.example` to `frontend/.env.local` and set:
-  - `NEXT_PUBLIC_API_URL` — backend URL (default: `http://localhost:8080`)
-  - `NEXT_PUBLIC_APP_URL` — frontend URL for metadata
-  - `NEXT_PUBLIC_PLAN_FREE_DISPLAY_NAME` / `BASIC` / `PRO` / `PROMAX` — plan display name customization (default: S/M/L/XL)
-
-</details>
-
-## Connect an MCP Client
-
-Works with Claude Code, Claude Desktop, Claude Chat, ChatGPT, Gemini, Muse, Gemini CLI, and any Streamable-HTTP MCP client.
-
-**Claude Code (3 steps):**
-
-1. Start services and open `http://localhost:3000/workspace/integrations/credentials?tab=api-keys` to create an API key
-2. Copy `.mcp.json.example` to `.mcp.json` and fill in your API key (a key created there is scoped to its workspace):
-
-```bash
-cp .mcp.json.example .mcp.json
-# Edit .mcp.json — set the API key
-```
-
-`.mcp.json.example` ships with the all-tools URL. Set `"url"` to one of:
-
-- **Core tools (default):** `http://localhost:8080/mcp`
-- **All tools:** `http://localhost:8080/mcp?profile=full`
-
-An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Gemini, Muse, Cursor, `claude mcp add`) uses the same `/mcp` URL and connects to the workspace selected in the web UI; `/mcp/w/{workspace_id}` pins such a connector to one workspace when you belong to several.
-
-The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out `explore`, Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 2.7 times larger). See [Tool Profiles](docs/mcp-tools.md#tool-profiles).
-
-3. Restart Claude Code and verify:
-
-```
-You: "Remember: our API uses JWT with 1h expiry and refresh token rotation"
-→ AI calls remember() — stored permanently
-
-You: "What do we know about auth?"
-→ AI calls recall() — finds it instantly, even months later
-```
-
-> `.mcp.json` is in `.gitignore` — never commit it (contains API keys).
-
-Full setup guide — every client, the memory-sync hook, the ready-to-use `.claude/` templates, the **kagura-memory** Claude Code plugin (skills + tool-guardrail hooks), and the WSL2 networking note: **[MCP Client Setup](docs/mcp-clients.md)**
-
-## MCP Tools
-
-**72 tools across 14 categories**: Guide (`guide`, the tool manual on demand; `describe_tools`, the tools the URL left out), Memory (`remember` / `remember_batch` / `recall` / `explore` …), Agent Substrate (pinned + time-triggered delivery, deterministic `list` / `changes_since`, one-call `bootstrap`, state, measurements, feedback), Agent Control Plane (preview), Neural Edges, Contexts, Tags, Files (R2), Analyses (Memory Analysis), Resources, Secrets (zero-knowledge), Sleep Maintenance, Usage, and API-Key Bindings — each with per-role access control.
-
-Tool-by-tool reference with required roles: **[MCP Tools Reference](docs/mcp-tools.md)**
-
-An agent's writes can be listed and undone: `changes_since` + `rollback_session` per session (a stateless MCP client can name its own session with `_meta["ai.kagura/sessionId"]` or a `Kagura-Session-Id` header), or — for clients without a session id — over a time window of your own writes (`by_me=true`, `since` / `until`); see [Which clients get a session id](docs/mcp-clients.md#which-clients-get-a-session-id).
-
-A client does not have to list all 72: the default URL [above](#connect-an-mcp-client) lists the 21 core tools (`?profile=full` lists everything), `?tools=remember,recall` lists exactly the tools you name, and `?add_tools=list_edges` lists the core tools plus the ones you name — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
-
-## REST API
-
-In addition to MCP tools, a full REST API is available:
-
-- **Memory**: remember, recall, reference, forget, explore (`/api/v1/memory/*`)
-- **Contexts**: CRUD, search settings (`/api/v1/contexts/*`)
-- **Agents (preview)**: Registry, context bindings, and composed bootstrap (`/api/v1/agents/*`)
-- **Files**: Presigned upload/download backed by R2 (`/api/v1/files/*`, up to 100 MiB); legacy `/api/v1/attachments/*` routes return `410 Gone`
-- **Analyses**: Memory Analysis preview/start/read/cancel (`/api/v1/analyses/*`)
-- **Resources**: External event ingestion and resource inspection (`/api/v1/resources/*`)
-- **Workspaces**: Management, members, invitations (`/api/v1/workspaces/*`)
-- **Admin**: Users, plan management, neural config (`/api/v1/admin/*`)
-- **Secrets**: Zero-knowledge secret store — ciphertext-only, server never decrypts (`/api/v1/config/secrets/*`)
-
-Full API documentation: `http://localhost:8080/redoc`
-
-## Authentication
-
-Two OAuth2 providers are supported:
-
-- **Google OAuth2** — Optional. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
-- **GitHub OAuth2** — Optional. Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`
-
-Users with the same email address across providers share a single account. Password + MFA login is available without any OAuth provider (see [Quick Start](#quick-start)). An existing account can also add a password from its profile and then sign in with its verified email address and that password; see [Deployment → Email + password sign-in](docs/deployment.md#email--password-sign-in-issue-1678).
-
-## Plan Tier Customization
-
-Plans control per-workspace resource limits (contexts / memories / MCP calls per day). Four tiers ship by default: S (`free`), M (`basic`), L (`pro`) and XL (`promax`). For self-hosted single-user setups, assign the XL (`promax`) plan to your workspace — it is the only tier that may create resources, connectors and public contexts (numeric limits are env-overridable; a tier's feature set is not). Defaults, environment-variable overrides, and optional Stripe self-service billing: **[Deployment → Plan Tiers](docs/deployment.md#plan-tiers)**
-
-## Development with Claude Code
-
-This project is designed to be developed **with** Claude Code and Kagura Memory Cloud itself — pre-configured slash commands, safety hooks, sub-agents, and rules load automatically from `.claude/`. Setup and the full tooling reference: **[Contributing → Development with Claude Code](CONTRIBUTING.md#development-with-claude-code)**
+Built with **FastAPI, PostgreSQL, Qdrant, Redis, and Next.js**. Read the [architecture](docs/architecture.md) and [core concepts](docs/concepts.md) for the underlying design.
 
 ## Documentation
 
-**API reference** — two complementary entry points:
+| I want to… | Read |
+|---|---|
+| Install and save my first memory | [Getting Started](docs/getting-started.md) |
+| Connect an AI client | [MCP Client Setup](docs/mcp-clients.md) |
+| Build an integration | [MCP Tools](docs/mcp-tools.md) · [REST API](docs/api-reference.md) · [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) |
+| Write useful memories | [Chunking Guide](docs/chunking-guide.md) · [Core Concepts](docs/concepts.md) |
+| Evaluate quality | [Benchmarks](docs/benchmarks.md) |
+| Deploy and operate | [Deployment](docs/deployment.md) · [Troubleshooting](docs/troubleshooting.md) |
+| Find a specialist guide | [Documentation index](docs/README.md) |
+| See what changed | [Releases](https://github.com/kagura-ai/memory-cloud/releases) · [Changelog](CHANGELOG.md) |
 
-- **Concepts (markdown)**: [API Reference](docs/api-reference.md) — auth, base URLs, MCP endpoint, request/response examples
-- **Endpoint reference (live)**: `http://localhost:8080/redoc` — auto-generated from FastAPI, always in sync with the running backend
+## Contribute
 
-**Concepts & guides:**
-
-- [Core Concepts](docs/concepts.md) — Workspace, Context, Memory, Neural Memory, MCP Tools
-- [MCP Client Setup](docs/mcp-clients.md) — Claude Code / Desktop / Chat, ChatGPT, Gemini, Muse, Gemini CLI, plugin & templates
-- [MCP Tools Reference](docs/mcp-tools.md) — All 72 tools with required roles
-- [Architecture](docs/architecture.md) — System design and data flow
-- [Getting Started](docs/getting-started.md) — Detailed setup guide
-- [Chunking Guide](docs/chunking-guide.md) — Best practices for memory storage
-- [Resource Tokens Guide](docs/resource-tokens-guide.md) — External data ingestion via resource tokens
-- [Neural Memory Evaluation](docs/neural-memory-evaluation.md) — Benchmark results, architecture decisions
-- [Search Quality Benchmark](docs/search-quality-benchmark.md) — Accuracy tests, reranking, best practices
-- [Retrieval Feedback & Eval Gate](docs/eval/retrieval-feedback-and-eval-gate.md) — Feedback signal + the no-self-update-loop policy (Agent Memory Substrate)
-- [Deployment](docs/deployment.md) — Production deployment with Caddy reverse proxy
-- [Contributing](CONTRIBUTING.md) — Development setup, code style, PR workflow
-- [Security](SECURITY.md) — Vulnerability reporting, security design
-- [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) — `KaguraClient` (MCP) plus REST clients for resources, files, secrets, workspaces, and agent bootstrap, and a document `FileIngestor`
-- **Project site**: [www.kagura-ai.com](https://www.kagura-ai.com) — overview, use cases, getting started paths
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR workflow.
+Bug reports, documentation improvements, and contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](LICENSE).
