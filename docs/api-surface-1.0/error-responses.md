@@ -1,7 +1,9 @@
 # Error Response Shapes — pre-1.0 surface enumeration
 
 > Issue: #622 — pre-1.0 public API surface enumeration and freeze
-> Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
+> Frozen at: `<v1.0.0-rc1 commit — fill in when rc1 is tagged>`
+> Source of truth: `backend/tests/api/fixtures/openapi_schema_snapshot.json` (pinned by `backend/tests/api/test_openapi_schema_snapshot.py`). This markdown is human-readable commentary on that fixture: the canonical error shapes; where the two disagree, the fixture wins. The emitted `error_code` set (REST and MCP) is not in the fixture, so the list below is its only record.
+> History: first enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (2026-06-12).
 
 Method: exhaustive `grep -rn "error_code" backend/src --include='*.py'` (all 80 occurrences triaged), full read of `backend/src/utils/exceptions.py`, the exception handlers in `backend/src/api/main.py`, the MCP transport/tool error paths, and a per-file census of raw `raise HTTPException(` sites.
 
