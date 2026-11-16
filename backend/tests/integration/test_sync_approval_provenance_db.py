@@ -58,6 +58,18 @@ async def assert_unapproved(activity, row):
         )
 
 
+async def approver_denials(activity):
+    async with activity.factory() as db:
+        return await db.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(
+                AuditLog.action == "sync.authority.denied",
+                AuditLog.user_id == activity.store.users["owner"],
+            )
+        )
+
+
 def assert_refused(response):
     assert response.status_code == 409, response.text
     assert response.json() == {"error": "RES-002"}
@@ -65,13 +77,22 @@ def assert_refused(response):
 
 
 @pytest.mark.parametrize(
-    "mutation", ["revoked", "grant", "expired", "scope", "role", "owner_epoch", "other_source"]
+    "mutation",
+    ["revoked", "grant", "expired", "scope", "role", "seat", "owner_epoch", "other_source"],
 )
 async def test_manual_approval_rechecks_original_provenance_even_for_another_valid_editor(
     activity, mutation
 ):
     _proof, row = await prepared_manual(activity)
-    if mutation == "revoked":
+    denials_before = await approver_denials(activity)
+    if mutation == "seat":
+        # Seats shrink below the member count: the original requester keeps the
+        # membership row and Editor role but no longer has a seat; the owner does.
+        async with activity.factory() as db:
+            workspace = await db.get(Workspace, activity.store.wid)
+            workspace.plan_name, workspace.addon_member_bonus = "basic", 0
+            await db.commit()
+    elif mutation == "revoked":
         await change(
             activity.store,
             OIDCToken,
@@ -125,6 +146,8 @@ async def test_manual_approval_rechecks_original_provenance_even_for_another_val
     response = await approve(activity, row)
     assert_refused(response)
     await assert_unapproved(activity, row)
+    # A lost original proof is a conflict, never a denial of the current approver.
+    assert await approver_denials(activity) == denials_before
 
 
 async def test_live_manual_approval_preserves_original_request_and_deadlines_across_different_editors(

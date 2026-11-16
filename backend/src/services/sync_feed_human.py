@@ -25,7 +25,12 @@ from models.sync_installation import SyncService
 from services.sync_feed_authority import current_schema, human_feed_boundary, locked
 from services.sync_feed_runs import run_view
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import ConflictError, NotFoundException, SyncProtocolError
+from utils.exceptions import (
+    ConflictError,
+    MemoryCloudException,
+    NotFoundException,
+    SyncProtocolError,
+)
 from utils.query_bounds import MAX_INT32
 
 
@@ -158,9 +163,16 @@ async def approve_diff(
                 request_id = UUID(reference)
             except (AttributeError, TypeError, ValueError):
                 raise ConflictError("Manual request is no longer current") from None
-            await validate_manual_request(
-                db, installation, principal.client_id, request_id, fence=fence
-            )
+            try:
+                await validate_manual_request(
+                    db, installation, principal.client_id, request_id, fence=fence
+                )
+            except ConflictError:
+                raise
+            except MemoryCloudException:
+                # Any lost original authority (seat, plan, capacity) is the same
+                # fixed conflict; it never answers as a refusal of this approver.
+                raise ConflictError("Manual request authority changed") from None
         row.approval_id = row.approval_id or uuid4()
         row.approved_by, row.approval_epoch = principal.user_id, workspace.ownership_epoch
         fence.deadlines.extend([row.expires_at, row.prepared_until])
