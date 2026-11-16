@@ -1,6 +1,6 @@
 # API Reference
 
-Kagura Memory Cloud provides both REST APIs and MCP (Model Context Protocol) tools for AI memory management.
+Kagura Memory Cloud provides both REST APIs and 72 MCP tools (Model Context Protocol) for AI memory management.
 
 ## Overview
 

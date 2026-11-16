@@ -5192,6 +5192,187 @@
         ],
         "type": "object"
       },
+      "FeedConfigurationDetail": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "config_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "config_version": {
+            "maximum": 2147483647.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "feed_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "generation": {
+            "maximum": 2147483647.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "installation_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "product",
+              "faq"
+            ],
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "schema_hash": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "anyOf": [
+              {
+                "maximum": 2147483647.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "as_of",
+          "config_hash",
+          "config_version",
+          "feed_id",
+          "generation",
+          "installation_id",
+          "kind",
+          "revision",
+          "schema_hash",
+          "schema_version",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "FeedConfigurationPage": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "generation": {
+            "maximum": 2147483647.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "installation_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FeedObservation"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          "schema_hash": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "anyOf": [
+              {
+                "maximum": 2147483647.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "as_of",
+          "generation",
+          "installation_id",
+          "items",
+          "schema_hash",
+          "schema_version",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "FeedObservation": {
+        "properties": {
+          "config_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "config_version": {
+            "maximum": 2147483647.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "feed_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "product",
+              "faq"
+            ],
+            "type": "string"
+          },
+          "revision": {
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "config_hash",
+          "config_version",
+          "feed_id",
+          "kind",
+          "revision"
+        ],
+        "type": "object"
+      },
       "FeedbackRequest": {
         "properties": {
           "helpful": {
@@ -39515,6 +39696,247 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/feeds": {
+      "get": {
+        "operationId": "get_feed_configurations_api_v1_workspaces__workspace_id__sync_installations__installation_id__activity_feeds_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedConfigurationPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/feeds/{feed_id}": {
+      "get": {
+        "operationId": "get_feed_configuration_api_v1_workspaces__workspace_id__sync_installations__installation_id__activity_feeds__feed_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "feed_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedConfigurationDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/requests": {
       "post": {
         "operationId": "request_sync_api_v1_workspaces__workspace_id__sync_installations__installation_id__activity_requests_post",
@@ -39960,6 +40382,51 @@
                   "config_hash": {
                     "pattern": "^[0-9a-f]{64}$",
                     "type": "string"
+                  },
+                  "expected": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "config_version": {
+                        "maximum": 2147483647,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "generation": {
+                        "maximum": 2147483647,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "schema_hash": {
+                        "anyOf": [
+                          {
+                            "pattern": "^[0-9a-f]{64}$",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "schema_version": {
+                        "anyOf": [
+                          {
+                            "maximum": 2147483647,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "config_version",
+                      "generation",
+                      "schema_hash",
+                      "schema_version"
+                    ],
+                    "type": "object"
                   },
                   "kind": {
                     "enum": [

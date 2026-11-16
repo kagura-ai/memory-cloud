@@ -12,6 +12,8 @@ from sqlalchemy.orm import defer
 from auth.sync_identity import SyncPrincipal, load_sync_identity
 from config.settings import get_settings
 from models.auth import AuditLog, User, Workspace
+from models.management_schemas import digest
+from models.resource import Resource
 from models.sync_activity import SyncManualRequest
 from models.sync_feed import SyncChunk, SyncFeed, SyncRecord, SyncRun
 from models.sync_installation import SyncInstallation, SyncService
@@ -19,11 +21,17 @@ from models.sync_management import SyncManagedTarget
 from services.capacity_lock import CapacityPolicy
 from services.public_usage_budget import read_public_usage_budget
 from services.sync_audit import ACTIONS, RETENTION_DAYS, SCHEMA, bind_actor, event_view, human_actor
-from services.sync_feed_authority import FeedFence, feed_fence, lock_membership, locked
+from services.sync_feed_authority import (
+    FeedFence,
+    current_schema,
+    feed_fence,
+    lock_membership,
+    locked,
+)
 from services.sync_feed_index import index_status
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import NotFoundException
+from utils.exceptions import ConflictError, NotFoundException
 
 
 def activity_enabled() -> None:
@@ -126,6 +134,57 @@ async def overview(db: AsyncSession, wid: UUID, iid: UUID, principal: SyncPrinci
             },
             "as_of": to_utc_iso(allowance.as_of),
         }
+        await db.commit()
+    return result
+
+
+async def feed_configuration(
+    db: AsyncSession,
+    wid: UUID,
+    iid: UUID,
+    principal: SyncPrincipal,
+    *,
+    feed_id: UUID | None = None,
+) -> dict:
+    """Observe opaque current configuration without a data grant or a source URL."""
+    async with activity_boundary(db, wid, iid, principal) as (installation, _workspace, _fence):
+        # Exclude a concurrent schema insertion through its Resource FK, as the
+        # write path does. This is a short, NOWAIT SQL-only observation.
+        resource = await locked(db, Resource, Resource.id == installation.resource_pk, write=True)
+        schema = await current_schema(db, installation) if resource is not None else None
+        query = select(SyncFeed).where(SyncFeed.installation_id == iid)
+        if feed_id is not None:
+            query = query.where(SyncFeed.id == feed_id)
+        rows = list(
+            (
+                await db.scalars(
+                    query.order_by(SyncFeed.id).limit(21).execution_options(populate_existing=True)
+                )
+            ).all()
+        )
+        if feed_id is not None and not rows:
+            raise NotFoundException("Synchronization feed")
+        if len(rows) > 20:
+            raise ConflictError("Synchronization feed limit exceeded")
+        snapshot = {
+            "workspace_id": str(wid),
+            "installation_id": str(iid),
+            "generation": installation.generation,
+            "schema_hash": digest(schema.field_definitions) if schema else None,
+            "schema_version": schema.schema_version if schema else None,
+            "as_of": to_utc_iso(utcnow()),
+        }
+        items = [
+            {
+                "feed_id": str(row.id),
+                "kind": row.kind,
+                "config_hash": row.config_hash,
+                "config_version": row.config_version,
+                "revision": row.revision,
+            }
+            for row in rows
+        ]
+        result = {**snapshot, **items[0]} if feed_id is not None else {**snapshot, "items": items}
         await db.commit()
     return result
 
