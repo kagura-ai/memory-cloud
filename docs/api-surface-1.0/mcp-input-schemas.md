@@ -1,12 +1,14 @@
 # MCP Tool Input Schemas — pre-1.0 surface enumeration
 
 > Issue: #622 — pre-1.0 public API surface enumeration and freeze
-> Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
-> Source: backend/src/mcp_server/tools/_definitions.py — 45 tools, 45 of 45 enumerated
-> Re-frozen after #990 (Phase 1): additionalProperties:false on all 45 schemas; analyze_context `query` no-op removed.
-> Re-frozen after #990 (Phase 2): merge_contexts `source_id`/`target_id` → `source_context_id`/`target_context_id` (handler keeps the old names for one release as a deprecated alias; kagura-memory-python-sdk#196 tracks the SDK); analyze_context's internal `model_id` (llm_pricing.id int PK) **removed** from the public MCP surface (run uses server-default model); `k`/`limit`/`cap` result-size trio **consciously frozen** as three distinct conventions (see below). The cross-surface stable-model-identifier replacement (REST + MCP) stays deferred to the v1.5 per-workspace model selection. #990 is now resolved on the MCP surface.
+> Frozen at: `<v1.0.0-rc1 commit — fill in when rc1 is tagged>`
+> Source of truth: `backend/tests/mcp_server/fixtures/tool_schema_skeleton.json` (pinned by `backend/tests/mcp_server/test_tool_definition_budget.py`). This markdown is human-readable commentary on that fixture: naming rationale, exposure checks and the exclusion list; where the two disagree, the fixture wins.
+> History: first enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (2026-06-12; 45 tools, 45 of 45 enumerated).
+> Coverage at the freeze preparation (main 6a940892, `get_tool_definitions()` in `backend/src/mcp_server/tools/_definitions.py`): 72 tools — 49 enumerated below, 18 [experimental](#experimental-tools--excluded-from-the-10-commitment), 5 [not yet classified](#not-yet-classified--owner-decision-before-rc1).
+> Changed by #990 (Phase 1): additionalProperties:false on all 45 schemas; analyze_context `query` no-op removed.
+> Changed by #990 (Phase 2): merge_contexts `source_id`/`target_id` → `source_context_id`/`target_context_id` (handler keeps the old names for one release as a deprecated alias; kagura-memory-python-sdk#196 tracks the SDK); analyze_context's internal `model_id` (llm_pricing.id int PK) **removed** from the public MCP surface (run uses server-default model); `k`/`limit`/`cap` result-size trio **consciously frozen** as three distinct conventions (see below). The cross-surface stable-model-identifier replacement (REST + MCP) stays deferred to the v1.5 per-workspace model selection. #990 is now resolved on the MCP surface.
 
-**#2125 note (default context)**: `context_id` left `required` on the 30 context-scoped tools (the remember family, `reference`, `list_revisions`, the deterministic reads, the edge tools, `get_context_info`, `list_tags`, `get_sleep_history`, `rollback_session`, the analysis reads, `feedback`, `list`, `changes_since`, `bootstrap`, the state and measurement tools). It can come from `?context=<uuid>` on the MCP URL (or an agent-bound key's default binding), and the server still refuses a call with `context_id_required` when nothing supplies one. Where a `required` list below names `context_id` for those tools, read it as "required unless the connection has a default". The tools whose `context_id` names the context being administered keep it required: `delete_context`, `update_search_config`, `update_context`, `bind_agent_context`. Loosening is the safe direction for schema-validating clients (cf. the #1054 revert on `recall`).
+**#2125 note (default context)**: `context_id` left `required` on the 30 context-scoped tools (the remember family, `reference`, `list_revisions`, the deterministic reads, the edge tools, `get_context_info`, `list_tags`, `get_sleep_history`, `rollback_session`, the analysis reads, `feedback`, `list`, `changes_since`, `bootstrap`, the state and measurement tools). It can come from `?context=<uuid>` on the MCP URL (or an agent-bound key's default binding), and the server still refuses a call with `context_id_required` when nothing supplies one. Where a `required` list below names `context_id` for those tools, read it as "required unless the connection has a default". The tools whose `context_id` names the context being administered keep it required: `delete_context`, `update_search_config`, `update_context`, `bind_agent_context` (the last is experimental, see below; it is only mentioned here, not enumerated). Loosening is the safe direction for schema-validating clients (cf. the #1054 revert on `recall`).
 
 **Global note**: ✅ **Resolved in #990.** Every tool `inputSchema` now sets `additionalProperties: false` — undeclared top-level parameters are forbidden by the published contract. Applied centrally in `get_tool_definitions()` so all 45 tools stay uniform and any new tool inherits the policy automatically. The policy is advisory at the server (handlers read args defensively via `.get` and never Pydantic-validate), so it tightens the client-facing contract without changing server behaviour; nested object params are unaffected (only the top-level argument object is closed).
 
@@ -488,6 +490,103 @@ Read one key or list all live state entries for a context (read-only).
 
 - **Required**: `context_id` — string (⚠ no uuid format)
 - **Optional**: `key` — string (omit to list all live entries)
+
+### remember_batch
+
+Store up to 50 memories in one call (the end-of-session save); dedupe, tags_normalize and verbose apply to the whole batch. Frozen at the owner's decision of 2026-11-16 (#622).
+
+- **Required**: `items` — array of object, minItems 1, maxItems 50 (one object per memory with remember's arguments; `summary`, `content`, `type` required per item) ⚠ the item objects are untyped in the schema (`{"type": "object"}`): remember's argument names and limits apply per item and are enforced by the handler (an unknown item key fails only that item with `invalid_argument`), not by the published schema
+- **Optional**:
+  - `context_id` — string, format `uuid` (not in `required`: the connection default, #2125, can supply it)
+  - `atomic` — boolean (default false per description; `true` = one transaction, all or nothing)
+  - `tags_normalize` — boolean (default false per description; as remember's, applied to every item)
+  - `dedupe` — string, enum [`suggest`, `check`, `off`] (as remember's, applied per item; with `atomic=true` a `check` candidate rolls the batch back)
+  - `verbose` — boolean (default false per description; keeps `persistence.detail` on each item)
+- An item may repeat a batch-level argument (`dedupe`, `tags_normalize`, `verbose`) only with the batch's value.
+
+### guide
+
+Return the manual for the tools on demand (read-only, static text). Frozen at the owner's decision of 2026-11-16 (#622).
+
+- **Required**: none
+- **Optional**: `topics` — array of string, minItems 1, maxItems 20 (tool names or `<tool>.<section>` topics; `["index"]`, the default per description, lists them all) ⚠ the topic vocabulary is the manual's content, not schema; only the parameter shape is frozen here, and an unknown topic is reported in `unknown`, not refused
+
+### describe_tools
+
+List the tools the URL's `tools/list` left out, or return their full definitions (read-only). Frozen at the owner's decision of 2026-11-16 (#622).
+
+- **Required**: none
+- **Optional**:
+  - `names` — array of string, maxItems 20 (tool names whose complete definitions to return; omitted → the hidden-tool list)
+  - `query` — string (case-insensitive substring on name, title or summary, narrowing the hidden-tool list)
+- The two reply shapes (without `names`: `{status, tools, count, listed, url, url_error?, hint}`; with `names`: `{status, definitions, unknown?, url, url_error?}`) are the frozen part of the reply; the hidden set itself depends on the URL's profile (`?profile=` / `?add_tools=`), which is not a schema property.
+
+---
+
+## Experimental tools — excluded from the 1.0 commitment
+
+Issue #622 decision 2. These 18 tools are not enumerated above and are **not**
+part of the 1.0 semver commitment. Their input schemas stay pinned by
+`backend/tests/mcp_server/fixtures/tool_schema_skeleton.json`, so every change
+still lands as a reviewed fixture diff, but they **may change in a MINOR
+release** until they are promoted into the enumeration above. A promotion is an
+additive doc change (a `###` entry here, removal from this list).
+
+Agent registry and bindings:
+
+- `register_agent`
+- `list_agents`
+- `get_agent`
+- `update_agent`
+- `delete_agent`
+- `bind_agent_context`
+- `list_agent_bindings`
+- `update_agent_binding`
+- `unbind_agent_context`
+- `get_agent_bootstrap`
+
+Secrets:
+
+- `secret_register_pubkey`
+- `secret_put`
+- `secret_get`
+- `secret_list`
+- `secret_revoke_grant`
+
+Guardrails and measurements:
+
+- `load_guardrails`
+- `record_measurement`
+- `recall_series`
+
+The tool descriptions do not carry an "experimental" marker yet: appending one
+centrally in `get_tool_definitions()` pushes the `load_guardrails` definition
+over its size cap (`backend/tests/mcp_server/test_load_guardrails_tool.py::test_definition_stays_small`,
+2,100 characters, which the definition already nearly fills), so this list is
+the record until that cap is decided.
+
+### Experimental reply fields and URL options (satellite-facing)
+
+Issue #622 owner decision 3 (2026-11-16): surfaces that exist for the
+service-notice satellite are experimental, even on a tool whose input schema is
+otherwise in scope.
+
+- `bootstrap` reply field `notices` — `{provenance, items: [{id, text, published_at, expires_at}]}`, placed right after `status`; absent (never `[]` or `null`) when there is no notice (#2762, #2796). Built in `backend/src/mcp_server/tools/_notices.py`, called from `backend/src/mcp_server/tools/bootstrap.py`. Delivered only when the deployment sets `MCP_NOTICES_ENABLED` and the credential speaks for the person reading.
+- MCP URL query option `?notices=off` (`notices_off_in_url` in `_notices.py`): turns the field off for that connection.
+- The REST side of the same feature (`/api/v1/me/mcp-notices`, `/api/v1/admin/mcp-notices`) is marked in `rest-response-models.md`.
+
+## Not yet classified — owner decision before rc1
+
+These tools are in `get_tool_definitions()` but neither enumerated above nor in
+the experimental list. Under decision 2 an unenumerated tool is excluded by
+default, which for these core tools is probably not the intent; each needs an
+explicit "freeze" (a `###` entry above) or "experimental" call before rc1.
+
+- `bootstrap` — session-start reply; its `notices` field is experimental either way (see above)
+- `list` — deterministic listing
+- `changes_since` — change log; its `session_id` / `by_me` additions are recorded under "Additive since v0.113.0"
+- `list_revisions` — recorded under "Additive since v0.113.0" (`full` profile only)
+- `rollback_session` — recorded under "Additive since v0.113.0"
 
 ---
 
