@@ -21,50 +21,66 @@ Karpathy's pattern describes any "living knowledge base" as 5 layers. Kagura's i
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Client Applications                      │
-│  (Claude Desktop, Claude Code, ChatGPT, Web UI, Custom)     │
+│  (Claude Desktop, Claude Code, ChatGPT, Codex, Google       │
+│   connected apps, Microsoft 365 Copilot, Web UI, Custom)    │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                    Authentication Layer                      │
-│  OAuth2 (Google, GitHub) │ API Keys │ JWT Tokens            │
+│  Sign-in: Google / GitHub OAuth, email + password,          │
+│           passkeys, TOTP MFA                                │
+│  MCP / API: OAuth2 server (incl. device code), API keys,    │
+│           share keys, resource tokens, sync service tokens  │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────────────┬──────────────────────────────────────┐
 │   MCP Server (HTTP)  │          REST API (FastAPI)          │
 │  - 72 MCP Tools      │  - Memory CRUD                       │
+│    (21 listed by     │                                      │
+│     default: `core`) │                                      │
 │    (memory / agent   │  - OAuth2 endpoints                  │
 │     substrate/control│  - API Key + Agent management        │
 │     / edges / context│  - Agent state + feedback lanes      │
 │     / files / analysis│ - Resource Ingest API               │
 │     / resources /    │  - Admin: sleep-reports, neural cfg  │
 │     sleep / usage)   │                                      │
-│  - Session Mgmt      │                                      │
-│  - JSON-RPC          │                                      │
+│  - Session Mgmt      │  - Sync platform, erasure, public    │
+│  - JSON-RPC          │    MCP endpoints, operator console   │
 └──────────────────────┴──────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                      Service Layer                           │
 │  MemoryService │ SearchService │ EmbeddingService           │
-│  GraphService │ NeuralMemoryEngine │ WorkspaceService       │
-│  PermissionService │ SleepService │ LLMService              │
+│  GraphService │ HebbianLearner │ WorkspaceService           │
+│  PermissionService │ SleepOrchestrator │ LLMService         │
 │  ResourceIndexer │ ContextService │ QuotaService            │
-│  AgentRegistry │ AgentBinding │ AgentBootstrap              │
+│  AgentRegistryService │ AgentBindingService │               │
+│  AgentBootstrapService                                      │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                     Data Access Layer                        │
 │  SQLAlchemy async models (backend/src/models/)              │
-│  + service-owned queries (no dedicated repository layer)    │
+│  + repositories for memories, edges, graph, config, users   │
+│    (backend/src/repositories/); other queries live in       │
+│    their services                                           │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────┬──────────────┬──────────────┬───────────────┐
 │  PostgreSQL  │   Qdrant     │    Redis     │  External API │
-│  - Memories  │  - Vectors   │  - Sessions  │  - OpenAI     │
-│  - Workspace │  - BM25      │  - Cache     │  - Cohere     │
-│  - Resources │  (single     │  - Rate Lmt  │  - Stripe     │
-│  - Graph     │   collection)│              │               │
+│  - Memories  │  - Vectors   │  - Sessions  │  - Embedding: │
+│  - Workspace │  - BM25      │  - Cache     │    OpenAI or  │
+│  - Resources │  (single     │  - Rate Lmt  │    self-hosted│
+│  - Graph     │   collection)│              │  - Rerank:    │
+│              │  or LanceDB  │              │    Voyage /   │
+│              │  (lite)      │              │    Cohere     │
+│              │              │              │  - LLM lanes  │
+│              │              │              │  - Resend,    │
+│              │              │              │    R2 / S3    │
 └──────────────┴──────────────┴──────────────┴───────────────┘
 ```
+
+Billing is not in this repository: in-process Stripe billing was removed in #1096, and plan entitlements arrive through the internal billing API.
 
 ## 3-Layer Memory Architecture
 
@@ -93,13 +109,15 @@ User Query
     ↓
 ┌─────────────────────────────┐
 │  Query Processing           │
-│  - Tokenization             │
-│  - OpenAI Embedding         │
+│  - Tokenization (Sudachi    │
+│    for Japanese)            │
+│  - Embedding (configured    │
+│    provider)                │
 └─────────────────────────────┘
     ↓
 ┌──────────────┬──────────────┐
 │  Semantic    │   BM25       │
-│  (Vector)    │  (Keyword)   │
+│  (Vector)    │  (Sparse)    │
 │  60% weight  │  40% weight  │
 └──────────────┴──────────────┘
     ↓               ↓
@@ -108,21 +126,32 @@ Results A       Results B
             ↓
     ┌───────────────┐
     │  Fusion       │
-    │  (Weighted)   │
+    │  (weighted,   │
+    │  max-normed)  │
     └───────────────┘
             ↓
     ┌───────────────┐
-    │  Cohere       │
+    │  Optional AI  │
     │  Reranking    │
+    └───────────────┘
+            ↓
+    ┌───────────────┐
+    │  Reinforce    │
+    │  re-rank      │
+    │  (per context)│
     └───────────────┘
             ↓
       Final Results
 ```
 
 ### Search Weights
-- **Semantic Search**: 60% (better for meaning)
-- **BM25 Full-text**: 40% (better for exact keywords)
-- **Reranking**: Cohere multilingual-v3.0
+- **Semantic Search**: 60% (better for meaning) — per-context default (`context_search_configs.semantic_weight`)
+- **BM25 Full-text**: 40% (better for exact keywords) — a Qdrant sparse vector with IDF (`bm25_weight`)
+- **Fusion**: each lane's scores are normalised by its maximum, then summed with the weights (`backend/src/services/search_service.py`)
+- **Modes**: `search_mode` = `hybrid` (default), `semantic` or `keyword`; a context can opt into the deterministic query router (`routing_mode`)
+- **Reranking**: off by default (`use_rerank`); when on, Voyage `rerank-2` by default, or Cohere or a self-hosted reranker (`backend/src/services/reranker_service.py`); plan-gated
+- **Embedding**: OpenAI by default; Cohere, Hugging Face and self-hosted (Ollama / vLLM) providers are supported (`EMBEDDING_PROVIDER`)
+- **Recall LLM selector**: an opt-in, plan-gated LLM pass that picks from the candidates (`backend/src/services/recall_selector.py`)
 
 ## Neural Memory Engine
 
@@ -211,7 +240,7 @@ declared
 
 For the reader-friendly framing (hippocampus / cortex analogy and the `1/N²` motivation), see [Neural Memory § Edge Origins](concepts.md#edge-origins) in the concepts doc. For the migration history, deploy runbook, and backfill procedure, see [`docs/operations/semantic-edge-rollout.md`](operations/semantic-edge-rollout.md). For the `Memory.scope` (`working` / `persistent`) lifecycle — which is **orthogonal** to edge origin and managed by Sleep Consolidation — see [Sleep Maintenance](sleep-maintenance.md).
 
-> **Note**: the schema documented above reflects the shipped state as of v0.16.x. A richer two-axis provenance schema (relation × origin × frozen flag) is in design as RFC #84 and may extend this taxonomy in a future release.
+> **Note**: `origin` is one axis. Each edge also carries an `edge_type` (the relation): `neural_association`, `related_to`, `depends_on`, `learned_from`, `continues_from`, `references_file`, and since #1208 `supersedes` and `contradicts` (see [Fact Succession](concepts.md#fact-succession-supersedes--contradicts)). The list is in `backend/src/models/memory.py`.
 
 ### Activation Spreading
 Graph-based exploration from seed memory:
@@ -231,20 +260,24 @@ Seed Memory
 
 **Parameters**:
 - `depth`: Max hops (default: 2, max: 5)
-- `min_weight`: Minimum edge weight (default: 0.5)
+- `min_weight`: Minimum edge weight (default: 0.05)
 - `relation_types`: Filter by relation types
 
 ### Unified Scoring
-Combines multiple signals:
+`UnifiedScorer` (`backend/src/neural/`) combines several signals with the defaults in `backend/src/neural/config.py`:
 
 ```python
 score = (
-    0.4 * semantic_score +
-    0.3 * graph_score +
-    0.2 * temporal_score +
-    0.1 * trust_score
+    0.55 * semantic_score +
+    0.20 * graph_score +
+    0.10 * recency_score +
+    0.10 * importance_score +
+    0.05 * trust_score
+    - 0.25 * redundancy_penalty
 )
 ```
+
+`recall()` does not use it: recall ranks on the hybrid-search scores, then the optional reranker and the reinforce re-rank.
 
 ## Agent Memory Substrate Lanes
 
@@ -317,7 +350,11 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 - **memories** — 3-layer memory storage. Carries server-stamped `source_type` (provenance) and `delivery_mode` (`on_recall` / `always` / `on_trigger`)
 - **attachments** — Legacy small-file rows (≤5 MB) stored inline as PostgreSQL `BYTEA`. The public `/api/v1/attachments/*` routes are deprecated and return `410 Gone`; new uploads use `file_objects` in R2
 - **neural_memory_edges** — Primary Hebbian edge storage (workspace + context scoped)
-- **graph_memory** — Legacy NetworkX JSON (read paths still reference it; new writes go to `neural_memory_edges`)
+- **graph_memory** — Legacy per-user row, still written on each Hebbian pass for decay bookkeeping; edges themselves live in `neural_memory_edges`
+- **memory_revisions** / **memory_session_rollbacks** — The revision log behind `list_revisions` / `reference(version=N)` and the record of `rollback_session` runs
+- **memory_access_events** — Append-only access audit for the agent control plane
+- **measurements** — The `record_measurement` / `recall_series` time series
+- **memory_analyses** / **memory_analysis_clusters** / **memory_analysis_assignments** — Memory Analysis runs and their clusters
 
 **Agent memory substrate** (epic #885, v0.24.0 / v0.25.0 — see [Agent Memory Substrate Lanes](#agent-memory-substrate-lanes))
 - **agent_states** — Per-context key→value JSON scratch state with optional TTL (`expires_at`); unique on `(context_id, key)`. Structurally excluded from `recall()`
@@ -338,7 +375,7 @@ Since v0.48.0, REST and MCP batch ingest are thin adapters over `ResourceIngestS
 - **workspace_storage_usage** — Denormalized per-workspace `(used_bytes, file_count)` counter, maintained atomically with `file_objects` inserts/soft-deletes so the quota path reads one row instead of an online `SUM`.
 
 **Plans, quotas & sleep**
-- **user_plans** / **plan_changes** — Plan state and history
+- **plan_changes** — Plan history; the current plan is `workspaces.plan_name` (the old `user_plans` table was dropped)
 - **usage_stats** — Rate-limit and quota counters
 - **sleep_reports** — Per-run Sleep Maintenance summaries (the only record of Sleep's LLM cost)
 - **llm_call_log** — Per-call cost ledger for LLM / embedding calls made outside a run (recall embeddings, the write-time supersede check); see [deployment.md](deployment.md#where-cost-is-recorded-sleep_reports-vs-llm_call_log)
@@ -348,6 +385,14 @@ Since v0.48.0, REST and MCP batch ingest are thin adapters over `ResourceIngestS
 - **neural_config** — Neural engine per-workspace config
 - **config_overrides** — Legacy for configuration: nothing reads it as settings at runtime and the `/config` write routes refuse (#1580). Configuration is env-only; rows are ignored, except the one-time marker `marker:content_chunks_gap_seed` (#2107), whose removal makes the next scheduler leader re-stamp every flag-on context once (with `CONTENT_CHUNKS_REQUIRE_PLAN` on)
 - **mcp_tool_descriptions** — Admin-editable MCP tool description overrides
+
+**Other domains** (not detailed here; see `backend/src/models/`)
+- **Sign-in & identity** — `webauthn_credentials` (passkeys), `oauth_device_codes`, `oidc_*` (identity-only OIDC provider), `email_signup_requests`, `share_keys`, `signup_allowlist` / `signup_gate_config`
+- **Sync platform** — `sync_*` (services, installations, feeds, runs, records, signing keys and access tokens) and `workspace_integration_*`
+- **Erasure** — `erasure_requests`, `vector_erasure_jobs`, `deferred_point_deletes`
+- **Public MCP endpoints** — `public_mcp_*` and `public_usage_budgets`
+- **Secret store** — `secrets`, `secret_versions`, `secret_grants`, `secret_access_log`, `recipient_pubkeys`
+- **Operations** — `scheduled_job_status`, `workspace_operation_history`, `mcp_notices*`, `referral_grants`
 
 ### Qdrant Collections
 
@@ -363,23 +408,27 @@ Since v0.48.0, REST and MCP batch ingest are thin adapters over `ResourceIngestS
 
 **Features**:
 - Semantic vector search
-- Full-text BM25 search (MatchText + sparse vector)
+- Full-text BM25 search (sparse vector with IDF; Sudachi tokens for Japanese)
 - Metadata filtering (workspace / context / tags / importance)
 
 Prior "1 user = 1 collection" design (`kagura_user_{user_id}`) was replaced by the single-collection migration; no per-user collections remain in new deployments.
 
+For a single-process "lite" setup, `vector_backend=lance` replaces Qdrant with an embedded LanceDB store (the `lite` extra).
+
 ### Redis Storage
 
 1. **Sessions**: Session-based authentication (7 days TTL)
-2. **Cache**: Embedding cache, search results
+2. **Cache**: Embedding cache (24 h TTL), search results
 3. **Rate Limiting**: Per-key request counters
 
 ### Object Storage (R2)
 
-Binary file uploads are stored in **Cloudflare R2**, not in Postgres. R2 is the
-**only** object-storage backend — there is no `STORAGE_BACKEND` switch, and the
-`file_objects.storage_backend` column is pinned to `r2` by a `CHECK`. R2 access is
-configured via the `R2_*` environment variables. The canonical schema lives in
+Binary file uploads are stored in S3-compatible object storage — **Cloudflare R2**
+by default — not in Postgres. `storage_backend_type` selects the endpoint
+(`r2`, `s3`, `minio`, `s3-compatible`, `aws`; all use the same S3 client,
+`backend/src/storage/factory.py`), and the local docker-compose runs MinIO. The
+`file_objects.storage_backend` column is still pinned to `r2` by a `CHECK`. R2
+access is configured via the `R2_*` environment variables. The canonical schema lives in
 `backend/src/models/file_objects.py` + alembic `e03_485_file_objects`; this section
 is the conceptual overview (Issue #485). Bucket keys are
 `{workspace_id}/{sha256[:2]}/{sha256}` — the `sha256[:2]` sub-prefix spreads objects
@@ -452,7 +501,7 @@ All checks funnel through `PermissionService` in `backend/src/services/permissio
 
 - **API Keys**: SHA256 hash storage
 - **External API Keys**: Fernet symmetric encryption
-- **JWT Tokens**: HS256 signing (1 hour expiration)
+- **OAuth access tokens**: opaque random strings, not JWTs (1 hour lifetime); signed tokens use asymmetric keys — RS256 for the OIDC provider and the sync service JWTs, EdDSA for the billing handoff
 - **OAuth2 client secrets**: SHA-256 hash storage for confidential clients; public clients authenticate without a client secret
 - **OAuth / MCP access and refresh tokens**: `sha256$`-prefixed SHA-256 digests in `oauth_tokens.access_token` and `oauth_tokens.refresh_token` after explicit finalization. The additive migration starts in `bridge` mode, retaining raw writes while old binaries are drained. Compatible readers accept existing raw rows and hashed rows, but a stored digest is never accepted as a bearer credential. Finalization hashes all rows, including revoked and expired tokens, validates a hash-only database constraint, and changes the durable mode to `hashed` in one transaction. Token values returned to clients, lifetimes, scopes, rotation, revocation and introspection rules are unchanged. Operators must complete the [staged rollout](ops/oauth-token-hash-rollout.md); applying the schema migration alone does not finish it.
 
@@ -477,14 +526,15 @@ Every Google / GitHub callback requires that cookie too (#2791): without it the 
 
 ### Horizontal Scaling
 - **Backend**: Stateless FastAPI (scale with replicas)
-- **Frontend**: Next.js static export (CDN-ready)
+- **Frontend**: Next.js `standalone` server build (`frontend/next.config.ts`)
 - **Database**: PostgreSQL connection pooling (asyncpg)
 - **Redis**: Cluster mode support
+- **Scheduled jobs**: with several backend replicas, one leader process runs the scheduler (`backend/src/tasks/scheduler_leader.py`, #1980)
 
 ### Performance Optimizations
 - **Async I/O**: All database operations async
-- **Connection Pooling**: PostgreSQL (20 max), Redis (10 max)
-- **Caching**: Redis cache for embeddings (60 min TTL)
+- **Connection Pooling**: PostgreSQL `DB_POOL_SIZE` 5 + `DB_MAX_OVERFLOW` 10 per engine (two engines per process); Redis 50 connections per worker
+- **Caching**: Redis cache for embeddings (24 h TTL)
 - **Batch Processing**: Background tasks with APScheduler
 
 ### Resource Usage (per instance)
@@ -494,24 +544,29 @@ Every Google / GitHub callback requires that cookie too (#2791): without it the 
 
 ## Deployment Architecture
 
+The reference self-hosted deployment (`terraform/single-server/`) is one VM running Docker Compose behind Cloudflare:
+
 ```
 ┌──────────────────────────────────────┐
-│         Load Balancer (GCP)          │
+│        Cloudflare (DNS / proxy)      │
 └──────────────────────────────────────┘
               ↓
 ┌──────────────────────────────────────┐
-│      Backend Instances (Docker)      │
-│  - your-domain.com (production)      │
-│  - localhost:8080 (development)      │
+│     VM (Docker Compose)              │
+│  - Caddy (TLS, routing)              │
+│  - API (FastAPI) + Web (Next.js)     │
+│  - PostgreSQL, Qdrant, Redis         │
+│  - optional: ClamAV, Ollama          │
 └──────────────────────────────────────┘
               ↓
 ┌──────────────────────────────────────┐
-│     Managed Services (GCP)           │
-│  - Cloud SQL (PostgreSQL)            │
-│  - Qdrant Cloud                      │
-│  - Memorystore (Redis)               │
+│  External: object storage (R2 / S3), │
+│  embedding / rerank / LLM providers, │
+│  email (Resend)                      │
 └──────────────────────────────────────┘
 ```
+
+For local development, `docker-compose.yml` runs the same services with MinIO in place of R2 (API on `localhost:8080`).
 
 ## Technology Stack
 
@@ -520,33 +575,37 @@ Every Google / GitHub callback requires that cookie too (#2791): without it the 
 | **Backend** | FastAPI | 0.133+ |
 | **Database** | PostgreSQL | 18+ |
 | **Vector DB** | Qdrant | 1.19 (the client accepts 1.17–1.19) |
+| **Vector DB (lite)** | LanceDB | optional `lite` extra |
 | **Cache** | Redis | 7+ |
 | **Frontend** | Next.js | 16 |
 | **ORM** | SQLAlchemy | 2.1 (async) |
 | **Auth** | Authlib | 1.9 |
-| **AI** | OpenAI API | Latest |
-| **Reranking** | Cohere API | Latest |
-| **Graph** | NetworkX | 3.0+ |
+| **Embedding** | OpenAI API or self-hosted (Ollama / vLLM) | Latest |
+| **Reranking** | Voyage, Cohere or self-hosted (optional) | Latest |
+| **Graph** | PostgreSQL (`neural_memory_edges`) | — |
 
 ## Monitoring & Observability
 
 ### Logging
 - **Format**: Structured JSON logs (structlog)
 - **Levels**: DEBUG, INFO, WARNING, ERROR
-- **Destinations**: stdout (Docker), CloudWatch (prod)
+- **Destinations**: stdout as JSON; the hosting platform's log collector picks it up
+
+### Operations views
+- `GET /api/v1/admin/operations/status` — system-admin view, in aggregates, of each scheduled job's last run, each work queue's size and oldest item, and each platform LLM lane's usage (#2768)
+- Sync activity and observability endpoints for sync-managed contexts (#2679, #2810)
 
 ### Metrics (Future)
+There is no Prometheus or OpenTelemetry metrics exporter yet. Candidates:
 - Request latency (p50, p95, p99)
 - Error rates
 - Database query performance
 - Memory usage per user
 
 ### Health Checks
-- `/health` - Basic health check
-- `/api/v1/system/info` - Version and deployment feature flags (public)
-- Database connection status
-- Qdrant connection status
-- Redis connection status
+- `/health` — liveness
+- `/readiness` — checks PostgreSQL, Qdrant and Redis connections
+- `/api/v1/system/info` — version and deployment feature flags (public)
 
 ## Future Enhancements
 
