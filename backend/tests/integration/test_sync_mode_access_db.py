@@ -5,18 +5,23 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, insert, select, text
+from sqlalchemy.exc import DBAPIError
 
 from api.routes import me_workspaces
-from models.auth import Context, ContextMember, Workspace, WorkspaceMember
+from models.auth import Context, ContextMember, IdentityLink, Workspace, WorkspaceMember
 from models.memory import Memory
 from models.oidc import OIDCClient, OIDCGrant, OIDCToken
 from models.public_mcp import PublicMcpEndpoint
 from models.sync_installation import SyncInstallation, SyncService
 from models.sync_management import SyncManagedTarget, SyncModeOperation
 from services.capacity_lock import ENTITLEMENT_SOURCE_EXTERNAL_BILLING
+from services.context_service import ContextService
+from services.identity_link_service import IdentityLinkService
+from services.permission_service import PermissionService
 from tests.integration import test_sync_management_db as management
 from tests.integration.sync_feed_fixtures import human, request
+from utils.db_helpers import is_lock_not_available
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 store, worker, feeds, managed = (
@@ -57,6 +62,89 @@ async def footprint(subject):
                 .where(SyncModeOperation.installation_id == subject.iid)
             ),
         )
+
+
+async def private_target(subject, *, linked=False):
+    await management.manual(subject)
+    context_id = UUID(subject.target["context_id"])
+    async with subject.factory() as owner:
+        service = ContextService(owner)
+        await service.update_context(subject.store.users["owner"], context_id, is_public=False)
+        if linked:
+            await service.update_context(subject.store.users["owner"], context_id, is_private=True)
+            await IdentityLinkService(owner).link(
+                subject.store.users["owner"], subject.store.users["admin"]
+            )
+    return context_id
+
+
+async def test_profile_refreshes_context_after_owner_privacy_change(subject, monkeypatch):
+    context_id = await private_target(subject)
+    original = management.sync_management.target_fence
+
+    async def racing_privacy(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        async with subject.factory() as owner:
+            await ContextService(owner).update_context(
+                subject.store.users["owner"], context_id, is_private=True
+            )
+        return result
+
+    monkeypatch.setattr(management.sync_management, "target_fence", racing_privacy)
+    response = await human(subject, "GET", "management/access", role="admin")
+    assert response.status_code == 404, response.text
+    private(response)
+
+
+async def test_profile_fences_actual_unlink_until_its_observation_commits(subject, monkeypatch):
+    await private_target(subject, linked=True)
+    original = PermissionService.check_context_access
+    checks, blocked = 0, False
+
+    async def racing_unlink(self, *args, **kwargs):
+        nonlocal checks, blocked
+        result = await original(self, *args, **kwargs)
+        if args[0] == subject.store.users["admin"]:
+            checks += 1
+            if checks == 3:
+                async with subject.factory() as owner:
+                    await owner.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                    try:
+                        await IdentityLinkService(owner).unlink(
+                            subject.store.users["owner"], subject.store.users["admin"]
+                        )
+                    except DBAPIError as exc:
+                        assert is_lock_not_available(exc)
+                        await owner.rollback()
+                        blocked = True
+        return result
+
+    monkeypatch.setattr(PermissionService, "check_context_access", racing_unlink)
+    response = await human(subject, "GET", "management/access", role="admin")
+    assert checks == 3
+    assert blocked, "Unlink committed after final RBAC before lifecycle capability observation"
+    profile(subject, response, "admin", available=False)
+    async with subject.factory() as owner:
+        await IdentityLinkService(owner).unlink(
+            subject.store.users["owner"], subject.store.users["admin"]
+        )
+    assert (await human(subject, "GET", "management/access", role="admin")).status_code == 404
+
+
+@pytest.mark.parametrize("held", ["context", "link"])
+async def test_profile_authority_contention_never_returns_a_stale_capability(subject, held):
+    context_id = await private_target(subject, linked=True)
+    async with subject.factory() as writer:
+        model, condition = (
+            (Context, Context.id == context_id)
+            if held == "context"
+            else (IdentityLink, IdentityLink.user_id == subject.store.users["admin"])
+        )
+        await writer.scalar(select(model).where(condition).with_for_update())
+        response = await human(subject, "GET", "management/access", role="admin")
+        assert response.status_code == 409, response.text
+        assert "permissions" not in response.text
+        await writer.rollback()
 
 
 async def normal_access(subject, role="owner"):

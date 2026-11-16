@@ -100,6 +100,11 @@ their existing capacity-safe policy: a capacity hold or Context write suspension
 does not remove safe lifecycle access. Existing workspace/resource data `read`
 and `sync.manage` flags remain unchanged. These booleans describe role capability;
 they neither grant a new scope nor prove that draining/indexing can complete.
+The Context is refreshed under a NOWAIT shared row lock before the final role
+check. Private linked-owner reach also locks both ownership-witness link rows in
+user order. Those locks remain through observation commit, so concurrent privacy
+changes or unlink cannot return stale capabilities. Contention remains an error;
+this does not require a live public endpoint or take the global link mutex.
 Stop/finalize still require a separately authorized `integrations:manage` token
 and revalidate current authority at the mutation boundary. Resume, source writes,
 canonical content reads and paid service operations retain their normal gates.

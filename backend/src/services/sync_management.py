@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.sync_identity import SyncPrincipal, load_sync_identity
 from auth.workspace_roles import ContextRole
 from config.settings import get_settings
-from models.auth import Context, User, Workspace
+from models.auth import Context, IdentityLink, User, Workspace
 from models.management_schemas import digest
 from models.memory import Memory
 from models.resource import IndexerState, ResourceEvent
@@ -389,14 +389,6 @@ async def read_mode_access(
     ):
         from services.sync_provisioning import installation_view
 
-        _context, role = await PermissionService(db).check_context_access(
-            principal.user_id,
-            installation.context_id,
-            required_role=ContextRole.VIEWER,
-            capacity=CapacityPolicy.ALLOWED,
-            key_workspace_id=wid,
-        )
-        allowed = role in (ContextRole.EDITOR, ContextRole.OWNER)
         current = await target_fence(db, installation.context_id)
         if current.mode is None:
             # A row moved away from this retained Context is drift, not an
@@ -410,6 +402,31 @@ async def read_mode_access(
             current.mode.generation,
         ) != (iid, installation.resource_pk, installation.context_id, installation.generation):
             raise ConflictError("Synchronization ownership changed")
+        # A capability snapshot must not outlive the Context privacy/linked-owner
+        # evidence used to authorize it. Refresh and retain those metadata locks
+        # through the final RBAC check and commit, without requiring publication.
+        context = await locked(db, Context, Context.id == installation.context_id)
+        if context is None or context.deleted_at is not None:
+            raise NotFoundException("Synchronization target")
+        if context.is_private and context.created_by != principal.user_id:
+            if context.created_by is None:
+                raise NotFoundException("Synchronization target")
+            groups = set()
+            for user_id in sorted({principal.user_id, context.created_by}):
+                link = await locked(db, IdentityLink, IdentityLink.user_id == user_id)
+                if link is None:
+                    raise NotFoundException("Synchronization target")
+                groups.add(link.group_id)
+            if len(groups) != 1:
+                raise NotFoundException("Synchronization target")
+        _context, role = await PermissionService(db).check_context_access(
+            principal.user_id,
+            installation.context_id,
+            required_role=ContextRole.VIEWER,
+            capacity=CapacityPolicy.ALLOWED,
+            key_workspace_id=wid,
+        )
+        allowed = role in (ContextRole.EDITOR, ContextRole.OWNER)
         status = (
             mode_view(current.mode)
             if current.mode is not None
