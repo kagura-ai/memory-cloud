@@ -24,6 +24,12 @@ from models.sync_management import (
     SyncResumeCandidate,
     SyncResumePreview,
 )
+from models.sync_mode_access_schemas import (
+    SyncModeAccess,
+    SyncModePermissions,
+    SyncModeStatus,
+    SyncModeTarget,
+)
 from services.capacity_lock import CapacityPolicy
 from services.permission_service import PermissionService
 from services.sync_feed_authority import FeedFence, feed_fence, locked
@@ -370,6 +376,73 @@ async def management_boundary(
         except BaseException:
             await db.rollback()
             raise
+
+
+async def read_mode_access(
+    db: AsyncSession, wid: UUID, iid: UUID, principal: SyncPrincipal
+) -> SyncModeAccess:
+    """Observe current lifecycle rights without enabling canonical data access."""
+    async with management_boundary(db, wid, iid, principal, write=False) as (
+        installation,
+        _workspace,
+        _fence,
+    ):
+        from services.sync_provisioning import installation_view
+
+        _context, role = await PermissionService(db).check_context_access(
+            principal.user_id,
+            installation.context_id,
+            required_role=ContextRole.VIEWER,
+            capacity=CapacityPolicy.ALLOWED,
+            key_workspace_id=wid,
+        )
+        allowed = role in (ContextRole.EDITOR, ContextRole.OWNER)
+        current = await target_fence(db, installation.context_id)
+        if current.mode is None:
+            # A row moved away from this retained Context is drift, not an
+            # unenrolled target whose conservative default may be projected.
+            if await locked(db, SyncManagedTarget, SyncManagedTarget.installation_id == iid):
+                raise ConflictError("Synchronization ownership changed")
+        elif (
+            current.mode.installation_id,
+            current.mode.resource_pk,
+            current.mode.context_id,
+            current.mode.generation,
+        ) != (iid, installation.resource_pk, installation.context_id, installation.generation):
+            raise ConflictError("Synchronization ownership changed")
+        status = (
+            mode_view(current.mode)
+            if current.mode is not None
+            else {
+                "mode": "feed",
+                "epoch": 1,
+                "generation": installation.generation,
+                "stop_event_id": 0,
+                "reason": None,
+            }
+        )
+        target = await installation_view(db, installation)
+        result = SyncModeAccess(
+            contract_version="sync-mode-access-v1",
+            subject=principal.user_id,
+            target=SyncModeTarget.model_validate(
+                target.model_dump(
+                    include={
+                        "workspace_id",
+                        "installation_id",
+                        "resource_pk",
+                        "context_id",
+                        "endpoint_id",
+                        "generation",
+                        "target_available",
+                    }
+                )
+            ),
+            management=SyncModeStatus.model_validate(status),
+            permissions=SyncModePermissions(read=True, stop=allowed, finalize=allowed),
+        )
+        await db.commit()
+        return result
 
 
 async def operation_receipt(

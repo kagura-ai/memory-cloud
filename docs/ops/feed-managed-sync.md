@@ -71,12 +71,48 @@ All outcomes are private/no-store. Foreign targets are uniformly not found.
 | Method and suffix | Body / query | Result |
 | --- | --- | --- |
 | `GET` | None | Mode, epoch, installation generation, stop watermark/reason |
+| `GET /access` | None | Versioned current-human lifecycle rights and retained target metadata |
 | `POST /stop` | `operation_id` UUID | Durable `stopping`; abort unfinished runs and advance generation once |
 | `POST /finalize` | `operation_id` UUID | `manual` only after writer exclusion and complete indexing |
 | `POST /resume/preview` | None | Preview UUID, diff hash, retire/publish counts, finite deadline |
 | `GET /resume/diff` | `preview_id`, `offset` (0–20,000), `limit` (1–100) | Exact current human's paginated diff |
 | `POST /resume/confirm` | `operation_id`, `preview_id`, `diff_hash` | Atomic new generation and `feed` publication |
 | `POST /reconnect` | `operation_id`, fresh owner `authorization_id` | Same retained target, active authentication, still `manual` |
+
+### Readonly lifecycle access
+
+`GET /access` accepts the ordinary registered browser client's human token with
+`workspaces:read`. Its strict `sync-mode-access-v1` response contains exactly:
+
+- `contract_version` and the current human `subject`.
+- `target`: `workspace_id`, `installation_id`, `resource_pk`, `context_id`,
+  `endpoint_id`, `generation` and `target_available`. No public URL, source URL,
+  resource slug, records or credentials are included.
+- `management`: `mode`, `epoch`, matching `generation`, `stop_event_id` and nullable
+  bounded `reason`. All counters are integers in the JavaScript safe range.
+- `permissions`: `read: true` for this metadata, plus boolean `stop` and `finalize`
+  calculated from the current Context Editor/Owner role. A Viewer gets metadata
+  with both mutation capabilities false. Workspace role alone is insufficient.
+
+This uses the same current identity, browser-client registration, membership,
+seat/reach and target fence as the management controls. It deliberately applies
+their existing capacity-safe policy: a capacity hold or Context write suspension
+does not remove safe lifecycle access. Existing workspace/resource data `read`
+and `sync.manage` flags remain unchanged. These booleans describe role capability;
+they neither grant a new scope nor prove that draining/indexing can complete.
+Stop/finalize still require a separately authorized `integrations:manage` token
+and revalidate current authority at the mutation boundary. Resume, source writes,
+canonical content reads and paid service operations retain their normal gates.
+
+The read never enrolls a target, changes generation/mode/Sleep, creates an operation
+receipt or repairs missing publication. Unpublished endpoint metadata reports
+`target_available: false` without granting any extra authority. An unenrolled
+target reports the conservative default `feed` epoch 1 at its current generation.
+The existing `SYNC_MANAGED_ENABLED` rollout switch also gates this route. Disabled
+or foreign targets remain private/not-found; every outcome is no-store/no-cache.
+Consumers must validate the explicit version, subject, full target and matching
+generation; absence of this profile is not permission to infer Context rights or
+fall back to ordinary data permissions for lifecycle operations.
 
 Operation receipts bind the real principal, action and exact body. Repeating an
 operation returns its original result without advancing generation again;

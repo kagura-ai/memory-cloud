@@ -13277,6 +13277,149 @@
         ],
         "type": "object"
       },
+      "SyncModeAccess": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": "sync-mode-access-v1",
+            "type": "string"
+          },
+          "management": {
+            "$ref": "#/components/schemas/SyncModeStatus"
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/SyncModePermissions"
+          },
+          "subject": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/SyncModeTarget"
+          }
+        },
+        "required": [
+          "contract_version",
+          "management",
+          "permissions",
+          "subject",
+          "target"
+        ],
+        "type": "object"
+      },
+      "SyncModePermissions": {
+        "additionalProperties": false,
+        "properties": {
+          "finalize": {
+            "type": "boolean"
+          },
+          "read": {
+            "const": true,
+            "type": "boolean"
+          },
+          "stop": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "finalize",
+          "read",
+          "stop"
+        ],
+        "type": "object"
+      },
+      "SyncModeStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "epoch": {
+            "maximum": 9007199254740991.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "generation": {
+            "maximum": 9007199254740991.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "feed",
+              "stopping",
+              "manual"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stop_event_id": {
+            "maximum": 9007199254740991.0,
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "epoch",
+          "generation",
+          "mode",
+          "reason",
+          "stop_event_id"
+        ],
+        "type": "object"
+      },
+      "SyncModeTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "context_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "endpoint_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "generation": {
+            "maximum": 9007199254740991.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "installation_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "resource_pk": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "target_available": {
+            "type": "boolean"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context_id",
+          "endpoint_id",
+          "generation",
+          "installation_id",
+          "resource_pk",
+          "target_available",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "SyncWorkerError": {
         "properties": {
           "error": {
@@ -40103,6 +40246,122 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/access": {
+      "get": {
+        "operationId": "management_access_api_v1_workspaces__workspace_id__sync_installations__installation_id__management_access_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncModeAccess"
                 }
               }
             }

@@ -130,7 +130,9 @@ def test_every_command_is_listed_where_the_commands_are_listed() -> None:
     assert "login" in commands
     assert _listed(GUIDE, r"^\| `([a-z-]+)` \|") == commands
     assert _listed(CLIENT_DOCS, r"^\| `/kagura-memory:([a-z-]+)` \|") == commands
-    assert _listed(README_JA, r"^\| `/kagura-memory:([a-z-]+)` \|") == commands
+    # The README overview links to the complete catalogue after #2864. Keep
+    # completeness checks on the actual catalogues above, not the overview.
+    assert "[MCPクライアント設定](docs/mcp-clients.md)" in _read(README_JA)
     # The development guide lists them on one line, under the plugin's directory.
     (dev_line,) = _listed(DEV_GUIDE, r"^  - Commands: (.*)$")
     assert set(re.findall(r"`/kagura-memory:([a-z-]+)`", dev_line)) == commands
