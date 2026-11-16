@@ -132,7 +132,7 @@ async def test_delayed_original_update_cannot_replace_a_newer_configuration(conf
         assert before[:2] == ("b" * 64, 2)
     finally:
         release.set()
-        await pending
+        await asyncio.gather(pending, return_exceptions=True)
 
 
 async def test_two_real_sessions_cannot_both_apply_the_same_expected_version(configured):
