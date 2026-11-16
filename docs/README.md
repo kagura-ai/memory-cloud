@@ -1,13 +1,30 @@
 # Documentation
 
-> Kagura Memory Cloud is a team-scale **LLM Knowledge Base** — beyond RAG. It implements the 5-layer pattern from [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) (Ingest → Compile → Index → Query → Enhance) using MCP as the compile API, BM25 + Qdrant + Hebbian as a triple-index, and Sleep Maintenance for batch consolidation. See [Architecture](architecture.md#llm-knowledge-base--5-layer-mapping) for the full mapping.
+Kagura Memory Cloud gives people and AI agents shared, persistent memory through MCP, a REST API, and a web UI. Start with a working connection and one saved memory, then explore the guides for your use case.
+
+| Your next step | Start here |
+|---|---|
+| Understand the product | [English README](../README.md) · [日本語 README](../README.ja.md) |
+| Use the released OpenAI Plugin in ChatGPT | [Add Kagura Memory Cloud](https://chatgpt.com/plugins/plugin_asdk_app_6adacc9eaf5481919a85fad2aaa7aade) · [Request a cloud invite](https://www.kagura-ai.com/waitlist/) |
+| Run your own server | [Getting Started](getting-started.md) |
+| Find supported platforms | [Platform overview](../README.md#supported-platforms) · [MCP Client Setup](mcp-clients.md) |
+| Evaluate accuracy and cost | [Benchmarks](benchmarks.md) · [公開レポート（日本語）](https://www.kagura-ai.com/ja/benchmarks/) |
+| Build an integration | [MCP Tools](mcp-tools.md) · [REST API](api-reference.md) · [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk) |
+| Operate a deployment | [Deployment](deployment.md) · [Troubleshooting](troubleshooting.md) |
 
 ## Getting Started
 
 - [Getting Started](getting-started.md) — Installation, setup, and first steps
 - [Core Concepts](concepts.md) — Workspace, Context, Memory, Neural Memory, MCP Tools
-- [MCP Client Setup](mcp-clients.md) — Claude Code / Desktop / Chat, ChatGPT, Gemini CLI, plugin & templates, WSL2 note
-- [MCP Tools Reference](mcp-tools.md) — All 72 tools with required roles
+- [MCP Client Setup](mcp-clients.md) — ChatGPT plugin and custom MCP, Claude, Codex, Cursor, Gemini, Muse, Grok, Microsoft 365 Copilot, CLI clients, and hooks
+- [Microsoft 365 Copilot](microsoft-365-copilot.md) — MCP profile, operator OAuth setup, and Microsoft registration
+- [MCP Tools Reference](mcp-tools.md) — Tool profiles, parameters, and required roles
+
+## Benchmarks & Evaluation
+
+- [Benchmark Reading Guide](benchmarks.md) — Public FC, LongMemEval, and LoCoMo results; versions, grading, and cost boundaries
+- [Search Quality Benchmark](search-quality-benchmark.md) — Retrieval accuracy, reranking, and memory-writing practices
+- [Evaluation Documentation](eval/README.md) — Offline evaluation and labeling protocols
 
 ## Architecture & API
 

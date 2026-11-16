@@ -371,7 +371,7 @@ Kagura Memory Cloud exposes 72 tools via the [Model Context Protocol (MCP)](http
 | Usage | 1 | `get_usage` — workspace quota and usage queries |
 | API-Key Bindings | 2 | `list_my_bindings`, `describe_binding` — introspect public-bound API keys (read-only, owner-scoped) |
 
-See [README › MCP Tools](../README.md#mcp-tools) for the full per-tool table with descriptions and required roles.
+See the [MCP Tools Reference](mcp-tools.md) for the full per-tool table with descriptions and required roles.
 
 **Typical workflow:**
 

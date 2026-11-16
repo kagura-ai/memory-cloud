@@ -1,6 +1,8 @@
 # MCP Client Setup
 
-How to connect MCP clients (Claude Code, Claude Desktop/Chat, ChatGPT, Gemini, Muse, Grok, Gemini CLI, and any Streamable-HTTP client) to a self-hosted Kagura Memory Cloud. Start from the [README Quick Start](../README.md#quick-start) if your server isn't running yet; the full tool list is in the [MCP Tools Reference](mcp-tools.md).
+How to connect MCP clients (ChatGPT, Claude Code, Claude Desktop/Chat, Codex, Cursor, Gemini, Muse, Grok, Microsoft 365 Copilot, Gemini CLI, and any Streamable-HTTP client) to a self-hosted Kagura Memory Cloud. Start from the [README Quick Start](../README.md#quick-start) if your server isn't running yet; the full tool list is in the [MCP Tools Reference](mcp-tools.md).
+
+**Using hosted Kagura AI?** The [released OpenAI Plugin for ChatGPT](https://chatgpt.com/plugins/plugin_asdk_app_6adacc9eaf5481919a85fad2aaa7aade) lets you add Kagura Memory Cloud and sign in to your account. See the [release announcement](https://www.kagura-ai.com/ja/news/2026-11-10-chatgpt-plugin/). Gemini and Muse connect over remote MCP; their setup sections are [Gemini](#gemini-custom-mcp-connector) and [Muse](#muse). The custom endpoint instructions below also support your own deployment.
 
 ## Which URL?
 
@@ -26,15 +28,7 @@ The default URL lists the core memory and context tools (the exact set is under 
 
 Claude Code + Kagura Memory Cloud gives your AI assistant **persistent, searchable, team-shareable memory** that works across sessions, machines, and projects.
 
-**Why not just use Claude Code's built-in memory?**
-
-| | Claude Code Memory | Kagura Memory Cloud |
-|---|---|---|
-| Storage | Local files (`~/.claude/`) | Cloud (PostgreSQL + Qdrant) |
-| Search | File name only | Hybrid Search (semantic + full-text) |
-| Sharing | Single machine | Team workspace with RBAC |
-| Structure | Flat markdown | 3-layer architecture + Neural Memory graph |
-| Cross-project | Per-project only | Any project via MCP |
+Use Kagura alongside your client's own memory when you want a shared knowledge store across clients and team members. Kagura adds hybrid retrieval, workspace/context access controls, and a web UI for inspecting and maintaining saved memories.
 
 **Setup (3 steps):**
 
@@ -57,10 +51,10 @@ You: "List my memory contexts"
 → AI calls list_contexts()
 
 You: "Remember: our API uses JWT with 1h expiry and refresh token rotation"
-→ AI calls remember() — stored permanently
+→ AI calls remember() in the chosen context — committed to the server
 
 You: "What do we know about auth?"
-→ AI calls recall() — finds it instantly, even months later
+→ AI calls recall() in that same context — retrieves the saved decision
 ```
 
 > `.mcp.json` is in `.gitignore` — never commit it (contains API keys).
@@ -226,13 +220,13 @@ Neither client runs tool hooks, so the server sends its `instructions` on `initi
 
 ## ChatGPT Desktop
 
-ChatGPT desktop app supports MCP servers. Add via Settings > MCP Servers:
-1. Server URL ([which one?](#which-url)):
-   - **All tools (default):** `https://your-domain.com/mcp`
-   - **All tools:** `https://your-domain.com/mcp?profile=full`
-2. Authentication: OAuth — ChatGPT registers itself and opens the Kagura sign-in (no OAuth app to create). Alternatively a Bearer token `kagura_{your_api_key}`.
+For ChatGPT's custom MCP connection, follow the [official connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt); available controls depend on the client and workspace policy. For a public deployment, enter:
 
-> Like Claude Chat, ChatGPT requires a public URL. For local development, use a tunnel or the REST API directly.
+- **Core tools (default):** `https://your-domain.com/mcp`
+- **All tools:** `https://your-domain.com/mcp?profile=full`
+- **Authentication:** OAuth; sign in to Kagura and approve access when prompted.
+
+A local `http://localhost:8080/mcp` URL is not reachable from ChatGPT's servers. The official guide also describes Secure MCP Tunnel for private servers. For local server checks without a connector, use the [REST example](getting-started.md#quick-api-test).
 
 > If the deployment has an app listed in ChatGPT's app directory, its operator can set `CHATGPT_APP_URL` ([Deployment › ChatGPT app link](deployment.md#chatgpt-app-link-issue-2760)): the web UI then shows a link to the listing on the onboarding chat screen and the MCP connection card, where the user adds the app and signs in instead of pasting the URL. Without it, connect by the Server URL above.
 
