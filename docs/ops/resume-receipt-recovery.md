@@ -43,6 +43,14 @@ observation: it does not prove that a still-live original confirmation cannot
 commit later. Safe abandonment must additionally prove the original publication
 authority is no longer usable, using its original finite KMC deadlines or an
 acknowledged revocation; never extend the original authorization window.
+A `not_found` whose `as_of` is at or after the original preview's `expires_at` is
+final: a confirmation of that preview can no longer apply.
+
+`mismatch` is not evidence that the operation was not applied. Besides a different
+action, body or actor, it also covers a confirmation whose original actor's account
+was later removed: account deletion clears the saved actor of the receipt, so the
+original subject can no longer match. A typed answer for that case is an open
+decision.
 
 The lookup shares current identity/membership and NOWAIT workspace/installation
 locks with management transitions and validates the retained ownership binding.
@@ -56,7 +64,7 @@ Audit of the HTTP access remains the existing control-plane behavior.
 
 Authentication, authorization, rollout, contention, validation and infrastructure
 failures remain private errors, never successful `not_found`. In particular,
-HTTP409 from this API or `/resume/confirm` is not evidence of original absence.
+HTTP 409 from this API or `/resume/confirm` is not evidence of original absence.
 All responses include `Cache-Control: no-store` and `Pragma: no-cache`.
 
 This implementation does not merge prerequisites, enable any feature, deploy an
