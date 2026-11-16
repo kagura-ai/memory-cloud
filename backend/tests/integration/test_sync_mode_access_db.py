@@ -303,6 +303,43 @@ async def test_read_profile_does_not_turn_an_ordinary_token_into_a_control_grant
     assert await footprint(subject) == before
 
 
+async def test_profile_requires_the_workspace_read_scope_on_the_live_token(subject):
+    async with subject.factory() as db:
+        for model, key in (
+            (OIDCGrant, subject.store.grant_ids["owner"]),
+            (OIDCToken, subject.store.token_ids["owner"]),
+        ):
+            row = await db.get(model, key)
+            row.scope = "openid integrations:manage"
+        await db.commit()
+    before = await footprint(subject)
+    response = await human(subject, "GET", "management/access")
+    assert response.status_code == 403, response.text
+    private(response)
+    assert "permissions" not in response.text
+    assert await footprint(subject) == before
+
+
+async def test_credential_expiry_during_profile_observation_is_an_error_not_a_profile(
+    subject, monkeypatch
+):
+    from services import sync_provisioning
+
+    original = sync_provisioning.installation_view
+
+    async def expiring(*args, **kwargs):
+        subject.store.clock.now += timedelta(days=2)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(sync_provisioning, "installation_view", expiring)
+    before = await footprint(subject)
+    response = await human(subject, "GET", "management/access")
+    assert response.status_code == 409, response.text
+    private(response)
+    assert "permissions" not in response.text
+    assert await footprint(subject) == before
+
+
 async def test_fresh_role_and_membership_are_checked_for_each_profile(subject):
     profile(subject, await human(subject, "GET", "management/access", role="member"), "member")
     async with subject.factory() as db:

@@ -41051,46 +41051,39 @@
                 "additionalProperties": false,
                 "properties": {
                   "expected": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": false,
-                        "properties": {
-                          "epoch": {
-                            "maximum": 9007199254740991,
-                            "minimum": 1,
-                            "type": "integer"
-                          },
-                          "generation": {
-                            "maximum": 9007199254740991,
-                            "minimum": 1,
-                            "type": "integer"
-                          },
-                          "mode": {
-                            "enum": [
-                              "feed",
-                              "stopping",
-                              "manual"
-                            ],
-                            "type": "string"
-                          },
-                          "stop_event_id": {
-                            "maximum": 9007199254740991,
-                            "minimum": 0,
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "epoch",
-                          "generation",
-                          "mode",
-                          "stop_event_id"
-                        ],
-                        "type": "object"
+                    "additionalProperties": false,
+                    "properties": {
+                      "epoch": {
+                        "maximum": 9007199254740991,
+                        "minimum": 1,
+                        "type": "integer"
                       },
-                      {
-                        "type": "null"
+                      "generation": {
+                        "maximum": 9007199254740991,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "mode": {
+                        "enum": [
+                          "feed",
+                          "stopping",
+                          "manual"
+                        ],
+                        "type": "string"
+                      },
+                      "stop_event_id": {
+                        "maximum": 9007199254740991,
+                        "minimum": 0,
+                        "type": "integer"
                       }
-                    ]
+                    },
+                    "required": [
+                      "epoch",
+                      "generation",
+                      "mode",
+                      "stop_event_id"
+                    ],
+                    "type": "object"
                   },
                   "operation_id": {
                     "format": "uuid",
@@ -41937,46 +41930,39 @@
                 "additionalProperties": false,
                 "properties": {
                   "expected": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": false,
-                        "properties": {
-                          "epoch": {
-                            "maximum": 9007199254740991,
-                            "minimum": 1,
-                            "type": "integer"
-                          },
-                          "generation": {
-                            "maximum": 9007199254740991,
-                            "minimum": 1,
-                            "type": "integer"
-                          },
-                          "mode": {
-                            "enum": [
-                              "feed",
-                              "stopping",
-                              "manual"
-                            ],
-                            "type": "string"
-                          },
-                          "stop_event_id": {
-                            "maximum": 9007199254740991,
-                            "minimum": 0,
-                            "type": "integer"
-                          }
-                        },
-                        "required": [
-                          "epoch",
-                          "generation",
-                          "mode",
-                          "stop_event_id"
-                        ],
-                        "type": "object"
+                    "additionalProperties": false,
+                    "properties": {
+                      "epoch": {
+                        "maximum": 9007199254740991,
+                        "minimum": 1,
+                        "type": "integer"
                       },
-                      {
-                        "type": "null"
+                      "generation": {
+                        "maximum": 9007199254740991,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "mode": {
+                        "enum": [
+                          "feed",
+                          "stopping",
+                          "manual"
+                        ],
+                        "type": "string"
+                      },
+                      "stop_event_id": {
+                        "maximum": 9007199254740991,
+                        "minimum": 0,
+                        "type": "integer"
                       }
-                    ]
+                    },
+                    "required": [
+                      "epoch",
+                      "generation",
+                      "mode",
+                      "stop_event_id"
+                    ],
+                    "type": "object"
                   },
                   "operation_id": {
                     "format": "uuid",
