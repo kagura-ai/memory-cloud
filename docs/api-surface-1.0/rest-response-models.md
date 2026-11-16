@@ -37,7 +37,7 @@ noted.
 ### 1. System-admin routes and `SYSTEM_ADMIN_MODE=service` (#2767, operator console routes #2851)
 
 - **Behaviour** (`backend/src/auth/dependencies.py` `require_admin` / `AdminUser`, `backend/src/auth/system_admin_mode.py`, setting `SYSTEM_ADMIN_MODE` = `session` | `off` | `service` in `backend/src/config/settings.py`): `session` (default) = session cookie of a `role=admin` user; `off` = every admin route answers 404 and is dropped from `/openapi.json`; `service` = the session cookie is ignored, the caller must come from `SYSTEM_ADMIN_SERVICE_ALLOWED_CIDRS` (else 404), present `Authorization: Bearer <SYSTEM_ADMIN_SERVICE_TOKEN>` (or a `..._PREVIOUS` token) and exactly one `X-Operator-Email` header, and is served as an `operator:<address>` principal (`role="operator"`). Errors `SYSADMIN-001`..`SYSADMIN-004` (`backend/src/utils/exceptions.py`). Routes on `AdminAccountUser` (`require_admin_account`) refuse the operator principal (`SYSADMIN-004`). `/system/info` `features.system_admin` reflects the mode.
-- **Routes** (every route behind `AdminUser` / `AdminAccountUser`; the response models are defined in the route file):
+- **Routes** (every route behind `AdminUser` / `AdminAccountUser`, not only the #2851 additions: marking the whole `require_admin` surface experimental is the owner's decision of 2026-11-16; the response models are defined in the route file):
   - `admin.py` (`/admin`): `GET /users`, `GET /users/{user_id}/stats`, `GET /users/{user_id}`, `PUT /users/{user_id}/role`, `PATCH /users/{user_id}/workspace_slot_bonus`, `DELETE /users/{user_id}`, `POST /users/{user_id}/erase`, `POST /workspaces/{workspace_id}/force-transfer-ownership`, `POST /force-transfer-requests/{request_id}/approve`, `POST /force-transfer-requests/{request_id}/cancel`, `GET /force-transfer-requests/{request_id}`, `GET /force-transfer-requests` (#2851), `POST /embedding/retry-failed`, `GET /embedding/failures` (#2851), `POST /contexts/{context_id}/restore`, `GET /contexts/deleted` (#2851), `POST /contexts/recover` (dry-run only for an operator)
   - `admin_audit_logs.py`: `GET /admin/audit-logs` (#2851) · `admin_environment.py`: `GET /admin/environment` (#2851) · `admin_erasure_requests.py`: `GET /admin/erasure-requests`, `GET /admin/erasure-requests/{request_id}` (#2851)
   - `admin_memory_health.py`: `GET /admin/memory-health` (`AdminAccountUser`) · `admin_neural.py`: `POST /admin/neural/recalibrate`, `GET /admin/neural/calibrations` (#2851)
@@ -67,6 +67,33 @@ noted.
 ### 5. Identity-only OIDC provider (#2781, #2793)
 
 - `/oidc/.well-known/openid-configuration`, `/oidc/jwks`, `/oidc/authorize` (GET/POST), `/oidc/token`, `/oidc/userinfo`, `/oidc/revoke` — `backend/src/api/routes/oidc.py`, mounted at `/oidc` (not under `/api/v1`). They return `JSONResponse` / HTML bodies, not Pydantic models; the metadata, token and claim shapes are in `auth-surface.md`.
+
+### 6. Sync (#2806, #2812, #2815, #2807, #2840, #2810)
+
+Experimental by the owner's decision of 2026-11-16: every `/sync/*` and
+`/workspaces/*/sync-*` route, the sync service JWT and `kmc_sync_at_` tokens
+(`auth-surface.md`), and `/.well-known/kmc-sync-configuration`. Off unless
+`OIDC_ENABLED`, `SYNC_INTEGRATIONS_ENABLED` (and, per route family,
+`SYNC_CREDENTIALS_ENABLED`, `SYNC_RUNS_ENABLED`, `SYNC_OBSERVABILITY_ENABLED`)
+are on. Request / response models are in `backend/src/models/sync_*` and the
+route files.
+
+- `backend/src/api/routes/sync_installations.py` (`/workspaces/{workspace_id}`, OIDC `integrations:manage` / `workspaces:read`): `POST /sync-authorizations`, `DELETE /sync-authorizations/{authorization_id}`, `POST /sync-installations`, `GET /sync-installations/{installation_id}`, `DELETE /sync-installations/{installation_id}`
+- `backend/src/api/routes/sync_records.py` (`/workspaces/{workspace_id}/sync-installations/{installation_id}`): `PUT /feeds/{feed_id}`, `GET /records`, `GET /runs/{run_id}/diff`, `POST /runs/{run_id}/approvals`
+- `backend/src/api/routes/sync_management.py` (`…/sync-installations/{installation_id}/management`): `POST /reconnect`, `GET ""`, `POST /stop`, `POST /finalize`, `POST /resume/preview`, `GET /resume/diff`, `POST /resume/confirm`
+- `backend/src/api/routes/sync_activity.py` (`…/sync-installations/{installation_id}/activity`): `GET ""`, `GET /runs`, `GET /runs/{run_id}`, `GET /events`, `POST /requests`
+- `backend/src/api/routes/sync_worker.py` (`/sync/installations`, `kmc_sync_at_` service token): `GET /{installation_id}`
+- `backend/src/api/routes/sync_feeds.py` (`/sync/installations/{installation_id}`, `kmc_sync_at_` service token): `GET /schema`, `POST /resume-candidates`, `POST /runs`, `PUT /runs/{run_id}/chunks/{chunk_index}`, `POST /runs/{run_id}/prepare`, `GET /runs/{run_id}`, `GET /runs/{run_id}/diff`, `POST /runs/{run_id}/commit`, `POST /runs/{run_id}/abort`
+- `backend/src/api/routes/internal_sync_installations.py` (mounted without `/api/v1`, billing-integration caller only): `POST /internal/workspaces/{workspace_id}/sync-authorizations/validate`, `POST /internal/workspaces/{workspace_id}/sync-installations/activate`
+- `GET /.well-known/kmc-sync-configuration` — `backend/src/api/routes/well_known.py`, `SyncConfigurationV1` (`backend/src/models/sync_contract.py`)
+- #2865 (open PR #2867: feed-config reads and PUT preconditions) adds to this surface and inherits its experimental status.
+
+### 7. Other dashboard-facing routes
+
+Experimental by the owner's decision of 2026-11-16:
+
+- `GET /share/sessions` — `backend/src/api/routes/share_keys.py`, share-key auth (`get_share_key_principal`), `SharedSessionsResponse`; for an external, observe-only agent-status dashboard (#1064).
+- `GET /resources/{resource_id}/public-mcp/usage-health` — `backend/src/api/routes/public_mcp_usage.py`, `WorkspaceOwner`, `PublicMcpUsageHealthResponse` (with `PublicMcpUsageGaps`, `PublicMcpUsageWriterState`) (#2678).
 
 ## admin.py
 

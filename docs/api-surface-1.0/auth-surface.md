@@ -112,7 +112,7 @@ Code comments mark these as point-in-time and explicitly **not security-bearing*
   | `kagura_resource_` | resource token | `auth/resource_tokens.py` (`RESOURCE_TOKEN_PREFIX`) | frozen |
   | `kagura_obs_` | observation credential (#2679) | `auth/observation_credentials.py` (`OBSERVATION_KEY_PREFIX`) | experimental |
   | `kmc_oidc_code_` / `kmc_oidc_at_` / `kmc_oidc_rt_` | OIDC provider code / access / refresh token (#2781) | `auth/oidc_server.py` | experimental |
-  | `kmc_sync_at_` | sync service token (#2815) | `services/sync_credentials.py` (`TOKEN_PATTERN`) | not decided (see the end of this file) |
+  | `kmc_sync_at_` | sync service token (#2815) | `services/sync_credentials.py` (`TOKEN_PATTERN`) | experimental |
   | (none) | MCP OAuth access / refresh token | `auth/oauth2_server.py` | frozen |
 
   The `kagura_*` credentials other than API keys never reach the API-key store
@@ -222,8 +222,8 @@ Sync wire-profile document (#2812/#2815), `response_model=SyncConfigurationV1`
 | `service_scope` | `"resource.sync"` |
 | `assertion_audience` | `"issuer"` |
 
-Stability tier not decided (it describes the sync surface, see the end of this
-file).
+Experimental, with the rest of the sync surface (owner's decision of
+2026-11-16; see the end of this file).
 
 ---
 
@@ -363,10 +363,10 @@ Caveats inherited from #608 that remain open at this commit:
 
 Re-checked against main 6a940892 (2026-11-16). Routes are under `/api/v1`
 unless noted; their request / response models are in the OpenAPI snapshot,
-which stays the source of truth. Three tiers: **frozen** (part of the 1.0
-commitment like the sections above), **experimental** (#622 decision 3:
-satellite-facing, may change in a MINOR release) and **not decided** (flagged
-for the owner before rc1).
+which stays the source of truth. Two tiers: **frozen** (part of the 1.0
+commitment like the sections above) and **experimental** (#622 decision 3 and
+the owner's decisions of 2026-11-16: excluded from the 1.0 commitment, may
+change in a MINOR release).
 
 ### Browser sign-in and account credentials — frozen
 
@@ -427,8 +427,9 @@ bound to one context, scope `memory:read` only, always expiring (default and
 maximum 30 days). Managed at `/config/share-keys` (`POST`, `GET`,
 `POST /{key_id}/revoke`, `key_id` = `skey_…`); accepted only by
 `get_share_key_principal` (`auth/dependencies.py`) on `POST /share/recall` and
-`GET /share/sessions` (`api/routes/share_keys.py`). See "Satellite-surface
-candidates" below for `/share/sessions`.
+`GET /share/sessions` (`api/routes/share_keys.py`). `GET /share/sessions` is
+experimental (see "Other dashboard-facing routes" below); the key itself and
+`POST /share/recall` are frozen.
 
 ### Resource tokens — frozen, unchanged
 
@@ -494,7 +495,7 @@ live in their own tables (`models/oidc.py`), separate from MCP OAuth.
   `GET /me/workspaces/{workspace_id}/access` (`api/routes/me_workspaces.py`,
   #2794).
 
-### Sync service credentials — not decided
+### Sync service credentials — experimental (owner's decision of 2026-11-16)
 
 Built on the OIDC provider and off unless `OIDC_ENABLED`,
 `SYNC_INTEGRATIONS_ENABLED` and `SYNC_CREDENTIALS_ENABLED` are all on.
@@ -523,17 +524,18 @@ Built on the OIDC provider and off unless `OIDC_ENABLED`,
   route in the last two is unverified).
 - Discovery: `/.well-known/kmc-sync-configuration` (§6 of the well-known section).
 
-Whether this surface is frozen, experimental with the OIDC provider it depends
-on, or satellite-facing is an owner decision before rc1.
+The whole sync surface is experimental: the client assertion, the
+`kmc_sync_at_` token, every `/sync/*` and `/workspaces/*/sync-*` route (full
+list with files in `rest-response-models.md`, section 6) and
+`/.well-known/kmc-sync-configuration`. #2865 (open PR #2867: feed-config reads
+and PUT preconditions) adds to this surface and inherits its experimental
+status.
 
-### Satellite-surface candidates — not decided
-
-Found while marking decision 3; they may exist only for a satellite, but the
-owner has not classified them:
+### Other dashboard-facing routes — experimental (owner's decision of 2026-11-16)
 
 - `GET /share/sessions` (`api/routes/share_keys.py`, share-key auth): its
   docstring (#1064) names "an external, observe-only dashboard" rendering live
-  agent status. Predates #2678 / #2679.
+  agent status.
 - `GET /resources/{resource_id}/public-mcp/usage-health`
   (`api/routes/public_mcp_usage.py`, `WorkspaceOwner`, #2678): owner-facing
   health of the public MCP usage events the observability API exports.
