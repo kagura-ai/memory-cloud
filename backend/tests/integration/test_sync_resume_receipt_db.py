@@ -507,6 +507,48 @@ async def test_retained_management_binding_drift_is_not_typed_absence(managed):
     assert "as_of" not in response.text
 
 
+@pytest.mark.parametrize("changed", ["context_id", "resource_pk"])
+async def test_management_row_moved_off_the_retained_binding_is_not_typed_absence(managed, changed):
+    async with managed.factory() as db:
+        target = await db.get(SyncManagedTarget, managed.iid)
+        setattr(target, changed, uuid4())
+        await db.commit()
+    before = await footprint(managed)
+    response = await observe(managed, command(managed))
+    assert response.status_code == 409, response.text
+    assert "as_of" not in response.text and "not_found" not in response.text
+    assert await footprint(managed) == before
+
+
+async def test_scope_lost_after_route_authentication_is_rechecked_under_the_lookup_lock(
+    managed, monkeypatch
+):
+    original = sync_resume_receipt.management_boundary
+
+    def downgraded(*args, **kwargs):
+        async def revoke():
+            async with managed.factory() as db:
+                row = await db.get(OIDCToken, managed.store.token_ids["member"])
+                row.scope = "openid workspaces:read"
+                await db.commit()
+
+        class Boundary:
+            async def __aenter__(self):
+                await revoke()
+                self.inner = original(*args, **kwargs)
+                return await self.inner.__aenter__()
+
+            async def __aexit__(self, *exc):
+                return await self.inner.__aexit__(*exc)
+
+        return Boundary()
+
+    monkeypatch.setattr(sync_resume_receipt, "management_boundary", downgraded)
+    response = await observe(managed, command(managed), role="member")
+    assert response.status_code == 403, response.text
+    assert "as_of" not in response.text
+
+
 async def test_expiry_during_observation_remains_a_commit_error(managed, monkeypatch):
     def expired_clock():
         now = managed.store.clock.now
