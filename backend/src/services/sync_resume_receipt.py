@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.sync_identity import SyncPrincipal
 from auth.workspace_roles import ContextRole
-from models.auth import Context
+from models.auth import Context, IdentityLink
 from models.management_schemas import digest
 from models.sync_management import SyncManagedTarget, SyncModeOperation
 from models.sync_resume_receipt_schemas import (
@@ -60,6 +60,21 @@ async def read_resume_receipt(
         context = await locked(db, Context, Context.id == installation.context_id)
         if context is None or context.deleted_at is not None:
             raise NotFoundException("Synchronization target")
+        if context.is_private and context.created_by != principal.user_id:
+            # A linked owner's reach can be revoked without changing any User,
+            # Workspace, Context or membership row. Lock both actual ownership
+            # witnesses, in order, before rechecking RBAC. Never wait while
+            # holding these metadata locks or take the global link mutex here.
+            if context.created_by is None:
+                raise NotFoundException("Synchronization target")
+            groups = set()
+            for user_id in sorted({principal.user_id, context.created_by}):
+                link = await locked(db, IdentityLink, IdentityLink.user_id == user_id)
+                if link is None:
+                    raise NotFoundException("Synchronization target")
+                groups.add(link.group_id)
+            if len(groups) != 1:
+                raise NotFoundException("Synchronization target")
         await PermissionService(db).check_context_access(
             principal.user_id,
             installation.context_id,

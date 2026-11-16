@@ -5,9 +5,10 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, text
+from sqlalchemy.exc import DBAPIError
 
-from models.auth import Context, ContextMember, Workspace, WorkspaceMember
+from models.auth import Context, ContextMember, IdentityLink, Workspace, WorkspaceMember
 from models.memory import Memory
 from models.oidc import OIDCClient, OIDCGrant, OIDCToken
 from models.resource import ResourceEvent
@@ -24,8 +25,11 @@ from models.sync_management import (
 from services import sync_management, sync_resume_receipt
 from services.capacity_lock import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, ensure_not_capacity_locked
 from services.context_service import ContextService
+from services.identity_link_service import IdentityLinkService
+from services.permission_service import PermissionService
 from tests.integration import test_sync_management_db as management
 from tests.integration.sync_feed_fixtures import human, product, request
+from utils.db_helpers import is_lock_not_available
 from utils.exceptions import CapacityLockedError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -406,6 +410,88 @@ async def test_owner_privacy_change_after_initial_rbac_cannot_return_a_stale_out
         return result
 
     monkeypatch.setattr(sync_resume_receipt, "target_fence", racing_privacy)
+    response = await observe(managed, command(managed), role="admin")
+    assert response.status_code == 404, response.text
+    assert "as_of" not in response.text
+
+
+async def private_linked_subject(subject):
+    await management.manual(subject)
+    context_id = UUID(subject.target["context_id"])
+    async with subject.factory() as owner:
+        service = ContextService(owner)
+        await service.update_context(subject.store.users["owner"], context_id, is_public=False)
+        await service.update_context(subject.store.users["owner"], context_id, is_private=True)
+        await IdentityLinkService(owner).link(
+            subject.store.users["owner"], subject.store.users["admin"]
+        )
+
+
+async def test_final_linked_owner_check_fences_actual_unlink_until_observation_commits(
+    managed, monkeypatch
+):
+    await private_linked_subject(managed)
+    original = PermissionService.check_context_access
+    checks, blocked = 0, False
+
+    async def racing_unlink(self, *args, **kwargs):
+        nonlocal checks, blocked
+        result = await original(self, *args, **kwargs)
+        if args[0] == managed.store.users["admin"]:
+            checks += 1
+            if checks == 3:  # boundary, locked membership, final receipt check
+                async with managed.factory() as owner:
+                    await owner.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                    try:
+                        await IdentityLinkService(owner).unlink(
+                            managed.store.users["owner"], managed.store.users["admin"]
+                        )
+                    except DBAPIError as exc:
+                        assert is_lock_not_available(exc)
+                        await owner.rollback()
+                        blocked = True
+        return result
+
+    monkeypatch.setattr(PermissionService, "check_context_access", racing_unlink)
+    body = command(managed)
+    response = await observe(managed, body, role="admin")
+    assert checks == 3
+    assert blocked, "Actual unlink committed after final RBAC but before result observation"
+    outcome(response, managed, body, "not_found")
+    async with managed.factory() as owner:
+        await IdentityLinkService(owner).unlink(
+            managed.store.users["owner"], managed.store.users["admin"]
+        )
+    assert (await observe(managed, body, role="admin")).status_code == 404
+
+
+async def test_link_row_contention_is_not_successful_absence(managed):
+    await private_linked_subject(managed)
+    async with managed.factory() as owner:
+        await owner.scalar(
+            select(IdentityLink)
+            .where(IdentityLink.user_id == managed.store.users["admin"])
+            .with_for_update()
+        )
+        response = await observe(managed, command(managed), role="admin")
+        assert response.status_code == 409, response.text
+        assert "as_of" not in response.text
+        await owner.rollback()
+
+
+async def test_link_removed_after_initial_reach_never_becomes_an_outcome(managed, monkeypatch):
+    await private_linked_subject(managed)
+    original = sync_resume_receipt.target_fence
+
+    async def removed_link(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        async with managed.factory() as owner:
+            await IdentityLinkService(owner).unlink(
+                managed.store.users["owner"], managed.store.users["admin"]
+            )
+        return result
+
+    monkeypatch.setattr(sync_resume_receipt, "target_fence", removed_link)
     response = await observe(managed, command(managed), role="admin")
     assert response.status_code == 404, response.text
     assert "as_of" not in response.text

@@ -46,6 +46,9 @@ acknowledged revocation; never extend the original authorization window.
 
 The lookup shares current identity/membership and NOWAIT workspace/installation
 locks with management transitions and validates the retained ownership binding.
+The Context metadata and, for private linked-owner reach, both actual identity-link
+rows remain locked through the final reach check and observation commit. Contention
+is refused without waiting; lookup does not take the global link mutation mutex.
 It never calls confirmation, paid publication, enrollment or allocation; content,
 preview, candidate, request, receipt, generation, quota and indexing state remain
 unchanged. No original preview or credential is required to observe a receipt.
