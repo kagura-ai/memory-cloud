@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.sync_identity import SyncPrincipal, load_sync_identity
 from auth.workspace_roles import ContextRole
 from config.settings import get_settings
-from models.auth import Context, User, Workspace
+from models.auth import Context, IdentityLink, User, Workspace
 from models.management_schemas import digest
 from models.memory import Memory
 from models.resource import IndexerState, ResourceEvent
@@ -23,6 +23,12 @@ from models.sync_management import (
     SyncModeOperation,
     SyncResumeCandidate,
     SyncResumePreview,
+)
+from models.sync_mode_access_schemas import (
+    SyncModeAccess,
+    SyncModePermissions,
+    SyncModeStatus,
+    SyncModeTarget,
 )
 from services.capacity_lock import CapacityPolicy
 from services.permission_service import PermissionService
@@ -370,6 +376,90 @@ async def management_boundary(
         except BaseException:
             await db.rollback()
             raise
+
+
+async def read_mode_access(
+    db: AsyncSession, wid: UUID, iid: UUID, principal: SyncPrincipal
+) -> SyncModeAccess:
+    """Observe current lifecycle rights without enabling canonical data access."""
+    async with management_boundary(db, wid, iid, principal, write=False) as (
+        installation,
+        _workspace,
+        _fence,
+    ):
+        from services.sync_provisioning import installation_view
+
+        current = await target_fence(db, installation.context_id)
+        if current.mode is None:
+            # A row moved away from this retained Context is drift, not an
+            # unenrolled target whose conservative default may be projected.
+            if await locked(db, SyncManagedTarget, SyncManagedTarget.installation_id == iid):
+                raise ConflictError("Synchronization ownership changed")
+        elif (
+            current.mode.installation_id,
+            current.mode.resource_pk,
+            current.mode.context_id,
+            current.mode.generation,
+        ) != (iid, installation.resource_pk, installation.context_id, installation.generation):
+            raise ConflictError("Synchronization ownership changed")
+        # A capability snapshot must not outlive the Context privacy/linked-owner
+        # evidence used to authorize it. Refresh and retain those metadata locks
+        # through the final RBAC check and commit, without requiring publication.
+        context = await locked(db, Context, Context.id == installation.context_id)
+        if context is None or context.deleted_at is not None:
+            raise NotFoundException("Synchronization target")
+        if context.is_private and context.created_by != principal.user_id:
+            if context.created_by is None:
+                raise NotFoundException("Synchronization target")
+            groups = set()
+            for user_id in sorted({principal.user_id, context.created_by}):
+                link = await locked(db, IdentityLink, IdentityLink.user_id == user_id)
+                if link is None:
+                    raise NotFoundException("Synchronization target")
+                groups.add(link.group_id)
+            if len(groups) != 1:
+                raise NotFoundException("Synchronization target")
+        _context, role = await PermissionService(db).check_context_access(
+            principal.user_id,
+            installation.context_id,
+            required_role=ContextRole.VIEWER,
+            capacity=CapacityPolicy.ALLOWED,
+            key_workspace_id=wid,
+        )
+        allowed = role in (ContextRole.EDITOR, ContextRole.OWNER)
+        status = (
+            mode_view(current.mode)
+            if current.mode is not None
+            else {
+                "mode": "feed",
+                "epoch": 1,
+                "generation": installation.generation,
+                "stop_event_id": 0,
+                "reason": None,
+            }
+        )
+        target = await installation_view(db, installation)
+        result = SyncModeAccess(
+            contract_version="sync-mode-access-v1",
+            subject=principal.user_id,
+            target=SyncModeTarget.model_validate(
+                target.model_dump(
+                    include={
+                        "workspace_id",
+                        "installation_id",
+                        "resource_pk",
+                        "context_id",
+                        "endpoint_id",
+                        "generation",
+                        "target_available",
+                    }
+                )
+            ),
+            management=SyncModeStatus.model_validate(status),
+            permissions=SyncModePermissions(read=True, stop=allowed, finalize=allowed),
+        )
+        await db.commit()
+        return result
 
 
 async def operation_receipt(

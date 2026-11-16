@@ -9,7 +9,8 @@ from pydantic import Field
 from api.routes.sync_feeds import Database, bounded_body, exact_query, json_body
 from api.routes.sync_installations import SYNC_RESPONSES, Manager, Reader, SyncControlRoute
 from models.sync_feed_schemas import Hash, StrictBody
-from services.sync_management import control_mode, management_enabled
+from models.sync_mode_access_schemas import SyncModeAccess
+from services.sync_management import control_mode, management_enabled, read_mode_access
 from services.sync_resume import confirm_resume, reconnect, resume_diff, resume_preview
 
 router = APIRouter(
@@ -65,6 +66,15 @@ async def reconnect_sync_management(
     return await reconnect(
         db, workspace_id, installation_id, principal, body.operation_id, body.authorization_id
     )
+
+
+@router.get("/access", response_model=SyncModeAccess)
+async def management_access(
+    workspace_id: UUID, installation_id: UUID, request: Request, principal: Reader, db: Database
+) -> SyncModeAccess:
+    """Inspect capacity-safe lifecycle capabilities with ordinary human login."""
+    exact_query(request)
+    return await read_mode_access(db, workspace_id, installation_id, principal)
 
 
 @router.get("")

@@ -133,6 +133,11 @@ ROUTES: dict[tuple[str, str], str] = {
         "GET",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management",
     ): ALLOWED,
+    # #2873: current-human lifecycle metadata, not canonical data access.
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/access",
+    ): ALLOWED,
     (
         "POST",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/stop",

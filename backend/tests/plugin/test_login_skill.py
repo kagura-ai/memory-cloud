@@ -130,9 +130,6 @@ def test_every_command_is_listed_where_the_commands_are_listed() -> None:
     assert "login" in commands
     assert _listed(GUIDE, r"^\| `([a-z-]+)` \|") == commands
     assert _listed(CLIENT_DOCS, r"^\| `/kagura-memory:([a-z-]+)` \|") == commands
-    # The README overview links to the complete catalogue after #2864. Keep
-    # completeness checks on the actual catalogues above, not the overview.
-    assert "[MCPクライアント設定](docs/mcp-clients.md)" in _read(README_JA)
     # The development guide lists them on one line, under the plugin's directory.
     (dev_line,) = _listed(DEV_GUIDE, r"^  - Commands: (.*)$")
     assert set(re.findall(r"`/kagura-memory:([a-z-]+)`", dev_line)) == commands
@@ -141,6 +138,24 @@ def test_every_command_is_listed_where_the_commands_are_listed() -> None:
     # `digest` reads Claude Code transcripts; the Codex version is a follow-up (#1931).
     codex = _listed(CODEX_SKILL, r"^- `/kagura-memory:([a-z-]+)` -> ")
     assert codex == commands - {"setup", "digest"}
+
+
+def test_japanese_readme_onboards_and_links_to_the_complete_client_guide() -> None:
+    # #2864 made the README an onboarding page. Full command inventories stay in
+    # GUIDE/CLIENT_DOCS, whose equality is checked above, rather than a duplicate
+    # table that the README intentionally no longer contains.
+    section = re.search(
+        r"^### Claude Code[^\n]*\n(.*?)(?=^#{1,3} |\Z)",
+        _read(README_JA),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert section is not None
+    text = section.group(1)
+    assert "/plugin marketplace add kagura-ai/memory-cloud" in text
+    assert "/plugin install kagura-memory@kagura-memory-cloud" in text
+    assert "/kagura-memory:session-start" in text
+    assert "/kagura-memory:session-summary" in text
+    assert re.search(r"\[[^\]]+\]\(docs/mcp-clients\.md\)", text)
 
 
 def test_codex_skill_maps_the_login_command_and_triggers_on_it() -> None:
