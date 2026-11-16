@@ -10,7 +10,8 @@ A **Workspace** is the top-level organizational unit — think of it as a team o
 
 - All resources (contexts, memories, members) belong to a workspace
 - Plan limits (memory count, API quotas, context count) are enforced per workspace
-- One user can own up to 10 workspaces and be a member of unlimited workspaces via invitations
+- Plans are S / M / L / XL (internal names `free` / `basic` / `pro` / `promax`, `backend/src/config/plan_tiers.py`); limits such as contexts, members, memories and Sleep contexts come from the plan plus any add-ons
+- One user owns 1 workspace, plus the slots granted by the highest plan among the workspaces they own (L: 3 in total, XL: 20) and any per-user bonus slots; joined workspaces (via invitation) are uncapped
 - Each workspace has role-based access control (RBAC)
 
 **Workspace Roles:**
@@ -52,6 +53,8 @@ A **Context** is a namespace for organizing memories — like a folder for your 
 | **Private** (`is_private=true`) | Only the creator can access |
 | **Shared** (`is_private=false`) | All workspace members can access |
 
+**Context roles** (`context_members.role`): `owner` (settings and deletion), `editor` (read/write memories) and `viewer` (read-only). "Context editor or above" below means `editor` or `owner`.
+
 **Naming rules:** lowercase alphanumeric + hyphens/underscores only (`^[a-z0-9_-]+$`)
 
 ## Memory
@@ -60,14 +63,14 @@ A **Memory** is a single piece of knowledge stored in Kagura Memory Cloud. Each 
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ Layer 1: Summary (50-500 chars)                 │
+│ Layer 1: Summary (10-500 chars, aim for 50+)    │
 │   → Embedded as vector for semantic search      │
 │   → Write the conclusion, not the process       │
 │   ✅ "JWT expiry caused 401. Fixed with         │
 │      refresh token rotation."                   │
 │   ❌ "Discussed auth errors in meeting."        │
 ├─────────────────────────────────────────────────┤
-│ Layer 2: Context Summary (optional)             │
+│ Layer 2: Context Summary (optional, ≤2000 chars)│
 │   → Why this memory matters                     │
 │   → How and when to use it                      │
 ├─────────────────────────────────────────────────┤
@@ -77,12 +80,14 @@ A **Memory** is a single piece of knowledge stored in Kagura Memory Cloud. Each 
 └─────────────────────────────────────────────────┘
 ```
 
+Only the summary is embedded by default. A context can opt into **content chunks** (`content_chunks_enabled`, off by default and plan-gated) so long content is searchable too. Over MCP, a summary longer than 500 characters is cut at a sentence end (`summary_truncated: true`) rather than refused.
+
 **Key attributes:**
 
-- **type** — `code`, `note`, `decision`, `bug-fix`, `feature`, `learning`, etc.
+- **type** — free-form, up to 50 characters (for example `decision`, `pattern`, `fact`, `troubleshooting`, `note`). Only `time` has a special meaning (Time Memories, below)
 - **importance** — `0.0-1.0` (critical=0.9+, useful=0.6-0.8, reference=0.3-0.5)
 - **tags** — For categorization and filtering (e.g., `["python", "auth", "jwt"]`)
-- **scope** — `working` (short-term) or `persistent` (long-term)
+- **scope** — `working` (short-term, the default) or `persistent` (long-term). Set by the server, not by `remember` / `update_memory`: Sleep consolidation promotes memories, and pinning (`delivery_mode="always"`) makes one persistent
 - **version** — 1 on create, +1 for each edit that changes the summary, context summary, content, details, type, importance or tags ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043))
 
 **Versions and the revision log.** Several agents can share a context, so an edit can be made conditional: `update_memory(expected_version=N)` (REST: `PATCH` with `expected_version`) applies only while the memory is still at version N, and otherwise fails with `version_conflict` and the current version — nothing is lost to a concurrent edit. Each versioned edit records the values it overwrote (the changed fields only) and who made it in the memory's revision log, next to `created` and `forgotten` events. Maintenance that is not an edit — `forget`, Sleep's importance re-evaluation and tag merges, promotion, re-embedding, access statistics — never moves the version. `list_revisions(memory_id)` (REST: `GET /api/v1/memory/{memory_id}/revisions`) lists a memory's events with the fields each edit changed, and `reference(memory_id, version=N)` returns an earlier version rebuilt from them; a revert is an ordinary conditional edit with the old values. The log is not embedded or searchable; it stays with a forgotten memory's tombstone (both reads answer not-found once it is forgotten) and goes when the memory is purged.
@@ -98,23 +103,26 @@ When you search with `recall()`, Kagura uses **Hybrid Search** combining two app
 │  Semantic Search     │    │  Full-Text Search    │
 │  (60% weight)        │    │  (40% weight)        │
 │                      │    │                      │
-│  OpenAI Embedding    │    │  Qdrant BM25         │
+│  Embedding vector    │    │  BM25 sparse vector  │
 │  Vector similarity   │    │  Keyword matching    │
 │  "What does it mean?"│    │  "What words match?" │
 └──────────┬───────────┘    └──────────┬───────────┘
            │                           │
            └─────────┬─────────────────┘
                      ▼
-            ┌────────────────┐
-            │  Merged Results │
-            │  (RRF fusion)   │
-            └────────┬───────┘
-                     ▼
-            ┌────────────────┐
-            │  Optional       │
-            │  AI Reranking   │
-            └────────────────┘
+            ┌─────────────────────┐
+            │  Weighted fusion     │
+            │  (max-normalised     │
+            │   scores, 0.6 / 0.4) │
+            └──────────┬──────────┘
+                       ▼
+            ┌─────────────────────┐
+            │  Optional            │
+            │  AI Reranking        │
+            └─────────────────────┘
 ```
+
+The 60 / 40 weights are per-context defaults (`update_search_config`). Each lane's scores are normalised by its maximum and then summed with the weights; there is no RRF. Embeddings come from the configured provider (OpenAI by default, or a self-hosted model). Vectors live in Qdrant, or in an embedded LanceDB store for the single-process "lite" setup (`vector_backend=lance`). Reranking is off by default (`use_rerank`), uses Voyage, Cohere or a self-hosted reranker when enabled, and is plan-gated.
 
 **Tips for better search:**
 - Use the **HyDE technique**: generate a hypothetical answer, then search with it
@@ -235,8 +243,8 @@ Neural Memory edges are tagged with one of three **origins**, each with differen
 | | **Hebbian** (hippocampus-like) | **Semantic** (cortex-like) | **Declared** |
 |---|---|---|---|
 | Encodes | "fired together recently" — episodic co-activation | "about similar things" — content neighborhood | "I'm telling you these are related" — explicit user assertion |
-| Created by | runtime `recall()` co-activation | sleep `edge_discovery` (cosine sim ≥ 0.5) | MCP `create_edge` tool |
-| Weight | 0.0–3.0 co-activation amplitude | `cosine_sim` at creation (0.5–1.0) | user-supplied (default 1.0) |
+| Created by | runtime `recall()` co-activation | sleep `edge_discovery` (an LLM judges pairs in the 0.6–0.9 similarity band), plus weak k-NN seed edges when a memory is created | MCP `create_edge` tool |
+| Weight | 0.0–3.0 co-activation amplitude | set at creation (seed edges stay below 0.5) | user-supplied (default 1.0) |
 | Decays? | yes — strengthens with co-recall, fades without | **no** — content similarity is a static property | **no** — user-asserted, never auto-removed |
 | Maintenance | nightly Hebbian decay + prune below threshold | monthly `semantic_edge_reverify` drops edges with deleted endpoints | none — lives until the user deletes it |
 
@@ -274,16 +282,19 @@ Starting from a seed memory, activation spreads outward through the graph, retur
 
 ## Sleep Maintenance
 
-**Sleep Maintenance** is a nightly background cycle that pays down memory debt asynchronously. Write paths optimize for ingest speed; over time this leaves near-duplicates, stale importance values, and graph gaps. Sleep runs per context and executes six phases in order:
+**Sleep Maintenance** is a nightly background cycle that pays down memory debt asynchronously. Write paths optimize for ingest speed; over time this leaves near-duplicates, stale importance values, and graph gaps. Sleep runs per context; in `full` mode its phases are (`backend/src/services/sleep/orchestrator.py`):
 
-1. **Edge Discovery** — find missing edges between related memories via medium-similarity search + optional LLM judgment
-2. **Dedup / Merge** — cluster high-similarity memories and merge duplicates
-3. **Importance Re-eval** — adjust importance via LLM scoring with EMA smoothing
-4. **Consolidation** — promote / keep / archive working memories (replaces the legacy rule-only consolidation)
-5. **Reindex** — re-embed memories modified by earlier phases so Qdrant stays in sync with PostgreSQL
-6. **Report** — aggregate per-phase results and the action audit log
+1. **Edge Discovery** — find missing edges between related memories via medium-similarity search + LLM judgment
+2. **Related index** — when enabled by its flag, record the related-memories index from discovery's evidence
+3. **Dedup / Merge** — cluster high-similarity memories and merge duplicates
+4. **Retention** — `merge_retention`, `forget_retention` and `measurement_retention` purge merge losers, forgotten memories and old measurements after their retention windows (no LLM)
+5. **Importance Re-eval** — adjust importance via LLM scoring with EMA smoothing
+6. **Consolidation** — promote / keep / archive working memories
+7. **Reindex** — re-embed memories changed by earlier phases so the vector store stays in sync with PostgreSQL
 
-Each context has a `sleep_mode` setting (`full`, `edges_only`, or `skip`) that controls which phases run. Every action is recorded in `sleep_actions` and can be reversed via `rollback_sleep_run`.
+Each run is summarised in a sleep report.
+
+Each context has a `sleep_mode` setting (`full`, `edges_only`, or `skip`; the default is `skip`) that controls which phases run. How many contexts may run Sleep depends on the plan (none on S and M, 3 on L, 15 on XL); a workspace whose plan suspends Sleep still runs the retention phases. Every action is recorded in `sleep_actions` and can be reversed via `rollback_sleep_run`.
 
 See [Sleep Maintenance](sleep-maintenance.md) for the complete reference.
 
@@ -305,7 +316,7 @@ Kagura is a **knowledge store** for humans *and* an **agent memory substrate** f
 | *(any)* + `details.tool_trigger` | **At the matching tool call**, by a client-side hook | `load_guardrails()` (hooks cache it) | Tool guardrails — the lesson about one specific tool call |
 | *(any)* + `details.tool_trigger`, client **without** hooks | **At connect** (server `instructions`, `?guardrails=<context_id>` or an agent default binding), **at session start** (`bootstrap.guardrails` / `get_context_info.guardrails`, default on) or **from an always-loaded file** (`AGENTS.md` export block) | a digest of `load_guardrails`' tool-triggered lane — summaries only ([Server instructions](mcp-tools.md#server-instructions)) | The same tool guardrails for ChatGPT web, ChatGPT Work web, Claude Desktop / Claude Chat and Codex cloud |
 
-- **`always` (pinned)** — `load_pinned()` returns the *complete, unranked* always-load set every call — the deterministic counterpart to probabilistic `recall()`. Pin with `remember(delivery_mode="always")` (or `update_memory(...)`); pinning also forces `scope="persistent"` so there is no sleep-consolidation wait. Unpin with `update_memory(delivery_mode="on_recall")`.
+- **`always` (pinned)** — `load_pinned()` returns the *unranked* always-load set every call, up to its `cap` (1–1000; `truncated: true` when more exist) — the deterministic counterpart to probabilistic `recall()`. Pin with `remember(delivery_mode="always")` (or `update_memory(...)`); pinning also forces `scope="persistent"` so there is no sleep-consolidation wait. Unpin with `update_memory(delivery_mode="on_recall")`.
 - **Time Memories** — a Time Memory (`type="time"`, `details.trigger={year, month, day?}`) surfaces via `recall_upcoming()` when its window is upcoming. This is a deterministic time query keyed on the type, not semantic search; `delivery_mode="on_trigger"` is accepted by the schema but nothing reads it.
 - **Tool guardrails** — orthogonal to `type` and `delivery_mode`: any memory can carry `details.tool_trigger = {tool, on?, match?, action?}` (server-validated: a safe regex subset, patterns compiled once and never run on the server). `load_guardrails(context_id)` returns the trusted-tier pinned set plus every marked memory, each lane deterministic and capped on its own; client hooks cache that result and inject the matching summary at the tool call. Authoring needs context editor or above. Contract and cache format: [MCP Tools › Tool guardrails](mcp-tools.md#tool-guardrails).
 - **WHERE axis (location)** — orthogonal to both `type` and `delivery_mode`: any memory can carry `details.location = {lat, lon, label?, text?}` (server-validated; `lat`/`lon` must be JSON numbers, not strings). `recall_nearby(context_id, lat, lon, radius_m=1000)` lists memories near a point, nearest first with `distance_m` — the deterministic spatial twin of `recall_upcoming()`. Coordinates belong ONLY in `details.location` (never in `context`, which is replicated into the search-index payload store), and `details` is replaced wholesale on update — resend `location` when updating details or it is dropped, or send `details_patch`, which merges into the stored details (a key set to `null` is deleted). Tags work the same way: `tags` replaces the list, `add_tags` / `remove_tags` edit it.
@@ -315,11 +326,11 @@ Kagura is a **knowledge store** for humans *and* an **agent memory substrate** f
 
 Not all memories are equally trustworthy as *instructions*. Connector-ingested content (Slack/Discord/etc.) is data, not commands — treating it as instructions is an indirect prompt-injection vector ([OWASP LLM01 / LLM03](https://owasp.org/www-project-top-10-for-large-language-model-applications/)).
 
-- **`Memory.source_type`** — server-stamped provenance, never client-trusted: one of `manual`, `file`, `url`, `vault`, `api`, `connector` (NOT NULL + CHECK).
+- **`Memory.source_type`** — provenance: one of `manual`, `file`, `url`, `vault`, `api`, `connector` (NOT NULL + CHECK). A client may set the user-origin values (`file` / `url` / `vault` / `api` / `manual`) on import; `connector` is stamped by the server only. Trust is decided by the context's tier, not by this field.
 - **`Context.trust_tier`** — `trusted` (default) or `external`. Connector-fed contexts are marked `external`.
 - **Trust filter** — pass `recall(filters={"trust_tier": "trusted"})` for any **behaviour-influencing read** (one whose results are fed back to the model as context/instructions). It excludes memories from `external`-tier contexts **and** any `source_type="connector"` memory (defence-in-depth). Default recall returns everything; the filter is opt-in and protective on connector-mixed workspaces, a no-op on manual-only ones.
 
-The session-start bootstrap recalls use `trust_tier: "trusted"` for exactly this reason. `load_guardrails` applies the same gate unconditionally — there is no parameter to turn it off.
+`bootstrap` reads only deterministic lanes (pinned, upcoming, changes — no recall), and `get_agent_bootstrap`'s optional recall is trusted-only, for exactly this reason; a follow-up topic recall at session start should pass `trust_tier: "trusted"` too. `load_guardrails` applies the same gate unconditionally — there is no parameter to turn it off.
 
 ### 3. Agent state lane — scratchpad, never recalled
 
@@ -349,18 +360,21 @@ The control plane is a separate layer over the Agent Memory Substrate. The subst
 - **Subtractive context bindings** — `agent_context_bindings` computes effective access as existing RBAC ∩ binding. A binding can never grant access. In `enforce` mode, an unbound context is denied with the same not-found shape used for inaccessible contexts.
 - **Composed bootstrap** — `get_agent_bootstrap` combines the context info, pinned memories, an optional trusted-only recall, upcoming time memories, and agent state. Components fail softly; identity and authorization fail closed.
 
-The v0.49.0 milestone shipped the registry, context-level bindings, agent-bound keys, bootstrap, W3C Trace Context/baggage correlation, and the append-only `memory_access_events` foundation. Correlation is observability, never authorization; credential-bound identity outranks explicit/bootstrap and baggage claims. Per-memory type/source filters remain reserved and reject non-`null` values; audit emission currently covers bootstrap, load-pinned, feedback, recall, reference, and remember. Filter enforcement, `update`/`forget` emission, and deny persistence continue in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286). See the [F1 binding design](design/agent-registry-and-bindings.md), [F2 bootstrap contract](design/agent-bootstrap-contract.md), and [F4 correlation design](design/agent-otel-correlation.md).
+The v0.49.0 milestone shipped the registry, context-level bindings, agent-bound keys, bootstrap, W3C Trace Context/baggage correlation, and the append-only `memory_access_events` foundation. Correlation is observability, never authorization; credential-bound identity outranks explicit/bootstrap and baggage claims. Per-memory type/source filters (`allowed_memory_types` / `allowed_source_types`; `null` = all, `[]` = deny-all) are enforced on the memory-read lanes for enforce-mode agents since [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299). `memory_access_events` records recall, reference, remember, update, forget, load_pinned, bootstrap, feedback, explore, load_guardrails, list, changes_since and the time / location recall lanes, including binding denies (`backend/src/models/memory_access_event.py`). See the [F1 binding design](design/agent-registry-and-bindings.md), [F2 bootstrap contract](design/agent-bootstrap-contract.md), and [F4 correlation design](design/agent-otel-correlation.md).
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 72 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 14 categories:
+Kagura Memory Cloud exposes 72 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 14 categories.
+
+**Tool profiles.** `tools/list` answers with the 21-tool `core` profile unless the MCP URL asks for more: `?profile=full` lists all 72, `?add_tools=<name,...>` adds tools to a profile, `?tools=<name,...>` picks an exact set, and `?profile=google` / `?profile=microsoft` serve the core set shaped for Google connected apps and Microsoft 365 Copilot (#2773, #2778). A profile only changes what is listed — every tool stays callable. The core set is `remember`, `remember_batch`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `create_edge`, `get_context_info`, `list_contexts`, `list_tags`, `create_context`, `update_context`, `delete_context`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since` and `bootstrap` (`backend/src/mcp_server/tools/_profiles.py`). `describe_tools` and `guide` are how a client finds and learns the tools it does not list.
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
+| Discovery | 2 | `guide`, `describe_tools` — the per-tool manual and the schemas of tools outside the listed profile |
 | Memory | 9 | `remember`, `remember_batch`, `recall`, `recall_nearby`, `reference`, `list_revisions`, `update_memory`, `forget`, `explore` — store / search / discover memories, read a memory's revision history |
 | Agent Substrate | 12 | `load_pinned`, `load_guardrails`, `recall_upcoming`, `set_state`, `get_state`, `record_measurement`, `recall_series`, `feedback`, `list`, `changes_since`, `bootstrap`, `rollback_session` — delivery-mode-aware retrieval, deterministic listing and change log, one-call session start, undoing one session's writes, agent state lane, measurement series, feedback signal (see [Agent Memory Substrate](#agent-memory-substrate)) |
 | Agent Control Plane (preview) | 10 | `register_agent`, `list_agents`, `get_agent`, `update_agent`, `delete_agent`, `bind_agent_context`, `list_agent_bindings`, `update_agent_binding`, `unbind_agent_context`, `get_agent_bootstrap` — registry, subtractive scoping, and session bootstrap |
-| Neural Edges | 4 | `list_edges`, `create_edge`, `update_edge`, `delete_edge` — manage the Hebbian graph manually |
+| Neural Edges | 4 | `list_edges`, `create_edge`, `update_edge`, `delete_edge` — read the graph and manage declared edges (`create_edge` writes `origin='declared'`; edge types: `neural_association`, `related_to`, `depends_on`, `learned_from`, `continues_from`, `references_file`, `supersedes`, `contradicts`) |
 | Contexts | 7 | `get_context_info`, `list_contexts`, `create_context`, `update_context`, `delete_context`, `merge_contexts`, `update_search_config` |
 | Tags | 1 | `list_tags` — tag vocabulary discovery: a tag review, or the stored spellings for a `recall` tag filter (a write aligns its spellings with `tags_normalize=true`, no `list_tags` call first) |
 | Files / R2 | 5 | `init_file_upload`, `complete_file_upload`, `list_files`, `get_file_download_url`, `delete_file` — binary attachments via R2 |
@@ -376,9 +390,10 @@ See [README › MCP Tools](../README.md#mcp-tools) for the full per-tool table w
 **Typical workflow:**
 
 ```
-list_contexts()           → Discover available contexts
+list_contexts()           → Discover available contexts (skip when the URL sets ?context=)
   ↓
-get_context_info(id)      → Describe the context (owner's notes, as data)
+bootstrap(context_id)     → Open the session: context notes, guardrails, pinned,
+                            upcoming and recent changes in one call
   ↓
 recall(query)             → Search for relevant memories
   ↓
