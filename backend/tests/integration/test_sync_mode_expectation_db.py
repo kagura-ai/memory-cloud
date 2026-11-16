@@ -378,3 +378,27 @@ async def test_strict_numeric_guard_bounds_never_coerce_or_overflow(managed, fie
     )
     assert result.status_code == 400 and result.json() == {"error": "invalid_request"}, result.text
     assert await footprint(managed) == before
+
+
+async def denials(subject, role):
+    async with subject.factory() as db:
+        return await db.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(
+                AuditLog.action == "sync.authority.denied",
+                AuditLog.user_id == subject.store.users[role],
+            )
+        )
+
+
+@pytest.mark.parametrize("action", ["stop", "finalize"])
+async def test_guarded_authenticated_denial_is_still_audited_without_a_transition(managed, action):
+    if action == "finalize":
+        await management.stop(managed)
+    body = {"operation_id": str(uuid4()), "expected": await expected_state(managed)}
+    before, audited = await footprint(managed), await denials(managed, "viewer")
+    result = await human(managed, "POST", "management/" + action, role="viewer", body=body)
+    assert result.status_code == 404, result.text
+    assert await denials(managed, "viewer") == audited + 1
+    assert await footprint(managed) == before
