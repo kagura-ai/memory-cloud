@@ -117,6 +117,13 @@ ambiguous credentials and invalid payloads receive fixed no-store errors.
    `POST`s `{"diff_hash":"..."}` to the human `/runs/{run}/approvals` path.
    The returned finite approval also binds the workspace ownership epoch;
    commit rechecks the approver's current membership and write permission.
+   For a run declaring `manual_request_id`, approval also revalidates the
+   original manual request, requester token/family and Editor reach, browser
+   client, ownership/generation and complete source version. Its original
+   request/token deadlines join the approval transaction fence. A different
+   valid Editor cannot replace a lost original proof or extend its lifetime;
+   approval failure rolls back identity and audit before success is returned.
+   Automatic/unattributed approvals keep their existing behavior.
 7. Worker `POST .../runs/{run}/commit` sends the exact `diff_hash` and, when
    required, `approval_id`. Canonical approved records, all version-specific
    Resource events, the index outbox and the durable commit receipt commit

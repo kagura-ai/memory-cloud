@@ -137,6 +137,17 @@ async def approve_diff(
             or row.generations != [service.generation, client.generation, installation.generation]
         ):
             raise ConflictError("Prepared synchronization diff changed or expired")
+        reference = row.manifest.get("manual_request_id")
+        if reference is not None:
+            from services.sync_requests import validate_manual_request
+
+            try:
+                request_id = UUID(reference)
+            except (AttributeError, TypeError, ValueError):
+                raise ConflictError("Manual request is no longer current") from None
+            await validate_manual_request(
+                db, installation, principal.client_id, request_id, fence=fence
+            )
         row.approval_id = row.approval_id or uuid4()
         row.approved_by, row.approval_epoch = principal.user_id, workspace.ownership_epoch
         fence.deadlines.extend([row.expires_at, row.prepared_until])
