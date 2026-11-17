@@ -145,7 +145,7 @@ describe("MCPConfigBlock", () => {
       expect(screen.getByText(/"mcpServers"/)).toBeInTheDocument();
       expect(screen.getByText(/"kagura-memory"/)).toBeInTheDocument();
       expect(
-        screen.getByText(new RegExp(`"url": "${MCP_URL}"`)),
+        screen.getByText(`"url": "${MCP_URL}"`, { exact: false }),
       ).toBeInTheDocument();
     });
   });
@@ -573,7 +573,7 @@ describe("MCPConfigBlock", () => {
       ).toBeInTheDocument();
       // url row carries the MCP_URL
       expect(
-        screen.getByText(new RegExp(`url = "${MCP_URL}"`)),
+        screen.getByText(`url = "${MCP_URL}"`, { exact: false }),
       ).toBeInTheDocument();
       // Codex reads the key from the environment: the file names the
       // variable and never the key (an inline `bearer_token` is rejected by
