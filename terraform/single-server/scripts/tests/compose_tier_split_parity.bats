@@ -128,6 +128,25 @@ print(e['DATABASE_URL'].split('@')[1], e['QDRANT_URL'], e['REDIS_URL'])
     [ "$output" = "postgres:5432/kagura http://qdrant:6333 redis://redis:6379" ]
 }
 
+@test "both API services mount the OIDC key directory read-only in both layouts (#2885)" {
+    require_compose
+    # The DIRECTORY, not the key file: an atomic replacement of the file is
+    # visible through a directory mount and invisible through a file mount.
+    for f in "$WORK/single.json" "$WORK/split.json"; do
+        run python3 -c "
+import json,sys
+services=json.load(open(sys.argv[1]))['services']
+for name in ('api-blue','api-green'):
+    mounts=[v for v in services[name].get('volumes',[]) if v['target'].startswith('/run/kagura/oidc')]
+    print(name, [(v['type'], v['source'], v['target'], v.get('read_only', False)) for v in mounts])
+" "$f"
+        [ "$status" -eq 0 ]
+        expected="[('bind', '/opt/kagura-memory/oidc', '/run/kagura/oidc', True)]"
+        [ "$output" = "api-blue $expected
+api-green $expected" ]
+    done
+}
+
 @test "the data VM overlay refuses to publish without an explicit bind address" {
     require_compose
     # DATA_BIND_ADDR is unset here: compose must fail rather than bind 0.0.0.0.

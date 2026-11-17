@@ -33,6 +33,23 @@ visible inside the container. A single-file bind mount stays attached to the
 old inode after a host-side replacement; recreate every API container using
 that mount to load the replacement file.
 
+On the single-server layout (`terraform/single-server/docker-compose.prod.yml`
+and `docker-compose.app.yml`) that mount is already there: the host directory
+`/opt/kagura-memory/oidc` appears read-only at `/run/kagura/oidc` in `api-blue`
+and `api-green`, so `OIDC_SIGNING_KEYS_FILE` is a path under `/run/kagura/oidc`
+([#2885](https://github.com/kagura-ai/memory-cloud/issues/2885)).
+
+- The API runs as uid 1000 inside the container, and a bind mount keeps the
+  host's owner and mode. The key file must therefore be owned by uid 1000 on
+  the host with mode `0400` or `0600`, and the directory must let uid 1000
+  enter it (for example `root:root` `0755`, or uid 1000 `0700`).
+- When the host directory does not exist, Docker creates it empty and owned by
+  root at `compose up`. Nothing reads it while `OIDC_ENABLED` is off, so a
+  deployment that does not use the provider needs no preparation.
+- The keys are read for each operation, not at start-up. A missing or refused
+  file with `OIDC_ENABLED=true` answers `503` on `/oidc/*`; the rest of the API
+  and the deploy's readiness check are not affected.
+
 A JWK set has a `keys` array. Each key needs a distinct `kid`; the active key
 needs RSA private material. Previous public RSA keys may remain in the set for
 verification overlap. Optional `alg` and `use` must be `RS256` and `sig`.
