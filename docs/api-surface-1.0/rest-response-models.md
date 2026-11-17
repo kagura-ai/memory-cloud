@@ -86,7 +86,11 @@ route files.
 - `backend/src/api/routes/sync_feeds.py` (`/sync/installations/{installation_id}`, `kmc_sync_at_` service token): `GET /schema`, `POST /resume-candidates`, `POST /runs`, `PUT /runs/{run_id}/chunks/{chunk_index}`, `POST /runs/{run_id}/prepare`, `GET /runs/{run_id}`, `GET /runs/{run_id}/diff`, `POST /runs/{run_id}/commit`, `POST /runs/{run_id}/abort`
 - `backend/src/api/routes/internal_sync_installations.py` (mounted without `/api/v1`, billing-integration caller only): `POST /internal/workspaces/{workspace_id}/sync-authorizations/validate`, `POST /internal/workspaces/{workspace_id}/sync-installations/activate`
 - `GET /.well-known/kmc-sync-configuration` — `backend/src/api/routes/well_known.py`, `SyncConfigurationV1` (`backend/src/models/sync_contract.py`)
-- #2865 (open PR #2867: feed-config reads and PUT preconditions) adds to this surface and inherits its experimental status.
+- Added in v0.167.0 (#2877), experimental like the rest of this section:
+  - `GET /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/feeds` and `.../activity/feeds/{feed_id}` (#2865) — `backend/src/api/routes/sync_activity.py`, `FeedConfigurationPage` / `FeedConfigurationDetail`
+  - the optional `expected` bundle on `PUT .../sync-installations/{installation_id}/feeds/{feed_id}` (#2865) — `backend/src/api/routes/sync_records.py`, `FeedConfig` / `FeedConfigExpected`
+  - the optional `expected` snapshot on `POST .../management/stop` and `.../finalize` (#2871) — `backend/src/api/routes/sync_management.py`, `GuardedModeCommand` / `ModeExpectation`
+  - `GET .../management/access` (#2873) — `SyncModeAccess`; `POST .../management/resume/receipt` (#2875) — `SyncResumeReceiptCommand` / `SyncResumeReceiptView`
 
 ### 7. Other dashboard-facing routes
 

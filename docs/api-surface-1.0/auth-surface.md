@@ -527,9 +527,10 @@ Built on the OIDC provider and off unless `OIDC_ENABLED`,
 The whole sync surface is experimental: the client assertion, the
 `kmc_sync_at_` token, every `/sync/*` and `/workspaces/*/sync-*` route (full
 list with files in `rest-response-models.md`, section 6) and
-`/.well-known/kmc-sync-configuration`. #2865 (open PR #2867: feed-config reads
-and PUT preconditions) adds to this surface and inherits its experimental
-status.
+`/.well-known/kmc-sync-configuration`. v0.167.0 (#2877: #2865 #2869 #2871 #2873
+#2875) added the feed-configuration reads, the `expected` preconditions, lifecycle
+access and resume receipts; they inherit the experimental status (list in
+`rest-response-models.md`, section 6).
 
 ### Other dashboard-facing routes — experimental (owner's decision of 2026-11-16)
 
