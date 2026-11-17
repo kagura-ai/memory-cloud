@@ -551,17 +551,25 @@ class ContextService:
         return list(result.scalars().all())
 
     async def list_contexts(
-        self, user_id: str, *, raise_on_lookup_error: bool = False
+        self,
+        user_id: str,
+        *,
+        workspace_id: UUID | None = None,
+        raise_on_lookup_error: bool = False,
     ) -> list[Context]:
         """List all contexts accessible to user (via workspace membership).
 
-        Issue #115 Phase B: Lists contexts from user's current workspace.
+        Issue #115 Phase B: Lists contexts of one workspace (``workspace_id``, or
+        the user's current workspace when it is not given).
         Issue #234: Respects allowed_context_ids whitelist for member/viewer.
 
         Args:
             user_id: User ID
+            workspace_id: #2884. The workspace the request is bound to (an API
+                key's scope, an MCP URL's workspace); ``None`` lists the user's
+                current workspace. Membership is still checked.
             raise_on_lookup_error: A failed access lookup (not a member of the
-                current workspace, a database error) is an empty list by
+                workspace, a database error) is an empty list by
                 default; True raises ``ContextListingFailedError`` instead, so
                 MCP ``list_contexts`` does not read it as an empty account
                 (#1658).
@@ -571,8 +579,8 @@ class ContextService:
         """
         from services.permission_service import PermissionService
 
-        # Get user's current workspace
-        workspace_id = await self._get_user_current_workspace_id(user_id)
+        if workspace_id is None:
+            workspace_id = await self._get_user_current_workspace_id(user_id)
         if not workspace_id:
             return []
 

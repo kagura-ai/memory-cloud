@@ -975,8 +975,13 @@ async def handle_list_contexts(
             # always has, but it is not an empty account, so it gets no hint.
             lookup_failed = False
             try:
+                # #2884: the workspace the request is bound to (the key's scope,
+                # else the URL's workspace, else the current one), the same one
+                # count / limit below describe — never the web UI's selection.
                 contexts = await execute_with_timeout(
-                    context_service.list_contexts(user_id, raise_on_lookup_error=True),
+                    context_service.list_contexts(
+                        user_id, workspace_id=workspace_id, raise_on_lookup_error=True
+                    ),
                     operation_name="list_contexts",
                 )
             except ContextListingFailedError as e:
@@ -1082,7 +1087,8 @@ async def handle_list_contexts(
             # ``count`` is quota usage, so it never tracks name_contains; the
             # number of items actually returned is ``total`` (#1600).
             quota_info: dict[str, Any] = {"count": visible_count, "total": len(context_list)}
-            if workspace_id:
+            # #2884: no quota figures for a workspace the caller could not list.
+            if workspace_id and not lookup_failed:
                 try:
                     from sqlalchemy import func as sql_func
                     from sqlalchemy import select as sql_select

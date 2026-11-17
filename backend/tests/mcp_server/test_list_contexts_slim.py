@@ -346,7 +346,9 @@ async def test_filter_runs_after_the_permission_scoped_listing():
 
     payload = await _payload(harness, {"name_contains": "team", "include_stats": True})
 
-    harness.service.list_contexts.assert_awaited_once_with("u1", raise_on_lookup_error=True)
+    harness.service.list_contexts.assert_awaited_once_with(
+        "u1", workspace_id=None, raise_on_lookup_error=True
+    )
     assert {c["id"] for c in payload["contexts"]} <= {str(c.id) for c in visible}
 
     # include_stats only pays for the contexts that survived the filter.
@@ -618,6 +620,23 @@ async def test_failed_access_lookup_is_not_an_empty_account():
     assert payload["status"] == "success"
     assert payload["contexts"] == []
     assert "hint" not in payload
+    # #2884: and no quota figures of the workspace it could not list.
+    assert payload["count"] == 0
+    assert "limit" not in payload and "can_create" not in payload
+
+
+@pytest.mark.asyncio
+async def test_listing_is_asked_for_the_request_workspace():
+    """#2884: the service lists the workspace the request is bound to (an API
+    key's scope, an MCP URL's workspace), not the user's web UI selection."""
+    harness = _Harness([_context("a")], workspace_count=1)
+    workspace_id = uuid4()
+
+    await _payload(harness, {}, workspace_id=workspace_id)
+
+    harness.service.list_contexts.assert_awaited_once_with(
+        "u1", workspace_id=workspace_id, raise_on_lookup_error=True
+    )
 
 
 @pytest.mark.asyncio
