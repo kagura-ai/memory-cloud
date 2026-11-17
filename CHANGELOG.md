@@ -4,6 +4,31 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.168.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.168.0) — 2026-11-17
+
+A setup-only billing handoff for sync add-ons. The current workspace owner can enter the payment service's sync add-on setup flow from Public ([kagura-public#39](https://github.com/kagura-ai/kagura-public/issues/39)) with the isolated `integrations:manage` OIDC token. No KMC session is needed, and the credential carries no generic billing authority.
+
+The sync APIs are `experimental` (they may change in a minor release). No migration. Two new settings, needed only when the route is enabled.
+
+### Added
+- **Setup-only sync billing handoff** ([#2878](https://github.com/kagura-ai/memory-cloud/issues/2878)): `POST /api/v1/workspaces/{workspace_id}/sync-billing-handoffs` takes `application_id`, `application_revision` and `input_digest`. It returns a short-lived signed credential and a ready `url` on the payment origin's fixed `/addons/sync/enter` path.
+  - Only the current canonical owner can mint it. That needs OWNER membership, a live `integrations:manage` OIDC token and an enabled registered service. Ordinary login tokens, sessions, API keys, Resource Tokens, workers and other roles cannot.
+  - The credential has its own audience, type and purpose. It binds the subject, workspace, registered service, application tuple and current ownership epoch.
+  - It lives at most 60 seconds, and never past the OIDC token or grant deadline. When fewer than 5 seconds would remain, the route answers `401`.
+  - It grants setup only: no subscription, paid entitlement, resource or generic billing portal access. The legacy `POST /api/v1/billing/handoff` is unchanged.
+  - Issuance is audited as `sync.setup_handoff.created`, with the token's `jti` as the operation id. No token or request body is logged.
+  - See `docs/ops/sync-setup-billing-handoff.md` and the contract fixture `backend/tests/fixtures/sync-setup-handoff-v1.json`.
+
+### Fixed
+- **Busy owner membership answers `409`** ([#2878](https://github.com/kagura-ai/memory-cloud/issues/2878)): sync owner controls answer the retryable `409` instead of `503` `temporarily_unavailable` while another request holds the owner's membership row.
+- **Revoke and unlink check expiry after the audit write** ([#2878](https://github.com/kagura-ai/memory-cloud/issues/2878)): `DELETE .../sync-authorizations/{authorization_id}` and `DELETE .../sync-installations/{installation_id}` write their audit row before the final expiry check. A token or grant that expires during that write no longer commits the change.
+
+### Notes
+- No migration.
+- New settings `BILLING_SYNC_SETUP_SIGNING_KEY` (a separate Ed25519 PKCS8 PEM) and `BILLING_SYNC_SETUP_KEY_ID`, empty by default. The route answers a fixed `503` when they are empty, or when they reuse the key material or kid of `BILLING_HANDOFF_SIGNING_KEY` / `BILLING_HANDOFF_KEY_ID`. The legacy key is never a fallback. `PAYMENT_PUBLIC_BASE_URL` must be an HTTPS origin.
+- The route follows `SYNC_INTEGRATIONS_ENABLED` and `OIDC_ENABLED`, both off by default. It has its own OIDC rate bucket, `sync-setup-handoff`.
+- Payment ([kagura-payment#201](https://github.com/kagura-ai/kagura-payment/issues/201)) must accept the setup kid only on its setup entry point and consume each `jti` once. This release alone enables no payment flow.
+
 ## [v0.167.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.167.0) — 2026-11-17
 
 Sync contract fixes that the public resource dashboard ([kagura-public#37](https://github.com/kagura-ai/kagura-public/issues/37)) builds on:
