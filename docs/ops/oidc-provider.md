@@ -33,6 +33,44 @@ visible inside the container. A single-file bind mount stays attached to the
 old inode after a host-side replacement; recreate every API container using
 that mount to load the replacement file.
 
+On the single-server layout (`terraform/single-server/docker-compose.prod.yml`
+and `docker-compose.app.yml`) the compose files carry that mount: the host
+directory `/opt/kagura-memory/oidc` appears read-only at `/run/kagura/oidc` in
+`api-blue` and `api-green`, so `OIDC_SIGNING_KEYS_FILE` is a path under
+`/run/kagura/oidc` ([#2885](https://github.com/kagura-ai/memory-cloud/issues/2885)).
+
+- **Containers created before the mount was added do not have it.** Run
+  `deploy.sh` once with a release that has the mount before placing the key
+  and setting `OIDC_ENABLED=true`. After that first deploy only the new color
+  has it: `deploy.sh --rollback` goes back to the old container, where
+  `/run/kagura/oidc` does not exist and `/oidc/*` answers `503`. A second
+  deploy gives both colors the mount.
+- **Owner and mode.** The API runs as uid 1000 inside the container, and a
+  bind mount keeps the host's owner and mode. The key file must be owned by
+  uid 1000 on the host with mode `0400` or `0600`, and the directory must let
+  uid 1000 enter it (for example `root:root` `0755`). The host account with
+  uid 1000, often the first login account of the VM, can then read the key:
+  treat that account as you treat the one that can read `.env.prod`.
+- **Replacing the file** keeps working only when the new file has the same
+  owner and mode before the rename, for example
+  `sudo install -o 1000 -g 1000 -m 0400 new-keys.json /opt/kagura-memory/oidc/.signing-keys.json.new`
+  followed by `sudo mv` over the live name. A file left owned by root or by
+  the operator is unreadable for the API, and `/oidc/*` answers `503` at once.
+  The same happens after a recursive `chown` of `/opt/kagura-memory` (the
+  set-up step in `terraform/single-server/README.md`): restore uid 1000 on the
+  key file afterwards.
+- **Keep only the live file in the directory.** Everything in it is visible
+  to both API containers, so remove staged copies, backups and retired keys.
+- **A missing host directory** is created by Docker at `compose up`, empty and
+  owned by root. Nothing reads it while `OIDC_ENABLED` is off, so a deployment
+  that does not use the provider needs no preparation.
+- **A missing or refused key file** with `OIDC_ENABLED=true` answers `503` on
+  `/oidc/*`. The keys are read for each operation, not at start-up, so the
+  containers start and the deploy's readiness check stays green. Clients
+  cannot sign in or refresh a token meanwhile, so everything that needs an
+  OIDC token (the sync owner controls, for example) stops within the token
+  lifetime of five minutes.
+
 A JWK set has a `keys` array. Each key needs a distinct `kid`; the active key
 needs RSA private material. Previous public RSA keys may remain in the set for
 verification overlap. Optional `alg` and `use` must be `RS256` and `sig`.

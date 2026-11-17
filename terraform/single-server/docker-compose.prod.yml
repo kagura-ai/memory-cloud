@@ -79,6 +79,15 @@ x-api-common: &api-common
   # source, and GET /api/v1/workers/active-color then answers 503 "unreadable".
   volumes:
     - /opt/kagura-memory/active-color:/run/kagura/active-color:ro
+    # #2885: the OIDC provider's signing keys (docs/ops/oidc-provider.md).
+    # Mounted as the DIRECTORY, read-only: an atomic replacement of the key
+    # file (write a new file, rename it over the old one) is then visible
+    # without recreating the containers, which a single-file mount would not
+    # give. Unlike the marker above, the host directory may be missing: Docker
+    # creates it empty and root-owned, and nothing reads it while OIDC_ENABLED
+    # is off. The key file must be owned by uid 1000 (the container user) with
+    # mode 0400 or 0600; OIDC_SIGNING_KEYS_FILE names it under /run/kagura/oidc.
+    - /opt/kagura-memory/oidc:/run/kagura/oidc:ro
   depends_on:
     postgres:
       condition: service_healthy
