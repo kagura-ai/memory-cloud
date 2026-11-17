@@ -98,6 +98,14 @@ ROUTES: dict[tuple[str, str], str] = {
     # #2810: metadata observations and human intent do not read/write memory bodies.
     (
         "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/feeds",
+    ): ALLOWED,
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/feeds/{feed_id}",
+    ): ALLOWED,
+    (
+        "GET",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity",
     ): ALLOWED,
     (
@@ -125,6 +133,11 @@ ROUTES: dict[tuple[str, str], str] = {
         "GET",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management",
     ): ALLOWED,
+    # #2873: current-human lifecycle metadata, not canonical data access.
+    (
+        "GET",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/access",
+    ): ALLOWED,
     (
         "POST",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/stop",
@@ -145,6 +158,10 @@ ROUTES: dict[tuple[str, str], str] = {
         "POST",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/resume/confirm",
     ): BLOCKED,
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management/resume/receipt",
+    ): ALLOWED,
     ("GET", "/api/v1/sync/installations/{installation_id}/schema"): ALLOWED,
     ("POST", "/api/v1/sync/installations/{installation_id}/runs"): BLOCKED,
     (

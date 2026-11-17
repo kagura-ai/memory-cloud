@@ -16,6 +16,8 @@ from api.routes.sync_installations import (
 from models.sync_activity_schemas import (
     ActivityOverview,
     EventPage,
+    FeedConfigurationDetail,
+    FeedConfigurationPage,
     ManualRequestBody,
     ManualRequestView,
     RunDetail,
@@ -41,6 +43,31 @@ async def get_activity(
     """Read current mode and the authoritative workspace allowance without consuming it."""
     exact_query(request)
     return await activity.overview(db, workspace_id, installation_id, principal)
+
+
+@router.get("/feeds", response_model=FeedConfigurationPage)
+async def get_feed_configurations(
+    workspace_id: UUID, installation_id: UUID, request: Request, principal: Reader, db: Database
+) -> dict:
+    """Read at most twenty opaque feed configurations, never their source data."""
+    exact_query(request)
+    return await activity.feed_configuration(db, workspace_id, installation_id, principal)
+
+
+@router.get("/feeds/{feed_id}", response_model=FeedConfigurationDetail)
+async def get_feed_configuration(
+    workspace_id: UUID,
+    installation_id: UUID,
+    feed_id: UUID,
+    request: Request,
+    principal: Reader,
+    db: Database,
+) -> dict:
+    """Read the exact feed and current generation/schema for a guarded update."""
+    exact_query(request)
+    return await activity.feed_configuration(
+        db, workspace_id, installation_id, principal, feed_id=feed_id
+    )
 
 
 @router.get("/runs", response_model=RunPage)

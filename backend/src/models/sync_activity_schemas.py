@@ -4,12 +4,13 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from models.api_base import TZAwareBaseModel
 from models.public_usage_budget import PublicUsageBudgetStatus
 from models.sync_activity import SyncActivityAction
-from models.sync_feed_schemas import StrictBody
+from models.sync_feed_schemas import Hash, StrictBody
+from utils.query_bounds import MAX_INT32
 
 
 class ManualRequestBody(StrictBody):
@@ -46,6 +47,44 @@ class ActivityOverview(TZAwareBaseModel):
     allowance: PublicUsageBudgetStatus
     notification: NotificationSignal
     as_of: datetime
+
+
+class FeedObservation(TZAwareBaseModel):
+    """Only opaque configuration and canonical revision metadata, never source data."""
+
+    # The inherited datetime wrapper returns Any for every field in serialization
+    # mode. These responses preserve field types on the wire; use their bounded
+    # validation schema rather than advertising every property as unconstrained.
+    model_config = ConfigDict(json_schema_mode_override="validation")
+
+    feed_id: UUID
+    kind: Literal["product", "faq"]
+    config_hash: Hash
+    config_version: int = Field(ge=1, le=MAX_INT32)
+    revision: int = Field(ge=0, le=MAX_INT32)
+
+
+class FeedConfigurationState(TZAwareBaseModel):
+    """Current installation/schema observations are not mutation authority."""
+
+    model_config = ConfigDict(json_schema_mode_override="validation")
+
+    workspace_id: UUID
+    installation_id: UUID
+    generation: int = Field(ge=1, le=MAX_INT32)
+    schema_hash: Hash | None
+    schema_version: int | None = Field(ge=1, le=MAX_INT32)
+    as_of: datetime
+
+
+class FeedConfigurationPage(FeedConfigurationState):
+    """An installation has at most twenty configured feeds."""
+
+    items: list[FeedObservation] = Field(max_length=20)
+
+
+class FeedConfigurationDetail(FeedConfigurationState, FeedObservation):
+    """The requested exact feed and current installation/schema snapshot."""
 
 
 class SearchObservation(TZAwareBaseModel):

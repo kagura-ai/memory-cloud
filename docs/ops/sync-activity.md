@@ -27,6 +27,8 @@ client bindings still prevent inspection. Every response/error is no-store.
 | Method / suffix | Input | Result |
 | --- | --- | --- |
 | `GET` | None | Contract version, installation state/generation, effective management mode/epoch/stop watermark, feed/record counts, authoritative allowance and notification signal |
+| `GET /feeds` | None | At most 20 opaque feed observations (ID, kind, config hash/version, canonical revision) with the current generation, schema hash/version and UTC `as_of`; see [conditional updates](staged-feed-sync.md#current-configuration-and-conditional-updates) |
+| `GET /feeds/{feed_id}` | None | The same snapshot for one feed of this installation |
 | `GET /runs` | `limit` 1–100 (default 50), optional UUID `cursor` | Receipt metadata, next cursor and UTC `as_of`; search state is explicitly `not_evaluated` on a list |
 | `GET /runs/{run_id}` | None | One run's admission/state/counts/times, received chunk/record counts and current search evidence |
 | `GET /events` | `limit` 1–100 (default 50), optional positive integer `before_id` | Protocol-v1 audit references, next marker, retention window and UTC `as_of` |

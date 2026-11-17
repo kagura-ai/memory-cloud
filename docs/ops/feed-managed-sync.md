@@ -71,12 +71,90 @@ All outcomes are private/no-store. Foreign targets are uniformly not found.
 | Method and suffix | Body / query | Result |
 | --- | --- | --- |
 | `GET` | None | Mode, epoch, installation generation, stop watermark/reason |
-| `POST /stop` | `operation_id` UUID | Durable `stopping`; abort unfinished runs and advance generation once |
-| `POST /finalize` | `operation_id` UUID | `manual` only after writer exclusion and complete indexing |
+| `GET /access` | None | Versioned current-human lifecycle rights and retained target metadata |
+| `POST /stop` | `operation_id` UUID, optional `expected` snapshot | Durable `stopping`; abort unfinished runs and advance generation once |
+| `POST /finalize` | `operation_id` UUID, optional `expected` snapshot | `manual` only after writer exclusion and complete indexing |
 | `POST /resume/preview` | None | Preview UUID, diff hash, retire/publish counts, finite deadline |
 | `GET /resume/diff` | `preview_id`, `offset` (0–20,000), `limit` (1–100) | Exact current human's paginated diff |
 | `POST /resume/confirm` | `operation_id`, `preview_id`, `diff_hash` | Atomic new generation and `feed` publication |
+| `POST /resume/receipt` | `operation_id`, `preview_id`, `diff_hash`, `original_subject` | Read-only, typed original outcome under fresh current Editor authority |
 | `POST /reconnect` | `operation_id`, fresh owner `authorization_id` | Same retained target, active authentication, still `manual` |
+
+See [read-only outcome recovery](resume-receipt-recovery.md) for the versioned
+receipt/absence contract and the additional conditions needed for safe abandonment.
+
+For stop/finalize, send the four fields from the confirmed `GET` status as
+`expected: {"mode":"feed","epoch":1,"generation":1,"stop_event_id":0}`.
+The entire object is required when present: mode is `feed`, `stopping` or `manual`;
+epoch/generation are positive integers, and stop_event_id is nonnegative. Numeric
+fields are bounded to JavaScript's safe integer range; booleans, partial objects,
+unknown fields and coercions are rejected. A first operation compares the snapshot
+under the same exclusive target and workspace locks as the transition. A mismatch
+returns the fixed private `409` without enrollment, successful transition audit,
+operation receipt, generation change or pending-run/chunk changes. Current human
+authorization and the finalize drain/indexing checks still apply.
+
+A target without an ownership row yet reports the projected default `feed`, epoch 1.
+A guarded finalize confirmed against that projection only enrolls the target and
+returns the enrolled state; it never unlocks in the same operation. A target unlinked
+before the ownership barrier enrolls as `stopping` (reason `legacy_unlinked`), so read
+status again and confirm the finalize against that state with a new operation UUID.
+An exact retry of the enrolling operation returns the same enrollment receipt.
+
+The operation UUID binds its action, real principal and complete request body.
+An exact retry returns its historical receipt before checking the current state;
+it does not stop a subsequently resumed generation. Changing the snapshot or
+switching a UUID between guarded and legacy bodies conflicts. Status must be read
+again to display current mode. Only omission of `expected` keeps legacy unguarded
+behavior and the same legacy operation identity; an explicit `"expected": null` is
+rejected like any other malformed body. A status read that still shows the confirmed
+snapshot does not prove that an earlier guarded stop/finalize can no longer apply:
+it stays applicable until the snapshot changes or the request's token expires, and
+there is no cancel operation. Public's exact-confirmation
+controls must require a complete non-null snapshot and must never fall back to
+an unguarded command, including against an older server.
+
+### Readonly lifecycle access
+
+`GET /access` accepts the ordinary registered browser client's human token with
+`workspaces:read`. Its strict `sync-mode-access-v1` response contains exactly:
+
+- `contract_version` and the current human `subject`.
+- `target`: `workspace_id`, `installation_id`, `resource_pk`, `context_id`,
+  `endpoint_id`, `generation` and `target_available`. No public URL, source URL,
+  resource slug, records or credentials are included.
+- `management`: `mode`, `epoch`, matching `generation`, `stop_event_id` and nullable
+  bounded `reason`. All counters are integers in the JavaScript safe range.
+- `permissions`: `read: true` for this metadata, plus boolean `stop` and `finalize`
+  calculated from the current Context Editor/Owner role. A Viewer gets metadata
+  with both mutation capabilities false. A workspace member or viewer role alone is
+  insufficient; workspace owners and admins hold the Context Owner role on every
+  Context they can reach.
+
+This uses the same current identity, browser-client registration, membership,
+seat/reach and target fence as the management controls. It deliberately applies
+their existing capacity-safe policy: a capacity hold or Context write suspension
+does not remove safe lifecycle access. Existing workspace/resource data `read`
+and `sync.manage` flags remain unchanged. These booleans describe role capability;
+they neither grant a new scope nor prove that draining/indexing can complete.
+The Context is refreshed under a NOWAIT shared row lock before the final role
+check. Private linked-owner reach also locks both ownership-witness link rows in
+user order. Those locks remain through observation commit, so concurrent privacy
+changes or unlink cannot return stale capabilities. Contention remains an error;
+this does not require a live public endpoint or take the global link mutex.
+Stop/finalize still require a separately authorized `integrations:manage` token
+and revalidate current authority at the mutation boundary. Resume, source writes,
+canonical content reads and paid service operations retain their normal gates.
+
+The read never enrolls a target, changes generation/mode/Sleep, creates an operation
+receipt or repairs missing publication. Unpublished endpoint metadata reports
+`target_available: false` without granting any extra authority. An unenrolled
+target reports the conservative default `feed` epoch 1 at its current generation.
+The existing `SYNC_MANAGED_ENABLED` rollout switch also gates this route. Disabled
+or foreign targets remain private/not-found; every outcome is no-store/no-cache.
+Consumers must validate the explicit version, subject, full target and matching
+generation; absence of this profile is not permission to infer Context rights or
+fall back to ordinary data permissions for lifecycle operations.
 
 Operation receipts bind the real principal, action and exact body. Repeating an
 operation returns its original result without advancing generation again;

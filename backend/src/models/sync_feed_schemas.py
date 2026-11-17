@@ -3,13 +3,15 @@
 import json
 import re
 import unicodedata
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from models.management_schemas import digest
+from utils.query_bounds import MAX_INT32
 
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 MAX_RECORDS = 10_000
@@ -52,11 +54,38 @@ class StrictBody(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class FeedConfigExpected(StrictBody):
+    """One complete snapshot; version zero is an assertion that the feed is absent."""
+
+    config_version: Annotated[StrictInt, Field(ge=0, le=MAX_INT32)]
+    generation: Annotated[StrictInt, Field(ge=1, le=MAX_INT32)]
+    schema_hash: Hash | None
+    schema_version: Annotated[StrictInt, Field(ge=1, le=MAX_INT32)] | None
+
+    @model_validator(mode="after")
+    def complete_schema(self) -> Self:
+        """An absent schema has neither an identity hash nor a version."""
+        if (self.schema_hash is None) != (self.schema_version is None):
+            raise ValueError("incomplete_schema_snapshot")
+        return self
+
+
 class FeedConfig(StrictBody):
     """Opaque hash of the source configuration; KMC never retrieves feed URLs."""
 
     kind: Literal["product", "faq"]
     config_hash: Hash
+    # Omission alone preserves the legacy unguarded protocol. SkipJsonSchema
+    # describes the accepted optional object, not the internal omission sentinel.
+    expected: FeedConfigExpected | SkipJsonSchema[None] = Field(default_factory=lambda: None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def explicit_null_is_not_omission(cls, value: Any) -> Any:
+        """A malformed requested guard must never silently become a legacy write."""
+        if isinstance(value, dict) and "expected" in value and value["expected"] is None:
+            raise ValueError("invalid_configuration_precondition")
+        return value
 
 
 class RunManifest(StrictBody):
