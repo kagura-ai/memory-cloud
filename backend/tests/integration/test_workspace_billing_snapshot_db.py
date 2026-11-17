@@ -65,7 +65,7 @@ async def test_read_does_not_opt_in_and_legacy_workspaces_keep_existing_behavior
 
 async def test_atomic_write_persists_complete_plan_quotas_and_all_service_rights(ordered):
     s = ordered
-    body = complete(addons={"memory": 7, "history_retention_days": 30})
+    body = complete(addons={key: index + 1 for index, key in enumerate(ADDON_COLUMNS)})
     response = await call(s, body)
     assert response.status_code == 200, response.text
     result = response.json()
@@ -222,12 +222,14 @@ async def test_exception_after_plan_mutation_rolls_back_entire_snapshot_and_mode
 
 async def test_concurrent_full_snapshots_preserve_newer_whole_state(ordered):
     s = ordered
-    old, new = complete(1, addons={"memory": 4}), complete(2, addons={"memory": 8})
+    old = complete(1, addons={"memory": 4})
+    new = complete(2, plan="free", addons={"memory": 8}, services=[])
+    new["max_access"] = None
     responses = await asyncio.gather(call(s, new), call(s, old))
     assert all(response.status_code == 200 for response in responses)
     view = (await call(s)).json()
     assert view["revision"] == 2 and view["plan"] == new["plan"]
-    assert view["max_access"]["evidence_ref"] == new["max_access"]["evidence_ref"]
+    assert view["plan_name"] == "free" and view["max_access"] is None and view["services"] == []
 
 
 async def test_complete_replacement_keeps_unrelated_services_and_clears_old_quotas(ordered):
