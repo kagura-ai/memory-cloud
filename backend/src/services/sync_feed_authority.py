@@ -182,14 +182,19 @@ async def human_feed_boundary(
 
 async def current_schema(db: AsyncSession, row: SyncInstallation) -> ResourceSchema | None:
     """Resource UPDATE blocks a concurrent schema insertion through its FK."""
-    return await db.scalar(
-        select(ResourceSchema)
-        .where(ResourceSchema.resource_pk == row.resource_pk)
-        .order_by(ResourceSchema.schema_version.desc())
-        .limit(1)
-        .with_for_update(read=True, nowait=True)
-        .execution_options(populate_existing=True)
-    )
+    try:
+        return await db.scalar(
+            select(ResourceSchema)
+            .where(ResourceSchema.resource_pk == row.resource_pk)
+            .order_by(ResourceSchema.schema_version.desc())
+            .limit(1)
+            .with_for_update(read=True, nowait=True)
+            .execution_options(populate_existing=True)
+        )
+    except DBAPIError as exc:
+        if is_lock_not_available(exc):
+            raise ConflictError("Synchronization state is changing; retry") from exc
+        raise
 
 
 async def worker_target(

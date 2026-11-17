@@ -25,7 +25,13 @@ from models.sync_installation import SyncService
 from services.sync_feed_authority import current_schema, human_feed_boundary, locked
 from services.sync_feed_runs import run_view
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import ConflictError, NotFoundException, SyncProtocolError
+from utils.exceptions import (
+    ConflictError,
+    MemoryCloudException,
+    NotFoundException,
+    SyncProtocolError,
+)
+from utils.query_bounds import MAX_INT32
 
 
 async def configure_feed(
@@ -38,6 +44,19 @@ async def configure_feed(
         _fence,
     ):
         schema = await current_schema(db, installation)
+        row = await locked(db, SyncFeed, SyncFeed.id == fid, write=True)
+        if row is not None and row.installation_id != iid:
+            raise NotFoundException("Synchronization feed")
+        expected = body.expected
+        if expected is not None and (
+            expected.config_version != (row.config_version if row else 0)
+            or expected.generation != installation.generation
+            or expected.schema_version != (schema.schema_version if schema else None)
+            or expected.schema_hash != (digest(schema.field_definitions) if schema else None)
+        ):
+            # Compare before schema creation/autoflush, configuration or success
+            # audit mutation, while the existing authoritative locks are held.
+            raise ConflictError("Synchronization configuration snapshot changed")
         if schema is None:
             db.add(
                 ResourceSchema(
@@ -49,9 +68,6 @@ async def configure_feed(
             )
         elif digest(schema.field_definitions) != SCHEMA_HASH:
             raise ConflictError("Dedicated synchronization schema has changed")
-        row = await locked(db, SyncFeed, SyncFeed.id == fid, write=True)
-        if row is not None and row.installation_id != iid:
-            raise NotFoundException("Synchronization feed")
         if row is None:
             count = (
                 await db.scalar(
@@ -70,6 +86,8 @@ async def configure_feed(
             if row.kind != body.kind:
                 raise ConflictError("Feed kind is immutable")
             if row.config_hash != body.config_hash:
+                if row.config_version >= MAX_INT32:
+                    raise ConflictError("Synchronization configuration version exhausted")
                 row.config_hash = body.config_hash
                 row.config_version += 1
         from services.sync_audit import add_audit, human_actor
@@ -137,6 +155,24 @@ async def approve_diff(
             or row.generations != [service.generation, client.generation, installation.generation]
         ):
             raise ConflictError("Prepared synchronization diff changed or expired")
+        reference = row.manifest.get("manual_request_id")
+        if reference is not None:
+            from services.sync_requests import validate_manual_request
+
+            try:
+                request_id = UUID(reference)
+            except (AttributeError, TypeError, ValueError):
+                raise ConflictError("Manual request is no longer current") from None
+            try:
+                await validate_manual_request(
+                    db, installation, principal.client_id, request_id, fence=fence
+                )
+            except ConflictError:
+                raise
+            except MemoryCloudException:
+                # Any lost original authority (seat, plan, capacity) is the same
+                # fixed conflict; it never answers as a refusal of this approver.
+                raise ConflictError("Manual request authority changed") from None
         row.approval_id = row.approval_id or uuid4()
         row.approved_by, row.approval_epoch = principal.user_id, workspace.ownership_epoch
         fence.deadlines.extend([row.expires_at, row.prepared_until])
