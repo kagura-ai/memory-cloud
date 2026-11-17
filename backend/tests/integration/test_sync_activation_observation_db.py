@@ -73,7 +73,7 @@ async def test_lost_reply_discovers_the_same_target_after_original_consent_expir
 
 
 @pytest.mark.parametrize(
-    "kind", ["transfer", "away_back", "service_generation", "revoke", "pending_expiry"]
+    "kind", ["transfer", "away_back", "service_generation", "revoke", "pending_expiry", "consumed"]
 )
 async def test_current_binding_changes_are_holds_without_mutation(store, kind):
     approval = await approve(store)
@@ -86,6 +86,10 @@ async def test_current_binding_changes_are_holds_without_mutation(store, kind):
     elif kind == "revoke":
         await change(
             store, SyncAuthorization, UUID(approval["authorization_id"]), revoked_at=store.clock.now
+        )
+    elif kind == "consumed":
+        await change(
+            store, SyncAuthorization, UUID(approval["authorization_id"]), used_at=store.clock.now
         )
     else:
         store.clock.now += timedelta(days=8)
