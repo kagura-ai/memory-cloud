@@ -734,6 +734,18 @@ class Settings(BaseSettings):
             "rotation). Empty disables the endpoint (fail-closed, 503)."
         ),
     )
+    # Setup-only tokens must use independently managed material and a distinct kid.
+    # Empty configuration disables setup issuance; legacy billing is never a fallback.
+    billing_sync_setup_signing_key: str = Field(
+        default="",
+        repr=False,
+        exclude=True,
+        description="Separate Ed25519 PKCS8 PEM for sync setup handoffs; empty fails closed.",
+    )
+    billing_sync_setup_key_id: str = Field(
+        default="",
+        description="Separate sync setup signing kid; must differ from the legacy billing kid.",
+    )
     billing_handoff_issuer: str = Field(
         default="kagura-memory-cloud",
         description=(

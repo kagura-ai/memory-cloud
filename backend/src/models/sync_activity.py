@@ -79,6 +79,7 @@ SyncActivityAction = Literal[
     "sync.authorization.created",
     "sync.authorization.revoked",
     "sync.authorization.superseded",
+    "sync.setup_handoff.created",
     "sync.client.disabled",
     "sync.client.enabled",
     "sync.client.registered",

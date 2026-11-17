@@ -1,0 +1,36 @@
+{
+  "contract_version": "sync-setup-handoff-v1",
+  "method": "POST",
+  "path": "/api/v1/workspaces/{workspace_id}/sync-billing-handoffs",
+  "maximum_body_bytes": 4096,
+  "body_timeout_seconds": 5,
+  "request": {
+    "application_id": "11111111-1111-4111-8111-111111111111",
+    "application_revision": 3,
+    "input_digest": "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac"
+  },
+  "token": {
+    "algorithm": "Ed25519",
+    "type": "kagura-sync-setup+jwt",
+    "audience": "kagura-billing-sync-setup",
+    "purpose": "sync_addon_setup",
+    "maximum_lifetime_seconds": 60,
+    "required_claims": [
+      "iss", "aud", "purpose", "sub", "workspace_id", "service_id", "client_id",
+      "application_id", "application_revision", "input_digest", "epoch", "iat", "exp", "jti"
+    ],
+    "forbidden_claims": [
+      "role", "approved", "plan", "price_id", "customer_id", "payment_method_id",
+      "authorization_id", "resource_id"
+    ]
+  },
+  "response": {
+    "status": 200,
+    "token_type": "sync_addon_setup",
+    "fields": ["contract_version", "token_type", "token", "kid", "jti", "expires_at", "url"]
+  },
+  "landing": {
+    "path": "/addons/sync/enter",
+    "query_keys": ["t"]
+  }
+}
