@@ -83,6 +83,8 @@ def billing(monkeypatch):
                 exec_result = MagicMock()
                 exec_result.scalar_one_or_none.return_value = workspace
                 db.execute = AsyncMock(return_value=exec_result)
+                # Nonparticipants have no ordered workspace billing state.
+                db.scalar = AsyncMock(return_value=False)
                 db.commit = AsyncMock()
                 yield db
 

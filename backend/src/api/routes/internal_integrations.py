@@ -16,9 +16,15 @@ from models.integration_entitlement_schemas import (
     IntegrationEntitlementResult,
     IntegrationEntitlementView,
 )
+from models.workspace_billing_schemas import (
+    WorkspaceBillingPush,
+    WorkspaceBillingResult,
+    WorkspaceBillingView,
+)
 from services.integration_entitlements import (
     apply_integration_entitlements,
     read_integration_entitlements,
+    read_workspace_billing,
 )
 
 # Keep the window type available with the endpoint's contract.
@@ -74,3 +80,36 @@ async def put_integration_entitlements(
     result = await apply_integration_entitlements(db, workspace_id, body)
     await db.commit()
     return result
+
+
+@router.get("/workspaces/{workspace_id}/billing-snapshot", response_model=WorkspaceBillingView)
+async def get_workspace_billing_snapshot(
+    workspace_id: UUID,
+    response: Response,
+    _: None = Depends(billing_integration_caller),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceBillingView:
+    """Read a coherent complete snapshot; reading alone never opts a workspace in."""
+    response.headers.update({"Cache-Control": "no-store", "Pragma": "no-cache"})
+    return await read_workspace_billing(db, workspace_id)
+
+
+@router.put("/workspaces/{workspace_id}/billing-snapshot", response_model=WorkspaceBillingResult)
+async def put_workspace_billing_snapshot(
+    workspace_id: UUID,
+    body: WorkspaceBillingPush,
+    response: Response,
+    _: None = Depends(billing_integration_caller),
+    db: AsyncSession = Depends(get_db),
+) -> WorkspaceBillingResult:
+    """Atomically opt into and publish one ordered plan/quota/paid-rights state."""
+    response.headers.update({"Cache-Control": "no-store", "Pragma": "no-cache"})
+    # Retain the typed complete body: plan=null is ordered, not a legacy push,
+    # and the digest must include every validated top-level field unchanged.
+    result = await apply_integration_entitlements(db, workspace_id, body)
+    view = await read_workspace_billing(db, workspace_id)
+    answer = WorkspaceBillingResult(
+        **view.model_dump(), applied=result.applied, outcome=result.outcome
+    )
+    await db.commit()
+    return answer

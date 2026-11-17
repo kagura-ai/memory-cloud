@@ -1725,6 +1725,51 @@
         ],
         "type": "object"
       },
+      "BillingSnapshotPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "addons": {
+            "additionalProperties": {
+              "maximum": 2000000000.0,
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "plan_name": {
+            "enum": [
+              "free",
+              "basic",
+              "pro",
+              "promax"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "addons",
+          "plan_name"
+        ],
+        "type": "object"
+      },
+      "BillingSnapshotPlanView": {
+        "properties": {
+          "addons": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "plan_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addons",
+          "plan_name"
+        ],
+        "type": "object"
+      },
       "BindingCreate": {
         "properties": {
           "allowed_memory_types": {
@@ -15348,6 +15393,133 @@
           "workspace_id",
           "workspace_permissions",
           "workspace_role"
+        ],
+        "type": "object"
+      },
+      "WorkspaceBillingPush": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": "workspace-billing-snapshot-v1",
+            "type": "string"
+          },
+          "event_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "max_access": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EntitlementWindow-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BillingSnapshotPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 9.223372036854776e+18,
+            "type": "integer"
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceEntitlement-Input"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "source_ref": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract_version",
+          "event_id",
+          "max_access",
+          "plan",
+          "revision",
+          "services",
+          "source_ref"
+        ],
+        "type": "object"
+      },
+      "WorkspaceBillingResult": {
+        "properties": {
+          "applied": {},
+          "contract_version": {},
+          "entitlement_source": {},
+          "event_id": {},
+          "max_access": {},
+          "ordered_billing": {},
+          "outcome": {},
+          "plan": {},
+          "plan_name": {},
+          "revision": {},
+          "services": {},
+          "source": {},
+          "source_ref": {},
+          "updated_at": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "applied",
+          "entitlement_source",
+          "event_id",
+          "max_access",
+          "ordered_billing",
+          "outcome",
+          "plan",
+          "plan_name",
+          "revision",
+          "services",
+          "source",
+          "source_ref",
+          "updated_at",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "WorkspaceBillingView": {
+        "properties": {
+          "contract_version": {},
+          "entitlement_source": {},
+          "event_id": {},
+          "max_access": {},
+          "ordered_billing": {},
+          "plan": {},
+          "plan_name": {},
+          "revision": {},
+          "services": {},
+          "source": {},
+          "source_ref": {},
+          "updated_at": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "entitlement_source",
+          "event_id",
+          "max_access",
+          "ordered_billing",
+          "plan",
+          "plan_name",
+          "revision",
+          "services",
+          "source",
+          "source_ref",
+          "updated_at",
+          "workspace_id"
         ],
         "type": "object"
       },
@@ -42775,6 +42947,102 @@
         },
         "tags": [
           "system"
+        ]
+      }
+    },
+    "/internal/workspaces/{workspace_id}/billing-snapshot": {
+      "get": {
+        "operationId": "get_workspace_billing_snapshot_internal_workspaces__workspace_id__billing_snapshot_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceBillingView"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BillingPublisher": []
+          }
+        ],
+        "tags": [
+          "internal-billing"
+        ]
+      },
+      "put": {
+        "operationId": "put_workspace_billing_snapshot_internal_workspaces__workspace_id__billing_snapshot_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceBillingPush"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceBillingResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BillingPublisher": []
+          }
+        ],
+        "tags": [
+          "internal-billing"
         ]
       }
     },

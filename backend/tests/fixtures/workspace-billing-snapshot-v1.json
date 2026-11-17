@@ -1,0 +1,60 @@
+{
+  "contract_version": "workspace-billing-snapshot-v1",
+  "workspace_id": "11111111-1111-4111-8111-111111111111",
+  "snapshot": {
+    "revision": 42,
+    "event_id": "billing-delivery-42",
+    "source_ref": "billing-workspace-state-42",
+    "max_access": {
+      "valid_from": "2026-11-14T00:00:00Z",
+      "valid_until": "2026-12-14T00:00:00Z",
+      "evidence_ref": "base-paid-receipt"
+    },
+    "services": [
+      {
+        "service_id": "catalog-sync",
+        "valid_from": "2026-11-14T00:00:00Z",
+        "valid_until": "2026-12-14T00:00:00Z",
+        "evidence_ref": "service-paid-receipt"
+      }
+    ],
+    "contract_version": "workspace-billing-snapshot-v1",
+    "plan": {
+      "plan_name": "promax",
+      "addons": {
+        "memory": 0,
+        "mcp_quota": 0,
+        "rest_quota": 0,
+        "public_quota": 0,
+        "member": 0,
+        "context": 0,
+        "analysis": 0,
+        "storage_mb": 0,
+        "sleep_contexts": 0,
+        "connector": 0,
+        "memories_per_day": 0,
+        "history_retention_days": 0
+      }
+    }
+  },
+  "rights_only_snapshot": {
+    "revision": 43,
+    "event_id": "billing-delivery-43-rights-only",
+    "source_ref": "billing-workspace-state-42",
+    "max_access": {
+      "valid_from": "2026-11-14T00:00:00Z",
+      "valid_until": "2026-12-14T00:00:00Z",
+      "evidence_ref": "base-paid-receipt"
+    },
+    "services": [
+      {
+        "service_id": "catalog-sync",
+        "valid_from": "2026-11-14T00:00:00Z",
+        "valid_until": "2026-12-14T00:00:00Z",
+        "evidence_ref": "service-paid-receipt"
+      }
+    ],
+    "contract_version": "workspace-billing-snapshot-v1",
+    "plan": null
+  }
+}

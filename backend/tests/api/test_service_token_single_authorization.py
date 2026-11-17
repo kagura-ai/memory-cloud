@@ -48,6 +48,8 @@ EXPECTED = {
     ("POST", "/internal/workspaces/{workspace_id}/capacity-lock-notice"): BILLING_TOKEN,
     ("GET", "/internal/workspaces/{workspace_id}/integration-entitlements"): BILLING_TOKEN,
     ("PUT", "/internal/workspaces/{workspace_id}/integration-entitlements"): BILLING_TOKEN,
+    ("GET", "/internal/workspaces/{workspace_id}/billing-snapshot"): BILLING_TOKEN,
+    ("PUT", "/internal/workspaces/{workspace_id}/billing-snapshot"): BILLING_TOKEN,
     # #2802: trusted paid activation, behind SYNC_INTEGRATIONS_ENABLED.
     ("POST", "/internal/workspaces/{workspace_id}/sync-authorizations/validate"): BILLING_TOKEN,
     ("POST", "/internal/workspaces/{workspace_id}/sync-installations/activate"): BILLING_TOKEN,
@@ -80,11 +82,11 @@ ROUTES = sorted(EXPECTED)
 ROUTE_IDS = [f"{method} {path}" for method, path in ROUTES]
 
 
-def test_the_service_token_routes_are_exactly_the_pinned_twelve():
+def test_the_service_token_routes_are_exactly_the_pinned_fourteen():
     discovered = _discovered()
     assert discovered == EXPECTED
     tokens = list(discovered.values())
-    assert (tokens.count(BILLING_TOKEN), tokens.count(WORKER_TOKEN)) == (9, 3)
+    assert (tokens.count(BILLING_TOKEN), tokens.count(WORKER_TOKEN)) == (11, 3)
 
 
 def _sync_control_routes() -> set[tuple[str, str]]:

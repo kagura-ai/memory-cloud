@@ -76,6 +76,11 @@ delivery returns the **current** state, never the older submitted state.
 
 ## Publisher responsibilities and rollout
 
+For the coordinated complete plan/quota/rights publisher, use the opt-in
+[ordered workspace billing API](ordered-workspace-billing.md) (#2882). Once a
+workspace opts in, the legacy billing plan and integration-only write paths
+are fenced. The separate-path contract below applies to unmanaged workspaces.
+
 The existing plan/addon PUT remains unchanged. Continue publishing the canonical
 workspace tier through that API. This API does not rewrite its provenance,
 quota bonuses or tier. For a participating workspace, publish complete rights
