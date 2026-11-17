@@ -60,7 +60,10 @@ class _Harness:
     """Drive ``handle_list_contexts`` against mocked service + session.
 
     ``db.execute`` is scripted per statement so a test can tell the
-    ``ContextSearchConfig`` batch query from the workspace quota count.
+    ``ContextSearchConfig`` batch query from the workspace-wide context count.
+    That count (``workspace_count``) drives ``limit`` / ``can_create`` and the
+    full-workspace hint only; ``count`` is the number of ``contexts`` the
+    service returns (#2891).
     """
 
     def __init__(self, contexts, *, configs=(), workspace_count=0, max_contexts=50):
@@ -784,10 +787,10 @@ async def test_member_with_no_access_gets_the_hint_even_when_the_workspace_has_c
 
 
 @pytest.mark.asyncio
-async def test_sees_nothing_in_a_full_workspace_gets_both_sentences_cap_last():
-    """#2891: the empty-account hint alone would tell the caller to create a
-    context in a workspace that is full; both texts go in one ``hint``, the cap
-    sentence last."""
+async def test_sees_nothing_in_a_full_workspace_is_not_told_to_create_a_context():
+    """#2891: the empty-account hint would tell the caller to create a context in
+    a workspace that is full; the full-workspace text replaces it and asks for
+    access or room instead."""
     from mcp_server.tools import context as context_tools
 
     harness = _Harness([], workspace_count=50, max_contexts=50)
@@ -796,9 +799,12 @@ async def test_sees_nothing_in_a_full_workspace_gets_both_sentences_cap_last():
 
     assert (payload["count"], payload["limit"], payload["can_create"]) == (0, 50, False)
     hint = payload["hint"]
-    assert hint == f"{context_tools._EMPTY_CONTEXTS_HINT} {context_tools._WORKSPACE_FULL_HINT}"
+    assert hint == context_tools._EMPTY_FULL_WORKSPACE_HINT
     assert hint.startswith("No contexts are visible to you yet.")
-    assert hint.endswith(context_tools._WORKSPACE_FULL_HINT)
+    assert context_tools._WORKSPACE_FULL_HINT in hint
+    assert "create_context" not in hint
+    assert "give you access" in hint
+    assert not any(ch.isdigit() for ch in hint)
 
 
 @pytest.mark.asyncio

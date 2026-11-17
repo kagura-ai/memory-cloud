@@ -846,13 +846,17 @@ _NO_WORKSPACE_HINT = (
 # #2891: ``count`` is what the caller can see, while ``limit`` / ``can_create``
 # count every context of the workspace. When the workspace is full although
 # ``count`` is below ``limit``, this says why ``can_create`` is false. Static
-# text: it carries no number of the contexts the caller cannot see. Appended
-# after the empty-account hint when both apply, so a caller who sees nothing is
-# not only told to create a context.
+# text: it carries no number of the contexts the caller cannot see. A caller who
+# sees nothing in such a workspace gets the second text instead of the
+# empty-account hint, which would tell them to create a context that cannot fit.
 _WORKSPACE_FULL_HINT = (
     "This workspace has reached its context limit, so no context can be created. "
     "Contexts you cannot see here (for example ones private to other members or "
     "not shared with you) count toward limit as well."
+)
+_EMPTY_FULL_WORKSPACE_HINT = (
+    f"No contexts are visible to you yet. {_WORKSPACE_FULL_HINT} Ask an owner or "
+    "admin to give you access to a context, or to make room for a new one."
 )
 
 
@@ -1142,7 +1146,7 @@ async def handle_list_contexts(
             if visible_count == 0 and not lookup_failed:
                 hint = _EMPTY_CONTEXTS_HINT if workspace_id else _NO_WORKSPACE_HINT
             if full_with_unseen_contexts:
-                hint = f"{hint} {_WORKSPACE_FULL_HINT}" if hint else _WORKSPACE_FULL_HINT
+                hint = _EMPTY_FULL_WORKSPACE_HINT if visible_count == 0 else _WORKSPACE_FULL_HINT
 
             await _log_tool_usage(db, user_id, "list_contexts", start_time, 200, None, workspace_id)
 

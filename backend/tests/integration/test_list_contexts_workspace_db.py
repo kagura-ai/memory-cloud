@@ -501,10 +501,10 @@ async def test_member_who_sees_nothing_keeps_the_empty_hint(member_workspace):
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_member_who_sees_nothing_in_a_full_workspace_gets_both_hints_cap_last(
+async def test_member_who_sees_nothing_in_a_full_workspace_is_not_told_to_create(
     member_workspace, db_session
 ):
-    from mcp_server.tools.context import _EMPTY_CONTEXTS_HINT, _WORKSPACE_FULL_HINT
+    from mcp_server.tools.context import _EMPTY_FULL_WORKSPACE_HINT
 
     s = member_workspace
     cap = await _fill_to_cap(db_session, s["ws"], s["owner_id"], s["tag"])
@@ -512,4 +512,5 @@ async def test_member_who_sees_nothing_in_a_full_workspace_gets_both_hints_cap_l
     payload = await _list(s, "ws", user_key="no_access_id")
 
     assert (payload["count"], payload["limit"], payload["can_create"]) == (0, cap, False)
-    assert payload["hint"] == f"{_EMPTY_CONTEXTS_HINT} {_WORKSPACE_FULL_HINT}"
+    assert payload["hint"] == _EMPTY_FULL_WORKSPACE_HINT
+    assert "create_context" not in payload["hint"]

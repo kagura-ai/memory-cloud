@@ -745,8 +745,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "context of the workspace, including ones you cannot see; has_more = pass "
         "next_cursor as cursor for the next page (1-200 per page, default 100; a "
         "page also stops at 20000 characters); hint = present when you can see no "
-        "context (says how to create one), and when the workspace is full while "
-        "count is below limit (contexts you cannot see count toward it)."
+        "context (says how to create one, or whom to ask when the workspace is "
+        "full), and when the workspace is full while count is below limit "
+        "(contexts you cannot see count toward it)."
     ),
     # --------------------------------------------------------------- list
     "list.filters": (
