@@ -5,7 +5,16 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+    false,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
@@ -34,6 +43,9 @@ class WorkspaceIntegrationState(Base):
     event_id: Mapped[str] = mapped_column(String(128), nullable=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="external_billing")
     source_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    ordered_billing: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     max_valid_from: Mapped[datetime | None] = mapped_column(DateTime)
     max_valid_until: Mapped[datetime | None] = mapped_column(DateTime)
     max_evidence_ref: Mapped[str | None] = mapped_column(String(128))

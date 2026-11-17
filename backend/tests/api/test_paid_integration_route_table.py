@@ -256,6 +256,7 @@ PAID_INTEGRATION_SYMBOLS: dict[str, str] = {
     "services.integration_entitlements": SERVICE,
     "models.integration_entitlement": MODELS,
     "api.routes.internal_integrations": PUBLISHER,
+    "api.routes.internal_billing": PUBLISHER,  # reads the opt-in legacy-writer fence
     "models": REGISTRY,  # importlib.import_module("models.integration_entitlement")
     "models.data_boundary": DATA_BOUNDARY,
     # #2802: activate_installation creates the sync target inside

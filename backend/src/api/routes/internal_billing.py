@@ -53,8 +53,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.single_authorization import sole_authorization
+from config.billing_addons import ADDON_COLUMNS as _ADDON_COLUMNS
+from config.billing_addons import ADDON_MAX_BONUS as _ADDON_MAX_BONUS
+from config.billing_addons import ADDON_MAX_BY_KEY as _ADDON_MAX_BY_KEY
 from config.plan_tiers import PLAN_TIERS, PlanName
-from config.retention import OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -63,9 +65,11 @@ from services.downgrade_eligibility_service import (
     DowngradeEligibilityService,
     TierDowngradeEligibility,
 )
+from services.integration_entitlements import read_ordered_billing_mode
 from utils.datetime import to_utc_iso
 from utils.exceptions import (
     AuthenticationError,
+    ConflictError,
     MemoryCloudException,
     NotFoundException,
     ValidationError,
@@ -75,34 +79,6 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/internal", tags=["internal-billing"])
-
-# Friendly addon dimension name → Workspace column. Billing pushes absolute
-# bonus values keyed by these stable names so the wire contract is decoupled
-# from the ORM column names. Unknown keys are rejected (contract-mismatch guard).
-_ADDON_COLUMNS: dict[str, str] = {
-    "memory": "addon_memory_bonus",
-    "mcp_quota": "addon_mcp_quota_bonus",
-    "rest_quota": "addon_rest_quota_bonus",
-    "public_quota": "addon_public_quota_bonus",
-    "member": "addon_member_bonus",
-    "context": "addon_context_bonus",
-    "analysis": "addon_analysis_bonus",
-    "storage_mb": "addon_storage_bonus_mb",
-    "sleep_contexts": "addon_sleep_contexts_bonus",  # Issue #560
-    "connector": "addon_connector_bonus",
-    "memories_per_day": "addon_memories_per_day_bonus",  # #1975
-    "history_retention_days": "addon_history_retention_days_bonus",  # #2739, in days
-}
-
-# Upper bound on any addon bonus, matching the admin quota endpoint's
-# ``le=2_000_000_000``. Keeps an oversized push a clean 422 instead of letting it
-# overflow the INTEGER column and surface as a 500 at commit.
-_ADDON_MAX_BONUS = 2_000_000_000
-# Dimensions with a tighter, domain bound than the column's (same bound as the
-# admin quota endpoint). #2739: about ten years of extra history retention.
-_ADDON_MAX_BY_KEY: dict[str, int] = {
-    "history_retention_days": OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS,
-}
 
 
 async def verify_billing_service_token(
@@ -245,6 +221,9 @@ async def set_workspace_plan_from_billing(
     # ``free`` (a cancellation catching up) is still accepted.
     if workspace.deleted_at is not None and body.plan_name != PlanName.FREE:
         raise NotFoundException("Workspace")
+
+    if await read_ordered_billing_mode(db, ws_uuid):
+        raise ConflictError("Workspace requires an ordered billing snapshot")
 
     # Apply entitlement (absolute set → idempotent). Mark provenance as
     # billing-owned (#1095) so the external reconciler may reconcile this row;
