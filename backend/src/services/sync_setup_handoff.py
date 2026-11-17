@@ -1,7 +1,8 @@
 """Current-owner setup handoff; no payment, paid license or resource provisioning."""
 
+from typing import cast
 from urllib.parse import urlencode, urlsplit
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,14 +49,15 @@ async def create_setup_handoff(
     body: SyncSetupHandoffCreate,
 ) -> SyncSetupHandoffView:
     """Hold canonical owner/registration fences until signing and COMMIT finish."""
+    settings = get_settings()
+    origin = _payment_origin(settings.payment_public_base_url)
+    signer = SyncSetupHandoffSigner(settings)
+    signer.validate_configuration()
     async with sync_authority(db, workspace_id, principal) as authority:
-        current = authority.principal
-        if current is None:
-            raise SyncSetupHandoffUnavailable()
+        # A provided human principal is reloaded by sync_authority, never absent.
+        current = cast(SyncPrincipal, authority.principal)
         service = await registered_service(db, browser_client_id=current.client_id)
-        settings = get_settings()
-        origin = _payment_origin(settings.payment_public_base_url)
-        minted = SyncSetupHandoffSigner(settings).mint(
+        minted = signer.mint(
             user_id=authority.owner.user_id,
             workspace_id=authority.workspace.id,
             service_id=service.service_id,
@@ -80,7 +82,7 @@ async def create_setup_handoff(
             human_actor(authority.owner.user_id, current.client_id),
             workspace_id=authority.workspace.id,
             service_id=service.service_id,
-            operation_id=uuid4(),
+            operation_id=UUID(minted.jti),
         )
         # before_commit runs before SQLAlchemy's implicit flush. Await the audit
         # INSERT first, so expiry during that SQL is seen by the final hook.

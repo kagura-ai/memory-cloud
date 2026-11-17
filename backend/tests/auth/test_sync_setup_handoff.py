@@ -4,18 +4,35 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from joserfc import jwt
+from joserfc.errors import JoseError
 from joserfc.jwk import OKPKey
 from joserfc.jwt import JWTClaimsRegistry
 
 from auth import sync_setup_handoff
 from auth.billing_handoff import BillingHandoffInvalid, BillingHandoffSigner, verify_handoff_token
-from auth.sync_setup_handoff import SyncSetupHandoffSigner, SyncSetupHandoffUnavailable
+from auth.sync_setup_handoff import (
+    SyncSetupHandoffExpired,
+    SyncSetupHandoffSigner,
+    SyncSetupHandoffUnavailable,
+)
 
-from ._billing_handoff_helpers import ed25519_keypair, handoff_settings, token_header
+from ._billing_handoff_helpers import ed25519_keypair, token_header
+from ._billing_handoff_helpers import handoff_settings as legacy_handoff_settings
+
+
+def handoff_settings(
+    signing_key, *, kid="setup-key", iss="kagura-memory-cloud", aud="kagura-billing", ttl=120
+):
+    legacy, _ = ed25519_keypair()
+    settings = legacy_handoff_settings(legacy, kid="legacy-key", iss=iss, aud=aud, ttl=ttl)
+    settings.billing_sync_setup_signing_key = signing_key
+    settings.billing_sync_setup_key_id = kid
+    return settings
+
 
 CONTRACT = json.loads(
     (Path(__file__).parents[1] / "fixtures/sync-setup-handoff-v1.json").read_text()
@@ -102,7 +119,7 @@ def test_never_mints_a_generic_token_as_an_intermediate(context, monkeypatch):
     generic.assert_not_called()
 
 
-@pytest.mark.parametrize("remaining", [1, 9, 59])
+@pytest.mark.parametrize("remaining", [5, 9, 59])
 def test_original_oidc_deadline_caps_handoff_without_renewal(context, remaining):
     private, public = ed25519_keypair()
     context["valid_until"] += timedelta(seconds=remaining, minutes=-5)
@@ -111,12 +128,13 @@ def test_original_oidc_deadline_caps_handoff_without_renewal(context, remaining)
     assert claims["exp"] - claims["iat"] == remaining
 
 
-@pytest.mark.parametrize("remaining", [0, -1])
+@pytest.mark.parametrize("remaining", [4, 1, 0, -1])
 def test_expired_original_authority_never_mints(context, remaining):
     private, _ = ed25519_keypair()
     context["valid_until"] += timedelta(seconds=remaining, minutes=-5)
-    with pytest.raises(SyncSetupHandoffUnavailable):
+    with pytest.raises(SyncSetupHandoffExpired) as failure:
         SyncSetupHandoffSigner(handoff_settings(private)).mint(**context)
+    assert failure.value.status_code == 401
 
 
 def test_every_handoff_has_its_own_single_use_identity(context):
@@ -124,7 +142,19 @@ def test_every_handoff_has_its_own_single_use_identity(context):
     signer = SyncSetupHandoffSigner(handoff_settings(private))
     first, second = signer.mint(**context), signer.mint(**context)
     assert first.jti != second.jti
+    assert str(UUID(first.jti)) == first.jti and str(UUID(second.jti)) == second.jti
     assert len(first.jti) >= 32 and len(second.jti) >= 32
+
+
+def test_minimum_lifetime_uses_real_clock_after_integer_expiry_rounding(context, monkeypatch):
+    private, _ = ed25519_keypair()
+    now = context["valid_until"] - timedelta(minutes=5) + timedelta(microseconds=1)
+    monkeypatch.setattr(sync_setup_handoff, "utcnow", lambda: now)
+    context["valid_until"] = now + timedelta(seconds=5)
+    with pytest.raises(SyncSetupHandoffExpired):
+        SyncSetupHandoffSigner(handoff_settings(private)).mint(**context)
+    context["valid_until"] = now + timedelta(seconds=6)
+    assert SyncSetupHandoffSigner(handoff_settings(private)).mint(**context).expires_at > now
 
 
 def test_configured_generic_audience_collision_is_refused(context):
@@ -139,13 +169,13 @@ def test_signing_failures_reveal_no_material(context, monkeypatch, kind):
     private, public = ed25519_keypair()
     settings = handoff_settings(private)
     if kind == "missing_key":
-        settings.billing_handoff_signing_key = ""
+        settings.billing_sync_setup_signing_key = ""
     elif kind == "missing_kid":
-        settings.billing_handoff_key_id = ""
+        settings.billing_sync_setup_key_id = ""
     elif kind == "invalid_key":
-        settings.billing_handoff_signing_key = "SENSITIVE_SYNTHETIC_INVALID_KEY"
+        settings.billing_sync_setup_signing_key = "SENSITIVE_SYNTHETIC_INVALID_KEY"
     else:
-        settings.billing_handoff_signing_key = public
+        settings.billing_sync_setup_signing_key = public
     diagnostic = Mock()
     monkeypatch.setattr(sync_setup_handoff, "logger", diagnostic)
     with pytest.raises(SyncSetupHandoffUnavailable) as failure:
@@ -155,3 +185,55 @@ def test_signing_failures_reveal_no_material(context, monkeypatch, kind):
     assert private not in str(diagnostic.mock_calls)
     assert public not in str(diagnostic.mock_calls)
     assert "SENSITIVE_SYNTHETIC_INVALID_KEY" not in str(diagnostic.mock_calls)
+
+
+@pytest.mark.parametrize("collision", ["same_key", "same_key_crlf", "same_kid"])
+def test_setup_key_and_identifier_cannot_alias_generic_billing(context, collision):
+    private, _public = ed25519_keypair()
+    settings = handoff_settings(private)
+    if collision == "same_kid":
+        settings.billing_sync_setup_key_id = settings.billing_handoff_key_id
+    else:
+        settings.billing_handoff_signing_key = (
+            private if collision == "same_key" else private.replace("\n", "\r\n")
+        )
+    with pytest.raises(SyncSetupHandoffUnavailable):
+        SyncSetupHandoffSigner(settings).mint(**context)
+
+
+def test_setup_signature_is_not_verifiable_by_legacy_key(context):
+    private, _public = ed25519_keypair()
+    legacy, legacy_public = ed25519_keypair()
+    settings = handoff_settings(private)
+    settings.billing_handoff_signing_key = legacy
+    result = SyncSetupHandoffSigner(settings).mint(**context)
+    with pytest.raises(JoseError):
+        jwt.decode(result.token, OKPKey.import_key(legacy_public), algorithms=["Ed25519"])
+
+
+def test_prepared_signer_does_not_reparse_pem_during_mint(context, monkeypatch):
+    private, public = ed25519_keypair()
+    signer = SyncSetupHandoffSigner(handoff_settings(private))
+    signer.validate_configuration()
+    parser = Mock(side_effect=AssertionError("PEM parse after entering authority"))
+    monkeypatch.setattr(sync_setup_handoff, "load_pem_private_key", parser)
+    assert verified(signer.mint(**context), public)["sub"] == context["user_id"]
+    parser.assert_not_called()
+
+
+def test_mint_failure_logs_only_exception_type(context, monkeypatch):
+    private, _public = ed25519_keypair()
+    signer = SyncSetupHandoffSigner(handoff_settings(private))
+    signer.validate_configuration()
+    diagnostic = Mock()
+    monkeypatch.setattr(sync_setup_handoff, "logger", diagnostic)
+    monkeypatch.setattr(
+        sync_setup_handoff.jwt, "encode", Mock(side_effect=RuntimeError("SENSITIVE_SIGNER_ERROR"))
+    )
+    with pytest.raises(SyncSetupHandoffUnavailable):
+        signer.mint(**context)
+    diagnostic.warning.assert_called_once_with(
+        "sync_setup_handoff_unavailable", failure_type="RuntimeError"
+    )
+    assert "SENSITIVE_SIGNER_ERROR" not in str(diagnostic.mock_calls)
+    assert private not in str(diagnostic.mock_calls)

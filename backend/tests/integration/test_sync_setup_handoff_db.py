@@ -5,7 +5,7 @@ import json
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from joserfc import jwt
@@ -40,10 +40,13 @@ CONTRACT = json.loads(
 @pytest.fixture
 def setup(store, monkeypatch):
     private, public = ed25519_keypair()
+    legacy, _legacy_public = ed25519_keypair()
     settings = get_settings()
     for name, value in {
-        "billing_handoff_signing_key": private,
-        "billing_handoff_key_id": "fixture-setup-key",
+        "billing_sync_setup_signing_key": private,
+        "billing_sync_setup_key_id": "fixture-setup-key",
+        "billing_handoff_signing_key": legacy,
+        "billing_handoff_key_id": "fixture-legacy-key",
         "billing_handoff_issuer": "kagura-memory-cloud",
         "billing_handoff_audience": "kagura-billing",
         "billing_handoff_ttl_seconds": 120,
@@ -123,6 +126,7 @@ async def test_current_registered_owner_gets_only_exact_setup_context(setup):
             )
         )
         assert audit is not None
+        assert UUID(audit.user_metadata["operation_id"]) == UUID(data["jti"])
         metadata = json.dumps(audit.user_metadata)
         assert data["token"] not in metadata
         assert setup.setup_body["input_digest"] not in metadata
@@ -244,6 +248,98 @@ async def test_expiry_during_pending_audit_flush_cannot_return_success(setup, el
     assert response.status_code == expected
     assert "token" not in response.json()
     assert await audit_count(setup) == 0
+
+
+@pytest.mark.parametrize("operation", ["revoke_authorization", "unlink_installation"])
+@pytest.mark.parametrize("autoflush", [False, True])
+async def test_existing_owner_mutations_recheck_expiry_after_audit_sql(setup, operation, autoflush):
+    setup.factory.configure(autoflush=autoflush)
+    approval = await fixtures.approve(setup)
+    installation_id = None
+    generation = None
+    if operation == "unlink_installation":
+        await fixtures.paid(setup)
+        created = await http(
+            setup, "POST", "sync-installations", body=fixtures.activation(approval)
+        )
+        assert created.status_code == 201
+        installation_id = UUID(created.json()["installation_id"])
+        generation = created.json()["generation"]
+    action = (
+        "sync.authorization.revoked"
+        if operation == "revoke_authorization"
+        else "sync.installation.revoked"
+    )
+
+    def expire_after_sql(session, _context):
+        if any(isinstance(row, AuditLog) and row.action == action for row in session.new):
+            setup.clock.now += timedelta(seconds=3601)
+
+    event.listen(Session, "after_flush", expire_after_sql)
+    try:
+        suffix = (
+            "sync-authorizations/" + approval["authorization_id"]
+            if installation_id is None
+            else "sync-installations/" + str(installation_id)
+        )
+        response = await http(setup, "DELETE", suffix)
+    finally:
+        event.remove(Session, "after_flush", expire_after_sql)
+    assert response.status_code == 401
+    async with setup.factory() as db:
+        if installation_id is None:
+            saved = await db.get(SyncAuthorization, UUID(approval["authorization_id"]))
+            assert saved is not None and saved.revoked_at is None
+        else:
+            saved_installation = await db.get(SyncInstallation, installation_id)
+            assert saved_installation is not None and saved_installation.state == "active"
+            assert (
+                saved_installation.generation == generation
+                and saved_installation.revoked_at is None
+            )
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(
+                    AuditLog.action == action,
+                    AuditLog.user_metadata["workspace_id"].as_string() == str(setup.wid),
+                )
+            )
+            == 0
+        )
+
+
+@pytest.mark.parametrize("configuration", ["origin", "missing_key", "same_key", "same_kid"])
+async def test_invalid_setup_configuration_precedes_authority_locks(
+    setup, monkeypatch, configuration
+):
+    from unittest.mock import Mock
+
+    settings = get_settings()
+    if configuration == "origin":
+        monkeypatch.setattr(settings, "payment_public_base_url", "http://localhost")
+    elif configuration == "missing_key":
+        monkeypatch.setattr(settings, "billing_sync_setup_signing_key", "")
+    elif configuration == "same_key":
+        monkeypatch.setattr(
+            settings, "billing_sync_setup_signing_key", settings.billing_handoff_signing_key
+        )
+    else:
+        monkeypatch.setattr(settings, "billing_sync_setup_key_id", settings.billing_handoff_key_id)
+    locked = Mock(side_effect=AssertionError("Invalid configuration took authority locks"))
+    monkeypatch.setattr(service, "sync_authority", locked)
+    response = await request(setup)
+    assert response.status_code == 503 and "token" not in response.json()
+    locked.assert_not_called()
+    assert await audit_count(setup) == 0
+
+
+async def test_too_short_original_lifetime_returns_401_without_issuance(setup):
+    await change(setup, OIDCToken, setup.token_ids["owner"], expires_in=4)
+    response = await request(setup)
+    assert response.status_code == 401
+    assert "token" not in response.json() and await audit_count(setup) == 0
 
 
 async def test_busy_erasure_owner_is_retryable_without_minting(setup):

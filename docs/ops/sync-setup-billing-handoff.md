@@ -1,7 +1,7 @@
 # Setup-only billing handoff for a registered sync service
 
 Issue [#2878](https://github.com/kagura-ai/memory-cloud/issues/2878), milestone
-v0.167.0. The shared machine contract is
+v0.168.0. The shared machine contract is
 [sync-setup-handoff-v1.json](../../backend/tests/fixtures/sync-setup-handoff-v1.json).
 Public/PAY consumers must implement that same strict version before rollout.
 
@@ -25,9 +25,9 @@ fixture's `application_id` UUID, strict integer `application_revision`
 (1–2147483646), and `input_digest` (64 lowercase hex characters). It accepts no
 query, price/customer/card/plan/service/target override or browser review flag.
 Reject duplicate JSON/header ambiguity, unknown fields and non-UTF8 JSON.
-Body maximum is4096bytes with a5s deadline. Namespace/rate checks precede DB;
+Body maximum is 4096 bytes with a 5 s deadline. Namespace/rate checks precede DB;
 body reading precedes the first identity SQL and any authority transaction.
-Invalid input is400; oversized input413. Every outcome is no-store with fixed,
+Invalid input is 400; oversized input is 413. Every outcome is no-store with fixed,
 non-reflective errors.
 
 Only the isolated live OIDC access namespace and explicit `integrations:manage`
@@ -36,10 +36,10 @@ workers cannot mint. Scope alone is not ownership. Canonical owner and OWNER
 membership must both match; the authenticated browser selects its registered
 enabled service. Account/workspace/membership, token/grant/client and registration
 are fenced through signing and final COMMIT. Competing authority changes are
-retryable409. Final-boundary expiry returns no credential and rolls back audit.
+retryable 409. Final-boundary expiry returns no credential and rolls back audit.
 No remote payment call runs under those locks.
 
-JOSE fixes `alg: Ed25519`, operator-managed `kid` and
+JOSE fixes `alg: Ed25519`, a separately managed setup `kid` and
 `typ: kagura-sync-setup+jwt`. Audience is exactly `kagura-billing-sync-setup`,
 purpose exactly `sync_addon_setup`. Issuer is the configured billing-handoff
 issuer. Refuse a generic-audience configuration that collides with the setup
@@ -51,11 +51,13 @@ current ownership `epoch`, UTC integer `iat`/`exp` and random single-use `jti`.
 The application tuple is an owner-approved **setup context**, not an assertion
 that KMC has inspected Public's review database.
 
-Lifetime is the shorter of60seconds, configured legacy handoff TTL if shorter,
+Lifetime is the shorter of 60 seconds, configured legacy handoff TTL if shorter,
 and the original/reloaded OIDC token/grant deadline. Integer expiry never rounds
-past that deadline. A new JTI does not refresh an earlier credential or consent.
+past that deadline. Refuse with 401 if fewer than 5 seconds of actual lifetime
+remain after integer-expiry rounding. A new JTI does not refresh an earlier
+credential or consent.
 
-Response200 has `contract_version: sync-setup-handoff-v1`,
+Response 200 has `contract_version: sync-setup-handoff-v1`,
 `token_type: sync_addon_setup`, opaque `token`, `kid`, `jti`, UTC `expires_at`
 and `url`. URL contains only the configured HTTPS payment origin, fixed
 `/addons/sync/enter` path and a single `t` token parameter.
@@ -63,14 +65,14 @@ and `url`. URL contains only the configured HTTPS payment origin, fixed
 ## Required consumers
 
 Public uses a separate current-owner/session/selection/application-bound
-Code+S256PKCE flow for `openid profile integrations:manage`. Ordinary login stays
+Code + S256 PKCE flow for `openid profile integrations:manage`. Ordinary login stays
 `openid profile workspaces:read`. Verify the same human, signed issuer/audience,
 nonce/state and exact elevated scope; keep tokens ephemeral/server-only, use a
 distinct encrypted flow/callback, preserve the normal session and revoke the
 separate refresh grant afterwards. Validate the fixed response/URL binding.
 
 Payment needs a **separate setup-only entry point**. Verify allowlisted
-Ed25519 key/kid, exact algorithm/type/issuer/audience/purpose, claim bounds,
+setup-only Ed25519 key/kid, exact algorithm/type/issuer/audience/purpose, claim bounds,
 original timing and every expected application/service/workspace binding.
 Atomically consume JTI before establishing only a setup-scoped session. Strip
 the token using a fixed redirect and no-referrer. Never establish generic portal
@@ -98,20 +100,32 @@ Issuer tests alone do not establish deployed integration.
 
 The route follows default-off `SYNC_INTEGRATIONS_ENABLED` and isolated OIDC
 enablement. Register the service/browser and exact separate Public redirect URI.
-Configure protected `BILLING_HANDOFF_SIGNING_KEY`, `BILLING_HANDOFF_KEY_ID`,
-issuer/audience and `PAYMENT_PUBLIC_BASE_URL`. Payment base must be an ASCII
+Configure protected `BILLING_SYNC_SETUP_SIGNING_KEY` and `BILLING_SYNC_SETUP_KEY_ID`,
+the existing issuer/audience policy and `PAYMENT_PUBLIC_BASE_URL`. Empty or invalid
+setup settings fail closed without using a legacy signing key. A setup kid equal
+to `BILLING_HANDOFF_KEY_ID` or key material equal to `BILLING_HANDOFF_SIGNING_KEY`
+also fails closed, including different PEM encodings of the same key.
+Validate the landing origin and parse the signing configuration before taking
+the authority row locks. Payment base must be an ASCII
 HTTPS origin without credentials, path, query or fragment. Missing/invalid
-signing or landing configuration fails503. Keep private signing material in KMC.
+signing or landing configuration fails 503. Keep private signing material in KMC.
+Payment puts the matching public keys only in `BILLING_SYNC_SETUP_PUBLIC_KEYS`
+for its setup verifier. Its generic entry uses `BILLING_HANDOFF_PUBLIC_KEYS` and
+must never trust the setup kid or key; the two allowlists must be disjoint in
+both identifiers and public-key material, including during rotation.
 
 The new path has a distinct `sync-setup-handoff` OIDC rate bucket. Invalid rate
-configuration/store failure fails503 before DB/crypto; over budget is429.
+configuration/store failure fails 503 before DB/crypto; over budget is 429.
 It does not reuse the legacy generic handoff's fail-open limiter.
 
 Successful issuance appends `sync.setup_handoff.created` through the existing
 erasure-aware audit boundary with scalar workspace/service/operation identity
-and authenticated actor. No token, source body, digest or card data is audited.
+and authenticated actor. The random UUID `jti` is also the audit `operation_id`,
+so a reported issuance reference can be correlated without recording a JWT.
+No token, source body, digest or card data is audited.
 Errors/logs contain no token/code/subject/body or native crypto/connection text.
-Existing sync audit retention applies.
+Unexpected mint failures log only `failure_type` (the exception class name),
+never its message. Existing sync audit retention applies.
 
 Coordinate consumer deployment and test key rotation, JTI replay, expiry,
 transfer and outages before enabling setup. This work performs no registration,

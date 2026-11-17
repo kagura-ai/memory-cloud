@@ -183,6 +183,7 @@ async def revoke_authorization(
                 service_id=approval.service_id,
             )
         result = authorization_view(approval)
+        await db.flush()
         await db.commit()
         return result
 
@@ -355,5 +356,6 @@ async def unlink_installation(
                     managed.mode.generation = row.generation
             audit_sync(db, authority, "sync.installation.revoked", row.id, installation=row)
         result = await installation_view(db, row)
+        await db.flush()
         await db.commit()
         return result

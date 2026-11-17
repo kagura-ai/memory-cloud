@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import re
-import secrets
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
+    load_pem_private_key,
+)
+from fastapi import HTTPException
 from joserfc import jwt
 from joserfc.jwk import OKPKey
 
@@ -28,6 +32,7 @@ SETUP_AUDIENCE = "kagura-billing-sync-setup"
 SETUP_TOKEN_TYPE = "kagura-sync-setup+jwt"  # noqa: S105 -- public protocol discriminator
 SETUP_PURPOSE = "sync_addon_setup"
 MAX_SETUP_TTL_SECONDS = 60
+MIN_SETUP_REMAINING_SECONDS = 5
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 
@@ -40,6 +45,13 @@ class SyncSetupHandoffUnavailable(MemoryCloudException):
             status_code=503,
             error_code="SYNC_SETUP_UNAVAILABLE",
         )
+
+
+class SyncSetupHandoffExpired(HTTPException):
+    """The original authority cannot give the browser a usable setup lifetime."""
+
+    def __init__(self) -> None:
+        super().__init__(401, "invalid_token", headers={"WWW-Authenticate": "Bearer"})
 
 
 @dataclass(frozen=True)
@@ -69,10 +81,52 @@ def _utc(value: datetime) -> datetime:
 
 
 class SyncSetupHandoffSigner:
-    """Sign only the setup purpose, using the existing operator-managed Ed25519 key."""
+    """Sign only setup, using a separately managed key prepared before authority locks."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings if settings is not None else get_settings()
+        self._key: OKPKey | None = None
+        self._kid = ""
+        self._issuer = ""
+        self._ttl = 0
+
+    def validate_configuration(self) -> None:
+        """Parse independent key material once, before entering sync_authority."""
+        try:
+            settings = self._settings
+            if settings.billing_handoff_audience == SETUP_AUDIENCE:
+                raise ValueError("Credential audiences must be distinct")
+            private_pem = settings.billing_sync_setup_signing_key
+            if not isinstance(private_pem, str) or not 1 <= len(private_pem) <= 16_384:
+                raise ValueError("Unsupported setup signing material")
+            kid = _text(settings.billing_sync_setup_key_id, 128).strip()
+            if kid == settings.billing_handoff_key_id.strip():
+                raise ValueError("Signing key identifiers must be distinct")
+            private = load_pem_private_key(private_pem.strip().encode("utf-8"), password=None)
+            if not isinstance(private, Ed25519PrivateKey):
+                raise ValueError("Unsupported setup signing material")
+            legacy_pem = settings.billing_handoff_signing_key
+            if legacy_pem:
+                if not isinstance(legacy_pem, str) or len(legacy_pem) > 16_384:
+                    raise ValueError("Invalid legacy signing configuration")
+                legacy = load_pem_private_key(legacy_pem.strip().encode("utf-8"), password=None)
+                if not isinstance(legacy, Ed25519PrivateKey) or (
+                    private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+                    == legacy.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+                ):
+                    raise ValueError("Signing key material must be distinct")
+            ttl = settings.billing_handoff_ttl_seconds
+            if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 1:
+                raise ValueError("Invalid setup lifetime")
+            self._key = OKPKey.import_key(private_pem.strip())
+            self._kid, self._issuer, self._ttl = (
+                kid,
+                _text(settings.billing_handoff_issuer, 255),
+                ttl,
+            )
+        except Exception as exc:
+            logger.warning("sync_setup_handoff_unavailable", failure_type=type(exc).__name__)
+            raise SyncSetupHandoffUnavailable() from None
 
     def mint(
         self,
@@ -93,20 +147,11 @@ class SyncSetupHandoffSigner:
         method never creates, wraps or derives a generic owner billing token.
         """
         try:
-            settings = self._settings
-            if settings.billing_handoff_audience == SETUP_AUDIENCE:
-                raise ValueError("Credential audiences must be distinct")
-            private_pem = settings.billing_handoff_signing_key
-            # PEM is a multiline cryptographic format, not a one-line claim.
-            # Its parser validates the key; the size/type bound limits the input.
-            if not isinstance(private_pem, str) or not 1 <= len(private_pem) <= 16_384:
-                raise ValueError("Unsupported signing material")
-            private_pem = private_pem.strip()
-            kid = _text(settings.billing_handoff_key_id, 128).strip()
-            issuer = _text(settings.billing_handoff_issuer, 255)
-            ttl = settings.billing_handoff_ttl_seconds
-            if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 1:
-                raise ValueError("Invalid setup lifetime")
+            if self._key is None:
+                self.validate_configuration()
+            key = self._key
+            assert key is not None
+            kid, issuer, ttl = self._kid, self._issuer, self._ttl
             if (
                 type(application_revision) is not int
                 or not 1 <= application_revision <= 2_147_483_646
@@ -124,17 +169,10 @@ class SyncSetupHandoffSigner:
             end = min(now + timedelta(seconds=min(ttl, MAX_SETUP_TTL_SECONDS)), _utc(valid_until))
             issued_seconds = int(now.replace(tzinfo=UTC).timestamp())
             expires_seconds = int(end.replace(tzinfo=UTC).timestamp())
-            if expires_seconds <= issued_seconds:
-                raise ValueError("Original authority expired")
-            # Import a genuine private Ed25519 key before joserfc can select any
-            # signing behavior. Public-only/wrong-curve material fails closed.
-            if not isinstance(
-                load_pem_private_key(private_pem.encode("utf-8"), password=None),
-                Ed25519PrivateKey,
-            ):
-                raise ValueError("Unsupported signing material")
-            key = OKPKey.import_key(private_pem)
-            jti = secrets.token_urlsafe(24)
+            real_end = datetime.fromtimestamp(expires_seconds, UTC).replace(tzinfo=None)
+            if (real_end - now).total_seconds() < MIN_SETUP_REMAINING_SECONDS:
+                raise SyncSetupHandoffExpired()
+            jti = str(uuid4())
             claims = {
                 "iss": issuer,
                 "aud": SETUP_AUDIENCE,
@@ -165,8 +203,10 @@ class SyncSetupHandoffSigner:
                 issued_at=now,
                 expires_at=datetime.fromtimestamp(expires_seconds, UTC).replace(tzinfo=None),
             )
-        except Exception:
+        except (SyncSetupHandoffExpired, SyncSetupHandoffUnavailable):
+            raise
+        except Exception as exc:
             # Cryptographic and settings exceptions may include key material.
             # Neither those strings nor subject/application/request data is logged.
-            logger.warning("sync_setup_handoff_unavailable")
+            logger.warning("sync_setup_handoff_unavailable", failure_type=type(exc).__name__)
             raise SyncSetupHandoffUnavailable() from None
