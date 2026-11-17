@@ -102,12 +102,17 @@ async def sync_authority(
         member = await PermissionService(db).check_workspace_access(
             owner_id, workspace_id, required_role=WorkspaceRole.OWNER, require_seat=False
         )
-        member = await db.scalar(
-            select(WorkspaceMember)
-            .where(WorkspaceMember.id == member.id)
-            .with_for_update(read=True, nowait=True)
-            .execution_options(populate_existing=True)
-        )
+        try:
+            member = await db.scalar(
+                select(WorkspaceMember)
+                .where(WorkspaceMember.id == member.id)
+                .with_for_update(read=True, nowait=True)
+                .execution_options(populate_existing=True)
+            )
+        except DBAPIError as exc:
+            if is_lock_not_available(exc):
+                raise ConflictError("Workspace membership is changing; retry") from exc
+            raise
         if member is None or member.role != WorkspaceRole.OWNER:
             raise NotFoundException("Workspace")
         authority = SyncAuthority(workspace, owner, principal)

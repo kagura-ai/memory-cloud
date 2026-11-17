@@ -1,5 +1,7 @@
 """Scoped owner controls and current-member inspection of synchronization targets."""
 
+import asyncio
+import re
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 from uuid import UUID
@@ -11,7 +13,10 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.sync_identity import SyncPrincipal, sync_manager, sync_reader
+from api.routes.sync_feeds import bounded_body, exact_query, json_body
+from auth.oidc_bearer import identity_access_token
+from auth.oidc_server import credential_hash
+from auth.sync_identity import SyncPrincipal, load_sync_identity, sync_manager, sync_reader
 from config.settings import get_settings
 from db.base import get_db
 from models.sync_installation_schemas import (
@@ -20,6 +25,7 @@ from models.sync_installation_schemas import (
     SyncAuthorizationView,
     SyncInstallationView,
 )
+from models.sync_setup_handoff_schemas import SyncSetupHandoffCreate, SyncSetupHandoffView
 from services.sync_installations import (
     activate_installation,
     create_authorization,
@@ -27,7 +33,13 @@ from services.sync_installations import (
     revoke_authorization,
     unlink_installation,
 )
-from utils.exceptions import AuthorizationError, MemoryCloudException, NotFoundException
+from services.sync_setup_handoff import create_setup_handoff
+from utils.exceptions import (
+    AuthorizationError,
+    MemoryCloudException,
+    NotFoundException,
+    SyncProtocolError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -91,6 +103,43 @@ router = APIRouter(
 Manager = Annotated[SyncPrincipal, Depends(sync_manager)]
 Reader = Annotated[SyncPrincipal, Depends(sync_reader)]
 Database = Annotated[AsyncSession, Depends(get_db)]
+SETUP_BODY_TIMEOUT_SECONDS = 5.0
+
+
+@router.post(
+    "/sync-billing-handoffs",
+    response_model=SyncSetupHandoffView,
+    openapi_extra=json_body(SyncSetupHandoffCreate),
+)
+async def setup_billing_handoff(
+    workspace_id: UUID,
+    request: Request,
+    token: Annotated[str, Depends(identity_access_token)],
+    db: Database,
+) -> SyncSetupHandoffView:
+    """Enter only add-on setup with explicit scoped, current canonical ownership."""
+    exact_query(request)
+    lengths = request.headers.getlist("content-length")
+    if len(request.headers.getlist("content-type")) != 1 or len(lengths) > 1:
+        raise SyncProtocolError("invalid_request")
+    if lengths:
+        if re.fullmatch(r"0|[1-9][0-9]{0,5}", lengths[0]) is None:
+            raise SyncProtocolError("invalid_request")
+        if int(lengths[0]) > 4096:
+            raise SyncProtocolError("request_too_large", 413)
+    try:
+        body, _size = await asyncio.wait_for(
+            bounded_body(request, SyncSetupHandoffCreate, 4096),
+            timeout=SETUP_BODY_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        raise SyncProtocolError("invalid_request") from None
+    # identity_access_token rejects other namespaces and checks rate before DB.
+    # Read the bounded body before the first SQL, so a slow client holds no
+    # connection/authority transaction. Recheck the scoped identity again inside
+    # the service's nonblocking canonical-owner/registration transaction.
+    principal = await load_sync_identity(db, credential_hash(token), "integrations:manage")
+    return await create_setup_handoff(db, workspace_id, principal, body)
 
 
 @router.post("/sync-authorizations", response_model=SyncAuthorizationView, status_code=201)
