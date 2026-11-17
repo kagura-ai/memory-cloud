@@ -36,5 +36,25 @@
         "history_retention_days": 0
       }
     }
+  },
+  "rights_only_snapshot": {
+    "revision": 43,
+    "event_id": "billing-delivery-43-rights-only",
+    "source_ref": "billing-workspace-state-42",
+    "max_access": {
+      "valid_from": "2026-11-14T00:00:00Z",
+      "valid_until": "2026-12-14T00:00:00Z",
+      "evidence_ref": "base-paid-receipt"
+    },
+    "services": [
+      {
+        "service_id": "catalog-sync",
+        "valid_from": "2026-11-14T00:00:00Z",
+        "valid_until": "2026-12-14T00:00:00Z",
+        "evidence_ref": "service-paid-receipt"
+      }
+    ],
+    "contract_version": "workspace-billing-snapshot-v1",
+    "plan": null
   }
 }

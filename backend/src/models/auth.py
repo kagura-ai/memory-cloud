@@ -2056,14 +2056,15 @@ class Workspace(Base):
     # Issue #1470: memory-quota bonus earned through the referral program.
     #
     # DO NOT add this column to any of the three addon collections:
-    #   - ``internal_billing._ADDON_COLUMNS``
+    #   - ``config.billing_addons.ADDON_COLUMNS``
     #   - ``admin_plans._ADDON_FIELD_SPECS``
     #   - ``AddonCalculatorService.recalculate_workspace_bonuses``'s bonuses dict
     #
     # It is deliberately named WITHOUT the ``addon_`` prefix and kept outside
     # that machinery, because each of those paths would destroy it:
-    #   1. ``internal_billing.py`` zeroes every column in ``_ADDON_COLUMNS`` on
-    #      any billing push that carries ``addons`` (full-replace semantics).
+    #   1. The legacy plan push with ``addons`` and the ordered billing snapshot
+    #      with non-null ``plan`` replace every column in
+    #      ``config.billing_addons.ADDON_COLUMNS`` (full-replace semantics).
     #      Billing knows nothing about referrals, so the reward would silently
     #      evaporate at the exact moment a referred user converts to paid.
     #   2. ``addon_*`` columns are a CACHE of ``SUM(WorkspaceAddon.quantity x

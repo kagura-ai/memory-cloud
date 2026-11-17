@@ -16,8 +16,9 @@ Design decisions (documented for the cross-repo contract; see #954):
 - **No destructive cascade.** This automated webhook ONLY sets the canonical
   entitlement; it never removes members, transfers memories or revokes tokens.
   (The owner-facing ``PUT /api/v1/workspaces/{id}/plan`` that once did that
-  cleanup was removed in #1116; plans now change only through this endpoint
-  or the system-admin ``PUT /api/v1/admin/plans/workspaces/{id}/plan``.)
+  cleanup was removed in #1116; plans change through this endpoint, ordered
+  ``PUT /internal/workspaces/{id}/billing-snapshot`` with a non-null ``plan``,
+  or system-admin ``PUT /api/v1/admin/plans/workspaces/{id}/plan``.)
   Feature and quota enforcement is gate-time (reads ``plan_name`` and the
   effective limits), so a downgrade takes effect immediately without this endpoint
   silently destroying data on a billing glitch: over-limit objects are kept,
@@ -223,7 +224,14 @@ async def set_workspace_plan_from_billing(
         raise NotFoundException("Workspace")
 
     if await read_ordered_billing_mode(db, ws_uuid):
-        raise ConflictError("Workspace requires an ordered billing snapshot")
+        logger.info(
+            "ordered_billing_refused",
+            workspace_id=str(ws_uuid),
+            route="/internal/workspaces/{workspace_id}/plan",
+        )
+        raise ConflictError(
+            "Workspace requires an ordered billing snapshot", reason="ordered_billing_required"
+        )
 
     # Apply entitlement (absolute set → idempotent). Mark provenance as
     # billing-owned (#1095) so the external reconciler may reconcile this row;

@@ -1752,6 +1752,24 @@
         ],
         "type": "object"
       },
+      "BillingSnapshotPlanView": {
+        "properties": {
+          "addons": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "plan_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addons",
+          "plan_name"
+        ],
+        "type": "object"
+      },
       "BindingCreate": {
         "properties": {
           "allowed_memory_types": {
@@ -15400,7 +15418,14 @@
             ]
           },
           "plan": {
-            "$ref": "#/components/schemas/BillingSnapshotPlan"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BillingSnapshotPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "revision": {
             "exclusiveMinimum": 0.0,

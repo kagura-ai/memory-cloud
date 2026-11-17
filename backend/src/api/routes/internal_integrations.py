@@ -104,12 +104,9 @@ async def put_workspace_billing_snapshot(
 ) -> WorkspaceBillingResult:
     """Atomically opt into and publish one ordered plan/quota/paid-rights state."""
     response.headers.update({"Cache-Control": "no-store", "Pragma": "no-cache"})
-    integration = IntegrationEntitlementPush.model_validate(
-        body.model_dump(exclude={"contract_version", "plan"})
-    )
-    result = await apply_integration_entitlements(
-        db, workspace_id, integration, billing_plan=body.plan
-    )
+    # Retain the typed complete body: plan=null is ordered, not a legacy push,
+    # and the digest must include every validated top-level field unchanged.
+    result = await apply_integration_entitlements(db, workspace_id, body)
     view = await read_workspace_billing(db, workspace_id)
     answer = WorkspaceBillingResult(
         **view.model_dump(), applied=result.applied, outcome=result.outcome

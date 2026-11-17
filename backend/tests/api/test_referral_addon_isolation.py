@@ -7,9 +7,9 @@ test. It is to remove ``referral_memory_bonus`` from whichever addon collection
 it was just added to. The referral reward is deliberately NOT an addon, and each
 of the three collections guarded below would destroy it:
 
-1. ``internal_billing._ADDON_COLUMNS`` — the billing push has FULL-REPLACE
-   semantics: when the payload carries ``addons`` it zeroes every column in this
-   map before applying the provided values. Billing knows nothing about
+1. ``config.billing_addons.ADDON_COLUMNS`` — the legacy push with ``addons``
+   and the ordered snapshot with non-null ``plan`` FULL-REPLACE every column
+   in this map. Billing knows nothing about
    referrals, so a referral bonus listed here evaporates the moment a referred
    user converts to paid — the worst possible time.
 
@@ -35,7 +35,7 @@ from __future__ import annotations
 import inspect
 
 from api.routes.admin_plans import _ADDON_FIELD_SPECS
-from api.routes.internal_billing import _ADDON_COLUMNS
+from config.billing_addons import ADDON_COLUMNS
 from models.auth import Workspace
 from services.addon_calculator_service import ADDON_UNIT_VALUES, AddonCalculatorService
 
@@ -49,12 +49,12 @@ _WHY = (
 
 def test_referral_column_absent_from_billing_addon_columns() -> None:
     """The billing push must not be able to zero the referral bonus."""
-    assert REFERRAL_COLUMN not in _ADDON_COLUMNS.values(), (
-        f"{_WHY} internal_billing._ADDON_COLUMNS full-replaces every column it "
+    assert REFERRAL_COLUMN not in ADDON_COLUMNS.values(), (
+        f"{_WHY} config.billing_addons.ADDON_COLUMNS full-replaces every column it "
         "lists, so a referral bonus here is wiped by any billing push carrying "
         "`addons` — i.e. at the exact moment a referred user converts to paid."
     )
-    assert REFERRAL_COLUMN not in _ADDON_COLUMNS, _WHY
+    assert REFERRAL_COLUMN not in ADDON_COLUMNS, _WHY
 
 
 def test_referral_column_absent_from_addon_cache_recalc() -> None:

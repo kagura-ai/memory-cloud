@@ -1,23 +1,27 @@
 """Atomic plan/quota/paid-right snapshots and fencing of late legacy writers."""
 
 import asyncio
+import copy
+from contextlib import asynccontextmanager
 from datetime import UTC, timedelta
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 
 from api.routes import internal_billing
 from config.billing_addons import ADDON_COLUMNS
 from models.auth import Context, Workspace
 from models.integration_entitlement import WorkspaceIntegrationEvent, WorkspaceIntegrationState
 from models.public_usage_budget import PublicUsageBudget
-from models.workspace_billing_schemas import WorkspaceBillingPush
+from models.workspace_billing_schemas import BILLING_V1_ADDON_KEYS, WorkspaceBillingPush
 from services import integration_entitlements as service
 from tests.integration.test_integration_entitlements_db import NOW, snapshot
 from tests.integration.test_integration_entitlements_db import store as store
+from utils.exceptions import MemoryCloudException
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -25,6 +29,13 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 @pytest_asyncio.fixture(loop_scope="session")
 async def ordered(store):
     store.app.include_router(internal_billing.router)
+
+    @store.app.exception_handler(MemoryCloudException)
+    async def canonical(_request, exc):
+        return JSONResponse(
+            {"error": exc.error_code, "details": exc.details}, status_code=exc.status_code
+        )
+
     return store
 
 
@@ -32,9 +43,11 @@ def complete(revision=1, *, plan="promax", addons=None, services=None):
     return {
         **snapshot(revision, services=services),
         "contract_version": "workspace-billing-snapshot-v1",
-        "plan": {
+        "plan": None
+        if plan is None
+        else {
             "plan_name": plan,
-            "addons": {**dict.fromkeys(ADDON_COLUMNS, 0), **(addons or {})},
+            "addons": {**dict.fromkeys(BILLING_V1_ADDON_KEYS, 0), **(addons or {})},
         },
     }
 
@@ -169,10 +182,7 @@ async def test_old_writer_waiting_on_workspace_lock_is_fenced_after_opt_in(order
             await service.apply_integration_entitlements(
                 db,
                 s.wid,
-                service.IntegrationEntitlementPush.model_validate(
-                    value.model_dump(exclude={"contract_version", "plan"})
-                ),
-                billing_plan=value.plan,
+                value,
             )
             await db.commit()
             assert (await asyncio.wait_for(blocked, 2)).status_code == 409
@@ -199,10 +209,7 @@ async def test_exception_after_plan_mutation_rolls_back_entire_snapshot_and_mode
             await service.apply_integration_entitlements(
                 db,
                 s.wid,
-                service.IntegrationEntitlementPush.model_validate(
-                    body.model_dump(exclude={"contract_version", "plan"})
-                ),
-                billing_plan=body.plan,
+                body,
             )
         await db.rollback()
     current = (await call(s)).json()
@@ -271,10 +278,7 @@ async def test_read_waits_for_the_whole_committed_plan_and_rights_state(ordered)
             await service.apply_integration_entitlements(
                 db,
                 s.wid,
-                service.IntegrationEntitlementPush.model_validate(
-                    value.model_dump(exclude={"contract_version", "plan"})
-                ),
-                billing_plan=value.plan,
+                value,
             )
             await db.commit()
             answer = await asyncio.wait_for(pending, 2)
@@ -317,3 +321,194 @@ async def test_missing_workspace_cannot_receive_or_disclose_a_complete_snapshot(
     missing = uuid4()
     assert (await call(ordered, workspace=missing)).status_code == 404
     assert (await call(ordered, complete(), workspace=missing)).status_code == 404
+
+
+async def admin_state(s, *, plan="promax", source="admin_grant", bonus=17):
+    async with s.factory() as db:
+        workspace = await db.get(Workspace, s.wid)
+        workspace.plan_name, workspace.entitlement_source = plan, source
+        for index, column in enumerate(ADDON_COLUMNS.values()):
+            setattr(workspace, column, bonus + index)
+        await db.commit()
+    return {key: bonus + index for index, key in enumerate(ADDON_COLUMNS)}
+
+
+async def test_rights_only_delivery_preserves_admin_plan_every_quota_and_provenance(ordered):
+    s = ordered
+    quotas = await admin_state(s)
+    response = await call(s, complete(plan=None))
+    assert response.status_code == 200, response.text
+    current = response.json()
+    assert current["ordered_billing"] and current["applied"] and current["revision"] == 1
+    assert current["plan"] == {"plan_name": "promax", "addons": quotas}
+    assert current["entitlement_source"] == "admin_grant"
+    assert service.EntitlementWindow.model_validate(
+        current["max_access"]
+    ) == service.EntitlementWindow.model_validate(complete()["max_access"])
+    assert len(current["services"]) == 1
+    assert (await call(s, complete(plan=None))).json()["outcome"] == "duplicate"
+    assert (await call(s, snapshot(2), suffix="integration-entitlements")).status_code == 409
+    async with s.factory() as db:
+        assert (await service.inspect_paid_integration(db, s.wid, "catalog-sync")).allowed
+
+
+@pytest.mark.parametrize("null_first", [True, False])
+async def test_increasing_revisions_can_switch_between_rights_only_and_plan_transfer(
+    ordered, null_first
+):
+    s = ordered
+    quotas = await admin_state(s)
+    first = complete(1, plan=None if null_first else "pro", addons={"memory": 9})
+    assert (await call(s, first)).status_code == 200
+    before = (await call(s)).json()
+    second = complete(2, plan="pro" if null_first else None, addons={"memory": 9})
+    result = await call(s, second)
+    assert result.status_code == 200, result.text
+    current = result.json()
+    assert current["revision"] == 2 and current["ordered_billing"]
+    assert current["plan_name"] == "pro" and current["entitlement_source"] == "external_billing"
+    assert current["plan"]["addons"]["memory"] == 9
+    if null_first:
+        assert before["plan"]["addons"] == quotas and before["entitlement_source"] == "admin_grant"
+    else:
+        assert current["plan"] == before["plan"]
+
+
+@pytest.mark.parametrize("null_first", [True, False])
+@pytest.mark.parametrize("reuse", ["exact_event", "new_revision", "new_event"])
+async def test_null_and_nonnull_plan_are_distinct_receipted_content(ordered, null_first, reuse):
+    s = ordered
+    first = complete(3, plan=None if null_first else "promax")
+    assert (await call(s, first)).status_code == 200
+    conflicting = copy.deepcopy(first)
+    conflicting["plan"] = complete()["plan"] if null_first else None
+    if reuse == "new_revision":
+        conflicting["revision"] += 1
+    elif reuse == "new_event":
+        conflicting["event_id"] = "different-event"
+    assert (await call(s, conflicting)).status_code == 409
+    assert (await call(s)).json()["revision"] == 3
+
+
+@pytest.mark.parametrize("stored", ["tier", "source", "bonus"])
+async def test_read_and_rights_only_apply_report_out_of_write_contract_state(ordered, stored):
+    s = ordered
+    constraint = {"tier": "valid_plan_name", "source": "valid_entitlement_source"}.get(stored)
+    async with future_stored_vocabulary(s, constraint):
+        quotas = await admin_state(
+            s,
+            plan="future-tier" if stored == "tier" else "promax",
+            source="future-source" if stored == "source" else "admin_grant",
+            bonus=2_100_000_000 if stored == "bonus" else 17,
+        )
+        before = await call(s)
+        assert before.status_code == 200, before.text
+        response = await call(s, complete(plan=None))
+        assert response.status_code == 200, response.text
+        current = response.json()
+        assert current["plan"] == before.json()["plan"] and current["plan"]["addons"] == quotas
+        assert current["entitlement_source"] == before.json()["entitlement_source"]
+        assert current["revision"] == 1 and current["ordered_billing"]
+
+
+@asynccontextmanager
+async def future_stored_vocabulary(s, constraint):
+    """Simulate future vocabulary in the owned DB, then restore the original check."""
+    if constraint is None:
+        yield
+        return
+    assert constraint in {"valid_plan_name", "valid_entitlement_source"}
+    async with s.factory() as db:
+        definition = await db.scalar(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid='workspaces'::regclass AND conname=:name"
+            ),
+            {"name": constraint},
+        )
+        assert definition
+        await db.execute(text(f"ALTER TABLE workspaces DROP CONSTRAINT {constraint}"))
+        await db.commit()
+    try:
+        yield
+    finally:
+        async with s.factory() as db:
+            await db.execute(
+                update(Workspace)
+                .where(Workspace.id == s.wid)
+                .values(
+                    plan_name="promax",
+                    entitlement_source="admin_grant",
+                )
+            )
+            await db.execute(
+                text(f"ALTER TABLE workspaces ADD CONSTRAINT {constraint} {definition}")
+            )
+            await db.commit()
+
+
+@pytest.mark.parametrize("suffix", ["plan", "integration-entitlements"])
+async def test_legacy_fence_has_one_structured_reason_and_info_log(ordered, monkeypatch, suffix):
+    from unittest.mock import Mock
+
+    s = ordered
+    assert (await call(s, complete(plan=None))).status_code == 200
+
+    logged = Mock()
+    monkeypatch.setattr(internal_billing.logger, "info", logged)
+    monkeypatch.setattr(service.logger, "info", logged)
+    body = {"plan_name": "free"} if suffix == "plan" else snapshot(2)
+    response = await call(s, body, suffix=suffix)
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "RES-002",
+        "details": {"reason": "ordered_billing_required"},
+    }
+    logged.assert_called_once_with(
+        "ordered_billing_refused",
+        workspace_id=str(s.wid),
+        route=f"/internal/workspaces/{{workspace_id}}/{suffix}",
+    )
+
+
+async def test_applied_plan_logs_prior_and_new_plan_quotas_and_provenance(ordered, monkeypatch):
+    from unittest.mock import Mock
+
+    s = ordered
+    old = await admin_state(s)
+    logged = Mock()
+    monkeypatch.setattr(service.logger, "info", logged)
+    body = complete(plan="pro", addons={"memory": 42})
+    assert (await call(s, body)).status_code == 200
+    changes = [
+        item for item in logged.call_args_list if item.args[0] == "workspace_billing_plan_applied"
+    ]
+    assert len(changes) == 1
+    assert changes[0].kwargs == {
+        "workspace_id": str(s.wid),
+        "revision": 1,
+        "old_plan_name": "promax",
+        "old_addons": old,
+        "old_entitlement_source": "admin_grant",
+        "new_plan_name": "pro",
+        "new_addons": body["plan"]["addons"],
+        "new_entitlement_source": "external_billing",
+    }
+    logged.reset_mock()
+    assert (await call(s, complete(2, plan=None))).status_code == 200
+    assert not any(
+        item.args[0] == "workspace_billing_plan_applied" for item in logged.call_args_list
+    )
+
+
+async def test_deleted_ordered_workspace_has_terminal_snapshot_notfound_and_legacy_fence(ordered):
+    s = ordered
+    assert (await call(s, complete())).status_code == 200
+    async with s.factory() as db:
+        workspace = await db.get(Workspace, s.wid)
+        workspace.deleted_at = NOW
+        await db.commit()
+    for body in (None, complete(2), complete(2, plan=None)):
+        response = await call(s, body)
+        assert response.status_code == 404 and response.json()["error"] == "RES-001"
+    assert (await call(s, {"plan_name": "free"}, suffix="plan")).status_code == 409

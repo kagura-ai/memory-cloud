@@ -29,7 +29,7 @@ from models.integration_entitlement_schemas import (
     IntegrationEntitlementView,
     ServiceEntitlement,
 )
-from models.workspace_billing_schemas import BillingSnapshotPlan, WorkspaceBillingView
+from models.workspace_billing_schemas import WorkspaceBillingPush, WorkspaceBillingView
 from utils.datetime import utcnow
 from utils.exceptions import AuthorizationError, ConflictError, NotFoundException
 from utils.logger import get_logger
@@ -127,13 +127,9 @@ async def read_integration_entitlements(
 def _digest(
     workspace_id: UUID,
     body: IntegrationEntitlementPush,
-    billing_plan: BillingSnapshotPlan | None = None,
 ) -> str:
     payload = body.model_dump(mode="json")
     payload["services"] = sorted(payload["services"], key=lambda item: item["service_id"])
-    if billing_plan is not None:
-        payload["contract_version"] = "workspace-billing-snapshot-v1"
-        payload["plan"] = billing_plan.model_dump(mode="json")
     wire = json.dumps({"workspace_id": str(workspace_id), "snapshot": payload}, sort_keys=True)
     return hashlib.sha256(wire.encode()).hexdigest()
 
@@ -169,8 +165,6 @@ async def apply_integration_entitlements(
     db: AsyncSession,
     workspace_id: UUID,
     body: IntegrationEntitlementPush,
-    *,
-    billing_plan: BillingSnapshotPlan | None = None,
 ) -> IntegrationEntitlementResult:
     """Apply a complete newer snapshot atomically; the caller owns the commit.
 
@@ -181,9 +175,18 @@ async def apply_integration_entitlements(
     if workspace is None or workspace.deleted_at is not None:
         raise NotFoundException("Workspace")
     state = await _state(db, workspace_id)
-    if state is not None and state.ordered_billing and billing_plan is None:
-        raise ConflictError("Workspace requires an ordered billing snapshot")
-    digest = _digest(workspace_id, body, billing_plan)
+    ordered = isinstance(body, WorkspaceBillingPush)
+    billing_plan = body.plan if isinstance(body, WorkspaceBillingPush) else None
+    if state is not None and state.ordered_billing and not ordered:
+        logger.info(
+            "ordered_billing_refused",
+            workspace_id=str(workspace_id),
+            route="/internal/workspaces/{workspace_id}/integration-entitlements",
+        )
+        raise ConflictError(
+            "Workspace requires an ordered billing snapshot", reason="ordered_billing_required"
+        )
+    digest = _digest(workspace_id, body)
     receipt = await db.get(WorkspaceIntegrationEvent, (workspace_id, body.event_id))
     outcome: Literal["applied", "duplicate", "stale"] = "applied"
     if receipt is not None:
@@ -209,12 +212,19 @@ async def apply_integration_entitlements(
             db.add(state)
         state.revision, state.event_id = body.revision, body.event_id
         state.source, state.source_ref = "external_billing", body.source_ref
-        if billing_plan is not None:
+        if ordered:
             state.ordered_billing = True
+        plan_change = None
+        if billing_plan is not None:
+            plan_change = {
+                "old_plan_name": workspace.plan_name,
+                "old_addons": {key: getattr(workspace, col) for key, col in ADDON_COLUMNS.items()},
+                "old_entitlement_source": workspace.entitlement_source,
+            }
             workspace.plan_name = billing_plan.plan_name
             workspace.entitlement_source = "external_billing"
             for key, column in ADDON_COLUMNS.items():
-                setattr(workspace, column, billing_plan.addons[key])
+                setattr(workspace, column, billing_plan.addons.get(key, 0))
         window = body.max_access
         state.max_valid_from = window.valid_from.replace(tzinfo=None) if window else None
         state.max_valid_until = window.valid_until.replace(tzinfo=None) if window else None
@@ -231,6 +241,16 @@ async def apply_integration_entitlements(
             )
         )
         await db.flush()
+        if plan_change is not None:
+            logger.info(
+                "workspace_billing_plan_applied",
+                workspace_id=str(workspace_id),
+                revision=body.revision,
+                **plan_change,
+                new_plan_name=workspace.plan_name,
+                new_addons={key: getattr(workspace, col) for key, col in ADDON_COLUMNS.items()},
+                new_entitlement_source=workspace.entitlement_source,
+            )
         logger.info(
             "integration_entitlements_applied",
             workspace_id=str(workspace_id),

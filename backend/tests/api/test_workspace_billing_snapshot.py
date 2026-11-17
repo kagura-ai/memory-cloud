@@ -4,6 +4,7 @@ import copy
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
@@ -12,9 +13,10 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from api.routes import internal_integrations
+from config.billing_addons import ADDON_COLUMNS, ADDON_MAX_BY_KEY
 from config.settings import get_settings
 from db.base import get_db
-from models.workspace_billing_schemas import WorkspaceBillingPush
+from models.workspace_billing_schemas import BILLING_V1_ADDON_KEYS, WorkspaceBillingPush
 from utils.exceptions import MemoryCloudException
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/workspace-billing-snapshot-v1.json"
@@ -31,6 +33,44 @@ def test_shared_wire_is_a_strict_complete_normalized_snapshot():
     assert result.plan.addons["history_retention_days"] == 0
     assert result.max_access.valid_from.utcoffset().total_seconds() == 0
     assert result.model_dump(mode="json") == body()
+
+
+def test_plan_is_required_but_nullable_with_distinct_digest():
+    from services.integration_entitlements import _digest
+
+    full = WorkspaceBillingPush.model_validate(body())
+    value = {**body(), "plan": None}
+    rights = WorkspaceBillingPush.model_validate(value)
+    assert rights.plan is None and rights.model_dump(mode="json")["plan"] is None
+    wid = UUID("11111111-1111-4111-8111-111111111111")
+    assert _digest(wid, full) != _digest(wid, rights)
+    value.pop("plan")
+    with pytest.raises(ValidationError):
+        WorkspaceBillingPush.model_validate(value)
+
+
+def test_v1_addon_keys_are_frozen_while_storage_and_domain_maps_can_grow(monkeypatch):
+    monkeypatch.setitem(ADDON_COLUMNS, "future", "addon_future_bonus")
+    monkeypatch.setitem(ADDON_MAX_BY_KEY, "future", 2)
+    value = body()
+    assert set(WorkspaceBillingPush.model_validate(value).plan.addons) == set(BILLING_V1_ADDON_KEYS)
+    value["plan"]["addons"]["future"] = 0
+    with pytest.raises(ValidationError):
+        WorkspaceBillingPush.model_validate(value)
+
+
+def test_nonnull_fixture_digest_preserves_pre_review_applied_receipts():
+    from services.integration_entitlements import _digest
+
+    # Computed with the actual _digest from reviewed commit37c91b35; nullable
+    # plan support must not turn retries of its non-null deliveries into409s.
+    assert (
+        _digest(
+            UUID("11111111-1111-4111-8111-111111111111"),
+            WorkspaceBillingPush.model_validate(body()),
+        )
+        == "025120e7bc84c5954b648df2fcbe0388b51bfc45ad0b672bc6046e171aec486d"
+    )
 
 
 @pytest.mark.parametrize(

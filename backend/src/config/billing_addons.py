@@ -2,6 +2,8 @@
 
 from config.retention import OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS
 
+# Friendly wire names are decoupled from ORM columns; callers never accept
+# arbitrary column names. Both billing writers replace every listed column.
 ADDON_COLUMNS: dict[str, str] = {
     "memory": "addon_memory_bonus",
     "mcp_quota": "addon_mcp_quota_bonus",
@@ -16,6 +18,8 @@ ADDON_COLUMNS: dict[str, str] = {
     "memories_per_day": "addon_memories_per_day_bonus",
     "history_retention_days": "addon_history_retention_days_bonus",
 }
+# Stay below signed PostgreSQL INTEGER's 2_147_483_647 ceiling so excessive
+# bonuses fail validation instead of producing a database overflow/HTTP500.
 ADDON_MAX_BONUS = 2_000_000_000
 ADDON_MAX_BY_KEY: dict[str, int] = {
     "history_retention_days": OPERATION_HISTORY_MAX_RETENTION_BONUS_DAYS,
