@@ -4,6 +4,33 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.169.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.169.0) — 2026-11-17
+
+An ordered billing snapshot for the payment service, a fix to which workspace MCP `list_contexts` lists, and the OIDC signing key mount for the single-server layout.
+
+One migration (`f54_2882_ordered_billing`). No new setting. The internal billing and sync APIs are `experimental` (they may change in a minor release).
+
+### Added
+- **Ordered workspace billing snapshot** ([#2882](https://github.com/kagura-ai/memory-cloud/issues/2882)): `GET` and `PUT /internal/workspaces/{workspace_id}/billing-snapshot` (contract `workspace-billing-snapshot-v1`), with the internal billing publisher credential. One delivery applies the plan, the twelve addon quotas and the finite Max / service rights in one transaction, under one workspace revision.
+  - `plan` is required and may be `null`. `null` applies only the rights and leaves the plan, the quotas and `entitlement_source` as they are, for a workspace an administrator granted. A non-null plan sets all of them and marks the workspace billing-owned.
+  - The first applied snapshot switches the workspace to ordered billing. From then on the legacy `PUT /internal/workspaces/{id}/plan` and `PUT .../integration-entitlements` answer `409` `RES-002` with `details.reason: ordered_billing_required`. A workspace that never received a snapshot behaves as before.
+  - An exact retry is a no-op. Reusing an event or a revision with different content is `409`. An older revision is a stale no-op and does not switch the workspace.
+  - The switch cannot be undone through the API. See `docs/ops/ordered-workspace-billing.md` and the fixture `backend/tests/fixtures/workspace-billing-snapshot-v1.json`.
+- **OIDC signing key directory in the single-server compose files** ([#2885](https://github.com/kagura-ai/memory-cloud/issues/2885)): `docker-compose.prod.yml` and `docker-compose.app.yml` mount the host directory `/opt/kagura-memory/oidc` read-only at `/run/kagura/oidc` in both API containers, so `OIDC_SIGNING_KEYS_FILE` can point there.
+  - The key file must be owned by uid 1000 with mode `0400` or `0600`. Replacing it by rename is picked up without a restart.
+  - `.env.prod.example` lists the four `OIDC_*` settings; `docs/ops/oidc-provider.md` has the details for this layout.
+
+### Fixed
+- **MCP `list_contexts` lists the connection's workspace** ([#2884](https://github.com/kagura-ai/memory-cloud/issues/2884)): the list comes from the workspace the connection is bound to: the API key's workspace for a workspace-scoped key, else the workspace in the MCP URL, else your current workspace. `count`, `limit` and `can_create` describe that same workspace.
+  - Switching workspaces in the web UI no longer changes what a key- or URL-bound connection lists.
+  - The tool description now says that `total` is the page and that `count` / `limit` / `can_create` are the workspace's context quota, which includes contexts you cannot see.
+
+### Notes
+- **Migration** `f54_2882_ordered_billing` adds `workspace_integration_states.ordered_billing` (boolean, default false) and a trigger that refuses clearing it. Existing rows stay false. `alembic upgrade head` is enough. A downgrade drops the column and with it the ordered state: do not downgrade once a workspace has switched.
+- **Ordered billing rollout.** Every API instance must run this release, and older instances must be drained, before the payment service sends its first snapshot. After a workspace has switched, do not roll back to an earlier release while billing requests can run.
+- **Compose change.** The first deploy with the new compose files recreates the API containers with the key mount. Containers created before it do not have the mount: place the key and set `OIDC_ENABLED=true` after that deploy. A missing host directory is created empty and is harmless while the provider is off.
+- No new setting.
+
 ## [v0.168.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.168.0) — 2026-11-17
 
 A setup-only billing handoff for sync add-ons. The current workspace owner can enter the payment service's sync add-on setup flow from Public ([kagura-public#39](https://github.com/kagura-ai/kagura-public/issues/39)) with the isolated `integrations:manage` OIDC token. No KMC session is needed, and the credential carries no generic billing authority.
