@@ -4,6 +4,48 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.167.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.167.0) — 2026-11-17
+
+Sync contract fixes that the public resource dashboard ([kagura-public#37](https://github.com/kagura-ai/kagura-public/issues/37)) builds on:
+- A delayed or retried human request no longer changes sync state that a newer confirmation replaced. Feed configuration updates and the stop / finalize controls take an optional `expected` snapshot. The server compares it inside the transaction that applies the change and answers `409` when it is stale.
+- Approving a prepared manual run checks the original request's provenance first, as committing it already did.
+- Three read-only metadata views: the current feed configurations, the caller's lifecycle rights on a managed installation, and the receipt of a resume confirmation whose reply was lost.
+
+The sync APIs are `experimental` (they may change in a minor release). No migration, no new setting.
+
+### Added
+- **Feed configuration reads** ([#2865](https://github.com/kagura-ai/memory-cloud/issues/2865)): `GET /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/activity/feeds` (at most 20) and `.../activity/feeds/{feed_id}`, for a current Viewer with `workspaces:read`.
+  - Each entry returns the opaque feed id, kind, configuration hash and version, canonical revision, the installation generation, the schema hash and version (both `null` when there is no schema), the workspace and installation ids, and the observation time.
+  - No source URL, body, diff, actor or credential is returned, and the read counts no MCP usage.
+  - The activity API's existing switch (`SYNC_OBSERVABILITY_ENABLED`) and its authority and capacity rules apply.
+- **Lifecycle access** ([#2873](https://github.com/kagura-ai/memory-cloud/issues/2873)): `GET .../management/access` returns the versioned `sync-mode-access-v1` profile.
+  - The profile holds the current subject, the retained target and whether it is available, the management mode, epoch, generation and stop watermark, and `read` / `stop` / `finalize` booleans taken from the current Context Editor / Owner role.
+  - The read works while ordinary data access is held by capacity. It does not grant a scope; stop and finalize still need an `integrations:manage` token.
+  - Gated by `SYNC_MANAGED_ENABLED`.
+- **Resume confirmation receipts** ([#2875](https://github.com/kagura-ai/memory-cloud/issues/2875)): `POST .../management/resume/receipt` takes the original operation id, preview id, diff hash and original subject. It answers `found` with the exact historical receipt, or `not_found`, or `mismatch`, with an `as_of` time.
+  - A fresh current Editor can reconcile a lost reply after the original grant or preview expired. The lookup never replays the confirmation or renews publication authority.
+  - Unknown or mismatched operations reveal no other metadata. See `docs/ops/resume-receipt-recovery.md`.
+
+### Fixed
+- **Feed configuration updates are fenced** ([#2865](https://github.com/kagura-ai/memory-cloud/issues/2865)): the human `PUT .../sync-installations/{installation_id}/feeds/{feed_id}` takes an optional `expected` bundle: `config_version`, `generation`, `schema_hash`, `schema_version`.
+  - Version `0` means create-only.
+  - A stale configuration, generation or schema, a stale create, or an ABA change answers `409`. It is refused under the existing authority and target locks, before any schema insert, configuration change, version increment or audit row.
+  - Malformed, partial, coerced or out-of-range bundles answer `400`, and an exhausted version counter answers `409` instead of a database error.
+  - Without the bundle the call behaves as before and is unguarded. Callers should read the current state after a `409` or an unknown outcome and not replay the old request.
+- **Approving a prepared manual run checks its provenance** ([#2869](https://github.com/kagura-ai/memory-cloud/issues/2869)): approval runs the same original-request validation as the canonical commit before it records the approval or its audit row.
+  - Another Editor's live token no longer stands in for an original request whose authority expired or changed. That case answers the existing fixed `409`, and nothing is recorded. This includes the original requester losing a seat.
+  - The original request and token deadlines hold until the transaction commits.
+- **Stop and finalize are fenced** ([#2871](https://github.com/kagura-ai/memory-cloud/issues/2871)): `POST .../management/stop` and `.../finalize` take an optional `expected` snapshot (`mode`, `epoch`, `generation`, `stop_event_id`, bounded to the JavaScript safe-integer range).
+  - A mismatch answers `409` before enrollment, transition, receipt or generation change.
+  - The snapshot is part of the operation's identity: an exact retry returns its historical receipt, and a changed snapshot conflicts.
+  - A guarded finalize on a target that has no ownership row yet only enrolls it and returns that state. The client confirms the unlock against the real snapshot.
+  - Omitting `expected` keeps the old unguarded call. An explicit `"expected": null` answers `400`, as on the feed configuration update.
+
+### Notes
+- No migration, no new setting, no operator action. All new routes sit behind the existing sync switches, which stay off by default.
+- On the worker sync routes, a schema row held by another request now answers `409` `RES-002` instead of `503` `temporarily_unavailable`.
+- The README pages keep the wording of #2864. The doc tests that pinned the old command table now check the onboarding links.
+
 ## [v0.166.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.166.0) — 2026-11-15
 
 Follow-ups to v0.165.0's admin API:
