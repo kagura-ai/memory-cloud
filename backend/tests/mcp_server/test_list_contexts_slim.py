@@ -844,6 +844,9 @@ async def test_default_page_is_100_with_a_cursor():
     second = await _payload(harness, {"cursor": first["next_cursor"]})
     assert [c["name"] for c in second["contexts"]] == [f"ctx-{i:03d}" for i in range(100, 150)]
     assert second["has_more"] is False and second["next_cursor"] is None
+    # #2891: count is every visible context, not the page: the same on each page.
+    assert first["count"] == second["count"] == 150
+    assert second["total"] == 50
 
 
 @pytest.mark.asyncio

@@ -851,8 +851,8 @@ _NO_WORKSPACE_HINT = (
 # not only told to create a context.
 _WORKSPACE_FULL_HINT = (
     "This workspace has reached its context limit, so no context can be created. "
-    "Contexts you cannot see (private to other members, or not shared with you) "
-    "count toward limit as well."
+    "Contexts you cannot see here (for example ones private to other members or "
+    "not shared with you) count toward limit as well."
 )
 
 
