@@ -86,8 +86,9 @@ Create a temporary test context for isolation:
 ```
 list_contexts()
 -> Verify: status=success; `contexts` is an array and `total` equals its length (the number of
-   items on this page). `count` is NOT the list length — it is the workspace's context quota usage,
-   next to `limit` and `can_create`; `has_more` / `next_cursor` page the list
+   items on this page). `count` is NOT the list length — it is the number of contexts you can see
+   in the workspace, the same on every page; `limit` and `can_create` are the workspace's context
+   quota, which contexts you cannot see count toward too; `has_more` / `next_cursor` page the list
 -> Verify: items carry only id, name, is_private, is_locked, last_used_at — no `summary` /
    `embedding_model` (opt-in via include_summary / include_details), so the response stays small
    even on a workspace with many contexts
@@ -891,7 +892,7 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | 2 | describe_tools | Full definition by name + unknown name | PASS/FAIL |
 | 3 | guide | Index topic | PASS/FAIL |
 | 4 | guide | Tool name expands to sections + unknown topic | PASS/FAIL |
-| 5 | list_contexts | List contexts (total = page length; count = quota usage) | PASS/FAIL |
+| 5 | list_contexts | List contexts (total = page length; count = contexts you can see) | PASS/FAIL |
 | 6 | create_context | Create test context (top-level context_id) | PASS/FAIL |
 | 7 | list_contexts (verify) | Find the new context with name_contains + include_summary | PASS/FAIL |
 | 8 | get_context_info | Get context details | PASS/FAIL |

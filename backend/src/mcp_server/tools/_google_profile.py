@@ -329,12 +329,12 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     },
     "list_contexts": {
         _D: (
-            "6333658fdc236bb8",
+            "98e41ec0295172bd",
             "List the contexts you can access as a name→id directory (the id is the "
             "context_id argument; the URL's ?context= sets a default), most recently used "
             "first. Narrow with name_contains.\n"
             "Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], "
-            "total (this page), count/limit/can_create (workspace quota), has_more, "
+            "total (page), count (all visible), limit/can_create (quota), has_more, "
             "next_cursor, hint?}; pass next_cursor as cursor for the next page.",
         ),
     },

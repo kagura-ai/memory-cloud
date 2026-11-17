@@ -738,12 +738,15 @@ GUIDE_TOPICS: dict[str, str] = {
         "name_contains. For one context's full summary, usage guide and search "
         "config call get_context_info(context_id). Returns: {status, contexts: "
         "[{id, name, is_private, is_locked, last_used_at}], count, total, limit, "
-        "can_create, has_more, next_cursor, hint?}. count = contexts in the workspace "
-        "(quota usage, unaffected by name_contains); total = contexts in this "
-        "response (0 on no match is still a success); limit = the plan's maximum; "
-        "has_more = pass next_cursor as cursor for the next page (1-200 per page, "
-        "default 100; a page also stops at 20000 characters); hint = present only "
-        "when you can see no context, says how to create one."
+        "can_create, has_more, next_cursor, hint?}. count = contexts you can see in "
+        "the workspace (unaffected by name_contains); total = contexts in this "
+        "response (0 on no match is still a success); limit = the plan's maximum "
+        "and can_create = whether one more context fits, both decided on every "
+        "context of the workspace, including ones you cannot see; has_more = pass "
+        "next_cursor as cursor for the next page (1-200 per page, default 100; a "
+        "page also stops at 20000 characters); hint = present when you can see no "
+        "context (says how to create one), and when the workspace is full while "
+        "count is below limit (contexts you cannot see count toward it)."
     ),
     # --------------------------------------------------------------- list
     "list.filters": (

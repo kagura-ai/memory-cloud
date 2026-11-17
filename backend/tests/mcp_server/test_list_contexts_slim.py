@@ -12,9 +12,10 @@ Pinned here:
 - the default item shape (no ``summary`` / ``embedding_model``) and that the
   ``ContextSearchConfig`` batch query is skipped when it is not needed;
 - ``name_contains`` / ``include_summary`` / ``include_details`` semantics;
-- the envelope: ``count`` / ``limit`` / ``can_create`` keep their quota meaning
-  (``count`` is the workspace-wide context count, NOT the number of items
-  returned), so the number of returned items is the new ``total``;
+- the envelope: ``count`` is the number of contexts the caller can see (#2891),
+  NOT the number of items returned, which is ``total``; ``limit`` /
+  ``can_create`` keep their workspace-wide quota meaning, with a hint when the
+  workspace is full while ``count`` is below ``limit``;
 - argument validation → structured ``validation_error``;
 - a response-size guard so the waste cannot silently return.
 
@@ -362,10 +363,11 @@ async def test_filter_runs_after_the_permission_scoped_listing():
 
 
 @pytest.mark.asyncio
-async def test_envelope_keeps_quota_meaning_and_adds_total():
-    """``count`` is the workspace-wide context count used for the quota (it can
-    exceed what the caller is allowed to see), so it must not start tracking
-    the filter. ``total`` carries the number of returned items."""
+async def test_count_is_what_the_caller_can_see_and_ignores_name_contains():
+    """#2891: ``count`` is the number of contexts the caller can see in the
+    workspace (9 exist, 3 are visible), counted before ``name_contains`` so it
+    does not track the filter; ``total`` carries the number of returned items.
+    ``limit`` / ``can_create`` stay the workspace's quota."""
     workspace_id = uuid4()
     harness = _Harness(
         [_context("alpha"), _context("beta", age_days=1), _context("gamma", age_days=2)],
@@ -376,11 +378,100 @@ async def test_envelope_keeps_quota_meaning_and_adds_total():
     unfiltered = await _payload(harness, {}, workspace_id=workspace_id)
     filtered = await _payload(harness, {"name_contains": "alp"}, workspace_id=workspace_id)
 
-    assert (unfiltered["count"], unfiltered["limit"], unfiltered["can_create"]) == (9, 10, True)
-    assert (filtered["count"], filtered["limit"], filtered["can_create"]) == (9, 10, True)
+    assert (unfiltered["count"], unfiltered["limit"], unfiltered["can_create"]) == (3, 10, True)
+    assert (filtered["count"], filtered["limit"], filtered["can_create"]) == (3, 10, True)
     assert unfiltered["total"] == 3
     assert filtered["total"] == 1
     assert len(filtered["contexts"]) == 1
+    # Under the cap: no figure about the 6 contexts the caller cannot see.
+    assert "hint" not in unfiltered and "hint" not in filtered
+
+
+@pytest.mark.asyncio
+async def test_can_create_counts_every_context_of_the_workspace():
+    """``can_create`` is decided on the whole workspace (private contexts of
+    other members included), not on the caller's ``count``."""
+    harness = _Harness([_context("alpha")], workspace_count=10, max_contexts=10)
+
+    payload = await _payload(harness, {}, workspace_id=uuid4())
+
+    assert (payload["count"], payload["limit"], payload["can_create"]) == (1, 10, False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("workspace_count", "args"),
+    [
+        (10, {}),
+        (10, {"name_contains": "alp"}),
+        # A workspace over its cap (a lowered plan) is full as well.
+        (12, {}),
+    ],
+)
+async def test_full_workspace_with_contexts_the_caller_cannot_see_adds_the_cap_hint(
+    workspace_count, args
+):
+    """#2891: at the cap while ``count`` is below ``limit``, the reply says why
+    ``can_create`` is false: contexts the caller cannot see count toward it."""
+    from mcp_server.tools import context as context_tools
+
+    harness = _Harness(
+        [_context("alpha"), _context("beta", age_days=1)],
+        workspace_count=workspace_count,
+        max_contexts=10,
+    )
+
+    payload = await _payload(harness, args, workspace_id=uuid4())
+
+    assert (payload["count"], payload["limit"], payload["can_create"]) == (2, 10, False)
+    assert payload["hint"] == context_tools._WORKSPACE_FULL_HINT
+    hint = payload["hint"]
+    assert "context limit" in hint
+    assert "cannot see" in hint
+    assert "private to other members" in hint and "not shared with you" in hint
+    # Static text: no number from which the unseen contexts can be read.
+    assert not any(ch.isdigit() for ch in hint)
+    # The hint is for a full workspace, never the empty-account text.
+    assert "No contexts are visible" not in hint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("visible", "workspace_count"), [(10, 10), (12, 12)])
+async def test_caller_who_sees_every_context_of_a_full_workspace_gets_no_hint(
+    visible, workspace_count
+):
+    """``count`` reaching ``limit`` already explains ``can_create: false``."""
+    harness = _Harness(
+        [_context(f"c{i}", age_days=i) for i in range(visible)],
+        workspace_count=workspace_count,
+        max_contexts=10,
+    )
+
+    payload = await _payload(harness, {}, workspace_id=uuid4())
+
+    assert payload["count"] == visible
+    assert payload["can_create"] is False
+    assert "hint" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visible", [0, 2])
+async def test_quota_lookup_failure_gets_no_cap_hint(visible):
+    """A failed quota lookup answers ``limit: 0`` / ``can_create: false``, which
+    is not a full workspace: no cap sentence (the empty-account hint, which
+    follows what the caller sees, is unchanged)."""
+    from mcp_server.tools import context as context_tools
+
+    harness = _Harness([_context(f"c{i}", age_days=i) for i in range(visible)], workspace_count=10)
+    harness.quota.get_effective_quotas = AsyncMock(side_effect=RuntimeError("quota db"))
+
+    payload = await _payload(harness, {}, workspace_id=uuid4())
+
+    assert (payload["count"], payload["limit"], payload["can_create"]) == (visible, 0, False)
+    if visible:
+        assert "hint" not in payload
+    else:
+        assert payload["hint"] == context_tools._EMPTY_CONTEXTS_HINT
 
 
 @pytest.mark.asyncio
@@ -610,7 +701,8 @@ async def test_failed_access_lookup_is_not_an_empty_account():
     """A permission or database failure inside the access lookup keeps the empty
     success it has always answered, but carries no hint — the caller is not
     told to create a context when the listing simply failed."""
-    harness = _Harness([], workspace_count=3)
+    # A full workspace: #2891's cap hint must not fire here either.
+    harness = _Harness([], workspace_count=3, max_contexts=3)
     harness.service.list_contexts = AsyncMock(
         side_effect=ContextListingFailedError("not a member of workspace")
     )
@@ -623,6 +715,7 @@ async def test_failed_access_lookup_is_not_an_empty_account():
     # #2884: and no quota figures of the workspace it could not list.
     assert payload["count"] == 0
     assert "limit" not in payload and "can_create" not in payload
+    assert harness.quota.get_effective_quotas.await_count == 0
 
 
 @pytest.mark.asyncio
@@ -676,14 +769,36 @@ async def test_service_lookup_failure_is_empty_by_default_and_raises_on_request(
 
 @pytest.mark.asyncio
 async def test_member_with_no_access_gets_the_hint_even_when_the_workspace_has_contexts():
-    """``count`` is workspace-wide quota usage; the hint follows what the caller
-    can see, so a member without access to any of 3 contexts still gets it."""
+    """The hint follows what the caller can see, so a member without access to
+    any of 3 contexts still gets it; under the cap it is the unchanged
+    empty-account text and ``count`` is the caller's 0 (#2891)."""
+    from mcp_server.tools import context as context_tools
+
     harness = _Harness([], workspace_count=3)
 
     payload = await _payload(harness, {}, workspace_id="ws-1")
 
-    assert payload["count"] == 3
-    assert "hint" in payload
+    assert payload["count"] == 0
+    assert payload["can_create"] is True
+    assert payload["hint"] == context_tools._EMPTY_CONTEXTS_HINT
+
+
+@pytest.mark.asyncio
+async def test_sees_nothing_in_a_full_workspace_gets_both_sentences_cap_last():
+    """#2891: the empty-account hint alone would tell the caller to create a
+    context in a workspace that is full; both texts go in one ``hint``, the cap
+    sentence last."""
+    from mcp_server.tools import context as context_tools
+
+    harness = _Harness([], workspace_count=50, max_contexts=50)
+
+    payload = await _payload(harness, {}, workspace_id="ws-1")
+
+    assert (payload["count"], payload["limit"], payload["can_create"]) == (0, 50, False)
+    hint = payload["hint"]
+    assert hint == f"{context_tools._EMPTY_CONTEXTS_HINT} {context_tools._WORKSPACE_FULL_HINT}"
+    assert hint.startswith("No contexts are visible to you yet.")
+    assert hint.endswith(context_tools._WORKSPACE_FULL_HINT)
 
 
 @pytest.mark.asyncio

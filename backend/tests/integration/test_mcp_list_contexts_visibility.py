@@ -8,8 +8,8 @@ must not see (another member's private context, a shared context outside the
 caller's ``allowed_context_ids`` whitelist) still does not return it — in any
 of the item shapes.
 
-``count`` is deliberately NOT a visibility signal: it is the workspace-wide
-quota count and already exceeded the caller-visible list before #1600.
+``count`` follows the same rule (#2891): it is the number of contexts the
+caller can see, counted before the filter, so it differs per caller.
 """
 
 import json
@@ -156,8 +156,10 @@ async def test_name_filter_never_returns_a_context_the_caller_cannot_see(listing
     }
     assert owner["total"] == 3
 
-    # Quota meaning is unchanged: workspace-wide, identical for both callers.
-    assert member["count"] == owner["count"] == 3
+    # #2891: count is each caller's visible number, not the filter's matches;
+    # limit / can_create stay the workspace's and are the same for both.
+    assert (member["count"], owner["count"]) == (1, 3)
+    assert (member["limit"], member["can_create"]) == (owner["limit"], owner["can_create"])
 
 
 @pytest.mark.asyncio(loop_scope="session")
