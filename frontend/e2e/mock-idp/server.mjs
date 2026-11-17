@@ -82,7 +82,9 @@ function identityFrom(value, prefix) {
 
 function bearer(req) {
   const header = req.headers.authorization ?? "";
-  const match = /^(?:Bearer|token)\s+(.+)$/i.exec(header);
+  // The token starts at the first non-space character, so the separator and
+  // the token cannot both match a run of spaces.
+  const match = /^(?:Bearer|token)\s+(\S.*)$/i.exec(header);
   return match ? match[1] : null;
 }
 
