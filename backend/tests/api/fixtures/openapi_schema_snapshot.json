@@ -13328,6 +13328,33 @@
         ],
         "type": "object"
       },
+      "SyncActivationObservation": {
+        "properties": {
+          "application_id": {},
+          "authorization": {},
+          "binding_current": {},
+          "contract_version": {},
+          "installation": {},
+          "management": {},
+          "observed_at": {},
+          "ownership_epoch": {},
+          "valid_until": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "application_id",
+          "authorization",
+          "binding_current",
+          "contract_version",
+          "installation",
+          "management",
+          "observed_at",
+          "ownership_epoch",
+          "valid_until",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "SyncAuthorizationCreate": {
         "additionalProperties": false,
         "properties": {
@@ -43582,6 +43609,123 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SyncInstallationView"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BillingPublisher": []
+          }
+        ],
+        "tags": [
+          "internal-billing"
+        ]
+      }
+    },
+    "/internal/workspaces/{workspace_id}/sync-installations/observe": {
+      "post": {
+        "operationId": "observe_original_sync_internal_workspaces__workspace_id__sync_installations_observe_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncActivation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncActivationObservation"
                 }
               }
             }
