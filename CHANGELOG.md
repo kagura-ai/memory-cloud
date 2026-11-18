@@ -4,6 +4,38 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.170.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.170.0) — 2026-11-18
+
+A recovery observation for the payment service's sync activations, a `list_contexts` `count` that reports only the contexts you can see, and a Members tab on the context page.
+
+No migration. No new setting. The internal billing and sync APIs are `experimental` (they may change in a minor release).
+
+### Added
+- **Billing observation of the original sync activation** ([#2892](https://github.com/kagura-ai/memory-cloud/issues/2892)): `POST /internal/workspaces/{workspace_id}/sync-installations/observe`, with the internal billing publisher credential and behind the sync-control gate. After a lost activation reply, it returns a `sync-activation-observation-v1` record valid for at most 30 seconds. The record carries the stored approval, the current ownership epoch, `binding_current`, and the original installation with its management mode.
+  - The facts are read under the existing authority locks and rechecked before commit. The call never provisions, resumes, consumes consent or writes.
+  - After a human reconnect with fresh consent, the original approval's references answer `binding_current=false` with the retained installation, and nothing from the newer approval. That answer is final for those references.
+  - An approval that never bound the workspace's installation gets no installation. Another application's retained installation, a disabled sync service and a revoked browser registration answer `409`.
+  - See "Billing recovery observation" in `docs/ops/workspace-sync-installations.md`. Started in [#2893](https://github.com/kagura-ai/memory-cloud/pull/2893) and finished in [#2897](https://github.com/kagura-ai/memory-cloud/pull/2897).
+- **Members tab on the context page** ([#2895](https://github.com/kagura-ai/memory-cloud/issues/2895)): context members moved from the bottom of the Settings tab to their own tab (`?tab=members`, just before Settings), which every workspace role can open.
+  - Workspace owners and admins add, change and remove members there. Members and viewers see the list read-only, with a note saying who can change it.
+  - A private context explains why it has no members. Owners and admins also get a button to Settings, where sharing is changed.
+  - The tab explains how privacy (private / shared / public), context roles and context access lists decide access.
+  - On the contexts list, the Shared and Public badges open the context's Members tab. On a narrow screen the context's tab list scrolls sideways.
+
+### Changed
+- **MCP `list_contexts` `count` is the number of contexts you can see** ([#2891](https://github.com/kagura-ai/memory-cloud/issues/2891)): it is counted in the listed workspace before `name_contains`, and is the same on every page. Until now it was every context of the workspace, so an invited member could get `count: 25, total: 1`.
+  - `limit` and `can_create` still describe the whole workspace.
+  - When the workspace is full while `count` is below `limit`, `hint` says that contexts you cannot see count toward `limit`. A caller who sees nothing in a full workspace is asked to request access or room, instead of being told to run `create_context`.
+  - For a caller who sees every context, the number does not change.
+- **Next.js 16.4.5** ([#2889](https://github.com/kagura-ai/memory-cloud/issues/2889)): `next` and `eslint-config-next` from 16.4.2. The frontend does not use the cache APIs the 16.4.5 security fix concerns.
+
+### Migration
+- **`list_contexts` `count`** ([#2891](https://github.com/kagura-ai/memory-cloud/issues/2891)): it is no longer the workspace's context quota usage. A client that computed free slots as `limit - count`, or compared `count` with `limit`, should read `can_create` instead, for example `if reply["can_create"]: create_context(...)`. A client that read `count` as "how many contexts I can use" gets the right number now.
+
+### Notes
+- No migration, no new environment variables. The new internal route answers only with the billing publisher credential and while the sync-control surface is enabled, as the existing activation route does.
+- The payment service's recovery reader (kagura-payment#225) consumes the observation, including `binding_current=false` after a reconnect.
+
 ## [v0.169.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.169.0) — 2026-11-17
 
 An ordered billing snapshot for the payment service, a fix to which workspace MCP `list_contexts` lists, and the OIDC signing key mount for the single-server layout.
