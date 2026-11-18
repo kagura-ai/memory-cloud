@@ -158,7 +158,8 @@ async def test_with_every_sync_switch_off_a_tick_makes_one_audit_lookup_per_inte
     lookups: list[str] = []
 
     def record(_conn, _cursor, statement, *_args):
-        if "FROM audit_logs" in statement:
+        # The lookup is the SELECT; a batch it found is then deleted by id.
+        if statement.lstrip().upper().startswith("SELECT") and "FROM audit_logs" in statement:
             lookups.append(statement)
 
     async with feeds.factory() as db:

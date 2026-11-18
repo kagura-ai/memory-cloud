@@ -356,5 +356,11 @@ async def prune_activity(db: AsyncSession, *, limit: int = 500) -> None:
         .limit(limit)
         .with_for_update(skip_locked=True)
     )
-    await db.execute(delete(AuditLog).where(AuditLog.id.in_(audit_ids)))
-    await db.execute(delete(SyncManualRequest).where(SyncManualRequest.id.in_(request_ids)))
+    # Each batch is selected first and then deleted by id: a limited locking
+    # subquery inside IN can be evaluated more than once, which would break the bound.
+    audit_batch = list(await db.scalars(audit_ids))
+    if audit_batch:
+        await db.execute(delete(AuditLog).where(AuditLog.id.in_(audit_batch)))
+    request_batch = list(await db.scalars(request_ids))
+    if request_batch:
+        await db.execute(delete(SyncManualRequest).where(SyncManualRequest.id.in_(request_batch)))
