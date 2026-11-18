@@ -1479,3 +1479,39 @@ describe("ContextsPage memory health (#2764)", () => {
     expect(screen.queryByTestId("health-unattributed-card")).toBeNull();
   });
 });
+
+describe("ContextsPage visibility badge links to the Members tab (#2895)", () => {
+  it("links the Shared and Public badges to ?tab=members with an accessible name", async () => {
+    setupWithOwnedAndSharedContexts();
+    render(<ContextsPage />);
+    await screen.findByText("From Bob");
+
+    const shared = screen.getByTestId("visibility-link-ctx-bob");
+    expect(shared.tagName).toBe("A");
+    expect(shared).toHaveAttribute("href", "/workspace/contexts/ctx-bob?tab=members");
+    expect(shared).toHaveAccessibleName(
+      'visibilityMembersLink {"visibility":"sharedOption","name":"From Bob"}',
+    );
+    expect(shared).toHaveTextContent("sharedOption");
+
+    const pub = screen.getByTestId("visibility-link-ctx-public");
+    expect(pub).toHaveAttribute("href", "/workspace/contexts/ctx-public?tab=members");
+    expect(pub).toHaveAccessibleName(
+      'visibilityMembersLink {"visibility":"publicLabel","name":"Public Docs"}',
+    );
+    expect(pub).toHaveTextContent("publicLabel");
+  });
+
+  it("leaves the Private badge as plain text", async () => {
+    setupWithOwnedAndSharedContexts();
+    render(<ContextsPage />);
+    await screen.findByText("Mine");
+    expect(screen.queryByTestId("visibility-link-ctx-mine")).toBeNull();
+    const row = screen.getByText("Mine").closest("tr") as HTMLElement;
+    expect(within(row).getByText("privateOption").closest("a")).toBeNull();
+    // Every link in the row still goes somewhere else than the Members tab.
+    for (const link of within(row).queryAllByRole("link")) {
+      expect(link.getAttribute("href") ?? "").not.toContain("tab=members");
+    }
+  });
+});

@@ -1805,6 +1805,7 @@
     "privateOption": "Private",
     "privateOptionDesc": "Only you can access this context",
     "sharedOption": "Shared",
+    "visibilityMembersLink": "{visibility}: open the members of {name}",
     "sharedOptionDesc": "Workspace members can access this context",
     "ownerOnly": "Owner only",
     "onlyOwnersCanCreatePrivate": "Only owners can create private contexts. Admins can create shared contexts.",
@@ -1920,6 +1921,7 @@
     "memberUser": "User",
     "memberRoleColumn": "Role",
     "addFirstMemberHint": "Grant another workspace member access to this shared context.",
+    "noMembersReadOnlyHint": "No workspace member has a role on this context yet.",
     "youLabel": "you",
     "workspaceAccessNote": "Rows marked \"via workspace access\" have access through their workspace role and cannot be removed here — manage them in Workspace members.",
     "collectionNameCopied": "Collection name copied",
@@ -3836,7 +3838,22 @@
       "memories": "Memories",
       "connections": "Connections",
       "graph": "Graph",
+      "members": "Members",
       "settings": "Settings"
+    },
+    "membersTab": {
+      "readOnlyNotice": "On this page, only workspace owners and admins can add, change or remove members.",
+      "privateTitle": "This context is private",
+      "privateNotice": "A private context is used only by the person who created it, so it cannot have members. Change it to shared to give other people in the workspace access.",
+      "openSettings": "Change sharing in Settings",
+      "explanationTitle": "How privacy and access work",
+      "explainPrivate": "Private: only the person who created the context can use it. It cannot have members.",
+      "explainShared": "Shared: workspace owners and admins reach every shared context. Someone with the workspace role Member can use one only when it is in their context access list (empty until one is assigned) and they have a role on it. Someone with the workspace role Viewer reads every shared context, or only the ones in their list once it is set.",
+      "explainPublic": "Public: a shared context that can also be searched, read-only and without signing in, through its public search API. Its members work as for a shared context.",
+      "explainRoles": "Context roles: owner (settings, members and deletion), editor (reads and writes memories) and viewer (reads only).",
+      "explainAccessListAdd": "Adding a member whose context access list does not include this context also adds it to their list, once the person adding them confirms.",
+      "explainAccessListWhere": "Workspace owners and admins change context access lists on the workspace Members page.",
+      "workspaceMembersLink": "Open the workspace Members page"
     },
     "memoriesPanel": {
       "emptyTitle": "No memories yet",

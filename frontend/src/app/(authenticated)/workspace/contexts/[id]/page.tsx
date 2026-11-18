@@ -43,7 +43,7 @@ import { MemoriesTabPanel } from "@/components/contexts/MemoriesTabPanel";
 import { ConnectionsTabPanel } from "@/components/contexts/ConnectionsTabPanel";
 import { SettingsTabPanel } from "@/components/contexts/SettingsTabPanel";
 import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSection";
-import { MembersSection } from "@/components/contexts/MembersSection";
+import { ContextMembersTabPanel } from "@/components/contexts/ContextMembersTabPanel";
 import { ProtectionSection } from "@/components/contexts/ProtectionSection";
 import { ExportContextButton } from "@/components/contexts/ExportContextButton";
 import { MemoryHealthReport } from "@/components/contexts/MemoryHealthReport";
@@ -132,9 +132,14 @@ function ScopedContextDetail() {
   const tHealth = useTranslations("memoryHealth");
   const visibleTabs = useMemo<readonly string[]>(() => {
     const base = canSeeAnalysesTab ? OWNER_CONTEXT_TABS : ADMIN_CONTEXT_TABS;
-    if (!canSeeHealthTab) return base;
-    // Health sits before Settings, like Analyses.
-    return [...base.slice(0, -1), "health", "settings"];
+    // Health sits before Settings, like Analyses; Members (#2895, every
+    // role) comes right before Settings.
+    return [
+      ...base.slice(0, -1),
+      ...(canSeeHealthTab ? ["health"] : []),
+      "members",
+      "settings",
+    ];
   }, [canSeeAnalysesTab, canSeeHealthTab]);
   const [tab, setTab] = useTabParam("overview", "tab", visibleTabs);
   const [context, setContext] = useState<Context | null>(null);
@@ -327,7 +332,9 @@ function ScopedContextDetail() {
         </Alert>
       )}
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
+        {/* Up to eight tabs: scroll sideways on a narrow screen instead of
+            widening the page. */}
+        <TabsList className="max-w-full justify-start overflow-x-auto">
           <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
           <TabsTrigger value="memories">{t("tabs.memories")}</TabsTrigger>
           <TabsTrigger value="connections">{t("tabs.connections")}</TabsTrigger>
@@ -341,6 +348,7 @@ function ScopedContextDetail() {
           {canSeeHealthTab && (
             <TabsTrigger value="health">{tHealth("tabLabel")}</TabsTrigger>
           )}
+          <TabsTrigger value="members">{t("tabs.members")}</TabsTrigger>
           <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
         </TabsList>
 
@@ -376,12 +384,6 @@ function ScopedContextDetail() {
               <Separator className="my-8" />
               <SearchSettingsSection contextId={contextId} />
               </fieldset>
-              {!context.is_private && (
-                <>
-                  <Separator className="my-8" />
-                  <MembersSection contextId={contextId} context={context} />
-                </>
-              )}
               <Separator className="my-8" />
               <fieldset disabled={context.feed_management_mode === "feed" || context.feed_management_mode === "stopping"}>
               <ProtectionSection context={context} />
@@ -410,6 +412,16 @@ function ScopedContextDetail() {
             <MemoryHealthReport scope={contextId} />
           </TabsContent>
         )}
+        {/* #2895: every role opens Members; the panel decides what each may
+            do. Like the members section it replaced in Settings, it stays
+            outside the feed-managed fieldset. */}
+        <TabsContent value="members">
+          <ContextMembersTabPanel
+            contextId={contextId}
+            context={context}
+            onOpenSettings={() => setTab("settings")}
+          />
+        </TabsContent>
       </Tabs>
     </PageContainer>
   );
