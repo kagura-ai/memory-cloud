@@ -760,10 +760,19 @@ async def _extra_target(managed, db, iid, *, workspace_deleted=False, context_de
     )
 
 
-async def test_maintenance_skips_a_target_of_a_soft_deleted_workspace(managed):
+async def test_maintenance_skips_a_target_of_a_soft_deleted_workspace(managed, monkeypatch):
     async with managed.factory() as db:
         await _extra_target(managed, db, UUID(int=1), workspace_deleted=True)
         await db.commit()
+    async with managed.factory() as db:
+        # The scan itself leaves the target out: it is never attempted, so it cannot fail.
+        page = (await db.scalars(sync_management._maintenance_page(None))).all()
+        assert UUID(int=1) not in page
+        assert managed.iid in page
+    failures = []
+    monkeypatch.setattr(
+        sync_management.logger, "error", lambda event, **kw: failures.append((event, kw))
+    )
     managed.store.clock.now += timedelta(minutes=5)
     async with managed.factory() as db:
         await sync_management.maintain_sync_management(db)
@@ -773,6 +782,7 @@ async def test_maintenance_skips_a_target_of_a_soft_deleted_workspace(managed):
         assert skipped.updated_at != managed.store.clock.now
         maintained = await db.get(SyncManagedTarget, managed.iid)
         assert maintained.updated_at == managed.store.clock.now
+    assert failures == []
 
 
 async def test_maintenance_continues_with_the_next_target_after_one_fails(managed, monkeypatch):
