@@ -65,7 +65,7 @@ directory `/opt/kagura-memory/oidc` appears read-only at `/run/kagura/oidc` in
   owned by root. Nothing reads it while `OIDC_ENABLED` is off, so a deployment
   that does not use the provider needs no preparation.
 - **A missing or refused key file** with `OIDC_ENABLED=true` answers `503` on
-  `/oidc/*`. The keys are read for each operation, not at start-up, so the
+  `/oidc/*`. The keys are read when they are first needed, not at start-up, so the
   containers start and the deploy's readiness check stays green. Clients
   cannot sign in or refresh a token meanwhile, so everything that needs an
   OIDC token (the sync owner controls, for example) stops within the token
@@ -130,18 +130,106 @@ and PKCE validation. Do not use an ID token as an API access token.
 
 ## Protocol burst limits
 
-`OIDC_RATE_LIMIT_PER_MINUTE` defaults to 120 requests per trusted peer address
-and endpoint. Authorization, token exchange, revocation and authenticated
-UserInfo work are protected before database or signing operations. Discovery
-and JWKS remain available independently of that counter.
+`OIDC_RATE_LIMIT_PER_MINUTE` (default 120) is applied per minute in two
+buckets, each per endpoint:
 
-An exhausted budget returns 429 with `Retry-After`; an unavailable Redis
-counter returns 503 instead of allowing unlimited authentication attempts.
-The peer address comes from ASGI, so configure Uvicorn to trust only the actual
-reverse proxy. Raw client-supplied forwarding headers do not choose the key.
-Size the limit for a web application's shared server egress address as well
-as direct browser requests. Neither credentials nor raw peer addresses are
-stored in the counter keys.
+1. **Per peer address.** Every authorization, token, revocation and UserInfo
+   request (and the workspace, sync control and sync service routes that take
+   these credentials) is counted for its peer address before any validation,
+   database or signing work. Under this budget nothing else is checked.
+2. **Per credential holder, over the peer budget.** A request over the
+   per-peer budget is still admitted when it presents a credential this
+   server issued and recognises with one indexed lookup, without any
+   client-secret or signature work: an authorization code or refresh token on
+   `/oidc/token`, the token being revoked on `/oidc/revoke`, an OIDC access
+   token on UserInfo, the workspace routes, the sync control routes and the
+   setup handoff, or a sync service token on the sync service routes. It is
+   then counted in a bucket for that credential's holder, with the same
+   limit. An authorization code, refresh token or access token is held by
+   the client and the user it was issued to together, so each signed-in user
+   of a client has a bucket of their own; a sync service token is held by its
+   sync client. On `/oidc/authorize` a browser that is already signed in is
+   counted for its account; the session cookie was already resolved for the
+   request. Recognition only decides admission: the request then goes
+   through the usual checks and gets the same answer it would get within the
+   budget.
+
+A request over the per-peer budget without such a credential (none, an
+unknown one, or a `client_credentials` grant, whose signed assertion is new
+for every request) gets 429 with `Retry-After`, before any client
+authentication. A holder over its own bucket gets the same 429; other users
+of the same client, and other clients, are not affected. An unavailable Redis counter, for either bucket, returns 503
+instead of allowing unlimited authentication attempts. Discovery and JWKS
+remain available independently of these counters. Neither credentials, client
+IDs nor raw peer addresses are stored in the counter keys.
+
+### Peer address behind a reverse proxy or CDN
+
+The peer address comes from ASGI. Raw client-supplied forwarding headers do
+not choose the key; Uvicorn replaces the peer address only for requests from
+the hosts it trusts. Behind a reverse proxy, every caller otherwise shares the
+proxy's address and so one per-peer budget. To key the first bucket on the
+caller's address:
+
+1. **Application server.** Start Uvicorn with
+   `--forwarded-allow-ips=<proxy address or network>` (or set
+   `FORWARDED_ALLOW_IPS`), for example `FORWARDED_ALLOW_IPS=192.0.2.10`.
+   List only the reverse proxy, never `*` while anything else can reach the
+   API port. Uvicorn then takes the client address from `X-Forwarded-For`,
+   skipping the trusted hosts from the right.
+2. **Reverse proxy.** The proxy must send the caller's address in
+   `X-Forwarded-For`. Directly in front of the API, Caddy's `reverse_proxy`
+   does this by default.
+3. **CDN in front of the proxy.** The proxy's own peer is then a CDN edge
+   address that unrelated visitors share. Configure the proxy to accept the
+   CDN's client-address header only from the CDN's published address ranges,
+   and to forward exactly that address. For Caddy (the ranges and the header
+   name come from your CDN's documentation, for example `CF-Connecting-IP`):
+
+   ```caddyfile
+   {
+   	servers {
+   		trusted_proxies static 198.51.100.0/24 203.0.113.0/24
+   		client_ip_headers CF-Connecting-IP
+   	}
+   }
+
+   identity.example.com {
+   	reverse_proxy api:8080 {
+   		header_up X-Forwarded-For {client_ip}
+   	}
+   }
+   ```
+
+   Requests that do not come from those ranges keep their own peer address,
+   so the header cannot be supplied by a caller that reaches the proxy
+   directly. Keep the range list current when the CDN publishes changes.
+   The `header_up` line is needed as well as the two global lines: for a
+   request from a trusted proxy, Caddy's default `X-Forwarded-For` keeps the
+   incoming list and appends its direct peer, the CDN edge, and Uvicorn
+   would take that edge address as the caller.
+
+   In the single-server template's Caddyfile, the two lines go into its
+   existing global `servers` block, and `header_up X-Forwarded-For {client_ip}`
+   goes into every `reverse_proxy ${API_UPSTREAM}:8080` (the `/oidc/*`,
+   `/api/*`, `/oauth/*`, `/mcp*` and `/.well-known/*` handlers and the other
+   API handlers, including the public MCP domain block when it is enabled).
+   A one-line `reverse_proxy ${API_UPSTREAM}:8080` becomes a block holding
+   that line, as in the example above. The API containers reach Caddy over a
+   Compose network: find that network's subnet with `docker network inspect`
+   and use it for `FORWARDED_ALLOW_IPS` in step 1.
+4. **Check.** Send a request through the CDN and confirm in the API's access
+   log that it carries the caller's address, not the proxy's or the CDN's.
+
+Without these steps, requests that carry a credential this server issued, or
+come from a signed-in browser, are still counted per holder when the shared
+per-peer budget is spent. Other requests share the per-peer budget and get the
+429 while it is spent: `client_credentials` token requests (so a sync service
+cannot renew its five-minute service token) and `/oidc/authorize` requests
+from browsers that are not signed in. Deployments that use sync service
+credentials, or whose users start sign-in through this provider, should
+complete the steps above. Size the limit for a web application's shared server
+egress address as well as direct browser requests.
 
 ## Lifetimes and revocation
 
@@ -197,8 +285,14 @@ does not silently alter another application's registration.
    its public key through the maximum old-token lifetime plus the deployment's
    clock-skew/cache overlap. Remove the old public key only after that window.
 
-The signing configuration is reloaded for each operation. Publish files with
-an atomic replacement; writing in place can temporarily produce a safe 503.
+Each API process keeps the signing keys it parsed and re-reads the file when it
+changes: every operation compares the file's device, inode, modification and
+change time, size and mode, and the `OIDC_ISSUER`, `OIDC_ACTIVE_SIGNING_KID` and
+`OIDC_SIGNING_KEYS_FILE` settings, with the ones the keys were parsed from. An
+atomically replaced file therefore takes effect on the next request. A
+replacement that cannot be read or validated answers 503; the keys parsed
+before it are not used. Publish files with an atomic replacement; writing in
+place can temporarily produce a safe 503.
 Back up private material through the secret-management process, separate from
 public JWKS and database exports. After compromise, rotate the key and revoke
 affected clients/grants; removing a public JWKS entry alone does not revoke a

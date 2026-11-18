@@ -194,6 +194,12 @@ by the paid commit guard, and the next maintenance tick records `stopping`
 (log event `sync_stop_deferred`). An installation without a managed-target row
 is not scanned by maintenance, so its delivery is refused with a retryable 409
 instead (see [Ordered workspace billing](ordered-workspace-billing.md)).
+Maintenance runs at the start of each resource-indexer tick as a step of its
+own: an error there is rolled back and logged (`indexer_sync_maintenance_failed`)
+and the tick still runs the queued indexers. Each installation is maintained on
+its own, so one that fails (`sync_maintenance_installation_failed`, with its
+installation id) does not hold back the others; targets of a soft-deleted
+workspace are skipped.
 Credential/temporary service disablement retains the lock. The public endpoint
 is retained; stopping/status do not require a live service credential or paid
 access, while resuming does. Revoking publication does not grant data editing.

@@ -24,7 +24,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.oidc_config import load_oidc_config
-from auth.oidc_limits import check_oidc_rate_limit
+from auth.oidc_limits import (
+    PresentedCredential,
+    check_oidc_rate_limit,
+    grant_credential,
+    revocation_credential,
+)
 from auth.oidc_server import (
     IDENTITY_SCOPES,
     TOKEN_AUTH_METHODS,
@@ -126,6 +131,17 @@ async def _load_form(request: Request) -> dict[str, str] | None:
     return result
 
 
+async def _bounded_form(request: Request) -> dict[str, str] | None:
+    """``_load_form`` at most once per request: the body stream is single-use.
+
+    Over the peer budget the limiter reads the credential from the form before
+    the route does; the route then validates that same parsed form.
+    """
+    if not hasattr(request.state, "oidc_form"):
+        request.state.oidc_form = await _load_form(request)
+    return request.state.oidc_form
+
+
 @router.get("/.well-known/openid-configuration")
 async def discovery() -> Response:
     """Publish the dedicated issuer and supported confidential-client profile."""
@@ -199,7 +215,10 @@ async def authorize(request: Request) -> Response:
     """Validate before login/consent; issue a code only for a live browser user."""
     if not _configured():
         return _error("not_found", 404)
-    limited = await check_oidc_rate_limit(request)
+    browser = _browser(request)
+    limited = await check_oidc_rate_limit(
+        request, PresentedCredential("session_user", browser[0]) if browser else None
+    )
     if limited is not None:
         return limited
     if not _query_valid(request):
@@ -343,10 +362,14 @@ async def token(request: Request, db: Annotated[AsyncSession, Depends(get_db)]) 
     """Exchange or refresh in one transaction, including ID-token signing."""
     if not _configured():
         return _error("not_found", 404)
-    limited = await check_oidc_rate_limit(request)
+
+    async def presented() -> PresentedCredential | None:
+        return grant_credential(await _bounded_form(request))
+
+    limited = await check_oidc_rate_limit(request, presented)
     if limited is not None:
         return limited
-    form = await _load_form(request)
+    form = await _bounded_form(request)
     if request.query_params or form is None or len(request.headers.getlist("authorization")) > 1:
         return _error("invalid_request")
     if form.get("grant_type") == "client_credentials":
@@ -412,7 +435,9 @@ async def userinfo(request: Request) -> Response:
     access_token = parts[1]
     if len(request.headers.getlist("authorization")) != 1:
         return _bearer_error()
-    limited = await check_oidc_rate_limit(request)
+    limited = await check_oidc_rate_limit(
+        request, PresentedCredential("access_token", access_token)
+    )
     if limited is not None:
         return limited
 
@@ -447,10 +472,14 @@ async def revoke(request: Request) -> Response:
     """Revoke this client's identity grant without touching the KMC browser session."""
     if not _configured():
         return _error("not_found", 404)
-    limited = await check_oidc_rate_limit(request)
+
+    async def presented() -> PresentedCredential | None:
+        return revocation_credential(await _bounded_form(request))
+
+    limited = await check_oidc_rate_limit(request, presented)
     if limited is not None:
         return limited
-    form = await _load_form(request)
+    form = await _bounded_form(request)
     if request.query_params or form is None or not form.get("token") or len(form["token"]) > 256:
         return _error("invalid_request")
 

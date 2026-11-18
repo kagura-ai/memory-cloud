@@ -369,3 +369,155 @@ def test_private_key_and_client_secret_symlinks_are_refused(tmp_path, signing_ke
         load_oidc_config(_settings(linked))
     with pytest.raises(OIDCConfigurationError, match="non-symlink"):
         read_client_secret(str(linked))
+
+
+# #2902: the parsed key ring is reused until the key file or the settings change.
+
+
+@pytest.fixture
+def imports(monkeypatch):
+    """A cold key ring cache and a record of every RSA key import (by key id)."""
+    from auth import oidc_config
+
+    monkeypatch.setattr(oidc_config, "_key_ring_cache", oidc_config._KeyRingCache())
+    seen: list[str] = []
+    real = oidc_config._import_rsa
+
+    def counting(value, kid):
+        seen.append(kid)
+        return real(value, kid)
+
+    monkeypatch.setattr(oidc_config, "_import_rsa", counting)
+    return seen
+
+
+def _two_private_keys(tmp_path, signing_keys, name="keys.json"):
+    first, second = signing_keys
+    keys = [first.as_dict(private=True, kid="current"), second.as_dict(private=True, kid="other")]
+    return _secret_file(tmp_path / name, json.dumps({"keys": keys}))
+
+
+def test_unchanged_key_file_is_parsed_once_across_loads(tmp_path, signing_keys, imports):
+    path = _ring(tmp_path, signing_keys)
+    configs = [load_oidc_config(_settings(path)) for _ in range(5)]
+    assert sorted(imports) == ["current", "previous"]
+    assert all(config is configs[0] for config in configs)
+
+
+def test_concurrent_first_loads_parse_the_key_file_once(tmp_path, signing_keys, imports):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = _ring(tmp_path, signing_keys)
+    start = threading.Barrier(8)
+
+    def load():
+        start.wait()
+        return load_oidc_config(_settings(path))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        configs = list(pool.map(lambda _: load(), range(8)))
+    assert sorted(imports) == ["current", "previous"]
+    assert len({id(config) for config in configs}) == 1
+
+
+def test_atomically_replaced_key_file_takes_effect_on_the_next_load(
+    tmp_path, signing_keys, imports
+):
+    path = _ring(tmp_path, signing_keys)
+    before = load_oidc_config(_settings(path))
+    active, _ = signing_keys
+    staged = _secret_file(
+        tmp_path / "next.json",
+        json.dumps({"keys": [active.as_dict(private=True, kid="current")]}),
+    )
+    staged.replace(path)
+    after = load_oidc_config(_settings(path))
+    assert [key["kid"] for key in before.public_jwks["keys"]] == ["current", "previous"]
+    assert [key["kid"] for key in after.public_jwks["keys"]] == ["current"]
+
+
+def test_invalid_replacement_is_refused_instead_of_the_cached_keys(tmp_path, signing_keys, imports):
+    path = _ring(tmp_path, signing_keys)
+    load_oidc_config(_settings(path))
+    _secret_file(tmp_path / "broken.json", '{"keys": [{"kty": "RSA", "kid": "current"}]}').replace(
+        path
+    )
+    for _ in range(2):
+        with pytest.raises(OIDCConfigurationError, match="invalid"):
+            load_oidc_config(_settings(path))
+
+
+def test_removed_key_file_is_refused_instead_of_the_cached_keys(tmp_path, signing_keys, imports):
+    path = _ring(tmp_path, signing_keys)
+    load_oidc_config(_settings(path))
+    path.unlink()
+    with pytest.raises(OIDCConfigurationError, match="could not be read"):
+        load_oidc_config(_settings(path))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits; Windows uses file ACLs")
+def test_permission_change_in_place_is_refused_on_the_next_load(tmp_path, signing_keys, imports):
+    path = _ring(tmp_path, signing_keys)
+    load_oidc_config(_settings(path))
+    path.chmod(0o644)
+    with pytest.raises(OIDCConfigurationError, match="permissions"):
+        load_oidc_config(_settings(path))
+
+
+def test_in_place_rewrite_keeping_size_and_modification_time_is_reloaded(
+    tmp_path, signing_keys, imports
+):
+    """Same inode, size, mode and restored mtime: only the change time tells it apart."""
+    import time
+
+    path = _ring(tmp_path, signing_keys)
+    before = path.stat()
+    first = load_oidc_config(_settings(path))
+    content = path.read_bytes()
+    rewritten = content.replace(b'"previous"', b'"formerly"')
+    assert len(rewritten) == len(content) and rewritten != content
+    with path.open("r+b") as handle:
+        handle.write(rewritten)
+    deadline = time.monotonic() + 2
+    while True:
+        # utime restores the modification time and always moves the change time.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        if after.st_ctime_ns != before.st_ctime_ns or time.monotonic() > deadline:
+            break
+        time.sleep(0.005)
+    assert (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size, after.st_mode) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_size,
+        before.st_mode,
+    )
+    assert after.st_ctime_ns != before.st_ctime_ns
+    second = load_oidc_config(_settings(path))
+    assert [key["kid"] for key in first.public_jwks["keys"]] == ["current", "previous"]
+    assert [key["kid"] for key in second.public_jwks["keys"]] == ["current", "formerly"]
+
+
+def test_changing_the_active_key_id_setting_reloads_the_key_file(tmp_path, signing_keys, imports):
+    path = _two_private_keys(tmp_path, signing_keys)
+    current = load_oidc_config(_settings(path))
+    other = load_oidc_config(_settings(path, oidc_active_signing_kid="other"))
+    assert (current.active_kid, other.active_kid) == ("current", "other")
+    assert current.private_key.thumbprint() != other.private_key.thumbprint()
+    assert sorted(imports) == ["current", "current", "other", "other"]
+
+
+def test_changing_the_issuer_or_path_setting_reloads_the_key_file(tmp_path, signing_keys, imports):
+    path = _ring(tmp_path, signing_keys)
+    (tmp_path / "copy").mkdir()
+    copy = _ring(tmp_path / "copy", signing_keys)
+    first = load_oidc_config(_settings(path))
+    moved = load_oidc_config(_settings(path, oidc_issuer="https://other.example.test/oidc"))
+    assert (first.issuer, moved.issuer) == (
+        "https://identity.example.test/oidc",
+        "https://other.example.test/oidc",
+    )
+    load_oidc_config(_settings(copy))
+    assert len(imports) == 6

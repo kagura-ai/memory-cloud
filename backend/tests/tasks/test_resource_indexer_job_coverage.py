@@ -31,6 +31,7 @@ import pydantic.root_model  # noqa: F401  isort: skip
 import pytest
 import pytest_asyncio
 from sqlalchemy import text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Importing ``tasks.resource_indexer_job`` triggers ``tasks/__init__`` →
@@ -296,6 +297,50 @@ class TestRunQueuedIndexers:
         assert seeded_state.job_status == "idle"
         assert seeded_state.metrics == {"applied_upserts": 3, "skipped": False}
         assert seeded_state.last_run_at is not None
+
+    async def test_ordinary_indexing_continues_while_sync_maintenance_fails(
+        self, db_session, seeded_state
+    ):
+        """#2901: sync maintenance runs first in each tick. When it fails (here it
+        leaves the transaction aborted, as a database error does), the job rolls
+        it back, logs it and still indexes the queued ordinary row."""
+
+        async def failing_maintenance(db):
+            with pytest.raises(DBAPIError):
+                await db.execute(text("SELECT 1/0"))
+            raise RuntimeError("sync maintenance failed")
+
+        client = _fake_redis()
+        metrics = MagicMock()
+        metrics.reason = None
+        metrics.to_dict.return_value = {"applied_upserts": 1}
+        indexer_instance = MagicMock()
+        indexer_instance.process_incremental = AsyncMock(return_value=metrics)
+        indexer_ctor = MagicMock(return_value=indexer_instance)
+        errors: list[tuple[str, dict]] = []
+
+        with (
+            patch("tasks.resource_indexer_job.get_db", _mock_get_db(db_session)),
+            patch("tasks.resource_indexer_job.maintain_sync_runs", failing_maintenance),
+            patch("tasks.resource_indexer_job.get_redis_client", return_value=client),
+            patch("tasks.resource_indexer_job.increment_counter", AsyncMock()),
+            patch("tasks.resource_indexer_job.ResourceIndexer", indexer_ctor),
+            patch("tasks.resource_indexer_job.record_indexer_run", AsyncMock()),
+            patch(
+                "tasks.resource_indexer_job.logger.error",
+                lambda event, **kw: errors.append((event, kw)),
+            ),
+        ):
+            result = await run_queued_indexers()
+
+        assert result == {"picked": 1, "failed": 0, "rate_limited": 0}
+        indexer_instance.process_incremental.assert_awaited_once()
+        await db_session.refresh(seeded_state)
+        assert seeded_state.job_status == "idle"
+        assert seeded_state.metrics == {"applied_upserts": 1}
+        assert [(event, kw["error_type"]) for event, kw in errors] == [
+            ("indexer_sync_maintenance_failed", "RuntimeError")
+        ]
 
     async def test_memories_per_day_refusal_requeues_for_utc_reset(self, db_session, seeded_state):
         """#1549: a batch refused for the daily memory-creation quota applied
