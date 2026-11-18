@@ -4,6 +4,54 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.171.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.171.0) — 2026-11-18
+
+A fix release for managed synchronization, the resource indexer and the OIDC provider, plus the billing-side validation of a retained reconnect.
+
+One migration (`f55_2916_sync_run_retention`). No new setting. The sync, OIDC-provider and internal billing APIs are `experimental` (they may change in a minor release); every status change below is in `docs/ops/`.
+
+### Added
+- **Billing observation of an established sync target and reconnect validation** ([#2899](https://github.com/kagura-ai/memory-cloud/issues/2899)): `POST /internal/workspaces/{workspace_id}/sync-installations/observe-established` and `POST /internal/workspaces/{workspace_id}/sync-authorizations/validate-reconnect`, with the internal billing publisher credential. Both are read-only. See "Billing recovery observation" in `docs/ops/workspace-sync-installations.md`.
+  - `validate-reconnect` answers the same fixed 404 as the reconnect itself while `SYNC_MANAGED_ENABLED` or `SYNC_RUNS_ENABLED` is off ([#2917](https://github.com/kagura-ai/memory-cloud/issues/2917)).
+
+### Fixed
+- **Resource indexing keeps running when sync maintenance fails** ([#2901](https://github.com/kagura-ai/memory-cloud/issues/2901)): the resource-indexer job runs sync maintenance as its own step. A failure is rolled back and logged as `indexer_sync_maintenance_failed`, and the same tick still indexes the queued resource events. Each managed installation is maintained on its own (`sync_maintenance_installation_failed` names one that fails), and targets of soft-deleted workspaces are skipped.
+- **The indexer no longer skips a committed sync event after a busy lock** ([#2904](https://github.com/kagura-ai/memory-cloud/issues/2904)): when a lock on the event's rows is held for a moment (for example by a worker's status poll), the batch stops before that event, keeps what it applied, records nothing in `failed_events`, and a later run applies the rest. The same holds when the retirement of a document's previous version finds its row locked. The daily Memory-creation quota of events that run again is given back.
+  - Events skipped this way before the upgrade still need the rewind in `docs/ops/resource-indexer-backfill.md`.
+- **`index_status` reports `failed` when a run's event fails** ([#2905](https://github.com/kagura-ai/memory-cloud/issues/2905)): a run no longer reads `pending` until the cursor moves. `failed` can still change to `complete` when a retry applies the event; a run held up only by a busy lock stays `pending`. A target whose failure record is full (20 entries) reports new runs as `failed` until they are indexed: clear or rewind stale failure records after the upgrade.
+- **The single-event ingest route respects feed-managed targets** ([#2906](https://github.com/kagura-ai/memory-cloud/issues/2906)): `POST /api/v1/resources/{resource_id}/events` answers 409 `SYNC-LOCKED` and stores nothing on a `feed` or `stopping` target, as the batch, management and MCP paths already did. Every ordinary ingest path refuses `event_metadata` that carries `sync_run_id` or `installation_generation` with 422 before any quota is counted.
+- **`supersedes` edges share the feed fence** ([#2907](https://github.com/kagura-ai/memory-cloud/issues/2907)): on a feed-managed context, MCP `create_edge` / `update_edge` / `delete_edge` and `POST /api/v1/graph/edges` refuse a write that creates, retypes or deletes a `supersedes` edge with 409 `SYNC-LOCKED`, as PATCH `accept_supersede_candidate` already did. Other edge types stay writable.
+- **Feed rows can get their vector point back** ([#2908](https://github.com/kagura-ai/memory-cloud/issues/2908)): in `feed` or `stopping` mode the embedding pipeline rebuilds the point of a row that exactly matches its canonical sync record (after a cancelled account erasure, a failed payload patch or the admin embedding retry). Anything else stays `SYNC-LOCKED`, and a refused row keeps its retry budget. Failed embedding rows are now retried in order of their last attempt, so rows that cannot succeed yet do not hold back the others.
+- **OIDC consent page redirect** ([#2909](https://github.com/kagura-ai/memory-cloud/issues/2909)): the consent page no longer sends `form-action` in its Content-Security-Policy. Chromium-based browsers applied it to the redirect after Continue or Cancel, so a client callback on another origin never received the answer.
+- **A replayed OIDC authorization code revokes its grant** ([#2910](https://github.com/kagura-ai/memory-cloud/issues/2910)): the tokens of the first exchange stop working (RFC 6749 §4.1.2); the request still answers 400 `invalid_grant`.
+- **Manual sync requests last 15 minutes of the requester's login** ([#2911](https://github.com/kagura-ai/memory-cloud/issues/2911)): a request used to end with the 300-second access token that made it. It now ends after 15 minutes, or at once when the login is revoked or the requester loses the Editor role, seat or capacity. A manual run whose request has ended gives back its active-run slot and is expired with its staged records and diff cleared (the change count is kept).
+- **Requester and approver rechecks answer 409** ([#2912](https://github.com/kagura-ai/memory-cloud/issues/2912)): when the Editor who made a manual request, or who approved a destructive diff, has lost a seat, role, reach or capacity, worker and resume calls answer 409 `RES-002` instead of 403/404, and no `sync.authority.denied` event is recorded against the worker or another Editor.
+- **Billing deliveries commit when the sync stop has to wait** ([#2913](https://github.com/kagura-ai/memory-cloud/issues/2913)): a `billing-snapshot` or `integration-entitlements` delivery that ends a paid integration right no longer rolls back with a bare 409. For a managed target the delivery commits and the next maintenance tick records `stopping` (`sync_stop_deferred`). An installation from before feed management answers a retryable 409 with `details.reason: sync_transition_busy`, never 404 `RES-001`.
+- **Sync activity and human feed reads share the workspace row** ([#2914](https://github.com/kagura-ai/memory-cloud/issues/2914)): parallel reads, or a read during a memory save, no longer answer 409; a busy row is retried for under a second first. Ownership, role, epoch and deletion changes still exclude the reads.
+
+### Changed
+- **The OIDC provider reuses its parsed signing keys** ([#2902](https://github.com/kagura-ai/memory-cloud/issues/2902)): each API process re-reads `OIDC_SIGNING_KEYS_FILE` only when the file or `OIDC_ISSUER` / `OIDC_ACTIVE_SIGNING_KID` changes. An atomically replaced key file takes effect on the next request; a replacement that cannot be read or validated answers 503 and never falls back to the previous keys.
+- **OIDC burst limits count callers with issued credentials per holder** ([#2903](https://github.com/kagura-ai/memory-cloud/issues/2903)): the per-peer bucket is unchanged. Over that budget, a request that carries a recognised authorization code, refresh token, OIDC access token or sync service token (or a signed-in browser on `/oidc/authorize`) is counted for its holder with the same `OIDC_RATE_LIMIT_PER_MINUTE`; every other request gets the same 429 as before. `POST`/`DELETE .../sync-authorizations` and `POST .../sync-installations` are now counted.
+- **The sync activity prune is bounded** ([#2915](https://github.com/kagura-ai/memory-cloud/issues/2915)): it runs at most once an hour per process, finds its rows through an indexed column and commits on its own, instead of scanning `audit_logs` on every indexer tick.
+- **Finished sync runs are cleared and expire** ([#2916](https://github.com/kagura-ai/memory-cloud/issues/2916)): aborted, expired and discarded runs no longer keep their diff; the change count is stored on the run and reported as before. With `SYNC_RUNS_ENABLED` on, maintenance deletes runs that never committed 30 days after they ended (at most 50 per pass) and clears the diff of committed runs that a newer commit superseded. Committed runs, their receipts and the newest committed run per feed are kept. No per-day run limit was added.
+
+### Migration
+- **`f55_2916_sync_run_retention`** ([#2916](https://github.com/kagura-ai/memory-cloud/issues/2916)): adds `sync_runs.change_count`, backfills it and builds three indexes concurrently. `alembic upgrade head` is enough; every step can be re-run.
+  - It takes a brief `ACCESS EXCLUSIVE` lock on `sync_runs` for the column, then row locks for the backfill. It touches no `users` or `workspaces` row.
+  - It does not run offline (`--sql`) and needs a session-pinned connection, not a transaction-pooling proxy.
+  - With `SYNC_RUNS_ENABLED` on, run it before the new version serves. With every sync switch off the new code never reads `sync_runs`.
+- **Clients of the experimental sync and OIDC APIs**:
+  - drop `sync_run_id` and `installation_generation` from `event_metadata` on ordinary ingest (422 now);
+  - treat `details.reason: sync_transition_busy` on a billing delivery as retryable with the same body;
+  - restart the authorization flow after a repeated code exchange instead of retrying it;
+  - `validate-reconnect` answers 404 until `SYNC_MANAGED_ENABLED` and `SYNC_RUNS_ENABLED` are both on.
+
+### Notes
+- New log events: `indexer_sync_maintenance_failed`, `sync_maintenance_installation_failed`, `indexer_event_lock_busy`, `sync_activity_prune_failed`, `sync_stop_deferred`, `sync_stop_refused`.
+- Behind a reverse proxy or CDN, follow "Peer address behind a reverse proxy or CDN" in `docs/ops/oidc-provider.md` so the per-peer OIDC budget is the caller's. `client_credentials` token requests and sign-ins from browsers that are not signed in yet share the per-peer budget.
+- After upgrading, run one OIDC sign-in end to end in Chrome or Edge, and publish OIDC key files by atomic replacement.
+- Feed rows that ended `failed` before this release can be reset with the admin embedding retry for their context.
+
 ## [v0.170.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.170.0) — 2026-11-18
 
 A recovery observation for the payment service's sync activations, a `list_contexts` `count` that reports only the contexts you can see, and a Members tab on the context page.
