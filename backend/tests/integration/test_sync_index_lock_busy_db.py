@@ -161,19 +161,38 @@ async def test_busy_batch_that_applied_nothing_ends_cleanly_and_is_requeued(feed
         assert outbox.delivered_at is None
 
 
+@pytest.mark.parametrize(
+    ("held", "applied_first"),
+    [
+        # Every event blocked: the Resource row a status poll holds.
+        ("resource", 0),
+        # Only the middle event blocked, so the one after it would apply: the
+        # case where a cursor moving past the blocked event loses it.
+        ("record", 1),
+    ],
+)
 async def test_released_lock_lets_the_next_run_apply_every_event_and_report_complete(
-    feeds, indexing
+    feeds, indexing, held, applied_first
 ):
     row = await committed(feeds, [product("one"), product("two"), product("three")])
     events = await _events(feeds)
     resource_pk, _context_id = _target(feeds)
+    lock = {
+        "resource": select(Resource).where(Resource.id == resource_pk),
+        "record": select(SyncRecord).where(
+            SyncRecord.resource_pk == events[1].resource_pk,
+            SyncRecord.doc_id == events[1].doc_id,
+        ),
+    }[held]
     await _maintain(feeds)
     async with feeds.factory() as holder:
-        await holder.scalar(select(Resource).where(Resource.id == resource_pk).with_for_update())
-        await _run(feeds, maintain=False)
+        await holder.scalar(lock.with_for_update())
+        first = await _run(feeds, maintain=False)
         await holder.rollback()
+    assert first.applied_upserts == applied_first and first.failed_events == []
+    assert await _index_status(feeds, row["run_id"]) == "pending"
     metrics = await _run(feeds)
-    assert metrics.applied_upserts == 3 and metrics.failed_events == []
+    assert metrics.applied_upserts == 3 - applied_first and metrics.failed_events == []
     offset, failed = await _offset(feeds)
     assert offset == events[-1].id and failed == []
     assert await _index_status(feeds, row["run_id"]) == "complete"
