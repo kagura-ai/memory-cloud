@@ -53,7 +53,11 @@ of arbitrary URLs or resources. Query parameters, duplicate/unknown form keys,
 cookie fallback are refused. The existing 8 KiB/32-field parser and fail-closed
 Redis anonymous burst gate bound protocol work before cryptography/DB queries.
 The service metadata route uses the same per-peer burst policy, with one key
-shared across installation IDs; these are not public-MCP usage charges.
+shared across installation IDs; these are not public-MCP usage charges. Over
+the peer budget, a request with a service token this server issued is counted
+for the token's credential client instead, and an unknown token keeps the 429
+(see [OIDC provider](oidc-provider.md#protocol-burst-limits)). The
+`client_credentials` grant itself has no such credential and stays per peer.
 
 The assertion header has `alg=RS256` and the registered `kid`. Recommend
 `typ=client-authentication+jwt`; omitted `typ` or `JWT` remain accepted for

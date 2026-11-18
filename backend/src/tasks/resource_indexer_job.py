@@ -133,7 +133,18 @@ async def run_queued_indexers() -> JobResult:
 
     async for db in get_db():
         try:
-            await maintain_sync_runs(db)
+            # #2901: sync maintenance is a step of its own. A failure there is
+            # rolled back and logged, and the tick still runs the queued
+            # indexers of every workspace.
+            try:
+                await maintain_sync_runs(db)
+            except Exception as e:
+                await db.rollback()
+                logger.error(
+                    "indexer_sync_maintenance_failed",
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
             # Find queued indexers ready to run
             result = await db.execute(
                 select(IndexerState)

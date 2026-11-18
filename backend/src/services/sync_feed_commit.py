@@ -3,6 +3,7 @@
 import hashlib
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +18,7 @@ from services.sync_feed_authority import FeedFence, lock_membership
 from services.sync_feed_provenance import assert_managed_memories
 from services.sync_feed_runs import build_diff, clear_staging, editable, run_for, staged_records
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError, SyncProtocolError
+from utils.exceptions import ConflictError, MemoryCloudException, SyncProtocolError
 
 
 def document_id(iid: UUID, fid: UUID, external_id: str) -> str:
@@ -106,7 +107,14 @@ async def commit_run(
             or workspace.ownership_epoch != row.approval_epoch
         ):
             raise SyncProtocolError("human_approval_required", 409)
-        await lock_membership(db, row.approved_by, authority.installation, write=True)
+        try:
+            await lock_membership(db, row.approved_by, authority.installation, write=True)
+        except ConflictError:
+            raise
+        except (HTTPException, MemoryCloudException):
+            # A refusal of the APPROVER (membership, role, seat, plan, capacity)
+            # is one fixed conflict: it is never a refusal of the worker (#2912).
+            raise ConflictError("Approval authority changed") from None
     elif body.approval_id is not None and body.approval_id != row.approval_id:
         raise ConflictError("Unknown synchronization approval")
     previous = await owned_documents(db, authority, feed, diff)

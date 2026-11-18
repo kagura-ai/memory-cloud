@@ -135,7 +135,9 @@ async def test_membership_removal_after_destructive_approval_denies_commit(feeds
         f"runs/{row['run_id']}/commit",
         body={**body, "approval_id": approval.json()["approval_id"]},
     )
-    assert result.status_code == 404, result.text
+    # The approver's lost reach is a conflict, not a refusal of the worker (#2912).
+    assert result.status_code == 409, result.text
+    assert result.json() == {"error": "RES-002"}
     assert (await human(feeds, "GET", "records")).json()["records"]
 
 

@@ -76,6 +76,20 @@ endpoint identities or usage counters are recreated. Quota/rights changes do not
 start a new public usage period. Normal admission and stop-ineligible behavior
 still apply.
 
+A delivery that ends a paid integration right also stops that workspace's
+synchronization in the same transaction. When the stop has to wait for another
+transaction, a workspace whose installation has a managed-target row still gets
+its normal `200`: the stop is finished by the next maintenance tick. An
+installation from before feed management (no managed-target row, with
+`SYNC_MANAGED_ENABLED` on) cannot be left for maintenance, so the delivery is
+refused before anything is kept: `409`, error `RES-002`, with
+`details.reason: sync_transition_busy`, logged as `sync_stop_refused`. It is
+retryable, unlike the event/revision content conflicts and
+`ordered_billing_required`: keep the saved body and retry it exactly, with
+backoff. It is never a `404` for an existing workspace. A retry that keeps
+answering it (for example, the installation's Context was deleted while
+management was off) needs the sync operator, not a different body.
+
 A missing or soft-deleted workspace returns `404` / `RES-001` from the snapshot
 read/write. This is final for a known deleted workspace: the publisher records
 its cancellation and stops applicable billing, as for the existing entitlement

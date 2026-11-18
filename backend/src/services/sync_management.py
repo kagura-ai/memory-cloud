@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import and_, case, cast, func, or_, select, update
+from sqlalchemy import Select, and_, case, cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,9 @@ from services.sync_managed_guard import TargetFence, target_fence
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -577,8 +580,38 @@ async def control_mode(
         return result
 
 
+class SyncTransitionBusyError(ConflictError):
+    """A delivery that must stop a legacy installation now, and cannot (409, #2913).
+
+    ``details.reason`` is ``sync_transition_busy``: the publisher retries the
+    same delivery. Only an installation without a managed-target row answers
+    it; maintenance finishes the stop of a managed one instead.
+    """
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Synchronization is changing; retry the delivery", reason="sync_transition_busy"
+        )
+
+
 async def stop_ineligible_workspace(db: AsyncSession, wid: UUID) -> None:
-    """Billing/plan mutations already own Workspace; eligibility loss uses the same barrier."""
+    """Billing/plan mutations already own Workspace; eligibility loss uses the same barrier.
+
+    An eligible workspace, an unmanaged one and a target already ``stopping``
+    or ``manual`` need no transition. The remaining stop runs in a savepoint
+    (#2913): when its fence is busy (``ConflictError``) or the legacy target
+    cannot be enrolled (``NotFoundException``), only the stop is rolled back.
+    A target with a managed row then keeps its mode and the caller's billing
+    delivery commits; :func:`maintain_sync_management` retries the stop on its
+    next tick. An installation without a managed row is never scanned by
+    maintenance, so there the delivery is refused with
+    :class:`SyncTransitionBusyError`.
+
+    Raises:
+        SyncTransitionBusyError: a legacy installation could not be stopped.
+    """
     from services.integration_entitlements import inspect_paid_integration
 
     installation = await db.scalar(
@@ -586,80 +619,127 @@ async def stop_ineligible_workspace(db: AsyncSession, wid: UUID) -> None:
     )
     if installation is None:
         return
-    fence = await target_fence(db, installation.context_id)
-    if (
-        fence.state is not None
-        and not (await inspect_paid_integration(db, wid, installation.service_id)).allowed
-    ):
-        await start_stopping(db, installation, "entitlement_ended")
+    # Eligibility is a plain read under the caller's Workspace lock; decide it
+    # before any fence, so an eligible delivery never meets a busy one.
+    if (await inspect_paid_integration(db, wid, installation.service_id)).allowed:
+        return
+    try:
+        async with db.begin_nested():
+            fence = await target_fence(db, installation.context_id)
+            if fence.state in (None, "stopping", "manual"):
+                return
+            await start_stopping(db, installation, "entitlement_ended")
+    except (ConflictError, NotFoundException) as exc:
+        # The rollback to the savepoint released the fences and row locks the
+        # stop took and discarded its rows; the caller's own writes, flushed
+        # before the savepoint, and its Workspace lock are kept.
+        managed = await db.scalar(
+            select(SyncManagedTarget.installation_id).where(
+                SyncManagedTarget.context_id == installation.context_id
+            )
+        )
+        if managed is None and not get_settings().sync_managed_enabled:
+            return  # no target fence applies: nothing to stop
+        logger.warning(
+            "sync_stop_deferred" if managed is not None else "sync_stop_refused",
+            workspace_id=str(wid),
+            installation_id=str(installation.id),
+            error=type(exc).__name__,
+        )
+        if managed is None:
+            raise SyncTransitionBusyError() from exc
 
 
-async def maintain_sync_management(db: AsyncSession) -> None:
-    """Bounded periodic recovery catches clock expiry and crashes while retaining failed locks."""
-    from models.sync_management import SyncResumeCandidate, SyncResumePreview
+def _maintenance_page(after: UUID | None) -> Select[UUID]:
+    """One scan page of targets whose workspace is live, in installation order.
 
+    A soft-deleted workspace keeps its installation and target rows until a hard
+    delete cascades them; maintenance has nothing to do for it and skips it.
+    """
     query = (
         select(SyncManagedTarget.installation_id)
+        .join(SyncInstallation, SyncInstallation.id == SyncManagedTarget.installation_id)
+        .join(Workspace, Workspace.id == SyncInstallation.workspace_id)
+        .where(Workspace.deleted_at.is_(None))
         .order_by(SyncManagedTarget.installation_id)
         .limit(100)
     )
-    if _maintenance_scan.after is not None:
-        query = query.where(SyncManagedTarget.installation_id > _maintenance_scan.after)
-    rows = (await db.scalars(query)).all()
+    if after is not None:
+        query = query.where(SyncManagedTarget.installation_id > after)
+    return query
+
+
+async def _maintain_installation(db: AsyncSession, iid: UUID) -> None:
+    """Recover one installation; a conflict keeps stopping durable and stays quiet."""
+    from models.sync_management import SyncResumeCandidate, SyncResumePreview
+
+    try:
+        installation = await db.get(SyncInstallation, iid)
+        if installation is None:
+            return
+        await lock_workspace_for_update(db, installation.workspace_id, nowait=True)
+        await stop_ineligible_workspace(db, installation.workspace_id)
+        target = await db.get(SyncManagedTarget, iid)
+        if target is not None and target.mode == "stopping":
+            await finish_stopping(db, installation)
+        if target is not None:
+            target.updated_at = utcnow()
+        for candidate in (
+            await db.scalars(
+                select(SyncResumeCandidate).where(
+                    SyncResumeCandidate.installation_id == iid,
+                    SyncResumeCandidate.expires_at <= utcnow(),
+                    SyncResumeCandidate.records.is_not(None),
+                )
+            )
+        ).all():
+            candidate.active, candidate.records = False, None
+        preview = await db.get(SyncResumePreview, iid)
+        if preview is not None and utcnow() >= preview.expires_at:
+            await db.delete(preview)
+        await db.flush()
+        await db.commit()
+    except ConflictError:
+        # Keep stopping durable even when finalization cannot yet succeed.
+        await db.rollback()
+        try:
+            installation = await db.get(SyncInstallation, iid)
+            if installation is not None:
+                await lock_workspace_for_update(db, installation.workspace_id, nowait=True)
+                await stop_ineligible_workspace(db, installation.workspace_id)
+                target = await db.get(SyncManagedTarget, iid)
+                if target is not None:
+                    target.updated_at = utcnow()
+                await db.flush()
+                await db.commit()
+        except ConflictError:
+            await db.rollback()
+
+
+async def maintain_sync_management(db: AsyncSession) -> None:
+    """Bounded periodic recovery catches clock expiry and crashes while retaining failed locks.
+
+    Each installation is handled on its own: an error for one is rolled back and
+    logged, and the scan continues with the next one.
+    """
+    rows = (await db.scalars(_maintenance_page(_maintenance_scan.after))).all()
     if not rows and _maintenance_scan.after is not None:
         _maintenance_scan.after = None
-        rows = (
-            await db.scalars(
-                select(SyncManagedTarget.installation_id)
-                .order_by(SyncManagedTarget.installation_id)
-                .limit(100)
-            )
-        ).all()
+        rows = (await db.scalars(_maintenance_page(None))).all()
     if rows:
         # Progress even when every selected target is busy or awaits operator repair.
         _maintenance_scan.after = rows[-1]
     await db.rollback()
     for iid in rows:
         try:
-            installation = await db.get(SyncInstallation, iid)
-            if installation is None:
-                continue
-            await lock_workspace_for_update(db, installation.workspace_id, nowait=True)
-            await stop_ineligible_workspace(db, installation.workspace_id)
-            target = await db.get(SyncManagedTarget, iid)
-            if target is not None and target.mode == "stopping":
-                await finish_stopping(db, installation)
-            if target is not None:
-                target.updated_at = utcnow()
-            for candidate in (
-                await db.scalars(
-                    select(SyncResumeCandidate).where(
-                        SyncResumeCandidate.installation_id == iid,
-                        SyncResumeCandidate.expires_at <= utcnow(),
-                        SyncResumeCandidate.records.is_not(None),
-                    )
-                )
-            ).all():
-                candidate.active, candidate.records = False, None
-            preview = await db.get(SyncResumePreview, iid)
-            if preview is not None and utcnow() >= preview.expires_at:
-                await db.delete(preview)
-            await db.flush()
-            await db.commit()
-        except ConflictError:
-            # Keep stopping durable even when finalization cannot yet succeed.
+            await _maintain_installation(db, iid)
+        except Exception as exc:
             await db.rollback()
-            try:
-                installation = await db.get(SyncInstallation, iid)
-                if installation is not None:
-                    await lock_workspace_for_update(db, installation.workspace_id, nowait=True)
-                    await stop_ineligible_workspace(db, installation.workspace_id)
-                    target = await db.get(SyncManagedTarget, iid)
-                    if target is not None:
-                        target.updated_at = utcnow()
-                    await db.flush()
-                    await db.commit()
-            except ConflictError:
-                await db.rollback()
+            logger.error(
+                "sync_maintenance_installation_failed",
+                installation_id=str(iid),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         finally:
             await db.rollback()

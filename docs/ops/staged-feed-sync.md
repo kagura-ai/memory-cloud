@@ -59,7 +59,7 @@ and question/answer text, without exposing other resource schema fields.
 | Boundary | Initial limit |
 | --- | --- |
 | Feeds per installation | 20 |
-| Active unexpired runs per installation | 4 |
+| Active unexpired runs per installation | 4 (a manual run counts only while its request is current; once it is not, the run is expired and its staging cleared at the next run creation or maintenance pass, so staging stays bounded by about 4 runs x 20 MiB plus manual runs that ended since the last sweep) |
 | Records per full snapshot | 10,000 |
 | Upload bytes per run | 20 MiB |
 | Chunks per run | 1,000 |
@@ -117,12 +117,17 @@ ambiguous credentials and invalid payloads receive fixed no-store errors.
    `POST`s `{"diff_hash":"..."}` to the human `/runs/{run}/approvals` path.
    The returned finite approval also binds the workspace ownership epoch;
    commit rechecks the approver's current membership and write permission.
+   When the approver no longer qualifies (membership, Editor role, seat, plan
+   or capacity), the worker's commit answers 409 `RES-002`; that is not a
+   refusal of the worker, so no `sync.authority.denied` event is recorded.
    For a run declaring `manual_request_id`, approval also revalidates the
-   original manual request, requester token/family and Editor reach, browser
-   client, ownership/generation and complete source version. Its original
-   request/token deadlines join the approval transaction fence. A different
-   valid Editor cannot replace a lost original proof or extend its lifetime;
-   approval failure rolls back identity and audit before success is returned.
+   original manual request, the requester's login (its OIDC grant) and Editor
+   reach, browser client, ownership/generation and complete source version.
+   The request's 15-minute deadline and the login's deadline join the approval
+   transaction fence; the expiry of the access token that made the request
+   does not. A different valid Editor cannot replace a lost original proof or
+   extend its lifetime; approval failure rolls back identity and audit before
+   success is returned.
    Automatic/unattributed approvals keep their existing behavior.
 7. Worker `POST .../runs/{run}/commit` sends the exact `diff_hash` and, when
    required, `approval_id`. Canonical approved records, all version-specific
@@ -218,6 +223,14 @@ revisions. A changed dataset requires restarting pagination (409). Every page
 reauthorizes the current caller; it is not a public MCP call and consumes no
 anonymous public MCP weekly allowance. Both human and worker surfaces use the
 existing fail-closed peer OIDC burst limiter, across target/run IDs.
+The two human reads (`/records` and `/runs/{run_id}/diff`) share the workspace
+row with each other and with the activity reads, so parallel reads from one
+browser or several members do not exclude each other there. An ownership
+transfer, role change, ownership-epoch change, workspace deletion, a feed
+configuration write or a diff approval still excludes them. The reads also hold the
+installation's resource and context rows for a moment, so two of them take
+turns there; a busy row is tried again for under a second before the read
+answers 409 (`RES-002`).
 The worker uses the fixed snapshot/chunk/event bounds and its own service
 credential; it does not inherit a caller-selected Resource Token's hourly
 quota. The existing Indexer workspace capacity and daily Memory-creation

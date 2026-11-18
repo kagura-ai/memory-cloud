@@ -12,7 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.oidc_limits import check_oidc_rate_limit
+from auth.oidc_limits import PresentedCredential, check_oidc_rate_limit
 from auth.oidc_server import credential_hash
 from config.settings import get_settings
 from db.base import get_db
@@ -40,14 +40,18 @@ async def identity_access_token(
     request: Request,
     _credentials: Annotated[HTTPAuthorizationCredentials | None, Security(_BEARER)],
 ) -> str:
-    """Reject other credential namespaces and excessive work before opening a DB."""
+    """Reject other credential namespaces and excessive work before the request's DB.
+
+    Over the peer budget the limiter recognises the token on a short session
+    of its own and counts it for the token's client and user (#2903).
+    """
     if not get_settings().oidc_enabled:
         raise HTTPException(404, "not_found")
     headers = request.headers.getlist("authorization")
     parts = headers[0].split() if len(headers) == 1 else []
     if len(parts) != 2 or parts[0].lower() != "bearer" or not _TOKEN.fullmatch(parts[1]):
         raise HTTPException(401, "invalid_token", headers={"WWW-Authenticate": "Bearer"})
-    limited = await check_oidc_rate_limit(request)
+    limited = await check_oidc_rate_limit(request, PresentedCredential("access_token", parts[1]))
     if limited is not None:
         raise HTTPException(
             limited.status_code,

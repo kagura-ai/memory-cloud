@@ -46,6 +46,18 @@ than implying that no records or changes exist. A run that never committed
 leaves the list 30 days after its upload window closed (see
 [staged feed sync](staged-feed-sync.md), "Retention and rollback").
 
+Reads share the workspace row: parallel `GET`s from one browser or several
+members do not exclude each other, and neither do writes that only reference
+the workspace. An ownership transfer, role change, ownership-epoch change or
+workspace deletion still excludes them, and `POST /requests` keeps the row to
+itself. When the row is busy the request tries again for under a second before
+it answers 409 (`RES-002`), so a short holder such as a memory being saved in
+the same workspace no longer turns a read into a conflict. The two feed
+configuration reads (`/feeds`, `/feeds/{feed_id}`) also hold the
+installation's resource row for a moment, so they take turns with each other
+and with a feed configuration write instead of running side by side; the same
+retry keeps a parallel one from answering 409.
+
 The mode is independent of authentication state and allowance. A null mode
 means no effective ownership fence exists; an unenrolled legacy target that
 the managed rollout conservatively fences is reported as `feed` with null
@@ -92,15 +104,29 @@ actor header, subject, email or user ID is accepted as human proof.
 
 The server receipt binds its authenticated user/browser/token, installation
 generation, ownership epoch, every configured source version and schema.
-It lasts at most 15 minutes and no longer than the original human login.
+It is bound to the login that made it (the OIDC grant behind that access
+token), not to the access token itself: it lasts 15 minutes from creation and
+never beyond that login (`expires_at` is the earlier of the two). The access
+token that made the request lasts at most five minutes; its expiry or rotation
+by a refresh does not end the request. Anything that revokes the login ends
+the request at once: the client's sign-out through `/oidc/revoke`, reuse of an
+already rotated refresh token, a replayed authorization code, a password reset,
+account erasure, or the operator revoking the client.
 Creation is idempotent per installation/operation and never extends a retry's
 deadline; at most four live requests may exist per installation. A request
 can bind at most one logical run per configured feed. Separate feeds can
 share it, consistent with the existing per-feed commit boundary.
 
-Acceptance and later staging/preparation/commit recheck the original login,
-current Editor permissions, ownership/source/schema/generation and finite
-deadlines. Revocation, erasure or expiry never turns pending manual work into
+Acceptance and later staging/preparation/commit recheck the original login
+(the grant is neither revoked nor expired and still carries
+`integrations:manage`), the requester's current Editor permissions, seat and
+capacity, ownership/source/schema/generation and finite deadlines. A run whose
+request has expired or whose login was revoked no longer counts toward the
+four active runs per installation and can no longer be staged, prepared or
+committed. It is expired and its staged records are cleared at the next run
+creation for that installation or at the next maintenance pass, whichever
+comes first, not at its 24-hour expiry.
+Revocation, erasure or expiry never turns pending manual work into
 an automatic run. A committed retry remains an immutable receipt; it does not
 re-execute work. Without the optional field, manifests/digests and old retry
 identities retain their old form. Keep the worker as executor and the verified
@@ -108,6 +134,12 @@ human as requester; approval of a destructive diff is a separate human act.
 Pinned manual resume candidates retain the same original request checks at
 preview, diff and confirmation, including the final commit deadline. Their
 24-hour candidate lifetime cannot extend the original request's 15 minutes.
+When that recheck finds the original requester no longer qualifies (login,
+Editor role, seat, plan or capacity), every path answers the same 409
+`RES-002`: the worker's run creation, staging, preparation and commit, and
+another Editor's approval and resume preview, diff and confirmation. It is
+not a refusal of the worker or of that Editor, so no `sync.authority.denied`
+event is recorded against them.
 
 ## Audit and lifecycle
 

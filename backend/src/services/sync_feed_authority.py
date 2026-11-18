@@ -23,7 +23,11 @@ from models.sync_installation import SyncInstallation, SyncService
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.permission_service import PermissionService
 from services.plan_seats import ensure_context_writable
-from services.workspace_locks import lock_workspace_for_update
+from services.workspace_locks import (
+    lock_workspace_for_update,
+    lock_workspace_nowait,
+    retry_nowait,
+)
 from utils.datetime import utcnow
 from utils.db_helpers import is_lock_not_available
 from utils.exceptions import ConflictError, NotFoundException, SyncLockBusyError
@@ -85,11 +89,38 @@ async def feed_fence(db: AsyncSession) -> AsyncIterator[FeedFence]:
         event.remove(db.sync_session, "before_commit", fence.check)
 
 
-async def exact_target(db: AsyncSession, row: SyncInstallation) -> None:
-    """Never rebind missing or drifted UUID targets, including private contexts."""
-    resource = await locked(db, Resource, Resource.id == row.resource_pk, write=True)
-    context = await locked(db, Context, Context.id == row.context_id, write=True)
-    endpoint = await locked(db, PublicMcpEndpoint, PublicMcpEndpoint.id == row.endpoint_id)
+async def _retried(db: AsyncSession, model: type[T], *conditions: Any, write: bool) -> T | None:
+    """The lock :func:`locked` takes, tried again for a moment through ``retry_nowait``."""
+
+    async def lock() -> T | None:
+        return await db.scalar(
+            select(model)
+            .where(*conditions)
+            .with_for_update(read=not write, nowait=True)
+            .execution_options(populate_existing=True)
+        )
+
+    return await retry_nowait(db, lock)
+
+
+async def exact_target(db: AsyncSession, row: SyncInstallation, *, retry: bool = False) -> None:
+    """Never rebind missing or drifted UUID targets, including private contexts.
+
+    ``retry=True`` (human feed reads, #2914) takes the same rows in the same
+    modes and order, each through ``retry_nowait``: two reads of one
+    installation take turns on the Resource and Context rows for a moment
+    instead of the second answering 409.
+    """
+    if retry:
+        resource = await _retried(db, Resource, Resource.id == row.resource_pk, write=True)
+        context = await _retried(db, Context, Context.id == row.context_id, write=True)
+        endpoint = await _retried(
+            db, PublicMcpEndpoint, PublicMcpEndpoint.id == row.endpoint_id, write=False
+        )
+    else:
+        resource = await locked(db, Resource, Resource.id == row.resource_pk, write=True)
+        context = await locked(db, Context, Context.id == row.context_id, write=True)
+        endpoint = await locked(db, PublicMcpEndpoint, PublicMcpEndpoint.id == row.endpoint_id)
     if (
         resource is None
         or context is None
@@ -151,7 +182,14 @@ async def human_feed_boundary(
     async with feed_fence(db) as fence:
         try:
             await locked(db, User, User.user_id == principal.user_id)
-            workspace = await lock_workspace_for_update(db, wid, nowait=True)
+            if write:
+                workspace = await lock_workspace_for_update(db, wid, nowait=True)
+            else:
+                # Reads share the row with each other, with activity reads and
+                # with foreign-key checks; ownership, epoch, role, deletion and
+                # feed configuration writers still exclude them. Holding the
+                # users row, a read retries instead of waiting (#2914).
+                workspace = await lock_workspace_nowait(db, wid, shared=True)
             live = await load_sync_identity(
                 db,
                 principal.token_hash,
@@ -175,7 +213,7 @@ async def human_feed_boundary(
                 or service.browser_client_id != live.client_id
             ):
                 raise NotFoundException("Synchronization target")
-            await exact_target(db, row)
+            await exact_target(db, row, retry=not write)
             await lock_membership(db, live.user_id, row, write=write)
             fence.deadlines.append(live.expires_at)
             yield row, workspace, fence

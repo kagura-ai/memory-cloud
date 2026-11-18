@@ -158,7 +158,17 @@ class IdentityAuthorizationCodeGrant(grants.AuthorizationCodeGrant):
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if row is None or row.consumed_at is not None or row.expires_at <= utcnow():
+        if row is None:
+            return None
+        if row.consumed_at is not None:
+            # A spent code presented again by its own client (#2910): revoke
+            # the grant and so every token issued from it, and keep that
+            # revocation although the request answers invalid_grant.
+            grant.revoked_at = utcnow()
+            server.persist_revocation = True
+            server.db.flush()
+            return None
+        if row.expires_at <= utcnow():
             return None
         server.active_grant = grant
         return row

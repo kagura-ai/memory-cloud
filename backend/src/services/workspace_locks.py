@@ -131,3 +131,45 @@ async def lock_workspace_for_update(
     if workspace is None:
         raise NotFoundException("Workspace")
     return workspace
+
+
+async def lock_workspace_nowait(
+    db: AsyncSession, workspace_id: UUID, *, shared: bool = False
+) -> Workspace:
+    """Lock the live workspace row ``NOWAIT`` through :func:`retry_nowait`.
+
+    For a path that holds a ``users`` row and so must not wait on the workspace
+    row (#2443). ``shared=False`` takes ``FOR UPDATE``. ``shared=True`` takes
+    ``FOR SHARE`` (#2914): it still conflicts with the ``FOR UPDATE`` that
+    ownership transfers, role changes, erasure and workspace deletion take and
+    with every ``UPDATE`` of the row (``FOR NO KEY UPDATE``, e.g. an
+    ``ownership_epoch`` bump), but not with other ``FOR SHARE`` readers or with
+    the ``FOR KEY SHARE`` a foreign-key insert takes.
+
+    Args:
+        db: The request-scoped async session.
+        workspace_id: The workspace to lock.
+        shared: Take ``FOR SHARE`` instead of ``FOR UPDATE``.
+
+    Returns:
+        The locked :class:`Workspace` row, refreshed from the database.
+
+    Raises:
+        NotFoundException: the workspace is missing or soft-deleted (404).
+        ConflictError: the row is still locked after the tries (409).
+    """
+
+    async def lock() -> Workspace | None:
+        return await db.scalar(
+            select(Workspace)
+            .where(Workspace.id == workspace_id, Workspace.deleted_at.is_(None))
+            .with_for_update(read=shared, nowait=True)
+            # Overwrite a cached instance with the row read under the lock
+            # (see lock_workspace_for_update).
+            .execution_options(populate_existing=True)
+        )
+
+    workspace = await retry_nowait(db, lock)
+    if workspace is None:
+        raise NotFoundException("Workspace")
+    return workspace

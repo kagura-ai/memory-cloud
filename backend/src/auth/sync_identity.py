@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,17 +38,17 @@ class SyncPrincipal:
             raise HTTPException(401, "invalid_token", headers={"WWW-Authenticate": "Bearer"})
 
 
-async def load_sync_identity(
-    db: AsyncSession, token_hash: str, scope: str, *, lock: bool = False, audit_context: bool = True
-) -> SyncPrincipal:
-    """Validate all authority scopes, optionally holding nonblocking shared locks."""
+async def _authority_row(
+    db: AsyncSession, condition: ColumnElement[bool], scope: str, *, lock: bool
+) -> tuple[OIDCToken, OIDCGrant, OIDCClient, int]:
+    """Load one token row with its grant, client and account; refuse revocation or scope."""
     stmt = (
         select(OIDCToken, OIDCGrant, OIDCClient, User.id)
         .select_from(OIDCToken)
         .join(OIDCGrant, OIDCGrant.id == OIDCToken.grant_id)
         .join(OIDCClient, OIDCClient.client_id == OIDCGrant.client_id)
         .join(User, User.user_id == OIDCGrant.user_id)
-        .where(OIDCToken.access_token_hash == token_hash)
+        .where(condition)
         .execution_options(populate_existing=True)
     )
     if lock:
@@ -60,11 +61,21 @@ async def load_sync_identity(
         raise
     if row is None or any(item.revoked_at is not None for item in row[:3]):
         raise HTTPException(401, "invalid_token", headers={"WWW-Authenticate": "Bearer"})
-    token, grant, client = row[:3]
     if any(scope not in item.scope.split() for item in row[:3]):
         raise HTTPException(
             403, "insufficient_scope", headers={"WWW-Authenticate": f'Bearer scope="{scope}"'}
         )
+    token, grant, client, account_id = row
+    return token, grant, client, account_id
+
+
+async def load_sync_identity(
+    db: AsyncSession, token_hash: str, scope: str, *, lock: bool = False, audit_context: bool = True
+) -> SyncPrincipal:
+    """Validate all authority scopes, optionally holding nonblocking shared locks."""
+    token, grant, client, account_id = await _authority_row(
+        db, OIDCToken.access_token_hash == token_hash, scope, lock=lock
+    )
     expiry = datetime.fromtimestamp(token.issued_at + token.expires_in, UTC).replace(tzinfo=None)
     principal = SyncPrincipal(
         grant.user_id, client.client_id, token_hash, scope, min(expiry, grant.expires_at)
@@ -73,12 +84,30 @@ async def load_sync_identity(
     from services.sync_audit import bind_actor, human_actor
 
     if audit_context:
-        bind_actor(
-            human_actor(
-                principal.user_id, principal.client_id, account_id=row[3] if len(row) > 3 else None
-            ),
-            db,
-        )
+        bind_actor(human_actor(principal.user_id, principal.client_id, account_id=account_id), db)
+    return principal
+
+
+async def load_login_identity(
+    db: AsyncSession, token_id: UUID, scope: str, *, lock: bool = False
+) -> SyncPrincipal:
+    """Recheck the login (OIDC grant) behind a stored token row, not that token's lifetime.
+
+    A manual synchronization request is bound to the login that made it
+    (#2911): the access token it was made with may have expired or been
+    rotated since. The grant and client must still be unrevoked and carry
+    ``scope``, the grant must be unexpired, and the stored token row itself
+    must not be revoked. The principal expires with the grant. Same rows and
+    the same nonblocking shared locks as ``load_sync_identity``; no audit actor
+    is bound, because the caller is not this login's user.
+    """
+    token, grant, client, _account_id = await _authority_row(
+        db, OIDCToken.id == token_id, scope, lock=lock
+    )
+    principal = SyncPrincipal(
+        grant.user_id, client.client_id, token.access_token_hash, scope, grant.expires_at
+    )
+    principal.assert_live()
     return principal
 
 
