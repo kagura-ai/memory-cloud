@@ -229,6 +229,15 @@ switch and can lag or apply in batches. Results distinguish `pending`, `failed`,
 `complete`, `superseded`, `unchanged` and `not_committed`. An advanced event
 cursor alone never proves completion: visible owned versions and deletion
 postconditions must agree too. `unchanged` means the run created no index events.
+While the cursor is below the run's last event, the run reads `pending` until
+the indexer records one of its events as failed (in the target's
+`failed_events`, see [resource indexer backfill](resource-indexer-backfill.md)),
+and `failed` from then on. A full record (20 entries) whose newest entry is
+older than the run's last event reads as a failure of the run too, since it no
+longer keeps later ones. `failed` can still change to `complete`: the
+scheduler re-queues the target, and a retry that applies the event moves the
+cursor past the run. An event stopped by a busy lock is not a failure; its run
+stays `pending`.
 Existing indexer batch size and per-target scheduling limits still apply;
 consumers must poll status rather than infer readiness from a successful commit.
 

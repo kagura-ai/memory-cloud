@@ -12,12 +12,13 @@ from sqlalchemy.sql import Select
 
 from models.auth import Context
 from models.memory import Memory
-from models.resource import IndexerState, ResourceEvent, ResourceSchema
+from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
 from models.sync_feed import SyncIndexOutbox, SyncRecord, SyncRun
 from services import resource_indexer
 from services.sync_feed_index import hold_sync_index_receipt, maintain_sync_runs
 from services.sync_feed_provenance import guard_sync_event
 from tests.integration import sync_feed_fixtures as fixtures
+from tests.integration import test_sync_index_lock_busy_db as batches
 from tests.integration.sync_feed_fixtures import committed, human, product, service, staged
 from utils.exceptions import ConflictError, QdrantError
 
@@ -568,3 +569,133 @@ async def test_full_replacement_frees_owned_capacity_before_creating_new_ids(fee
     assert (await service(feeds, "GET", f"runs/{row['run_id']}")).json()[
         "index_status"
     ] == "complete"
+
+
+# #2905: a run whose events the indexer recorded as failed reports ``failed``
+# while the cursor is still below its watermark, and ``complete`` once a retry
+# applies them. Real batches; only the embedding double refuses documents.
+indexing = batches.indexing
+
+
+def _refusing(monkeypatch, refused: set[str]) -> None:
+    """Route every batch to an embedding double that refuses these titles.
+
+    The set is read on each call: clearing it lets the next retry succeed.
+    """
+    embed = AsyncMock()
+
+    async def _embed(*, text: str, **_kwargs) -> list[float]:
+        if any(title in text for title in refused):
+            raise RuntimeError("embedding refused")
+        return [0.1] * 1536
+
+    embed.embed.side_effect = _embed
+    monkeypatch.setattr(
+        resource_indexer,
+        "resolve_context_routing",
+        AsyncMock(return_value=("test-collection", embed)),
+    )
+
+
+async def test_index_status_reports_failed_when_the_last_event_of_a_run_fails(
+    feeds, indexing, monkeypatch
+):
+    refused: set[str] = set()
+    _refusing(monkeypatch, refused)
+    row = await committed(feeds, [product("one"), product("two"), product("three")])
+    events = await batches._events(feeds)
+    assert len(events) == 3
+    refused.add(events[-1].payload["title"])
+    metrics = await batches._run(feeds)
+    assert metrics.applied_upserts == 2 and metrics.errors == 1
+    offset, failed = await batches._offset(feeds)
+    assert offset == events[1].id
+    assert [entry["event_id"] for entry in failed] == [events[-1].id]
+    assert await batches._index_status(feeds, row["run_id"]) == "failed"
+
+
+async def test_index_status_reports_failed_when_every_event_of_a_run_fails(
+    feeds, indexing, monkeypatch
+):
+    refused: set[str] = set()
+    _refusing(monkeypatch, refused)
+    row = await committed(feeds, [product("one"), product("two")])
+    events = await batches._events(feeds)
+    refused.update(event.payload["title"] for event in events)
+    metrics = await batches._run(feeds)
+    assert metrics.applied_upserts == 0 and metrics.errors == 2
+    offset, failed = await batches._offset(feeds)
+    assert offset < events[0].id
+    assert [entry["event_id"] for entry in failed] == [event.id for event in events]
+    assert await batches._index_status(feeds, row["run_id"]) == "failed"
+
+
+async def test_failed_last_event_then_a_successful_retry_reports_complete(
+    feeds, indexing, monkeypatch
+):
+    refused: set[str] = set()
+    _refusing(monkeypatch, refused)
+    row = await committed(feeds, [product("one"), product("two")])
+    events = await batches._events(feeds)
+    refused.add(events[-1].payload["title"])
+    await batches._run(feeds)
+    assert await batches._index_status(feeds, row["run_id"]) == "failed"
+    refused.clear()
+    # The outbox replay re-queues the idle target below the watermark.
+    metrics = await batches._run(feeds)
+    assert metrics.applied_upserts == 1 and metrics.failed_events == []
+    assert await batches._offset(feeds) == (events[-1].id, [])
+    assert await batches._index_status(feeds, row["run_id"]) == "complete"
+
+
+async def test_a_run_a_busy_lock_stopped_stays_pending_beside_an_older_failure(
+    feeds, indexing, monkeypatch
+):
+    """Only this run's events count: a busy stop records nothing for them, and
+    an older run's recorded failure on the same target is not theirs."""
+    refused = {"Public product one"}
+    _refusing(monkeypatch, refused)
+    first = await committed(feeds, [product("one")])
+    await batches._run(feeds)
+    assert await batches._index_status(feeds, first["run_id"]) == "failed"
+    second = await committed(feeds, [product("one"), product("two")])
+    resource_pk, _context_id = batches._target(feeds)
+    await batches._maintain(feeds)
+    async with feeds.factory() as holder:
+        await holder.scalar(select(Resource).where(Resource.id == resource_pk).with_for_update())
+        busy = await batches._run(feeds, maintain=False)
+        await holder.rollback()
+    assert busy.batch_committed and busy.applied_upserts == 0
+    _offset, failed = await batches._offset(feeds)
+    assert len(failed) == 1
+    assert await batches._index_status(feeds, second["run_id"]) == "pending"
+    refused.clear()
+    metrics = await batches._run(feeds)
+    assert metrics.applied_upserts == 2 and metrics.failed_events == []
+    assert await batches._index_status(feeds, second["run_id"]) == "complete"
+
+
+async def test_a_failure_the_full_failed_events_record_dropped_still_reports_failed(
+    feeds, indexing, monkeypatch
+):
+    """The record keeps the 20 lowest event ids: a full one whose highest id is
+    below the run's last event may have dropped a failure of the run."""
+    refused: set[str] = set()
+    _refusing(monkeypatch, refused)
+    row = await committed(feeds, [product("one"), product("two")])
+    events = await batches._events(feeds)
+    refused.add(events[-1].payload["title"])
+    await batches._maintain(feeds)
+    older = [
+        {"event_id": events[0].id - 20 + n, "doc_id": "older", "error_class": "RuntimeError"}
+        for n in range(resource_indexer.MAX_RECORDED_FAILED_EVENTS)
+    ]
+    async with feeds.factory() as db:
+        state = await batches._state(feeds, db)
+        state.last_offset, state.metrics = events[0].id - 1, {"failed_events": older}
+        await db.commit()
+    metrics = await batches._run(feeds, maintain=False)
+    assert metrics.applied_upserts == 1 and metrics.errors == 1
+    # The run's failure did not fit into the record.
+    assert await batches._offset(feeds) == (events[0].id, older)
+    assert await batches._index_status(feeds, row["run_id"]) == "failed"

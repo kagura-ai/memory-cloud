@@ -1,8 +1,10 @@
 """Durable index wakeups and conservative, separately observable search progress."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select, update
@@ -187,8 +189,39 @@ async def hold_sync_index_receipt(db: AsyncSession, resource_pk: UUID, context_i
         )
 
 
+def run_failure_recorded(metrics: Any, event_ids: Sequence[int] | None) -> bool:
+    """Whether the target's failure record holds, or may have dropped, a run's event (#2905).
+
+    ``metrics`` is the target's ``indexer_state.metrics``; ``event_ids`` the
+    run's outbox ``event_ids``. The record keeps only the
+    ``MAX_RECORDED_FAILED_EVENTS`` lowest event ids, so once it is full a
+    failure above its highest id is not in it: a full record whose highest id
+    is below the run's last event counts as a failure of the run too. Such a
+    target needs an operator rewind or clear anyway
+    (docs/ops/resource-indexer-backfill.md); a retry that applies the events
+    still turns the run ``complete``.
+    """
+    from services.resource_indexer import MAX_RECORDED_FAILED_EVENTS, recorded_failed_events
+
+    run_ids = {event_id for event_id in event_ids or () if type(event_id) is int}
+    recorded = {entry["event_id"] for entry in recorded_failed_events(metrics)}
+    if not run_ids or not recorded:
+        return False
+    if not recorded.isdisjoint(run_ids):
+        return True
+    return len(recorded) >= MAX_RECORDED_FAILED_EVENTS and max(recorded) < max(run_ids)
+
+
 async def index_status(db: AsyncSession, row: SyncRun, feed: SyncFeed) -> str:
-    """An advanced cursor alone never proves success; validate visible rows too."""
+    """An advanced cursor alone never proves success; validate visible rows too.
+
+    Below the run's watermark the run is ``pending`` while the indexer has not
+    applied its events yet, a batch stopped at a busy lock included, and
+    ``failed`` once the target's job failed or the indexer recorded one of the
+    run's events as failed (#2905). ``failed`` there can still turn
+    ``complete``: the outbox replay re-queues the target and a retry that
+    applies the event moves the cursor past the watermark.
+    """
     if row.state != "committed":
         return "not_committed"
     if feed.revision != row.base_revision + 1:
@@ -212,14 +245,19 @@ async def index_status(db: AsyncSession, row: SyncRun, feed: SyncFeed) -> str:
     )
     state = (
         await db.execute(
-            select(IndexerState.last_offset, IndexerState.job_status).where(
+            select(IndexerState.last_offset, IndexerState.job_status, IndexerState.metrics).where(
                 IndexerState.resource_pk == installation.resource_pk,
                 IndexerState.context_id == installation.context_id,
             )
         )
     ).first()
     if watermark and (state is None or state.last_offset < watermark):
-        return "failed" if state is not None and state.job_status == "failed" else "pending"
+        if state is not None and (
+            state.job_status == "failed"
+            or (outbox is not None and run_failure_recorded(state.metrics, outbox.event_ids))
+        ):
+            return "failed"
+        return "pending"
     # A shared job's historical/other-feed errors cannot override actual
     # current canonical proof for this feed. Stop/drain retains its stricter
     # context-wide failure barrier independently.
