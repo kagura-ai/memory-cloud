@@ -89,15 +89,27 @@ actor header, subject, email or user ID is accepted as human proof.
 
 The server receipt binds its authenticated user/browser/token, installation
 generation, ownership epoch, every configured source version and schema.
-It lasts at most 15 minutes and no longer than the original human login.
+It is bound to the login that made it (the OIDC grant behind that access
+token), not to the access token itself: it lasts 15 minutes from creation and
+never beyond that login (`expires_at` is the earlier of the two). The access
+token that made the request lasts at most five minutes; its expiry or rotation
+by a refresh does not end the request. Anything that revokes the login ends
+the request at once: the client's sign-out through `/oidc/revoke`, reuse of an
+already rotated refresh token, a replayed authorization code, a password reset,
+account erasure, or the operator revoking the client.
 Creation is idempotent per installation/operation and never extends a retry's
 deadline; at most four live requests may exist per installation. A request
 can bind at most one logical run per configured feed. Separate feeds can
 share it, consistent with the existing per-feed commit boundary.
 
-Acceptance and later staging/preparation/commit recheck the original login,
-current Editor permissions, ownership/source/schema/generation and finite
-deadlines. Revocation, erasure or expiry never turns pending manual work into
+Acceptance and later staging/preparation/commit recheck the original login
+(the grant is neither revoked nor expired and still carries
+`integrations:manage`), the requester's current Editor permissions, seat and
+capacity, ownership/source/schema/generation and finite deadlines. A run whose
+request has expired or whose login was revoked no longer counts toward the
+four active runs per installation, although it stays `uploading` or `prepared`
+until its 24-hour expiry; it can no longer be staged, prepared or committed.
+Revocation, erasure or expiry never turns pending manual work into
 an automatic run. A committed retry remains an immutable receipt; it does not
 re-execute work. Without the optional field, manifests/digests and old retry
 identities retain their old form. Keep the worker as executor and the verified
@@ -106,7 +118,7 @@ Pinned manual resume candidates retain the same original request checks at
 preview, diff and confirmation, including the final commit deadline. Their
 24-hour candidate lifetime cannot extend the original request's 15 minutes.
 When that recheck finds the original requester no longer qualifies (login,
-token, Editor role, seat, plan or capacity), every path answers the same 409
+Editor role, seat, plan or capacity), every path answers the same 409
 `RES-002`: the worker's run creation, staging, preparation and commit, and
 another Editor's approval and resume preview, diff and confirmation. It is
 not a refusal of the worker or of that Editor, so no `sync.authority.denied`

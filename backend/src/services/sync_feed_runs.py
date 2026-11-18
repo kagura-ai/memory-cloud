@@ -3,11 +3,12 @@
 from datetime import timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.management_schemas import digest
-from models.sync_activity import SyncManualRun
+from models.oidc import OIDCClient, OIDCGrant, OIDCToken
+from models.sync_activity import SyncManualRequest, SyncManualRun
 from models.sync_feed import SyncChunk, SyncFeed, SyncRecord, SyncRun
 from models.sync_feed_schemas import (
     MAX_RUN_BYTES,
@@ -125,14 +126,34 @@ async def create_run(
     ):
         raise SyncProtocolError("invalid_manifest")
     await schema_matches(db, authority)
+    now = utcnow()
+    # A manual run holds one of the four slots only while its request is
+    # current (#2911): unexpired, and its login (grant and client) not revoked
+    # or deleted. None of these conditions reverts, and every later stage,
+    # prepare and commit of that run rechecks the request and refuses it, so a
+    # run left out of the count can do no more work.
+    current_request = (
+        select(SyncManualRequest.id)
+        .join(OIDCToken, OIDCToken.id == SyncManualRequest.token_id)
+        .join(OIDCGrant, OIDCGrant.id == OIDCToken.grant_id)
+        .join(OIDCClient, OIDCClient.client_id == OIDCGrant.client_id)
+        .where(
+            SyncManualRequest.id == SyncManualRun.request_id,
+            SyncManualRequest.expires_at > now,
+            OIDCGrant.revoked_at.is_(None),
+            OIDCClient.revoked_at.is_(None),
+        )
+    )
     pending = await db.scalar(
         select(func.count())
         .select_from(SyncRun)
         .join(SyncFeed)
+        .outerjoin(SyncManualRun, SyncManualRun.run_id == SyncRun.id)
         .where(
             SyncFeed.installation_id == authority.installation.id,
             SyncRun.state.in_(["uploading", "prepared"]),
-            SyncRun.expires_at > utcnow(),
+            SyncRun.expires_at > now,
+            or_(SyncManualRun.run_id.is_(None), current_request.exists()),
         )
     )
     schema = await current_schema(db, authority.installation)

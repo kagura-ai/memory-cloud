@@ -58,7 +58,7 @@ def recheck(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         browser_client_id=CLIENT,
         source_version_hash="v" * 64,
     )
-    token = SimpleNamespace(access_token_hash="h" * 64)
+    token = SimpleNamespace(id=request.token_id, access_token_hash="h" * 64)
     rows = iter([request, token])
 
     async def locked(_db, _model, *_where):
@@ -71,7 +71,7 @@ def recheck(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
     identity = AsyncMock(return_value=live)
     membership = AsyncMock(return_value=None)
-    monkeypatch.setattr(sync_requests, "load_sync_identity", identity)
+    monkeypatch.setattr(sync_requests, "load_login_identity", identity)
     monkeypatch.setattr(sync_requests, "lock_membership", membership)
     db = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(ownership_epoch=5)))
     installation = SimpleNamespace(id=uuid4(), workspace_id=uuid4(), generation=3)
@@ -96,6 +96,14 @@ async def _validate(recheck: SimpleNamespace):
 
 async def test_current_requester_passes_the_recheck(recheck):
     assert await _validate(recheck) is recheck.request
+
+
+async def test_recheck_loads_the_login_behind_the_stored_token_row(recheck):
+    """#2911: the grant behind the stored token row, by its id, under shared locks."""
+    await _validate(recheck)
+    recheck.identity.assert_awaited_once_with(
+        recheck.db, recheck.request.token_id, "integrations:manage", lock=True
+    )
 
 
 @pytest.mark.parametrize(

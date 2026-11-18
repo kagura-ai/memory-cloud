@@ -59,7 +59,7 @@ and question/answer text, without exposing other resource schema fields.
 | Boundary | Initial limit |
 | --- | --- |
 | Feeds per installation | 20 |
-| Active unexpired runs per installation | 4 |
+| Active unexpired runs per installation | 4 (a manual run counts only while its request is current) |
 | Records per full snapshot | 10,000 |
 | Upload bytes per run | 20 MiB |
 | Chunks per run | 1,000 |
@@ -121,11 +121,13 @@ ambiguous credentials and invalid payloads receive fixed no-store errors.
    or capacity), the worker's commit answers 409 `RES-002`; that is not a
    refusal of the worker, so no `sync.authority.denied` event is recorded.
    For a run declaring `manual_request_id`, approval also revalidates the
-   original manual request, requester token/family and Editor reach, browser
-   client, ownership/generation and complete source version. Its original
-   request/token deadlines join the approval transaction fence. A different
-   valid Editor cannot replace a lost original proof or extend its lifetime;
-   approval failure rolls back identity and audit before success is returned.
+   original manual request, the requester's login (its OIDC grant) and Editor
+   reach, browser client, ownership/generation and complete source version.
+   The request's 15-minute deadline and the login's deadline join the approval
+   transaction fence; the expiry of the access token that made the request
+   does not. A different valid Editor cannot replace a lost original proof or
+   extend its lifetime; approval failure rolls back identity and audit before
+   success is returned.
    Automatic/unattributed approvals keep their existing behavior.
 7. Worker `POST .../runs/{run}/commit` sends the exact `diff_hash` and, when
    required, `approval_id`. Canonical approved records, all version-specific
