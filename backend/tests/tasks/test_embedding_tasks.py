@@ -343,6 +343,36 @@ class TestSweepPendingEmbeddings:
         assert "embedding_retry_count < 3" in processing.split("embedding_status = 'failed'")[0]
 
     @pytest.mark.asyncio
+    async def test_failed_candidates_rotate_by_their_last_attempt(self):
+        """#979 / #2908: pending and processing rows first, in creation order;
+        failed rows after them by their last attempt, never-attempted first, so
+        rows whose failure keeps the retry budget rotate with the others. The
+        rotation itself runs against PostgreSQL in
+        tests/integration/test_embedding_sweep_rotation_db.py."""
+        mock_db = MagicMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        captured_stmt = None
+
+        async def capture_execute(stmt):
+            nonlocal captured_stmt
+            captured_stmt = stmt
+            return mock_result
+
+        mock_db.execute = AsyncMock(side_effect=capture_execute)
+
+        with patch("db.base.get_db", mock_get_db_factory(mock_db)):
+            await sweep_pending_embeddings()
+
+        order = _pg(captured_stmt).split("ORDER BY", 1)[1].split("LIMIT", 1)[0]
+        assert " ".join(order.split()) == (
+            "CASE WHEN (memories.embedding_status = 'failed') THEN 1 ELSE 0 END, "
+            "CASE WHEN (memories.embedding_status = 'failed') "
+            "THEN memories.embedding_attempted_at END ASC NULLS FIRST, "
+            "memories.created_at"
+        )
+
+    @pytest.mark.asyncio
     async def test_exception_during_sweep_is_logged(self):
         """Errors inside the sweep are caught and logged, not re-raised."""
         mock_db = MagicMock()

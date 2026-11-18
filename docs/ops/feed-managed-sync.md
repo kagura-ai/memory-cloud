@@ -73,7 +73,10 @@ or moved row, a previous version the indexer will replace, a generic rewrite,
 the Sleep reindex, an embedding-model migration) stays refused with
 `SYNC-LOCKED`. A refused row is left `failed` with an
 `embedding_error` starting `SYNC-LOCKED` and its retry budget intact, so the
-sweep tries it again after each backoff instead of retiring it (#2908).
+sweep tries it again after each backoff instead of retiring it (#2908). The
+sweep takes failed rows in the order of their last attempt, so such rows, like
+rows failed on a configuration error, take turns with every other failed row
+of the deployment and never keep a newer one from its retry.
 Removing a point whose author was erased while it was being written is erasure
 work and is never fenced: the check after the upsert compares the author only,
 and reopens and drains the erasure scope on any target mode.
