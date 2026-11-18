@@ -229,8 +229,10 @@ Actual provisioning enters `paid_integration_write` before every write or row
 lock. Only plain reads may precede it, matching the enforced guard entry
 contract. Under its Workspace lock, owner/User, membership, OIDC and service
 authority are refreshed and protected with nonblocking locks. Non-paid owner
-controls use the existing User fence followed by Workspace NOWAIT. A competing
-erasure/authority update returns a retryable conflict instead of a lock cycle.
+controls use the existing User fence followed by Workspace NOWAIT, which is
+tried again for under a second before it conflicts, so a short holder such as a
+memory being saved does not refuse them. A competing erasure/authority update
+returns a retryable conflict instead of a lock cycle.
 
 An outer authority context retains its synchronous `before_commit` hook until
 the paid guard has flushed, rechecked paid rights and committed. Human-token

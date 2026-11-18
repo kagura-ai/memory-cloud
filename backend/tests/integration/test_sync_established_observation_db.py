@@ -419,3 +419,24 @@ async def test_established_observation_serializes_with_workspace_transfer_or_rec
     response = await request(store, approval)
     assert response.status_code == 200 and response.json()["continuity_current"] is True
     assert response.json()["installation"] == created
+
+
+async def test_owner_controls_wait_out_a_short_workspace_holder(store):
+    """A memory create holds the workspace row from its quota check to commit (#2914)."""
+    import asyncio
+
+    from services.workspace_locks import NOWAIT_LOCK_BACKOFF_SECONDS
+
+    approval, created = await established(store)
+    async with store.factory() as db:
+        await lock_workspace_for_update(db, store.wid)
+
+        async def let_go():
+            await asyncio.sleep(NOWAIT_LOCK_BACKOFF_SECONDS * 4)
+            await db.rollback()
+
+        released = asyncio.create_task(let_go())
+        response = await request(store, approval)
+        await released
+    assert response.status_code == 200, response.text
+    assert response.json()["installation"] == created

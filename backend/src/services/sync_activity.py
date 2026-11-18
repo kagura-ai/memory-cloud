@@ -29,7 +29,7 @@ from services.sync_feed_authority import (
     locked,
 )
 from services.sync_feed_index import index_status
-from services.workspace_locks import lock_workspace_for_update
+from services.workspace_locks import lock_workspace_nowait
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, NotFoundException
 
@@ -54,7 +54,10 @@ async def activity_boundary(
     async with feed_fence(db) as fence:
         try:
             await locked(db, User, User.user_id == principal.user_id)
-            workspace = await lock_workspace_for_update(db, wid, nowait=True)
+            # Reads share the row with each other and with foreign-key checks;
+            # ownership, epoch, role and deletion writers still exclude them.
+            # Holding the users row, the boundary retries instead of waiting.
+            workspace = await lock_workspace_nowait(db, wid, shared=not write)
             live = await load_sync_identity(
                 db,
                 principal.token_hash,
