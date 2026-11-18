@@ -139,9 +139,15 @@ There are no private/public keys, tokens, authorization codes, payment secrets,
 product/FAQ bodies, arbitrary headers or source URLs in this envelope.
 
 Protocol-v1 audit and manual request records have a 90-day retention window.
-Run maintenance prunes at most 500 of each per tick, even with run processing
-disabled, without changing unrelated audit producers' retention. Expired
-requests cannot authorize work while awaiting physical retention cleanup.
+Run maintenance prunes at most 500 of each once an hour per process (the first
+indexer tick after a start included), even with run processing disabled,
+without changing unrelated audit producers' retention. The audit lookup goes
+through the indexed `user_email` every activity record carries
+(`system:sync-audit`), so its cost does not grow with other producers' history.
+The pass commits on its own: a failure is rolled back and logged as
+`sync_activity_prune_failed`, and the run sweep and queued indexing of the same
+tick go on. Expired requests cannot authorize work while awaiting physical
+retention cleanup.
 Deleting a request nulls its linking FK; the immutable non-sensitive UUID in
 the run manifest and canonical source/run receipts remain. Existing raw
 staging/candidate/preview lifetimes and general account/workspace erasure are

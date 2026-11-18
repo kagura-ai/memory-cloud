@@ -1,6 +1,8 @@
 """Durable index wakeups and conservative, separately observable search progress."""
 
+from dataclasses import dataclass
 from datetime import timedelta
+from time import monotonic
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select, update
@@ -11,15 +13,51 @@ from config.settings import get_settings
 from models.resource import IndexerState, Resource
 from models.sync_feed import SyncChunk, SyncFeed, SyncIndexOutbox, SyncRecord, SyncRun
 from utils.datetime import utcnow
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# #2915: the activity retention is not tick work. One pass of up to 500 rows an
+# hour per process keeps the 90-day bound; the first tick after a start runs it.
+ACTIVITY_PRUNE_INTERVAL_SECONDS = 3600
+
+
+@dataclass
+class ActivityPruneSchedule:
+    """When this process may run the activity retention next (``time.monotonic``)."""
+
+    due_at: float = 0.0
+
+
+activity_prune_schedule = ActivityPruneSchedule()
+
+
+async def prune_activity_on_schedule(db: AsyncSession) -> None:
+    """Run the sync activity retention at most once an interval, in its own transaction.
+
+    The session must hold no work of its caller: the pass commits on its own,
+    and a failing pass is rolled back and logged here, so it neither cancels
+    the run sweep after it nor ends the indexer tick. A failed pass waits for
+    the next interval like a successful one.
+    """
+    now = monotonic()
+    if now < activity_prune_schedule.due_at:
+        return
+    activity_prune_schedule.due_at = now + ACTIVITY_PRUNE_INTERVAL_SECONDS
+    from services.sync_audit import prune_activity
+
+    try:
+        await prune_activity(db)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.error("sync_activity_prune_failed", error_class=type(exc).__name__)
 
 
 async def maintain_sync_runs(db: AsyncSession) -> None:
     """Periodic, bounded work; replay an undelivered wakeup after crashes/lost updates."""
-    from services.sync_audit import prune_activity
-
-    await prune_activity(db)
+    await prune_activity_on_schedule(db)
     if not get_settings().sync_runs_enabled:
-        await db.commit()
         from services.sync_management import maintain_sync_management
 
         await maintain_sync_management(db)

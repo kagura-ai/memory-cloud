@@ -4,12 +4,12 @@ from asyncio import timeout
 from collections.abc import Awaitable, Callable, Coroutine
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, get_args
 from uuid import UUID, uuid4
 
 from fastapi import Request, Response
-from sqlalchemy import delete, select
+from sqlalchemy import Select, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 RETENTION_DAYS = 90
 SCHEMA = "sync-activity-v1"
+# Every activity row carries it; the indexed column bounds the retention (#2915).
+ACTIVITY_EMAIL = "system:sync-audit"
 ACTIONS = frozenset(get_args(SyncActivityAction))
 
 logger = get_logger(__name__)
@@ -235,7 +237,7 @@ def add_audit(
     db.add(
         AuditLog(
             user_id=actor.subject,
-            user_email="system:sync-audit",
+            user_email=ACTIVITY_EMAIL,
             action=action,
             resource=resource,
             user_metadata=metadata,
@@ -319,14 +321,17 @@ async def record_denial(status: int) -> None:
         logger.warning("sync_denial_audit_unavailable")
 
 
-async def prune_activity(db: AsyncSession, *, limit: int = 500) -> None:
-    """Bound cleanup to this protocol; do not change another audit producer's retention."""
-    if not 1 <= limit <= 500:
-        raise ValueError("Activity cleanup limit must be between 1 and 500")
-    cutoff = utcnow() - timedelta(days=RETENTION_DAYS)
-    audit_ids = (
+def expired_activity_ids(cutoff: datetime, limit: int) -> Select[int]:
+    """The activity rows past retention, oldest id first, skipping locked rows.
+
+    ``user_email`` is indexed (``ix_audit_logs_user_email``) and narrows the
+    lookup to this protocol's rows, so its cost does not grow with the other
+    producers' history (#2915); the schema check filters what remains.
+    """
+    return (
         select(AuditLog.id)
         .where(
+            AuditLog.user_email == ACTIVITY_EMAIL,
             AuditLog.user_metadata["schema"].as_string() == SCHEMA,
             AuditLog.created_at < cutoff,
         )
@@ -334,6 +339,14 @@ async def prune_activity(db: AsyncSession, *, limit: int = 500) -> None:
         .limit(limit)
         .with_for_update(skip_locked=True)
     )
+
+
+async def prune_activity(db: AsyncSession, *, limit: int = 500) -> None:
+    """Bound cleanup to this protocol; do not change another audit producer's retention."""
+    if not 1 <= limit <= 500:
+        raise ValueError("Activity cleanup limit must be between 1 and 500")
+    cutoff = utcnow() - timedelta(days=RETENTION_DAYS)
+    audit_ids = expired_activity_ids(cutoff, limit)
     request_ids = (
         select(SyncManualRequest.id)
         .where(
