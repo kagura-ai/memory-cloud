@@ -143,7 +143,7 @@ async def identity(activity, tmp_path, monkeypatch):
     engine = _sync_engine()
     monkeypatch.setattr(oidc, "get_sync_session", sessionmaker(engine, expire_on_commit=False))
 
-    async def within_rate_limit(_request):
+    async def within_rate_limit(_request, _presented=None):
         return None
 
     monkeypatch.setattr(oidc, "check_oidc_rate_limit", within_rate_limit)
