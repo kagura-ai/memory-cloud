@@ -221,10 +221,15 @@ caller's address:
 4. **Check.** Send a request through the CDN and confirm in the API's access
    log that it carries the caller's address, not the proxy's or the CDN's.
 
-Without these steps the per-holder bucket still keeps every client with valid
-credentials working when the shared per-peer budget is spent; size the limit
-for a web application's shared server egress address as well as direct
-browser requests.
+Without these steps, requests that carry a credential this server issued, or
+come from a signed-in browser, are still counted per holder when the shared
+per-peer budget is spent. Other requests share the per-peer budget and get the
+429 while it is spent: `client_credentials` token requests (so a sync service
+cannot renew its five-minute service token) and `/oidc/authorize` requests
+from browsers that are not signed in. Deployments that use sync service
+credentials, or whose users start sign-in through this provider, should
+complete the steps above. Size the limit for a web application's shared server
+egress address as well as direct browser requests.
 
 ## Lifetimes and revocation
 
