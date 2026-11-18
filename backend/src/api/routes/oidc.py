@@ -269,11 +269,14 @@ async def authorize(request: Request) -> Response:
                         '<button name="confirm" value="no">Cancel</button></form></html>'
                     )
                     db.rollback()
+                    # No form-action (#2909): browsers apply it to every
+                    # redirect that follows the form POST, and the answer
+                    # redirects to the client's callback on another origin.
                     return HTMLResponse(
                         page,
                         headers={
                             **_NO_STORE,
-                            "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+                            "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
                             "Referrer-Policy": "no-referrer",
                             "X-Content-Type-Options": "nosniff",
                         },

@@ -421,6 +421,44 @@ def test_consent_is_bound_to_account_and_authorization_parameters(api, store):
         assert db.scalars(select(OIDCGrant)).first() is None
 
 
+def test_consent_page_csp_lets_the_form_redirect_to_a_cross_origin_callback(api):
+    """#2909: browsers apply ``form-action`` to every redirect after a form POST.
+
+    The consent form posts to this origin and the answer redirects to the
+    client's registered callback on another origin, so the page must carry no
+    ``form-action`` directive; every other directive and header stays.
+    """
+    _, params = authorization_params()
+    page = api.get("/oidc/authorize", params=params)
+    assert page.status_code == 200, page.text
+    assert page.headers["content-security-policy"] == (
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    )
+    directives = [part.split()[0] for part in page.headers["content-security-policy"].split(";")]
+    assert "form-action" not in directives
+    assert page.headers["referrer-policy"] == "no-referrer"
+    assert page.headers["x-content-type-options"] == "nosniff"
+    assert page.headers["cache-control"] == "no-store"
+    for confirm, key in (("yes", "code"), ("no", "error")):
+        _, params = authorization_params()
+        page = api.get("/oidc/authorize", params=params)
+        csrf = re.search(r'name="csrf_token" value="([a-f0-9]+)"', page.text)[1]
+        answered = api.post(
+            "/oidc/authorize",
+            params=params,
+            data={"confirm": confirm, "csrf_token": csrf},
+            follow_redirects=False,
+        )
+        assert answered.status_code in (302, 303), answered.text
+        location = answered.headers["location"]
+        assert location.split("?")[0] == CALLBACK
+        query = parse_qs(urlsplit(location).query)
+        assert query["state"] == [params["state"]]
+        assert key in query
+        if confirm == "no":
+            assert query["error"] == ["access_denied"]
+
+
 @pytest.mark.parametrize(
     "path,method",
     [("authorize", "GET"), ("token", "POST"), ("revoke", "POST"), ("userinfo", "GET")],
