@@ -152,6 +152,15 @@ that deadline. Access tokens are opaque and are accepted only by the isolated
 identity resource. The issuer's account ID is the stable `sub`, regardless of
 the email or upstream sign-in provider shown to the user.
 
+A credential used twice ends its grant. When a client presents an
+authorization code that was already exchanged, the token endpoint answers
+`invalid_grant` and revokes the grant behind the code, so the access and
+refresh tokens of the first exchange stop working as well. Presenting an
+already rotated refresh token does the same. A client that retries a code
+exchange after a lost response, or sends the same exchange twice at once,
+therefore must restart the authorization flow. A code that expired unused, an
+unknown code, or a code presented by a different client revokes nothing.
+
 An operator can revoke an external client:
 
 ```sh
@@ -199,8 +208,8 @@ client's already cached ID tokens.
 
 Check Discovery's exact issuer and endpoint URLs, public-only JWKS, a complete
 HTTPS Code Flow, client authentication, S256 enforcement, UserInfo subject
-matching, code/refresh reuse rejection, fixed expiry, client revocation, and
-password-reset revocation. Also verify that the new tokens are refused by
-memory and MCP APIs and that existing MCP clients still work. Inspect API and
-ingress logs for credential leaks without recording test payloads or live
-secrets in operational evidence.
+matching, code/refresh reuse rejection with grant revocation, fixed expiry,
+client revocation, and password-reset revocation. Also verify that the new
+tokens are refused by memory and MCP APIs and that existing MCP clients still
+work. Inspect API and ingress logs for credential leaks without recording
+test payloads or live secrets in operational evidence.

@@ -252,6 +252,81 @@ def test_refresh_rotation_and_replay_revoke_the_grant(api, store):
         assert db.scalars(select(OIDCGrant)).one().revoked_at is not None
 
 
+def _userinfo_status(api: TestClient, access_token: str) -> int:
+    return api.get(
+        "/oidc/userinfo", headers={"Authorization": "Bearer " + access_token}
+    ).status_code
+
+
+def test_replayed_code_revokes_the_grant_and_every_token_of_it(api, store):
+    """#2910: a consumed code presented again by its own client revokes the grant."""
+    code, verifier = authorize(api)
+    first = exchange(api, code, verifier)
+    assert first.status_code == 200, first.text
+    issued = first.json()
+    replay = exchange(api, code, verifier)
+    assert replay.status_code == 400
+    assert replay.json()["error"] == "invalid_grant"
+    with store.factory() as db:
+        assert db.scalars(select(OIDCGrant)).one().revoked_at is not None
+    assert refresh(api, issued["refresh_token"]).status_code == 400
+    assert _userinfo_status(api, issued["access_token"]) == 401
+
+
+def test_replayed_code_without_the_verifier_still_revokes_the_grant(api, store):
+    """#2910: the code is looked up before the PKCE check, so a replay without
+    the verifier is still a replay of a consumed code."""
+    code, verifier = authorize(api)
+    issued = exchange(api, code, verifier).json()
+    assert exchange(api, code, verifier, code_verifier="v" * 64).status_code == 400
+    with store.factory() as db:
+        assert db.scalars(select(OIDCGrant)).one().revoked_at is not None
+    assert _userinfo_status(api, issued["access_token"]) == 401
+
+
+def test_replayed_code_from_another_client_revokes_nothing(api, store):
+    """#2910: the code is bound to its client through lock_grant."""
+    other = CLIENT + "-other"
+    with store.factory() as db:
+        db.add(
+            OIDCClient(
+                client_id=other,
+                client_secret_hash=bcrypt.hashpw(SECRET.encode(), bcrypt.gensalt(4)).decode(),
+                client_name="Other identity test",
+                redirect_uris=[CALLBACK],
+                scope="openid profile workspaces:read",
+            )
+        )
+        db.commit()
+    code, verifier = authorize(api)
+    issued = exchange(api, code, verifier).json()
+    assert exchange(api, code, verifier, client_id=other).status_code == 400
+    with store.factory() as db:
+        assert db.scalars(select(OIDCGrant)).one().revoked_at is None
+    assert _userinfo_status(api, issued["access_token"]) == 200
+    assert refresh(api, issued["refresh_token"]).status_code == 200
+
+
+def test_expired_unused_and_unknown_codes_revoke_nothing(api, store):
+    """#2910: only a consumed code is a replay; an expired unused or unknown code is not."""
+    live_code, live_verifier = authorize(api)
+    issued = exchange(api, live_code, live_verifier).json()
+    code, verifier = authorize(api)
+    with store.factory() as db:
+        row = db.get(OIDCAuthorizationCode, hashlib.sha256(code.encode()).hexdigest())
+        row.expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+    assert exchange(api, code, verifier).status_code == 400
+    assert exchange(api, "unknown-" + secrets.token_urlsafe(16), verifier).status_code == 400
+    with store.factory() as db:
+        assert [grant.revoked_at for grant in db.scalars(select(OIDCGrant))] == [None, None]
+        assert (
+            db.get(OIDCAuthorizationCode, hashlib.sha256(code.encode()).hexdigest()).consumed_at
+            is None
+        )
+    assert _userinfo_status(api, issued["access_token"]) == 200
+
+
 def test_signing_failure_rolls_back_code_consumption(api, store, monkeypatch):
     code, verifier = authorize(api)
     from auth.oidc_server import IdentityCode
