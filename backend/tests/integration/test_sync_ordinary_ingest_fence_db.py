@@ -42,11 +42,19 @@ async def scenario(async_engine, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "mcp_public_endpoints_enabled", True)
     monkeypatch.setattr(settings, "sync_managed_enabled", True)
-    # Quota (Redis), indexer scheduling and usage logging are not under test.
+    # Quota (Redis), indexer scheduling and usage logging are not under test;
+    # the quota mocks are kept so a test can assert a refusal reserved none.
+    quota_mocks = {
+        target: AsyncMock()
+        for target in (
+            "api.routes.resource_ingest.check_event_quota",
+            "api.routes.resource_management.check_event_quota",
+            "mcp_server.tools.resource.check_event_quota",
+        )
+    }
+    for target, mock in quota_mocks.items():
+        monkeypatch.setattr(target, mock)
     for target in (
-        "api.routes.resource_ingest.check_event_quota",
-        "api.routes.resource_management.check_event_quota",
-        "mcp_server.tools.resource.check_event_quota",
         "api.routes.resource_ingest._schedule_indexer_for_resource",
         "api.routes.resource_management._schedule_indexer_for_resource",
         "mcp_server.tools.resource._log_tool_usage",
@@ -106,6 +114,7 @@ async def scenario(async_engine, monkeypatch):
         w.endpoint_id = endpoint.id  # type: ignore[attr-defined]
         w.token = token  # type: ignore[attr-defined]
         w.grant = result.json()  # type: ignore[attr-defined]
+        w.quota_mocks = quota_mocks  # type: ignore[attr-defined]
         yield w
 
 
@@ -294,6 +303,8 @@ async def test_sync_reserved_metadata_is_422_on_every_ordinary_ingest_route(scen
     w = scenario
     before = await event_count(w)
     metadata = {"event_metadata": {key: 1}}
+    for quota in w.quota_mocks.values():
+        quota.reset_mock()
     async with app_client(w) as c:
         single = await c.post(
             f"/api/v1/resources/{w.slugs['a1']}/events",
@@ -321,6 +332,9 @@ async def test_sync_reserved_metadata_is_422_on_every_ordinary_ingest_route(scen
     assert mcp["error"] == "validation_error"
     assert mcp["index"] == 1
     assert await event_count(w) == before
+    # Every refusal comes before the hourly quota is counted, on every route.
+    for target, quota in w.quota_mocks.items():
+        assert quota.await_count == 0, target
 
 
 async def test_single_event_route_holds_the_shared_fence_through_the_insert(scenario):

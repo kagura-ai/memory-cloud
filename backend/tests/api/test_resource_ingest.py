@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from api.routes.resource_ingest import (
     _enforce_workspace_membership,
     _resolve_authoritative_context,
+    ingest_batch,
     ingest_event,
     verify_resource_token,
 )
@@ -26,7 +27,7 @@ from db.constraint_names import (
 )
 from models.auth import Context
 from models.resource import ResourceEvent, ResourceToken
-from models.schemas import ResourceEventRequest
+from models.schemas import ResourceEventBatchRequest, ResourceEventRequest
 from utils.exceptions import AuthorizationError, ConflictError, ValidationError
 
 
@@ -956,6 +957,39 @@ class TestSingleEventFeedFence:
         quota.assert_not_awaited()
         connector.assert_not_awaited()
         db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", ["sync_run_id", "installation_generation"])
+    async def test_batch_refuses_sync_reserved_metadata_before_quota_is_counted(self, auth, key):
+        """A refused batch reserves no hourly quota: the check runs before ``check_event_quota``."""
+        db = MagicMock()
+        db.add = MagicMock()
+        db.commit = AsyncMock()
+        quota = AsyncMock()
+        persist = AsyncMock()
+        request = ResourceEventBatchRequest(
+            events=[
+                self._request(source="client"),
+                self._request(**{key: "1"}),
+            ]
+        )
+        with (
+            patch("api.routes.resource_ingest.check_event_quota", new=quota),
+            patch("services.resource_ingest_service.persist_events", new=persist),
+        ):
+            with pytest.raises(ValidationError) as exc_info:
+                await ingest_batch(
+                    resource_id="ec_products",
+                    request=request,
+                    auth=auth,
+                    db=db,
+                )
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.details == {"field": "event_metadata", "index": 1}
+        quota.assert_not_awaited()
+        persist.assert_not_awaited()
+        db.add.assert_not_called()
+        db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_single_event_on_feed_target_is_refused_before_the_row_is_built(self, auth):
