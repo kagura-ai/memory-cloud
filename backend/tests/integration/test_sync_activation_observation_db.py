@@ -284,6 +284,40 @@ async def test_reconnected_original_observes_its_target_as_no_longer_current(sto
         assert row.authorization_id == UUID(fresh["authorization_id"])
 
 
+@pytest.mark.parametrize("kind", ["superseded", "pending"])
+async def test_never_consumed_approval_does_not_report_another_approvals_target(store, kind):
+    """A row created under a later approval is never the unconsumed original's target."""
+    original = await approve(store)
+    later = await approve(store)
+    await paid(store)
+    created = await http(store, "POST", "", billing=True, body=activation(later))
+    assert created.status_code == 200, created.text
+    async with store.factory() as db:
+        prior = await db.get(SyncAuthorization, UUID(original["authorization_id"]))
+        assert prior.used_at is None and prior.revoked_at is not None
+    if kind == "pending":
+        # Still unrevoked and unexpired: a retained row means it can never activate.
+        await change(store, SyncAuthorization, UUID(original["authorization_id"]), revoked_at=None)
+    response = await observe(store, original)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["binding_current"] is False
+    assert body["installation"] is None and body["management"] is None
+    assert body["authorization"]["authorization_id"] == original["authorization_id"]
+    assert body["authorization"]["used_at"] is None
+    assert response.text.count(created.json()["installation_id"]) == 0
+    assert response.text.count(later["authorization_id"]) == 0
+    observed = store.clock.now.replace(tzinfo=UTC)
+    assert body["valid_until"] == (observed + timedelta(seconds=30)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert await targets(store) == (1, 1, 1)
+    async with store.factory() as db:
+        row = await db.get(SyncInstallation, UUID(created.json()["installation_id"]))
+        assert row.authorization_id == UUID(later["authorization_id"])
+        assert (await db.get(SyncAuthorization, UUID(original["authorization_id"]))).used_at is None
+
+
 @pytest.mark.parametrize("state", ["paused", "revoked"])
 async def test_read_preserves_paused_or_revoked_target_and_generation(store, state):
     approval = await approve(store)

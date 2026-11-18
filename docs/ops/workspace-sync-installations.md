@@ -151,7 +151,13 @@ same retained installation is bound to the newer approval: observing the origina
 references then returns that installation and its management projection with
 `binding_current=false`, and nothing about the newer approval. This answer is
 final for the original references; billing continues through the newer approval's
-flow instead of retrying them. A retained installation of another application is a
+flow instead of retrying them. An approval only becomes an installation's original by
+being consumed, which happens only in the transaction that binds the installation to
+it. A never-consumed approval is therefore not credited with an installation that a
+later approval of the same application created: observing it returns `installation`
+and `management` null with `binding_current=false`, also while it is still unexpired,
+because the retained installation means it can never activate. This answer is final
+for its references too. A retained installation of another application is a
 conflict and is never adopted; retrying the same references does not change that
 answer. A missing physical target is reported
 as `target_available=false`. Paused/revoked installation states and

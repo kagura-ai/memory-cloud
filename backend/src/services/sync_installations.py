@@ -250,9 +250,11 @@ async def observe_activation(
 
     Consumption or expiry may identify an existing original. They never enable
     provisioning a missing target. No approvals, targets or lifecycle states are
-    changed. A retained row of another application is a conflict; one rebound to
-    a newer approval is reported with ``binding_current=false`` and is never
-    adopted as the original's current authority.
+    changed. A retained row of another application is a conflict. The row is this
+    approval's original only while bound to it or once the approval was consumed;
+    one later rebound to a newer approval is reported with ``binding_current=false``
+    and is never adopted as the original's current authority. A row this approval
+    never bound is not reported: the approval then has no target.
     """
     from models.sync_management import SyncManagedTarget
     from services.sync_feed_authority import locked
@@ -269,9 +271,19 @@ async def observe_activation(
         row = await _installation(db, wid)
         if row is not None and row.application_id != body.application_id:
             raise ConflictError("Workspace has a different retained synchronization approval")
-        # A human reconnect binds the same retained row to fresh consent. The
-        # original references still identify that row, never as current authority.
-        rebound = row is not None and row.authorization_id != approval.id
+        # One permanent row per workspace, and an approval is consumed only in the
+        # transaction that binds that row to it (activation or human reconnect).
+        # So the row is this approval's original iff it is bound to it now or the
+        # approval was consumed; a row created under another approval is not.
+        original = (
+            row
+            if row is not None
+            and (row.authorization_id == approval.id or approval.used_at is not None)
+            else None
+        )
+        # A human reconnect binds the original row to fresh consent. The original
+        # references still identify that row, never as current authority.
+        rebound = original is not None and original.authorization_id != approval.id
         binding_current = (
             not rebound
             and approval.authorized_by == authority.owner.user_id
@@ -281,26 +293,33 @@ async def observe_activation(
             and approval.browser_client_id == service.browser_client_id
             and approval.service_client_id == service.service_client_id
             and approval.operations == list(SYNC_OPERATIONS)
-            and (row is not None or approval.used_at is None and observed < approval.expires_at)
+            # Without an original, only a pending approval in a workspace that has
+            # no retained row could still activate.
+            and (
+                original is not None
+                or row is None
+                and approval.used_at is None
+                and observed < approval.expires_at
+            )
         )
-        if row is None and binding_current:
+        if original is None and binding_current:
             until = min(until, approval.expires_at)
             authority.deadlines.append(until)
         management = None
-        if row is not None:
-            managed = await target_fence(db, row.context_id)
+        if original is not None:
+            managed = await target_fence(db, original.context_id)
             if managed.mode is None and await locked(
-                db, SyncManagedTarget, SyncManagedTarget.installation_id == row.id
+                db, SyncManagedTarget, SyncManagedTarget.installation_id == original.id
             ):
                 raise ConflictError("Retained target management changed; retry")
             if managed.mode is not None and (
-                managed.mode.installation_id != row.id
-                or managed.mode.resource_pk != row.resource_pk
-                or managed.mode.generation != row.generation
+                managed.mode.installation_id != original.id
+                or managed.mode.resource_pk != original.resource_pk
+                or managed.mode.generation != original.generation
             ):
                 raise ConflictError("Retained target management changed; retry")
             management = (
-                mode_view(managed.mode) if managed.mode is not None else default_mode_view(row)
+                mode_view(managed.mode) if managed.mode is not None else default_mode_view(original)
             )
         result = SyncActivationObservation(
             contract_version="sync-activation-observation-v1",
@@ -309,7 +328,7 @@ async def observe_activation(
             authorization=authorization_view(approval),
             ownership_epoch=authority.workspace.ownership_epoch,
             binding_current=binding_current,
-            installation=await installation_view(db, row) if row is not None else None,
+            installation=await installation_view(db, original) if original is not None else None,
             management=management,
             observed_at=observed,
             valid_until=until,
