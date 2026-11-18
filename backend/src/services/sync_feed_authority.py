@@ -26,7 +26,7 @@ from services.plan_seats import ensure_context_writable
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
 from utils.db_helpers import is_lock_not_available
-from utils.exceptions import ConflictError, NotFoundException
+from utils.exceptions import ConflictError, NotFoundException, SyncLockBusyError
 
 T = TypeVar("T", bound=Base)
 
@@ -34,7 +34,11 @@ T = TypeVar("T", bound=Base)
 async def locked(
     db: AsyncSession, model: type[T], *conditions: Any, write: bool = False
 ) -> T | None:
-    """Nonblocking authority locks, always refreshing the identity map."""
+    """Nonblocking authority locks, always refreshing the identity map.
+
+    A busy row raises :class:`SyncLockBusyError`: an HTTP caller gets the same
+    409 as for any conflict, the resource indexer retries the event later.
+    """
     try:
         return await db.scalar(
             select(model)
@@ -44,7 +48,7 @@ async def locked(
         )
     except DBAPIError as exc:
         if is_lock_not_available(exc):
-            raise ConflictError("Synchronization state is changing; retry") from exc
+            raise SyncLockBusyError() from exc
         raise
 
 

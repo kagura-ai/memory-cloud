@@ -802,7 +802,8 @@ class ResourceIndexer:
 
         Returns:
             IndexerMetrics with execution stats, ``failed_events`` the record
-            as the row now holds it.
+            as the row now holds it. A lock the batch could not take at once
+            ends it before that event, which is not recorded (#2904).
         """
         start_time = utcnow()
         recorded = list(failed_events)
@@ -983,6 +984,7 @@ class ResourceIndexer:
                     return metrics
 
             # 5. Process each event
+            ran_through = events[-1].id
             for event in events:
                 repointed_mark = len(self._repointed)
                 retired_mark = len(self._retired)
@@ -1018,6 +1020,23 @@ class ResourceIndexer:
                     del self._repointed[repointed_mark:]
                     del self._retired[retired_mark:]
                     self._history_changes = history_before
+                    from services.sync_feed_provenance import sync_lock_busy
+
+                    if sync_lock_busy(e):
+                        # #2904: a lock taken without waiting was held (a
+                        # worker's status poll, a feed transition), which says
+                        # nothing about the event. Stop before it: the applied
+                        # prefix commits, the offset stays on the last applied
+                        # event, and nothing is recorded as failed. A later run
+                        # starts from this event; for a sync target the outbox
+                        # replay (services.sync_feed_index) re-queues the row.
+                        logger.warning(
+                            "indexer_event_lock_busy",
+                            event_id=event.id,
+                            doc_id=event.doc_id,
+                        )
+                        ran_through = event.id - 1
+                        break
                     logger.error(
                         "indexer_event_failed",
                         event_id=event.id,
@@ -1051,8 +1070,9 @@ class ResourceIndexer:
             # one, which a process can die before. An entry this batch ran
             # again (after a rewind, or a failure at the end of the last batch)
             # gives way to its new outcome; the rest stay until an operator
-            # rewinds past them or clears them.
-            ran_again = range(last_offset + 1, events[-1].id + 1)
+            # rewinds past them or clears them. A batch that stopped at a busy
+            # lock ran nothing from that event on (#2904).
+            ran_again = range(last_offset + 1, ran_through + 1)
             metrics.failed_events = merge_failed_events(
                 [entry for entry in recorded if entry["event_id"] not in ran_again],
                 run_failures,

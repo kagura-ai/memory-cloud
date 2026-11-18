@@ -11,7 +11,7 @@ from models.memory import Memory
 from models.resource import Resource
 from models.sync_installation import SyncInstallation
 from models.sync_management import SyncManagedTarget
-from utils.exceptions import ConflictError, ManagedDataLockedError
+from utils.exceptions import ConflictError, ManagedDataLockedError, SyncLockBusyError
 
 _SHARED = text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:key, 0))")
 _EXCLUSIVE = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))")
@@ -77,7 +77,8 @@ async def target_fence(
             {"key": "sync-management:" + str(context_id)},
         )
         if acquired is False:
-            raise ConflictError("Feed management is changing; retry")
+            # Busy, not refused: the resource indexer retries the event later.
+            raise SyncLockBusyError("Feed management is changing; retry")
         row = await db.scalar(
             select(SyncManagedTarget)
             .where(SyncManagedTarget.context_id == context_id)

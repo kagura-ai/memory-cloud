@@ -238,7 +238,9 @@ and retries an abandoned `running` state after 30 minutes. A live index batch
 holds its receipt lock so recovery cannot steal it. A lost wakeup after a prior
 batch commit is reasserted. The indexer refuses foreign/independently edited
 Memory rows before vector changes, and skips obsolete upserts superseded by a
-new canonical version/deletion. Deletions address only explicitly owned versions
+new canonical version/deletion. A guard lock held by another transaction (a
+status poll holds the target rows) ends the batch before that event instead of
+failing it: the event stays pending and the next scheduled run applies it. Deletions address only explicitly owned versions
 which can remain visible, so accumulated retired history does not make a valid
 snapshot undeletable. Existing indexer failure inspection/rewind procedures
 apply to failed Resource events.

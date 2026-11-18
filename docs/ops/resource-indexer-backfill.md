@@ -87,6 +87,16 @@ run, once one is queued. `indexer-status` reports the count as
 `state.metrics.failed_events`; `metrics.failed_events` on the row lists the
 events (`event_id`, `doc_id`, `error_class`), the oldest 20.
 
+A lock the event needed and could not take at once is not a failure (#2904).
+The synchronization guard takes its locks without waiting, and a worker's
+status poll or a feed transition can hold them for a moment. The batch then
+logs `indexer_event_lock_busy` and stops before that event: the events before
+it commit, `last_offset` stays on the last applied one, and nothing is added to
+`failed_events`. A later run starts from the event again; for a sync target
+the outbox replay re-queues the row on the next five-minute tick, and the
+per-target limits (10 minutes apart, 6 runs an hour) bound the retries while
+the lock stays held.
+
 The list stays until you act on it (#2477): a rewind, or the clear below.
 Every other run keeps it, a batch with no failures included, and a batch with
 failures adds to it. The batch commit writes it, so it does not depend on the
