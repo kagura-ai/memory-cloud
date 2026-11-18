@@ -250,7 +250,9 @@ async def observe_activation(
 
     Consumption or expiry may identify an existing original. They never enable
     provisioning a missing target. No approvals, targets or lifecycle states are
-    changed, and a different retained authorization cannot be silently adopted.
+    changed. A retained row of another application is a conflict; one rebound to
+    a newer approval is reported with ``binding_current=false`` and is never
+    adopted as the original's current authority.
     """
     from models.sync_management import SyncManagedTarget
     from services.sync_feed_authority import locked
@@ -265,12 +267,14 @@ async def observe_activation(
         _match_application(approval, body, None)
         service = await registered_service(db, service_id=approval.service_id)
         row = await _installation(db, wid)
-        if row is not None and (
-            row.authorization_id != approval.id or row.application_id != body.application_id
-        ):
+        if row is not None and row.application_id != body.application_id:
             raise ConflictError("Workspace has a different retained synchronization approval")
+        # A human reconnect binds the same retained row to fresh consent. The
+        # original references still identify that row, never as current authority.
+        rebound = row is not None and row.authorization_id != approval.id
         binding_current = (
-            approval.authorized_by == authority.owner.user_id
+            not rebound
+            and approval.authorized_by == authority.owner.user_id
             and approval.ownership_epoch == authority.workspace.ownership_epoch
             and approval.revoked_at is None
             and approval.service_generation == service.generation

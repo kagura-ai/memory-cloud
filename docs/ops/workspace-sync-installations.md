@@ -143,11 +143,17 @@ transfer away and back, revoked approval, changed registration generation or
 expired/consumed approval without a target returns `binding_current=false`.
 A disabled/unavailable service or revoked browser registration is a conflict
 hold; a caller must retain the same original references and retry after the
-operator restores authority. It must not replace the approval or target.
+operator restores that registration. It must not replace the approval or target.
 
 An unchanged consumed or expired approval can identify its existing original
-target after a lost activation response. A retained installation bound to another
-authorization/application is a conflict. A missing physical target is reported
+target after a lost activation response. After a human unlink and reconnect the
+same retained installation is bound to the newer approval: observing the original
+references then returns that installation and its management projection with
+`binding_current=false`, and nothing about the newer approval. This answer is
+final for the original references; billing continues through the newer approval's
+flow instead of retrying them. A retained installation of another application is a
+conflict and is never adopted; retrying the same references does not change that
+answer. A missing physical target is reported
 as `target_available=false`. Paused/revoked installation states and
 `management.mode=stopping|manual` remain separate holds; an active installation
 does not imply feed mode. The management projection is read under the existing

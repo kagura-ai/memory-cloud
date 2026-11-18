@@ -115,56 +115,133 @@ async def test_consumed_original_observation_detects_transfer_away_and_back(stor
     assert await targets(store) == (1, 1, 1)
 
 
-@pytest.mark.parametrize("kind", ["application", "authorization", "retained_authorization"])
+@pytest.mark.parametrize("kind", ["application", "authorization"])
 async def test_other_references_are_never_adopted(store, kind):
     approval = await approve(store)
-    if kind == "retained_authorization":
-        await paid(store)
-        created = await http(store, "POST", "", billing=True, body=activation(approval))
-        assert created.status_code == 200
-        async with store.factory() as db:
-            row = await db.scalar(
-                select(SyncInstallation).where(SyncInstallation.workspace_id == store.wid)
-            )
-            prior = await db.get(SyncAuthorization, UUID(approval["authorization_id"]))
-            # Another retained consent must not become the original operation's result.
-            newer = SyncAuthorization(
-                **{
-                    key: getattr(prior, key)
-                    for key in (
-                        "workspace_id",
-                        "application_id",
-                        "service_id",
-                        "service_generation",
-                        "browser_client_id",
-                        "service_client_id",
-                        "operations",
-                        "authorized_by",
-                        "ownership_epoch",
-                        "request_hash",
-                        "public_name",
-                        "created_at",
-                        "expires_at",
-                    )
-                },
-                id=uuid4(),
-                request_id=uuid4(),
-            )
-            db.add(newer)
-            await db.flush()
-            row.authorization_id = newer.id
-            await db.commit()
-        response = await observe(store, approval)
-        assert response.status_code == 409
-    else:
-        response = await observe(
-            store,
-            approval,
-            **{"application_id": "other"}
-            if kind == "application"
-            else {"authorization_id": str(uuid4())},
+    response = await observe(
+        store,
+        approval,
+        **{"application_id": "other"}
+        if kind == "application"
+        else {"authorization_id": str(uuid4())},
+    )
+    assert response.status_code in {404, 409}
+
+
+async def test_retained_installation_of_another_application_is_a_conflict(store):
+    approval = await approve(store)
+    await paid(store)
+    created = await http(store, "POST", "", billing=True, body=activation(approval))
+    assert created.status_code == 200, created.text
+    iid = UUID(created.json()["installation_id"])
+    await change(store, SyncInstallation, iid, application_id="application-2")
+    response = await observe(store, approval)
+    assert response.status_code == 409, response.text
+    async with store.factory() as db:
+        assert (await db.get(SyncInstallation, iid)).application_id == "application-2"
+
+
+async def test_rebound_retained_row_is_observed_but_never_current(store):
+    approval = await approve(store)
+    await paid(store)
+    created = await http(store, "POST", "", billing=True, body=activation(approval))
+    assert created.status_code == 200
+    async with store.factory() as db:
+        row = await db.scalar(
+            select(SyncInstallation).where(SyncInstallation.workspace_id == store.wid)
         )
-        assert response.status_code in {404, 409}
+        prior = await db.get(SyncAuthorization, UUID(approval["authorization_id"]))
+        # Another retained consent must not become the original operation's result.
+        newer = SyncAuthorization(
+            **{
+                key: getattr(prior, key)
+                for key in (
+                    "workspace_id",
+                    "application_id",
+                    "service_id",
+                    "service_generation",
+                    "browser_client_id",
+                    "service_client_id",
+                    "operations",
+                    "authorized_by",
+                    "ownership_epoch",
+                    "request_hash",
+                    "public_name",
+                    "created_at",
+                    "expires_at",
+                )
+            },
+            id=uuid4(),
+            request_id=uuid4(),
+        )
+        db.add(newer)
+        await db.flush()
+        row.authorization_id = newer.id
+        await db.commit()
+    response = await observe(store, approval)
+    assert response.status_code == 200, response.text
+    assert response.json()["binding_current"] is False
+    assert response.json()["authorization"]["authorization_id"] == approval["authorization_id"]
+    assert response.json()["installation"]["installation_id"] == created.json()["installation_id"]
+    assert response.text.count(str(newer.id)) == 0
+
+
+async def reconnected(store, monkeypatch):
+    """Activate with consent A, unlink, then reconnect the same row with fresh consent B."""
+    from api.routes import sync_management as management_routes
+    from services import sync_feed_authority, sync_management, sync_resume
+
+    for name in ("sync_runs_enabled", "sync_managed_enabled"):
+        monkeypatch.setattr(sync_management.get_settings(), name, True)
+    for module in (sync_feed_authority, sync_management, sync_resume):
+        monkeypatch.setattr(module, "utcnow", lambda: store.clock.now)
+    store.app.include_router(management_routes.router, prefix="/api/v1")
+    original = await approve(store)
+    await paid(store)
+    created = await http(store, "POST", "", billing=True, body=activation(original))
+    assert created.status_code == 200, created.text
+    iid = UUID(created.json()["installation_id"])
+    async with store.factory() as db:
+        await sync_management.enroll(db, await db.get(SyncInstallation, iid))
+        await db.commit()
+    unlinked = await http(store, "DELETE", f"sync-installations/{iid}")
+    assert unlinked.status_code == 200, unlinked.text
+    async with store.factory() as db:
+        assert await sync_management.finish_stopping(db, await db.get(SyncInstallation, iid))
+        await db.commit()
+    fresh = await approve(store)
+    command = {"operation_id": str(uuid4()), "authorization_id": fresh["authorization_id"]}
+    result = await http(
+        store, "POST", f"sync-installations/{iid}/management/reconnect", body=command
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["mode"] == "manual"
+    return original, fresh, created.json()
+
+
+async def test_reconnected_original_observes_its_target_as_no_longer_current(store, monkeypatch):
+    original, fresh, created = await reconnected(store, monkeypatch)
+    response = await observe(store, original)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["binding_current"] is False
+    assert body["authorization"]["authorization_id"] == original["authorization_id"]
+    assert body["installation"]["installation_id"] == created["installation_id"]
+    assert body["installation"]["application_id"] == created["application_id"]
+    assert body["installation"]["service_client_id"] == created["service_client_id"]
+    assert body["installation"]["state"] == "active"
+    assert body["management"]["mode"] == "manual"
+    assert body["management"]["generation"] == body["installation"]["generation"]
+    observed = store.clock.now.replace(tzinfo=UTC)
+    assert body["valid_until"] == (observed + timedelta(seconds=30)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    # Nothing in the observation names or describes the newer approval.
+    assert response.text.count(fresh["authorization_id"]) == 0
+    assert await targets(store) == (1, 1, 1)
+    async with store.factory() as db:
+        row = await db.get(SyncInstallation, UUID(created["installation_id"]))
+        assert row.authorization_id == UUID(fresh["authorization_id"])
 
 
 @pytest.mark.parametrize("state", ["paused", "revoked"])
