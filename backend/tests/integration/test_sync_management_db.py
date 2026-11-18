@@ -699,6 +699,104 @@ async def test_maintenance_pages_past_100_blocked_drains_to_expired_target(manag
         assert (await db.get(SyncManagedTarget, UUID(int=1))).mode == "stopping"
 
 
+async def _extra_target(managed, db, iid, *, workspace_deleted=False, context_deleted=False):
+    """A second managed target that sorts before the fixture's own (UUID(int=n) is small)."""
+    original = await db.get(SyncInstallation, managed.iid)
+    now = managed.store.clock.now
+    wid = uuid4()
+    managed.management_extra_workspaces.append(wid)
+    db.add(
+        Workspace(
+            id=wid,
+            name=f"Extra-{iid.int}",
+            owner_user_id=managed.store.users["owner"],
+            plan_name="promax",
+            deleted_at=now if workspace_deleted else None,
+        )
+    )
+    await db.flush()
+    context_id = uuid4()
+    if context_deleted:
+        db.add(
+            Context(
+                id=context_id,
+                workspace_id=wid,
+                name=f"extra-{iid.int}",
+                created_by=managed.store.users["owner"],
+                is_private=False,
+                deleted_at=now,
+            )
+        )
+        await db.flush()
+    installation = SyncInstallation(
+        id=iid,
+        workspace_id=wid,
+        service_id=original.service_id,
+        service_client_id=original.service_client_id,
+        authorization_id=uuid4(),
+        application_id=f"extra-{iid.int}",
+        operations=original.operations,
+        context_id=context_id,
+        resource_pk=uuid4(),
+        endpoint_id=uuid4(),
+        resource_id=f"extra-{iid.int}",
+        generation=2,
+    )
+    db.add(installation)
+    await db.flush()
+    db.add(
+        SyncManagedTarget(
+            installation_id=iid,
+            context_id=context_id,
+            resource_pk=installation.resource_pk,
+            mode="stopping",
+            generation=2,
+            drain_generation=1,
+            stop_event_id=0,
+            event_floor=0,
+            epoch=2,
+            manual_sleep_mode="skip",
+        )
+    )
+
+
+async def test_maintenance_skips_a_target_of_a_soft_deleted_workspace(managed):
+    async with managed.factory() as db:
+        await _extra_target(managed, db, UUID(int=1), workspace_deleted=True)
+        await db.commit()
+    managed.store.clock.now += timedelta(minutes=5)
+    async with managed.factory() as db:
+        await sync_management.maintain_sync_management(db)
+    async with managed.factory() as db:
+        skipped = await db.get(SyncManagedTarget, UUID(int=1))
+        assert skipped.mode == "stopping"
+        assert skipped.updated_at != managed.store.clock.now
+        maintained = await db.get(SyncManagedTarget, managed.iid)
+        assert maintained.updated_at == managed.store.clock.now
+
+
+async def test_maintenance_continues_with_the_next_target_after_one_fails(managed, monkeypatch):
+    # A stopping target whose context was deleted cannot be finalized: finish_stopping
+    # raises NotFoundException, which is not a ConflictError.
+    async with managed.factory() as db:
+        await _extra_target(managed, db, UUID(int=1), context_deleted=True)
+        await db.commit()
+    failures = []
+    monkeypatch.setattr(
+        sync_management.logger, "error", lambda event, **kw: failures.append((event, kw))
+    )
+    managed.store.clock.now += timedelta(minutes=5)
+    async with managed.factory() as db:
+        await sync_management.maintain_sync_management(db)
+    async with managed.factory() as db:
+        assert (await db.get(SyncManagedTarget, UUID(int=1))).mode == "stopping"
+        maintained = await db.get(SyncManagedTarget, managed.iid)
+        assert maintained.updated_at == managed.store.clock.now
+    assert [(event, kw["installation_id"], kw["error_type"]) for event, kw in failures] == [
+        ("sync_maintenance_installation_failed", str(UUID(int=1)), "NotFoundException")
+    ]
+
+
 @pytest.mark.parametrize("revoked", [False, True])
 async def test_legacy_pending_source_is_held_then_drained_at_its_real_generation(
     feeds, monkeypatch, revoked
