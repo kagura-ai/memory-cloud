@@ -65,7 +65,7 @@ directory `/opt/kagura-memory/oidc` appears read-only at `/run/kagura/oidc` in
   owned by root. Nothing reads it while `OIDC_ENABLED` is off, so a deployment
   that does not use the provider needs no preparation.
 - **A missing or refused key file** with `OIDC_ENABLED=true` answers `503` on
-  `/oidc/*`. The keys are read for each operation, not at start-up, so the
+  `/oidc/*`. The keys are read when they are first needed, not at start-up, so the
   containers start and the deploy's readiness check stays green. Clients
   cannot sign in or refresh a token meanwhile, so everything that needs an
   OIDC token (the sync owner controls, for example) stops within the token
@@ -188,8 +188,14 @@ does not silently alter another application's registration.
    its public key through the maximum old-token lifetime plus the deployment's
    clock-skew/cache overlap. Remove the old public key only after that window.
 
-The signing configuration is reloaded for each operation. Publish files with
-an atomic replacement; writing in place can temporarily produce a safe 503.
+Each API process keeps the signing keys it parsed and re-reads the file when it
+changes: every operation compares the file's device, inode, modification time,
+size and mode, and the `OIDC_ISSUER`, `OIDC_ACTIVE_SIGNING_KID` and
+`OIDC_SIGNING_KEYS_FILE` settings, with the ones the keys were parsed from. An
+atomically replaced file therefore takes effect on the next request. A
+replacement that cannot be read or validated answers 503; the keys parsed
+before it are not used. Publish files with an atomic replacement; writing in
+place can temporarily produce a safe 503.
 Back up private material through the secret-management process, separate from
 public JWKS and database exports. After compromise, rotate the key and revoke
 affected clients/grants; removing a public JWKS entry alone does not revoke a

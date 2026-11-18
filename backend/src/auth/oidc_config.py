@@ -10,6 +10,7 @@ import json
 import os
 import re
 import stat
+import threading
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,11 @@ def read_private_file(path: str | Path, *, label: str) -> bytes:
     POSIX hosts require owner-only permissions; Windows deployments must apply
     equivalent file ACLs. The path and file content never appear in errors.
     """
+    return _read_private_file(path, label=label)[0]
+
+
+def _read_private_file(path: str | Path, *, label: str) -> tuple[bytes, os.stat_result]:
+    """``read_private_file`` plus the status of the very file the bytes came from."""
     try:
         target = Path(path)
         before = target.lstat()
@@ -65,7 +71,7 @@ def read_private_file(path: str | Path, *, label: str) -> bytes:
             content = source.read(_MAX_SECRET_BYTES + 1)
         if not content or len(content) > _MAX_SECRET_BYTES:
             raise OIDCConfigurationError(f"{label} is empty or exceeds its size limit")
-        return content
+        return content, opened
     except OIDCConfigurationError:
         raise
     except (OSError, ValueError):
@@ -128,11 +134,47 @@ def _import_rsa(value: dict[str, Any] | bytes, kid: str) -> RSAKey:
         raise OIDCConfigurationError("OIDC signing key material is invalid") from None
 
 
-def load_oidc_config(settings: Any = None) -> OIDCConfig:
-    """Load a fresh validated key ring; disabled/unconfigured providers refuse.
+_KEY_FILE_LABEL = "OIDC_SIGNING_KEYS_FILE"
 
-    Loading per operation makes an atomically replaced key ring visible without
-    a process-local stale key cache. The caller maps failures to a safe 503.
+
+@dataclass(frozen=True)
+class _CachedKeyRing:
+    settings: tuple[str, str, str]
+    file: tuple[int, ...]
+    config: OIDCConfig
+
+
+@dataclass
+class _KeyRingCache:
+    """The last key ring parsed in this process, guarded by one lock.
+
+    Importing private RSA material is expensive, so the parsed ring is reused
+    while the key file and the settings it was parsed with stay the same.
+    """
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    entry: _CachedKeyRing | None = None
+
+
+_key_ring_cache = _KeyRingCache()
+
+
+def _file_identity(status: os.stat_result) -> tuple[int, ...]:
+    """What tells a changed key file apart: a new file (atomic replacement),
+    new content (size, modification time) or new permissions or file type."""
+    return (status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size, status.st_mode)
+
+
+def load_oidc_config(settings: Any = None) -> OIDCConfig:
+    """Return the validated key ring; disabled/unconfigured providers refuse.
+
+    The parsed ring is reused until the key file or the settings change: each
+    call compares the file's identity (device, inode, modification time, size
+    and mode) and the issuer, active key ID and path with the ones the ring was
+    parsed from, and re-reads the file when any differs. An atomically replaced
+    key file therefore takes effect on the next call. A replacement that cannot
+    be read or validated is refused; the previously parsed keys are never used
+    for it. The caller maps failures to a safe 503.
     """
     if settings is None:
         from config.settings import get_settings
@@ -147,7 +189,26 @@ def load_oidc_config(settings: Any = None) -> OIDCConfig:
     path = getattr(settings, "oidc_signing_keys_file", "")
     if not path:
         raise OIDCConfigurationError("OIDC_SIGNING_KEYS_FILE is required")
-    content = read_private_file(path, label="OIDC_SIGNING_KEYS_FILE")
+    wanted = (issuer, active_kid, str(path))
+    cache = _key_ring_cache
+    with cache.lock:
+        entry = cache.entry
+        if entry is not None and entry.settings == wanted:
+            try:
+                current = _file_identity(Path(path).lstat())
+            except (OSError, ValueError):
+                current = None
+            if current == entry.file:
+                return entry.config
+        # Whatever happens below, the old ring no longer answers for this file.
+        cache.entry = None
+        content, opened = _read_private_file(path, label=_KEY_FILE_LABEL)
+        config = _parse_key_ring(content, issuer, active_kid)
+        cache.entry = _CachedKeyRing(wanted, _file_identity(opened), config)
+        return config
+
+
+def _parse_key_ring(content: bytes, issuer: str, active_kid: str) -> OIDCConfig:
     keys: dict[str, RSAKey] = {}
     if content.lstrip().startswith(b"{"):
         try:
