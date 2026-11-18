@@ -906,3 +906,118 @@ class TestIngestSuspendedOnFree:
     async def test_paid_plan_still_ingests(self):
         token, quota, _ = await self._verify("promax", connector_owned=True)
         assert quota == 1000
+
+
+class TestSingleEventFeedFence:
+    """#2906: the single-event route shares the ordinary-ingest fence and metadata rule."""
+
+    @pytest.fixture
+    def auth(self):
+        token = MagicMock(spec=ResourceToken)
+        token.id = 7
+        token.created_by = "user-1"
+        token.resource_pk = uuid4()
+        ctx = MagicMock(spec=Context)
+        ctx.id = uuid4()
+        ctx.workspace_id = uuid4()
+        return (token, 1000, ctx)
+
+    @staticmethod
+    def _request(**metadata):
+        return ResourceEventRequest(
+            op="upsert",
+            doc_id="PROD-1",
+            version=1,
+            payload={"name": "Synthetic"},
+            event_metadata=metadata,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", ["sync_run_id", "installation_generation"])
+    async def test_single_event_refuses_sync_reserved_metadata_with_422(self, auth, key):
+        db = MagicMock()
+        db.add = MagicMock()
+        quota = AsyncMock()
+        connector = AsyncMock(return_value=None)
+        with (
+            patch("api.routes.resource_ingest.check_event_quota", new=quota),
+            patch("api.routes.resource_ingest.get_connector_id_for_resource_pk", new=connector),
+        ):
+            with pytest.raises(ValidationError) as exc_info:
+                await ingest_event(
+                    resource_id="ec_products",
+                    request=self._request(**{key: "1"}),
+                    auth=auth,
+                    db=db,
+                )
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.details == {"field": "event_metadata"}
+        # Refused before any quota is reserved or row built.
+        quota.assert_not_awaited()
+        connector.assert_not_awaited()
+        db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_single_event_on_feed_target_is_refused_before_the_row_is_built(self, auth):
+        from utils.exceptions import ManagedDataLockedError
+
+        token_record, _, _ = auth
+        db = MagicMock()
+        db.add = MagicMock()
+        db.commit = AsyncMock()
+        guard = AsyncMock(side_effect=ManagedDataLockedError("feed"))
+        with (
+            patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()),
+            patch(
+                "api.routes.resource_ingest.get_connector_id_for_resource_pk",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("services.sync_managed_guard.assert_resource_mutable", new=guard),
+        ):
+            with pytest.raises(ManagedDataLockedError) as exc_info:
+                await ingest_event(
+                    resource_id="ec_products",
+                    request=self._request(source="client"),
+                    auth=auth,
+                    db=db,
+                )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.error_code == "SYNC-LOCKED"
+        guard.assert_awaited_once_with(db, token_record.resource_pk)
+        db.add.assert_not_called()
+        db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_single_event_on_unmanaged_target_runs_the_fence_then_inserts(self, auth):
+        token_record, _, _ = auth
+        calls: list[str] = []
+        db = MagicMock()
+        db.add = MagicMock(side_effect=lambda event: calls.append("add"))
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock(side_effect=lambda event: setattr(event, "id", 42))
+        guard = AsyncMock(side_effect=lambda *args: calls.append("fence"))
+        with (
+            patch("api.routes.resource_ingest.check_event_quota", new=AsyncMock()),
+            patch(
+                "api.routes.resource_ingest.get_connector_id_for_resource_pk",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("services.sync_managed_guard.assert_resource_mutable", new=guard),
+            patch("api.routes.resource_ingest._schedule_indexer_for_resource", new=AsyncMock()),
+            patch("utils.usage_logger.log_usage", new=AsyncMock()),
+        ):
+            response = await ingest_event(
+                resource_id="ec_products",
+                request=self._request(source="client"),
+                auth=auth,
+                db=db,
+            )
+        assert calls == ["fence", "add"]
+        guard.assert_awaited_once_with(db, token_record.resource_pk)
+        assert response.model_dump() == {
+            "status": "success",
+            "event_id": 42,
+            "queued": True,
+            "estimated_indexing_time_seconds": None,
+        }
+        assert db.add.call_args[0][0].event_metadata == {"source": "client"}

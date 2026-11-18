@@ -408,12 +408,17 @@ async def ingest_event(
     Errors:
         - 401: Invalid/revoked token
         - 409: Duplicate version (resource_id, doc_id, version already exists)
+        - 409: ``SYNC-LOCKED`` — the target is feed-managed (#2906)
         - 413: Payload too large (>100KB)
-        - 422: Validation error (e.g., missing payload for upsert)
+        - 422: Validation error (e.g., missing payload for upsert, or
+          ``event_metadata`` carrying ``sync_run_id`` / ``installation_generation``)
         - 429: Quota exceeded
     """
     # Context is resolved and workspace-verified in the dependency — always non-None here.
     token_record, quota_per_hour, context = auth
+    # #2906: keys only feed synchronization sets are refused (422) before any
+    # quota is reserved, as on every other ordinary ingest path.
+    resource_ingest_service.reject_sync_reserved_metadata(request.event_metadata)
     connector_id = await get_connector_id_for_resource_pk(db, token_record.resource_pk)
     validate_connector_idempotency_key(
         connector_id=connector_id,
@@ -444,7 +449,21 @@ async def ingest_event(
                 detail=f"Payload too large: {payload_size} bytes (max {MAX_PAYLOAD_SIZE_BYTES})",
             )
 
-    # 3. Create event record
+    # 3. Ownership fence (#2906): the same guard the batch, management and MCP
+    #    paths run in ``persist_events``. A feed or stopping target (or a
+    #    retained target not enrolled yet) answers 409 ``SYNC-LOCKED`` and no
+    #    row is built. The shared fence lock it takes is transaction-scoped, so
+    #    it is held through the insert below until the commit. A token without
+    #    ``resource_pk`` cannot insert (the model's invariant listener refuses
+    #    it); it is still fenced through its resolved context.
+    from services import sync_managed_guard
+
+    if token_record.resource_pk is not None:
+        await sync_managed_guard.assert_resource_mutable(db, token_record.resource_pk)
+    else:
+        await sync_managed_guard.assert_context_mutable(db, context.id)
+
+    # 4. Create event record
     #
     # ``resource_pk`` is sourced from the auth token (backfilled by migration
     # a97 for existing tokens) so the partial UNIQUE
@@ -479,10 +498,10 @@ async def ingest_event(
             doc_id=request.doc_id,
         )
 
-        # 4. Schedule indexer run (find all contexts using this resource)
+        # 5. Schedule indexer run (find all contexts using this resource)
         await _schedule_indexer_for_resource(db, context.workspace_id, resource_id)
 
-        # 5. Log usage statistics (Issue #242)
+        # 6. Log usage statistics (Issue #242)
         from utils.usage_logger import log_usage
 
         await log_usage(
@@ -594,7 +613,9 @@ async def ingest_batch(
         - 401: Invalid/revoked token
         - 403: Cross-tenant ingest blocked (Issue #322)
         - 404: Resource not bound to an active Context
-        - 422: Validation error (max 100 events)
+        - 409: ``SYNC-LOCKED`` — the target is feed-managed
+        - 422: Validation error (max 100 events, or an event's
+          ``event_metadata`` carrying ``sync_run_id`` / ``installation_generation``)
         - 429: Quota exceeded
     """
     # Context is resolved and workspace-verified in the dependency — always non-None here.
@@ -611,6 +632,12 @@ async def ingest_batch(
         raise ValidationError(
             f"Batch size exceeds maximum ({resource_ingest_service.MAX_BATCH_SIZE} events)"
         )
+
+    # #2906: keys only feed synchronization sets are refused (422) for the
+    # whole request before any quota is reserved (``validate_events`` repeats
+    # the check for the service's other callers).
+    for index, event_req in enumerate(request.events):
+        resource_ingest_service.reject_sync_reserved_metadata(event_req.event_metadata, index=index)
 
     # 2. Check quota for entire batch (workspace-scoped counter shared with MCP).
     #    The token dependency already resolved the effective per-hour quota;

@@ -33,6 +33,18 @@ the fence. Managed contexts use Sleep `skip`; the prior setting is restored on
 manual entry. Access counters and erasure/retention remain separate lifecycle
 operations. No caller-controlled bypass or owner impersonation exists.
 
+Manual ingestion means every ordinary ingest route: the single-event
+`POST /api/v1/resources/{resource_id}/events`, the batch `/events/batch`, the
+management-grant `POST /api/v1/resource-management/events` and MCP
+`ingest_events`. On a `feed` or `stopping` target, and on a retained target that
+is not enrolled yet, each answers 409 `SYNC-LOCKED` (MCP: an error envelope
+carrying `management_mode`) and stores no event. The `event_metadata` keys
+`sync_run_id` and `installation_generation` are set only by the feed commit and
+the resume writer; an ordinary ingest request that carries either is refused as
+a whole with 422 `VAL-001` (`details.field` `event_metadata`, plus
+`details.index` for a batch; MCP: `validation_error`) before any quota is
+counted, whatever the target's mode (#2906).
+
 An absent ownership row is conservatively treated as `feed` while the flag is
 enabled. New installations enroll automatically; the first source/control
 mutation enrolls an existing retained target. Status is read-only. Before an

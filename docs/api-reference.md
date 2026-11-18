@@ -1205,6 +1205,8 @@ Memory Analysis clusters a context with UMAP + KMeans and labels clusters with t
 
 Since v0.48.0, the REST batch endpoint and MCP `ingest_events` delegate to the same `ResourceIngestService`. Authentication and wire envelopes remain surface-specific, while quota, authoritative Resource resolution, UTF-8 byte-size validation, per-event SAVEPOINT handling, constraint mapping, commit behavior, and post-commit indexer scheduling share one implementation.
 
+All ingest routes refuse a feed-managed target with 409 `SYNC-LOCKED` and store nothing, and refuse a request whose `event_metadata` carries `sync_run_id` or `installation_generation` (keys only feed synchronization sets) with 422 `VAL-001` before quota is counted ([#2906](https://github.com/kagura-ai/memory-cloud/issues/2906); see [Feed ownership and safe manual operation](ops/feed-managed-sync.md)).
+
 ### Resource token management
 
 Workspace owner only. Full usage in the [Resource Tokens Guide](resource-tokens-guide.md).

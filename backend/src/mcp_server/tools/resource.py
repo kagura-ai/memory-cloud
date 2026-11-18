@@ -671,6 +671,12 @@ async def handle_ingest_events(
             "validation_error",
             f"Batch size {len(events)} exceeds maximum of {_MAX_BATCH_SIZE}.",
         )
+    # #2906: the REST 422 for keys only feed synchronization sets, before any
+    # quota is reserved (``validate_events`` repeats it as a backstop).
+    try:
+        resource_ingest_service.reject_sync_reserved_event_metadata(events)
+    except resource_ingest_service.SyncReservedMetadataError as reserved:
+        return _error_response("validation_error", reserved.message, **reserved.details)
 
     if not workspace_id:
         return _error_response("workspace_required", "No active workspace.")

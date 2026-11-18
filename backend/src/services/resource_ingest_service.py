@@ -25,14 +25,15 @@ Design notes:
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar, Literal
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from utils.exceptions import ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -40,6 +41,42 @@ logger = get_logger(__name__)
 MAX_BATCH_SIZE = 100
 MAX_PAYLOAD_SIZE_BYTES = 100_000
 DEFAULT_IMPORTANCE = 0.6  # Issue #262
+
+# ``event_metadata`` keys that only the feed commit and the resume writer set
+# (#2906). The ownership fence and the receipt check read them, so every
+# ordinary ingest path (single event, batch, management route, MCP) refuses a
+# client event that carries one. Those two writers build their rows directly
+# and never pass through this module.
+SYNC_RESERVED_METADATA_KEYS = frozenset({"sync_run_id", "installation_generation"})
+
+
+class SyncReservedMetadataError(ValidationError):
+    """A client event carried an ``event_metadata`` key reserved for feed synchronization."""
+
+    log_level: ClassVar[Literal["error", "warning"]] = "warning"
+
+    def __init__(self, index: int | None = None) -> None:
+        details: dict[str, Any] = {} if index is None else {"index": index}
+        super().__init__(
+            "event_metadata must not contain sync_run_id or installation_generation: "
+            "only feed synchronization sets these keys",
+            field="event_metadata",
+            **details,
+        )
+
+
+def reject_sync_reserved_metadata(metadata: object, *, index: int | None = None) -> None:
+    """Refuse one client ``event_metadata`` that carries a sync-reserved key (422)."""
+    if isinstance(metadata, dict) and not SYNC_RESERVED_METADATA_KEYS.isdisjoint(metadata):
+        raise SyncReservedMetadataError(index)
+
+
+def reject_sync_reserved_event_metadata(raw_events: Iterable[object]) -> None:
+    """Refuse a whole raw batch when any event carries a sync-reserved metadata key."""
+    for index, event in enumerate(raw_events):
+        if isinstance(event, dict):
+            reject_sync_reserved_metadata(event.get("event_metadata"), index=index)
+
 
 # Structured error kinds. Adapters map these to their historic wire strings —
 # never serialize the kind itself (or raw DB constraint details) to clients.
@@ -109,7 +146,13 @@ def validate_events(
     An explicit ``importance: null`` is treated as absent and takes
     ``DEFAULT_IMPORTANCE`` (the REST semantic; the MCP path previously
     rejected an explicit null — unified per #1255's equivalence criterion).
+
+    Raises:
+        SyncReservedMetadataError: An event's ``event_metadata`` carries a
+            key only feed synchronization sets; the whole call is refused (422)
+            before any per-item validation (#2906).
     """
+    reject_sync_reserved_event_metadata(raw_events)
     valid: list[IngestEventInput] = []
     errors: list[IngestItemError] = []
 
@@ -272,8 +315,9 @@ async def persist_events(
         validate_connector_idempotency_key,
     )
     from services.sync_managed_guard import assert_resource_mutable
-    from utils.exceptions import ValidationError
 
+    for ev in events:
+        reject_sync_reserved_metadata(ev.event_metadata, index=ev.index)
     await assert_resource_mutable(db, resource_pk)
     connector_id = await get_connector_id_for_resource_pk(db, resource_pk)
 
