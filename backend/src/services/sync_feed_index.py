@@ -43,6 +43,10 @@ async def maintain_sync_runs(db: AsyncSession) -> None:
             .where(SyncRun.id.in_(expired))
             .values(state="expired", approved_by=None, approval_id=None, approval_epoch=None)
         )
+    from services.sync_feed_runs import expire_ended_manual_runs
+
+    # A manual run whose request ended is expired now, not at its 24-hour expiry (#2911).
+    await expire_ended_manual_runs(db)
     stale = utcnow() - timedelta(minutes=30)
     eligible = (
         select(SyncIndexOutbox.run_id)

@@ -119,8 +119,10 @@ Acceptance and later staging/preparation/commit recheck the original login
 `integrations:manage`), the requester's current Editor permissions, seat and
 capacity, ownership/source/schema/generation and finite deadlines. A run whose
 request has expired or whose login was revoked no longer counts toward the
-four active runs per installation, although it stays `uploading` or `prepared`
-until its 24-hour expiry; it can no longer be staged, prepared or committed.
+four active runs per installation and can no longer be staged, prepared or
+committed. It is expired and its staged records are cleared at the next run
+creation for that installation or at the next maintenance pass, whichever
+comes first, not at its 24-hour expiry.
 Revocation, erasure or expiry never turns pending manual work into
 an automatic run. A committed retry remains an immutable receipt; it does not
 re-execute work. Without the optional field, manifests/digests and old retry

@@ -59,7 +59,7 @@ and question/answer text, without exposing other resource schema fields.
 | Boundary | Initial limit |
 | --- | --- |
 | Feeds per installation | 20 |
-| Active unexpired runs per installation | 4 (a manual run counts only while its request is current) |
+| Active unexpired runs per installation | 4 (a manual run counts only while its request is current; once it is not, the run is expired and its staging cleared at the next run creation or maintenance pass, so staging stays bounded by about 4 runs x 20 MiB plus manual runs that ended since the last sweep) |
 | Records per full snapshot | 10,000 |
 | Upload bytes per run | 20 MiB |
 | Chunks per run | 1,000 |

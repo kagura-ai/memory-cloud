@@ -5,7 +5,8 @@ refresh writes a new token row. A manual request is bound to the login (the
 OIDC grant) behind the token that made it: it lasts at most 15 minutes and
 never beyond that login, an expired or rotated access token alone does not end
 it, and anything that revokes the login ends it at once. A run whose request
-is no longer current gives back its active-run slot.
+is no longer current gives back its active-run slot and is expired with its
+staged records cleared.
 
 These tests mint realistic 300-second tokens for the requester and approver
 (the shared fixtures' 3600 s tokens would hide the token lifetime).
@@ -23,7 +24,7 @@ import pytest_asyncio
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from joserfc.jwk import RSAKey
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
@@ -32,9 +33,10 @@ from auth import sync_identity
 from auth.oidc_server import credential_hash
 from config.settings import get_settings
 from models.oidc import OIDCAuthorizationCode, OIDCClient, OIDCGrant, OIDCToken
-from models.sync_feed import SyncRun
+from models.sync_feed import SyncChunk, SyncRun
 from services import sync_requests
 from services.oauth_grant_revocation import revoke_oauth_grants
+from services.sync_feed_index import maintain_sync_runs
 from tests.integration import sync_credential_fixtures as credentials
 from tests.integration import test_sync_activity_db as fixtures
 from tests.integration import test_sync_management_db as management
@@ -114,8 +116,15 @@ async def create(activity, records=None, **extra):
 
 
 async def stage(activity, run_id, records=None):
+    return await stage_index(activity, run_id, 0, records)
+
+
+async def stage_index(activity, run_id, index, records=None):
     return await service(
-        activity, "PUT", f"runs/{run_id}/chunks/0", body={"records": records or [product()]}
+        activity,
+        "PUT",
+        f"runs/{run_id}/chunks/{index}",
+        body={"records": records or [product()]},
     )
 
 
@@ -390,6 +399,17 @@ async def test_resume_confirmation_follows_the_15_minutes_of_a_300_second_login(
 # --- the active-run cap ------------------------------------------------------
 
 
+async def assert_run_expired_and_cleared(activity, run_id) -> None:
+    """The run is expired and none of its staged chunks keeps a body."""
+    async with activity.factory() as db:
+        assert (await db.get(SyncRun, UUID(str(run_id)))).state == "expired"
+        chunks = (
+            await db.scalars(select(SyncChunk).where(SyncChunk.run_id == UUID(str(run_id))))
+        ).all()
+        assert chunks
+        assert [chunk.records for chunk in chunks] == [None] * len(chunks)
+
+
 async def test_ended_manual_runs_give_back_their_active_run_slots(activity):
     runs = []
     for _ in range(4):
@@ -397,18 +417,50 @@ async def test_ended_manual_runs_give_back_their_active_run_slots(activity):
         created = await create(activity, manual_request_id=proof["request_id"])
         assert created.status_code == 201, created.text
         runs.append(UUID(created.json()["run_id"]))
+        staged_chunk = await stage(activity, runs[-1])
+        assert staged_chunk.status_code == 200, staged_chunk.text
 
     # The access tokens have expired, the requests have not: the slots stay held.
     await later(activity, minutes=6)
     refused = await create(activity)
     assert_conflict(refused)
+    async with activity.factory() as db:
+        assert {(await db.get(SyncRun, rid)).state for rid in runs} == {"uploading"}
 
     await later(activity, minutes=9)
     accepted = await create(activity)
     assert accepted.status_code == 201, accepted.text
+    # The ended runs were expired and their staged records cleared, so staging
+    # stays bounded by the four active runs.
+    for rid in runs:
+        await assert_run_expired_and_cleared(activity, rid)
+
+
+async def test_maintenance_expires_a_run_whose_login_was_revoked_before_24_hours(activity):
+    ended_proof = await manual_request(activity, await login(activity))
+    ended = await create(activity, manual_request_id=ended_proof["request_id"])
+    assert ended.status_code == 201, ended.text
+    assert (await stage(activity, ended.json()["run_id"])).status_code == 200
+    automatic = await create(activity)
+    assert automatic.status_code == 201, automatic.text
+    assert (await stage(activity, automatic.json()["run_id"])).status_code == 200
+
+    await change(
+        activity.store,
+        OIDCGrant,
+        activity.store.grant_ids["member"],
+        revoked_at=activity.store.clock.now,
+    )
     async with activity.factory() as db:
-        # Nothing rewrote the ended runs; they are simply not counted.
-        assert {(await db.get(SyncRun, rid)).state for rid in runs} == {"uploading"}
+        await maintain_sync_runs(db)
+        await db.commit()
+
+    await assert_run_expired_and_cleared(activity, ended.json()["run_id"])
+    async with activity.factory() as db:
+        kept = await db.get(SyncRun, UUID(automatic.json()["run_id"]))
+        assert kept.state == "uploading"
+        chunk = await db.get(SyncChunk, (kept.id, 0))
+        assert chunk.records is not None
 
 
 # --- revocation ends the request at once ---------------------------------------
@@ -490,8 +542,12 @@ async def test_revoking_the_login_ends_the_request_and_frees_its_slot_at_once(
     revoke, message = REVOCATIONS[path]
     token = await login(activity)
     proof = await manual_request(activity, token)
-    manual_run = await create(activity, manual_request_id=proof["request_id"])
+    pair = [product("first"), product("second")]
+    manual_run = await create(activity, pair, chunks=2, manual_request_id=proof["request_id"])
     assert manual_run.status_code == 201, manual_run.text
+    run_id = manual_run.json()["run_id"]
+    first = await stage_index(activity, run_id, 0, [pair[0]])
+    assert first.status_code == 200, first.text
     for _ in range(3):
         automatic = await create(activity)
         assert automatic.status_code == 201, automatic.text
@@ -501,11 +557,13 @@ async def test_revoking_the_login_ends_the_request_and_frees_its_slot_at_once(
     await assert_login_revoked(activity)
 
     seen = conflicts_of(monkeypatch, sync_requests, "validate_manual_request")
-    assert_conflict(await stage(activity, manual_run.json()["run_id"]))
+    assert_conflict(await stage_index(activity, run_id, 1, [pair[1]]))
     assert seen == [message]
-    # No clock advance: the run gives back its slot as soon as the login is revoked.
+    # No clock advance: the run gives back its slot as soon as the login is revoked,
+    # and its staged records are cleared with it.
     accepted = await create(activity)
     assert accepted.status_code == 201, accepted.text
+    await assert_run_expired_and_cleared(activity, run_id)
 
 
 async def test_rotating_the_requesters_access_token_keeps_the_request(identity):
@@ -526,8 +584,12 @@ async def test_revoking_the_identity_client_ends_the_request_and_frees_its_slot(
 ):
     token = await login(activity)
     proof = await manual_request(activity, token)
-    created = await create(activity, manual_request_id=proof["request_id"])
+    pair = [product("first"), product("second")]
+    created = await create(activity, pair, chunks=2, manual_request_id=proof["request_id"])
     assert created.status_code == 201, created.text
+    run_id = created.json()["run_id"]
+    first = await stage_index(activity, run_id, 0, [pair[0]])
+    assert first.status_code == 200, first.text
     for _ in range(3):
         automatic = await create(activity)
         assert automatic.status_code == 201, automatic.text
@@ -536,7 +598,8 @@ async def test_revoking_the_identity_client_ends_the_request_and_frees_its_slot(
         activity.store, OIDCClient, activity.store.client_id, revoked_at=activity.store.clock.now
     )
     seen = conflicts_of(monkeypatch, sync_requests, "validate_manual_request")
-    assert_conflict(await stage(activity, created.json()["run_id"]))
+    assert_conflict(await stage_index(activity, run_id, 1, [pair[1]]))
     assert seen == [CHANGED]
     accepted = await create(activity)
     assert accepted.status_code == 201, accepted.text
+    await assert_run_expired_and_cleared(activity, run_id)
