@@ -73,11 +73,23 @@ async def capture_vector_erasure(
     return len(rows)
 
 
-async def embedding_author_current(db: AsyncSession, memory: EmbeddingAuthor) -> bool:
-    """Fresh scalar lookup: ORM identity-map state cannot authorize a write."""
+async def embedding_author_current(
+    db: AsyncSession, memory: EmbeddingAuthor, *, canonical_rebuild: bool = False
+) -> bool:
+    """Fresh scalar lookup: ORM identity-map state cannot authorize a write.
+
+    ``canonical_rebuild`` (#2908): the caller rebuilds the row's point from the
+    row itself, so a feed-managed row passes the feed fence when it holds its
+    own unchanged canonical content (``assert_vector_memory_mutable``). Any
+    other vector write to a feed-managed row stays refused.
+    """
     from services.sync_managed_guard import assert_vector_memory_mutable
 
-    await assert_vector_memory_mutable(db, memory.id)
+    await assert_vector_memory_mutable(
+        db,
+        memory.id,
+        rebuild_from=memory if canonical_rebuild and isinstance(memory, Memory) else None,
+    )
     async with db.begin_nested():
         current = await db.scalar(
             select(Memory.id).where(
@@ -301,13 +313,16 @@ async def drain_vector_erasures(
     return {"completed": done, "pending": failed}
 
 
-async def reconcile_erased_writer(db: AsyncSession, memory: EmbeddingAuthor) -> bool:
+async def reconcile_erased_writer(
+    db: AsyncSession, memory: EmbeddingAuthor, *, canonical_rebuild: bool = False
+) -> bool:
     """Reopen durable scopes after a stale writer finishes, then remove raw points.
 
     Called after a summary/chunk/resource upsert. The repaired current author
     is queued only when explicitly restored; suppression itself never clears.
+    ``canonical_rebuild``: the writer's own fence rule (``embedding_author_current``).
     """
-    if await embedding_author_current(db, memory):
+    if await embedding_author_current(db, memory, canonical_rebuild=canonical_rebuild):
         return False
     from db.base import isolated_session
     from services.content_chunk_writer import requeue_embedding

@@ -569,8 +569,9 @@ async def test_re_embed_rebuilds_the_indexer_point_of_a_resource_row() -> None:
         await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll", db=db)
 
     indexer_cls.assert_called_once_with(db)
+    # #2908: a Sleep restore never takes the feed pipeline's restore.
     indexer.rebuild_point.assert_awaited_once_with(
-        memory, collection_name="coll", embedding_service=svc, usage=None
+        memory, collection_name="coll", embedding_service=svc, usage=None, canonical_rebuild=False
     )
     upsert.assert_not_awaited()
     write.assert_not_awaited()

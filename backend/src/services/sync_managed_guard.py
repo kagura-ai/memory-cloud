@@ -117,11 +117,118 @@ async def assert_memory_mutable(db: AsyncSession, memory: Memory) -> None:
         await assert_context_mutable(db, context_id)
 
 
-async def assert_vector_memory_mutable(db: AsyncSession, memory_id: UUID) -> None:
-    """Background vector writers resolve the authoritative current context first."""
+async def assert_vector_memory_mutable(
+    db: AsyncSession, memory_id: UUID, *, rebuild_from: Memory | None = None
+) -> None:
+    """Background vector writers resolve the authoritative current context first.
+
+    On a ``feed`` / ``stopping`` target every vector write is refused, except a
+    restore-only rebuild (#2908): the caller passes the row it rebuilds the
+    point from as ``rebuild_from``, and the write passes when that row is a
+    live feed row whose stored and in-hand content and resource version equal
+    its canonical sync record (``_canonical_feed_row``). The test runs after
+    the shared fence is taken, in the same transaction, so no mode transition
+    can come between it and the caller's commit. A rebuild also fences the
+    in-hand row's context when it differs from the stored one.
+
+    Raises:
+        ManagedDataLockedError: The row's context is feed-managed and this is
+            not a rebuild of its own unchanged canonical content.
+        ConflictError: A mode transition holds the fence; retry.
+    """
     context_id = await db.scalar(select(Memory.context_id).where(Memory.id == memory_id))
-    if isinstance(context_id, UUID):
-        await assert_context_mutable(db, context_id)
+    contexts = {context_id} if isinstance(context_id, UUID) else set()
+    if rebuild_from is not None and isinstance(rebuild_from.context_id, UUID):
+        contexts.add(rebuild_from.context_id)
+    for context in sorted(contexts, key=str):
+        fence = await target_fence(db, context)
+        if fence.state in (None, "manual"):
+            continue
+        if (
+            rebuild_from is not None
+            and rebuild_from.id == memory_id
+            and await _canonical_feed_row(db, fence, rebuild_from)
+        ):
+            continue
+        raise ManagedDataLockedError(fence.state)
+
+
+async def _canonical_feed_row(db: AsyncSession, fence: TargetFence, memory: Memory) -> bool:
+    """Whether ``memory`` holds exactly its canonical record under the enrolled target.
+
+    The conditions ``canonical_index_complete`` checks for one row, minus the
+    embedding status: live, in the target's context and resource, a feed row
+    (``source`` ``resource_ingest``, ``version`` 1, authored by the context
+    creator) whose document has a canonical record with a payload, whose
+    resource version is the record's and whose content is the record's
+    payload. The in-hand row must carry the same values, since a point is built
+    from it. A retained target not enrolled yet has no target row: refused.
+    """
+    from sqlalchemy import and_, case, cast, func
+    from sqlalchemy.dialects.postgresql import JSONB
+
+    from models.auth import Context
+    from models.sync_feed import SyncFeed, SyncRecord
+
+    target = fence.mode
+    if target is None:
+        return False
+    stored = case(
+        (func.pg_input_is_valid(Memory.content, "jsonb"), cast(Memory.content, JSONB)),
+        else_=None,
+    )
+    with db.no_autoflush:
+        row = (
+            await db.execute(
+                select(
+                    Memory.content,
+                    Memory.context_id,
+                    Memory.user_id,
+                    Memory.resource_id,
+                    Memory.resource_doc_id,
+                    Memory.resource_version,
+                )
+                .join(
+                    SyncInstallation,
+                    and_(
+                        SyncInstallation.id == target.installation_id,
+                        SyncInstallation.context_id == Memory.context_id,
+                        SyncInstallation.resource_id == Memory.resource_id,
+                    ),
+                )
+                .join(
+                    Context,
+                    and_(Context.id == Memory.context_id, Context.created_by == Memory.user_id),
+                )
+                .join(SyncFeed, SyncFeed.installation_id == SyncInstallation.id)
+                .join(
+                    SyncRecord,
+                    and_(
+                        SyncRecord.feed_id == SyncFeed.id,
+                        SyncRecord.doc_id == Memory.resource_doc_id,
+                        SyncRecord.version == Memory.resource_version,
+                        SyncRecord.payload.is_not(None),
+                        stored.is_not_distinct_from(SyncRecord.payload),
+                    ),
+                )
+                .where(
+                    Memory.id == memory.id,
+                    Memory.context_id == target.context_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.version == 1,
+                    Memory.source == "resource_ingest",
+                )
+                .limit(1)
+            )
+        ).first()
+    return row is not None and tuple(row) == (
+        memory.content,
+        memory.context_id,
+        memory.user_id,
+        memory.resource_id,
+        memory.resource_doc_id,
+        memory.resource_version,
+    )
 
 
 async def fence_state_for_memories(

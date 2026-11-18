@@ -78,11 +78,43 @@ async def test_a_resource_row_gets_the_indexer_point_back() -> None:
 
     assert written is None
     indexer.rebuild_point.assert_awaited_once_with(
-        memory, collection_name="coll", embedding_service=svc, usage=usage
+        memory, collection_name="coll", embedding_service=svc, usage=usage, canonical_rebuild=False
     )
     assert order == ["on_write", "rebuild"]
     upsert.assert_not_awaited()
     svc.embed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resource_row", [True, False])
+async def test_only_a_resource_row_takes_the_canonical_rebuild_rule(resource_row) -> None:
+    """#2908: the pipeline's restore applies to an indexer point, never a summary point."""
+    memory = _resource_memory() if resource_row else _memory()
+    svc = MagicMock()
+    svc.embed = AsyncMock(return_value=[0.1])
+    indexer = MagicMock()
+    indexer.rebuild_point = AsyncMock()
+    guard = AsyncMock(return_value=True)
+    with (
+        patch("services.vector_erasure.embedding_author_current", new=guard),
+        patch("services.vector_erasure.reconcile_erased_writer", new=AsyncMock(return_value=False)),
+        patch("services.memory_service.add_memory_to_qdrant", new=AsyncMock()),
+    ):
+        await write_memory_point(
+            MagicMock(),
+            memory,
+            collection_name="coll",
+            embedding_service=svc,
+            resource_indexer=indexer,
+            canonical_rebuild=True,
+            **_SCOPE,
+        )
+
+    assert guard.await_args_list[0].kwargs == {"canonical_rebuild": resource_row}
+    if resource_row:
+        assert indexer.rebuild_point.await_args.kwargs["canonical_rebuild"] is True
+    else:
+        indexer.rebuild_point.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -1892,6 +1892,7 @@ class ResourceIndexer:
         collection_name: str,
         embedding_service: EmbeddingService,
         usage: dict[str, int] | None = None,
+        canonical_rebuild: bool = False,
     ) -> UUID:
         """Write the point of a resource-ingested row again, from the row (#1870).
 
@@ -1920,6 +1921,11 @@ class ResourceIndexer:
             usage: Optional out-parameter for a caller that accounts embedding
                 cost (Sleep reindex, #2053): ``usage["tokens"]`` is set to the
                 embedding's token count (0 on a cache hit).
+            canonical_rebuild: The embedding pipeline's restore (#2908). On a
+                ``feed`` / ``stopping`` target the rebuild is written only when
+                the row holds its own unchanged canonical content, checked
+                under the feed fence before the embedding and again before the
+                upsert; without it any feed-managed row is refused.
 
         Returns:
             The id of the point written, equal to ``memory.point_id``.
@@ -1930,13 +1936,17 @@ class ResourceIndexer:
                 object. Ingesting the document again (a newer
                 version; the same one is refused as a duplicate) rebuilds it.
             QdrantError: The upsert failed.
+            ManagedDataLockedError: The row is feed-managed and this is not a
+                canonical rebuild of it.
         """
         from services.sync_managed_guard import assert_context_mutable
         from services.vector_erasure import embedding_author_current, reconcile_erased_writer
 
-        await assert_context_mutable(self.db, memory.context_id)
+        if not canonical_rebuild:
+            # A canonical rebuild fences the in-hand context in the guard below.
+            await assert_context_mutable(self.db, memory.context_id)
 
-        if not await embedding_author_current(self.db, memory):
+        if not await embedding_author_current(self.db, memory, canonical_rebuild=canonical_rebuild):
             return memory.point_id
         if not owns_resource_point(memory):
             raise ResourceRebuildError(f"Memory {memory.id} does not own a resource point")
@@ -2016,7 +2026,7 @@ class ResourceIndexer:
                 else None
             ),
         )
-        if not await embedding_author_current(self.db, memory):
+        if not await embedding_author_current(self.db, memory, canonical_rebuild=canonical_rebuild):
             return memory.point_id
         # Rebuild follows the row author, including an explicit restored pseudonym.
         if point.payload is not None:
@@ -2030,7 +2040,7 @@ class ResourceIndexer:
         except Exception as e:
             raise QdrantError(f"Failed to upsert point: {e}") from e
 
-        await reconcile_erased_writer(self.db, memory)
+        await reconcile_erased_writer(self.db, memory, canonical_rebuild=canonical_rebuild)
         logger.info(
             "resource_point_rebuilt",
             memory_id=str(memory.id),

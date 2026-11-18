@@ -38,6 +38,7 @@ from services import memory_service
 from services.memory_service import (
     embedding_failure_values,
     is_configuration_failure,
+    is_managed_lock_failure,
     is_unrebuildable_resource_failure,
 )
 from services.resource_indexer import ResourceRebuildError
@@ -45,6 +46,7 @@ from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
     FeatureNotAvailableError,
+    ManagedDataLockedError,
     OpenAIError,
     ValidationError,
 )
@@ -216,6 +218,43 @@ class TestAnUnrebuildableResourceRowIsFinalAtOnce:
 
     def test_a_transient_failure_keeps_its_budget(self):
         assert "embedding_retry_count" not in embedding_failure_values(OpenAIError("boom"), NOW)
+
+
+class TestAFeedManagedRefusalKeepsItsBudget:
+    """#2908: the feed fence refused the row; retries cannot change that.
+
+    Stopping the feed, or the indexer replacing the row with the current
+    version, does. The row must not count down to the ceiling meanwhile, or it
+    stays unsearchable once the target is ``manual`` and blocks nothing.
+    """
+
+    @pytest.mark.parametrize("mode", ["feed", "stopping"])
+    def test_it_is_its_own_class_of_failure(self, mode):
+        exc = ManagedDataLockedError(mode)
+        assert is_managed_lock_failure(exc) is True
+        assert is_unrebuildable_resource_failure(exc) is False
+
+    @pytest.mark.parametrize(
+        "factory",
+        [
+            lambda: OpenAIError("Embedding generation failed: connection reset"),
+            lambda: ConfigurationError("OpenAI API key not configured"),
+            lambda: ResourceRebuildError("no schema"),
+            lambda: RuntimeError("something else entirely"),
+        ],
+        ids=["provider-error", "no-credential", "unrebuildable", "unknown"],
+    )
+    def test_nothing_else_is(self, factory):
+        assert is_managed_lock_failure(factory()) is False
+
+    def test_the_row_stays_failed_with_its_budget(self):
+        """Re-probed after each backoff without bound, like a missing credential."""
+        exc = ManagedDataLockedError("feed")
+        values = embedding_failure_values(exc, NOW)
+        assert values["embedding_status"] == "failed"
+        assert values["embedding_retry_count"] == 0
+        assert values["embedding_error"] == f"SYNC-LOCKED: {exc}"
+        assert values["embedding_attempted_at"] == NOW
 
 
 class TestTheExceptionTypesSurviveTheServiceLayer:
