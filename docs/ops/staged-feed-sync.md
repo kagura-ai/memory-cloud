@@ -117,6 +117,9 @@ ambiguous credentials and invalid payloads receive fixed no-store errors.
    `POST`s `{"diff_hash":"..."}` to the human `/runs/{run}/approvals` path.
    The returned finite approval also binds the workspace ownership epoch;
    commit rechecks the approver's current membership and write permission.
+   When the approver no longer qualifies (membership, Editor role, seat, plan
+   or capacity), the worker's commit answers 409 `RES-002`; that is not a
+   refusal of the worker, so no `sync.authority.denied` event is recorded.
    For a run declaring `manual_request_id`, approval also revalidates the
    original manual request, requester token/family and Editor reach, browser
    client, ownership/generation and complete source version. Its original

@@ -15,9 +15,11 @@ from sqlalchemy import func, select
 
 from config import plan_tiers
 from models.auth import AuditLog, Workspace
+from services import sync_requests
 from tests.integration import test_sync_activity_db as fixtures
 from tests.integration import test_sync_management_db as management
 from tests.integration.sync_feed_fixtures import human, manifest, product, service, staged
+from utils.exceptions import ConflictError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 store, worker, feeds, activity = fixtures.store, fixtures.worker, fixtures.feeds, fixtures.activity
@@ -65,6 +67,29 @@ def assert_conflict(response) -> None:
     assert response.json() == {"error": "RES-002"}
 
 
+def conflicts_of(monkeypatch, module, name) -> list[str]:
+    """Record the conflict message each call of ``module.name`` ends with.
+
+    The response only carries ``RES-002``; the message shows which check
+    refused (here: the recheck of the original requester or approver).
+    """
+    seen: list[str] = []
+    original = getattr(module, name)
+
+    async def spy(*args, **kwargs):
+        try:
+            return await original(*args, **kwargs)
+        except ConflictError as exc:
+            seen.append(exc.message)
+            raise
+
+    monkeypatch.setattr(module, name, spy)
+    return seen
+
+
+CHANGED = "Manual request authority changed"
+
+
 async def test_worker_manual_run_paths_answer_409_when_the_requester_lost_a_seat(
     activity, monkeypatch
 ):
@@ -95,6 +120,7 @@ async def test_worker_manual_run_paths_answer_409_when_the_requester_lost_a_seat
     before = await denials(activity)
 
     await lose_requester_seat(activity, monkeypatch)
+    seen = conflicts_of(monkeypatch, sync_requests, "validate_manual_request")
 
     created = await service(
         activity,
@@ -103,6 +129,7 @@ async def test_worker_manual_run_paths_answer_409_when_the_requester_lost_a_seat
         body=manifest(activity, records, manual_request_id=unused_request),
     )
     assert_conflict(created)
+    assert seen == [CHANGED]
     assert_conflict(
         await service(
             activity,
@@ -111,7 +138,9 @@ async def test_worker_manual_run_paths_answer_409_when_the_requester_lost_a_seat
             body={"records": records},
         )
     )
+    assert seen == [CHANGED] * 2
     assert_conflict(await service(activity, "POST", f"runs/{to_prepare.json()['run_id']}/prepare"))
+    assert seen == [CHANGED] * 3
     assert_conflict(
         await service(
             activity,
@@ -120,6 +149,7 @@ async def test_worker_manual_run_paths_answer_409_when_the_requester_lost_a_seat
             body={"diff_hash": to_commit["diff_hash"]},
         )
     )
+    assert seen == [CHANGED] * 4
     # A lost original seat is a conflict, never a refusal of the worker.
     assert await denials(activity) == before
 
