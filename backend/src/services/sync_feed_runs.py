@@ -125,10 +125,12 @@ async def expire_ended_manual_runs(
 
     The same transition as the 24-hour expiry in ``maintain_sync_runs``, taken
     as soon as the request is no longer current, so an ended run holds neither
-    an active-run slot nor its staged chunks. Runs are locked ``FOR UPDATE OF
-    sync_runs SKIP LOCKED``: a run another transaction holds is left for the
-    next sweep (its own recheck refuses it meanwhile), and no feed row is
-    locked. Plain statements, no savepoint: the caller's transaction owns them.
+    an active-run slot nor its staged chunks; like every run that ends without
+    a commit, it drops its diff and keeps its change count (#2916). Runs are
+    locked ``FOR UPDATE OF sync_runs SKIP LOCKED``: a run another transaction
+    holds is left for the next sweep (its own recheck refuses it meanwhile),
+    and no feed row is locked. Plain statements, no savepoint: the caller's
+    transaction owns them.
 
     Args:
         db: Session of the caller's transaction.
@@ -156,7 +158,13 @@ async def expire_ended_manual_runs(
     await db.execute(
         update(SyncRun)
         .where(SyncRun.id.in_(ids))
-        .values(state="expired", approved_by=None, approval_id=None, approval_epoch=None)
+        .values(
+            state="expired",
+            approved_by=None,
+            approval_id=None,
+            approval_epoch=None,
+            **cleared_diff(),
+        )
     )
 
 

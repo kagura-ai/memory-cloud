@@ -399,10 +399,16 @@ async def test_resume_confirmation_follows_the_15_minutes_of_a_300_second_login(
 # --- the active-run cap ------------------------------------------------------
 
 
-async def assert_run_expired_and_cleared(activity, run_id) -> None:
-    """The run is expired and none of its staged chunks keeps a body."""
+async def assert_run_expired_and_cleared(activity, run_id, changes=None) -> None:
+    """The run is expired, none of its staged chunks keeps a body and it has no diff.
+
+    ``changes`` is the change count the run reported when it was prepared
+    (None for a run never prepared): an ended run keeps it without its diff,
+    as an abort or the 24-hour expiry does (#2916).
+    """
     async with activity.factory() as db:
-        assert (await db.get(SyncRun, UUID(str(run_id)))).state == "expired"
+        run = await db.get(SyncRun, UUID(str(run_id)))
+        assert (run.state, run.diff, run.change_count) == ("expired", None, changes)
         chunks = (
             await db.scalars(select(SyncChunk).where(SyncChunk.run_id == UUID(str(run_id))))
         ).all()
@@ -436,6 +442,24 @@ async def test_ended_manual_runs_give_back_their_active_run_slots(activity):
         await assert_run_expired_and_cleared(activity, rid)
 
 
+async def test_run_creation_expires_a_prepared_ended_run_without_its_diff(activity):
+    proof = await manual_request(activity, await login(activity))
+    created = await create(activity, manual_request_id=proof["request_id"])
+    assert created.status_code == 201, created.text
+    run_id = created.json()["run_id"]
+    assert (await stage(activity, run_id)).status_code == 200
+    prepared = await service(activity, "POST", f"runs/{run_id}/prepare")
+    assert prepared.status_code == 200, prepared.text
+    changes = prepared.json()["changes"]
+    assert changes >= 1
+
+    await later(activity, minutes=15)
+    accepted = await create(activity)
+    assert accepted.status_code == 201, accepted.text
+    # The next run creation expired the ended run: its diff went, its count stays.
+    await assert_run_expired_and_cleared(activity, run_id, changes=changes)
+
+
 async def test_maintenance_expires_a_run_whose_login_was_revoked_before_24_hours(activity):
     ended_proof = await manual_request(activity, await login(activity))
     ended = await create(activity, manual_request_id=ended_proof["request_id"])
@@ -444,6 +468,11 @@ async def test_maintenance_expires_a_run_whose_login_was_revoked_before_24_hours
     automatic = await create(activity)
     assert automatic.status_code == 201, automatic.text
     assert (await stage(activity, automatic.json()["run_id"])).status_code == 200
+    # The ended run is prepared: it has a diff for the expiry to clear.
+    prepared = await service(activity, "POST", f"runs/{ended.json()['run_id']}/prepare")
+    assert prepared.status_code == 200, prepared.text
+    changes = prepared.json()["changes"]
+    assert changes >= 1
 
     await change(
         activity.store,
@@ -455,7 +484,7 @@ async def test_maintenance_expires_a_run_whose_login_was_revoked_before_24_hours
         await maintain_sync_runs(db)
         await db.commit()
 
-    await assert_run_expired_and_cleared(activity, ended.json()["run_id"])
+    await assert_run_expired_and_cleared(activity, ended.json()["run_id"], changes=changes)
     async with activity.factory() as db:
         kept = await db.get(SyncRun, UUID(automatic.json()["run_id"]))
         assert kept.state == "uploading"
