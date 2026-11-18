@@ -189,8 +189,8 @@ does not silently alter another application's registration.
    clock-skew/cache overlap. Remove the old public key only after that window.
 
 Each API process keeps the signing keys it parsed and re-reads the file when it
-changes: every operation compares the file's device, inode, modification time,
-size and mode, and the `OIDC_ISSUER`, `OIDC_ACTIVE_SIGNING_KID` and
+changes: every operation compares the file's device, inode, modification and
+change time, size and mode, and the `OIDC_ISSUER`, `OIDC_ACTIVE_SIGNING_KID` and
 `OIDC_SIGNING_KEYS_FILE` settings, with the ones the keys were parsed from. An
 atomically replaced file therefore takes effect on the next request. A
 replacement that cannot be read or validated answers 503; the keys parsed

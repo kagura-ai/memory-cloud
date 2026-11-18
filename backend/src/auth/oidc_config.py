@@ -161,20 +161,32 @@ _key_ring_cache = _KeyRingCache()
 
 def _file_identity(status: os.stat_result) -> tuple[int, ...]:
     """What tells a changed key file apart: a new file (atomic replacement),
-    new content (size, modification time) or new permissions or file type."""
-    return (status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size, status.st_mode)
+    new content (size, modification time) or new permissions or file type.
+
+    The change time is part of it because a write, chmod, chown, rename or a
+    restored modification time all move it forward, so an in-place rewrite of
+    the same size within one modification-time tick is still noticed.
+    """
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+        status.st_size,
+        status.st_mode,
+    )
 
 
 def load_oidc_config(settings: Any = None) -> OIDCConfig:
     """Return the validated key ring; disabled/unconfigured providers refuse.
 
     The parsed ring is reused until the key file or the settings change: each
-    call compares the file's identity (device, inode, modification time, size
-    and mode) and the issuer, active key ID and path with the ones the ring was
-    parsed from, and re-reads the file when any differs. An atomically replaced
-    key file therefore takes effect on the next call. A replacement that cannot
-    be read or validated is refused; the previously parsed keys are never used
-    for it. The caller maps failures to a safe 503.
+    call compares the file's identity (device, inode, modification and change
+    time, size and mode) and the issuer, active key ID and path with the ones
+    the ring was parsed from, and re-reads the file when any differs. An
+    atomically replaced key file therefore takes effect on the next call. A
+    replacement that cannot be read or validated is refused; the previously
+    parsed keys are never used for it. The caller maps failures to a safe 503.
     """
     if settings is None:
         from config.settings import get_settings
@@ -200,8 +212,10 @@ def load_oidc_config(settings: Any = None) -> OIDCConfig:
                 current = None
             if current == entry.file:
                 return entry.config
-        # Whatever happens below, the old ring no longer answers for this file.
-        cache.entry = None
+        # A read or parse failure below leaves the previous entry in place, and
+        # that is safe: it answers only for the exact settings and file identity
+        # it was parsed from, which a changed file never has again (its change
+        # time has moved on), so the refused replacement never gets its keys.
         content, opened = _read_private_file(path, label=_KEY_FILE_LABEL)
         config = _parse_key_ring(content, issuer, active_kid)
         cache.entry = _CachedKeyRing(wanted, _file_identity(opened), config)

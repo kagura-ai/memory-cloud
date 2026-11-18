@@ -465,6 +465,41 @@ def test_permission_change_in_place_is_refused_on_the_next_load(tmp_path, signin
         load_oidc_config(_settings(path))
 
 
+def test_in_place_rewrite_keeping_size_and_modification_time_is_reloaded(
+    tmp_path, signing_keys, imports
+):
+    """Same inode, size, mode and restored mtime: only the change time tells it apart."""
+    import time
+
+    path = _ring(tmp_path, signing_keys)
+    before = path.stat()
+    first = load_oidc_config(_settings(path))
+    content = path.read_bytes()
+    rewritten = content.replace(b'"previous"', b'"formerly"')
+    assert len(rewritten) == len(content) and rewritten != content
+    with path.open("r+b") as handle:
+        handle.write(rewritten)
+    deadline = time.monotonic() + 2
+    while True:
+        # utime restores the modification time and always moves the change time.
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        if after.st_ctime_ns != before.st_ctime_ns or time.monotonic() > deadline:
+            break
+        time.sleep(0.005)
+    assert (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size, after.st_mode) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_size,
+        before.st_mode,
+    )
+    assert after.st_ctime_ns != before.st_ctime_ns
+    second = load_oidc_config(_settings(path))
+    assert [key["kid"] for key in first.public_jwks["keys"]] == ["current", "previous"]
+    assert [key["kid"] for key in second.public_jwks["keys"]] == ["current", "formerly"]
+
+
 def test_changing_the_active_key_id_setting_reloads_the_key_file(tmp_path, signing_keys, imports):
     path = _two_private_keys(tmp_path, signing_keys)
     current = load_oidc_config(_settings(path))
