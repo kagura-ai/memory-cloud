@@ -1,13 +1,14 @@
 """Fixed, non-expanding input and inspection contracts for synchronization."""
 
-from datetime import datetime
-from typing import Literal
+from datetime import datetime, timedelta
+from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from models.api_base import TZAwareBaseModel
 from models.sync_mode_access_schemas import SyncModeStatus
+from utils.datetime import to_naive_utc
 from utils.query_bounds import NO_NUL_PATTERN
 
 
@@ -86,5 +87,57 @@ class SyncActivationObservation(TZAwareBaseModel):
     binding_current: bool
     installation: SyncInstallationView | None
     management: SyncModeStatus | None
+    observed_at: datetime
+    valid_until: datetime
+
+
+class _FiniteSyncObservation(TZAwareBaseModel):
+    """A private observation lease, never a reusable authorization grant."""
+
+    model_config = ConfigDict(extra="forbid")
+    observed_at: datetime
+    valid_until: datetime
+
+    @model_validator(mode="after")
+    def finite_lifetime(self) -> Self:
+        lifetime = to_naive_utc(self.valid_until) - to_naive_utc(self.observed_at)
+        if not timedelta(0) < lifetime <= timedelta(seconds=30):
+            raise ValueError("Synchronization observation must expire within 30 seconds")
+        return self
+
+
+class SyncEstablishedTargetObservation(_FiniteSyncObservation):
+    """Established binding continuity, never a new-owner consent or lifecycle grant."""
+
+    model_config = ConfigDict(extra="forbid")
+    contract_version: Literal["sync-established-target-observation-v1"]
+    workspace_id: UUID
+    application_id: str
+    authorization: SyncAuthorizationView
+    ownership_epoch: int = Field(strict=True, ge=0, le=9_007_199_254_740_991)
+    continuity_current: StrictBool
+    installation: SyncInstallationView | None
+    management: SyncModeStatus | None
+    observed_at: datetime
+    valid_until: datetime
+
+
+class SyncReconnectValidation(SyncActivation):
+    """Select an exact retained target for read-only pending-consent validation."""
+
+    installation_id: UUID
+
+
+class SyncReconnectValidationView(_FiniteSyncObservation):
+    """Finite current-owner reconnect preconditions, without paid/provisioning authority."""
+
+    model_config = ConfigDict(extra="forbid")
+    contract_version: Literal["sync-reconnect-validation-v1"]
+    workspace_id: UUID
+    application_id: str
+    authorization: SyncAuthorizationView
+    ownership_epoch: int = Field(strict=True, ge=0, le=9_007_199_254_740_991)
+    installation: SyncInstallationView
+    management: SyncModeStatus
     observed_at: datetime
     valid_until: datetime
