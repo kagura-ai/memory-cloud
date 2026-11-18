@@ -144,9 +144,12 @@ buckets, each per endpoint:
    `/oidc/token`, the token being revoked on `/oidc/revoke`, an OIDC access
    token on UserInfo, the workspace routes, the sync control routes and the
    setup handoff, or a sync service token on the sync service routes. It is
-   then counted in a bucket for that credential's client, with the same
-   limit. On `/oidc/authorize` a browser that is already signed in is counted
-   for its account instead; the session cookie was already resolved for the
+   then counted in a bucket for that credential's holder, with the same
+   limit. An authorization code, refresh token or access token is held by
+   the client and the user it was issued to together, so each signed-in user
+   of a client has a bucket of their own; a sync service token is held by its
+   sync client. On `/oidc/authorize` a browser that is already signed in is
+   counted for its account; the session cookie was already resolved for the
    request. Recognition only decides admission: the request then goes
    through the usual checks and gets the same answer it would get within the
    budget.
@@ -154,8 +157,8 @@ buckets, each per endpoint:
 A request over the per-peer budget without such a credential (none, an
 unknown one, or a `client_credentials` grant, whose signed assertion is new
 for every request) gets 429 with `Retry-After`, before any client
-authentication. A client over its own bucket gets the same 429; other clients
-are not affected. An unavailable Redis counter, for either bucket, returns 503
+authentication. A holder over its own bucket gets the same 429; other users
+of the same client, and other clients, are not affected. An unavailable Redis counter, for either bucket, returns 503
 instead of allowing unlimited authentication attempts. Discovery and JWKS
 remain available independently of these counters. Neither credentials, client
 IDs nor raw peer addresses are stored in the counter keys.
@@ -200,11 +203,21 @@ caller's address:
 
    Requests that do not come from those ranges keep their own peer address,
    so the header cannot be supplied by a caller that reaches the proxy
-   directly. Keep the range list current when the CDN publishes changes. The
-   single-server template's Caddyfile already has a global `servers` block;
-   the two lines go there. Its API containers reach Caddy over a Compose
-   network: find that network's subnet with `docker network inspect` and use
-   it for `FORWARDED_ALLOW_IPS` in step 1.
+   directly. Keep the range list current when the CDN publishes changes.
+   The `header_up` line is needed as well as the two global lines: for a
+   request from a trusted proxy, Caddy's default `X-Forwarded-For` keeps the
+   incoming list and appends its direct peer, the CDN edge, and Uvicorn
+   would take that edge address as the caller.
+
+   In the single-server template's Caddyfile, the two lines go into its
+   existing global `servers` block, and `header_up X-Forwarded-For {client_ip}`
+   goes into every `reverse_proxy ${API_UPSTREAM}:8080` (the `/oidc/*`,
+   `/api/*`, `/oauth/*`, `/mcp*` and `/.well-known/*` handlers and the other
+   API handlers, including the public MCP domain block when it is enabled).
+   A one-line `reverse_proxy ${API_UPSTREAM}:8080` becomes a block holding
+   that line, as in the example above. The API containers reach Caddy over a
+   Compose network: find that network's subnet with `docker network inspect`
+   and use it for `FORWARDED_ALLOW_IPS` in step 1.
 4. **Check.** Send a request through the CDN and confirm in the API's access
    log that it carries the caller's address, not the proxy's or the CDN's.
 

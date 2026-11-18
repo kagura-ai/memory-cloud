@@ -178,7 +178,7 @@ async def test_setup_rate_guard_is_fail_closed_before_db(surface, failure, monke
     else:
         surface[3].return_value = 61
         # #2903: an unknown token over the peer budget gets the same 429.
-        monkeypatch.setattr(oidc_limits, "_scalar", AsyncMock(return_value=None))
+        monkeypatch.setattr(oidc_limits, "_first_row", AsyncMock(return_value=None))
         expected = 429
     response = await post(surface)
     assert response.status_code == expected and not surface[1]

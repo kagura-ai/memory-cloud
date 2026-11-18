@@ -2,7 +2,7 @@
 
 Over the per-peer budget the limiter recognises a presented credential with
 one plain read on a session of its own. These tests pin that the read finds
-the credential's client for every kind, never waits on (or takes) the row
+the credential's client and user for every kind, never waits on (or takes) the row
 locks the protocol holds, leaves nothing open and changes nothing it reads,
 and that real routes admit a recognised caller while an unknown one keeps the
 429.
@@ -103,6 +103,7 @@ async def issued(async_engine, monkeypatch):
             factory=factory,
             user_id=user_id,
             client_id=client_id,
+            holder=f"oidc-client:{client_id}:user:{user_id}",
             grant_id=grant_id,
             values=values,
         )
@@ -117,9 +118,9 @@ async def recognise(kind, value):
     return await asyncio.wait_for(oidc_limits._holder(PresentedCredential(kind, value)), 5)
 
 
-async def test_each_issued_credential_is_recognised_as_its_client(issued):
+async def test_each_issued_credential_is_recognised_as_its_client_and_user(issued):
     for kind, value in issued.values.items():
-        assert await recognise(kind, value) == "oidc-client:" + issued.client_id
+        assert await recognise(kind, value) == issued.holder
     for kind, prefix in PREFIXES.items():
         assert await recognise(kind, prefix + secrets.token_urlsafe(32)) is None
     # A credential presented as another kind does not match that kind's shape.
@@ -140,7 +141,7 @@ async def test_spent_expired_or_revoked_credentials_are_still_recognised(issued)
         grant.revoked_at = utcnow()
         await db.commit()
     for kind, value in issued.values.items():
-        assert await recognise(kind, value) == "oidc-client:" + issued.client_id
+        assert await recognise(kind, value) == issued.holder
 
 
 async def test_recognition_neither_waits_on_nor_takes_the_protocol_row_locks(issued):
@@ -158,7 +159,7 @@ async def test_recognition_neither_waits_on_nor_takes_the_protocol_row_locks(iss
         ):
             assert (await holder.execute(statement.with_for_update())).first() is not None
         for kind, value in issued.values.items():
-            assert await recognise(kind, value) == "oidc-client:" + issued.client_id
+            assert await recognise(kind, value) == issued.holder
         open_elsewhere = await holder.scalar(
             text(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
@@ -226,13 +227,19 @@ async def test_over_budget_owner_still_records_a_sync_authorization_counted_per_
         store, "POST", "sync-authorizations", body=installations.approval_body()
     )
     assert response.status_code == 201, response.text
-    assert counter.holder("sync-human", "oidc-client:" + store.client_id) == 1
+    assert (
+        counter.holder("sync-human", f"oidc-client:{store.client_id}:user:{store.users['owner']}")
+        == 1
+    )
     store.tokens["owner"] = "kmc_oidc_at_" + secrets.token_urlsafe(32)
     refused = await installations.http(
         store, "POST", "sync-authorizations", body=installations.approval_body()
     )
     assert refused.status_code == 429
-    assert counter.holder("sync-human", "oidc-client:" + store.client_id) == 1
+    assert (
+        counter.holder("sync-human", f"oidc-client:{store.client_id}:user:{store.users['owner']}")
+        == 1
+    )
 
 
 async def test_over_budget_worker_still_reads_its_installation_counted_per_sync_client(

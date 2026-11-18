@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from api.routes import oidc
 from auth import oidc_limits
 from config.settings import get_settings
+from models.auth import User
 from models.oidc import OIDCClient
 from tests.api.test_oidc_provider import (
     CALLBACK,
@@ -39,6 +40,8 @@ from tests.api.test_oidc_provider import (
 
 LIMIT = 10
 OTHER_CLIENT = CLIENT + "-other"
+OTHER_USER = SUBJECT + "-other"
+HOLDER = f"oidc-client:{CLIENT}:user:{SUBJECT}"
 PEER_429 = {"error": "temporarily_unavailable", "error_description": "OIDC rate limit exceeded."}
 
 
@@ -75,12 +78,13 @@ def burst(store: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> SimpleName
     async def lookup_on_store(statement):
         lookups.append(statement)
         with store.factory() as db:
-            return db.scalar(statement)
+            row = db.execute(statement).first()
+            return None if row is None else tuple(row)
 
     monkeypatch.setattr(get_settings(), "oidc_rate_limit_per_minute", LIMIT)
     monkeypatch.setattr(oidc_limits, "increment_counter", counter)
     monkeypatch.setattr(oidc_limits, "time", SimpleNamespace(time=lambda: 125.0))
-    monkeypatch.setattr(oidc_limits, "_scalar", lookup_on_store)
+    monkeypatch.setattr(oidc_limits, "_first_row", lookup_on_store)
     return SimpleNamespace(counter=counter, lookups=lookups)
 
 
@@ -93,6 +97,8 @@ def api(store: SimpleNamespace, burst: SimpleNamespace) -> Iterator[TestClient]:
     async def browser_session(request: Request, call_next):
         if request.cookies.get("kagura_session") == "test-session":
             request.state.user = {"user_id": SUBJECT, "name": "Identity User"}
+        elif request.cookies.get("kagura_session") == "test-session-other":
+            request.state.user = {"user_id": OTHER_USER, "name": "Other User"}
         return await call_next(request)
 
     app.include_router(oidc.router, prefix="/oidc")
@@ -130,6 +136,15 @@ def add_other_client(store: SimpleNamespace) -> None:
         db.commit()
 
 
+def sign_in_other_user(api: TestClient, store: SimpleNamespace) -> None:
+    with store.factory() as db:
+        db.add(User(user_id=OTHER_USER, email="other@example.test", name="Other User"))
+        db.commit()
+    sessions = {"test-session": SUBJECT, "test-session-other": OTHER_USER}
+    store.manager.session_holds_user = lambda sid, uid: sessions.get(sid) == uid
+    api.cookies.set("kagura_session", "test-session-other")
+
+
 def test_over_budget_peer_still_exchanges_and_refreshes_counted_per_client(
     api, burst, secret_checks
 ):
@@ -139,7 +154,7 @@ def test_over_budget_peer_still_exchanges_and_refreshes_counted_per_client(
     assert issued.status_code == 200, issued.text
     rotated = refresh(api, issued.json()["refresh_token"])
     assert rotated.status_code == 200, rotated.text
-    assert burst.counter.holder("token", "oidc-client:" + CLIENT) == 2
+    assert burst.counter.holder("token", HOLDER) == 2
     assert secret_checks.call_count == 2  # admitted requests still authenticate the client
 
 
@@ -156,9 +171,8 @@ def test_over_budget_peer_still_reads_userinfo_and_revokes_counted_per_client(ap
     )
     assert revoked.status_code == 200, revoked.text
     assert api.get("/oidc/userinfo", headers=bearer).status_code == 401
-    holder = "oidc-client:" + CLIENT
-    assert burst.counter.holder("userinfo", holder) == 2
-    assert burst.counter.holder("revoke", holder) == 1
+    assert burst.counter.holder("userinfo", HOLDER) == 2
+    assert burst.counter.holder("revoke", HOLDER) == 1
 
 
 def test_over_budget_signed_in_browser_still_authorizes_counted_per_user(api, burst):
@@ -234,7 +248,7 @@ def test_client_bucket_refuses_only_its_own_client(api, burst, store):
     code, verifier = authorize(api)
     other_code, other_verifier = authorize(api, client_id=OTHER_CLIENT)
     burst.counter.peer_exhausted = True
-    own = holder_key("token", "oidc-client:" + CLIENT)
+    own = holder_key("token", HOLDER)
     burst.counter.counts[own] = LIMIT
     refused = exchange(api, code, verifier)
     assert refused.status_code == 429
@@ -277,3 +291,23 @@ def test_over_budget_invalid_request_gets_the_same_answer_as_within_budget(api, 
         replay_within.status_code,
         replay_within.json(),
     )
+
+
+@pytest.mark.parametrize("presenter", ["authorization_code", "refresh_token"])
+def test_replayed_user_credential_counts_only_in_that_users_bucket(api, burst, store, presenter):
+    code, verifier = authorize(api)
+    issued = exchange(api, code, verifier)  # spends the code
+    assert issued.status_code == 200, issued.text
+    sign_in_other_user(api, store)
+    other_code, other_verifier = authorize(api)
+    burst.counter.peer_exhausted = True
+    if presenter == "authorization_code":
+        replay = {"grant_type": "authorization_code", "code": code, "redirect_uri": CALLBACK}
+    else:
+        replay = {"grant_type": "refresh_token", "refresh_token": issued.json()["refresh_token"]}
+    answers = [api.post("/oidc/token", data=replay).status_code for _ in range(LIMIT + 3)]
+    assert 429 in answers  # the presenting user's own bucket ran out
+    assert burst.counter.holder("token", HOLDER) == LIMIT + 3
+    other = exchange(api, other_code, other_verifier)
+    assert other.status_code == 200, other.text
+    assert burst.counter.holder("token", f"oidc-client:{CLIENT}:user:{OTHER_USER}") == 1

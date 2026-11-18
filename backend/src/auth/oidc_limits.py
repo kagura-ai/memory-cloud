@@ -4,8 +4,10 @@ Every counted request first increments a bucket for its ASGI peer, before any
 validation. Over that budget a request is still admitted when it presents a
 credential this server issued and one indexed lookup recognises (no password
 hashing, no signature work): it is then counted in a second bucket keyed on
-the credential's holder (its client, or the signed-in user on authorize), with
-the same per-minute limit. A request without a recognisable credential gets
+the credential's holder, with the same per-minute limit: a sync service token
+counts for its sync client, a code or token issued to a user through an OIDC
+client counts for that client and that user together, and a signed-in browser
+on authorize counts for its user. A request without a recognisable credential gets
 the same 429 as before. The lookup only decides admission; the protocol code
 that runs afterwards sees the request unchanged.
 """
@@ -125,19 +127,26 @@ def _over_budget(now: int) -> JSONResponse:
     )
 
 
-def _holder_lookup(credential: PresentedCredential) -> tuple[str, Select[Any]] | None:
-    """The holder namespace and the one indexed read that recognises ``credential``."""
+def _holder_lookup(
+    credential: PresentedCredential,
+) -> tuple[tuple[str, ...], Select[*tuple[Any, ...]]] | None:
+    """The holder labels and the one indexed read that recognises ``credential``.
+
+    The read selects one column per label. An OIDC code or token is held per
+    client and user: it is issued to a user's browser or client, so the user it
+    was issued to answers for it together with the client.
+    """
     shape = _SHAPES.get(credential.kind)
     if shape is None or not shape.fullmatch(credential.value):
         return None
     digest = credential_hash(credential.value)
     if credential.kind == "sync_token":
-        return "sync-client", select(SyncAccessToken.client_id).where(
+        return ("sync-client",), select(SyncAccessToken.client_id).where(
             SyncAccessToken.token_hash == digest
         )
     if credential.kind == "authorization_code":
-        return "oidc-client", (
-            select(OIDCGrant.client_id)
+        return ("oidc-client", "user"), (
+            select(OIDCGrant.client_id, OIDCGrant.user_id)
             .join(OIDCAuthorizationCode, OIDCAuthorizationCode.grant_id == OIDCGrant.id)
             .where(OIDCAuthorizationCode.code_hash == digest)
         )
@@ -146,14 +155,14 @@ def _holder_lookup(credential: PresentedCredential) -> tuple[str, Select[Any]] |
         if credential.kind == "access_token"
         else OIDCToken.refresh_token_hash
     )
-    return "oidc-client", (
-        select(OIDCGrant.client_id)
+    return ("oidc-client", "user"), (
+        select(OIDCGrant.client_id, OIDCGrant.user_id)
         .join(OIDCToken, OIDCToken.grant_id == OIDCGrant.id)
         .where(column == digest)
     )
 
 
-async def _scalar(statement: Select[Any]) -> object:
+async def _first_row(statement: Select[*tuple[Any, ...]]) -> tuple[object, ...] | None:
     """Run one plain read in a short session of its own, never the request's.
 
     No row lock and no write; the session (and its connection) is closed
@@ -161,7 +170,8 @@ async def _scalar(statement: Select[Any]) -> object:
     transaction, identity map or audit binding with it.
     """
     async with _get_session_factory()() as session:
-        return await session.scalar(statement)
+        row = (await session.execute(statement)).first()
+        return None if row is None else tuple(row)
 
 
 async def _holder(credential: PresentedCredential) -> str | None:
@@ -176,9 +186,13 @@ async def _holder(credential: PresentedCredential) -> str | None:
     lookup = _holder_lookup(credential)
     if lookup is None:
         return None
-    namespace, statement = lookup
-    holder = await _scalar(statement)
-    return f"{namespace}:{holder}" if isinstance(holder, str) and holder else None
+    labels, statement = lookup
+    row = await _first_row(statement)
+    if row is None or len(row) != len(labels):
+        return None
+    if not all(isinstance(part, str) and part for part in row):
+        return None
+    return ":".join(f"{label}:{part}" for label, part in zip(labels, row, strict=True))
 
 
 async def _recognised_holder(

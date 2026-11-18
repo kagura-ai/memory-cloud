@@ -130,11 +130,11 @@ def _holder_key(operation: str, holder: str) -> str:
 
 @pytest.fixture
 def recognised(monkeypatch):
-    """The one lookup the limiter may run, recorded; answers ``client-a``."""
+    """The one lookup the limiter may run, recorded; answers ``client-a`` for ``user-1``."""
     import auth.oidc_limits as limits
 
-    lookup = AsyncMock(return_value="client-a")
-    monkeypatch.setattr(limits, "_scalar", lookup)
+    lookup = AsyncMock(return_value=("client-a", "user-1"))
+    monkeypatch.setattr(limits, "_first_row", lookup)
     return lookup
 
 
@@ -160,8 +160,9 @@ async def test_over_budget_recognised_credential_is_counted_in_its_holders_bucke
     recognised.assert_awaited_once()
     peer_key, holder_key = (call.args[0] for call in limiter.call_args_list)
     assert hashlib.sha256(b"192.0.2.10").hexdigest() in peer_key
-    assert holder_key == _holder_key("userinfo", "oidc-client:client-a")
+    assert holder_key == _holder_key("userinfo", "oidc-client:client-a:user:user-1")
     assert "client-a" not in holder_key
+    assert "user-1" not in holder_key
     assert ACCESS not in holder_key
     assert limiter.call_args.kwargs == {"ttl": 60}
 
@@ -257,6 +258,43 @@ async def test_failing_credential_source_refuses_like_an_unknown_credential(limi
     recognised.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "kind,value",
+    [
+        ("authorization_code", "kmc_oidc_code_" + "C" * 43),
+        ("refresh_token", "kmc_oidc_rt_" + "R" * 43),
+        ("access_token", ACCESS),
+    ],
+)
+async def test_user_bound_credential_is_counted_per_client_and_user(
+    limiter, recognised, kind, value
+):
+    from auth.oidc_limits import PresentedCredential
+
+    limiter.side_effect = [121, 1, 121, 1]
+    assert await check_oidc_rate_limit(_request(), PresentedCredential(kind, value)) is None
+    assert limiter.call_args.args[0] == _holder_key("token", "oidc-client:client-a:user:user-1")
+    recognised.return_value = ("client-a", "user-2")
+    assert await check_oidc_rate_limit(_request(), PresentedCredential(kind, value)) is None
+    assert limiter.call_args.args[0] == _holder_key("token", "oidc-client:client-a:user:user-2")
+
+
+@pytest.mark.parametrize("row", [("client-a",), ("client-a", None), ("client-a", ""), ("", "u")])
+async def test_user_bound_credential_without_a_complete_holder_gets_the_plain_429(
+    limiter, recognised, row
+):
+    from auth.oidc_limits import PresentedCredential
+
+    recognised.return_value = row
+    limiter.return_value = 121
+    response = await check_oidc_rate_limit(
+        _request("/oidc/userinfo"), PresentedCredential("access_token", ACCESS)
+    )
+    assert response.status_code == 429
+    assert json.loads(response.body) == PEER_429
+    assert limiter.await_count == 1
+
+
 async def test_signed_in_browser_is_recognised_as_its_user_without_a_lookup(limiter, recognised):
     from auth.oidc_limits import PresentedCredential
 
@@ -272,6 +310,7 @@ async def test_sync_service_token_is_recognised_as_its_sync_client(limiter, reco
 
     limiter.side_effect = [121, 1]
     path = "/api/v1/sync/installations/11111111-1111-1111-1111-111111111111"
+    recognised.return_value = ("client-a",)
     presented = PresentedCredential("sync_token", "kmc_sync_at_" + "B" * 43)
     assert await check_oidc_rate_limit(_request(path), presented) is None
     assert limiter.call_args.args[0] == _holder_key("sync-service", "sync-client:client-a")
