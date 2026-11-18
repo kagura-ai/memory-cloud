@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import ConfigDict, Field, field_validator
 
 from models.api_base import TZAwareBaseModel
+from models.sync_mode_access_schemas import SyncModeStatus
 from utils.query_bounds import NO_NUL_PATTERN
 
 
@@ -72,3 +73,18 @@ class SyncInstallationView(TZAwareBaseModel):
     operations: list[str]
     created_at: datetime
     revoked_at: datetime | None
+
+
+class SyncActivationObservation(TZAwareBaseModel):
+    """Finite inspection of one original, never permission to provision or resume."""
+
+    contract_version: Literal["sync-activation-observation-v1"]
+    workspace_id: UUID
+    application_id: str
+    authorization: SyncAuthorizationView
+    ownership_epoch: int = Field(ge=0, le=9_007_199_254_740_991)
+    binding_current: bool
+    installation: SyncInstallationView | None
+    management: SyncModeStatus | None
+    observed_at: datetime
+    valid_until: datetime

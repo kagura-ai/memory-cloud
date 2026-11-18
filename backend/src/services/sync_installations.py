@@ -23,6 +23,7 @@ from models.sync_installation import (
 )
 from models.sync_installation_schemas import (
     SyncActivation,
+    SyncActivationObservation,
     SyncAuthorizationCreate,
     SyncAuthorizationView,
     SyncInstallationView,
@@ -238,6 +239,77 @@ async def validate_authorization(
             raise ConflictError("Workspace already has a retained synchronization target")
         authority.deadlines.append(approval.expires_at)
         result = authorization_view(approval)
+        await db.commit()
+        return result
+
+
+async def observe_activation(
+    db: AsyncSession, wid: UUID, body: SyncActivation
+) -> SyncActivationObservation:
+    """Inspect only the recorded target, fencing current owner/epoch/registration.
+
+    Consumption or expiry may identify an existing original. They never enable
+    provisioning a missing target. No approvals, targets or lifecycle states are
+    changed, and a different retained authorization cannot be silently adopted.
+    """
+    from models.sync_management import SyncManagedTarget
+    from services.sync_feed_authority import locked
+    from services.sync_managed_guard import target_fence
+    from services.sync_management import default_mode_view, mode_view
+
+    async with sync_authority(db, wid, None) as authority:
+        observed = utcnow()
+        until = observed + timedelta(seconds=30)
+        authority.deadlines.append(until)
+        approval = await _approval(db, wid, body.authorization_id)
+        _match_application(approval, body, None)
+        service = await registered_service(db, service_id=approval.service_id)
+        row = await _installation(db, wid)
+        if row is not None and (
+            row.authorization_id != approval.id or row.application_id != body.application_id
+        ):
+            raise ConflictError("Workspace has a different retained synchronization approval")
+        binding_current = (
+            approval.authorized_by == authority.owner.user_id
+            and approval.ownership_epoch == authority.workspace.ownership_epoch
+            and approval.revoked_at is None
+            and approval.service_generation == service.generation
+            and approval.browser_client_id == service.browser_client_id
+            and approval.service_client_id == service.service_client_id
+            and approval.operations == list(SYNC_OPERATIONS)
+            and (row is not None or approval.used_at is None and observed < approval.expires_at)
+        )
+        if row is None and binding_current:
+            until = min(until, approval.expires_at)
+            authority.deadlines.append(until)
+        management = None
+        if row is not None:
+            managed = await target_fence(db, row.context_id)
+            if managed.mode is None and await locked(
+                db, SyncManagedTarget, SyncManagedTarget.installation_id == row.id
+            ):
+                raise ConflictError("Retained target management changed; retry")
+            if managed.mode is not None and (
+                managed.mode.installation_id != row.id
+                or managed.mode.resource_pk != row.resource_pk
+                or managed.mode.generation != row.generation
+            ):
+                raise ConflictError("Retained target management changed; retry")
+            management = (
+                mode_view(managed.mode) if managed.mode is not None else default_mode_view(row)
+            )
+        result = SyncActivationObservation(
+            contract_version="sync-activation-observation-v1",
+            workspace_id=wid,
+            application_id=body.application_id,
+            authorization=authorization_view(approval),
+            ownership_epoch=authority.workspace.ownership_epoch,
+            binding_current=binding_current,
+            installation=await installation_view(db, row) if row is not None else None,
+            management=management,
+            observed_at=observed,
+            valid_until=until,
+        )
         await db.commit()
         return result
 
