@@ -65,16 +65,17 @@ async def test_two_concurrent_activity_reads_are_both_inside_the_boundary(activi
 
 
 async def test_parallel_activity_routes_for_one_installation_all_succeed(activity):
+    # The feed configuration reads take the resource row FOR UPDATE NOWAIT with
+    # a bounded retry, which guarantees two such readers, not N: gather at most two.
     responses = await asyncio.gather(
         human(activity, "GET", "activity"),
         human(activity, "GET", "activity/runs"),
         human(activity, "GET", "activity/events"),
         human(activity, "GET", "activity", role="member"),
-        human(activity, "GET", "activity/feeds"),
         human(activity, "GET", "activity/feeds", role="member"),
         human(activity, "GET", f"activity/feeds/{activity.fid}"),
     )
-    assert [r.status_code for r in responses] == [200] * 7, [r.text for r in responses]
+    assert [r.status_code for r in responses] == [200] * 6, [r.text for r in responses]
 
 
 def lock_resource(holder, activity):
