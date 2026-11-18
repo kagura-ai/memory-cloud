@@ -2,8 +2,13 @@
 
 The transport binds every MCP request to one workspace: the API key's scope,
 else the workspace in the URL, else the user's current workspace. The listing,
-``count`` and ``limit`` all come from that workspace, against a real database
-and the real ``PermissionService``.
+``count``, ``limit`` and ``can_create`` all come from that workspace, against a
+real database and the real ``PermissionService``.
+
+#2891: ``count`` is the number of contexts the caller can see in that
+workspace; ``limit`` / ``can_create`` are decided on every context of it
+(private ones of other members included), and a full workspace whose caller
+sees fewer contexts than ``limit`` says so in ``hint``.
 """
 
 import json
@@ -109,6 +114,8 @@ async def two_workspaces(async_engine, db_session, monkeypatch):
     yield {
         "user_id": user_id,
         "other_id": other_id,
+        "outsider_id": outsider_id,
+        "tag": tag,
         "wa": wa.id,
         "wb": wb.id,
         "wc": wc.id,
@@ -156,11 +163,53 @@ def _ids(payload: dict) -> set[str]:
     return {item["id"] for item in payload["contexts"]}
 
 
+async def _cap(db_session: AsyncSession, workspace_id) -> int:
+    """The workspace's context cap, as the real quota service computes it."""
+    from services.effective_quota_service import EffectiveQuotaService
+
+    quotas = await EffectiveQuotaService(db_session).get_effective_quotas(workspace_id)
+    return quotas["max_contexts"]
+
+
+async def _fill_to_cap(db_session: AsyncSession, workspace_id, created_by: str, tag: str) -> int:
+    """Top the workspace up to its cap with private contexts of ``created_by``.
+
+    Returns the cap. The rows go with the fixture's teardown (it deletes every
+    context of the workspace).
+    """
+    from sqlalchemy import func, select
+
+    cap = await _cap(db_session, workspace_id)
+    # One row per missing context: keep the plan's cap a size a test can fill.
+    assert 0 < cap <= 200, cap
+    existing = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(Context)
+            .where(Context.workspace_id == workspace_id, Context.deleted_at.is_(None))
+        )
+    ).scalar_one()
+    db_session.add_all(
+        [
+            Context(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                name=f"fill-{i}-{tag}",
+                created_by=created_by,
+                is_private=True,
+            )
+            for i in range(cap - existing)
+        ]
+    )
+    await db_session.commit()
+    return cap
+
+
 @pytest.mark.asyncio(loop_scope="session")
 @pytest.mark.parametrize(
     "extra", [{}, {"include_summary": True}, {"include_details": True}, {"include_stats": True}]
 )
-async def test_bound_workspace_is_listed_not_the_selected_one(two_workspaces, extra):
+async def test_bound_workspace_is_listed_not_the_selected_one(two_workspaces, db_session, extra):
     s = two_workspaces
     payload = await _list(s, "wa", extra)
 
@@ -168,9 +217,32 @@ async def test_bound_workspace_is_listed_not_the_selected_one(two_workspaces, ex
     # B is the user's selected workspace, but the request is bound to A.
     assert _ids(payload) == {str(s["a1"]), str(s["a2"])}
     assert payload["total"] == 2
-    # count / limit describe the same workspace the items come from (all of A,
-    # including the private context the caller cannot see).
-    assert payload["count"] == 3
+    # #2891: count is what the caller sees in A (not the other member's private
+    # context); limit / can_create describe A as a whole.
+    assert payload["count"] == 2
+    assert payload["limit"] == await _cap(db_session, s["wa"])
+    assert payload["can_create"] is True
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_limit_and_can_create_come_from_the_bound_workspace(two_workspaces, db_session):
+    """A is full (the other member's private contexts fill it); B, the selected
+    workspace, has room. Bound to A the caller sees 2 contexts, cannot create a
+    third and is told why; bound to B nothing about A shows."""
+    from mcp_server.tools.context import _WORKSPACE_FULL_HINT
+
+    s = two_workspaces
+    cap = await _fill_to_cap(db_session, s["wa"], s["other_id"], s["tag"])
+
+    in_a = await _list(s, "wa")
+    in_b = await _list(s, "wb")
+
+    assert _ids(in_a) == {str(s["a1"]), str(s["a2"])}
+    assert (in_a["count"], in_a["total"], in_a["limit"], in_a["can_create"]) == (2, 2, cap, False)
+    assert in_a["hint"] == _WORKSPACE_FULL_HINT
+    assert (in_b["count"], in_b["total"], in_b["can_create"]) == (1, 1, True)
+    assert in_b["limit"] == await _cap(db_session, s["wb"])
+    assert "hint" not in in_b
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -208,6 +280,23 @@ async def test_a_workspace_the_user_does_not_belong_to_lists_nothing(two_workspa
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_a_full_workspace_the_user_does_not_belong_to_still_gets_no_hint(
+    two_workspaces, db_session
+):
+    """#2891: the cap hint is never sent on the failed-lookup path, however full
+    the workspace is."""
+    s = two_workspaces
+    await _fill_to_cap(db_session, s["wc"], s["outsider_id"], s["tag"])
+
+    payload = await _list(s, "wc")
+
+    assert payload["contexts"] == []
+    assert payload["count"] == 0
+    assert "hint" not in payload
+    assert "limit" not in payload and "can_create" not in payload
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_no_bound_workspace_falls_back_to_the_selected_one(two_workspaces):
     s = two_workspaces
     payload = await _list(s, None)
@@ -225,3 +314,203 @@ async def test_role_and_access_list_come_from_the_bound_workspace(two_workspaces
     # Not a2 (off the list), and not the member's own private context either.
     assert _ids(in_a) == {str(s["a1"])}
     assert _ids(in_b) == {str(s["b1"])}
+    # #2891: count follows the same access rule in each workspace.
+    assert in_a["count"] == 1
+    assert in_b["count"] == 1
+
+
+# ============================================================================
+# #2891: count is what the caller can see; limit / can_create are the workspace's
+# ============================================================================
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def member_workspace(async_engine, db_session, monkeypatch):
+    """One workspace: an owner with three private contexts and one shared one,
+    a member whose access list holds the shared one only, and a member with an
+    empty access list (sees nothing)."""
+    import db.base as _db_base
+
+    monkeypatch.setattr(
+        _db_base,
+        "async_session_factory",
+        async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False),
+    )
+
+    tag = uuid4().hex[:8]
+    owner_id, member_id, no_access_id = (
+        f"vc-owner-{tag}",
+        f"vc-member-{tag}",
+        f"vc-none-{tag}",
+    )
+    ws = _workspace(tag, "vc", owner_id)
+    db_session.add(ws)
+    await db_session.flush()
+    db_session.add_all(
+        [_user(owner_id, ws.id), _user(member_id, ws.id), _user(no_access_id, ws.id)]
+    )
+    await db_session.flush()
+
+    private = [
+        Context(
+            id=uuid4(),
+            workspace_id=ws.id,
+            name=f"private-{i}-{tag}",
+            created_by=owner_id,
+            is_private=True,
+        )
+        for i in range(3)
+    ]
+    shared = Context(
+        id=uuid4(), workspace_id=ws.id, name=f"shared-{tag}", created_by=owner_id, is_private=False
+    )
+    db_session.add_all(
+        [
+            WorkspaceMember(workspace_id=ws.id, user_id=owner_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(
+                workspace_id=ws.id,
+                user_id=member_id,
+                role=WorkspaceRole.MEMBER,
+                allowed_context_ids=[shared.id],
+            ),
+            WorkspaceMember(
+                workspace_id=ws.id,
+                user_id=no_access_id,
+                role=WorkspaceRole.MEMBER,
+                allowed_context_ids=[],
+            ),
+            *private,
+            shared,
+        ]
+    )
+    await db_session.commit()
+
+    yield {
+        "tag": tag,
+        "ws": ws.id,
+        "owner_id": owner_id,
+        "member_id": member_id,
+        "no_access_id": no_access_id,
+        "shared": shared.id,
+        "private": [ctx.id for ctx in private],
+    }
+
+    try:
+        await db_session.execute(
+            WorkspaceMember.__table__.delete().where(WorkspaceMember.workspace_id == ws.id)
+        )
+        await db_session.execute(Context.__table__.delete().where(Context.workspace_id == ws.id))
+        await db_session.execute(
+            User.__table__.delete().where(User.user_id.in_([owner_id, member_id, no_access_id]))
+        )
+        await db_session.execute(Workspace.__table__.delete().where(Workspace.id == ws.id))
+        await db_session.commit()
+    except Exception:
+        await db_session.rollback()
+        raise
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_member_count_is_only_the_contexts_they_can_see(member_workspace, db_session):
+    """The member sees 1 of 4 contexts and gets no figure for the other 3 while
+    the workspace is under its cap; the owner gets everything they can see."""
+    s = member_workspace
+    cap = await _cap(db_session, s["ws"])
+
+    member = await _list(s, "ws", user_key="member_id")
+    owner = await _list(s, "ws", user_key="owner_id")
+
+    assert _ids(member) == {str(s["shared"])}
+    assert (member["count"], member["total"], member["limit"], member["can_create"]) == (
+        1,
+        1,
+        cap,
+        True,
+    )
+    assert "hint" not in member
+    assert _ids(owner) == {str(s["shared"]), *map(str, s["private"])}
+    assert (owner["count"], owner["total"], owner["limit"], owner["can_create"]) == (
+        4,
+        4,
+        cap,
+        True,
+    )
+    assert "hint" not in owner
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_member_of_a_full_workspace_gets_can_create_false_and_the_cap_hint(
+    member_workspace, db_session
+):
+    from mcp_server.tools.context import _WORKSPACE_FULL_HINT
+
+    s = member_workspace
+    cap = await _fill_to_cap(db_session, s["ws"], s["owner_id"], s["tag"])
+
+    member = await _list(s, "ws", user_key="member_id")
+
+    assert (member["count"], member["total"], member["limit"], member["can_create"]) == (
+        1,
+        1,
+        cap,
+        False,
+    )
+    assert member["count"] < member["limit"]
+    assert member["hint"] == _WORKSPACE_FULL_HINT
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_caller_who_sees_every_context_of_a_full_workspace_gets_no_hint(
+    member_workspace, db_session
+):
+    s = member_workspace
+    cap = await _fill_to_cap(db_session, s["ws"], s["owner_id"], s["tag"])
+
+    owner = await _list(s, "ws", user_key="owner_id")
+
+    assert owner["count"] == owner["limit"] == cap
+    assert owner["can_create"] is False
+    assert "hint" not in owner
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_name_contains_keeps_count_at_the_visible_number(member_workspace):
+    s = member_workspace
+
+    owner = await _list(s, "ws", {"name_contains": "private-"}, user_key="owner_id")
+    member = await _list(s, "ws", {"name_contains": "private-"}, user_key="member_id")
+
+    assert _ids(owner) == set(map(str, s["private"]))
+    assert (owner["count"], owner["total"]) == (4, 3)
+    # A filter aimed at contexts the member cannot see is a plain miss.
+    assert member["contexts"] == []
+    assert (member["count"], member["total"]) == (1, 0)
+    assert "hint" not in member
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_member_who_sees_nothing_keeps_the_empty_hint(member_workspace):
+    from mcp_server.tools.context import _EMPTY_CONTEXTS_HINT
+
+    s = member_workspace
+    payload = await _list(s, "ws", user_key="no_access_id")
+
+    assert payload["contexts"] == []
+    assert (payload["count"], payload["total"], payload["can_create"]) == (0, 0, True)
+    assert payload["hint"] == _EMPTY_CONTEXTS_HINT
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_member_who_sees_nothing_in_a_full_workspace_is_not_told_to_create(
+    member_workspace, db_session
+):
+    from mcp_server.tools.context import _EMPTY_FULL_WORKSPACE_HINT
+
+    s = member_workspace
+    cap = await _fill_to_cap(db_session, s["ws"], s["owner_id"], s["tag"])
+
+    payload = await _list(s, "ws", user_key="no_access_id")
+
+    assert (payload["count"], payload["limit"], payload["can_create"]) == (0, cap, False)
+    assert payload["hint"] == _EMPTY_FULL_WORKSPACE_HINT
+    assert "create_context" not in payload["hint"]

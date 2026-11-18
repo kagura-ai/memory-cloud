@@ -812,7 +812,7 @@ _LIST_TAGS_MAX_PAGE = 200
 _LIST_CONTEXTS_DEFAULT_LIMIT = 100
 _LIST_CONTEXTS_MAX_LIMIT = 200
 _LIST_CONTEXTS_DETAILS_MAX_LIMIT = 20
-# Room kept for the quota fields and the empty-account hint next to the items.
+# Room kept for the quota fields and the hint next to the items.
 _LIST_CONTEXTS_ENVELOPE_RESERVE = 1_500
 
 # #1658: a new account has a workspace but no context, and every memory tool
@@ -842,6 +842,21 @@ _NO_WORKSPACE_HINT = (
     "No contexts are visible to you and you have no current workspace, so "
     "create_context cannot run yet. Create or select a workspace in the web UI, "
     "then call list_contexts again."
+)
+# #2891: ``count`` is what the caller can see, while ``limit`` / ``can_create``
+# count every context of the workspace. When the workspace is full although
+# ``count`` is below ``limit``, this says why ``can_create`` is false. Static
+# text: it carries no number of the contexts the caller cannot see. A caller who
+# sees nothing in such a workspace gets the second text instead of the
+# empty-account hint, which would tell them to create a context that cannot fit.
+_WORKSPACE_FULL_HINT = (
+    "This workspace has reached its context limit, so no context can be created. "
+    "Contexts you cannot see here (for example ones private to other members or "
+    "not shared with you) count toward limit as well."
+)
+_EMPTY_FULL_WORKSPACE_HINT = (
+    f"No contexts are visible to you yet. {_WORKSPACE_FULL_HINT} Ask an owner or "
+    "admin to give you access to a context, or to make room for a new one."
 )
 
 
@@ -1083,10 +1098,14 @@ async def handle_list_contexts(
                 "next_cursor": str(next_offset) if has_more else None,
             }
 
-            # Get context quota (workspace-wide count, not just user-visible).
-            # ``count`` is quota usage, so it never tracks name_contains; the
-            # number of items actually returned is ``total`` (#1600).
+            # #2891: ``count`` is the number of contexts the caller can see in
+            # this workspace, counted before name_contains so it never tracks
+            # the filter; the number of items actually returned is ``total``
+            # (#1600). ``limit`` / ``can_create`` are the workspace's quota,
+            # decided on every non-deleted context in it (private ones of
+            # other members included).
             quota_info: dict[str, Any] = {"count": visible_count, "total": len(context_list)}
+            full_with_unseen_contexts = False
             # #2884: no quota figures for a workspace the caller could not list.
             if workspace_id and not lookup_failed:
                 try:
@@ -1109,9 +1128,13 @@ async def handle_list_contexts(
 
                     effective = await EffectiveQuotaService(db).get_effective_quotas(workspace_id)
                     max_contexts = effective.get("max_contexts", 0)
-                    quota_info["count"] = ws_context_count
                     quota_info["limit"] = max_contexts
                     quota_info["can_create"] = ws_context_count < max_contexts
+                    # Set only once both figures are read: the lookup-failure
+                    # branch below (limit 0) never sends the cap hint.
+                    full_with_unseen_contexts = (
+                        ws_context_count >= max_contexts and visible_count < max_contexts
+                    )
                 except Exception as e:
                     logger.warning("list_contexts_quota_failed: %s", str(e))
                     quota_info["limit"] = 0
@@ -1122,6 +1145,8 @@ async def handle_list_contexts(
             hint = None
             if visible_count == 0 and not lookup_failed:
                 hint = _EMPTY_CONTEXTS_HINT if workspace_id else _NO_WORKSPACE_HINT
+            if full_with_unseen_contexts:
+                hint = _EMPTY_FULL_WORKSPACE_HINT if visible_count == 0 else _WORKSPACE_FULL_HINT
 
             await _log_tool_usage(db, user_id, "list_contexts", start_time, 200, None, workspace_id)
 

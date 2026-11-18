@@ -874,7 +874,7 @@ Manual: guide(["get_context_info"]).""",
             "name": "list_contexts",
             "readOnly": True,
             "description": """List the contexts you can access as a name→id directory, most recently used first. Other tools need context_id unless the URL sets ?context=. Narrow with name_contains; get_context_info(context_id) for one context's details.
-Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], total (this page), count/limit/can_create (workspace quota), has_more, next_cursor, hint?}; pass next_cursor as cursor for the next page.
+Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], total (page), count (all visible), limit/can_create (quota), has_more, next_cursor, hint?}; pass next_cursor as cursor for the next page.
 Manual: guide(["list_contexts"]).""",
             "inputSchema": {
                 "type": "object",

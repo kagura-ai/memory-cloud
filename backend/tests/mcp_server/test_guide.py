@@ -144,7 +144,7 @@ def test_every_manual_pointer_names_an_existing_topic():
         "typical edge weights are 0.02-0.05",
         # contexts / tags / pinned / time
         "by_type keeps the 20 largest types",
-        "count = contexts in the workspace",
+        "count = contexts you can see in the workspace",
         "Soft-deleted memories are not counted",
         "no search, no ranking",
         "omit month/day for fuzzy timing",
