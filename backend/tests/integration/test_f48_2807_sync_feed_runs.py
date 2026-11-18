@@ -4,7 +4,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import inspect, select, text
+from sqlalchemy import insert, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -84,8 +84,10 @@ def test_feed_migration_roundtrip_constraints_cascades_and_event_preservation(as
             with Session(engine) as db, db.begin():
                 db.add(SyncFeed(id=fid, installation_id=iid, kind="product", config_hash="1" * 64))
                 db.flush()
-                db.add(
-                    SyncRun(
+                # The table, not the entity: the current model can map columns
+                # (f55's change_count) that this revision does not have yet.
+                db.execute(
+                    insert(SyncRun.__table__).values(
                         id=run_id,
                         feed_id=fid,
                         operation_id=uuid4(),

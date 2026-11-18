@@ -3,7 +3,7 @@
 from datetime import timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.management_schemas import digest
@@ -338,6 +338,37 @@ async def clear_staging(db: AsyncSession, row: SyncRun) -> None:
     await db.execute(update(SyncChunk).where(SyncChunk.run_id == row.id).values(records=None))
 
 
+def clear_diff(row: SyncRun) -> None:
+    """A run that can no longer commit drops its diff and keeps its change count (#2916)."""
+    if row.change_count is None and row.diff is not None:
+        row.change_count = len(row.diff)
+    row.diff = None
+
+
+def cleared_diff() -> dict:
+    """``clear_diff`` for a bulk ``UPDATE`` of ``sync_runs``: the values to set.
+
+    The count of a row whose diff came before ``change_count`` existed is read
+    from the diff it replaces.
+    """
+    return {
+        "change_count": func.coalesce(
+            SyncRun.change_count,
+            case(
+                (func.jsonb_typeof(SyncRun.diff) == "array", func.jsonb_array_length(SyncRun.diff))
+            ),
+        ),
+        "diff": None,
+    }
+
+
+def change_count(row: SyncRun) -> int | None:
+    """The run's diff length, also once the diff is cleared; None before a diff."""
+    if row.change_count is not None:
+        return row.change_count
+    return None if row.diff is None else len(row.diff)
+
+
 async def abort_run(db: AsyncSession, authority: CredentialAuthority, rid: UUID) -> SyncRun:
     """Abort is retryable but cannot undo an already committed snapshot."""
     row, _feed = await run_for(db, authority, rid)
@@ -346,6 +377,7 @@ async def abort_run(db: AsyncSession, authority: CredentialAuthority, rid: UUID)
     if row.state == "aborted":
         return row
     row.state = "aborted"
+    clear_diff(row)
     await clear_staging(db, row)
     from services.sync_audit import add_audit, service_actor
 
@@ -372,7 +404,7 @@ def run_view(row: SyncRun) -> dict:
         if row.state in {"uploading", "prepared"} and utcnow() >= row.expires_at
         else row.state,
         "diff_hash": row.diff_hash,
-        "changes": len(row.diff or []),
+        "changes": change_count(row) or 0,
         "requires_approval": row.requires_approval,
         "expires_at": to_utc_iso(row.expires_at),
         "prepared_until": to_utc_iso(row.prepared_until),

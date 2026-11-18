@@ -266,6 +266,27 @@ expiry refuses use immediately after 24h; while enabled, periodic maintenance
 physically clears expired staging in bounded batches. Stop accepting new runs
 and purge expired/uncommitted staging before disabling the feature for an
 extended period. Receipts retain hashes/operational IDs, not staged bodies.
+
+A run that ends without committing (aborted, expired, or discarded by a
+generation change) also drops its diff at once; its change count stays and is
+what its status, its diff pages (now empty) and the run history report.
+While `SYNC_RUNS_ENABLED` is on, the five-minute maintenance keeps finished
+runs for a retention window of 30 days (`RUN_RETENTION_DAYS` in
+`services/sync_feed_index.py`), in its own short transaction (a failure is
+rolled back and logged as `sync_run_retention_failed`; the rest of the tick
+goes on), at most 50 runs per pass:
+
+- a run that never committed is deleted 30 days after its upload window
+  closed, with its chunk receipts (and a resume candidate or manual-request
+  link it still has). Its status then answers 404, it leaves the run history,
+  and its `operation_id` can start a new run;
+- a committed run keeps its row, its chunk receipts and its outbox receipt:
+  the indexer proves every synchronized event against that receipt, also when
+  an operator rewinds the cursor and events apply again, and `index_status`
+  reads it. Once it was committed 30 days ago and a newer commit on the same
+  feed has superseded it, only its diff is cleared; the count stays. The
+  newest committed run of each feed is never touched.
+
 Canonical records and temporary chunks are raw user data; see
 [data boundary](../derived-layer-boundary.md). Workspace/resource erasure
 cascades data; removing an approver clears historical user identity.

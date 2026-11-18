@@ -287,6 +287,40 @@ async def test_manual_resume_needs_current_diff_then_reuses_target_and_tombstone
         )
 
 
+async def test_resume_ends_runs_without_their_diff_and_keeps_every_change_count(
+    managed, monkeypatch
+):
+    """#2916: the run a resume candidate pins and the upload the resume
+    discards drop their diff and keep its count; the resumed run counts the
+    diff it commits."""
+    await committed(managed, [product()])
+    await apply_pending(managed, monkeypatch)
+    await manual(managed)
+    await mint(managed)
+    pinned = await staged(managed, [product(title="Fresh source")])
+    result = await service(managed, "POST", "resume-candidates", body={"run_id": pinned["run_id"]})
+    assert result.status_code == 200, result.text
+    discarded = await staged(managed, [product(), product("two")])
+    async with managed.factory() as db:
+        run = await db.get(SyncRun, UUID(pinned["run_id"]))
+        assert (run.state, run.diff, run.change_count) == ("aborted", None, pinned["changes"])
+    p = (await human(managed, "POST", "management/resume/preview")).json()
+    body = {
+        "operation_id": str(uuid4()),
+        "preview_id": p["preview_id"],
+        "diff_hash": p["diff_hash"],
+    }
+    result = await human(managed, "POST", "management/resume/confirm", body=body)
+    assert result.status_code == 200, result.text
+    async with managed.factory() as db:
+        resumed = await db.get(SyncRun, UUID(pinned["run_id"]))
+        assert resumed.state == "committed" and resumed.diff is not None
+        assert resumed.change_count == len(resumed.diff)
+        dropped = await db.get(SyncRun, UUID(discarded["run_id"]))
+        assert (dropped.state, dropped.diff) == ("aborted", None)
+        assert dropped.change_count == discarded["changes"]
+
+
 @pytest.mark.parametrize("change", ["manual", "source", "expiry", "config"])
 async def test_changed_resume_snapshot_invalidates_human_confirmation(managed, change):
     await manual(managed)

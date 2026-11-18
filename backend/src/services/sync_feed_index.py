@@ -7,9 +7,10 @@ from time import monotonic
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from config.settings import get_settings
 from models.resource import IndexerState, Resource
@@ -56,6 +57,76 @@ async def prune_activity_on_schedule(db: AsyncSession) -> None:
         logger.error("sync_activity_prune_failed", error_class=type(exc).__name__)
 
 
+# #2916: how long a finished run keeps what nothing but its history reads.
+RUN_RETENTION_DAYS = 30
+# Runs deleted, and diffs cleared, per tick (each pass in one transaction).
+RUN_RETENTION_BATCH = 50
+
+
+async def prune_finished_runs(db: AsyncSession) -> None:
+    """Expire what finished runs keep past ``RUN_RETENTION_DAYS``; bounded (#2916).
+
+    - A run that never committed (``aborted``, ``expired``) is deleted once
+      its upload window closed that long ago, its chunk receipts with it (and
+      a resume candidate or manual-request link, by the foreign keys).
+      Nothing reads such a run after that: it cannot commit, and a pinned
+      resume candidate expires within a day.
+    - A committed run keeps its row, chunk receipts and outbox receipt: the
+      outbox is the indexer's proof of every event the run committed, read
+      again when an operator rewinds the cursor and by ``index_status``, and
+      the row answers its status and history. Only its diff goes, once it
+      committed that long ago and a newer commit on the same feed superseded
+      it; its change count stays. The newest committed run of a feed is
+      never touched.
+
+    Rows are taken in age order with ``SKIP LOCKED``: a row a request holds
+    waits for the next tick. The caller commits.
+    """
+    from services.sync_feed_runs import cleared_diff
+
+    cutoff = utcnow() - timedelta(days=RUN_RETENTION_DAYS)
+    ended = (
+        select(SyncRun.id)
+        .where(SyncRun.state.in_(["aborted", "expired"]), SyncRun.expires_at <= cutoff)
+        .order_by(SyncRun.expires_at, SyncRun.id)
+        .limit(RUN_RETENTION_BATCH)
+        .with_for_update(skip_locked=True)
+    )
+    await db.execute(delete(SyncRun).where(SyncRun.id.in_(ended)))
+    newer = aliased(SyncRun)
+    superseded = (
+        select(SyncRun.id)
+        .where(
+            SyncRun.state == "committed",
+            SyncRun.diff.is_not(None),
+            SyncRun.committed_at <= cutoff,
+            exists().where(
+                newer.feed_id == SyncRun.feed_id,
+                newer.state == "committed",
+                newer.base_revision > SyncRun.base_revision,
+            ),
+        )
+        .order_by(SyncRun.committed_at, SyncRun.id)
+        .limit(RUN_RETENTION_BATCH)
+        .with_for_update(of=SyncRun, skip_locked=True)
+    )
+    await db.execute(update(SyncRun).where(SyncRun.id.in_(superseded)).values(**cleared_diff()))
+
+
+async def prune_finished_runs_guarded(db: AsyncSession) -> None:
+    """``prune_finished_runs`` in its own transaction; a failure is rolled back and logged.
+
+    The session must hold no work of its caller, as for the activity prune:
+    a failing pass ends neither the run sweep after it nor the indexer tick.
+    """
+    try:
+        await prune_finished_runs(db)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.error("sync_run_retention_failed", error_class=type(exc).__name__)
+
+
 async def maintain_sync_runs(db: AsyncSession) -> None:
     """Periodic, bounded work; replay an undelivered wakeup after crashes/lost updates."""
     await prune_activity_on_schedule(db)
@@ -64,6 +135,7 @@ async def maintain_sync_runs(db: AsyncSession) -> None:
 
         await maintain_sync_management(db)
         return
+    await prune_finished_runs_guarded(db)
     expired = list(
         (
             await db.scalars(
@@ -75,13 +147,21 @@ async def maintain_sync_runs(db: AsyncSession) -> None:
         ).all()
     )
     if expired:
+        from services.sync_feed_runs import cleared_diff
+
         await db.execute(
             update(SyncChunk).where(SyncChunk.run_id.in_(expired)).values(records=None)
         )
         await db.execute(
             update(SyncRun)
             .where(SyncRun.id.in_(expired))
-            .values(state="expired", approved_by=None, approval_id=None, approval_epoch=None)
+            .values(
+                state="expired",
+                approved_by=None,
+                approval_id=None,
+                approval_epoch=None,
+                **cleared_diff(),
+            )
         )
     stale = utcnow() - timedelta(minutes=30)
     eligible = (

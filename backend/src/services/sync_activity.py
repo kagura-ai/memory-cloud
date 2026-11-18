@@ -189,10 +189,15 @@ async def feed_configuration(
     return result
 
 
+# A run's change count outlives its cleared diff (#2916); the length of the
+# diff only for a row whose diff was written before the count existed.
+_CHANGES = func.coalesce(SyncRun.change_count, func.jsonb_array_length(SyncRun.diff))
+
+
 async def _run(db: AsyncSession, iid: UUID, rid: UUID) -> tuple[SyncRun, SyncFeed, int | None]:
     pair = (
         await db.execute(
-            select(SyncRun, SyncFeed, func.jsonb_array_length(SyncRun.diff))
+            select(SyncRun, SyncFeed, _CHANGES)
             .options(defer(SyncRun.diff))
             .join(SyncFeed)
             .where(SyncRun.id == rid, SyncFeed.installation_id == iid)
@@ -239,7 +244,7 @@ async def runs_page(
     """Bound memory to metadata, not limit times the largest possible diff."""
     async with activity_boundary(db, wid, iid, principal):
         query = (
-            select(SyncRun, func.jsonb_array_length(SyncRun.diff))
+            select(SyncRun, _CHANGES)
             .options(
                 defer(SyncRun.diff),
             )

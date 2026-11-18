@@ -39,9 +39,12 @@ cursor cannot select another installation. A syntactically valid missing or
 foreign target is uniformly not found. Errors reuse the fixed sync
 `{"error":"..."}` envelope, never body text or database exception messages.
 Pagination rechecks current authority on every request and again at commit.
-Run lists defer the stored diff body and count its entries in SQL; cursor
-lookups select only ordering metadata. Counts are null when not yet known,
-rather than implying that no records or changes exist.
+Run lists defer the stored diff body and read the change count stored with
+the run, which stays when an ended run's diff is cleared; cursor lookups
+select only ordering metadata. Counts are null when not yet known, rather
+than implying that no records or changes exist. A run that never committed
+leaves the list 30 days after its upload window closed (see
+[staged feed sync](staged-feed-sync.md), "Retention and rollback").
 
 The mode is independent of authentication state and allowance. A null mode
 means no effective ownership fence exists; an unenrolled legacy target that

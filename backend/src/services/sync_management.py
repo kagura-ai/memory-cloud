@@ -57,11 +57,19 @@ async def discard_pending_runs(db: AsyncSession, iid: UUID) -> None:
         .join(SyncFeed)
         .where(SyncFeed.installation_id == iid, SyncRun.state.in_(["uploading", "prepared"]))
     )
+    from services.sync_feed_runs import cleared_diff
+
     await db.execute(update(SyncChunk).where(SyncChunk.run_id.in_(pending)).values(records=None))
     await db.execute(
         update(SyncRun)
         .where(SyncRun.id.in_(pending))
-        .values(state="aborted", approval_id=None, approved_by=None, approval_epoch=None)
+        .values(
+            state="aborted",
+            approval_id=None,
+            approved_by=None,
+            approval_epoch=None,
+            **cleared_diff(),
+        )
     )
 
 
