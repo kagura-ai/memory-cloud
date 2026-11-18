@@ -13489,6 +13489,34 @@
         ],
         "type": "object"
       },
+      "SyncEstablishedTargetObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {},
+          "authorization": {},
+          "continuity_current": {},
+          "contract_version": {},
+          "installation": {},
+          "management": {},
+          "observed_at": {},
+          "ownership_epoch": {},
+          "valid_until": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "application_id",
+          "authorization",
+          "continuity_current",
+          "contract_version",
+          "installation",
+          "management",
+          "observed_at",
+          "ownership_epoch",
+          "valid_until",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "SyncInstallationView": {
         "properties": {
           "application_id": {},
@@ -13669,6 +13697,55 @@
           "installation_id",
           "resource_pk",
           "target_available",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "SyncReconnectValidation": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "authorization_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "installation_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id",
+          "authorization_id",
+          "installation_id"
+        ],
+        "type": "object"
+      },
+      "SyncReconnectValidationView": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {},
+          "authorization": {},
+          "contract_version": {},
+          "installation": {},
+          "management": {},
+          "observed_at": {},
+          "ownership_epoch": {},
+          "valid_until": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "application_id",
+          "authorization",
+          "contract_version",
+          "installation",
+          "management",
+          "observed_at",
+          "ownership_epoch",
+          "valid_until",
           "workspace_id"
         ],
         "type": "object"
@@ -43579,6 +43656,123 @@
         ]
       }
     },
+    "/internal/workspaces/{workspace_id}/sync-authorizations/validate-reconnect": {
+      "post": {
+        "operationId": "validate_pending_reconnect_internal_workspaces__workspace_id__sync_authorizations_validate_reconnect_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncReconnectValidation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncReconnectValidationView"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BillingPublisher": []
+          }
+        ],
+        "tags": [
+          "internal-billing"
+        ]
+      }
+    },
     "/internal/workspaces/{workspace_id}/sync-installations/activate": {
       "post": {
         "operationId": "activate_paid_sync_internal_workspaces__workspace_id__sync_installations_activate_post",
@@ -43726,6 +43920,123 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SyncActivationObservation"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BillingPublisher": []
+          }
+        ],
+        "tags": [
+          "internal-billing"
+        ]
+      }
+    },
+    "/internal/workspaces/{workspace_id}/sync-installations/observe-established": {
+      "post": {
+        "operationId": "observe_established_sync_internal_workspaces__workspace_id__sync_installations_observe_established_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncActivation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncEstablishedTargetObservation"
                 }
               }
             }

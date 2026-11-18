@@ -54,6 +54,14 @@ EXPECTED = {
     ("POST", "/internal/workspaces/{workspace_id}/sync-authorizations/validate"): BILLING_TOKEN,
     ("POST", "/internal/workspaces/{workspace_id}/sync-installations/activate"): BILLING_TOKEN,
     ("POST", "/internal/workspaces/{workspace_id}/sync-installations/observe"): BILLING_TOKEN,
+    (
+        "POST",
+        "/internal/workspaces/{workspace_id}/sync-installations/observe-established",
+    ): BILLING_TOKEN,
+    (
+        "POST",
+        "/internal/workspaces/{workspace_id}/sync-authorizations/validate-reconnect",
+    ): BILLING_TOKEN,
     ("GET", "/api/v1/workers/apps"): WORKER_TOKEN,
     ("GET", "/api/v1/workers/config"): WORKER_TOKEN,
     ("GET", "/api/v1/workers/active-color"): WORKER_TOKEN,
@@ -83,11 +91,11 @@ ROUTES = sorted(EXPECTED)
 ROUTE_IDS = [f"{method} {path}" for method, path in ROUTES]
 
 
-def test_the_service_token_routes_are_exactly_the_pinned_fifteen():
+def test_the_service_token_routes_are_exactly_the_pinned_seventeen():
     discovered = _discovered()
     assert discovered == EXPECTED
     tokens = list(discovered.values())
-    assert (tokens.count(BILLING_TOKEN), tokens.count(WORKER_TOKEN)) == (12, 3)
+    assert (tokens.count(BILLING_TOKEN), tokens.count(WORKER_TOKEN)) == (14, 3)
 
 
 def _sync_control_routes() -> set[tuple[str, str]]:
@@ -103,11 +111,13 @@ def _sync_control_routes() -> set[tuple[str, str]]:
 SYNC_CONTROL = _sync_control_routes()
 
 
-def test_the_sync_control_routes_are_the_three_internal_sync_routes():
+def test_the_sync_control_routes_are_the_five_internal_sync_routes():
     assert SYNC_CONTROL == {
         ("POST", "/internal/workspaces/{workspace_id}/sync-authorizations/validate"),
         ("POST", "/internal/workspaces/{workspace_id}/sync-installations/activate"),
         ("POST", "/internal/workspaces/{workspace_id}/sync-installations/observe"),
+        ("POST", "/internal/workspaces/{workspace_id}/sync-installations/observe-established"),
+        ("POST", "/internal/workspaces/{workspace_id}/sync-authorizations/validate-reconnect"),
     }
 
 

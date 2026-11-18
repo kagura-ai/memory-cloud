@@ -172,6 +172,57 @@ deliver finite rights and recheck the original review/current-owner/consent, the
 use the existing paid-guarded activation POST. Reapproval/manual resume continues
 through the existing human reconnect/resume flow.
 
+## Established binding continuity
+
+`POST /internal/workspaces/{wid}/sync-installations/observe-established` accepts
+the same exact original `authorization_id` and `application_id`, with the same
+billing publisher credential and enabled sync-control gate. Its separate
+`sync-established-target-observation-v1` response preserves the original approval,
+current ownership epoch, original installation and management projections, and
+adds `continuity_current`. The existing `/observe` endpoint and its
+`sync-activation-observation-v1` response remain unchanged.
+
+Continuity ignores only the original authorizer/current-owner and original/current
+ownership-epoch differences for an already consumed approval. It still checks
+approval revocation, current service generation, browser and worker bindings,
+operations, unchanged installation authorization, and exact available physical
+resource/context/endpoint linkage. Missing or unestablished targets, a row rebound
+to later consent, and changed registration cannot become continuous. A disabled
+service or revoked browser registration remains a retryable conflict hold.
+
+This is metadata, not consent to create, reconnect, bill or resume. A caller using
+it for established-target confirmation must already have independently confirmed
+the same original physical tuple. It must still check its own finite paid/right
+evidence and explicit active installation/feed mode. Paused/revoked installations
+and manual/stopping modes remain visible holds and are never changed by a read.
+Both observation contracts expire within 30 seconds and are rechecked at commit.
+
+## Pending consent for a retained reconnect
+
+`POST /internal/workspaces/{wid}/sync-authorizations/validate-reconnect` accepts
+exactly `authorization_id`, `application_id` and the retained `installation_id`.
+It requires current canonical-owner pending consent, current ownership epoch,
+current service/client/operations, the same application/service/worker target,
+an intact physical binding, revoked installation and completed manual mode.
+Initial `/validate` continues to refuse any retained installation.
+
+The billing-authenticated read precedes funding, so it does not require the
+not-yet-funded additional service right. Its `sync-reconnect-validation-v1` result
+binds the pending authorization, current epoch, exact installation, manual-mode
+projection and observed/valid-until timestamps. The deadline is the earlier of
+30 seconds and approval expiry. A failed precondition is a fixed private
+404/409; unavailable authority remains a hold. All outcomes are no-store.
+
+Validation does not consume consent, grant rights, rebind the installation, change
+generation, create a target or leave manual mode. The existing current-owner
+unlink, paid reconnect and fresh exact diff confirmation remain required. A caller
+must revalidate at the actual operation boundary; a saved validation is not a
+durable authorization. There is no automatic replacement approval/target fallback.
+Synthetic request/response fixtures for both new contracts are in
+`backend/tests/fixtures/`. Deploy support before enabling a dependent caller;
+a missing endpoint must fail closed, never fall back to interpreting the old
+`binding_current=false` as ownership-only continuity.
+
 ## Transaction, retry and ownership boundaries
 
 Actual provisioning enters `paid_integration_write` before every write or row

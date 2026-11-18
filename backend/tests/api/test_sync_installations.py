@@ -57,7 +57,13 @@ async def test_owner_controls_refuse_other_credentials_before_db(app, credential
 @pytest.mark.parametrize("credential", [None, "Bearer kmc_oidc_at_wrong", "Bearer worker-key"])
 @pytest.mark.parametrize(
     "operation",
-    ["sync-installations/activate", "sync-authorizations/validate", "sync-installations/observe"],
+    [
+        "sync-installations/activate",
+        "sync-authorizations/validate",
+        "sync-installations/observe",
+        "sync-installations/observe-established",
+        "sync-authorizations/validate-reconnect",
+    ],
 )
 async def test_internal_activation_requires_the_billing_publisher(app, credential, operation):
     application, opened = app
@@ -100,3 +106,27 @@ async def test_missing_billing_configuration_fails_closed(app, monkeypatch):
             f"/internal/workspaces/{uuid4()}/sync-installations/activate", json={}
         )
     assert response.status_code == 503 and not opened
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["sync-installations/observe-established", "sync-authorizations/validate-reconnect"],
+)
+@pytest.mark.parametrize("disabled", [True, False])
+async def test_new_read_contracts_preserve_feature_and_configuration_gates(
+    app, monkeypatch, operation, disabled
+):
+    application, opened = app
+    settings = get_settings()
+    if disabled:
+        monkeypatch.setattr(settings, "sync_integrations_enabled", False)
+    else:
+        monkeypatch.setattr(settings, "billing_service_token", "")
+    async with AsyncClient(transport=ASGITransport(app=application), base_url="https://test") as c:
+        response = await c.post(
+            f"/internal/workspaces/{uuid4()}/{operation}",
+            headers={"Authorization": "Bearer fixture-billing-publisher"},
+            json={},
+        )
+    assert response.status_code == (404 if disabled else 503)
+    assert response.headers["cache-control"] == "no-store" and not opened

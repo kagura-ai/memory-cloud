@@ -1,0 +1,47 @@
+{
+  "request": {
+    "authorization_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "application_id": "33333333-3333-4333-8333-333333333333",
+    "installation_id": "77777777-7777-4777-8777-777777777777"
+  },
+  "response": {
+    "contract_version": "sync-reconnect-validation-v1",
+    "workspace_id": "22222222-2222-4222-8222-222222222222",
+    "application_id": "33333333-3333-4333-8333-333333333333",
+    "authorization": {
+      "authorization_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "workspace_id": "22222222-2222-4222-8222-222222222222",
+      "application_id": "33333333-3333-4333-8333-333333333333",
+      "service_id": "catalog-sync",
+      "operations": ["schema:read", "records:write", "results:read"],
+      "ownership_epoch": 1,
+      "created_at": "2026-11-18T01:00:00Z",
+      "expires_at": "2026-11-25T01:00:00Z",
+      "revoked_at": null,
+      "used_at": null
+    },
+    "ownership_epoch": 1,
+    "installation": {
+      "installation_id": "77777777-7777-4777-8777-777777777777",
+      "workspace_id": "22222222-2222-4222-8222-222222222222",
+      "service_id": "catalog-sync",
+      "service_client_id": "public-worker",
+      "application_id": "33333333-3333-4333-8333-333333333333",
+      "resource_pk": "88888888-8888-4888-8888-888888888888",
+      "context_id": "99999999-9999-4999-8999-999999999999",
+      "resource_id": "sync-synthetic-retained-target",
+      "endpoint_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "public_id": "synthetic-public-target",
+      "public_path": "/mcp/public/synthetic-public-target",
+      "target_available": true,
+      "state": "revoked",
+      "generation": 2,
+      "operations": ["schema:read", "records:write", "results:read"],
+      "created_at": "2026-11-18T00:01:00Z",
+      "revoked_at": "2026-11-18T00:30:00Z"
+    },
+    "management": {"mode": "manual", "epoch": 2, "generation": 2, "stop_event_id": 0, "reason": "unlinked"},
+    "observed_at": "2026-11-18T01:00:00Z",
+    "valid_until": "2026-11-18T01:00:30Z"
+  }
+}

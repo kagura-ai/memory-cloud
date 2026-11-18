@@ -13,8 +13,12 @@ from models.sync_installation_schemas import (
     SyncActivation,
     SyncActivationObservation,
     SyncAuthorizationView,
+    SyncEstablishedTargetObservation,
     SyncInstallationView,
+    SyncReconnectValidation,
+    SyncReconnectValidationView,
 )
+from services.sync_continuity import observe_established, validate_reconnect
 from services.sync_installations import (
     activate_installation,
     observe_activation,
@@ -65,3 +69,29 @@ async def observe_original_sync(
 ) -> SyncActivationObservation:
     """Read finite original-target/current-binding facts; never provision or resume."""
     return await observe_activation(db, workspace_id, body)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/sync-installations/observe-established",
+    response_model=SyncEstablishedTargetObservation,
+)
+async def observe_established_sync(
+    workspace_id: UUID,
+    body: SyncActivation,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SyncEstablishedTargetObservation:
+    """Inspect established continuity without authorizing creation or human reconnection."""
+    return await observe_established(db, workspace_id, body)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/sync-authorizations/validate-reconnect",
+    response_model=SyncReconnectValidationView,
+)
+async def validate_pending_reconnect(
+    workspace_id: UUID,
+    body: SyncReconnectValidation,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SyncReconnectValidationView:
+    """Read finite pending owner consent for one existing manual/revoked target."""
+    return await validate_reconnect(db, workspace_id, body)
