@@ -305,7 +305,9 @@ class TestReindexResourceRows:
         resource, other, plain = _make_resource_memory(), _make_resource_memory(), _make_memory()
         _mock_batch_fetch(mock_db, [resource, other, plain])
 
-        async def _rebuild(memory, *, collection_name, embedding_service, usage):
+        async def _rebuild(memory, *, collection_name, embedding_service, usage, canonical_rebuild):
+            # #2908: the Sleep reindex never takes the feed pipeline's restore.
+            assert canonical_rebuild is False
             usage["tokens"] = 11
             return memory.point_id
 
@@ -343,7 +345,7 @@ class TestReindexResourceRows:
         resource = _make_resource_memory()
         _mock_batch_fetch(mock_db, [resource])
 
-        async def _rebuild(memory, *, collection_name, embedding_service, usage):
+        async def _rebuild(memory, *, collection_name, embedding_service, usage, canonical_rebuild):
             usage["tokens"] = 9
             raise RuntimeError("upsert failed")
 

@@ -329,3 +329,47 @@ async def test_ingest_refused_with_plan_required_when_suspended(
     assert body["gate"] == "plan"
     mock_quota.assert_not_awaited()
     mock_db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["sync_run_id", "installation_generation"])
+async def test_ingest_events_refuses_sync_reserved_metadata_as_validation_error(workspace_id, key):
+    """#2906: the MCP form of the 422, before any quota is reserved or row built."""
+    mock_db = _build_db_mock(role=WorkspaceRole.MEMBER, boundary_ok=True)
+    mock_db.add = MagicMock()
+
+    with (
+        _patch_get_db(mock_db),
+        _patch_log_tool_usage(),
+        patch(
+            "mcp_server.tools.resource.resolve_workspace_event_quota_per_hour",
+            new=AsyncMock(return_value=1000),
+        ),
+        patch(
+            "mcp_server.tools.resource.check_event_quota", new=AsyncMock(return_value=None)
+        ) as mock_quota,
+    ):
+        result = await handle_ingest_events(
+            {
+                "resource_id": "ec_products",
+                "events": [
+                    {"op": "upsert", "doc_id": "D-0", "version": 1, "payload": {"x": 0}},
+                    {
+                        "op": "upsert",
+                        "doc_id": "D-1",
+                        "version": 1,
+                        "payload": {"x": 1},
+                        "event_metadata": {key: "1"},
+                    },
+                ],
+            },
+            "user-1",
+            workspace_id,
+        )
+
+    body = _json_of(result)
+    assert body["error"] == "validation_error"
+    assert "event_metadata" in body["message"]
+    assert body["index"] == 1
+    mock_quota.assert_not_awaited()
+    mock_db.add.assert_not_called()
