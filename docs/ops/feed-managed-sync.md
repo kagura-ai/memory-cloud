@@ -185,6 +185,15 @@ Unlink and authoritative entitlement removal use this same barrier while
 retaining data and all target UUIDs. Periodic run maintenance also detects
 clock expiry and retries stopping targets. The paid commit guard denies writes
 at the exact entitlement deadline even before the next maintenance tick.
+A billing delivery that ends the paid right stops the target in its own
+transaction only when the target is still `feed`; a target already `stopping` or
+`manual` is left as it is. When the stop cannot take the target fence at once
+(the indexer or an ordinary write holds it), only the stop is rolled back: the
+delivery still commits, the target stays `feed` with its writes already denied
+by the paid commit guard, and the next maintenance tick records `stopping`
+(log event `sync_stop_deferred`). An installation without a managed-target row
+is not scanned by maintenance, so its delivery is refused with a retryable 409
+instead (see [Ordered workspace billing](ordered-workspace-billing.md)).
 Credential/temporary service disablement retains the lock. The public endpoint
 is retained; stopping/status do not require a live service credential or paid
 access, while resuming does. Revoking publication does not grant data editing.

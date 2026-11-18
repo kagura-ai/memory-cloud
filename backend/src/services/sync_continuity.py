@@ -16,11 +16,23 @@ from models.sync_management import SyncManagedTarget
 from models.sync_mode_access_schemas import SyncModeStatus
 from services import sync_installations as installations
 from services.sync_authority import registered_service, sync_authority
-from services.sync_feed_authority import locked
+from services.sync_feed_authority import locked, runs_enabled
 from services.sync_managed_guard import target_fence
-from services.sync_management import default_mode_view, mode_view
+from services.sync_management import default_mode_view, management_enabled, mode_view
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException
+
+
+def reconnect_enabled() -> None:
+    """The switches the reconnect itself checks, in its order (#2917).
+
+    The management router checks ``management_enabled`` and the reconnect's
+    feed fence then ``runs_enabled``. Validation answers the same fixed 404
+    before it reads any state, so a disabled rollout is refused before funding,
+    not after.
+    """
+    management_enabled()
+    runs_enabled()
 
 
 async def _management(db: AsyncSession, row: SyncInstallation) -> SyncModeStatus:
@@ -107,6 +119,7 @@ async def validate_reconnect(
     No paid guard is needed for a read before funding. Actual reconnect remains
     the separate paid, current-owner operation and must recheck all conditions.
     """
+    reconnect_enabled()
     async with sync_authority(db, wid, None) as authority:
         observed = utcnow()
         approval = await installations._approval(db, wid, body.authorization_id)

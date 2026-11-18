@@ -19,7 +19,7 @@ from models.auth import User, Workspace, WorkspaceMember
 from models.oidc import OIDCClient
 from models.sync_installation import SyncInstallation, SyncService
 from services.permission_service import PermissionService
-from services.workspace_locks import lock_workspace_for_update
+from services.workspace_locks import lock_workspace_for_update, lock_workspace_nowait
 from utils.datetime import utcnow
 from utils.db_helpers import is_lock_not_available
 from utils.exceptions import ConflictError, NotFoundException
@@ -71,8 +71,9 @@ async def sync_authority(
 
     Paid provisioning enters the paid guard before all row locks, then takes
     User authority NOWAIT. Non-paid controls fence User before Workspace
-    NOWAIT, as existing erasure-safe owner operations do. Neither order waits
-    while holding the opposing authority lock.
+    NOWAIT, as existing erasure-safe owner operations do, and try the Workspace
+    row again for a moment so a short holder is not a conflict (#2914). Neither
+    order waits while holding the opposing authority lock.
     Internal activation checks the current owner without reusing a human grant.
     """
     authority = None
@@ -89,7 +90,8 @@ async def sync_authority(
             owner = await _lock_user(db, owner_id)
         else:
             owner = await _lock_user(db, owner_id)
-            workspace = await lock_workspace_for_update(db, workspace_id, nowait=True)
+            # Holding the users row: retry a short holder instead of waiting.
+            workspace = await lock_workspace_nowait(db, workspace_id)
         if workspace.owner_user_id != owner_id:
             raise ConflictError("Workspace ownership changed; retry")
         if principal is not None:

@@ -223,6 +223,14 @@ revisions. A changed dataset requires restarting pagination (409). Every page
 reauthorizes the current caller; it is not a public MCP call and consumes no
 anonymous public MCP weekly allowance. Both human and worker surfaces use the
 existing fail-closed peer OIDC burst limiter, across target/run IDs.
+The two human reads (`/records` and `/runs/{run_id}/diff`) share the workspace
+row with each other and with the activity reads, so parallel reads from one
+browser or several members do not exclude each other there. An ownership
+transfer, role change, ownership-epoch change, workspace deletion, a feed
+configuration write or a diff approval still excludes them. The reads also hold the
+installation's resource and context rows for a moment, so two of them take
+turns there; a busy row is tried again for under a second before the read
+answers 409 (`RES-002`).
 The worker uses the fixed snapshot/chunk/event bounds and its own service
 credential; it does not inherit a caller-selected Resource Token's hourly
 quota. The existing Indexer workspace capacity and daily Memory-creation

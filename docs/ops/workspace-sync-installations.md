@@ -205,6 +205,9 @@ It requires current canonical-owner pending consent, current ownership epoch,
 current service/client/operations, the same application/service/worker target,
 an intact physical binding, revoked installation and completed manual mode.
 Initial `/validate` continues to refuse any retained installation.
+While `SYNC_MANAGED_ENABLED` or `SYNC_RUNS_ENABLED` is off it answers the
+same fixed 404 the reconnect itself would, before it reads any state, so a
+reconnect that cannot run is never validated for funding.
 
 The billing-authenticated read precedes funding, so it does not require the
 not-yet-funded additional service right. Its `sync-reconnect-validation-v1` result
@@ -229,8 +232,10 @@ Actual provisioning enters `paid_integration_write` before every write or row
 lock. Only plain reads may precede it, matching the enforced guard entry
 contract. Under its Workspace lock, owner/User, membership, OIDC and service
 authority are refreshed and protected with nonblocking locks. Non-paid owner
-controls use the existing User fence followed by Workspace NOWAIT. A competing
-erasure/authority update returns a retryable conflict instead of a lock cycle.
+controls use the existing User fence followed by Workspace NOWAIT, which is
+tried again for under a second before it conflicts, so a short holder such as a
+memory being saved does not refuse them. A competing erasure/authority update
+returns a retryable conflict instead of a lock cycle.
 
 An outer authority context retains its synchronous `before_commit` hook until
 the paid guard has flushed, rechecked paid rights and committed. Human-token
