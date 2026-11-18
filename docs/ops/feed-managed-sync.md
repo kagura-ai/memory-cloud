@@ -28,8 +28,8 @@ approval; disabling a flag is not permission to edit managed content.
 
 Pausing a client, a service, an installation, or a failed fetch never unlocks
 content. Context identity/schema, ordinary memory creation/edit/deletion/moves,
-manual ingestion, restore, rollback, Sleep and generic embedding rewrites share
-the fence. Managed contexts use Sleep `skip`; the prior setting is restored on
+manual ingestion, declared `supersedes` edges, restore, rollback, Sleep and
+generic embedding rewrites share the fence. Managed contexts use Sleep `skip`; the prior setting is restored on
 manual entry. Access counters and erasure/retention remain separate lifecycle
 operations. No caller-controlled bypass or owner impersonation exists.
 
@@ -44,6 +44,18 @@ the resume writer; an ordinary ingest request that carries either is refused as
 a whole with 422 `VAL-001` (`details.field` `event_metadata`, plus
 `details.index` for a batch; MCP: `validation_error`) before any quota is
 counted, whatever the target's mode (#2906).
+
+A `supersedes` edge hides its target from default recall, so declared edges of
+that type are fenced too: creating, re-asserting, reweighting, retyping to or
+from, or deleting one through MCP `create_edge` / `update_edge` / `delete_edge`,
+REST `POST /api/v1/graph/edges` or PATCH `accept_supersede_candidate` answers
+409 `SYNC-LOCKED` (MCP: an error envelope carrying `management_mode`) when the
+edge's context or either memory's current context is `feed` or `stopping`, or a
+retained target not enrolled yet. No edge is written and a stored supersede
+suggestion stays. Other declared types (`related_to`, `contradicts`, ...) and
+recall-time learned edges stay writable. Every declared-edge write holds the
+shared fence of those contexts until it commits, so the edge type it decided on
+cannot be changed by a transition first (#2907).
 
 An absent ownership row is conservatively treated as `feed` while the flag is
 enabled. New installations enroll automatically; the first source/control

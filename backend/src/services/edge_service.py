@@ -38,7 +38,7 @@ from models.memory import (
     Memory,
 )
 from services.memory_ownership import own_memory_predicate
-from utils.exceptions import AuthorizationError
+from utils.exceptions import AuthorizationError, ManagedDataLockedError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -150,6 +150,57 @@ async def accept_supersede_candidate_if_matching(
         logger.warning("supersede_accept_check_failed", error=str(e))
 
 
+@dataclass(frozen=True)
+class EdgeWriteFence:
+    """The feed ownership fences one declared-edge write holds (#2907).
+
+    ``managed_mode`` is the first fenced mode (``feed`` / ``stopping``) among the
+    contexts the edge touches, or ``None`` when none is feed-managed. The shared
+    fences stay held until the caller's commit or rollback, so no mode
+    transition can change that answer before the write lands.
+    """
+
+    managed_mode: str | None
+
+    def require_unmanaged_for(self, *edge_types: str | None) -> None:
+        """Refuse a write that creates, retypes or removes a ``supersedes`` edge.
+
+        A ``supersedes`` edge hides its target from default recall and accepts
+        a stored suggestion, the effect PATCH ``accept_supersede_candidate``
+        has, which the fence refuses on a feed-managed context. Other declared
+        types and recall-time learned edges stay writable there.
+
+        Raises:
+            ManagedDataLockedError: One of ``edge_types`` is ``supersedes`` and a
+                context the edge touches is feed-managed (409 ``SYNC-LOCKED``).
+        """
+        if self.managed_mode is not None and EDGE_TYPE_SUPERSEDES in edge_types:
+            raise ManagedDataLockedError(self.managed_mode)
+
+
+async def fence_edge_write(
+    db: AsyncSession, *, context_id: str | UUID, source_id: UUID, target_id: UUID
+) -> EdgeWriteFence:
+    """Take the shared feed fence of every context a declared edge touches (#2907).
+
+    The edge's own context and each endpoint's current context (an endpoint can
+    have moved since the edge was written), in UUID order like every
+    multi-context writer (``fence_state_for_memories``). Called before the
+    edge row is read, so the edge type the caller decides on is read under the
+    fences: in a feed-managed context no ordinary writer can create or retype a
+    ``supersedes`` edge, and the mode cannot change until this transaction
+    ends. Each fence is a nonblocking advisory try-lock, so a transition in
+    progress answers 409 for a retry instead of waiting.
+
+    Raises:
+        ConflictError: A mode transition holds a fence; retry.
+    """
+    from services.sync_managed_guard import fence_state_for_memories
+
+    parsed = context_id if isinstance(context_id, UUID) else UUID(str(context_id))
+    return EdgeWriteFence(await fence_state_for_memories(db, parsed, [source_id, target_id]))
+
+
 async def ensure_supersedes_owned(
     db: AsyncSession,
     *,
@@ -215,9 +266,21 @@ async def create_declared_edge(
 
     When a ``supersedes`` edge is written, a matching stored supersede_candidate
     is accepted + cleared in the same transaction (#1403).
+
+    Feed ownership (#2907): every call holds the shared feed fence of the
+    contexts the edge touches (``fence_edge_write``) until the caller ends the
+    transaction. Writing a ``supersedes`` edge, or any write on a pair whose
+    existing edge is ``supersedes``, raises ``ManagedDataLockedError`` (409
+    ``SYNC-LOCKED``) on a ``feed`` / ``stopping`` target before anything is
+    written or a suggestion is cleared.
     """
     from repositories.neural_edge import NeuralEdgeRepository
 
+    # #2907: decided under the fences, before any read of the pair's edge.
+    fence = await fence_edge_write(
+        db, context_id=context_id, source_id=source_id, target_id=target_id
+    )
+    fence.require_unmanaged_for(edge_type)
     if edge_type == EDGE_TYPE_SUPERSEDES:
         await ensure_supersedes_owned(
             db,
@@ -237,6 +300,10 @@ async def create_declared_edge(
         workspace_id=workspace_id,
         context_id=context_id,
     )
+    if existing is not None:
+        # Retyping a supersedes edge away un-hides its target (and a conflict on
+        # it is answered the same way: the pair's supersession is fenced).
+        fence.require_unmanaged_for(existing.edge_type)
 
     if existing is not None and existing.origin == EDGE_ORIGIN_DECLARED and not overwrite:
         # Snapshot while the instance is still live: a caller's rollback on the

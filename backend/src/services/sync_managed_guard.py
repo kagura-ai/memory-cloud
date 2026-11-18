@@ -124,6 +124,32 @@ async def assert_vector_memory_mutable(db: AsyncSession, memory_id: UUID) -> Non
         await assert_context_mutable(db, context_id)
 
 
+async def fence_state_for_memories(
+    db: AsyncSession, context_id: UUID, memory_ids: list[UUID]
+) -> str | None:
+    """Hold the shared fence of ``context_id`` and of each memory's current context.
+
+    For a writer whose refusal depends on a row it reads next (a declared edge,
+    #2907): every fence is held until the transaction ends, so the state
+    returned cannot change before the write commits. Contexts are fenced in
+    UUID order.
+
+    Returns:
+        The first fenced state (``feed`` / ``stopping``) among those contexts,
+        or ``None`` when each is unmanaged or ``manual``.
+    """
+    contexts = {context_id}
+    with db.no_autoflush:
+        current = await db.scalars(select(Memory.context_id).where(Memory.id.in_(memory_ids)))
+        contexts.update(c for c in current.all() if isinstance(c, UUID))
+    state: str | None = None
+    for context in sorted(contexts, key=str):
+        fence = await target_fence(db, context)
+        if state is None and fence.state not in (None, "manual"):
+            state = fence.state
+    return state
+
+
 async def assert_resource_mutable(db: AsyncSession, resource_pk: UUID) -> None:
     """Guard slug-addressed ingestion/schema mutations at their authoritative UUID."""
     from models.auth import Context

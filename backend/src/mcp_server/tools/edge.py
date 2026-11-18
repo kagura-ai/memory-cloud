@@ -28,12 +28,13 @@ from services.edge_service import (
     accept_supersede_candidate_if_matching,
     create_declared_edge,
     ensure_supersedes_owned,
+    fence_edge_write,
 )
 from services.edge_service import (
     edge_to_dict as _edge_to_dict,
 )
 from services.identity_link_service import link_set_reads
-from utils.exceptions import AuthorizationError
+from utils.exceptions import AuthorizationError, ManagedDataLockedError
 from utils.response_budget import BudgetArgumentError, parse_limit
 
 # #1743: list_edges pages each direction. A hub memory can hold thousands of
@@ -353,6 +354,13 @@ async def handle_create_edge(
                 db, user_id, "create_edge", start_time, 403, current_context_id, workspace_id
             )
             return _error_response("permission_denied", e.message)
+        except ManagedDataLockedError:
+            # #2907: the dispatcher turns it into the conflict envelope with management_mode.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "create_edge", start_time, 409, current_context_id, workspace_id
+            )
+            raise
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
@@ -426,6 +434,11 @@ async def handle_update_edge(
 
             repo = NeuralEdgeRepository(db)
 
+            # #2907: the edge is read under the feed fences of every context it
+            # touches, held until the commit below.
+            fence = await fence_edge_write(
+                db, context_id=ctx_id, source_id=source_uuid, target_id=target_uuid
+            )
             existing = await repo.get_edge(
                 user_id,
                 source_uuid,
@@ -441,6 +454,9 @@ async def handle_update_edge(
                 )
 
             effective_type = new_edge_type or existing.edge_type
+            # Retyping to or from supersedes, or reweighting one (which also
+            # accepts a stored suggestion below), is refused on a feed target.
+            fence.require_unmanaged_for(existing.edge_type, effective_type)
             if effective_type == EDGE_TYPE_SUPERSEDES:
                 await execute_with_timeout(
                     ensure_supersedes_owned(
@@ -496,6 +512,13 @@ async def handle_update_edge(
                 db, user_id, "update_edge", start_time, 403, current_context_id, workspace_id
             )
             return _error_response("permission_denied", e.message)
+        except ManagedDataLockedError:
+            # The dispatcher turns it into the conflict envelope with management_mode.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "update_edge", start_time, 409, current_context_id, workspace_id
+            )
+            raise
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
@@ -538,6 +561,20 @@ async def handle_delete_edge(
             ctx_id = str(current_context_id)
 
             repo = NeuralEdgeRepository(db)
+            # #2907: deleting a supersedes edge un-hides its target, which the
+            # feed fence refuses; the edge type is read under the fences.
+            fence = await fence_edge_write(
+                db, context_id=ctx_id, source_id=source_uuid, target_id=target_uuid
+            )
+            existing = await repo.get_edge(
+                user_id,
+                source_uuid,
+                target_uuid,
+                workspace_id=ws_id,
+                context_id=ctx_id,
+            )
+            if existing is not None:
+                fence.require_unmanaged_for(existing.edge_type)
             deleted = await execute_with_timeout(
                 repo.delete_edge(
                     user_id=user_id,
@@ -566,6 +603,12 @@ async def handle_delete_edge(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except ManagedDataLockedError:
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "delete_edge", start_time, 409, current_context_id, workspace_id
+            )
+            raise
         except Exception:
             await db.rollback()
             await _log_tool_usage(
