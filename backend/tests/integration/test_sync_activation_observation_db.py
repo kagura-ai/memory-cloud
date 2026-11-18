@@ -7,6 +7,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 
+from models.oidc import OIDCClient
 from models.public_mcp import PublicMcpEndpoint
 from models.sync_installation import SyncAuthorization, SyncInstallation, SyncService
 from tests.integration import sync_installation_fixtures as fixtures
@@ -72,8 +73,24 @@ async def test_lost_reply_discovers_the_same_target_after_original_consent_expir
     assert await targets(store) == (1, 1, 1)
 
 
+# A disabled service or a revoked browser registration is a conflict hold; every
+# other change of the original binding answers binding_current=false.
+REGISTRATION_HOLDS = {"service_disabled", "browser_revoked"}
+
+
 @pytest.mark.parametrize(
-    "kind", ["transfer", "away_back", "service_generation", "revoke", "pending_expiry", "consumed"]
+    "kind",
+    [
+        "transfer",
+        "away_back",
+        "service_generation",
+        "revoke",
+        "pending_expiry",
+        "consumed",
+        "service_client",
+        "operations",
+        *sorted(REGISTRATION_HOLDS),
+    ],
 )
 async def test_current_binding_changes_are_holds_without_mutation(store, kind):
     approval = await approve(store)
@@ -91,13 +108,35 @@ async def test_current_binding_changes_are_holds_without_mutation(store, kind):
         await change(
             store, SyncAuthorization, UUID(approval["authorization_id"]), used_at=store.clock.now
         )
+    elif kind == "service_client":
+        await change(
+            store, SyncService, store.service_id, service_client_id=store.service_id + "-other"
+        )
+    elif kind == "operations":
+        await change(
+            store,
+            SyncAuthorization,
+            UUID(approval["authorization_id"]),
+            operations=["schema:read", "records:write"],
+        )
+    elif kind == "service_disabled":
+        await change(store, SyncService, store.service_id, enabled=False)
+    elif kind == "browser_revoked":
+        await change(store, OIDCClient, store.client_id, revoked_at=store.clock.now)
     else:
         store.clock.now += timedelta(days=8)
     response = await observe(store, approval)
-    assert response.status_code == 200, response.text
-    assert response.json()["binding_current"] is False
-    assert response.json()["installation"] is None
+    if kind in REGISTRATION_HOLDS:
+        assert response.status_code == 409, response.text
+    else:
+        assert response.status_code == 200, response.text
+        assert response.json()["binding_current"] is False
+        assert response.json()["installation"] is None
     assert await targets(store) == (0, 0, 0)
+    async with store.factory() as db:
+        assert (await db.get(SyncAuthorization, UUID(approval["authorization_id"]))).used_at == (
+            store.clock.now if kind == "consumed" else None
+        )
 
 
 async def test_consumed_original_observation_detects_transfer_away_and_back(store):
@@ -115,8 +154,8 @@ async def test_consumed_original_observation_detects_transfer_away_and_back(stor
     assert await targets(store) == (1, 1, 1)
 
 
-@pytest.mark.parametrize("kind", ["application", "authorization"])
-async def test_other_references_are_never_adopted(store, kind):
+@pytest.mark.parametrize("kind,status", [("application", 409), ("authorization", 404)])
+async def test_other_references_are_never_adopted(store, kind, status):
     approval = await approve(store)
     response = await observe(
         store,
@@ -125,7 +164,8 @@ async def test_other_references_are_never_adopted(store, kind):
         if kind == "application"
         else {"authorization_id": str(uuid4())},
     )
-    assert response.status_code in {404, 409}
+    assert response.status_code == status, response.text
+    assert await targets(store) == (0, 0, 0)
 
 
 async def test_retained_installation_of_another_application_is_a_conflict(store):
@@ -280,6 +320,73 @@ async def test_final_deadline_cannot_return_an_expired_observation(store, monkey
     monkeypatch.setattr(service, "authorization_view", slow_view)
     response = await observe(store, approval)
     assert response.status_code == 409 and await targets(store) == (0, 0, 0)
+
+
+async def facts(store, approval, iid=None):
+    """Every column an observation could plausibly touch."""
+    async with store.factory() as db:
+        consent = await db.get(SyncAuthorization, UUID(approval["authorization_id"]))
+        row = await db.get(SyncInstallation, iid) if iid is not None else None
+        return (
+            await targets(store),
+            (consent.used_at, consent.revoked_at, consent.expires_at),
+            (row.authorization_id, row.state, row.generation) if row is not None else None,
+        )
+
+
+def slow_observation(store, monkeypatch, delay):
+    """Move the clock while the observation is being assembled, before its commit."""
+    from services import sync_installations as service
+
+    original_view = service.authorization_view
+
+    def slow_view(row):
+        value = original_view(row)
+        store.clock.now += delay
+        return value
+
+    monkeypatch.setattr(service, "authorization_view", slow_view)
+
+
+async def test_retained_target_observation_cannot_outlive_its_deadline(store, monkeypatch):
+    approval = await approve(store)
+    await paid(store)
+    created = await http(store, "POST", "", billing=True, body=activation(approval))
+    assert created.status_code == 200, created.text
+    iid = UUID(created.json()["installation_id"])
+    before = await facts(store, approval, iid)
+    slow_observation(store, monkeypatch, timedelta(seconds=31))
+    response = await observe(store, approval)
+    assert response.status_code == 409, response.text
+    assert await facts(store, approval, iid) == before
+
+
+async def test_pending_expiry_deadline_is_enforced_before_commit(store, monkeypatch):
+    approval = await approve(store)
+    end = store.clock.now + timedelta(seconds=7)
+    await change(store, SyncAuthorization, UUID(approval["authorization_id"]), expires_at=end)
+    before = await facts(store, approval)
+    slow_observation(store, monkeypatch, timedelta(seconds=8))
+    response = await observe(store, approval)
+    assert response.status_code == 409, response.text
+    assert await facts(store, approval) == before
+
+
+async def test_mode_row_generation_drift_is_a_conflict(store):
+    from services import sync_management
+
+    approval = await approve(store)
+    await paid(store)
+    created = await http(store, "POST", "", billing=True, body=activation(approval))
+    iid = UUID(created.json()["installation_id"])
+    async with store.factory() as db:
+        row = await db.get(SyncInstallation, iid)
+        await sync_management.start_stopping(db, row, "manual_requested")
+        await db.commit()
+        generation = row.generation
+    await change(store, SyncInstallation, iid, generation=generation + 1)
+    response = await observe(store, approval)
+    assert response.status_code == 409, response.text
 
 
 async def test_stop_and_manual_holds_remain_distinct_without_reenrollment(store):
