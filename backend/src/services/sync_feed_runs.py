@@ -94,7 +94,7 @@ async def editable(
     await validate_run_request(db, authority, row, fence)
 
 
-def manual_request_is_current(now: datetime) -> Select[tuple[UUID]]:
+def manual_request_is_current(now: datetime) -> Select[UUID]:
     """Rows of the manual request behind ``SyncManualRun.request_id`` while it is current.
 
     Correlated on ``SyncManualRun``: use ``.exists()`` in a query that selects
