@@ -27,6 +27,7 @@ from models.auth import Context, User
 from models.erasure import STATUS_CANCELLED, STATUS_COOLING_OFF, ErasureRequest
 from models.memory import Memory
 from models.sync_feed import SyncRecord
+from models.sync_management import SyncManagedTarget
 from services import resource_indexer
 from services.sync_managed_guard import target_fence
 from tests.integration import sync_feed_fixtures as fixtures
@@ -283,8 +284,30 @@ async def test_a_refused_managed_row_keeps_its_retry_budget(managed, monkeypatch
     assert (await finalize(managed))["mode"] == "manual"
 
 
-@pytest.mark.parametrize("change", ["edited", "in_hand", "tombstoned", "generic"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "edited",
+        "in_hand",
+        "tombstoned",
+        "generic",
+        # Each of these leaves the content equal to the canonical payload, so
+        # only its own condition of the rule refuses the row.
+        "record_version",
+        "row_version",
+        "source",
+        "author",
+        "unenrolled",
+    ],
+)
 async def test_only_a_restore_of_unchanged_canonical_content_passes(managed, monkeypatch, change):
+    """The rule: a live feed row of the enrolled target (``resource_ingest``,
+    version 1, authored by the context creator) whose content and resource
+    version equal its canonical record. Every condition refuses on its own.
+
+    Each change is applied before the row is loaded, so the in-hand row agrees
+    with the stored one and only the canonical test can refuse it.
+    """
     from services.vector_erasure import embedding_author_current
 
     await committed(managed, [product("one")])
@@ -292,7 +315,29 @@ async def test_only_a_restore_of_unchanged_canonical_content_passes(managed, mon
     (row,) = await live_rows(managed)
     qdrant = stubs(monkeypatch)
     async with managed.factory() as db:
-        if change == "edited":
+        if change == "record_version":
+            # Same payload, newer record version: the row is not the record's.
+            await db.execute(
+                update(SyncRecord)
+                .where(SyncRecord.doc_id == row.resource_doc_id)
+                .values(version=SyncRecord.version + 1)
+            )
+        elif change == "row_version":
+            await db.execute(update(Memory).where(Memory.id == row.id).values(version=2))
+        elif change == "source":
+            await db.execute(
+                update(Memory).where(Memory.id == row.id).values(source="mcp_remember")
+            )
+        elif change == "author":
+            other = managed.store.users["admin"]
+            assert other != (await db.get(Context, ctx_of(managed))).created_by
+            await db.execute(update(Memory).where(Memory.id == row.id).values(user_id=other))
+        elif change == "unenrolled":
+            # A retained target without its mode row still reads as feed.
+            await db.execute(
+                delete(SyncManagedTarget).where(SyncManagedTarget.context_id == ctx_of(managed))
+            )
+        elif change == "edited":
             await db.execute(
                 update(Memory)
                 .where(Memory.id == row.id)
@@ -330,6 +375,44 @@ async def test_only_a_restore_of_unchanged_canonical_content_passes(managed, mon
         )
         await db.commit()
     assert upserted_points(qdrant) == {row.summary_embedding_id}
+
+
+async def test_a_record_that_moves_on_during_the_embedding_refuses_the_upsert(managed, monkeypatch):
+    """The canonical test runs again after ``embed()`` and before the upsert.
+
+    A feed commit takes only the shared fence, so the record can change while
+    the embedding is computed; the first passing test must not authorize the
+    write on its own.
+    """
+    await committed(managed, [product("one")])
+    await apply_pending(managed, monkeypatch)
+    (row,) = await live_rows(managed)
+    qdrant = stubs(monkeypatch)
+
+    async def move_the_record_on(**_kwargs) -> list[float]:
+        async with managed.factory() as other:
+            await other.execute(
+                update(SyncRecord)
+                .where(SyncRecord.doc_id == row.resource_doc_id)
+                .values(payload={"title": "Moved on"})
+            )
+            await other.commit()
+        return [0.1] * 1536
+
+    service = embedding()
+    service.embed.side_effect = move_the_record_on
+    async with managed.factory() as db:
+        memory = await db.get(Memory, row.id)
+        with pytest.raises(ManagedDataLockedError):
+            await resource_indexer.ResourceIndexer(db).rebuild_point(
+                memory,
+                collection_name="test-collection",
+                embedding_service=service,
+                canonical_rebuild=True,
+            )
+        await db.rollback()
+    service.embed.assert_awaited_once()
+    qdrant.upsert.assert_not_awaited()
 
 
 async def test_the_canonical_rebuild_holds_the_fence_against_a_transition(managed, monkeypatch):
