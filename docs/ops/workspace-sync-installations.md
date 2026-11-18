@@ -205,6 +205,9 @@ It requires current canonical-owner pending consent, current ownership epoch,
 current service/client/operations, the same application/service/worker target,
 an intact physical binding, revoked installation and completed manual mode.
 Initial `/validate` continues to refuse any retained installation.
+While `SYNC_MANAGED_ENABLED` or `SYNC_RUNS_ENABLED` is off it answers the
+same fixed 404 the reconnect itself would, before it reads any state, so a
+reconnect that cannot run is never validated for funding.
 
 The billing-authenticated read precedes funding, so it does not require the
 not-yet-funded additional service right. Its `sync-reconnect-validation-v1` result
