@@ -11,10 +11,15 @@ from api.routes.sync_installations import SYNC_RESPONSES, SyncControlRoute, sync
 from db.base import get_db
 from models.sync_installation_schemas import (
     SyncActivation,
+    SyncActivationObservation,
     SyncAuthorizationView,
     SyncInstallationView,
 )
-from services.sync_installations import activate_installation, validate_authorization
+from services.sync_installations import (
+    activate_installation,
+    observe_activation,
+    validate_authorization,
+)
 
 router = APIRouter(
     prefix="/internal",
@@ -47,3 +52,16 @@ async def activate_paid_sync(
 ) -> SyncInstallationView:
     """Recheck finite approval and paid rights internally, without reusing a human login."""
     return await activate_installation(db, workspace_id, body)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/sync-installations/observe",
+    response_model=SyncActivationObservation,
+)
+async def observe_original_sync(
+    workspace_id: UUID,
+    body: SyncActivation,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SyncActivationObservation:
+    """Read finite original-target/current-binding facts; never provision or resume."""
+    return await observe_activation(db, workspace_id, body)

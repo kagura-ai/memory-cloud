@@ -122,6 +122,56 @@ The billing delivery/reconciler invokes activation automatically after confirmed
 payment. This API is not a background scheduler and does not replace durable
 publisher retries. The sync worker receives no arbitrary provisioning grant.
 
+## Billing recovery observation
+
+`POST /internal/workspaces/{wid}/sync-installations/observe` accepts the same exact
+`authorization_id` and `application_id` references as activation. It requires the
+existing billing publisher credential and the enabled sync-control surface; it
+accepts no human session, browser access token or worker credential. Responses,
+including failures, remain `no-store`.
+
+The response is `sync-activation-observation-v1` and contains `workspace_id`,
+`application_id`, the stored `authorization`, current `ownership_epoch`,
+`binding_current`, the original `installation` or null, its `management` mode
+projection or null, and `observed_at` / `valid_until`. It expires in at most
+30 seconds (earlier for a pending authorization's expiry), rechecked immediately
+before commit. The observation is metadata, not authority to provision or resume.
+
+The current owner, epoch and registered service/client/generation/operation
+bindings are compared under existing authority locks. A transferred owner,
+transfer away and back, revoked approval, changed registration generation or
+expired/consumed approval without a target returns `binding_current=false`.
+A disabled/unavailable service or revoked browser registration is a conflict
+hold; a caller must retain the same original references and retry after the
+operator restores that registration. It must not replace the approval or target.
+
+An unchanged consumed or expired approval can identify its existing original
+target after a lost activation response. After a human unlink and reconnect the
+same retained installation is bound to the newer approval: observing the original
+references then returns that installation and its management projection with
+`binding_current=false`, and nothing about the newer approval. This answer is
+final for the original references; billing continues through the newer approval's
+flow instead of retrying them. An approval only becomes an installation's original by
+being consumed, which happens only in the transaction that binds the installation to
+it. A never-consumed approval is therefore not credited with an installation that a
+later approval of the same application created: observing it returns `installation`
+and `management` null with `binding_current=false`, also while it is still unexpired,
+because the retained installation means it can never activate. This answer is final
+for its references too. A retained installation of another application is a
+conflict and is never adopted; retrying the same references does not change that
+answer. A missing physical target is reported
+as `target_available=false`. Paused/revoked installation states and
+`management.mode=stopping|manual` remain separate holds; an active installation
+does not imply feed mode. The management projection is read under the existing
+target fence using the existing default view when no mode row exists. Observation
+does not enroll it or change its mode, generation, data, rights, usage or public
+endpoint. Current rights are checked separately before reporting paid activation.
+
+To activate a genuinely missing target, billing must separately confirm payment,
+deliver finite rights and recheck the original review/current-owner/consent, then
+use the existing paid-guarded activation POST. Reapproval/manual resume continues
+through the existing human reconnect/resume flow.
+
 ## Transaction, retry and ownership boundaries
 
 Actual provisioning enters `paid_integration_write` before every write or row

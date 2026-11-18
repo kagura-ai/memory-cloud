@@ -56,7 +56,8 @@ async def test_owner_controls_refuse_other_credentials_before_db(app, credential
 
 @pytest.mark.parametrize("credential", [None, "Bearer kmc_oidc_at_wrong", "Bearer worker-key"])
 @pytest.mark.parametrize(
-    "operation", ["sync-installations/activate", "sync-authorizations/validate"]
+    "operation",
+    ["sync-installations/activate", "sync-authorizations/validate", "sync-installations/observe"],
 )
 async def test_internal_activation_requires_the_billing_publisher(app, credential, operation):
     application, opened = app
