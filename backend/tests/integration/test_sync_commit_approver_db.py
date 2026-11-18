@@ -1,10 +1,11 @@
 """A destructive commit rechecks its human approver: a lost seat is a conflict (#2912).
 
 The worker commits a destructive diff only while the Editor who approved it
-still qualifies. When that approver lost a seat or the Editor role between the
-approval and the commit, the worker's commit answers the fixed ``RES-002``
-conflict ("Approval authority changed"): the refusal is about the approver,
-never about the worker, so no ``sync.authority.denied`` row is written for it.
+still qualifies. When that approver lost a seat, the Editor role or the reach
+to the context between the approval and the commit, the worker's commit
+answers the fixed ``RES-002`` conflict ("Approval authority changed"): the
+refusal is about the approver, never about the worker, so no
+``sync.authority.denied`` row is written for it.
 """
 
 from uuid import UUID
@@ -13,7 +14,7 @@ import pytest
 from sqlalchemy import select
 
 from api.routes import sync_feeds as feed_routes
-from models.auth import ContextMember
+from models.auth import ContextMember, WorkspaceMember
 from models.sync_feed import SyncRun
 from tests.integration import test_sync_activity_db as fixtures
 from tests.integration.sync_feed_fixtures import committed, human, product, service, staged
@@ -40,7 +41,22 @@ async def lose_approver_role(activity, monkeypatch) -> None:
         await db.commit()
 
 
-@pytest.mark.parametrize("loss", ["seat", "role"])
+async def lose_approver_reach(activity, monkeypatch) -> None:
+    async with activity.factory() as db:
+        member = await db.scalar(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == activity.store.wid,
+                WorkspaceMember.user_id == activity.store.users["member"],
+            )
+        )
+        member.allowed_context_ids = []
+        await db.commit()
+
+
+LOSSES = {"seat": lose_requester_seat, "role": lose_approver_role, "reach": lose_approver_reach}
+
+
+@pytest.mark.parametrize("loss", list(LOSSES))
 async def test_worker_commit_answers_409_when_the_approver_lost_authority(
     activity, monkeypatch, loss
 ):
@@ -57,10 +73,7 @@ async def test_worker_commit_answers_409_when_the_approver_lost_authority(
     assert approval.status_code == 200, approval.text
     before = await denials(activity)
 
-    if loss == "seat":
-        await lose_requester_seat(activity, monkeypatch)
-    else:
-        await lose_approver_role(activity, monkeypatch)
+    await LOSSES[loss](activity, monkeypatch)
     seen = conflicts_of(monkeypatch, feed_routes, "commit_run")
 
     response = await service(
