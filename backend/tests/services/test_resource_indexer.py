@@ -2495,6 +2495,73 @@ class TestProcessIncrementalSavepoints:
         indexer.qdrant_client.delete.assert_not_awaited()
         assert indexer._retired == []
 
+    @staticmethod
+    def _lock_not_available() -> Exception:
+        from sqlalchemy.exc import DBAPIError
+
+        class _DriverError(Exception):
+            sqlstate = "55P03"
+
+        return DBAPIError("SELECT ... FOR UPDATE NOWAIT", {}, _DriverError("busy"))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sync_event", "busy", "raises"),
+        [
+            # #2904: the retirement's busy candidate lock ends the event.
+            (True, True, True),
+            # Any other cleanup failure stays non-blocking, as before.
+            (True, False, False),
+            # A plain resource event's cleanup takes no NOWAIT lock; its
+            # failures stay non-blocking whatever they are.
+            (False, True, False),
+        ],
+        ids=["sync-busy", "sync-other-error", "plain-busy"],
+    )
+    async def test_old_version_cleanup_busy_lock_of_a_sync_event_is_a_retry(
+        self, sync_event, busy, raises
+    ):
+        old = MagicMock()
+        old.resource_version = 0
+        db = TestResourceIndexerNamedVectorUpsert._db_with_existing(None, old_memories=[old])
+        failure = self._lock_not_available() if busy else RuntimeError("cleanup flush failed")
+        flushes = 0
+
+        async def _flush():
+            nonlocal flushes
+            flushes += 1
+            if flushes == 2:  # the row's flush passes, the cleanup's fails
+                raise failure
+
+        db.flush = AsyncMock(side_effect=_flush)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        event = _make_event()
+        event.event_metadata = {"sync_run_id": str(uuid4())} if sync_event else None
+
+        async def _apply() -> None:
+            await indexer._apply_upsert(
+                event, _make_schema(), db.upsert_context, self.COLLECTION, indexer.embedding_service
+            )
+
+        # The ownership proof needs the real guard (DB tests); the cleanup's
+        # error handling is what is under test here.
+        with (
+            patch("services.sync_feed_provenance.assert_sync_memory_ids"),
+            patch("services.resource_indexer.logger") as log,
+        ):
+            if raises:
+                with pytest.raises(SyncLockBusyError) as retry:
+                    await _apply()
+                assert retry.value.__cause__ is failure
+            else:
+                await _apply()
+        warned = [c.args[0] for c in log.warning.call_args_list]
+        assert ("old_version_cleanup_failed" in warned) is not raises
+        assert indexer._retired == []
+
     @pytest.mark.asyncio
     async def test_old_points_are_queued_not_deleted_inside_the_event(self):
         """#2248: the event only queues the old row's points; the batch drains

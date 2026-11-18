@@ -1773,7 +1773,24 @@ class ResourceIndexer:
                         cleaned_count=len(retired),
                     )
             except Exception as cleanup_err:
-                # Non-blocking: cleanup failure should not block upsert
+                from services.sync_feed_provenance import sync_lock_busy
+
+                if (
+                    isinstance(event.event_metadata, dict)
+                    and "sync_run_id" in event.event_metadata
+                    and sync_lock_busy(cleanup_err)
+                ):
+                    # #2904: a sync event takes the old versions without
+                    # waiting (``sync_candidate_lock``). A held row says
+                    # nothing about the event, and going on would commit the
+                    # new version beside the old one while the offset moves
+                    # past the event, so nothing would retire it. The event
+                    # rolls back instead and the batch stops before it, as at
+                    # every other busy lock of a sync event.
+                    from utils.exceptions import SyncLockBusyError
+
+                    raise SyncLockBusyError() from cleanup_err
+                # Non-blocking: any other cleanup failure does not block the upsert
                 logger.warning(
                     "old_version_cleanup_failed",
                     resource_id=event.resource_id,

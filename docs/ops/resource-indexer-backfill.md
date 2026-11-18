@@ -89,7 +89,11 @@ events (`event_id`, `doc_id`, `error_class`), the oldest 20.
 
 A lock the event needed and could not take at once is not a failure (#2904).
 The synchronization guard takes its locks without waiting, and a worker's
-status poll or a feed transition can hold them for a moment. The batch then
+status poll or a feed transition can hold them for a moment. So does a sync
+upsert's retirement of the document's previous version, whose row another
+transaction can hold for a moment (a row that references it, for example):
+the new version is not written beside the old one, the event waits for its
+retry like any other busy one. The batch then
 logs `indexer_event_lock_busy` and stops before that event: the events before
 it commit, `last_offset` stays on the last applied one, and nothing is added to
 `failed_events`. A later run starts from the event again: for a sync target

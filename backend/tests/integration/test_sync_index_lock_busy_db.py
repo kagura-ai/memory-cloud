@@ -349,6 +349,95 @@ async def test_busy_candidate_lock_on_a_delete_ends_the_batch_without_a_record(f
     assert await _index_status(feeds, row["run_id"]) == "complete"
 
 
+async def _live_versions(feeds, doc_id: str) -> list[int]:
+    async with feeds.factory() as db:
+        return sorted(
+            (
+                await db.scalars(
+                    select(Memory.resource_version).where(
+                        Memory.context_id == feeds_context(feeds),
+                        Memory.resource_doc_id == doc_id,
+                        Memory.deleted_at.is_(None),
+                    )
+                )
+            ).all()
+        )
+
+
+async def test_busy_old_version_cleanup_ends_the_batch_instead_of_keeping_two_versions(
+    feeds, indexing
+):
+    """The upsert's retirement of the previous version takes its rows FOR
+    UPDATE NOWAIT. A held row there is a busy lock like the guard's: the event
+    rolls back and runs again, instead of committing the new version beside
+    the old one with the offset moved past it."""
+    await committed(feeds, [product("one")])
+    await _run(feeds)
+    offset, _failed = await _offset(feeds)
+    row = await committed(feeds, [product("one", title="one v2")])
+    (event,) = await _events(feeds, after=offset)
+    assert event.op == "upsert"
+    previous = event.version - 1
+    assert await _live_versions(feeds, event.doc_id) == [previous]
+    await _maintain(feeds)
+    async with feeds.factory() as holder:
+        # KEY SHARE is what a row referencing the old version takes (an FK
+        # insert): the guard's FOR SHARE passes, the cleanup's FOR UPDATE
+        # NOWAIT does not.
+        await holder.scalar(
+            select(Memory)
+            .where(
+                Memory.context_id == feeds_context(feeds),
+                Memory.resource_doc_id == event.doc_id,
+                Memory.resource_version == previous,
+            )
+            .with_for_update(read=True, key_share=True)
+        )
+        metrics = await _run(feeds, maintain=False)
+        await holder.rollback()
+    assert metrics.batch_committed and metrics.applied_upserts == 0
+    assert metrics.errors == 0 and metrics.failed_events == []
+    assert await _offset(feeds) == (offset, [])
+    assert await _live_versions(feeds, event.doc_id) == [previous]
+    assert await _index_status(feeds, row["run_id"]) == "pending"
+    metrics = await _run(feeds)
+    assert metrics.applied_upserts == 1 and metrics.failed_events == []
+    assert await _offset(feeds) == (event.id, [])
+    assert await _live_versions(feeds, event.doc_id) == [event.version]
+    assert await _index_status(feeds, row["run_id"]) == "complete"
+
+
+async def test_busy_batch_keeps_the_recorded_failure_of_the_event_it_stops_at(
+    feeds, indexing, monkeypatch
+):
+    """A batch that stops at a busy lock ran nothing from that event on, so an
+    entry recorded for it by an earlier batch stays (``ran_through``)."""
+    await committed(feeds, [product("one")])
+    (event,) = await _events(feeds)
+    failing = AsyncMock()
+    failing.embed.side_effect = RuntimeError("embedding refused")
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            resource_indexer,
+            "resolve_context_routing",
+            AsyncMock(return_value=("test-collection", failing)),
+        )
+        first = await _run(feeds)
+    assert first.errors == 1
+    offset, failed = await _offset(feeds)
+    assert offset < event.id
+    assert [entry["event_id"] for entry in failed] == [event.id]
+    resource_pk, _context_id = _target(feeds)
+    await _maintain(feeds)
+    async with feeds.factory() as holder:
+        await holder.scalar(select(Resource).where(Resource.id == resource_pk).with_for_update())
+        busy = await _run(feeds, maintain=False)
+        await holder.rollback()
+    assert busy.batch_committed and busy.applied_upserts == 0
+    assert busy.failed_events == failed
+    assert await _offset(feeds) == (offset, failed)
+
+
 @pytest.mark.parametrize("held", ["resource", "context", "record", "receipt"])
 async def test_guard_lock_collisions_raise_the_retryable_conflict(feeds, held):
     row = await committed(feeds, [product("one")])
