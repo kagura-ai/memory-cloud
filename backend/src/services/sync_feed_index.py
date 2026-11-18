@@ -298,9 +298,11 @@ async def index_status(db: AsyncSession, row: SyncRun, feed: SyncFeed) -> str:
     Below the run's watermark the run is ``pending`` while the indexer has not
     applied its events yet, a batch stopped at a busy lock included, and
     ``failed`` once the target's job failed or the indexer recorded one of the
-    run's events as failed (#2905). ``failed`` there can still turn
-    ``complete``: the outbox replay re-queues the target and a retry that
-    applies the event moves the cursor past the watermark.
+    run's events as failed (#2905). A run that created no index events waits
+    on the feed's events the cursor has not passed, so their recorded failures
+    count for it. ``failed`` there can still turn ``complete`` (``unchanged``):
+    the outbox replay re-queues the target and a retry that applies the event
+    moves the cursor past the watermark.
     """
     if row.state != "committed":
         return "not_committed"
@@ -332,12 +334,28 @@ async def index_status(db: AsyncSession, row: SyncRun, feed: SyncFeed) -> str:
         )
     ).first()
     if watermark and (state is None or state.last_offset < watermark):
-        if state is not None and (
-            state.job_status == "failed"
-            or (outbox is not None and run_failure_recorded(state.metrics, outbox.event_ids))
-        ):
+        if state is None:
+            return "pending"
+        if state.job_status == "failed":
             return "failed"
-        return "pending"
+        if outbox is not None:
+            run_events: Sequence[int] = outbox.event_ids
+        else:
+            # A run without index events waits on the feed's events the cursor
+            # has not passed: those are its events here. Only the recorded ids
+            # and the watermark (the highest) decide, so read just those.
+            from services.resource_indexer import recorded_failed_events
+
+            recorded = [entry["event_id"] for entry in recorded_failed_events(state.metrics)]
+            pending_failed = await db.scalars(
+                select(SyncRecord.last_event_id).where(
+                    SyncRecord.feed_id == feed.id,
+                    SyncRecord.last_event_id > state.last_offset,
+                    SyncRecord.last_event_id.in_(recorded),
+                )
+            )
+            run_events = [watermark, *pending_failed]
+        return "failed" if run_failure_recorded(state.metrics, run_events) else "pending"
     # A shared job's historical/other-feed errors cannot override actual
     # current canonical proof for this feed. Stop/drain retains its stricter
     # context-wide failure barrier independently.

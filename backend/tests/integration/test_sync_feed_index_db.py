@@ -699,3 +699,29 @@ async def test_a_failure_the_full_failed_events_record_dropped_still_reports_fai
     # The run's failure did not fit into the record.
     assert await batches._offset(feeds) == (events[0].id, older)
     assert await batches._index_status(feeds, row["run_id"]) == "failed"
+
+
+async def test_an_unchanged_run_reads_failed_while_an_earlier_event_of_the_feed_fails(
+    feeds, indexing, monkeypatch
+):
+    """A re-sent snapshot commits no events and no outbox: its status reads the
+    feed's events the cursor has not passed, so the failure shows there too."""
+    refused: set[str] = set()
+    _refusing(monkeypatch, refused)
+    records = [product("one"), product("two")]
+    first = await committed(feeds, records)
+    events = await batches._events(feeds)
+    refused.add(events[-1].payload["title"])
+    await batches._run(feeds)
+    offset, failed = await batches._offset(feeds)
+    assert offset == events[0].id
+    assert [entry["event_id"] for entry in failed] == [events[-1].id]
+    second = await committed(feeds, records)
+    async with feeds.factory() as db:
+        assert await db.get(SyncIndexOutbox, UUID(second["run_id"])) is None
+    assert await batches._index_status(feeds, first["run_id"]) == "superseded"
+    assert await batches._index_status(feeds, second["run_id"]) == "failed"
+    refused.clear()
+    metrics = await batches._run(feeds)
+    assert metrics.applied_upserts == 1 and metrics.failed_events == []
+    assert await batches._index_status(feeds, second["run_id"]) == "unchanged"
