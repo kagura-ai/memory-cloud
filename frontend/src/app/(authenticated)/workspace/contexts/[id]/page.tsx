@@ -332,7 +332,9 @@ function ScopedContextDetail() {
         </Alert>
       )}
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
+        {/* Up to eight tabs: scroll sideways on a narrow screen instead of
+            widening the page. */}
+        <TabsList className="max-w-full justify-start overflow-x-auto">
           <TabsTrigger value="overview">{t("tabs.overview")}</TabsTrigger>
           <TabsTrigger value="memories">{t("tabs.memories")}</TabsTrigger>
           <TabsTrigger value="connections">{t("tabs.connections")}</TabsTrigger>
