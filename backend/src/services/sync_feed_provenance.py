@@ -1,11 +1,13 @@
 """Server outbox receipts, never client metadata, prove managed event ownership."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy import Select, Uuid, case, cast, exists, func, or_, select, tuple_
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -16,7 +18,39 @@ from models.resource import Resource, ResourceEvent
 from models.sync_feed import SyncIndexOutbox, SyncRecord
 from models.sync_feed_schemas import MAX_RUN_BYTES
 from services.sync_feed_authority import locked
-from utils.exceptions import ConflictError
+from utils.db_helpers import is_lock_not_available
+from utils.exceptions import ConflictError, SyncLockBusyError
+
+
+def sync_lock_busy(exc: BaseException) -> bool:
+    """Whether ``exc`` only says that a lock taken without waiting was held (#2904).
+
+    :class:`SyncLockBusyError` from the guard's locks and the managed-target
+    fence, or Postgres ``lock_not_available`` from a ``NOWAIT`` row lock taken
+    further on (the candidate locks of an upsert or a delete), also when a
+    wrapper such as ``QdrantError`` carries it as its cause. Nothing about
+    the event is wrong: the same event applies once the holder is gone, so
+    the indexer stops its batch before it instead of recording it as failed.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, SyncLockBusyError) or is_lock_not_available(current):
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False
+
+
+@contextmanager
+def _busy_retries() -> Iterator[None]:
+    """A busy ``NOWAIT`` lock of the event guard is a retry, never a database error."""
+    try:
+        yield
+    except DBAPIError as exc:
+        if is_lock_not_available(exc):
+            raise SyncLockBusyError() from exc
+        raise
 
 
 @dataclass(frozen=True)
@@ -57,7 +91,11 @@ def assert_sync_memory_ids(
 
 
 def sync_candidate_lock(query: Select, event: ResourceEvent) -> Select:
-    """Refresh and lock actual sync candidates before comparing their row IDs."""
+    """Refresh and lock actual sync candidates before comparing their row IDs.
+
+    A busy row fails the statement with ``lock_not_available``, which
+    :func:`sync_lock_busy` reports as a retry of the event.
+    """
     if isinstance(event.event_metadata, dict) and "sync_run_id" in event.event_metadata:
         return (
             query.limit(20001)
@@ -203,6 +241,8 @@ async def guard_sync_event(db: AsyncSession, event: ResourceEvent, context: Cont
     Normal resource ingestion is unchanged. A sync event must have a real
     server receipt; a caller-supplied sync_run_id alone conveys no authority.
     The Resource/Context UPDATE locks also fence new Memory FK insertions.
+    Every lock here is taken without waiting; a held one raises
+    :class:`SyncLockBusyError` (#2904), any other refusal a ``ConflictError``.
     """
     from services.sync_managed_guard import event_applicable
 
@@ -217,16 +257,17 @@ async def guard_sync_event(db: AsyncSession, event: ResourceEvent, context: Cont
         run_id = UUID(event.event_metadata["sync_run_id"])
     except (ValueError, TypeError, AttributeError):
         raise ConflictError("Invalid synchronization receipt") from None
-    receipt = await db.scalar(
-        select(SyncIndexOutbox)
-        .where(
-            SyncIndexOutbox.run_id == run_id,
-            SyncIndexOutbox.resource_pk == event.resource_pk,
-            SyncIndexOutbox.context_id == context.id,
-            SyncIndexOutbox.event_ids.op("@>")(func.jsonb_build_array(event.id)),
+    with _busy_retries():
+        receipt = await db.scalar(
+            select(SyncIndexOutbox)
+            .where(
+                SyncIndexOutbox.run_id == run_id,
+                SyncIndexOutbox.resource_pk == event.resource_pk,
+                SyncIndexOutbox.context_id == context.id,
+                SyncIndexOutbox.event_ids.op("@>")(func.jsonb_build_array(event.id)),
+            )
+            .with_for_update(read=True, nowait=True)
         )
-        .with_for_update(read=True, nowait=True)
-    )
     if receipt is None or str(receipt.run_id) != event.event_metadata["sync_run_id"]:
         raise ConflictError("Unregistered synchronization event")
     # Match global vector-writer order before taking Context/Memory locks.
@@ -255,14 +296,16 @@ async def guard_sync_event(db: AsyncSession, event: ResourceEvent, context: Cont
             return False
         if record.payload != event.payload:
             raise ConflictError("Synchronization event content changed")
-    memories = await assert_managed_memories(
-        db,
-        fresh,
-        event.resource_id,
-        resource.id,
-        [event.doc_id],
-        version=event.version if event.op == "delete" else None,
-    )
+    # Here only: the feed commit's own busy rows keep their existing answer.
+    with _busy_retries():
+        memories = await assert_managed_memories(
+            db,
+            fresh,
+            event.resource_id,
+            resource.id,
+            [event.doc_id],
+            version=event.version if event.op == "delete" else None,
+        )
     db.info["sync_memory_proof"] = SyncMemoryProof(
         event.id,
         db.get_transaction(),

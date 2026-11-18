@@ -802,7 +802,8 @@ class ResourceIndexer:
 
         Returns:
             IndexerMetrics with execution stats, ``failed_events`` the record
-            as the row now holds it.
+            as the row now holds it. A lock the batch could not take at once
+            ends it before that event, which is not recorded (#2904).
         """
         start_time = utcnow()
         recorded = list(failed_events)
@@ -811,6 +812,26 @@ class ResourceIndexer:
         self._repointed = []
         self._retired = []
         self._history_changes.clear()
+        from services.quota_service import DailyReservation
+        from utils.exceptions import RedisError
+
+        # What the batch took off the daily quota (#2904). The events it does
+        # not apply and will run again (a batch that does not commit, the rest
+        # of one that stopped at a busy lock) give their share back, or every
+        # retry would charge them once more.
+        daily_charge: DailyReservation | None = None
+
+        async def give_back(count: int) -> None:
+            if daily_charge is None or count <= 0:
+                return
+            try:
+                await QuotaService(self.db).release_memories_per_day(
+                    DailyReservation(key=daily_charge.key, count=count)
+                )
+            except RedisError as e:
+                # The charge then expires with the day key (over-counting is
+                # the safe direction).
+                logger.warning("indexer_daily_quota_release_failed", count=count, error=str(e))
 
         try:
             # 1. Resolve context first so workspace_id is available for
@@ -966,10 +987,13 @@ class ResourceIndexer:
                     )
                     events = events[:batch_len]
             if new_count:
-                allowed, quota_error = await QuotaService(self.db).check_memories_per_day(
-                    context.workspace_id, count=new_count
-                )
-                if not allowed:
+                from utils.exceptions import QuotaExceededError
+
+                try:
+                    daily_charge = await QuotaService(self.db).reserve_memories_per_day(
+                        context.workspace_id, count=new_count
+                    )
+                except QuotaExceededError as quota_error:
                     metrics.skipped = True
                     metrics.reason = "memories_per_day_exceeded"
                     logger.warning(
@@ -978,12 +1002,14 @@ class ResourceIndexer:
                         context_id=context_id,
                         workspace_id=str(context.workspace_id),
                         new_docs=new_count,
-                        error=quota_error,
+                        error=quota_error.message,
                     )
                     return metrics
 
             # 5. Process each event
-            for event in events:
+            ran_through = events[-1].id
+            stopped_at: int | None = None
+            for index, event in enumerate(events):
                 repointed_mark = len(self._repointed)
                 retired_mark = len(self._retired)
                 history_before = self._history_changes.copy()
@@ -1018,6 +1044,24 @@ class ResourceIndexer:
                     del self._repointed[repointed_mark:]
                     del self._retired[retired_mark:]
                     self._history_changes = history_before
+                    from services.sync_feed_provenance import sync_lock_busy
+
+                    if sync_lock_busy(e):
+                        # #2904: a lock taken without waiting was held (a
+                        # worker's status poll, a feed transition), which says
+                        # nothing about the event. Stop before it: the applied
+                        # prefix commits, the offset stays on the last applied
+                        # event, and nothing is recorded as failed. A later run
+                        # starts from this event; for a sync target the outbox
+                        # replay (services.sync_feed_index) re-queues the row.
+                        logger.warning(
+                            "indexer_event_lock_busy",
+                            event_id=event.id,
+                            doc_id=event.doc_id,
+                        )
+                        ran_through = event.id - 1
+                        stopped_at = index
+                        break
                     logger.error(
                         "indexer_event_failed",
                         event_id=event.id,
@@ -1051,8 +1095,9 @@ class ResourceIndexer:
             # one, which a process can die before. An entry this batch ran
             # again (after a rewind, or a failure at the end of the last batch)
             # gives way to its new outcome; the rest stay until an operator
-            # rewinds past them or clears them.
-            ran_again = range(last_offset + 1, events[-1].id + 1)
+            # rewinds past them or clears them. A batch that stopped at a busy
+            # lock ran nothing from that event on (#2904).
+            ran_again = range(last_offset + 1, ran_through + 1)
             metrics.failed_events = merge_failed_events(
                 [entry for entry in recorded if entry["event_id"] not in ran_again],
                 run_failures,
@@ -1072,6 +1117,13 @@ class ResourceIndexer:
                     )
             await self.db.commit()
             metrics.batch_committed = True
+            if stopped_at is not None and daily_charge is not None:
+                # The creations of the applied prefix stay charged; the rest
+                # of the batch is charged again when it runs.
+                _prefix_len, applied_creations = _fit_memory_room(
+                    events[:stopped_at], known_doc_ids, room=None, ignored_event_ids=obsolete
+                )
+                await give_back(daily_charge.count - applied_creations)
             # #2164 / #2248: only now that the re-points and the old-version
             # deletes are durable.
             await self._drop_repointed_points()
@@ -1099,8 +1151,10 @@ class ResourceIndexer:
             await self.db.rollback()
             if not metrics.batch_committed:
                 # The offset went back too: the batch runs again, its failures
-                # and the entries it ran with it (#2477).
+                # and the entries it ran with it (#2477), and charges its
+                # creations again then (#2904).
                 metrics.failed_events = recorded
+                await give_back(daily_charge.count if daily_charge is not None else 0)
             logger.error(
                 "indexer_run_failed",
                 resource_id=resource_id,
@@ -1719,7 +1773,24 @@ class ResourceIndexer:
                         cleaned_count=len(retired),
                     )
             except Exception as cleanup_err:
-                # Non-blocking: cleanup failure should not block upsert
+                from services.sync_feed_provenance import sync_lock_busy
+
+                if (
+                    isinstance(event.event_metadata, dict)
+                    and "sync_run_id" in event.event_metadata
+                    and sync_lock_busy(cleanup_err)
+                ):
+                    # #2904: a sync event takes the old versions without
+                    # waiting (``sync_candidate_lock``). A held row says
+                    # nothing about the event, and going on would commit the
+                    # new version beside the old one while the offset moves
+                    # past the event, so nothing would retire it. The event
+                    # rolls back instead and the batch stops before it, as at
+                    # every other busy lock of a sync event.
+                    from utils.exceptions import SyncLockBusyError
+
+                    raise SyncLockBusyError() from cleanup_err
+                # Non-blocking: any other cleanup failure does not block the upsert
                 logger.warning(
                     "old_version_cleanup_failed",
                     resource_id=event.resource_id,
@@ -1892,6 +1963,7 @@ class ResourceIndexer:
         collection_name: str,
         embedding_service: EmbeddingService,
         usage: dict[str, int] | None = None,
+        canonical_rebuild: bool = False,
     ) -> UUID:
         """Write the point of a resource-ingested row again, from the row (#1870).
 
@@ -1920,6 +1992,11 @@ class ResourceIndexer:
             usage: Optional out-parameter for a caller that accounts embedding
                 cost (Sleep reindex, #2053): ``usage["tokens"]`` is set to the
                 embedding's token count (0 on a cache hit).
+            canonical_rebuild: The embedding pipeline's restore (#2908). On a
+                ``feed`` / ``stopping`` target the rebuild is written only when
+                the row holds its own unchanged canonical content, checked
+                under the feed fence before the embedding and again before the
+                upsert; without it any feed-managed row is refused.
 
         Returns:
             The id of the point written, equal to ``memory.point_id``.
@@ -1930,13 +2007,17 @@ class ResourceIndexer:
                 object. Ingesting the document again (a newer
                 version; the same one is refused as a duplicate) rebuilds it.
             QdrantError: The upsert failed.
+            ManagedDataLockedError: The row is feed-managed and this is not a
+                canonical rebuild of it.
         """
         from services.sync_managed_guard import assert_context_mutable
         from services.vector_erasure import embedding_author_current, reconcile_erased_writer
 
-        await assert_context_mutable(self.db, memory.context_id)
+        if not canonical_rebuild:
+            # A canonical rebuild fences the in-hand context in the guard below.
+            await assert_context_mutable(self.db, memory.context_id)
 
-        if not await embedding_author_current(self.db, memory):
+        if not await embedding_author_current(self.db, memory, canonical_rebuild=canonical_rebuild):
             return memory.point_id
         if not owns_resource_point(memory):
             raise ResourceRebuildError(f"Memory {memory.id} does not own a resource point")
@@ -2016,7 +2097,7 @@ class ResourceIndexer:
                 else None
             ),
         )
-        if not await embedding_author_current(self.db, memory):
+        if not await embedding_author_current(self.db, memory, canonical_rebuild=canonical_rebuild):
             return memory.point_id
         # Rebuild follows the row author, including an explicit restored pseudonym.
         if point.payload is not None:

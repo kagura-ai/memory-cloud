@@ -4,20 +4,24 @@ from datetime import UTC, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
+from config.settings import get_settings
 from models.auth import Context, User
 from models.oidc import OIDCClient
 from models.public_mcp import PublicMcpEndpoint
 from models.resource import Resource
 from models.sync_installation import SyncAuthorization, SyncInstallation, SyncService
+from models.sync_installation_schemas import SyncActivation, SyncReconnectValidation
 from models.sync_management import SyncManagedTarget
 from services import sync_continuity, sync_installations, sync_management
 from services.workspace_locks import lock_workspace_for_update
 from tests.integration import sync_installation_fixtures as fixtures
 from tests.integration.sync_installation_fixtures import (
     activation,
+    approval_body,
     approve,
     change,
     http,
@@ -25,6 +29,7 @@ from tests.integration.sync_installation_fixtures import (
     targets,
     transfer,
 )
+from utils.exceptions import ConflictError, NotFoundException
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 store = fixtures.store
@@ -179,6 +184,11 @@ async def test_continuity_does_not_ignore_other_binding_failures(store, kind):
     else:
         assert response.status_code == 200, response.text
         assert response.json()["continuity_current"] is False
+    if kind == "rebound":
+        # The retained row is reported, under the requested consent, never the rebound one.
+        assert response.json()["installation"]["installation_id"] == created["installation_id"]
+        assert response.json()["authorization"]["authorization_id"] == approval["authorization_id"]
+        assert fresh["authorization_id"] not in response.text
     assert await targets(store) == (1, 1, 1)
 
 
@@ -264,7 +274,9 @@ async def test_established_observation_keeps_installation_holds_explicit(store, 
 
 async def retained_manual(store, monkeypatch):
     approval, created = await established(store)
+    # Every switch the reconnect itself checks is on (#2917).
     monkeypatch.setattr(sync_management.get_settings(), "sync_managed_enabled", True)
+    monkeypatch.setattr(sync_management.get_settings(), "sync_runs_enabled", True)
     monkeypatch.setattr(sync_management, "utcnow", lambda: store.clock.now)
     iid = UUID(created["installation_id"])
     async with store.factory() as db:
@@ -419,3 +431,166 @@ async def test_established_observation_serializes_with_workspace_transfer_or_rec
     response = await request(store, approval)
     assert response.status_code == 200 and response.json()["continuity_current"] is True
     assert response.json()["installation"] == created
+
+
+async def test_owner_controls_wait_out_a_short_workspace_holder(store):
+    """A memory create holds the workspace row from its quota check to commit (#2914)."""
+    import asyncio
+
+    from services.workspace_locks import NOWAIT_LOCK_BACKOFF_SECONDS
+
+    approval, created = await established(store)
+    async with store.factory() as db:
+        await lock_workspace_for_update(db, store.wid)
+
+        async def let_go():
+            await asyncio.sleep(NOWAIT_LOCK_BACKOFF_SECONDS * 4)
+            await db.rollback()
+
+        released = asyncio.create_task(let_go())
+        response = await request(store, approval)
+        await released
+    assert response.status_code == 200, response.text
+    assert response.json()["installation"] == created
+
+
+async def direct(store, approval, *, installation=None):
+    """Call the service itself, so a test can pin the refusal's own detail."""
+    async with store.factory() as db:
+        if installation is None:
+            body = SyncActivation.model_validate(activation(approval))
+            return await sync_continuity.observe_established(db, store.wid, body)
+        body = SyncReconnectValidation.model_validate(
+            {**activation(approval), "installation_id": str(installation)}
+        )
+        return await sync_continuity.validate_reconnect(db, store.wid, body)
+
+
+@pytest.mark.parametrize(
+    ("switches", "detail"),
+    [
+        ({"sync_managed_enabled": False}, "Synchronization management not found"),
+        ({"sync_runs_enabled": False}, "Synchronization runs not found"),
+        # The reconnect checks management first, so validation does too.
+        (
+            {"sync_managed_enabled": False, "sync_runs_enabled": False},
+            "Synchronization management not found",
+        ),
+    ],
+)
+async def test_reconnect_validation_is_not_found_while_a_reconnect_switch_is_off(
+    store, monkeypatch, switches, detail
+):
+    _, fresh, created = await retained_manual(store, monkeypatch)
+    for name, value in switches.items():
+        monkeypatch.setattr(get_settings(), name, value)
+    iid = created["installation_id"]
+    response = await request(store, fresh, reconnect=True, installation=iid)
+    assert response.status_code == 404, response.text
+    assert response.json() == {"error": "not_found"}
+    async with store.factory() as db:
+        body = SyncReconnectValidation.model_validate({**activation(fresh), "installation_id": iid})
+        with pytest.raises(NotFoundException, match=f"^{detail}$"):
+            await sync_continuity.validate_reconnect(db, store.wid, body)
+        assert not db.in_transaction()  # refused before any state was read
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def second_service(store):
+    """A second registered service, on the fixture's other browser client."""
+    service_id = store.service_id + "-second"
+    async with store.factory() as db:
+        db.add(
+            SyncService(
+                service_id=service_id,
+                browser_client_id=store.foreign_client,
+                service_client_id=service_id + "-worker",
+            )
+        )
+        await db.commit()
+    yield service_id
+    async with store.factory() as db:
+        await db.execute(
+            delete(SyncAuthorization).where(SyncAuthorization.service_id == service_id)
+        )
+        await db.execute(delete(SyncService).where(SyncService.service_id == service_id))
+        await db.commit()
+
+
+@pytest.mark.parametrize("differs", ["application", "service"])
+async def test_reconnect_validation_refuses_consent_for_another_application_or_service(
+    store, monkeypatch, second_service, differs
+):
+    _, fresh, created = await retained_manual(store, monkeypatch)
+    if differs == "application":
+        consent = await approve(store, body=approval_body(application_id="application-2"))
+        assert consent["application_id"] == "application-2"
+    else:
+        consent = fresh
+        await change(
+            store,
+            SyncAuthorization,
+            UUID(fresh["authorization_id"]),
+            service_id=second_service,
+            browser_client_id=store.foreign_client,
+            service_client_id=second_service + "-worker",
+        )
+    # The body names the consent's own application, so the request-body check passes.
+    iid = created["installation_id"]
+    response = await request(store, consent, reconnect=True, installation=iid)
+    assert response.status_code == 409, response.text
+    with pytest.raises(
+        ConflictError, match="^Owner consent does not match the retained installation$"
+    ):
+        await direct(store, consent, installation=iid)
+
+
+async def drifted_management(store, monkeypatch, reconnect, drift):
+    if reconnect:
+        _, consent, created = await retained_manual(store, monkeypatch)
+    else:
+        consent, created = await established(store)
+        async with store.factory() as db:
+            row = await db.get(SyncInstallation, UUID(created["installation_id"]))
+            await sync_management.start_stopping(db, row, "manual_requested")
+            await db.commit()
+    iid = UUID(created["installation_id"])
+    if drift == "generation":
+        async with store.factory() as db:
+            generation = (await db.get(SyncInstallation, iid)).generation
+        await change(store, SyncInstallation, iid, generation=generation + 1)
+    else:
+        await change(store, SyncManagedTarget, iid, context_id=uuid4())
+    return consent, iid
+
+
+@pytest.mark.parametrize("drift", ["generation", "context"])
+@pytest.mark.parametrize(
+    "reconnect", [False, True], ids=["observe_established", "validate_reconnect"]
+)
+async def test_mode_row_drift_is_a_conflict_for_established_and_reconnect_reads(
+    store, monkeypatch, reconnect, drift
+):
+    consent, iid = await drifted_management(store, monkeypatch, reconnect, drift)
+    installation = iid if reconnect else None
+    response = await request(store, consent, reconnect=reconnect, installation=installation)
+    assert response.status_code == 409, response.text
+    with pytest.raises(ConflictError, match="^Retained target management changed; retry$"):
+        await direct(store, consent, installation=installation)
+    async with store.factory() as db:
+        assert (await db.get(SyncManagedTarget, iid)) is not None  # never re-enrolled
+
+
+async def test_established_observation_refuses_a_foreign_application(store):
+    _, created = await established(store)
+    consent = await approve(store, body=approval_body(application_id="application-2"))
+    response = await request(store, consent)
+    assert response.status_code == 409, response.text
+    with pytest.raises(
+        ConflictError, match="^Workspace has a different retained synchronization approval$"
+    ):
+        await direct(store, consent)
+    async with store.factory() as db:
+        assert (
+            await db.get(SyncInstallation, UUID(created["installation_id"]))
+        ).application_id == "application-1"

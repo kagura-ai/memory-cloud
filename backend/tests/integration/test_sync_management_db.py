@@ -32,7 +32,7 @@ from tests.integration import sync_credential_fixtures as credentials
 from tests.integration import sync_feed_fixtures as fixtures
 from tests.integration import sync_installation_fixtures as installations
 from tests.integration.sync_feed_fixtures import committed, human, product, service, staged
-from utils.exceptions import ConflictError, ManagedDataLockedError
+from utils.exceptions import ConflictError, ManagedDataLockedError, QuotaExceededError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 store, worker, feeds = fixtures.store, fixtures.worker, fixtures.feeds
@@ -285,6 +285,40 @@ async def test_manual_resume_needs_current_diff_then_reuses_target_and_tombstone
             )
             == 0
         )
+
+
+async def test_resume_ends_runs_without_their_diff_and_keeps_every_change_count(
+    managed, monkeypatch
+):
+    """#2916: the run a resume candidate pins and the upload the resume
+    discards drop their diff and keep its count; the resumed run counts the
+    diff it commits."""
+    await committed(managed, [product()])
+    await apply_pending(managed, monkeypatch)
+    await manual(managed)
+    await mint(managed)
+    pinned = await staged(managed, [product(title="Fresh source")])
+    result = await service(managed, "POST", "resume-candidates", body={"run_id": pinned["run_id"]})
+    assert result.status_code == 200, result.text
+    discarded = await staged(managed, [product(), product("two")])
+    async with managed.factory() as db:
+        run = await db.get(SyncRun, UUID(pinned["run_id"]))
+        assert (run.state, run.diff, run.change_count) == ("aborted", None, pinned["changes"])
+    p = (await human(managed, "POST", "management/resume/preview")).json()
+    body = {
+        "operation_id": str(uuid4()),
+        "preview_id": p["preview_id"],
+        "diff_hash": p["diff_hash"],
+    }
+    result = await human(managed, "POST", "management/resume/confirm", body=body)
+    assert result.status_code == 200, result.text
+    async with managed.factory() as db:
+        resumed = await db.get(SyncRun, UUID(pinned["run_id"]))
+        assert resumed.state == "committed" and resumed.diff is not None
+        assert resumed.change_count == len(resumed.diff)
+        dropped = await db.get(SyncRun, UUID(discarded["run_id"]))
+        assert (dropped.state, dropped.diff) == ("aborted", None)
+        assert dropped.change_count == discarded["changes"]
 
 
 @pytest.mark.parametrize("change", ["manual", "source", "expiry", "config"])
@@ -934,14 +968,14 @@ async def test_actual_batch_suppresses_old_source_in_manual_and_honors_resume_ca
     qdrant, embedding = MagicMock(), AsyncMock()
     qdrant.upsert, qdrant.delete = AsyncMock(), AsyncMock()
     embedding.embed.return_value = [0.1] * 1536
-    quota = AsyncMock(return_value=(False, "No daily room"))
+    quota = AsyncMock(side_effect=QuotaExceededError("No daily room"))
     monkeypatch.setattr(resource_indexer, "get_qdrant_client", lambda: qdrant)
     monkeypatch.setattr(
         resource_indexer,
         "resolve_context_routing",
         AsyncMock(return_value=("test-collection", embedding)),
     )
-    monkeypatch.setattr(resource_indexer.QuotaService, "check_memories_per_day", quota)
+    monkeypatch.setattr(resource_indexer.QuotaService, "reserve_memories_per_day", quota)
 
     async def process(room):
         async with managed.factory() as db:
@@ -977,7 +1011,7 @@ async def test_actual_batch_suppresses_old_source_in_manual_and_honors_resume_ca
     result = await process(100)
     assert result.skipped and result.reason == "memories_per_day_exceeded"
     qdrant.upsert.assert_not_awaited()
-    quota.return_value = (True, None)
+    quota.side_effect, quota.return_value = None, None
     result = await process(100)
     assert result.batch_committed and result.errors == 0, result.to_dict()
     assert qdrant.upsert.await_count == 1

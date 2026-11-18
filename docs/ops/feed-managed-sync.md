@@ -28,10 +28,58 @@ approval; disabling a flag is not permission to edit managed content.
 
 Pausing a client, a service, an installation, or a failed fetch never unlocks
 content. Context identity/schema, ordinary memory creation/edit/deletion/moves,
-manual ingestion, restore, rollback, Sleep and generic embedding rewrites share
-the fence. Managed contexts use Sleep `skip`; the prior setting is restored on
+manual ingestion, declared `supersedes` edges, restore, rollback, Sleep and
+embedding rewrites share the fence, except the embedding pipeline's restore of
+an unchanged feed row described below. Managed contexts use Sleep `skip`; the prior setting is restored on
 manual entry. Access counters and erasure/retention remain separate lifecycle
 operations. No caller-controlled bypass or owner impersonation exists.
+
+Manual ingestion means every ordinary ingest route: the single-event
+`POST /api/v1/resources/{resource_id}/events`, the batch `/events/batch`, the
+management-grant `POST /api/v1/resource-management/events` and MCP
+`ingest_events`. On a `feed` or `stopping` target, and on a retained target that
+is not enrolled yet, each answers 409 `SYNC-LOCKED` (MCP: an error envelope
+carrying `management_mode`) and stores no event. The `event_metadata` keys
+`sync_run_id` and `installation_generation` are set only by the feed commit and
+the resume writer; an ordinary ingest request that carries either is refused as
+a whole with 422 `VAL-001` (`details.field` `event_metadata`, plus
+`details.index` for a batch; MCP: `validation_error`) before any quota is
+counted, whatever the target's mode (#2906).
+
+A `supersedes` edge hides its target from default recall, so declared edges of
+that type are fenced too: creating, re-asserting, reweighting, retyping to or
+from, or deleting one through MCP `create_edge` / `update_edge` / `delete_edge`,
+REST `POST /api/v1/graph/edges` or PATCH `accept_supersede_candidate` answers
+409 `SYNC-LOCKED` (MCP: an error envelope carrying `management_mode`) when the
+edge's context or either memory's current context in the edge's workspace is
+`feed` or `stopping`, or a retained target not enrolled yet. For a `supersedes`
+edge the endpoint owner check answers first, so a foreign endpoint gets the
+usual uniform denial. No edge is written and a stored supersede
+suggestion stays. Other declared types (`related_to`, `contradicts`, ...) and
+recall-time learned edges stay writable. Every declared-edge write holds the
+shared fence of those contexts until it commits, so the edge type it decided on
+cannot be changed by a transition first (#2907).
+
+A feed row whose point is gone can be re-queued for embedding without a feed
+run: the re-queue after a cancelled or failed account erasure whose vector-store
+step had run, a failed point payload patch, or the admin
+`POST /api/v1/admin/embedding/retry-failed`. On a `feed` or `stopping` target
+the embedding pipeline rebuilds such a row's indexer point only when it is a
+live feed row of the target (authored by the context creator, `version` 1)
+whose content and resource version equal its canonical sync record, the row
+`finalize` checks; the test runs under the shared fence, before the embedding
+and again before the upsert. Any other vector write to a managed row (an edited
+or moved row, a previous version the indexer will replace, a generic rewrite,
+the Sleep reindex, an embedding-model migration) stays refused with
+`SYNC-LOCKED`. A refused row is left `failed` with an
+`embedding_error` starting `SYNC-LOCKED` and its retry budget intact, so the
+sweep tries it again after each backoff instead of retiring it (#2908). The
+sweep takes failed rows in the order of their last attempt, so such rows, like
+rows failed on a configuration error, take turns with every other failed row
+of the deployment and never keep a newer one from its retry.
+Removing a point whose author was erased while it was being written is erasure
+work and is never fenced: the check after the upsert compares the author only,
+and reopens and drains the erasure scope on any target mode.
 
 An absent ownership row is conservatively treated as `feed` while the flag is
 enabled. New installations enroll automatically; the first source/control
@@ -178,13 +226,24 @@ a cursor alone cannot unlock. The transaction then sets `manual`, advances the
 mode epoch, records the manual event floor and restores the saved Sleep mode.
 If a process dies, a vector operation fails, quota/capacity holds indexing, or
 an event needs repair, the lock remains `stopping`. Repair/retry the existing
-index runbook; never clear ownership metadata to force progress. A Free-plan
+index runbook; a canonical row left without a point or `failed` is rebuilt by
+the embedding pipeline once it is re-queued (the admin retry above). Never
+clear ownership metadata to force progress. A Free-plan
 suspension can require restoring the plan/capacity before canonical drain.
 
 Unlink and authoritative entitlement removal use this same barrier while
 retaining data and all target UUIDs. Periodic run maintenance also detects
 clock expiry and retries stopping targets. The paid commit guard denies writes
 at the exact entitlement deadline even before the next maintenance tick.
+A billing delivery that ends the paid right stops the target in its own
+transaction only when the target is still `feed`; a target already `stopping` or
+`manual` is left as it is. When the stop cannot take the target fence at once
+(the indexer or an ordinary write holds it), only the stop is rolled back: the
+delivery still commits, the target stays `feed` with its writes already denied
+by the paid commit guard, and the next maintenance tick records `stopping`
+(log event `sync_stop_deferred`). An installation without a managed-target row
+is not scanned by maintenance, so its delivery is refused with a retryable 409
+instead (see [Ordered workspace billing](ordered-workspace-billing.md)).
 Maintenance runs at the start of each resource-indexer tick as a step of its
 own: an error there is rolled back and logged (`indexer_sync_maintenance_failed`)
 and the tick still runs the queued indexers. Each installation is maintained on

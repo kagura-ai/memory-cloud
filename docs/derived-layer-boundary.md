@@ -55,7 +55,7 @@ feature-development time, not discovered at export time.
 | `resources` | Connected source-of-truth resources |
 | `resource_events` | Ingested raw source events |
 | `sync_records` | Canonical approved product/FAQ fields and their feed provenance |
-| `sync_chunks` | Temporary raw staging; bodies are cleared on commit, abort and expiry |
+| `sync_chunks` | Temporary raw staging; bodies are cleared on commit, abort and expiry; the receipt rows of a run that never committed are deleted with it 30 days after its upload window |
 | `sync_resume_candidates` | Strict source snapshots for explicit manual-to-feed resume; finite lifetime |
 | `sync_resume_previews` | Finite human diff: authored summaries, exact hashes and approved public fields |
 | `resource_schemas` | User-registered resource schemas |

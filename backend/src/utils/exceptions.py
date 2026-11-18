@@ -270,6 +270,20 @@ class ConflictError(MemoryCloudException):
         super().__init__(message, status_code=409, error_code="RES-002", **details)
 
 
+class SyncLockBusyError(ConflictError):
+    """A synchronization lock taken without waiting is held elsewhere (409, ``RES-002``).
+
+    The same status, code and body as the plain ``ConflictError`` the
+    synchronization locks raised before, so an HTTP caller sees no difference.
+    It says nothing about the data: the same work succeeds once the other
+    transaction ends. The resource indexer therefore stops its batch before
+    the event and runs it again later instead of recording it as failed (#2904).
+    """
+
+    def __init__(self, message: str = "Synchronization state is changing; retry") -> None:
+        super().__init__(message)
+
+
 class DuplicateFileError(ConflictError):
     """The workspace already holds an active file with this sha256 (409, ``RES-002``).
 

@@ -136,6 +136,8 @@ async def sweep_pending_embeddings() -> JobResult:
     - failed past the retry backoff with budget left (#979): a transient
       embedding/Qdrant blip self-heals instead of needing the manual admin
       retry endpoint, bounded by MAX_EMBEDDING_RETRIES so a poison row stops.
+      Failed rows are taken by their last attempt (#2908), so the rows whose
+      failure keeps the budget rotate with the others.
     process_pending_embedding() re-checks each gate atomically in its claim,
     so this SELECT is only a candidate prefilter (no double-increment race).
     """
@@ -193,8 +195,17 @@ async def sweep_pending_embeddings() -> JobResult:
                 # #979: process genuinely-pending/processing rows before failed
                 # retries so a backlog of failed rows can't starve the limit(20)
                 # budget and delay brand-new memories' first embedding.
+                # #2908: failed rows by their last attempt, never-attempted
+                # first. A failure that keeps the retry budget (configuration,
+                # a refused feed-managed row) leaves its row eligible on every
+                # other tick; oldest-created first, enough such rows took every
+                # slot and a newer failed row was never retried. Pending and
+                # processing rows have no key here and stay in creation order.
                 .order_by(
                     case((Memory.embedding_status == "failed", 1), else_=0),
+                    case((Memory.embedding_status == "failed", Memory.embedding_attempted_at))
+                    .asc()
+                    .nulls_first(),
                     Memory.created_at,
                 )
                 .limit(20)

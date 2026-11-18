@@ -137,6 +137,7 @@ from utils.exceptions import (
     EmbeddingSpendCapExceeded,
     ExternalServiceError,
     FeatureNotAvailableError,
+    ManagedDataLockedError,
     MemoryCloudException,
     MemoryGoneError,
     NotFoundException,
@@ -10728,6 +10729,20 @@ def is_unrebuildable_resource_failure(exc: BaseException) -> bool:
     return isinstance(exc, ResourceRebuildError)
 
 
+def is_managed_lock_failure(exc: BaseException) -> bool:
+    """Was the row refused by the feed ownership fence? (#2908)
+
+    ``ManagedDataLockedError`` (``SYNC-LOCKED``): the row is feed-managed and
+    not a restore of its own unchanged canonical content, so only the feed may
+    write its point. A retry cannot change that, the stop of the feed or the
+    indexer replacing the row does, so the row keeps its budget like a
+    configuration failure: it stays ``failed`` with a zero counter and the
+    sweep re-probes it after each backoff, instead of reaching the ceiling and
+    staying unsearchable once the target is ``manual``.
+    """
+    return isinstance(exc, ManagedDataLockedError)
+
+
 def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any]:
     """Column values to stamp on a memory whose embedding failed (#1496).
 
@@ -10743,8 +10758,10 @@ def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any
     `processing` row. It also matches the doctrine the success path already
     states — the budget is per failure-episode, not a lifetime tally.
 
-    A row that cannot be rebuilt (#1897, ``is_unrebuildable_resource_failure``)
-    is put at the ceiling instead: ``embedding_retry_eligible_clause`` claims a
+    A row the feed fence refused (#2908, ``is_managed_lock_failure``) keeps
+    its budget the same way. A row that cannot be rebuilt (#1897,
+    ``is_unrebuildable_resource_failure``) is put at the ceiling instead:
+    ``embedding_retry_eligible_clause`` claims a
     ``failed`` row only below it, so no retry is scheduled, and the counts of
     rows nothing will retry (``embedding_retry_count >= MAX_EMBEDDING_RETRIES``)
     include it. The admin retry resets the counter along with the status.
@@ -10765,7 +10782,7 @@ def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any
         # made every embedded memory look edited).
         "embedding_attempted_at": now,
     }
-    if is_configuration_failure(exc):
+    if is_configuration_failure(exc) or is_managed_lock_failure(exc):
         values["embedding_retry_count"] = 0
     elif is_unrebuildable_resource_failure(exc):
         values["embedding_retry_count"] = MAX_EMBEDDING_RETRIES
@@ -10997,6 +11014,7 @@ async def write_memory_point(
     on_write: Callable[[], None] | None = None,
     resource_indexer: ResourceIndexer | None = None,
     embed_scope: tuple[Any, Any] | None = None,
+    canonical_rebuild: bool = False,
 ) -> tuple[list[float], dict[str, Any]] | None:
     """Write ``memory``'s own vector point: the one place that picks how (#2065).
 
@@ -11025,6 +11043,11 @@ async def write_memory_point(
         embed_scope: ``(workspace_id, context_id)`` for the embedding call's key
             lookup when it is not the point's (the pipeline passes the row's
             own, ``None`` for a context-less row).
+        canonical_rebuild: The embedding pipeline's restore (#2908): a
+            resource row of a ``feed`` / ``stopping`` target gets its indexer
+            point back when it holds its own unchanged canonical content
+            (``ResourceIndexer.rebuild_point``). Without it, and for every
+            other row, a feed-managed row is refused with ``SYNC-LOCKED``.
 
     Returns:
         ``(vector, payload)`` of the summary point written, or ``None`` for a
@@ -11032,15 +11055,20 @@ async def write_memory_point(
 
     Raises:
         ResourceRebuildError: A resource row whose point cannot be rebuilt.
+        ManagedDataLockedError: The row is feed-managed and this is not a
+            canonical rebuild of its resource point.
         Exception: The embedding or the vector-store write failed.
     """
     from services.resource_indexer import ResourceIndexer, owns_resource_point
     from services.vector_erasure import embedding_author_current, reconcile_erased_writer
 
-    if not await embedding_author_current(db, memory):
+    resource_row = owns_resource_point(memory)
+    if not await embedding_author_current(
+        db, memory, canonical_rebuild=canonical_rebuild and resource_row
+    ):
         return None
 
-    if owns_resource_point(memory):
+    if resource_row:
         if on_write is not None:
             on_write()
         indexer = resource_indexer if resource_indexer is not None else ResourceIndexer(db)
@@ -11049,6 +11077,7 @@ async def write_memory_point(
             collection_name=collection_name,
             embedding_service=embedding_service,
             usage=usage,
+            canonical_rebuild=canonical_rebuild,
         )
         return None
 
@@ -11348,6 +11377,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 context_id=str(memory.context_id),
                 on_write=_mark_written,
                 embed_scope=(memory.workspace_id, memory.context_id),
+                # #2908: a feed row is restored from its unchanged canonical
+                # content even while the target is feed-managed.
+                canonical_rebuild=True,
             )
             vector: list[float] | None = None
             if written is not None:
@@ -11546,6 +11578,11 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 # lost its schema, so a warning under its own name; the row
                 # carries the reason and waits for the admin retry.
                 logger.warning("embedding_resource_unrebuildable", **common)
+            elif is_managed_lock_failure(e):
+                # #2908: expected while a feed owns the row (a previous version
+                # the indexer replaces, a row of a target not enrolled yet); no
+                # budget spent, re-probed after the backoff.
+                logger.info("embedding_feed_managed_deferred", **common)
             elif final_count is not None and final_count >= MAX_EMBEDDING_RETRIES:
                 logger.error("embedding_budget_exhausted", **common)
             else:

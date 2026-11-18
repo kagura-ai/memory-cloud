@@ -173,6 +173,7 @@ def _managed_target_guards_need_a_session(monkeypatch):
         ("service_mode", sync_managed_guard.TargetFence(None, None, None)),
         ("event_applicable", True),
         ("management_modes", {}),
+        ("fence_state_for_memories", None),
     ):
         real = getattr(sync_managed_guard, name)
 

@@ -249,7 +249,10 @@ class QuotaService:
           / resource ingest; charged once per batch, up front, with
           ``count = number of upsert doc_ids not yet indexed`` (a re-sync of
           known docs is free); a batch that does not fit is left untouched and
-          the indexer job re-queues it for the next UTC midnight.
+          the indexer job re-queues it for the next UTC midnight. It reserves
+          through ``reserve_memories_per_day`` and gives back the share of the
+          events it runs again: all of it when the batch rolls back, the rest
+          of the batch when it stops at a busy lock (#2904).
 
         Not charged (they mutate or copy rows the workspace already created):
         ``MemoryService._update_in_place`` / ``patch_memory`` /
@@ -262,8 +265,8 @@ class QuotaService:
 
         A reservation is not refunded if the write fails later (validation,
         DB error): a failed attempt costs one unit, like an MCP call does.
-        The exception is the atomic batch (``MemoryService.remember_many``,
-        #1873): it reserves ``count=len(items)`` once through
+        The exceptions are the indexer batch above and the atomic batch
+        (``MemoryService.remember_many``, #1873): it reserves ``count=len(items)`` once through
         ``reserve_memories_per_day`` — this same gate, reporting what was
         actually added — and, when it rolls back, returns exactly that with
         ``release_memories_per_day``.

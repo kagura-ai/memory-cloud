@@ -60,11 +60,19 @@ async def discard_pending_runs(db: AsyncSession, iid: UUID) -> None:
         .join(SyncFeed)
         .where(SyncFeed.installation_id == iid, SyncRun.state.in_(["uploading", "prepared"]))
     )
+    from services.sync_feed_runs import cleared_diff
+
     await db.execute(update(SyncChunk).where(SyncChunk.run_id.in_(pending)).values(records=None))
     await db.execute(
         update(SyncRun)
         .where(SyncRun.id.in_(pending))
-        .values(state="aborted", approval_id=None, approved_by=None, approval_epoch=None)
+        .values(
+            state="aborted",
+            approval_id=None,
+            approved_by=None,
+            approval_epoch=None,
+            **cleared_diff(),
+        )
     )
 
 
@@ -572,8 +580,38 @@ async def control_mode(
         return result
 
 
+class SyncTransitionBusyError(ConflictError):
+    """A delivery that must stop a legacy installation now, and cannot (409, #2913).
+
+    ``details.reason`` is ``sync_transition_busy``: the publisher retries the
+    same delivery. Only an installation without a managed-target row answers
+    it; maintenance finishes the stop of a managed one instead.
+    """
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Synchronization is changing; retry the delivery", reason="sync_transition_busy"
+        )
+
+
 async def stop_ineligible_workspace(db: AsyncSession, wid: UUID) -> None:
-    """Billing/plan mutations already own Workspace; eligibility loss uses the same barrier."""
+    """Billing/plan mutations already own Workspace; eligibility loss uses the same barrier.
+
+    An eligible workspace, an unmanaged one and a target already ``stopping``
+    or ``manual`` need no transition. The remaining stop runs in a savepoint
+    (#2913): when its fence is busy (``ConflictError``) or the legacy target
+    cannot be enrolled (``NotFoundException``), only the stop is rolled back.
+    A target with a managed row then keeps its mode and the caller's billing
+    delivery commits; :func:`maintain_sync_management` retries the stop on its
+    next tick. An installation without a managed row is never scanned by
+    maintenance, so there the delivery is refused with
+    :class:`SyncTransitionBusyError`.
+
+    Raises:
+        SyncTransitionBusyError: a legacy installation could not be stopped.
+    """
     from services.integration_entitlements import inspect_paid_integration
 
     installation = await db.scalar(
@@ -581,12 +619,35 @@ async def stop_ineligible_workspace(db: AsyncSession, wid: UUID) -> None:
     )
     if installation is None:
         return
-    fence = await target_fence(db, installation.context_id)
-    if (
-        fence.state is not None
-        and not (await inspect_paid_integration(db, wid, installation.service_id)).allowed
-    ):
-        await start_stopping(db, installation, "entitlement_ended")
+    # Eligibility is a plain read under the caller's Workspace lock; decide it
+    # before any fence, so an eligible delivery never meets a busy one.
+    if (await inspect_paid_integration(db, wid, installation.service_id)).allowed:
+        return
+    try:
+        async with db.begin_nested():
+            fence = await target_fence(db, installation.context_id)
+            if fence.state in (None, "stopping", "manual"):
+                return
+            await start_stopping(db, installation, "entitlement_ended")
+    except (ConflictError, NotFoundException) as exc:
+        # The rollback to the savepoint released the fences and row locks the
+        # stop took and discarded its rows; the caller's own writes, flushed
+        # before the savepoint, and its Workspace lock are kept.
+        managed = await db.scalar(
+            select(SyncManagedTarget.installation_id).where(
+                SyncManagedTarget.context_id == installation.context_id
+            )
+        )
+        if managed is None and not get_settings().sync_managed_enabled:
+            return  # no target fence applies: nothing to stop
+        logger.warning(
+            "sync_stop_deferred" if managed is not None else "sync_stop_refused",
+            workspace_id=str(wid),
+            installation_id=str(installation.id),
+            error=type(exc).__name__,
+        )
+        if managed is None:
+            raise SyncTransitionBusyError() from exc
 
 
 def _maintenance_page(after: UUID | None) -> Select[UUID]:

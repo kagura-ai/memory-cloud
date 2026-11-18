@@ -59,7 +59,7 @@ and question/answer text, without exposing other resource schema fields.
 | Boundary | Initial limit |
 | --- | --- |
 | Feeds per installation | 20 |
-| Active unexpired runs per installation | 4 |
+| Active unexpired runs per installation | 4 (a manual run counts only while its request is current; once it is not, the run is expired and its staging cleared at the next run creation or maintenance pass, so staging stays bounded by about 4 runs x 20 MiB plus manual runs that ended since the last sweep) |
 | Records per full snapshot | 10,000 |
 | Upload bytes per run | 20 MiB |
 | Chunks per run | 1,000 |
@@ -117,12 +117,17 @@ ambiguous credentials and invalid payloads receive fixed no-store errors.
    `POST`s `{"diff_hash":"..."}` to the human `/runs/{run}/approvals` path.
    The returned finite approval also binds the workspace ownership epoch;
    commit rechecks the approver's current membership and write permission.
+   When the approver no longer qualifies (membership, Editor role, seat, plan
+   or capacity), the worker's commit answers 409 `RES-002`; that is not a
+   refusal of the worker, so no `sync.authority.denied` event is recorded.
    For a run declaring `manual_request_id`, approval also revalidates the
-   original manual request, requester token/family and Editor reach, browser
-   client, ownership/generation and complete source version. Its original
-   request/token deadlines join the approval transaction fence. A different
-   valid Editor cannot replace a lost original proof or extend its lifetime;
-   approval failure rolls back identity and audit before success is returned.
+   original manual request, the requester's login (its OIDC grant) and Editor
+   reach, browser client, ownership/generation and complete source version.
+   The request's 15-minute deadline and the login's deadline join the approval
+   transaction fence; the expiry of the access token that made the request
+   does not. A different valid Editor cannot replace a lost original proof or
+   extend its lifetime; approval failure rolls back identity and audit before
+   success is returned.
    Automatic/unattributed approvals keep their existing behavior.
 7. Worker `POST .../runs/{run}/commit` sends the exact `diff_hash` and, when
    required, `approval_id`. Canonical approved records, all version-specific
@@ -218,6 +223,14 @@ revisions. A changed dataset requires restarting pagination (409). Every page
 reauthorizes the current caller; it is not a public MCP call and consumes no
 anonymous public MCP weekly allowance. Both human and worker surfaces use the
 existing fail-closed peer OIDC burst limiter, across target/run IDs.
+The two human reads (`/records` and `/runs/{run_id}/diff`) share the workspace
+row with each other and with the activity reads, so parallel reads from one
+browser or several members do not exclude each other there. An ownership
+transfer, role change, ownership-epoch change, workspace deletion, a feed
+configuration write or a diff approval still excludes them. The reads also hold the
+installation's resource and context rows for a moment, so two of them take
+turns there; a busy row is tried again for under a second before the read
+answers 409 (`RES-002`).
 The worker uses the fixed snapshot/chunk/event bounds and its own service
 credential; it does not inherit a caller-selected Resource Token's hourly
 quota. The existing Indexer workspace capacity and daily Memory-creation
@@ -229,6 +242,18 @@ switch and can lag or apply in batches. Results distinguish `pending`, `failed`,
 `complete`, `superseded`, `unchanged` and `not_committed`. An advanced event
 cursor alone never proves completion: visible owned versions and deletion
 postconditions must agree too. `unchanged` means the run created no index events.
+While the cursor is below the run's last event, the run reads `pending` until
+the indexer records one of its events as failed (in the target's
+`failed_events`, see [resource indexer backfill](resource-indexer-backfill.md)),
+and `failed` from then on. A full record (20 entries) whose newest entry is
+older than the run's last event reads as a failure of the run too, since it no
+longer keeps later ones. A run that created no index events (a re-sent
+snapshot) waits on the feed's events the cursor has not passed, so it reads
+`failed` while one of those is recorded as failed, and `unchanged` once they
+are applied. `failed` can still change to `complete`: the
+scheduler re-queues the target, and a retry that applies the event moves the
+cursor past the run. An event stopped by a busy lock is not a failure; its run
+stays `pending`.
 Existing indexer batch size and per-target scheduling limits still apply;
 consumers must poll status rather than infer readiness from a successful commit.
 
@@ -238,7 +263,10 @@ and retries an abandoned `running` state after 30 minutes. A live index batch
 holds its receipt lock so recovery cannot steal it. A lost wakeup after a prior
 batch commit is reasserted. The indexer refuses foreign/independently edited
 Memory rows before vector changes, and skips obsolete upserts superseded by a
-new canonical version/deletion. Deletions address only explicitly owned versions
+new canonical version/deletion. A guard lock held by another transaction (a
+status poll holds the target rows), or a held row of the version an upsert
+retires, ends the batch before that event instead of failing it: the event
+stays pending and the next scheduled run applies it. Deletions address only explicitly owned versions
 which can remain visible, so accumulated retired history does not make a valid
 snapshot undeletable. Existing indexer failure inspection/rewind procedures
 apply to failed Resource events.
@@ -254,6 +282,27 @@ expiry refuses use immediately after 24h; while enabled, periodic maintenance
 physically clears expired staging in bounded batches. Stop accepting new runs
 and purge expired/uncommitted staging before disabling the feature for an
 extended period. Receipts retain hashes/operational IDs, not staged bodies.
+
+A run that ends without committing (aborted, expired, or discarded by a
+generation change) also drops its diff at once; its change count stays and is
+what its status, its diff pages (now empty) and the run history report.
+While `SYNC_RUNS_ENABLED` is on, the five-minute maintenance keeps finished
+runs for a retention window of 30 days (`RUN_RETENTION_DAYS` in
+`services/sync_feed_index.py`), in its own short transaction (a failure is
+rolled back and logged as `sync_run_retention_failed`; the rest of the tick
+goes on), at most 50 runs per pass:
+
+- a run that never committed is deleted 30 days after its upload window
+  closed, with its chunk receipts (and a resume candidate or manual-request
+  link it still has). Its status then answers 404, it leaves the run history,
+  and its `operation_id` can start a new run;
+- a committed run keeps its row, its chunk receipts and its outbox receipt:
+  the indexer proves every synchronized event against that receipt, also when
+  an operator rewinds the cursor and events apply again, and `index_status`
+  reads it. Once it was committed 30 days ago and a newer commit on the same
+  feed has superseded it, only its diff is cleared; the count stays. The
+  newest committed run of each feed is never touched.
+
 Canonical records and temporary chunks are raw user data; see
 [data boundary](../derived-layer-boundary.md). Workspace/resource erasure
 cascades data; removing an approver clears historical user identity.

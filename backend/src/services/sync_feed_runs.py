@@ -1,13 +1,14 @@
 """Bounded staging and preparation; never publishes events before commit."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import Select, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.management_schemas import digest
-from models.sync_activity import SyncManualRun
+from models.oidc import OIDCClient, OIDCGrant, OIDCToken
+from models.sync_activity import SyncManualRequest, SyncManualRun
 from models.sync_feed import SyncChunk, SyncFeed, SyncRecord, SyncRun
 from models.sync_feed_schemas import (
     MAX_RUN_BYTES,
@@ -93,6 +94,80 @@ async def editable(
     await validate_run_request(db, authority, row, fence)
 
 
+def manual_request_is_current(now: datetime) -> Select[UUID]:
+    """Rows of the manual request behind ``SyncManualRun.request_id`` while it is current.
+
+    Correlated on ``SyncManualRun``: use ``.exists()`` in a query that selects
+    from it. A request is current (#2911) while it is unexpired and its login
+    (grant and client) is neither revoked nor deleted. None of these conditions
+    reverts, and every later stage, prepare and commit of a run rechecks its
+    request and refuses it, so a run whose request is not current can do no
+    more work.
+    """
+    return (
+        select(SyncManualRequest.id)
+        .join(OIDCToken, OIDCToken.id == SyncManualRequest.token_id)
+        .join(OIDCGrant, OIDCGrant.id == OIDCToken.grant_id)
+        .join(OIDCClient, OIDCClient.client_id == OIDCGrant.client_id)
+        .where(
+            SyncManualRequest.id == SyncManualRun.request_id,
+            SyncManualRequest.expires_at > now,
+            OIDCGrant.revoked_at.is_(None),
+            OIDCClient.revoked_at.is_(None),
+        )
+    )
+
+
+async def expire_ended_manual_runs(
+    db: AsyncSession, installation_id: UUID | None = None, limit: int = 100
+) -> None:
+    """Expire active manual runs whose request ended and clear their staged records.
+
+    The same transition as the 24-hour expiry in ``maintain_sync_runs``, taken
+    as soon as the request is no longer current, so an ended run holds neither
+    an active-run slot nor its staged chunks; like every run that ends without
+    a commit, it drops its diff and keeps its change count (#2916). Runs are
+    locked ``FOR UPDATE OF sync_runs SKIP LOCKED``: a run another transaction
+    holds is left for the next sweep (its own recheck refuses it meanwhile),
+    and no feed row is locked. Plain statements, no savepoint: the caller's
+    transaction owns them.
+
+    Args:
+        db: Session of the caller's transaction.
+        installation_id: Only runs of this installation's feeds; None for all.
+        limit: At most this many runs per call.
+    """
+    query = (
+        select(SyncRun.id)
+        .join(SyncManualRun, SyncManualRun.run_id == SyncRun.id)
+        .where(
+            SyncRun.state.in_(["uploading", "prepared"]),
+            ~manual_request_is_current(utcnow()).exists(),
+        )
+    )
+    if installation_id is not None:
+        query = query.join(SyncFeed, SyncFeed.id == SyncRun.feed_id).where(
+            SyncFeed.installation_id == installation_id
+        )
+    ids = list(
+        (await db.scalars(query.limit(limit).with_for_update(of=SyncRun, skip_locked=True))).all()
+    )
+    if not ids:
+        return
+    await db.execute(update(SyncChunk).where(SyncChunk.run_id.in_(ids)).values(records=None))
+    await db.execute(
+        update(SyncRun)
+        .where(SyncRun.id.in_(ids))
+        .values(
+            state="expired",
+            approved_by=None,
+            approval_id=None,
+            approval_epoch=None,
+            **cleared_diff(),
+        )
+    )
+
+
 async def create_run(
     db: AsyncSession,
     authority: CredentialAuthority,
@@ -125,14 +200,22 @@ async def create_run(
     ):
         raise SyncProtocolError("invalid_manifest")
     await schema_matches(db, authority)
+    # Ended manual runs of this installation are expired and their staging
+    # cleared first, so the count below and the staged bytes stay bounded.
+    await expire_ended_manual_runs(db, authority.installation.id)
+    now = utcnow()
+    current_request = manual_request_is_current(now)
     pending = await db.scalar(
         select(func.count())
         .select_from(SyncRun)
         .join(SyncFeed)
+        .outerjoin(SyncManualRun, SyncManualRun.run_id == SyncRun.id)
         .where(
             SyncFeed.installation_id == authority.installation.id,
             SyncRun.state.in_(["uploading", "prepared"]),
-            SyncRun.expires_at > utcnow(),
+            SyncRun.expires_at > now,
+            # An ended run the sweep skipped (row locked) still gives back its slot.
+            or_(SyncManualRun.run_id.is_(None), current_request.exists()),
         )
     )
     schema = await current_schema(db, authority.installation)
@@ -338,6 +421,37 @@ async def clear_staging(db: AsyncSession, row: SyncRun) -> None:
     await db.execute(update(SyncChunk).where(SyncChunk.run_id == row.id).values(records=None))
 
 
+def clear_diff(row: SyncRun) -> None:
+    """A run that can no longer commit drops its diff and keeps its change count (#2916)."""
+    if row.change_count is None and row.diff is not None:
+        row.change_count = len(row.diff)
+    row.diff = None
+
+
+def cleared_diff() -> dict:
+    """``clear_diff`` for a bulk ``UPDATE`` of ``sync_runs``: the values to set.
+
+    The count of a row whose diff came before ``change_count`` existed is read
+    from the diff it replaces.
+    """
+    return {
+        "change_count": func.coalesce(
+            SyncRun.change_count,
+            case(
+                (func.jsonb_typeof(SyncRun.diff) == "array", func.jsonb_array_length(SyncRun.diff))
+            ),
+        ),
+        "diff": None,
+    }
+
+
+def change_count(row: SyncRun) -> int | None:
+    """The run's diff length, also once the diff is cleared; None before a diff."""
+    if row.change_count is not None:
+        return row.change_count
+    return None if row.diff is None else len(row.diff)
+
+
 async def abort_run(db: AsyncSession, authority: CredentialAuthority, rid: UUID) -> SyncRun:
     """Abort is retryable but cannot undo an already committed snapshot."""
     row, _feed = await run_for(db, authority, rid)
@@ -346,6 +460,7 @@ async def abort_run(db: AsyncSession, authority: CredentialAuthority, rid: UUID)
     if row.state == "aborted":
         return row
     row.state = "aborted"
+    clear_diff(row)
     await clear_staging(db, row)
     from services.sync_audit import add_audit, service_actor
 
@@ -372,7 +487,7 @@ def run_view(row: SyncRun) -> dict:
         if row.state in {"uploading", "prepared"} and utcnow() >= row.expires_at
         else row.state,
         "diff_hash": row.diff_hash,
-        "changes": len(row.diff or []),
+        "changes": change_count(row) or 0,
         "requires_approval": row.requires_approval,
         "expires_at": to_utc_iso(row.expires_at),
         "prepared_until": to_utc_iso(row.prepared_until),

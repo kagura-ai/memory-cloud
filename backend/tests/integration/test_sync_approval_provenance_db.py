@@ -32,6 +32,33 @@ async def prepared_manual(activity, *, prepare_delay=timedelta()):
     return proof, row
 
 
+async def shorten_login(activity, remaining: timedelta):
+    """End the requester's login (its OIDC grant) ``remaining`` from now; return the end."""
+    async with activity.factory() as db:
+        grant = await db.get(OIDCGrant, activity.store.grant_ids["member"])
+        grant.expires_at = (max(grant.created_at, activity.store.clock.now) + remaining).replace(
+            microsecond=0
+        ) + timedelta(seconds=1)
+        await db.commit()
+        return grant.expires_at
+
+
+async def test_expired_access_token_alone_keeps_the_original_request(activity):
+    """#2911: the stored access token may expire; the login behind it still holds."""
+    _proof, row = await prepared_manual(activity)
+    await change(
+        activity.store,
+        OIDCToken,
+        activity.store.token_ids["member"],
+        issued_at=int(
+            (activity.store.clock.now.replace(tzinfo=UTC) - timedelta(seconds=20)).timestamp()
+        ),
+        expires_in=1,
+    )
+    response = await approve(activity, row)
+    assert response.status_code == 200, response.text
+
+
 async def approve(activity, row):
     return await human(
         activity, "POST", f"runs/{row['run_id']}/approvals", body={"diff_hash": row["diff_hash"]}
@@ -78,7 +105,17 @@ def assert_refused(response):
 
 @pytest.mark.parametrize(
     "mutation",
-    ["revoked", "grant", "expired", "scope", "role", "seat", "owner_epoch", "other_source"],
+    [
+        "revoked",
+        "grant",
+        "login_expired",
+        "scope",
+        "grant_scope",
+        "role",
+        "seat",
+        "owner_epoch",
+        "other_source",
+    ],
 )
 async def test_manual_approval_rechecks_original_provenance_even_for_another_valid_editor(
     activity, mutation
@@ -106,21 +143,22 @@ async def test_manual_approval_rechecks_original_provenance_even_for_another_val
             activity.store.grant_ids["member"],
             revoked_at=activity.store.clock.now,
         )
-    elif mutation == "expired":
-        await change(
-            activity.store,
-            OIDCToken,
-            activity.store.token_ids["member"],
-            issued_at=int(
-                (activity.store.clock.now.replace(tzinfo=UTC) - timedelta(seconds=20)).timestamp()
-            ),
-            expires_in=1,
-        )
+    elif mutation == "login_expired":
+        # The request is bound to the login (#2911): its grant ends first.
+        login_ends = await shorten_login(activity, timedelta(seconds=30))
+        activity.store.clock.now = login_ends
     elif mutation == "scope":
         await change(
             activity.store,
             OIDCToken,
             activity.store.token_ids["member"],
+            scope="openid workspaces:read",
+        )
+    elif mutation == "grant_scope":
+        await change(
+            activity.store,
+            OIDCGrant,
+            activity.store.grant_ids["member"],
             scope="openid workspaces:read",
         )
     elif mutation == "role":
@@ -192,23 +230,18 @@ async def test_malformed_declared_manual_provenance_never_becomes_automatic_appr
     await assert_unapproved(activity, row)
 
 
-async def test_original_manual_deadline_is_rechecked_when_approval_commits(activity, monkeypatch):
+async def test_original_login_deadline_is_rechecked_when_approval_commits(activity, monkeypatch):
     from services import sync_audit
 
     _proof, row = await prepared_manual(activity)
-    await change(
-        activity.store,
-        OIDCToken,
-        activity.store.token_ids["member"],
-        issued_at=int(activity.store.clock.now.replace(tzinfo=UTC).timestamp()),
-        expires_in=2,
-    )
+    # The original login ends while the approval is being written (#2911).
+    login_ends = await shorten_login(activity, timedelta(seconds=2))
     original = sync_audit.add_audit
 
     def expire(db, action, actor, **kwargs):
         result = original(db, action, actor, **kwargs)
         if action == "sync.diff.approved":
-            activity.store.clock.now += timedelta(seconds=3)
+            activity.store.clock.now = login_ends
         return result
 
     monkeypatch.setattr(sync_audit, "add_audit", expire)

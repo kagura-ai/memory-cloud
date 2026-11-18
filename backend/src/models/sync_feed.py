@@ -9,13 +9,15 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from db.base import Base
 from models.json_types import NullableJSONB
@@ -44,7 +46,13 @@ class SyncFeed(Base):
 
 
 class SyncRun(Base):
-    """A durable operation receipt; credentials are deliberately absent from its identity."""
+    """A durable operation receipt; credentials are deliberately absent from its identity.
+
+    ``change_count`` is the length of the diff the run was given (#2916): it is
+    set with every diff written through the ORM and stays when an aborted,
+    expired or superseded run's ``diff`` is cleared, so a run's change count
+    never depends on the diff still being stored. NULL until the first diff.
+    """
 
     __tablename__ = "sync_runs"
     __table_args__ = (
@@ -56,6 +64,14 @@ class SyncRun(Base):
         CheckConstraint("base_revision >= 0", name="ck_sync_run_revision"),
         CheckConstraint("expires_at > created_at", name="ck_sync_run_expiry"),
         CheckConstraint("length(request_hash) = 64", name="ck_sync_run_request_hash"),
+        # #2916 (f55): the expiry and retention sweeps select by state and age;
+        # the superseded-diff pass reads only committed runs still holding one.
+        Index("ix_sync_runs_state_expires_at", "state", "expires_at"),
+        Index(
+            "ix_sync_runs_committed_diff",
+            "committed_at",
+            postgresql_where=text("state = 'committed' AND diff IS NOT NULL"),
+        ),
     )
     id: Mapped[UUID] = mapped_column(Uuid(), primary_key=True, default=uuid4)
     feed_id: Mapped[UUID] = mapped_column(
@@ -68,6 +84,7 @@ class SyncRun(Base):
     base_revision: Mapped[int] = mapped_column(Integer)
     state: Mapped[str] = mapped_column(String(16), default="uploading")
     diff: Mapped[list[dict] | None] = mapped_column(NullableJSONB)
+    change_count: Mapped[int | None] = mapped_column(Integer)
     diff_hash: Mapped[str | None] = mapped_column(String(64))
     requires_approval: Mapped[bool] = mapped_column(Boolean, default=False)
     prepared_until: Mapped[datetime | None] = mapped_column(DateTime)
@@ -80,6 +97,13 @@ class SyncRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     committed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    @validates("diff")
+    def _count_changes(self, _key: str, diff: list[dict] | None) -> list[dict] | None:
+        """Every stored diff sets the count; clearing the diff keeps it."""
+        if diff is not None:
+            self.change_count = len(diff)
+        return diff
 
     @property
     def manual_request_id(self) -> UUID | None:
@@ -137,6 +161,17 @@ class SyncIndexOutbox(Base):
     """Committed events and their target are enqueued in the same SQL transaction."""
 
     __tablename__ = "sync_index_outbox"
+    __table_args__ = (
+        # #2916 (f55): the replay and the live batch's receipt lock read only
+        # undelivered receipts.
+        Index(
+            "ix_sync_index_outbox_undelivered",
+            "resource_pk",
+            "context_id",
+            "last_event_id",
+            postgresql_where=text("delivered_at IS NULL"),
+        ),
+    )
     run_id: Mapped[UUID] = mapped_column(
         ForeignKey("sync_runs.id", ondelete="CASCADE"), primary_key=True
     )

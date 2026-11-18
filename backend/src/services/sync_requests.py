@@ -7,10 +7,10 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.sync_identity import SyncPrincipal, load_sync_identity
+from auth.sync_identity import SyncPrincipal, load_login_identity
 from models.auth import Workspace
 from models.management_schemas import digest
-from models.oidc import OIDCToken
+from models.oidc import OIDCGrant, OIDCToken
 from models.sync_activity import SyncManualRequest
 from models.sync_feed import SyncFeed, SyncRun
 from models.sync_installation import SyncInstallation
@@ -19,7 +19,10 @@ from services.sync_audit import add_audit, human_actor
 from services.sync_credentials import CredentialAuthority
 from services.sync_feed_authority import FeedFence, current_schema, lock_membership, locked
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthorizationError, ConflictError, NotFoundException
+from utils.exceptions import ConflictError, MemoryCloudException
+
+# A manual request lasts at most this long and never beyond its login (#2911).
+REQUEST_LIFETIME = timedelta(minutes=15)
 
 
 async def create_request(
@@ -60,11 +63,19 @@ async def create_request(
             )
             if pending is not None and pending >= 4:
                 raise ConflictError("Too many live manual requests")
-            token_id = await db.scalar(
-                select(OIDCToken.id).where(OIDCToken.access_token_hash == principal.token_hash)
-            )
-            if token_id is None:
+            # The request is bound to the login (the OIDC grant) behind this
+            # token, not to the token itself (#2911); the boundary above holds
+            # the token, grant and client rows.
+            login = (
+                await db.execute(
+                    select(OIDCToken.id, OIDCGrant.expires_at)
+                    .join(OIDCGrant, OIDCGrant.id == OIDCToken.grant_id)
+                    .where(OIDCToken.access_token_hash == principal.token_hash)
+                )
+            ).first()
+            if login is None:
                 raise ConflictError("Manual request authority changed")
+            token_id, login_expires_at = login
             row = SyncManualRequest(
                 installation_id=iid,
                 operation_id=operation_id,
@@ -75,7 +86,7 @@ async def create_request(
                 generation=installation.generation,
                 ownership_epoch=workspace.ownership_epoch,
                 created_at=now,
-                expires_at=min(principal.expires_at, now + timedelta(minutes=15)),
+                expires_at=min(login_expires_at, now + REQUEST_LIFETIME),
             )
             db.add(row)
             await db.flush()
@@ -154,15 +165,17 @@ async def validate_manual_request(
     if token is None:
         raise ConflictError("Manual request is no longer current")
     try:
-        live = await load_sync_identity(
-            db,
-            token.access_token_hash,
-            "integrations:manage",
-            lock=True,
-            audit_context=False,
-        )
+        # The login behind the stored token, not that token's own 300 s: an
+        # expired or rotated access token alone does not end the request, a
+        # revoked or expired grant does (#2911).
+        live = await load_login_identity(db, token.id, "integrations:manage", lock=True)
         await lock_membership(db, live.user_id, installation, write=True)
-    except (HTTPException, AuthorizationError, NotFoundException):
+    except ConflictError:
+        raise
+    except (HTTPException, MemoryCloudException):
+        # Any refusal of the ORIGINAL requester (identity, role, seat, plan,
+        # capacity) is one fixed conflict for every caller (#2912): the worker
+        # or another Editor never sees it as a refusal of their own.
         raise ConflictError("Manual request authority changed") from None
     if (live.user_id, live.client_id) != (request.requested_by, request.browser_client_id):
         raise ConflictError("Manual request authority changed")

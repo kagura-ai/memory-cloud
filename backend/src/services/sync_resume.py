@@ -27,7 +27,14 @@ from services.integration_entitlements import paid_integration_write
 from services.sync_credentials import CredentialAuthority
 from services.sync_feed_authority import FeedFence, current_schema, exact_target, locked
 from services.sync_feed_commit import document_id
-from services.sync_feed_runs import clear_staging, editable, generations, run_for, staged_records
+from services.sync_feed_runs import (
+    clear_diff,
+    clear_staging,
+    editable,
+    generations,
+    run_for,
+    staged_records,
+)
 from services.sync_managed_guard import service_mode
 from services.sync_management import (
     audit_mode,
@@ -130,6 +137,7 @@ async def pin_candidate(
     )
     db.add(candidate)
     row.state = "aborted"
+    clear_diff(row)
     await clear_staging(db, row)
     await db.flush()
     from services.sync_audit import add_audit, service_actor

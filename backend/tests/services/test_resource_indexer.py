@@ -27,7 +27,7 @@ from services.resource_indexer import (
     recorded_failed_events,
 )
 from utils.datetime import utcnow
-from utils.exceptions import QdrantError
+from utils.exceptions import QdrantError, QuotaExceededError, RedisError, SyncLockBusyError
 from utils.text import normalize_for_search
 
 
@@ -717,7 +717,7 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
             patch("services.resource_indexer.resolve_context_routing", mock_resolve),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
+            quota_cls.return_value.reserve_memories_per_day = AsyncMock(return_value=None)
             await indexer.process_incremental("res_test", uuid4())
 
         assert mock_resolve.await_count == 1, (
@@ -766,7 +766,12 @@ class TestProcessIncrementalMemoriesPerDay:
         return indexer
 
     def _run(self, indexer, allowed: bool):
-        quota = AsyncMock(return_value=(allowed, None if allowed else "over quota"))
+        # Allowed: Redis down / nothing kept (None); refused: the gate raises.
+        quota = (
+            AsyncMock(return_value=None)
+            if allowed
+            else AsyncMock(side_effect=QuotaExceededError("over quota"))
+        )
         routing = AsyncMock(return_value=("kagura_memories", MagicMock()))
         return quota, routing
 
@@ -805,7 +810,7 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memories_per_day = quota
+            quota_cls.return_value.reserve_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", self.context.id)
 
         assert metrics.batch_committed
@@ -827,7 +832,7 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memories_per_day = quota
+            quota_cls.return_value.reserve_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
         # Deletes create nothing — only the two new upserts are reserved, in one call.
@@ -851,7 +856,7 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memories_per_day = quota
+            quota_cls.return_value.reserve_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
         quota.assert_not_awaited()
@@ -872,7 +877,7 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memories_per_day = quota
+            quota_cls.return_value.reserve_memories_per_day = quota
             await indexer.process_incremental("res_test", uuid4())
 
         quota.assert_awaited_once_with(self.context.workspace_id, count=2)
@@ -887,7 +892,7 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memories_per_day = quota
+            quota_cls.return_value.reserve_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
         indexer._apply_upsert.assert_not_awaited()
@@ -909,12 +914,76 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memories_per_day = quota
+            quota_cls.return_value.reserve_memories_per_day = quota
             await indexer.process_incremental("res_test", uuid4())
 
         quota.assert_not_awaited()
         indexer._existing_resource_doc_ids.assert_not_awaited()
         assert indexer._apply_delete.await_count == 1
+
+    async def _charged(self, indexer, *, release=None):
+        """Run with a daily reservation of 3 on key ``day``; return the release mock."""
+        from services.quota_service import DailyReservation
+
+        release = release or AsyncMock(return_value=None)
+        routing = AsyncMock(return_value=("kagura_memories", MagicMock()))
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            quota_cls.return_value.reserve_memories_per_day = AsyncMock(
+                return_value=DailyReservation(key="day", count=3)
+            )
+            quota_cls.return_value.release_memories_per_day = release
+            self.metrics = await indexer.process_incremental("res_test", uuid4())
+        return release
+
+    @pytest.mark.asyncio
+    async def test_busy_stop_gives_back_the_charge_of_the_events_it_did_not_apply(self):
+        """#2904: the events from the busy one on run again later and are
+        charged then; only the applied prefix's creations stay charged."""
+        from services.quota_service import DailyReservation
+
+        indexer = self._indexer(_numbered(_upsert("doc_1"), _upsert("doc_2"), _upsert("doc_3")))
+
+        async def apply(event, *_args):
+            if event.doc_id == "doc_2":
+                raise SyncLockBusyError()
+
+        indexer._apply_upsert = AsyncMock(side_effect=apply)
+        release = await self._charged(indexer)
+
+        assert self.metrics.batch_committed and self.metrics.applied_upserts == 1
+        release.assert_awaited_once_with(DailyReservation(key="day", count=2))
+
+    @pytest.mark.asyncio
+    async def test_a_batch_that_runs_through_keeps_its_whole_charge(self):
+        indexer = self._indexer(_numbered(_upsert("doc_1"), _upsert("doc_2"), _upsert("doc_3")))
+        release = await self._charged(indexer)
+
+        assert self.metrics.batch_committed
+        release.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_batch_that_does_not_commit_gives_its_whole_charge_back(self):
+        """The offset goes back with the rollback, so every event runs again."""
+        from services.quota_service import DailyReservation
+
+        indexer = self._indexer(_numbered(_upsert("doc_1"), _upsert("doc_2"), _upsert("doc_3")))
+        indexer.db.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
+        release = await self._charged(indexer)
+
+        assert not self.metrics.batch_committed
+        release.assert_awaited_once_with(DailyReservation(key="day", count=3))
+
+    @pytest.mark.asyncio
+    async def test_a_failed_give_back_does_not_fail_the_committed_batch(self):
+        indexer = self._indexer(_numbered(_upsert("doc_1"), _upsert("doc_2")))
+        indexer._apply_upsert = AsyncMock(side_effect=[None, SyncLockBusyError()])
+        await self._charged(indexer, release=AsyncMock(side_effect=RedisError("down")))
+
+        assert self.metrics.batch_committed and self.metrics.errors == 0
+        assert self.metrics.applied_upserts == 1 and self.state.last_offset == 1
 
 
 def _delete(doc_id: str, event_id: int, version: int | None = None) -> MagicMock:
@@ -1000,8 +1069,8 @@ class TestProcessIncrementalSuspendedOrFull:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            self.daily_quota = AsyncMock(return_value=(True, None))
-            quota_cls.return_value.check_memories_per_day = self.daily_quota
+            self.daily_quota = AsyncMock(return_value=None)
+            quota_cls.return_value.reserve_memories_per_day = self.daily_quota
             return await indexer.process_incremental("res_test", uuid4())
 
     def _applied_doc_ids(self, indexer) -> list[str]:
@@ -2106,7 +2175,7 @@ class TestProcessIncrementalSavepoints:
             patch("services.resource_indexer.delete_chunk_points", chunks or AsyncMock()),
             patch("services.resource_indexer.delete_points_from_qdrant", points or AsyncMock()),
         ):
-            quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
+            quota_cls.return_value.reserve_memories_per_day = AsyncMock(return_value=None)
             return await indexer.process_incremental("res_test", uuid4(), **kwargs)
 
     @pytest.mark.asyncio
@@ -2426,6 +2495,73 @@ class TestProcessIncrementalSavepoints:
         indexer.qdrant_client.delete.assert_not_awaited()
         assert indexer._retired == []
 
+    @staticmethod
+    def _lock_not_available() -> Exception:
+        from sqlalchemy.exc import DBAPIError
+
+        class _DriverError(Exception):
+            sqlstate = "55P03"
+
+        return DBAPIError("SELECT ... FOR UPDATE NOWAIT", {}, _DriverError("busy"))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sync_event", "busy", "raises"),
+        [
+            # #2904: the retirement's busy candidate lock ends the event.
+            (True, True, True),
+            # Any other cleanup failure stays non-blocking, as before.
+            (True, False, False),
+            # A plain resource event's cleanup takes no NOWAIT lock; its
+            # failures stay non-blocking whatever they are.
+            (False, True, False),
+        ],
+        ids=["sync-busy", "sync-other-error", "plain-busy"],
+    )
+    async def test_old_version_cleanup_busy_lock_of_a_sync_event_is_a_retry(
+        self, sync_event, busy, raises
+    ):
+        old = MagicMock()
+        old.resource_version = 0
+        db = TestResourceIndexerNamedVectorUpsert._db_with_existing(None, old_memories=[old])
+        failure = self._lock_not_available() if busy else RuntimeError("cleanup flush failed")
+        flushes = 0
+
+        async def _flush():
+            nonlocal flushes
+            flushes += 1
+            if flushes == 2:  # the row's flush passes, the cleanup's fails
+                raise failure
+
+        db.flush = AsyncMock(side_effect=_flush)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        event = _make_event()
+        event.event_metadata = {"sync_run_id": str(uuid4())} if sync_event else None
+
+        async def _apply() -> None:
+            await indexer._apply_upsert(
+                event, _make_schema(), db.upsert_context, self.COLLECTION, indexer.embedding_service
+            )
+
+        # The ownership proof needs the real guard (DB tests); the cleanup's
+        # error handling is what is under test here.
+        with (
+            patch("services.sync_feed_provenance.assert_sync_memory_ids"),
+            patch("services.resource_indexer.logger") as log,
+        ):
+            if raises:
+                with pytest.raises(SyncLockBusyError) as retry:
+                    await _apply()
+                assert retry.value.__cause__ is failure
+            else:
+                await _apply()
+        warned = [c.args[0] for c in log.warning.call_args_list]
+        assert ("old_version_cleanup_failed" in warned) is not raises
+        assert indexer._retired == []
+
     @pytest.mark.asyncio
     async def test_old_points_are_queued_not_deleted_inside_the_event(self):
         """#2248: the event only queues the old row's points; the batch drains
@@ -2588,7 +2724,7 @@ async def _db_process(indexer, embedder, slug, ctx_id, **kwargs):
         ),
         patch("services.resource_indexer.QuotaService") as quota_cls,
     ):
-        quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
+        quota_cls.return_value.reserve_memories_per_day = AsyncMock(return_value=None)
         return await indexer.process_incremental(slug, ctx_id, **kwargs)
 
 

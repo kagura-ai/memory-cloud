@@ -29,7 +29,7 @@ from services.sync_feed_authority import (
     locked,
 )
 from services.sync_feed_index import index_status
-from services.workspace_locks import lock_workspace_for_update
+from services.workspace_locks import lock_workspace_nowait, retry_nowait
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, NotFoundException
 
@@ -54,7 +54,10 @@ async def activity_boundary(
     async with feed_fence(db) as fence:
         try:
             await locked(db, User, User.user_id == principal.user_id)
-            workspace = await lock_workspace_for_update(db, wid, nowait=True)
+            # Reads share the row with each other and with foreign-key checks;
+            # ownership, epoch, role and deletion writers still exclude them.
+            # Holding the users row, the boundary retries instead of waiting.
+            workspace = await lock_workspace_nowait(db, wid, shared=not write)
             live = await load_sync_identity(
                 db,
                 principal.token_hash,
@@ -149,8 +152,19 @@ async def feed_configuration(
     """Observe opaque current configuration without a data grant or a source URL."""
     async with activity_boundary(db, wid, iid, principal) as (installation, _workspace, _fence):
         # Exclude a concurrent schema insertion through its Resource FK, as the
-        # write path does. This is a short, NOWAIT SQL-only observation.
-        resource = await locked(db, Resource, Resource.id == installation.resource_pk, write=True)
+        # write path does: only FOR UPDATE conflicts with the insert's FOR KEY
+        # SHARE, so two feed reads take turns on this row. Holding the users
+        # row, the read retries a short holder (another feed read) instead of
+        # waiting (#2914).
+        async def lock_resource() -> Resource | None:
+            return await db.scalar(
+                select(Resource)
+                .where(Resource.id == installation.resource_pk)
+                .with_for_update(nowait=True)
+                .execution_options(populate_existing=True)
+            )
+
+        resource = await retry_nowait(db, lock_resource)
         schema = await current_schema(db, installation) if resource is not None else None
         query = select(SyncFeed).where(SyncFeed.installation_id == iid)
         if feed_id is not None:
@@ -189,10 +203,15 @@ async def feed_configuration(
     return result
 
 
+# A run's change count outlives its cleared diff (#2916); the length of the
+# diff only for a row whose diff was written before the count existed.
+_CHANGES = func.coalesce(SyncRun.change_count, func.jsonb_array_length(SyncRun.diff))
+
+
 async def _run(db: AsyncSession, iid: UUID, rid: UUID) -> tuple[SyncRun, SyncFeed, int | None]:
     pair = (
         await db.execute(
-            select(SyncRun, SyncFeed, func.jsonb_array_length(SyncRun.diff))
+            select(SyncRun, SyncFeed, _CHANGES)
             .options(defer(SyncRun.diff))
             .join(SyncFeed)
             .where(SyncRun.id == rid, SyncFeed.installation_id == iid)
@@ -239,7 +258,7 @@ async def runs_page(
     """Bound memory to metadata, not limit times the largest possible diff."""
     async with activity_boundary(db, wid, iid, principal):
         query = (
-            select(SyncRun, func.jsonb_array_length(SyncRun.diff))
+            select(SyncRun, _CHANGES)
             .options(
                 defer(SyncRun.diff),
             )

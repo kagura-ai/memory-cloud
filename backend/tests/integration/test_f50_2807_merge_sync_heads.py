@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect, select, text
+from sqlalchemy import insert, inspect, select, text
 from sqlalchemy.orm import Session
 
 from alembic import command
@@ -96,9 +96,11 @@ def _seed_sync(engine, ids):
     with Session(engine) as db, db.begin():
         db.add(SyncFeed(id=ids.fid, installation_id=ids.iid, kind="product", config_hash="1" * 64))
         db.flush()
+        # The table, not the entity: the current model can map columns (f55's
+        # change_count) that the revision under test does not have yet.
         for rid, state in ((ids.pending, "uploading"), (ids.committed, "committed")):
-            db.add(
-                SyncRun(
+            db.execute(
+                insert(SyncRun.__table__).values(
                     id=rid,
                     feed_id=ids.fid,
                     operation_id=uuid4(),
@@ -167,7 +169,9 @@ def _assert_preserved(engine, ids, *, sync, budget):
         assert db.get(ResourceEvent, ids.event_id).payload == {"title": "Kept"}
         if sync:
             assert db.get(SyncFeed, ids.fid).config_hash == "1" * 64
-            assert db.get(SyncRun, ids.pending).manifest == {"retained": "uploading"}
+            assert db.scalar(select(SyncRun.manifest).where(SyncRun.id == ids.pending)) == {
+                "retained": "uploading"
+            }
             assert db.get(SyncChunk, (ids.pending, 0)).records == [{"external_id": "pending"}]
             assert db.scalar(select(SyncRecord).where(SyncRecord.feed_id == ids.fid)).payload == {
                 "title": "Kept"

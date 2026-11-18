@@ -245,6 +245,33 @@ def test_concurrent_code_exchange_creates_exactly_one_token(api, store, monkeypa
             == 1
         )
         assert db.get(OIDCAuthorizationCode, hashlib.sha256(code.encode()).hexdigest()).consumed_at
+        # #2910: the waiting exchange finds the code spent, which is a replay
+        # of it, so the grant of the winning exchange is revoked as well.
+        assert db.get(OIDCGrant, grant_id).revoked_at is not None
+
+
+def test_replayed_code_commits_the_grant_revocation_with_the_400(api, store):
+    """#2910: the token route rolls back an error unless the revocation is marked
+    to persist; the replay's revocation must survive its 400 on a real database."""
+    code, verifier = authorize(api)
+    first = exchange(api, code, verifier)
+    assert first.status_code == 200, first.text
+    issued = first.json()
+    grant_id = _grant_id(store, code)
+    other_code, other_verifier = authorize(api, client_id=SECOND_CLIENT)
+    other = exchange(api, other_code, other_verifier, client_id=SECOND_CLIENT).json()
+    assert exchange(api, code, verifier, client_id=SECOND_CLIENT).status_code == 400
+    with store.factory() as db:
+        assert db.get(OIDCGrant, grant_id).revoked_at is None
+    replay = exchange(api, code, verifier)
+    assert replay.status_code == 400
+    assert replay.json()["error"] == "invalid_grant"
+    with store.factory() as db:
+        assert db.get(OIDCGrant, grant_id).revoked_at is not None
+        assert db.get(OIDCGrant, _grant_id(store, other_code)).revoked_at is None
+    assert refresh(api, issued["refresh_token"]).status_code == 400
+    assert _userinfo(api, issued["access_token"]).status_code == 401
+    assert _userinfo(api, other["access_token"]).status_code == 200
 
 
 def test_concurrent_refresh_rotates_once_then_commits_family_revocation(api, store, monkeypatch):

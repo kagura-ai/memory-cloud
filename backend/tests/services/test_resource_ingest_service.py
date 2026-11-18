@@ -297,6 +297,84 @@ class TestPersistEvents:
 
 
 # ============================================================================
+# Sync-reserved event_metadata keys (#2906)
+# ============================================================================
+
+
+class TestSyncReservedMetadata:
+    """Only the feed commit and the resume writer set these keys (#2906)."""
+
+    def test_sync_reserved_keys_are_declared_once(self):
+        assert svc.SYNC_RESERVED_METADATA_KEYS == frozenset(
+            {"sync_run_id", "installation_generation"}
+        )
+
+    def test_reserved_metadata_refusal_is_a_warning_level_422(self):
+        from utils.exceptions import ValidationError
+
+        assert issubclass(svc.SyncReservedMetadataError, ValidationError)
+        assert svc.SyncReservedMetadataError.log_level == "warning"
+        error = svc.SyncReservedMetadataError()
+        assert error.status_code == 422
+        assert error.error_code == "VAL-001"
+        assert error.details == {"field": "event_metadata"}
+
+    @pytest.mark.parametrize("key", ["sync_run_id", "installation_generation"])
+    def test_validate_events_refuses_reserved_metadata_with_422(self, key):
+        with pytest.raises(svc.SyncReservedMetadataError) as exc_info:
+            validate_events(
+                [
+                    {"op": "upsert", "doc_id": "d0", "version": 1, "payload": {"x": 1}},
+                    {
+                        "op": "upsert",
+                        "doc_id": "d1",
+                        "version": 1,
+                        "payload": {"x": 1},
+                        "event_metadata": {"source": "client", key: "1"},
+                    },
+                ]
+            )
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.details == {"field": "event_metadata", "index": 1}
+
+    def test_validate_events_refuses_reserved_metadata_on_an_otherwise_invalid_item(self):
+        # The whole call is refused, not reported as one item error among others.
+        with pytest.raises(svc.SyncReservedMetadataError):
+            validate_events([{"op": "bogus", "event_metadata": {"sync_run_id": "x"}}])
+
+    def test_validate_events_keeps_ordinary_metadata(self):
+        valid, errors = validate_events(
+            [
+                {
+                    "op": "upsert",
+                    "doc_id": "d0",
+                    "version": 1,
+                    "payload": {"x": 1},
+                    "event_metadata": {"source": "client", "sync_feed_id": "kept"},
+                },
+                {"op": "delete", "doc_id": "d1", "event_metadata": "not-an-object"},
+            ]
+        )
+        assert errors == []
+        assert valid[0].event_metadata == {"source": "client", "sync_feed_id": "kept"}
+
+    @pytest.mark.asyncio
+    async def test_persist_events_refuses_reserved_metadata_before_the_fence(self):
+        db = _mock_db()
+        guard = AsyncMock()
+        with patch("services.sync_managed_guard.assert_resource_mutable", new=guard):
+            with pytest.raises(svc.SyncReservedMetadataError):
+                await svc.persist_events(
+                    db,
+                    resource_id="res1",
+                    resource_pk=uuid4(),
+                    events=[_make_input(event_metadata={"installation_generation": 1})],
+                )
+        guard.assert_not_awaited()
+        db.add.assert_not_called()
+
+
+# ============================================================================
 # finalize_batch — the post-commit indexer boundary
 # ============================================================================
 
