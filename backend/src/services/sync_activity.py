@@ -29,7 +29,7 @@ from services.sync_feed_authority import (
     locked,
 )
 from services.sync_feed_index import index_status
-from services.workspace_locks import lock_workspace_nowait
+from services.workspace_locks import lock_workspace_nowait, retry_nowait
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, NotFoundException
 
@@ -152,8 +152,19 @@ async def feed_configuration(
     """Observe opaque current configuration without a data grant or a source URL."""
     async with activity_boundary(db, wid, iid, principal) as (installation, _workspace, _fence):
         # Exclude a concurrent schema insertion through its Resource FK, as the
-        # write path does. This is a short, NOWAIT SQL-only observation.
-        resource = await locked(db, Resource, Resource.id == installation.resource_pk, write=True)
+        # write path does: only FOR UPDATE conflicts with the insert's FOR KEY
+        # SHARE, so two feed reads take turns on this row. Holding the users
+        # row, the read retries a short holder (another feed read) instead of
+        # waiting (#2914).
+        async def lock_resource() -> Resource | None:
+            return await db.scalar(
+                select(Resource)
+                .where(Resource.id == installation.resource_pk)
+                .with_for_update(nowait=True)
+                .execution_options(populate_existing=True)
+            )
+
+        resource = await retry_nowait(db, lock_resource)
         schema = await current_schema(db, installation) if resource is not None else None
         query = select(SyncFeed).where(SyncFeed.installation_id == iid)
         if feed_id is not None:

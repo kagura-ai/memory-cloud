@@ -5,12 +5,13 @@ lock modes are the database's own, not a mock's.
 """
 
 import asyncio
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, update
 
 from models.auth import Workspace
+from models.resource import Resource
 from services import sync_activity
 from services.workspace_locks import NOWAIT_LOCK_BACKOFF_SECONDS, lock_workspace_for_update
 from tests.integration import test_sync_activity_db as fixtures
@@ -69,8 +70,66 @@ async def test_parallel_activity_routes_for_one_installation_all_succeed(activit
         human(activity, "GET", "activity/runs"),
         human(activity, "GET", "activity/events"),
         human(activity, "GET", "activity", role="member"),
+        human(activity, "GET", "activity/feeds"),
+        human(activity, "GET", "activity/feeds", role="member"),
+        human(activity, "GET", f"activity/feeds/{activity.fid}"),
     )
-    assert [r.status_code for r in responses] == [200, 200, 200, 200], [r.text for r in responses]
+    assert [r.status_code for r in responses] == [200] * 7, [r.text for r in responses]
+
+
+def lock_resource(holder, activity):
+    """What a feed configuration read or write takes on the installation's Resource row."""
+    return holder.execute(
+        select(Resource.id)
+        .where(Resource.id == UUID(activity.target["resource_pk"]))
+        .with_for_update()
+    )
+
+
+async def test_feed_configuration_read_waits_out_another_open_feed_read(activity, monkeypatch):
+    """The first read holds the Resource row for a moment; the second is not a 409."""
+    inside = asyncio.Event()
+    original = sync_activity.current_schema
+
+    async def slow(db, installation):
+        # Called with the Resource row held: keep it a short holder.
+        if not inside.is_set():
+            inside.set()
+            await asyncio.sleep(SHORT_HOLD_SECONDS)
+        return await original(db, installation)
+
+    monkeypatch.setattr(sync_activity, "current_schema", slow)
+    first = asyncio.create_task(human(activity, "GET", "activity/feeds"))
+    await asyncio.wait_for(inside.wait(), timeout=10)
+    second = await human(activity, "GET", f"activity/feeds/{activity.fid}", role="member")
+    assert (await first).status_code == 200, (await first).text
+    assert second.status_code == 200, second.text
+
+
+@pytest.mark.parametrize("path", ["activity/feeds", "feed"])
+async def test_feed_configuration_read_waits_out_a_short_resource_holder(activity, path):
+    suffix = f"activity/feeds/{activity.fid}" if path == "feed" else path
+    async with activity.factory() as holder:
+        await lock_resource(holder, activity)
+
+        async def let_go():
+            await asyncio.sleep(SHORT_HOLD_SECONDS)
+            await holder.rollback()
+
+        released = asyncio.create_task(let_go())
+        response = await human(activity, "GET", suffix)
+        await released
+    assert response.status_code == 200, response.text
+
+
+async def test_feed_configuration_read_past_the_retry_window_is_still_the_409(activity):
+    async with activity.factory() as holder:
+        await lock_resource(holder, activity)
+        response = await human(activity, "GET", "activity/feeds")
+        assert response.status_code == 409, response.text
+        assert response.json() == {"error": "RES-002"}
+        await holder.rollback()
+    assert (await human(activity, "GET", "activity/feeds")).status_code == 200
 
 
 @pytest.mark.parametrize("mode", ["share", "key_share"])

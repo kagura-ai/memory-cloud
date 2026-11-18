@@ -46,7 +46,11 @@ the workspace. An ownership transfer, role change, ownership-epoch change or
 workspace deletion still excludes them, and `POST /requests` keeps the row to
 itself. When the row is busy the request tries again for under a second before
 it answers 409 (`RES-002`), so a short holder such as a memory being saved in
-the same workspace no longer turns a read into a conflict.
+the same workspace no longer turns a read into a conflict. The two feed
+configuration reads (`/feeds`, `/feeds/{feed_id}`) also hold the
+installation's resource row for a moment, so they take turns with each other
+and with a feed configuration write instead of running side by side; the same
+retry keeps a parallel one from answering 409.
 Run lists defer the stored diff body and count its entries in SQL; cursor
 lookups select only ordering metadata. Counts are null when not yet known,
 rather than implying that no records or changes exist.
