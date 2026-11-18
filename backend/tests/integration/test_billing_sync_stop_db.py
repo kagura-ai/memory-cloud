@@ -26,6 +26,7 @@ from models.integration_entitlement import (
     WorkspaceIntegrationLicense,
     WorkspaceIntegrationState,
 )
+from models.sync_feed import SyncRun
 from models.sync_installation import SyncInstallation
 from models.sync_management import SyncManagedTarget
 from models.workspace_billing_schemas import BILLING_V1_ADDON_KEYS
@@ -33,7 +34,7 @@ from services import sync_management
 from services.sync_managed_guard import assert_context_mutable, target_fence
 from services.workspace_locks import lock_workspace_for_update
 from tests.integration import test_sync_management_db as fixtures
-from tests.integration.sync_feed_fixtures import committed, product
+from tests.integration.sync_feed_fixtures import committed, product, staged
 from utils.exceptions import MemoryCloudException
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -176,6 +177,36 @@ async def test_maintenance_while_the_fence_is_still_held_keeps_the_stop_retryabl
     await maintain(managed)
     assert (await target(managed)).stop_reason == "entitlement_ended"
     assert (await target(managed)).mode in {"stopping", "manual"}
+
+
+async def prepared_run(worker, run_id):
+    async with worker.factory() as db:
+        run = await db.get(SyncRun, UUID(run_id))
+        return run.state, None if run.diff is None else len(run.diff), run.change_count
+
+
+async def test_a_deferred_stop_keeps_a_prepared_run_and_the_stop_ends_it_without_its_diff(
+    managed,
+):
+    # The stop's savepoint holds the discard of pending runs too: rolled back
+    # behind a busy fence, the prepared run keeps its diff; the stop that
+    # maintenance takes later aborts it, and it keeps only its count (#2916).
+    row = await staged(managed, [product("one"), product("two")])
+    changes = row["changes"]
+    assert changes == 2
+    async with hold_shared_fence(managed):
+        assert (await deliver(managed, 10)).status_code == 200
+        assert await prepared_run(managed, row["run_id"]) == ("prepared", changes, changes)
+    await maintain(managed)
+    assert (await target(managed)).mode in {"stopping", "manual"}
+    assert await prepared_run(managed, row["run_id"]) == ("aborted", None, changes)
+
+
+async def test_a_delivery_that_stops_the_target_ends_a_prepared_run_without_its_diff(managed):
+    row = await staged(managed, [product("one"), product("two")])
+    assert (await deliver(managed, 10)).status_code == 200
+    assert (await target(managed)).mode in {"stopping", "manual"}
+    assert await prepared_run(managed, row["run_id"]) == ("aborted", None, row["changes"])
 
 
 @pytest.mark.parametrize("mode", ["stopping", "manual"])
