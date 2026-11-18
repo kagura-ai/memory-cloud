@@ -185,6 +185,12 @@ Unlink and authoritative entitlement removal use this same barrier while
 retaining data and all target UUIDs. Periodic run maintenance also detects
 clock expiry and retries stopping targets. The paid commit guard denies writes
 at the exact entitlement deadline even before the next maintenance tick.
+Maintenance runs at the start of each resource-indexer tick as a step of its
+own: an error there is rolled back and logged (`indexer_sync_maintenance_failed`)
+and the tick still runs the queued indexers. Each installation is maintained on
+its own, so one that fails (`sync_maintenance_installation_failed`, with its
+installation id) does not hold back the others; targets of a soft-deleted
+workspace are skipped.
 Credential/temporary service disablement retains the lock. The public endpoint
 is retained; stopping/status do not require a live service credential or paid
 access, while resuming does. Revoking publication does not grant data editing.

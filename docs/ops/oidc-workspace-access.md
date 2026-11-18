@@ -87,8 +87,12 @@ diagnostics. Unknown and duplicate query parameters are rejected.
 These reads use the async request DB session, independently of the synchronous
 Authlib protocol pool. `OIDC_RATE_LIMIT_PER_MINUTE` also bounds these operations
 per trusted ASGI peer, with separate `workspace-list` and `workspace-access`
-buckets. Workspace and context IDs do not create new buckets. Redis failure
+buckets. Workspace and context IDs do not create new buckets. Over the peer
+budget, a request whose access token this server issued is counted for the
+token's client and user instead (one indexed lookup on a separate session, before the
+request's own session opens); an unknown token keeps the 429. Redis failure
 refuses authentication work before a DB connection is opened. Proxy identity
-uses the deployment's existing trusted-proxy policy, never raw forwarded headers.
+uses the deployment's existing trusted-proxy policy, never raw forwarded headers
+(see [OIDC provider](oidc-provider.md#protocol-burst-limits)).
 
 No new tables, migrations or runtime dependencies are required.
