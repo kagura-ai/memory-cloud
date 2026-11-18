@@ -83,7 +83,7 @@ def store(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Iterator[SimpleNamespace
 def api(store: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     app = FastAPI()
 
-    async def within_rate_limit(_request):
+    async def within_rate_limit(_request, _presented=None):
         return None
 
     # Distributed limiter behavior is covered separately with a real counter
@@ -428,7 +428,7 @@ def test_consent_is_bound_to_account_and_authorization_parameters(api, store):
 def test_protocol_guard_runs_before_db_or_crypto(api, monkeypatch, path, method):
     from fastapi.responses import JSONResponse
 
-    async def limited(request):
+    async def limited(request, presented=None):
         return JSONResponse({"error": "temporarily_unavailable"}, status_code=429)
 
     def forbidden_db():

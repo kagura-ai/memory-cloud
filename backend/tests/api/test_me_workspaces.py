@@ -163,10 +163,28 @@ async def test_disabled_feature_never_opens_database(api, monkeypatch):
 @pytest.mark.asyncio
 async def test_rate_limit_before_database_is_private(api, monkeypatch):
     monkeypatch.setattr(oidc_limits, "increment_counter", AsyncMock(return_value=10**9))
+    # #2903: over the peer budget the token is looked up once, on the limiter's
+    # own session; an unknown token still gets the 429 and the request's
+    # database session is never opened.
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(oidc_limits, "_scalar", lookup)
     response = await get(api, headers={"Authorization": f"Bearer {TOKEN}"})
     assert_private(response, 429)
     assert int(response.headers["retry-after"]) > 0
     assert not api[2]
+    assert lookup.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_over_peer_budget_a_recognised_token_is_counted_per_client(api, monkeypatch):
+    counts = iter([10**9, 1])
+    counter = AsyncMock(side_effect=lambda key, ttl: next(counts))
+    monkeypatch.setattr(oidc_limits, "increment_counter", counter)
+    monkeypatch.setattr(oidc_limits, "_scalar", AsyncMock(return_value="client-a"))
+    response = await get(api, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert_private(response, 200)
+    assert api[2]
+    assert ":workspace-list:holder:" in counter.call_args_list[1].args[0]
 
 
 @pytest.mark.asyncio

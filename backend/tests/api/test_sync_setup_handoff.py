@@ -171,12 +171,14 @@ async def test_slow_body_does_not_hold_authority_sql(surface, monkeypatch):
 
 
 @pytest.mark.parametrize("failure", ["unavailable", "over_budget"])
-async def test_setup_rate_guard_is_fail_closed_before_db(surface, failure):
+async def test_setup_rate_guard_is_fail_closed_before_db(surface, failure, monkeypatch):
     if failure == "unavailable":
         surface[3].side_effect = RuntimeError("SENSITIVE_SYNTHETIC_REDIS_URL")
         expected = 503
     else:
         surface[3].return_value = 61
+        # #2903: an unknown token over the peer budget gets the same 429.
+        monkeypatch.setattr(oidc_limits, "_scalar", AsyncMock(return_value=None))
         expected = 429
     response = await post(surface)
     assert response.status_code == expected and not surface[1]
