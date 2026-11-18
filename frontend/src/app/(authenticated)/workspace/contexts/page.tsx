@@ -1312,23 +1312,40 @@ export default function ContextsPage() {
                       )}
                     </td>
 
-                    {/* Visibility */}
+                    {/* Visibility. #2895: Shared and Public open the
+                        context's Members tab; Private has no members. */}
                     <td className="px-4 py-3 text-center">
-                      {context.is_public ? (
-                        <span className="inline-flex items-center gap-1 text-xs text-purple-600 dark:text-purple-400">
-                          <Globe className="h-3 w-3" />
-                          {t("publicLabel")}
-                        </span>
-                      ) : context.is_private ? (
+                      {context.is_private && !context.is_public ? (
                         <span className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400">
                           <Lock className="h-3 w-3" />
                           {t("privateOption")}
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">
-                          <Users className="h-3 w-3" />
-                          {t("sharedOption")}
-                        </span>
+                        <Link
+                          href={`/workspace/contexts/${context.id}?tab=members`}
+                          data-testid={`visibility-link-${context.id}`}
+                          aria-label={t("visibilityMembersLink", {
+                            visibility: t(
+                              context.is_public ? "publicLabel" : "sharedOption",
+                            ),
+                            name: context.display_name || context.name,
+                          })}
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded text-xs underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            context.is_public
+                              ? "text-purple-600 dark:text-purple-400"
+                              : "text-green-600 dark:text-green-400",
+                          )}
+                        >
+                          {context.is_public ? (
+                            <Globe className="h-3 w-3" />
+                          ) : (
+                            <Users className="h-3 w-3" />
+                          )}
+                          {context.is_public
+                            ? t("publicLabel")
+                            : t("sharedOption")}
+                        </Link>
                       )}
                     </td>
 

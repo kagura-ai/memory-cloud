@@ -1,15 +1,13 @@
 /**
  * MembersSection
  *
- * Self-contained Settings-tab section for managing ContextMember entries on
- * shared contexts. Issue #362 — restores the regression introduced by PR #159
- * when the edit-modal was merged into the Settings page.
+ * The member list of a shared (or public) context, shown in the context
+ * page's Members tab (#2895; Issue #362 introduced it in Settings).
  *
- * Visibility is gated by the caller (`workspace/contexts/[id]/page.tsx`) on
- *   !context.is_private && hasWorkspaceRole(currentWorkspace?.current_user_role, "admin")
- *
- * The component defensively re-checks the same predicate and renders nothing if
- * it is ever rendered outside that envelope.
+ * Workspace owners and admins add, change and remove members. Every other
+ * role gets the same list read-only (the backend lets a context viewer list
+ * members) with no write control, so none of the dialogs can open. A
+ * private context has no members: it renders and loads nothing for one.
  */
 
 "use client";
@@ -96,8 +94,11 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
   const { toast } = useToast();
 
+  const isPrivate = context.is_private;
+  // Read-only for everyone below workspace admin; the backend enforces the
+  // same rule on every write.
   const canManage =
-    !context.is_private &&
+    !isPrivate &&
     hasWorkspaceRole(currentWorkspace?.current_user_role, WorkspaceRole.Admin);
 
   const [members, setMembers] = useState<ContextMember[]>([]);
@@ -142,9 +143,9 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
   }, [contextId, t]);
 
   useEffect(() => {
-    if (!canManage) return;
+    if (isPrivate) return;
     loadMembers();
-  }, [canManage, loadMembers]);
+  }, [isPrivate, loadMembers]);
 
   // Lazy-load workspace members on first "Add" open. The explicit loaded flag
   // prevents re-fetching on every dialog open when the workspace legitimately
@@ -330,11 +331,12 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
     }
   };
 
-  if (!canManage) return null;
+  if (isPrivate) return null;
 
   // Row-level action gate. Rendering no button is a UX hint; backend still
   // enforces the corresponding 400 guards independently.
   const canModifyMember = (m: ContextMember) =>
+    canManage &&
     !m.is_workspace_admin &&
     m.role !== ContextRole.Owner &&
     m.user_id !== currentUserId;
@@ -350,10 +352,12 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
               {t("membersCount", { count: members.length })}
             </span>
           </CardTitle>
-          <Button size="sm" onClick={handleOpenAddDialog}>
-            <UserPlus className="h-4 w-4 mr-2" />
-            {t("addMember")}
-          </Button>
+          {canManage && (
+            <Button size="sm" onClick={handleOpenAddDialog}>
+              <UserPlus className="h-4 w-4 mr-2" />
+              {t("addMember")}
+            </Button>
+          )}
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -361,14 +365,23 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
           ) : loadError ? (
             <ErrorBanner error={loadError} />
           ) : members.length === 0 ? (
-            <EmptyState
-              compact
-              icon={Users}
-              title={t("noMembersAssigned")}
-              description={t("addFirstMemberHint")}
-              actionLabel={t("addMember")}
-              onAction={handleOpenAddDialog}
-            />
+            canManage ? (
+              <EmptyState
+                compact
+                icon={Users}
+                title={t("noMembersAssigned")}
+                description={t("addFirstMemberHint")}
+                actionLabel={t("addMember")}
+                onAction={handleOpenAddDialog}
+              />
+            ) : (
+              <EmptyState
+                compact
+                icon={Users}
+                title={t("noMembersAssigned")}
+                description={t("noMembersReadOnlyHint")}
+              />
+            )
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -378,7 +391,7 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                     <th className="py-2 pr-4 font-medium">
                       {t("memberRoleColumn")}
                     </th>
-                    <th className="py-2 w-16"></th>
+                    {canManage && <th className="py-2 w-16"></th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -424,20 +437,22 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                           </span>
                         )}
                       </td>
-                      <td className="py-3 text-right">
-                        {canModifyMember(m) && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setRemoveTarget(m)}
-                            aria-label={t("removeMember", {
-                              name: m.user_email || m.user_id,
-                            })}
-                          >
-                            <Trash2 className="h-4 w-4 text-red-600" />
-                          </Button>
-                        )}
-                      </td>
+                      {canManage && (
+                        <td className="py-3 text-right">
+                          {canModifyMember(m) && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setRemoveTarget(m)}
+                              aria-label={t("removeMember", {
+                                name: m.user_email || m.user_id,
+                              })}
+                            >
+                              <Trash2 className="h-4 w-4 text-red-600" />
+                            </Button>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

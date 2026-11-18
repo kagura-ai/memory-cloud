@@ -71,7 +71,18 @@ vi.mock("@/components/contexts/SearchSettingsSection", () => ({
   SearchSettingsSection: () => <div />,
 }));
 vi.mock("@/components/contexts/MembersSection", () => ({
-  MembersSection: () => <div />,
+  MembersSection: () => <div data-testid="members-section" />,
+}));
+// #2895: the Members tab's panel; its own behaviour is covered in
+// ContextMembersTabPanel.test.tsx. The stub exposes the Settings switch.
+vi.mock("@/components/contexts/ContextMembersTabPanel", () => ({
+  ContextMembersTabPanel: ({ onOpenSettings }: { onOpenSettings: () => void }) => (
+    <div data-testid="members-panel">
+      <button type="button" onClick={onOpenSettings}>
+        open-settings
+      </button>
+    </div>
+  ),
 }));
 vi.mock("@/components/contexts/ProtectionSection", () => ({
   ProtectionSection: () => <div />,
@@ -342,5 +353,73 @@ describe("ContextDetailPage Health tab (#2764)", () => {
     expect(screen.queryByText("failedToLoad")).toBeNull();
     expect(screen.queryByText("boom")).toBeNull();
     expect(screen.getByTestId("overview-panel")).toBeInTheDocument();
+  });
+});
+
+describe("ContextDetailPage Members tab (#2895)", () => {
+  const ROLES = ["owner", "admin", "member", "viewer"] as const;
+
+  it.each(ROLES)("shows the Members tab to %s, just before Settings", async (role) => {
+    setupWithRole(role);
+    render(<ContextDetailPage />);
+    await screen.findByRole("tab", { name: "tabs.members" });
+    const names = screen.getAllByRole("tab").map((tab) => tab.textContent);
+    expect(names.slice(-2)).toEqual(["tabs.members", "tabs.settings"]);
+  });
+
+  it("keeps Members just before Settings when the Health tab is shown", async () => {
+    setupWithRole("owner");
+    mockGetMemoryHealthBreakdown.mockResolvedValue(breakdownListing("ctx-1"));
+    render(<ContextDetailPage />);
+    await screen.findByRole("tab", { name: "tabLabel" });
+    const names = screen.getAllByRole("tab").map((tab) => tab.textContent);
+    expect(names.slice(-3)).toEqual(["tabLabel", "tabs.members", "tabs.settings"]);
+  });
+
+  it.each(ROLES)("?tab=members opens the Members tab for %s", async (role) => {
+    setupWithRole(role, "members");
+    render(<ContextDetailPage />);
+    expect(await screen.findByTestId("members-panel")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "tabs.members" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // The panel is the tab's content, not the admin-only role guidance.
+    expect(screen.queryByText("admin")).toBeNull();
+    const overviewSnaps = mockReplace.mock.calls.filter(
+      (c) => typeof c[0] === "string" && (c[0] as string).includes("tab=overview"),
+    );
+    expect(overviewSnaps.length).toBe(0);
+  });
+
+  it("an unknown tab value still falls back to Overview", async () => {
+    setupWithRole("viewer", "bogus");
+    render(<ContextDetailPage />);
+    expect(await screen.findByTestId("overview-panel")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "tabs.overview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.queryByTestId("members-panel")).toBeNull();
+  });
+
+  it.each(["owner", "admin"] as const)(
+    "the Settings tab no longer contains the members section for %s",
+    async (role) => {
+      setupWithRole(role, "settings");
+      mockGetContext.mockResolvedValue({ ...makeContext(), is_private: false });
+      render(<ContextDetailPage />);
+      expect(await screen.findByTestId("settings-panel")).toBeInTheDocument();
+      expect(screen.queryByTestId("members-section")).toBeNull();
+      expect(screen.queryByTestId("members-panel")).toBeNull();
+    },
+  );
+
+  it("the panel's Settings button switches to the Settings tab", async () => {
+    setupWithRole("owner", "members");
+    render(<ContextDetailPage />);
+    await screen.findByTestId("members-panel");
+    fireEvent.click(screen.getByRole("button", { name: "open-settings" }));
+    expect(mockReplace).toHaveBeenCalledWith("/workspace/contexts/ctx-1?tab=settings");
   });
 });

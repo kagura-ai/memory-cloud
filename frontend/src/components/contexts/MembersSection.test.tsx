@@ -145,22 +145,26 @@ describe("MembersSection — visibility gating", () => {
     expect(mockListContextMembers).not.toHaveBeenCalled();
   });
 
-  it("renders nothing for member role on shared context", () => {
-    setWorkspace("member");
-    const { container } = render(
-      <MembersSection contextId={CONTEXT_ID} context={makeContext()} />,
-    );
-    expect(container.innerHTML).toBe("");
-    expect(mockListContextMembers).not.toHaveBeenCalled();
-  });
-
-  it("renders nothing for viewer role on shared context", () => {
-    setWorkspace("viewer");
-    const { container } = render(
-      <MembersSection contextId={CONTEXT_ID} context={makeContext()} />,
-    );
-    expect(container.innerHTML).toBe("");
-  });
+  // #2895: a member or viewer reads the list (the backend allows GET for a
+  // context viewer) but gets no write control.
+  it.each(["member", "viewer"])(
+    "renders the list read-only for %s on a shared context",
+    async (role) => {
+      setWorkspace(role);
+      mockListContextMembers.mockResolvedValue([
+        makeMember({ user_id: "u1", user_email: "one@ex.com" }),
+      ]);
+      render(<MembersSection contextId={CONTEXT_ID} context={makeContext()} />);
+      const row = await screen.findByTestId("member-row-u1");
+      expect(mockListContextMembers).toHaveBeenCalledWith(CONTEXT_ID);
+      expect(within(row).getByText("contextRoleEditor")).toBeInTheDocument();
+      expect(row.querySelector("select")).toBeNull();
+      expect(
+        row.querySelector("button[aria-label^='removeMember']"),
+      ).toBeNull();
+      expect(screen.queryByRole("button", { name: "addMember" })).toBeNull();
+    },
+  );
 
   it("renders for admin on shared context and loads members", async () => {
     setWorkspace("admin");
