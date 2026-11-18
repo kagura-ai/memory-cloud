@@ -183,8 +183,9 @@ async def fence_edge_write(
 ) -> EdgeWriteFence:
     """Take the shared feed fence of every context a declared edge touches (#2907).
 
-    The edge's own context and each endpoint's current context (an endpoint can
-    have moved since the edge was written), in UUID order like every
+    The edge's own context and each endpoint's current context in the edge's
+    workspace (an endpoint can have moved since the edge was written; one
+    outside the workspace is not looked up), in UUID order like every
     multi-context writer (``fence_state_for_memories``). Called before the
     edge row is read, so the edge type the caller decides on is read under the
     fences: in a feed-managed context no ordinary writer can create or retype a
@@ -280,8 +281,10 @@ async def create_declared_edge(
     fence = await fence_edge_write(
         db, context_id=context_id, source_id=source_id, target_id=target_id
     )
-    fence.require_unmanaged_for(edge_type)
     if edge_type == EDGE_TYPE_SUPERSEDES:
+        # Ownership first: an endpoint the caller does not own gets the uniform
+        # denial, never the feed state of a context it cannot see. Both owned
+        # endpoints are in the edge's own context, so the refusal below holds.
         await ensure_supersedes_owned(
             db,
             user_id=user_id,
@@ -290,6 +293,7 @@ async def create_declared_edge(
             workspace_id=workspace_id,
             context_id=context_id,
         )
+    fence.require_unmanaged_for(edge_type)
 
     repo = NeuralEdgeRepository(db)
 

@@ -51,8 +51,10 @@ that type are fenced too: creating, re-asserting, reweighting, retyping to or
 from, or deleting one through MCP `create_edge` / `update_edge` / `delete_edge`,
 REST `POST /api/v1/graph/edges` or PATCH `accept_supersede_candidate` answers
 409 `SYNC-LOCKED` (MCP: an error envelope carrying `management_mode`) when the
-edge's context or either memory's current context is `feed` or `stopping`, or a
-retained target not enrolled yet. No edge is written and a stored supersede
+edge's context or either memory's current context in the edge's workspace is
+`feed` or `stopping`, or a retained target not enrolled yet. For a `supersedes`
+edge the endpoint owner check answers first, so a foreign endpoint gets the
+usual uniform denial. No edge is written and a stored supersede
 suggestion stays. Other declared types (`related_to`, `contradicts`, ...) and
 recall-time learned edges stay writable. Every declared-edge write holds the
 shared fence of those contexts until it commits, so the edge type it decided on

@@ -241,13 +241,25 @@ async def fence_state_for_memories(
     returned cannot change before the write commits. Contexts are fenced in
     UUID order.
 
+    Only memories in ``context_id``'s own workspace count: a memory id outside
+    it is never looked up or fenced, so the answer (and a fence held by a
+    transition) says nothing about another workspace's rows. The caller's own
+    endpoint check answers for such an id.
+
     Returns:
         The first fenced state (``feed`` / ``stopping``) among those contexts,
         or ``None`` when each is unmanaged or ``manual``.
     """
+    from models.auth import Context
+
     contexts = {context_id}
+    workspace = select(Context.workspace_id).where(Context.id == context_id).scalar_subquery()
     with db.no_autoflush:
-        current = await db.scalars(select(Memory.context_id).where(Memory.id.in_(memory_ids)))
+        current = await db.scalars(
+            select(Memory.context_id).where(
+                Memory.id.in_(memory_ids), Memory.workspace_id == workspace
+            )
+        )
         contexts.update(c for c in current.all() if isinstance(c, UUID))
     state: str | None = None
     for context in sorted(contexts, key=str):

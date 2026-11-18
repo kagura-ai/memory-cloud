@@ -400,3 +400,72 @@ async def test_a_mode_transition_refuses_an_edge_write_in_flight_and_vice_versa(
         async with w.factory() as transition:
             await target_fence(transition, ctx, exclusive=True)
             await transition.rollback()
+
+
+@pytest.mark.parametrize("fenced", ["feed", "transition"])
+async def test_a_supersedes_edge_to_another_workspaces_feed_memory_is_permission_denied(
+    graph, fenced
+):
+    """An out-of-scope endpoint answers the uniform denial, never its context's feed state.
+
+    The caller owns workspace B and names, as the target, a memory of workspace
+    A's context a1, which is feed-managed (or mid-transition). The reply is the
+    same ``permission_denied`` a missing endpoint gets: nothing tells the caller
+    that the UUID exists or what its context's feed mode is.
+    """
+    from models.memory import Memory
+
+    w = graph
+    own = uuid4()
+    async with w.factory() as s:
+        s.add(
+            Memory(
+                id=own,
+                user_id=w.other_owner,
+                workspace_id=w.other_ws,
+                context_id=w.ctx["b1"],
+                summary="Synthetic memory of workspace B",
+                content="Synthetic content of workspace B",
+                type="note",
+                client="pytest",
+                embedding_status="success",
+            )
+        )
+        await s.commit()
+    before = await edges(w)
+
+    async def _get_db():
+        async with w.factory() as s:
+            yield s
+
+    async def create(target: UUID) -> dict:
+        args = {
+            "context_id": str(w.ctx["b1"]),
+            "source_id": str(own),
+            "target_id": str(target),
+            "edge_type": "supersedes",
+        }
+        with patch("db.base.get_db", new=_get_db):
+            try:
+                result = await handle_create_edge(args, w.other_owner, w.other_ws)
+            except Exception as exc:  # noqa: BLE001 - the dispatcher's own conversion
+                result = _tool_exception_response("create_edge", exc)
+        return json.loads(result[0].text)
+
+    try:
+        missing = await create(uuid4())
+        if fenced == "feed":
+            async with managed_as(w, "feed"):
+                foreign = await create(w.ids["d"])
+        else:
+            async with w.factory() as transition:
+                await target_fence(transition, UUID(str(w.ctx["a1"])), exclusive=True)
+                foreign = await create(w.ids["d"])
+                await transition.rollback()
+        assert missing["error"] == "permission_denied", missing
+        assert foreign == missing
+        assert await edges(w) == before
+    finally:
+        async with w.factory() as s:
+            await s.execute(delete(Memory).where(Memory.id == own))
+            await s.commit()

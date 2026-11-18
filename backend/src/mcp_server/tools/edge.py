@@ -454,10 +454,9 @@ async def handle_update_edge(
                 )
 
             effective_type = new_edge_type or existing.edge_type
-            # Retyping to or from supersedes, or reweighting one (which also
-            # accepts a stored suggestion below), is refused on a feed target.
-            fence.require_unmanaged_for(existing.edge_type, effective_type)
             if effective_type == EDGE_TYPE_SUPERSEDES:
+                # Ownership first, as in create_declared_edge: a foreign
+                # endpoint gets the uniform denial, not a feed state.
                 await execute_with_timeout(
                     ensure_supersedes_owned(
                         db,
@@ -469,6 +468,9 @@ async def handle_update_edge(
                     ),
                     operation_name="update_edge",
                 )
+            # Retyping to or from supersedes, or reweighting one (which also
+            # accepts a stored suggestion below), is refused on a feed target.
+            fence.require_unmanaged_for(existing.edge_type, effective_type)
 
             edge = await execute_with_timeout(
                 repo.create_or_update_edge(
