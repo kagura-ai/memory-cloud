@@ -19,7 +19,7 @@ from services.sync_audit import add_audit, human_actor
 from services.sync_credentials import CredentialAuthority
 from services.sync_feed_authority import FeedFence, current_schema, lock_membership, locked
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthorizationError, ConflictError, NotFoundException
+from utils.exceptions import ConflictError, MemoryCloudException
 
 
 async def create_request(
@@ -162,7 +162,12 @@ async def validate_manual_request(
             audit_context=False,
         )
         await lock_membership(db, live.user_id, installation, write=True)
-    except (HTTPException, AuthorizationError, NotFoundException):
+    except ConflictError:
+        raise
+    except (HTTPException, MemoryCloudException):
+        # Any refusal of the ORIGINAL requester (identity, role, seat, plan,
+        # capacity) is one fixed conflict for every caller (#2912): the worker
+        # or another Editor never sees it as a refusal of their own.
         raise ConflictError("Manual request authority changed") from None
     if (live.user_id, live.client_id) != (request.requested_by, request.browser_client_id):
         raise ConflictError("Manual request authority changed")

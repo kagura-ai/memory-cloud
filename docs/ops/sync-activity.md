@@ -105,6 +105,12 @@ human as requester; approval of a destructive diff is a separate human act.
 Pinned manual resume candidates retain the same original request checks at
 preview, diff and confirmation, including the final commit deadline. Their
 24-hour candidate lifetime cannot extend the original request's 15 minutes.
+When that recheck finds the original requester no longer qualifies (login,
+token, Editor role, seat, plan or capacity), every path answers the same 409
+`RES-002`: the worker's run creation, staging, preparation and commit, and
+another Editor's approval and resume preview, diff and confirmation. It is
+not a refusal of the worker or of that Editor, so no `sync.authority.denied`
+event is recorded against them.
 
 ## Audit and lifecycle
 
