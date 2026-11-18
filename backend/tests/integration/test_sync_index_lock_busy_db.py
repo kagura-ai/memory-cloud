@@ -231,6 +231,56 @@ async def test_busy_lock_after_an_applied_prefix_commits_the_prefix_and_stops(fe
     assert docs == {events[0].doc_id}
 
 
+_REAL_CHECK_MEMORIES_PER_DAY = resource_indexer.QuotaService.check_memories_per_day
+
+
+@pytest.fixture
+def daily_counter(monkeypatch, indexing) -> dict[str, int]:
+    """The real daily-quota gate on an in-memory counter instead of Redis."""
+    counter: dict[str, int] = {}
+
+    async def incrby(key: str, amount: int, ttl: int | None = None) -> int:
+        counter[key] = counter.get(key, 0) + amount
+        return counter[key]
+
+    monkeypatch.setattr(
+        resource_indexer.QuotaService, "check_memories_per_day", _REAL_CHECK_MEMORIES_PER_DAY
+    )
+    monkeypatch.setattr("services.quota_service.incrby_counter", incrby)
+    return counter
+
+
+@pytest.mark.parametrize(
+    ("held", "applied_first"),
+    [("resource", 0), ("record", 1)],
+)
+async def test_busy_stop_charges_the_daily_quota_only_for_the_applied_creations(
+    feeds, daily_counter, held, applied_first
+):
+    """The events after a busy lock run again later: charging them now as well
+    would count each of them once per collision."""
+    await committed(feeds, [product("one"), product("two"), product("three")])
+    events = await _events(feeds)
+    resource_pk, _context_id = _target(feeds)
+    lock = {
+        "resource": select(Resource).where(Resource.id == resource_pk),
+        "record": select(SyncRecord).where(
+            SyncRecord.resource_pk == events[1].resource_pk,
+            SyncRecord.doc_id == events[1].doc_id,
+        ),
+    }[held]
+    await _maintain(feeds)
+    async with feeds.factory() as holder:
+        await holder.scalar(lock.with_for_update())
+        first = await _run(feeds, maintain=False)
+        await holder.rollback()
+    assert first.applied_upserts == applied_first
+    assert sum(daily_counter.values()) == applied_first
+    metrics = await _run(feeds)
+    assert metrics.applied_upserts == 3 - applied_first
+    assert sum(daily_counter.values()) == 3
+
+
 async def test_deterministic_guard_conflict_is_still_recorded_and_the_batch_continues(
     feeds, indexing
 ):

@@ -32,7 +32,7 @@ from tests.integration import sync_credential_fixtures as credentials
 from tests.integration import sync_feed_fixtures as fixtures
 from tests.integration import sync_installation_fixtures as installations
 from tests.integration.sync_feed_fixtures import committed, human, product, service, staged
-from utils.exceptions import ConflictError, ManagedDataLockedError
+from utils.exceptions import ConflictError, ManagedDataLockedError, QuotaExceededError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 store, worker, feeds = fixtures.store, fixtures.worker, fixtures.feeds
@@ -826,14 +826,14 @@ async def test_actual_batch_suppresses_old_source_in_manual_and_honors_resume_ca
     qdrant, embedding = MagicMock(), AsyncMock()
     qdrant.upsert, qdrant.delete = AsyncMock(), AsyncMock()
     embedding.embed.return_value = [0.1] * 1536
-    quota = AsyncMock(return_value=(False, "No daily room"))
+    quota = AsyncMock(side_effect=QuotaExceededError("No daily room"))
     monkeypatch.setattr(resource_indexer, "get_qdrant_client", lambda: qdrant)
     monkeypatch.setattr(
         resource_indexer,
         "resolve_context_routing",
         AsyncMock(return_value=("test-collection", embedding)),
     )
-    monkeypatch.setattr(resource_indexer.QuotaService, "check_memories_per_day", quota)
+    monkeypatch.setattr(resource_indexer.QuotaService, "reserve_memories_per_day", quota)
 
     async def process(room):
         async with managed.factory() as db:
@@ -869,7 +869,7 @@ async def test_actual_batch_suppresses_old_source_in_manual_and_honors_resume_ca
     result = await process(100)
     assert result.skipped and result.reason == "memories_per_day_exceeded"
     qdrant.upsert.assert_not_awaited()
-    quota.return_value = (True, None)
+    quota.side_effect, quota.return_value = None, None
     result = await process(100)
     assert result.batch_committed and result.errors == 0, result.to_dict()
     assert qdrant.upsert.await_count == 1

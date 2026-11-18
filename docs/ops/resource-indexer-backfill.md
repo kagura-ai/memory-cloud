@@ -97,6 +97,10 @@ the outbox replay re-queues the row on the next five-minute tick while
 `SYNC_RUNS_ENABLED` is on (any other target runs again when its next ingest
 queues it), and the per-target limits (10 minutes apart, 6 runs an hour) bound
 the retries while the lock stays held.
+The batch reserved the daily Memory-creation quota for its new documents up
+front; it gives back the share of the events it did not apply, so a retry is
+charged once, not once per collision. A batch that rolls back gives back all of
+it.
 
 The list stays until you act on it (#2477): a rewind, or the clear below.
 Every other run keeps it, a batch with no failures included, and a batch with

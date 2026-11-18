@@ -812,6 +812,26 @@ class ResourceIndexer:
         self._repointed = []
         self._retired = []
         self._history_changes.clear()
+        from services.quota_service import DailyReservation
+        from utils.exceptions import RedisError
+
+        # What the batch took off the daily quota (#2904). The events it does
+        # not apply and will run again (a batch that does not commit, the rest
+        # of one that stopped at a busy lock) give their share back, or every
+        # retry would charge them once more.
+        daily_charge: DailyReservation | None = None
+
+        async def give_back(count: int) -> None:
+            if daily_charge is None or count <= 0:
+                return
+            try:
+                await QuotaService(self.db).release_memories_per_day(
+                    DailyReservation(key=daily_charge.key, count=count)
+                )
+            except RedisError as e:
+                # The charge then expires with the day key (over-counting is
+                # the safe direction).
+                logger.warning("indexer_daily_quota_release_failed", count=count, error=str(e))
 
         try:
             # 1. Resolve context first so workspace_id is available for
@@ -967,10 +987,13 @@ class ResourceIndexer:
                     )
                     events = events[:batch_len]
             if new_count:
-                allowed, quota_error = await QuotaService(self.db).check_memories_per_day(
-                    context.workspace_id, count=new_count
-                )
-                if not allowed:
+                from utils.exceptions import QuotaExceededError
+
+                try:
+                    daily_charge = await QuotaService(self.db).reserve_memories_per_day(
+                        context.workspace_id, count=new_count
+                    )
+                except QuotaExceededError as quota_error:
                     metrics.skipped = True
                     metrics.reason = "memories_per_day_exceeded"
                     logger.warning(
@@ -979,13 +1002,14 @@ class ResourceIndexer:
                         context_id=context_id,
                         workspace_id=str(context.workspace_id),
                         new_docs=new_count,
-                        error=quota_error,
+                        error=quota_error.message,
                     )
                     return metrics
 
             # 5. Process each event
             ran_through = events[-1].id
-            for event in events:
+            stopped_at: int | None = None
+            for index, event in enumerate(events):
                 repointed_mark = len(self._repointed)
                 retired_mark = len(self._retired)
                 history_before = self._history_changes.copy()
@@ -1036,6 +1060,7 @@ class ResourceIndexer:
                             doc_id=event.doc_id,
                         )
                         ran_through = event.id - 1
+                        stopped_at = index
                         break
                     logger.error(
                         "indexer_event_failed",
@@ -1092,6 +1117,13 @@ class ResourceIndexer:
                     )
             await self.db.commit()
             metrics.batch_committed = True
+            if stopped_at is not None and daily_charge is not None:
+                # The creations of the applied prefix stay charged; the rest
+                # of the batch is charged again when it runs.
+                _prefix_len, applied_creations = _fit_memory_room(
+                    events[:stopped_at], known_doc_ids, room=None, ignored_event_ids=obsolete
+                )
+                await give_back(daily_charge.count - applied_creations)
             # #2164 / #2248: only now that the re-points and the old-version
             # deletes are durable.
             await self._drop_repointed_points()
@@ -1119,8 +1151,10 @@ class ResourceIndexer:
             await self.db.rollback()
             if not metrics.batch_committed:
                 # The offset went back too: the batch runs again, its failures
-                # and the entries it ran with it (#2477).
+                # and the entries it ran with it (#2477), and charges its
+                # creations again then (#2904).
                 metrics.failed_events = recorded
+                await give_back(daily_charge.count if daily_charge is not None else 0)
             logger.error(
                 "indexer_run_failed",
                 resource_id=resource_id,
