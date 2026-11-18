@@ -30,7 +30,8 @@ from models.sync_installation import SyncInstallation
 from models.sync_management import SyncManagedTarget
 from models.workspace_billing_schemas import BILLING_V1_ADDON_KEYS
 from services import sync_management
-from services.sync_managed_guard import target_fence
+from services.sync_managed_guard import assert_context_mutable, target_fence
+from services.workspace_locks import lock_workspace_for_update
 from tests.integration import test_sync_management_db as fixtures
 from tests.integration.sync_feed_fixtures import committed, product
 from utils.exceptions import MemoryCloudException
@@ -195,6 +196,36 @@ async def test_plan_only_delivery_to_a_stopped_target_ignores_a_shared_fence_hol
     assert (revision, receipt) == (11, True)
     if route == "billing-snapshot":
         assert workspace.addon_memory_bonus == 5
+    after = await target(managed)
+    assert (after.mode, after.epoch, after.generation) == (
+        stopped.mode,
+        stopped.epoch,
+        stopped.generation,
+    )
+
+
+@pytest.mark.parametrize("mode", ["stopping", "manual"])
+async def test_stop_for_a_stopping_or_manual_target_takes_no_exclusive_fence(managed, mode):
+    # Without the early return the stop would enroll the target and keep its
+    # exclusive fence until the delivery commits, refusing every ordinary
+    # writer of a manual target (and the indexer) for that whole time.
+    assert (await deliver(managed, 10)).status_code == 200
+    if mode == "manual":
+        await fixtures.finalize(managed)
+    stopped = await target(managed)
+    assert stopped.mode == mode
+    context_id = UUID(managed.target["context_id"])
+    async with managed.factory() as delivery:
+        await lock_workspace_for_update(delivery, managed.store.wid)
+        await sync_management.stop_ineligible_workspace(delivery, managed.store.wid)
+        # The delivery's transaction is still open: another writer gets the
+        # shared fence, so the stop holds at most a shared fence itself.
+        async with managed.factory() as writer:
+            fence = await target_fence(writer, context_id)
+            assert fence.state == mode
+            if mode == "manual":
+                await assert_context_mutable(writer, context_id)
+        await delivery.commit()
     after = await target(managed)
     assert (after.mode, after.epoch, after.generation) == (
         stopped.mode,
