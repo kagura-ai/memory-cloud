@@ -72,6 +72,9 @@ the Sleep reindex, an embedding-model migration) stays refused with
 `SYNC-LOCKED`. A refused row is left `failed` with an
 `embedding_error` starting `SYNC-LOCKED` and its retry budget intact, so the
 sweep tries it again after each backoff instead of retiring it (#2908).
+Removing a point whose author was erased while it was being written is erasure
+work and is never fenced: the check after the upsert compares the author only,
+and reopens and drains the erasure scope on any target mode.
 
 An absent ownership row is conservatively treated as `feed` while the flag is
 enabled. New installations enroll automatically; the first source/control

@@ -364,3 +364,118 @@ async def test_the_canonical_rebuild_holds_the_fence_against_a_transition(manage
         await transition.rollback()
     qdrant.upsert.assert_not_awaited()
     assert (await stop(managed))["mode"] == "stopping"
+
+
+@pytest.mark.parametrize("writer", ["canonical_rebuild", "lost_claim"])
+async def test_an_author_erased_during_the_upsert_has_the_point_removed_not_locked(
+    managed, monkeypatch, writer
+):
+    """Removing an erased author's point is erasure work: the feed fence never refuses it.
+
+    The erasure pseudonymizes the row from a second session while the rebuild's
+    upsert of its canonical point is in flight (the erasure takes no feed
+    fence). The post-upsert reconcile must reopen and drain the durable scope,
+    which removes the point written under the raw author, on the canonical
+    rebuild and on the generic lost-claim reconcile alike, instead of answering
+    ``SYNC-LOCKED`` and leaving the point in place.
+    """
+    from models.vector_erasure import VectorErasureJob
+    from services import memory_service, vector_erasure
+    from services.erasure_details import erasure_pseudonym
+
+    await committed(managed, [product("one")])
+    await apply_pending(managed, monkeypatch)
+    (row,) = await live_rows(managed)
+    point = row.summary_embedding_id or row.id
+    async with managed.factory() as db:
+        creator = (await db.get(Context, ctx_of(managed))).created_by
+        email = await db.scalar(select(User.email).where(User.user_id == creator))
+        request = ErasureRequest(
+            user_id=erasure_pseudonym(creator),
+            user_email_hash=sha256_hex(email),
+            initiated_by=creator,
+            is_self_service=True,
+            reason_code="self_service",
+            status=STATUS_COOLING_OFF,
+            requested_at=utcnow() - timedelta(days=8),
+            confirmed_at=utcnow() - timedelta(days=7, minutes=1),
+            scheduled_for=utcnow() + timedelta(hours=1),
+            ip_address="203.0.113.9",
+            user_agent="agent",
+        )
+        db.add(request)
+        await db.flush()
+        # The erasure captured the row's scope and drained it already.
+        db.add(
+            VectorErasureJob(
+                request_id=request.id,
+                memory_id=row.id,
+                point_id=point,
+                subject_pseudonym=erasure_pseudonym(creator),
+                completed_at=utcnow(),
+            )
+        )
+        await db.commit()
+        request_id = request.id
+
+    async def erase_the_author(*_args, **_kwargs) -> None:
+        async with managed.factory() as erasure:
+            await erasure.execute(
+                update(Memory)
+                .where(Memory.id == row.id)
+                .values(
+                    user_id=erasure_pseudonym(creator),
+                    embedding_status="failed",
+                    embedding_suppressed_at=utcnow(),
+                )
+            )
+            await erasure.commit()
+
+    qdrant = stubs(monkeypatch)
+    erased_points = AsyncMock()
+    monkeypatch.setattr(
+        vector_erasure, "list_memory_collections", AsyncMock(return_value=["test-collection"])
+    )
+    monkeypatch.setattr(
+        vector_erasure,
+        "erasure_scope_points",
+        AsyncMock(return_value=[(str(point), creator)]),
+    )
+    monkeypatch.setattr(vector_erasure, "erase_point_author", erased_points)
+    try:
+        if writer == "canonical_rebuild":
+            qdrant.upsert.side_effect = erase_the_author
+            async with managed.factory() as db:
+                memory = await db.get(Memory, row.id)
+                await resource_indexer.ResourceIndexer(db).rebuild_point(
+                    memory,
+                    collection_name="test-collection",
+                    embedding_service=embedding(),
+                    canonical_rebuild=True,
+                )
+                await db.commit()
+            qdrant.upsert.assert_awaited_once()
+        else:
+            # A run that wrote the raw author's point, then found its claim lost.
+            await erase_the_author()
+            async with managed.factory() as db:
+                assert await memory_service._reconcile_after_lost_claim(
+                    db,
+                    row.id,
+                    collection="test-collection",
+                    point_id=point,
+                    user_id=creator,
+                    wrote_points=True,
+                )
+        erased_points.assert_awaited_once_with("test-collection", str(point), creator)
+        async with managed.factory() as db:
+            job = await db.scalar(
+                select(VectorErasureJob).where(VectorErasureJob.memory_id == row.id)
+            )
+        # Reopened by the late writer, then drained again.
+        assert job.generation == 1
+        assert job.completed_at is not None
+    finally:
+        async with managed.factory() as db:
+            await db.execute(delete(ErasureRequest).where(ErasureRequest.id == request_id))
+            await db.commit()

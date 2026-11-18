@@ -2040,7 +2040,7 @@ class ResourceIndexer:
         except Exception as e:
             raise QdrantError(f"Failed to upsert point: {e}") from e
 
-        await reconcile_erased_writer(self.db, memory, canonical_rebuild=canonical_rebuild)
+        await reconcile_erased_writer(self.db, memory)
         logger.info(
             "resource_point_rebuilt",
             memory_id=str(memory.id),
