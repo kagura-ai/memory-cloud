@@ -20,6 +20,7 @@ import { ContextMembersTabPanel } from "./ContextMembersTabPanel";
 import type { Context } from "@/lib/types/context";
 import type { ContextMember } from "@/lib/api/contexts";
 import { ContextRole, WorkspaceRole } from "@/lib/auth/rbac";
+import { ApiError } from "@/lib/api/base";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -268,6 +269,96 @@ describe("Members tab: member/viewer see the list read-only with a notice (#2895
       screen.queryByRole("button", { name: "contexts.addMember" }),
     ).toBeNull();
   });
+
+  it.each([
+    ["member", 403],
+    ["viewer", 403],
+    ["member", 404],
+    ["viewer", 404],
+  ] as const)(
+    "%s whose list load fails with %i sees the ErrorBanner, no table and no write control",
+    async (role, status) => {
+      setRole(role);
+      mockListContextMembers.mockRejectedValue(
+        new ApiError({
+          status,
+          message: "load failed",
+          details: { detail: `members load failed (${status})` },
+        }),
+      );
+      renderPanel(SHARED);
+      expect(
+        await screen.findByText(`members load failed (${status})`),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole("table")).toBeNull();
+      expect(screen.queryByText("contexts.noMembersAssigned")).toBeNull();
+      expect(screen.queryByRole("combobox")).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "contexts.addMember" }),
+      ).toBeNull();
+      expect(screen.getByTestId("members-readonly-notice")).toBeInTheDocument();
+    },
+  );
+});
+
+// ---------- The "via workspace access" note ---------------------------------
+
+describe("Members tab: the workspace-access note is for managers only (#2895)", () => {
+  it.each(["owner", "admin"] as const)(
+    "%s reads where workspace-access rows are managed",
+    async (role) => {
+      setRole(role);
+      renderPanel(SHARED);
+      expect(
+        await screen.findByTestId("members-workspace-access-note"),
+      ).toHaveTextContent("contexts.workspaceAccessNote");
+    },
+  );
+
+  it.each(["member", "viewer"] as const)(
+    "%s is not sent to a page where they cannot manage anything",
+    async (role) => {
+      setRole(role);
+      renderPanel(SHARED);
+      await screen.findByTestId("member-row-u-admin");
+      expect(
+        screen.getByText("contexts.viaWorkspaceAccess"),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("members-workspace-access-note")).toBeNull();
+      expect(screen.queryByText("contexts.workspaceAccessNote")).toBeNull();
+    },
+  );
+});
+
+// ---------- Notices are notes, not alerts ------------------------------------
+
+describe("Members tab: the static notices are not assertive alerts (#2895)", () => {
+  it.each(["member", "viewer"] as const)(
+    "%s: the read-only notice has role=note and nothing on the loaded tab is an alert",
+    async (role) => {
+      setRole(role);
+      renderPanel(SHARED);
+      await screen.findByTestId("member-row-u-editor");
+      expect(screen.getByTestId("members-readonly-notice")).toHaveAttribute(
+        "role",
+        "note",
+      );
+      expect(screen.queryByRole("alert")).toBeNull();
+    },
+  );
+
+  it.each(ROLES)(
+    "%s: the private-context notice has role=note and is not an alert",
+    (role) => {
+      setRole(role);
+      renderPanel(PRIVATE);
+      expect(screen.getByTestId("members-private-notice")).toHaveAttribute(
+        "role",
+        "note",
+      );
+      expect(screen.queryByRole("alert")).toBeNull();
+    },
+  );
 });
 
 // ---------- Private ----------------------------------------------------------
@@ -415,6 +506,15 @@ describe("Members tab strings exist in both languages (#2895)", () => {
       const value = pick(cat, key);
       expect(typeof value).toBe("string");
       expect((value as string).trim()).not.toBe("");
+    }
+  });
+
+  it("the ja Members tab copy spells memory メモリ like the tab bar", () => {
+    const ja_ = ja as unknown as Catalogue;
+    expect(pick(ja_, "contextDetail.tabs.memories")).toBe("メモリ");
+    const tab = pick(ja_, "contextDetail.membersTab") as Record<string, string>;
+    for (const value of Object.values(tab)) {
+      expect(value).not.toContain("メモリー");
     }
   });
 });

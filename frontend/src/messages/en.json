@@ -3842,15 +3842,15 @@
       "settings": "Settings"
     },
     "membersTab": {
-      "readOnlyNotice": "Only workspace owners and admins can add, change or remove the members of this context.",
+      "readOnlyNotice": "On this page, only workspace owners and admins can add, change or remove members.",
       "privateTitle": "This context is private",
-      "privateNotice": "A private context is used only by the person who created it, so it cannot have members. Change it to shared to give workspace members access.",
+      "privateNotice": "A private context is used only by the person who created it, so it cannot have members. Change it to shared to give other people in the workspace access.",
       "openSettings": "Change sharing in Settings",
       "explanationTitle": "How privacy and access work",
       "explainPrivate": "Private: only the person who created the context can use it. It cannot have members.",
-      "explainShared": "Shared: workspace owners and admins reach every shared context. A member can use one only when it is in their context access list (none until one is assigned) and they have a context role here. A viewer reads every shared context, or only the ones in their list once it is set.",
+      "explainShared": "Shared: workspace owners and admins reach every shared context. Someone with the workspace role Member can use one only when it is in their context access list (empty until one is assigned) and they have a role on it. Someone with the workspace role Viewer reads every shared context, or only the ones in their list once it is set.",
       "explainPublic": "Public: a shared context that can also be searched, read-only and without signing in, through its public search API. Its members work as for a shared context.",
-      "explainRoles": "Context roles: owner (settings and deletion), editor (reads and writes memories) and viewer (reads only).",
+      "explainRoles": "Context roles: owner (settings, members and deletion), editor (reads and writes memories) and viewer (reads only).",
       "explainAccessListAdd": "Adding a member whose context access list does not include this context also adds it to their list, once the person adding them confirms.",
       "explainAccessListWhere": "Workspace owners and admins change context access lists on the workspace Members page.",
       "workspaceMembersLink": "Open the workspace Members page"

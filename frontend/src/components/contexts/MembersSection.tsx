@@ -95,8 +95,9 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
   const { toast } = useToast();
 
   const isPrivate = context.is_private;
-  // Read-only for everyone below workspace admin; the backend enforces the
-  // same rule on every write.
+  // This page offers the write controls to workspace owners and admins only;
+  // everyone else gets the list read-only. The backend is wider: it also
+  // accepts member writes from a context owner (check_context_owner).
   const canManage =
     !isPrivate &&
     hasWorkspaceRole(currentWorkspace?.current_user_role, WorkspaceRole.Admin);
@@ -457,9 +458,16 @@ export function MembersSection({ contextId, context }: MembersSectionProps) {
                   ))}
                 </tbody>
               </table>
-              <p className="mt-3 text-xs text-muted-foreground">
-                {t("workspaceAccessNote")}
-              </p>
+              {/* The note tells a manager where those rows are managed; a
+                  read-only viewer can manage nothing, here or there. */}
+              {canManage && (
+                <p
+                  className="mt-3 text-xs text-muted-foreground"
+                  data-testid="members-workspace-access-note"
+                >
+                  {t("workspaceAccessNote")}
+                </p>
+              )}
             </div>
           )}
         </CardContent>

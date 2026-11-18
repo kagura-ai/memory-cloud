@@ -2,12 +2,17 @@
  * ContextMembersTabPanel
  *
  * The context page's Members tab (#2895), open to every workspace role:
- * - shared or public context: the member list (MembersSection), managed by
- *   workspace owners and admins and read-only, with a notice, for others;
+ * - shared or public context: the member list (MembersSection), managed on
+ *   this page by workspace owners and admins and read-only, with a notice,
+ *   for others;
  * - private context: a notice instead of a list, plus a button to the
  *   Settings tab (where sharing is changed) for owners and admins;
  * - always: how privacy and access decide who reaches the context
  *   (docs/concepts.md, "Workspace" and "Context").
+ *
+ * The two notices are static information, not events: they carry
+ * role="note" so a screen reader does not announce them assertively each
+ * time the tab mounts (the Alert primitive defaults to role="alert").
  */
 
 "use client";
@@ -45,7 +50,7 @@ export function ContextMembersTabPanel({
   return (
     <div className="space-y-6">
       {context.is_private ? (
-        <Alert data-testid="members-private-notice">
+        <Alert role="note" data-testid="members-private-notice">
           <Lock className="h-4 w-4" />
           <AlertTitle>{t("membersTab.privateTitle")}</AlertTitle>
           <AlertDescription>
@@ -65,7 +70,7 @@ export function ContextMembersTabPanel({
       ) : (
         <>
           {!canManage && (
-            <Alert data-testid="members-readonly-notice">
+            <Alert role="note" data-testid="members-readonly-notice">
               <Info className="h-4 w-4" />
               <AlertDescription>
                 {t("membersTab.readOnlyNotice")}
