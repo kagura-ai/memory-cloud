@@ -80,7 +80,9 @@ async def prune_finished_runs(db: AsyncSession) -> None:
       never touched.
 
     Rows are taken in age order with ``SKIP LOCKED``: a row a request holds
-    waits for the next tick. The caller commits.
+    waits for the next tick. Each batch is selected first and then changed by
+    id, so the bound holds whatever plan the database picks (a limited locking
+    subquery inside ``IN`` can be evaluated more than once). The caller commits.
     """
     from services.sync_feed_runs import cleared_diff
 
@@ -92,7 +94,9 @@ async def prune_finished_runs(db: AsyncSession) -> None:
         .limit(RUN_RETENTION_BATCH)
         .with_for_update(skip_locked=True)
     )
-    await db.execute(delete(SyncRun).where(SyncRun.id.in_(ended)))
+    ended_ids = list(await db.scalars(ended))
+    if ended_ids:
+        await db.execute(delete(SyncRun).where(SyncRun.id.in_(ended_ids)))
     newer = aliased(SyncRun)
     superseded = (
         select(SyncRun.id)
@@ -110,7 +114,11 @@ async def prune_finished_runs(db: AsyncSession) -> None:
         .limit(RUN_RETENTION_BATCH)
         .with_for_update(of=SyncRun, skip_locked=True)
     )
-    await db.execute(update(SyncRun).where(SyncRun.id.in_(superseded)).values(**cleared_diff()))
+    superseded_ids = list(await db.scalars(superseded))
+    if superseded_ids:
+        await db.execute(
+            update(SyncRun).where(SyncRun.id.in_(superseded_ids)).values(**cleared_diff())
+        )
 
 
 async def prune_finished_runs_guarded(db: AsyncSession) -> None:
