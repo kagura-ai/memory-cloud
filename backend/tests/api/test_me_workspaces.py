@@ -176,7 +176,7 @@ async def test_rate_limit_before_database_is_private(api, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_over_peer_budget_a_recognised_token_is_counted_per_client(api, monkeypatch):
+async def test_over_peer_budget_a_recognised_token_is_counted_per_client_and_user(api, monkeypatch):
     counts = iter([10**9, 1])
     counter = AsyncMock(side_effect=lambda key, ttl: next(counts))
     monkeypatch.setattr(oidc_limits, "increment_counter", counter)

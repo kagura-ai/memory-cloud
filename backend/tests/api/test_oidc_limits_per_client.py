@@ -1,4 +1,4 @@
-"""Over the per-peer OIDC budget, issued credentials are counted per client (#2903).
+"""Over the per-peer OIDC budget, issued credentials are counted per client and user (#2903).
 
 The real limiter runs against an in-memory counter, and its one recognition
 lookup runs on the same SQLite store the protocol code uses. Every other
@@ -145,7 +145,7 @@ def sign_in_other_user(api: TestClient, store: SimpleNamespace) -> None:
     api.cookies.set("kagura_session", "test-session-other")
 
 
-def test_over_budget_peer_still_exchanges_and_refreshes_counted_per_client(
+def test_over_budget_peer_still_exchanges_and_refreshes_counted_per_client_and_user(
     api, burst, secret_checks
 ):
     code, verifier = authorize(api)
@@ -158,7 +158,7 @@ def test_over_budget_peer_still_exchanges_and_refreshes_counted_per_client(
     assert secret_checks.call_count == 2  # admitted requests still authenticate the client
 
 
-def test_over_budget_peer_still_reads_userinfo_and_revokes_counted_per_client(api, burst):
+def test_over_budget_peer_still_reads_userinfo_and_revokes_counted_per_client_and_user(api, burst):
     code, verifier = authorize(api)
     issued = exchange(api, code, verifier).json()
     burst.counter.peer_exhausted = True

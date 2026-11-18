@@ -218,10 +218,10 @@ def exhaust_peer(monkeypatch, factory) -> Counter:
     return counter
 
 
-async def test_over_budget_owner_still_records_a_sync_authorization_counted_per_client(
+async def test_over_budget_owner_still_records_a_sync_authorization_counted_per_client_and_user(
     store, monkeypatch
 ):
-    """``POST .../sync-authorizations`` is counted (it was not), per client over budget."""
+    """``POST .../sync-authorizations`` is counted (it was not), per client and user over budget."""
     counter = exhaust_peer(monkeypatch, store.factory)
     response = await installations.http(
         store, "POST", "sync-authorizations", body=installations.approval_body()

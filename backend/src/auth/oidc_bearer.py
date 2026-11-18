@@ -43,7 +43,7 @@ async def identity_access_token(
     """Reject other credential namespaces and excessive work before the request's DB.
 
     Over the peer budget the limiter recognises the token on a short session
-    of its own and counts it for the token's client (#2903).
+    of its own and counts it for the token's client and user (#2903).
     """
     if not get_settings().oidc_enabled:
         raise HTTPException(404, "not_found")

@@ -116,8 +116,8 @@ both identifiers and public-key material, including during rotation.
 
 The new path has a distinct `sync-setup-handoff` OIDC rate bucket. Invalid rate
 configuration/store failure fails 503 before DB/crypto; over budget is 429
-(over the peer budget, a recognised access token is counted for its client
-instead, as described in [OIDC provider](oidc-provider.md#protocol-burst-limits)).
+(over the peer budget, a recognised access token is counted for its client and
+user instead, as described in [OIDC provider](oidc-provider.md#protocol-burst-limits)).
 It does not reuse the legacy generic handoff's fail-open limiter.
 
 Successful issuance appends `sync.setup_handoff.created` through the existing

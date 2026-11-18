@@ -96,7 +96,8 @@ Sync HTTP failures are fixed `{"error":"..."}` envelopes with no-store:
 401 for invalid credentials, 403 for forbidden authority, 404 for foreign/hidden
 targets or a disabled surface, 409 for changing authority/baselines/approval or
 `SYNC-LOCKED`, 429 for the fail-closed OIDC burst limiter (per peer, and per
-client for recognised credentials over the peer budget; every human control
+credential holder over the peer budget: client and user for the human control
+routes, sync client for the service routes; every human control
 route, `sync-authorizations` included, counts in one `sync-human` bucket), and 503
 `temporarily_unavailable` for unavailable authority/replay/burst stores. See the
 linked contracts/OpenAPI for each route's exact code (including established
