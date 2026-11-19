@@ -36,7 +36,9 @@ async def read_resume_receipt(
     The current Editor may reconcile a previous Editor's operation without using
     or renewing that original person's credentials. Errors never imply absence.
     """
-    async with management_boundary(db, wid, iid, principal) as (
+    # A lookup changes nothing: it shares the workspace and installation rows
+    # with other reads and still excludes every transition (#2925).
+    async with management_boundary(db, wid, iid, principal, shared=True) as (
         installation,
         _workspace,
         _fence,
