@@ -88,6 +88,7 @@ class E2E:
     context: UUID  # a shared context of ``shared``
     cookie: dict[str, str]
     key: str  # the member's API key scoped to ``shared``
+    stranger_key: str  # scoped to ``shared`` for a user who does not belong to it
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -97,6 +98,7 @@ async def e2e(slot_world: SlotWorld, monkeypatch) -> AsyncIterator[E2E]:
     world = slot_world
     owner = await world.user("e2e-owner")
     member = await world.user("e2e-member")
+    stranger = await world.user("e2e-stranger")
     first = await world.workspace(owner, current=True)
     billed = await world.workspace(owner)
     shared = await world.workspace(owner, members={member: "member"})
@@ -125,6 +127,10 @@ async def e2e(slot_world: SlotWorld, monkeypatch) -> AsyncIterator[E2E]:
         )
         key, _ = await APIKeyManager(s).create_key(
             name="e2e-member-key", user_id=member, workspace_id=shared
+        )
+        # Minted directly: the routes refuse to mint it for a non-member.
+        stranger_key, _ = await APIKeyManager(s).create_key(
+            name="e2e-stranger-key", user_id=stranger, workspace_id=shared
         )
         await s.commit()
 
@@ -164,11 +170,12 @@ async def e2e(slot_world: SlotWorld, monkeypatch) -> AsyncIterator[E2E]:
                     context=context,
                     cookie={owner: sessions.add(owner), member: sessions.add(member)},
                     key=key,
+                    stranger_key=stranger_key,
                 )
     finally:
         app.dependency_overrides.pop(get_db, None)
         async with world.maker() as s:
-            await s.execute(delete(APIKey).where(APIKey.user_id == member))
+            await s.execute(delete(APIKey).where(APIKey.user_id.in_([member, stranger])))
             await s.execute(delete(Context).where(Context.id == context))
             await s.commit()
 
@@ -183,8 +190,21 @@ async def _as(e: E2E, user_id: str, method: str, url: str, **kw: Any) -> httpx.R
     return await e.client.request(method, url, headers=headers, **kw)
 
 
-async def _with_key(e: E2E, method: str, url: str) -> httpx.Response:
-    return await e.client.request(method, url, headers={"Authorization": f"Bearer {e.key}"})
+async def _with_key(e: E2E, method: str, url: str, key: str | None = None) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {key or e.key}"}
+    return await e.client.request(method, url, headers=headers)
+
+
+async def _stranger_key_is_unknown(e: E2E) -> None:
+    """A key scoped to ``shared`` whose owner does not belong to it does not
+    authenticate at all, suspended or not (REST 401, MCP refused at auth)."""
+    from mcp_server.auth import InvalidTokenError, authenticate_mcp_request
+
+    for url in ("/api/v1/workspace/stats", f"/api/v1/contexts/{e.context}/tags"):
+        response = await _with_key(e, "GET", url, key=e.stranger_key)
+        assert response.status_code == 401, (url, response.text)
+    with pytest.raises(InvalidTokenError):
+        await authenticate_mcp_request(authorization_header=f"Bearer {e.stranger_key}")
 
 
 async def _deliver(e: E2E, revision: int, plan: str) -> None:
@@ -333,6 +353,11 @@ async def test_a_paid_plan_end_suspends_gates_is_managed_and_resumes(e2e: E2E) -
 
         probe = await _probe(e)
         assert _codes(probe) == REFUSED_EVERYWHERE
+        # The member's scoped key still authenticates (membership holds) and is
+        # refused by the gate; a key whose owner is not in the workspace is not
+        # a credential at all.
+        assert (probe["key workspace"][0], probe["key context"][0]) == (403, 403)
+        await _stranger_key_is_unknown(e)
         # The owner is sent to the account page; a member and a key's member are not.
         manage = get_settings().frontend_url.strip().rstrip("/") + "/profile/workspaces"
         assert probe["owner workspace"][1] == probe["owner context"][1] == manage
@@ -377,6 +402,7 @@ async def test_a_paid_plan_end_suspends_gates_is_managed_and_resumes(e2e: E2E) -
         # An upgrade delivery: Max again, every workspace resumes, plans untouched.
         await _deliver(e, 3, "promax")
         assert set((await _statuses(e)).values()) == {"active"}
+        await _stranger_key_is_unknown(e)
         assert set((await _listed(e, e.owner)).values()) == {False}
         assert _codes(await _probe(e)) == SERVED_EVERYWHERE
         first = await _as(e, e.owner, "GET", f"/api/v1/workspaces/{e.first}")
