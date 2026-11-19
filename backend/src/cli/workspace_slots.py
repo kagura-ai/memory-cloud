@@ -4,12 +4,16 @@ Runs where the API runs (same env), e.g. inside the API container::
 
     python -m src.cli.workspace_slots status                  # mode, counts
     python -m src.cli.workspace_slots status --owner <user_id>
+    python -m src.cli.workspace_slots status --over-allowance # owners above it now
     python -m src.cli.workspace_slots reconcile               # every owner with rows
     python -m src.cli.workspace_slots reconcile --owner <user_id>
     python -m src.cli.workspace_slots reconcile --even-when-off
 
-``reconcile`` resumes and prunes only; it never suspends. It waits for each
-owner's slot lock (up to 5 s) and commits per owner. While
+``status --over-allowance`` lists the owners who have more workspaces active
+than their allowance now (from before the feature, or a resume-only swap):
+their next drop cuts them to it. ``reconcile`` resumes and prunes only; it
+never suspends. It waits for each owner's slot lock (up to 5 s) and commits
+per owner; an owner whose reconcile fails is reported in every mode. While
 ``WORKSPACE_SLOT_SUSPENSION=off`` it refuses unless ``--even-when-off`` is
 given: run that before switching from ``off`` back to ``shadow`` or
 ``enforce``, so rows left from an earlier ``enforce`` period that should no
@@ -32,6 +36,7 @@ from sqlalchemy import func, select  # noqa: E402
 
 from cli._env_guard import require_settings  # noqa: E402
 from db.base import get_db, isolated_session  # noqa: E402
+from models.auth import Workspace  # noqa: E402
 from models.workspace_slots import WorkspaceSlotState, WorkspaceSlotSuspension  # noqa: E402
 from services.workspace_slots import (  # noqa: E402
     SlotMode,
@@ -43,7 +48,34 @@ from services.workspace_slots import (  # noqa: E402
 )
 
 
-async def _status(owner: str | None) -> int:
+async def _over_allowance(db) -> int:
+    """Print the owners with more workspaces active than their allowance."""
+    owners = list(
+        (
+            await db.execute(
+                select(Workspace.owner_user_id)
+                .where(Workspace.deleted_at.is_(None))
+                .group_by(Workspace.owner_user_id)
+                .having(func.count() > 1)
+                .order_by(Workspace.owner_user_id)
+            )
+        ).scalars()
+    )
+    over = 0
+    for one in owners:
+        overview = await get_slot_overview(db, one)
+        allowance = max(overview.allowance.cap, overview.contracted_count)
+        if overview.active_count > allowance:
+            over += 1
+            print(
+                f"  {one}: active {overview.active_count}, allowance {allowance}, "
+                f"owned {overview.owned_count}"
+            )
+    print(f"owners over their allowance: {over}")
+    return 0
+
+
+async def _status(owner: str | None, over_allowance: bool = False) -> int:
     require_settings()
     mode = workspace_slot_mode()
     print(f"WORKSPACE_SLOT_SUSPENSION={mode}")
@@ -51,6 +83,8 @@ async def _status(owner: str | None) -> int:
         if not await slot_tables_present(db):
             print("slot tables: missing (run `alembic upgrade head`)")
             return 2
+        if over_allowance:
+            return await _over_allowance(db)
         suspended = await db.scalar(select(func.count()).select_from(WorkspaceSlotSuspension))
         owners = await db.scalar(
             select(func.count(func.distinct(WorkspaceSlotSuspension.owner_user_id)))
@@ -83,9 +117,9 @@ async def _reconcile(owner: str | None, even_when_off: bool) -> int:
             "WORKSPACE_SLOT_SUSPENSION=off: nothing runs. Pass --even-when-off to resume and prune."
         )
         return 2
-    # Resume and prune only, in every mode (shadow deletes the rows that should
-    # resume too); while off, run as enforce does with no suspension.
-    mode: SlotMode = "enforce" if configured == "off" else configured
+    # Resume and prune only, in every mode, as enforce runs it (no suspension
+    # on this path): an error reaches the report instead of the shadow log.
+    mode: SlotMode = "enforce"
     async for db in get_db():
         if not await slot_tables_present(db):
             print("slot tables: missing (run `alembic upgrade head`)")
@@ -131,6 +165,11 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     sub = parser.add_subparsers(dest="command", required=True)
     status = sub.add_parser("status", help="mode, row counts, one owner's slots")
     status.add_argument("--owner", help="a user_id: show that owner's slots")
+    status.add_argument(
+        "--over-allowance",
+        action="store_true",
+        help="list the owners with more workspaces active than their allowance",
+    )
     reconcile = sub.add_parser("reconcile", help="resume and prune (never suspends)")
     reconcile.add_argument("--owner", help="only this user_id (default: every owner with rows)")
     reconcile.add_argument(
@@ -143,7 +182,7 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
 
 async def _main(args: argparse.Namespace) -> int:
     if args.command == "status":
-        return await _status(args.owner)
+        return await _status(args.owner, args.over_allowance)
     return await _reconcile(args.owner, args.even_when_off)
 
 

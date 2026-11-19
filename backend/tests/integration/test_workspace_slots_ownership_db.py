@@ -423,6 +423,37 @@ class TestCli:
         assert "WORKSPACE_SLOT_SUSPENSION=enforce" in out
         assert f"owner {owner}: cap 2" in out
 
+    async def test_status_lists_the_owners_over_their_allowance(
+        self, slot_world: SlotWorld, capsys
+    ) -> None:
+        over = await slot_world.user("cli-over")
+        for _ in range(3):
+            await slot_world.workspace(over)
+        within = await slot_world.user("cli-within", bonus=1)
+        await slot_world.workspace(within)
+        await slot_world.workspace(within)
+        with slot_mode("shadow"):
+            assert await cli_main(cli_parse(["status", "--over-allowance"])) == 0
+        lines = capsys.readouterr().out.splitlines()
+        assert f"  {over}: active 3, allowance 1, owned 3" in lines
+        assert not [line for line in lines if line.startswith(f"  {within}:")]
+
+    async def test_reconcile_reports_a_failed_owner_in_shadow(
+        self, slot_world: SlotWorld, capsys, monkeypatch
+    ) -> None:
+        owner = await slot_world.user("cli-fail", bonus=1)
+        await slot_world.workspace(owner, current=True)
+        waiting = await slot_world.workspace(owner)
+        await slot_world.suspend_row(waiting, owner)
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(slots, "_reconcile", broken)
+        with slot_mode("shadow"):
+            assert await cli_main(cli_parse(["reconcile", "--owner", owner])) == 1
+        assert f"  {owner}: failed (RuntimeError)" in capsys.readouterr().out.splitlines()
+
 
 class TestNoRowsOutliveAnErasedAccount:
     """Review B: a reconcile racing the erasure of its owner never re-creates
