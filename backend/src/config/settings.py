@@ -2692,6 +2692,46 @@ class Settings(BaseSettings):
             "window closes — tracked in #677 (sub-C: TOCTOU + enforce flip)."
         ),
     )
+    # Issue #2918: what happens when an owner's allowance falls below the
+    # number of workspaces they own. ``off`` (default): nothing; no statement
+    # touches the slot tables, so the code may run before their migration.
+    # ``shadow``: the triggers log what they would suspend, resume rows that
+    # should resume, and the gates ignore the rows. ``enforce``: excess owned
+    # workspaces are suspended (data kept) and resumed when slots return.
+    # Read through ``services.workspace_slots.workspace_slot_mode()``.
+    workspace_slot_suspension: Literal["off", "shadow", "enforce"] = Field(
+        default="off",
+        description=(
+            "Workspace slot suspension (Issue #2918): off (default), shadow (log only) "
+            "or enforce (suspend owned workspaces beyond the allowance). enforce "
+            "requires ENFORCE_WORKSPACE_CAP=true"
+        ),
+    )
+
+    @field_validator("workspace_slot_suspension", mode="before")
+    @classmethod
+    def _strip_workspace_slot_suspension(cls, v: Any) -> Any:
+        """Trim whitespace only; the ``Literal`` refuses anything else (#2918).
+
+        An empty value refuses startup rather than meaning ``off``, and case
+        is not folded (``Enforce`` refuses), as ``SYSTEM_ADMIN_MODE`` does.
+        """
+        return v.strip() if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _validate_workspace_slot_suspension(self) -> "Settings":
+        """``enforce`` needs the owned-workspace cap enforced as well (#2918).
+
+        Suspending existing workspaces while new ones can still be created
+        beyond the same allowance would let an owner replace a suspended
+        workspace with a fresh one; the two switches move together.
+        """
+        if self.workspace_slot_suspension == "enforce" and not self.enforce_workspace_cap:
+            raise ValueError(
+                "WORKSPACE_SLOT_SUSPENSION=enforce requires ENFORCE_WORKSPACE_CAP=true "
+                "(docs/ops/workspace-slots.md)."
+            )
+        return self
 
     # Plan Display Names (customizable for SaaS forks)
     plan_free_display_name: str | None = Field(

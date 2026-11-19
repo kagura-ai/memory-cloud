@@ -1901,3 +1901,104 @@ class TestTheCapacityGate:
         assert "200 memories and 50 MB" in mcp["help"]
         assert "forget" in mcp["help"]
         assert rest["cleanup_url"] in mcp["help"]
+
+
+# ---------------------------------------------------------------------------
+# #2918: workspace slot suspension
+# ---------------------------------------------------------------------------
+
+
+class TestTheWorkspaceSlotGate:
+    """``SLOT-001`` is a gate of its own: the workspace is suspended because its
+    owner owns more workspaces than their allowance. The details depend on who
+    asked; ``SLOT-002`` / ``SLOT-003`` / ``SLOT-004`` and the busy refusal are
+    not gate refusals (no ``gate``)."""
+
+    def test_workspace_slot_is_in_the_vocabulary(self) -> None:
+        from config.constants import GATE_WORKSPACE_SLOT
+
+        assert GATE_WORKSPACE_SLOT == "workspace_slot"
+        assert GATE_WORKSPACE_SLOT in GATE_KINDS
+
+    def test_the_owner_gets_the_workspace_and_the_manage_url(self) -> None:
+        from utils.exceptions import WorkspaceSlotSuspendedError
+
+        wid = uuid4()
+        exc = WorkspaceSlotSuspendedError.for_owner(
+            wid, "https://app.example.com/profile/workspaces"
+        )
+        assert (exc.status_code, exc.error_code, exc.log_level) == (403, "SLOT-001", "warning")
+        assert exc.details == {
+            "gate": "workspace_slot",
+            "workspace_id": str(wid),
+            "manage_url": "https://app.example.com/profile/workspaces",
+        }
+
+    def test_a_member_gets_the_workspace_and_no_manage_url(self) -> None:
+        from utils.exceptions import WorkspaceSlotSuspendedError
+
+        wid = uuid4()
+        exc = WorkspaceSlotSuspendedError.for_member(wid)
+        assert exc.details == {
+            "gate": "workspace_slot",
+            "workspace_id": str(wid),
+            "manage_url": None,
+        }
+        assert "owner" in exc.message
+
+    def test_an_outsider_gets_the_gate_only(self) -> None:
+        from utils.exceptions import WorkspaceSlotSuspendedError
+
+        exc = WorkspaceSlotSuspendedError.for_outsider()
+        assert exc.error_code == "SLOT-001"
+        assert exc.details == {"gate": "workspace_slot"}
+
+    @pytest.mark.asyncio
+    async def test_rest_body_carries_the_details(self) -> None:
+        from utils.exceptions import WorkspaceSlotSuspendedError
+
+        exc = WorkspaceSlotSuspendedError.for_owner(uuid4(), "https://app.example.com/x")
+        assert await _rest_details(exc) == exc.details
+
+    @pytest.mark.asyncio
+    async def test_the_other_slot_refusals_carry_no_gate(self) -> None:
+        from utils.exceptions import (
+            WorkspaceSlotsBusyError,
+            WorkspaceSlotsFullError,
+            WorkspaceSlotTransferRefusedError,
+            WorkspaceSlotVersionConflictError,
+        )
+
+        full = WorkspaceSlotsFullError(
+            cap=1,
+            active_slots=1,
+            active_count=1,
+            contracted_count=1,
+            next_tier="pro",
+            cap_on_next_tier=3,
+            unmet=["a"],
+        )
+        stale = WorkspaceSlotVersionConflictError(expected_version=4, current_version=5)
+        transfer = WorkspaceSlotTransferRefusedError()
+        busy = WorkspaceSlotsBusyError()
+        expected = [
+            (full, "SLOT-002", 409),
+            (stale, "SLOT-003", 409),
+            (transfer, "SLOT-004", 409),
+            (busy, "RES-002", 409),
+        ]
+        for exc, code, status in expected:
+            assert (exc.error_code, exc.status_code, exc.log_level) == (code, status, "warning")
+            assert "gate" not in await _rest_details(exc), code
+        assert full.details == {
+            "cap": 1,
+            "active_slots": 1,
+            "active_count": 1,
+            "contracted_count": 1,
+            "next_tier": "pro",
+            "cap_on_next_tier": 3,
+            "unmet": ["a"],
+        }
+        assert stale.details == {"expected_version": 4, "current_version": 5}
+        assert transfer.details == {}
+        assert busy.details == {"reason": "workspace_slots_busy"}
