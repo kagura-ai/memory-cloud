@@ -16,6 +16,7 @@ import { Download, ArrowUpDown, Lock, Users } from "lucide-react";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import { contextOwnerKind, contextOwnerLabel } from "@/lib/utils/contextOwner";
 import Link from "next/link";
+import { CopyContextLinkButton } from "@/components/dashboard/CopyContextLinkButton";
 import type {
   ContextStatsResponse,
   DashboardContextStats,
@@ -322,6 +323,12 @@ export function ContextBreakdownTable({
                             >
                               {context.context_name}
                             </Link>
+                            {/* #2936: copy this context's dashboard permalink */}
+                            <CopyContextLinkButton
+                              contextId={context.context_id}
+                              contextName={context.context_name}
+                              className="h-6 w-6 shrink-0"
+                            />
                             {/* #1777: who this context came from, when it
                                 is not the viewer's own */}
                             {marker && (

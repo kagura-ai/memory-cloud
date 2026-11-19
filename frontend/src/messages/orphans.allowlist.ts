@@ -825,7 +825,6 @@ export const ORPHAN_ALLOWLIST: readonly string[] = [
   "workspace.benefitTeamInvitations",
   "workspace.billing",
   "workspace.contextsCount",
-  "workspace.copyFailed",
   "workspace.currentContext",
   "workspace.currentlyOwning",
   "workspace.deleteConfirmDesc",
