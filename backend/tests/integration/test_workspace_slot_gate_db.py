@@ -1168,3 +1168,100 @@ async def test_a_contracted_sibling_keeps_the_deletion_guard(world: World) -> No
         await w.session.scalar(select(Workspace.deleted_at).where(Workspace.id == w.ws["k"]))
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Member credentials: membership first, then authorization, then the gate
+# ---------------------------------------------------------------------------
+
+_CREDENTIAL_ROUTES = [
+    ("GET", "credentials", None),
+    ("POST", "credentials/api-key/hide", None),
+    ("POST", "credentials/api-key/regenerate", None),
+    ("POST", "credentials/api-keys", {"name": "slot-probe"}),
+    ("DELETE", "credentials/api-key", None),
+    ("DELETE", "credentials/api-keys/akey_0123456789abcdefABCDEF", None),
+    ("POST", "credentials/oauth/hide", None),
+    ("POST", "credentials/oauth/regenerate", None),
+    ("DELETE", "credentials/oauth", None),
+]
+
+
+def _session_overrides(user_id: str) -> dict:
+    from auth.dependencies import get_user_from_api_key_or_session, require_session_auth
+
+    principal = {"user_id": user_id, "sub": user_id, "auth_type": "session"}
+    return {
+        require_session_auth: lambda: principal,
+        get_user_from_api_key_or_session: lambda: principal,
+    }
+
+
+def test_the_probe_covers_every_member_credential_route() -> None:
+    from tests.api._route_inventory import _iter_routes
+
+    prefix = "/api/v1/workspaces/{workspace_id}/members/{user_id}/"
+    served = sorted(
+        (method, path.removeprefix(prefix))
+        for method, path, _route, _extra in _iter_routes()
+        if path.startswith(prefix + "credentials")
+    )
+    probed = sorted(
+        (m, "credentials/api-keys/{key_id}" if p.startswith("credentials/api-keys/akey") else p)
+        for m, p, _ in _CREDENTIAL_ROUTES
+    )
+    assert probed == served
+
+
+async def test_a_non_member_gets_the_same_answer_for_a_suspended_workspace(
+    world: World,
+) -> None:
+    """Membership of the path workspace is checked first: someone outside it
+    cannot tell a suspended workspace from an active one on any route."""
+    w = world
+    answers: dict[str, list] = {"s": [], "k": []}
+    async with _client(w, _session_overrides(w.outsider)) as client:
+        with _mode("enforce"):
+            for key in ("s", "k"):
+                for method, path, body in _CREDENTIAL_ROUTES:
+                    url = f"/api/v1/workspaces/{w.ws[key]}/members/{w.outsider}/{path}"
+                    resp = await client.request(method, url, json=body)
+                    answers[key].append((method, path, resp.status_code, resp.content))
+    assert answers["s"] == answers["k"]
+    assert {status for _m, _p, status, _b in answers["s"]} == {403}
+
+
+async def test_the_member_credentials_page_is_gated_after_membership(world: World) -> None:
+    """Session GET: the owner, an admin and a member of a suspended workspace
+    get SLOT-001 (the owner with the account page); an admin viewing another
+    member too; in mode off everyone is served as before."""
+    from models.auth import APIKey
+
+    w = world
+    cases = [
+        (w.owner, w.owner, w.ws["s"]),
+        (w.admin, w.admin, w.ws["s"]),
+        (w.member, w.member, w.ws["s"]),
+        (w.admin, w.member, w.ws["s"]),
+    ]
+    try:
+        for caller, target, ws in cases:
+            async with _client(w, _session_overrides(caller)) as client:
+                with _mode("enforce"):
+                    refused = await client.get(
+                        f"/api/v1/workspaces/{ws}/members/{target}/credentials"
+                    )
+                with _mode("off"):
+                    served = await client.get(
+                        f"/api/v1/workspaces/{ws}/members/{target}/credentials"
+                    )
+            assert refused.status_code == 403, (caller, target, refused.text)
+            assert refused.json()["error"] == "SLOT-001"
+            manage = refused.json()["details"]["manage_url"]
+            assert (manage is not None) == (caller == w.owner)
+            assert served.status_code == 200, (caller, target, served.text)
+    finally:
+        await w.session.rollback()
+        users = [w.owner, w.admin, w.member]
+        await w.session.execute(delete(APIKey).where(APIKey.user_id.in_(users)))
+        await w.session.commit()
