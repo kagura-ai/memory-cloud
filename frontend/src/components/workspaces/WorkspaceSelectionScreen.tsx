@@ -5,6 +5,8 @@
  *
  * Issue #276: Full-screen workspace selection for users with multiple workspaces.
  * Displayed when user has multiple workspaces and current_workspace_id is not set.
+ * Issue #2919: a suspended workspace is listed but cannot be selected; its
+ * card links an owner to Workspace management.
  */
 
 import { useState, useEffect } from 'react';
@@ -34,7 +36,7 @@ export function WorkspaceSelectionScreen({
   // Check localStorage for last used workspace
   useEffect(() => {
     const lastWorkspaceId = localStorage.getItem(LAST_WORKSPACE_KEY);
-    if (lastWorkspaceId && workspaces.some(w => w.id === lastWorkspaceId)) {
+    if (lastWorkspaceId && workspaces.some(w => w.id === lastWorkspaceId && !w.slot_suspended)) {
       setSelectedId(lastWorkspaceId);
     }
   }, [workspaces]);
@@ -42,6 +44,8 @@ export function WorkspaceSelectionScreen({
   const handleSelect = async (workspaceId: string) => {
     // Validate workspace still exists before switching
     const workspace = workspaces.find(w => w.id === workspaceId);
+    // A suspended workspace is never switched to (the server refuses it).
+    if (workspace?.slot_suspended) return;
     if (!workspace) {
       console.error('Workspace not found:', workspaceId);
       localStorage.removeItem(LAST_WORKSPACE_KEY);

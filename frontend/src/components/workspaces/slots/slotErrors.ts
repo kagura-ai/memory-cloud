@@ -1,0 +1,29 @@
+/**
+ * Error codes of the workspace allowance API (#2918) the page acts on.
+ */
+
+import { ApiError } from "@/lib/api/base";
+import type { WorkspaceSlotsFullDetails } from "@/lib/api/workspaceSlots";
+
+/** The selection was saved against an older `version`. */
+export const SLOT_STALE = "SLOT-003";
+/** No active slot can be freed for a suspended workspace. */
+export const SLOT_FULL = "SLOT-002";
+/** A running paid subscription blocks deleting the workspace (#1940). */
+export const BILLING_CONTRACT_ACTIVE = "BILLING-005";
+
+export function errorCode(error: unknown): string | undefined {
+  return error instanceof ApiError ? error.error : undefined;
+}
+
+/** The remedies of a `SLOT-002`, or null for any other error. */
+export function slotsFullDetails(
+  error: unknown,
+): WorkspaceSlotsFullDetails | null {
+  if (errorCode(error) !== SLOT_FULL) return null;
+  return ((error as ApiError).details ?? {}) as WorkspaceSlotsFullDetails;
+}
+
+export function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}

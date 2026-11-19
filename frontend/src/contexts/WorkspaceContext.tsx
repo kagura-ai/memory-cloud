@@ -59,8 +59,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const available = await listWorkspaces();
       if (generation.current !== request) return;
       setWorkspaces(available);
+      // #2919: a workspace suspended over its owner's allowance is never the
+      // current one; the guard then asks for another (or exempts the page
+      // where the owner manages it).
       setCurrentWorkspace(selectedId
-        ? available.find(w => w.id === selectedId) ?? null
+        ? available.find(w => w.id === selectedId && !w.slot_suspended) ?? null
         : null);
     } catch {
       if (generation.current !== request) return;
@@ -74,6 +77,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const switchWorkspace = async (workspaceId: string) => {
     if (switchingRef.current) return;
+    // #2919: the server refuses a switch to a suspended workspace; never ask.
+    if (workspaces.some(w => w.id === workspaceId && w.slot_suspended)) return;
     switchingRef.current = true;
     setSwitching(true);
     const previous = activeScope.current;

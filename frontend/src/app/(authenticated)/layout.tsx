@@ -8,6 +8,8 @@
  * Issue #651, #655 - Unified landing and dashboard handling
  * Issue #115 Phase B-5: Workspace requirement check
  * Issue #1665: blocking terms re-acceptance step
+ * Issue #2919: Workspace management stays reachable without a usable
+ * workspace, and an owner who must choose is sent there once per session
  */
 
 import { Fragment, Suspense, useEffect, useState } from "react";
@@ -26,6 +28,29 @@ import { WorkspaceSelectionScreen } from "@/components/workspaces/WorkspaceSelec
 import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
 import { CapacityLockBanner } from "@/components/common/CapacityLockBanner";
 import { WorkspaceSuspensionNotice } from "@/components/plan/WorkspaceSuspensionNotice";
+
+/** Issue #2919: the owner's Workspace management page. */
+const WORKSPACE_MANAGEMENT_PATH = "/profile/workspaces";
+const SELECTION_PROMPT_KEY = "kagura_workspace_selection_prompted";
+/** Fallback for this page load when sessionStorage is unavailable. */
+let selectionPromptedThisLoad = false;
+
+/**
+ * Has this browser session already been sent to Workspace management? Kept
+ * in sessionStorage (one redirect per browser session); storage that throws
+ * (private mode, blocked site data) falls back to this page load.
+ */
+function takeSelectionPrompt(): boolean {
+  try {
+    if (window.sessionStorage.getItem(SELECTION_PROMPT_KEY) === "1") return false;
+    window.sessionStorage.setItem(SELECTION_PROMPT_KEY, "1");
+    return true;
+  } catch {
+    if (selectionPromptedThisLoad) return false;
+    selectionPromptedThisLoad = true;
+    return true;
+  }
+}
 
 /**
  * Issue #1665: shown INSTEAD of the app while `/auth/me` reports
@@ -76,8 +101,13 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
   const isSystemRoute = pathname === "/admin" || pathname.startsWith("/admin/");
   const isPublicPage =
     pathname === "/pricing" || pathname === "/login" || pathname === "/";
+  // #2919: an owner manages suspended workspaces here, so it never waits on a
+  // workspace selection (the zero-workspace redirect below still applies).
+  const isWorkspaceManagementPage = pathname === WORKSPACE_MANAGEMENT_PATH;
 
+  // A suspended sole membership is never switched to: the server refuses it.
   const autoSelectId = needsSelection && !user?.current_workspace_id && workspaces.length === 1 &&
+    !workspaces[0].slot_suspended && !isWorkspaceManagementPage &&
     !isWorkspaceCreationPage && !isSystemRoute && !isPublicPage ? workspaces[0].id : null;
 
   useEffect(() => {
@@ -142,7 +172,7 @@ function WorkspaceGuard({ children }: { children: React.ReactNode }) {
   }
 
   // Issue #276: Show workspace selection screen
-  if (needsSelection && !isWorkspaceCreationPage && !isPublicPage) {
+  if (needsSelection && !isWorkspaceCreationPage && !isPublicPage && !isWorkspaceManagementPage) {
     return (
       <WorkspaceSelectionScreen
         workspaces={workspaces}
@@ -204,6 +234,18 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
       router.push("/login");
     }
   }, [user, isLoading, pathname, router]);
+
+  // Issue #2919: owned workspaces were suspended and no choice is saved yet.
+  // After the terms step, send the owner to Workspace management once per
+  // browser session; never from platform administration.
+  const selectionRequired =
+    user?.workspace_selection_required === true && !user.terms_acceptance_required;
+  const isSystemRoute = pathname === "/admin" || pathname.startsWith("/admin/");
+  useEffect(() => {
+    if (!selectionRequired || isSystemRoute) return;
+    if (!takeSelectionPrompt()) return;
+    if (pathname !== WORKSPACE_MANAGEMENT_PATH) router.push(WORKSPACE_MANAGEMENT_PATH);
+  }, [selectionRequired, isSystemRoute, pathname, router]);
 
   // Show loading spinner while checking authentication
   if (isLoading) {

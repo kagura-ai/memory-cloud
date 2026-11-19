@@ -60,7 +60,12 @@ vi.mock("next/navigation", () => ({
 
 const mockSwitchWorkspace = vi.fn();
 let mockHasSelection = true;
-let mockWorkspaces: { id: string; current_user_role?: string }[] = [];
+let mockWorkspaces: {
+  id: string;
+  name?: string;
+  current_user_role?: string;
+  slot_suspended?: boolean;
+}[] = [];
 // The app behind the gate — must not mount while the gate is up.
 vi.mock("@/contexts/WorkspaceContext", () => ({
   WorkspaceProvider: ({ children }: { children: React.ReactNode }) => (
@@ -94,6 +99,7 @@ beforeEach(() => {
   mockPush.mockClear();
   mockReplace.mockClear();
   mockUser = null;
+  window.sessionStorage.clear();
 });
 
 afterEach(() => {
@@ -204,3 +210,134 @@ describe("(authenticated) layout — viewer landing (#2630)", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 });
+
+describe("(authenticated) layout — Workspace management (#2919)", () => {
+  const owner = {
+    id: "u1",
+    email: "u@example.test",
+    name: "U",
+    terms_acceptance_required: false,
+    current_workspace_id: "w1",
+  };
+  const twoOwned = [
+    { id: "w1", name: "Personal", current_user_role: "owner", slot_suspended: true },
+    { id: "w2", name: "Research", current_user_role: "owner" },
+  ];
+
+  it("exempts exactly /profile/workspaces from the selection screen", async () => {
+    mockUser = owner;
+    mockHasSelection = false;
+    mockWorkspaces = twoOwned;
+    mockPathname = "/profile/workspaces";
+    const { rerender } = render(<DashboardLayout><p>management page</p></DashboardLayout>);
+    expect(await screen.findByText("management page")).toBeInTheDocument();
+    expect(screen.queryByText("selectWorkspace")).toBeNull();
+
+    // /profile itself is not exempt.
+    mockPathname = "/profile";
+    rerender(<DashboardLayout><p>account settings</p></DashboardLayout>);
+    expect(await screen.findByText("selectWorkspace")).toBeInTheDocument();
+    expect(screen.queryByText("account settings")).toBeNull();
+  });
+
+  it("keeps the zero-workspace redirect on the management page", async () => {
+    mockUser = owner;
+    mockWorkspaces = [];
+    mockPathname = "/profile/workspaces";
+    render(<DashboardLayout><p>management page</p></DashboardLayout>);
+    await waitFor(() =>
+      expect(mockPush).toHaveBeenCalledWith("/workspace/settings/general?create=true"),
+    );
+  });
+
+  it("auto-select skips a suspended sole membership and shows it disabled", async () => {
+    mockUser = { ...owner, current_workspace_id: null };
+    mockHasSelection = false;
+    mockWorkspaces = [{ id: "w9", name: "Club", current_user_role: "member", slot_suspended: true }];
+    render(<DashboardLayout><p>protected page</p></DashboardLayout>);
+    expect(await screen.findByText("selectWorkspace")).toBeInTheDocument();
+    expect(mockSwitchWorkspace).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /Club/ })).toBeDisabled();
+    expect(screen.getByText("card.askOwner")).toBeInTheDocument();
+  });
+
+  it("the selection screen links an owner's suspended workspace to the page and keeps the others selectable", async () => {
+    mockUser = owner;
+    mockHasSelection = false;
+    mockWorkspaces = twoOwned;
+    render(<DashboardLayout><p>protected page</p></DashboardLayout>);
+    expect(await screen.findByText("selectWorkspace")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Personal/ })).toBeDisabled();
+    expect(screen.getByRole("link", { name: "card.manage" })).toHaveAttribute(
+      "href",
+      "/profile/workspaces",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Personal/ }));
+    expect(mockSwitchWorkspace).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Research/ }));
+    await waitFor(() => expect(mockSwitchWorkspace).toHaveBeenCalledWith("w2"));
+  });
+
+  it("sends an owner who must choose to the page once per browser session", async () => {
+    mockUser = { ...owner, workspace_selection_required: true };
+    const first = render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+    await waitFor(() => expect(mockPush).toHaveBeenCalledWith("/profile/workspaces"));
+    expect(mockPush).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    // A later sign-in landing (same browser session) is not redirected again.
+    mockPush.mockClear();
+    render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+    expect(await screen.findByText("dashboard")).toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it("does not redirect from platform administration", async () => {
+    mockUser = { ...owner, role: "admin", workspace_selection_required: true };
+    mockSystemInfo = { features: { system_admin: true } };
+    mockPathname = "/admin/users";
+    render(<DashboardLayout><p>platform users</p></DashboardLayout>);
+    expect(await screen.findByText("platform users")).toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalledWith("/profile/workspaces");
+  });
+
+  it("does not redirect before the terms are accepted", async () => {
+    mockUser = { ...owner, terms_acceptance_required: true, terms_version: "2026-09", workspace_selection_required: true };
+    render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it("on the page itself: no redirect, and it counts as this session's prompt", async () => {
+    mockUser = { ...owner, workspace_selection_required: true };
+    mockPathname = "/profile/workspaces";
+    const first = render(<DashboardLayout><p>management page</p></DashboardLayout>);
+    expect(await screen.findByText("management page")).toBeInTheDocument();
+    first.unmount();
+    mockPathname = "/workspace/dashboard";
+    render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+    expect(await screen.findByText("dashboard")).toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it("without sessionStorage it still redirects only once per page load", async () => {
+    const getItem = vi
+      .spyOn(Storage.prototype, "getItem")
+      .mockImplementation(() => {
+        throw new Error("blocked");
+      });
+    try {
+      mockUser = { ...owner, workspace_selection_required: true };
+      const first = render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+      await waitFor(() => expect(mockPush).toHaveBeenCalledWith("/profile/workspaces"));
+      first.unmount();
+      mockPush.mockClear();
+      render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+      expect(await screen.findByText("dashboard")).toBeInTheDocument();
+      expect(mockPush).not.toHaveBeenCalled();
+    } finally {
+      getItem.mockRestore();
+    }
+  });
+});
+

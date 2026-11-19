@@ -230,3 +230,31 @@ describe("WorkspaceProvider reload trigger", () => {
     await waitFor(() => expect(mockListWorkspaces).toHaveBeenCalledTimes(2));
   });
 });
+
+describe("suspended workspaces (#2919)", () => {
+  it("never makes a slot_suspended row the current workspace", async () => {
+    mockListWorkspaces.mockResolvedValue([
+      { id: "w1", name: "W1", slot_suspended: true },
+      { id: "w2", name: "W2" },
+    ]);
+    const { getByTestId } = renderProvider();
+    await waitFor(() => expect(getByTestId("loading").textContent).toBe("false"));
+    expect(getByTestId("ws").textContent).toBe("none");
+    expect(getByTestId("loadFailed").textContent).toBe("false");
+  });
+
+  it("never calls switch for a slot_suspended row", async () => {
+    mockListWorkspaces.mockResolvedValue([
+      { id: "w1", name: "W1" },
+      { id: "w2", name: "W2", slot_suspended: true },
+    ]);
+    const { getByTestId, getByText } = renderProvider();
+    await waitFor(() => expect(getByTestId("ws").textContent).toBe("w1"));
+    await act(async () => {
+      fireEvent.click(getByText("switch"));
+    });
+    expect(mockSwitch).not.toHaveBeenCalled();
+    expect(getByTestId("ws").textContent).toBe("w1");
+  });
+});
+
