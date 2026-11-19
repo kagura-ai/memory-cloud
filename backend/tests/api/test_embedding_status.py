@@ -1,18 +1,35 @@
 """Tests for embedding queue status endpoints (Issue #93)."""
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 
 from api.routes.workspace import get_embedding_status
-from models.auth import Workspace
+from models.auth import Workspace, WorkspaceMember
 from models.memory import Memory
 from utils.datetime import to_utc_iso, utcnow
+from utils.exceptions import AuthorizationError
 
 
+@pytest.fixture
+def workspace_member():
+    """The caller is a member of the selected workspace (#2928).
+
+    The mocked-db tests below drive the endpoint by call ORDER; the membership
+    check itself is covered on real rows in
+    ``tests/integration/test_current_workspace_routes_membership_db.py``.
+    """
+    with patch(
+        "services.permission_service.PermissionService.check_workspace_access",
+        new=AsyncMock(),
+    ) as access:
+        yield access
+
+
+@pytest.mark.usefixtures("workspace_member")
 class TestGetEmbeddingStatus:
     """Test GET /workspace/embedding-status endpoint."""
 
@@ -119,6 +136,29 @@ class TestGetEmbeddingStatus:
         assert response.failed_memories[0].embedding_attempted_at == "2026-04-01T13:00:00Z"
 
 
+class TestEmbeddingStatusRequiresMembership:
+    """#2928: the selected workspace's membership is checked before any read."""
+
+    @pytest.mark.asyncio
+    async def test_a_non_member_is_refused_before_any_read(self):
+        refusal = AuthorizationError("Insufficient permissions", reason="not_a_member")
+        db = AsyncMock()
+        workspace_id = uuid4()
+        user = {"user_id": "u1", "current_workspace_id": workspace_id}
+        with patch(
+            "services.permission_service.PermissionService.check_workspace_access",
+            new=AsyncMock(side_effect=refusal),
+        ) as access:
+            with pytest.raises(AuthorizationError):
+                await get_embedding_status(user=user, db=db, context_id=None)
+
+        access.assert_awaited_once_with(
+            "u1", workspace_id, required_role="viewer", require_seat=False
+        )
+        db.execute.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("workspace_member")
 class TestPrivateContextsAreNotLeaked:
     """#1496: this endpoint returns failed memories WITH their summaries.
 
@@ -196,6 +236,8 @@ class TestFailedMemoriesOrderByFailureClock:
     async def _workspace(db_session, owner):
         ws_id = uuid4()
         db_session.add(Workspace(id=ws_id, name="ws", owner_user_id=owner))
+        await db_session.flush()
+        db_session.add(WorkspaceMember(workspace_id=ws_id, user_id=owner, role="owner"))
         await db_session.flush()
         return ws_id
 

@@ -9,7 +9,12 @@ from uuid import UUID
 from mcp.types import TextContent
 
 from mcp_server.tools._errors import _tool_exception_response
-from mcp_server.tools._helpers import _error_response, _log_tool_usage, _success_response
+from mcp_server.tools._helpers import (
+    _check_workspace_membership,
+    _error_response,
+    _log_tool_usage,
+    _success_response,
+)
 
 
 async def handle_get_usage(
@@ -17,7 +22,10 @@ async def handle_get_usage(
 ) -> list[TextContent]:
     """Get current workspace usage and quota limits.
 
-    Returns memory, context, and member usage with effective limits.
+    Returns memory, context, and member usage with effective limits. Requires
+    membership of the session workspace (#2928), as the REST usage readouts
+    do: a non-member gets the uniform ``permission_denied``. A member without
+    a seat on the plan still reads the usage.
     """
     from sqlalchemy import func, select
 
@@ -35,6 +43,13 @@ async def handle_get_usage(
 
     async for db in get_db():
         try:
+            # #2928: membership of the session workspace before anything of it is read.
+            denied = await _check_workspace_membership(
+                db, user_id, workspace_id, "get usage", require_seat=False
+            )
+            if denied:
+                return denied
+
             ws_result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
             workspace = ws_result.scalar_one_or_none()
 

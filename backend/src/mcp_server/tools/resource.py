@@ -27,6 +27,7 @@ from mcp_server.tools._errors import (
 )
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
+    _check_workspace_membership,
     _context_cap_error_response,
     _error_response,
     _get_workspace_member_role,
@@ -270,7 +271,10 @@ async def _ingest_suspension_error(
 async def handle_get_resource_impact(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Get resource change impact information."""
+    """Get resource change impact information.
+
+    Requires membership of the session workspace (#2928).
+    """
     if "resource_id" not in args:
         return _error_response("missing_fields", "Missing required field: resource_id")
 
@@ -287,6 +291,11 @@ async def handle_get_resource_impact(
     start_time = time.time()
     async for db in get_db():
         try:
+            denied = await _check_workspace_membership(
+                db, user_id, workspace_id, "get resource impact", require_seat=False
+            )
+            if denied:
+                return denied
             # Workspace boundary check
             boundary_err = await _check_resource_workspace_boundary(db, resource_id, workspace_id)
             if boundary_err:
@@ -391,7 +400,10 @@ async def handle_get_resource_impact(
 async def handle_get_resource_schema(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Get field schema definition for a resource."""
+    """Get field schema definition for a resource.
+
+    Requires membership of the session workspace (#2928).
+    """
     if "resource_id" not in args:
         return _error_response("missing_fields", "Missing required field: resource_id")
 
@@ -408,6 +420,11 @@ async def handle_get_resource_schema(
     start_time = time.time()
     async for db in get_db():
         try:
+            denied = await _check_workspace_membership(
+                db, user_id, workspace_id, "get resource schema", require_seat=False
+            )
+            if denied:
+                return denied
             # Workspace boundary check
             boundary_err = await _check_resource_workspace_boundary(db, resource_id, workspace_id)
             if boundary_err:

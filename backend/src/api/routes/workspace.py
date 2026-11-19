@@ -43,7 +43,7 @@ from services.memory_counts import count_live_memories
 from services.permission_service import PermissionService
 from services.plan_seats import member_seat_suspended
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthenticationError
+from utils.exceptions import AuthenticationError, AuthorizationError
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,8 @@ async def get_workspace_stats(
 ) -> WorkspaceStatsResponse:
     """Get aggregated statistics across all user's contexts.
 
-    Returns total memory count and per-context breakdown.
+    Returns total memory count and per-context breakdown. Requires membership
+    of the selected workspace (#2928): anyone else gets the uniform 403.
 
     Args:
         user: Authenticated user from session or API key
@@ -164,6 +165,8 @@ async def get_workspace_stats(
             )
 
         _, workspace = row
+        # #2928: the caller must be a member before anything of it is read.
+        await _require_workspace_member(db, user, workspace.id)
 
         contexts_result = await db.execute(
             select(Context)
@@ -320,7 +323,7 @@ async def get_workspace_stats(
             erased_memories=total_erased,
         )
 
-    except HTTPException:
+    except (HTTPException, AuthorizationError):
         raise
     except Exception as e:
         logger.exception(
@@ -338,12 +341,13 @@ async def get_workspace_stats(
 # ============================================================================
 
 
-async def _check_usage_access(db: AsyncSession, user: dict, workspace_id: UUID) -> None:
-    """Refuse a caller who no longer belongs to the selected workspace (#2714).
+async def _require_workspace_member(db: AsyncSession, user: dict, workspace_id: UUID) -> None:
+    """Refuse a caller who does not belong to the selected workspace (#2714, #2928).
 
-    ``current_workspace_id`` alone is not proof of membership, so every usage
-    readout checks it before reading. The seat check is skipped: a
-    seat-suspended member still reads the non-monetary usage (#2632).
+    Every read of this router that acts on ``current_workspace_id`` (the usage
+    readouts, the stats and the embedding status) checks membership of that
+    workspace first. The seat check is skipped: a seat-suspended member still
+    reads the non-monetary usage (#2632).
 
     Raises:
         AuthorizationError: 403 for a non-member or a deleted workspace.
@@ -380,7 +384,7 @@ async def get_workspace_usage_current(
         )
 
     async with db_transaction(db, "get_workspace_usage_current", "Failed to get workspace usage"):
-        await _check_usage_access(db, user, workspace_id)
+        await _require_workspace_member(db, user, workspace_id)
         # Get workspace with plan limits
         workspace_result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
         workspace = workspace_result.scalar_one_or_none()
@@ -584,7 +588,7 @@ async def get_workspace_usage_history(
     async with db_transaction(
         db, "get_workspace_usage_history", "Failed to get workspace usage history"
     ):
-        await _check_usage_access(db, user, workspace_id)
+        await _require_workspace_member(db, user, workspace_id)
         # Calculate date range
         end_date = utcnow().date()
         start_date = end_date - timedelta(days=days - 1)
@@ -651,7 +655,7 @@ async def get_workspace_usage_breakdown(
     async with db_transaction(
         db, "get_workspace_usage_breakdown", "Failed to get workspace usage breakdown"
     ):
-        await _check_usage_access(db, user, workspace_id)
+        await _require_workspace_member(db, user, workspace_id)
         # Calculate date range
         end_date = utcnow().date()
         start_date = end_date - timedelta(days=days - 1)
@@ -732,7 +736,7 @@ async def get_workspace_member_usage(
         raise HTTPException(status_code=400, detail="No workspace selected")
 
     async with db_transaction(db, "get_member_usage", "Failed to get member usage"):
-        await _check_usage_access(db, user, workspace_id)
+        await _require_workspace_member(db, user, workspace_id)
         # Get all members with user info
         members_result = await db.execute(
             select(WorkspaceMember.user_id, User.name, User.email)
@@ -839,6 +843,8 @@ async def get_embedding_status(
     Issue #93: Visibility into embedding pipeline status.
     Returns counts by status and details of the 50 most recently failed
     memories, latest failure first; ``embedding_attempted_at`` is the failure time.
+    Requires membership of the caller's current workspace (#2928): anyone else
+    gets the uniform 403.
     """
     from uuid import UUID as PyUUID
 
@@ -852,6 +858,8 @@ async def get_embedding_status(
     workspace_id = user.get("current_workspace_id")
     if not workspace_id:
         raise HTTPException(status_code=400, detail="No active workspace")
+    # #2928: the caller must be a member of the workspace before anything of it is read.
+    await _require_workspace_member(db, user, workspace_id)
 
     # Use indexed Memory.workspace_id directly (no member_ids round-trip)
     conditions = [

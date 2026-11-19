@@ -522,15 +522,28 @@ async def list_embedding_models(
     """List available embedding models with availability status.
 
     Returns all models from EMBEDDING_MODEL_REGISTRY with availability
-    based on whether the provider is configured and reachable.
+    based on whether the provider is configured and reachable. With a
+    selected workspace, requires its membership (#2928): anyone else gets the
+    uniform 403.
 
     Returns:
         List of models with name, dimensions, provider, and availability
     """
     from config.constants import EMBEDDING_MODEL_REGISTRY
     from config.settings import get_settings
+    from services.permission_service import PermissionService
 
     settings = get_settings()
+
+    # #2928: the selected workspace's keys count only for its members. Checked
+    # before the lookup below, whose failures are deliberately swallowed.
+    if user.get("current_workspace_id"):
+        await PermissionService(db).check_workspace_access(
+            user["user_id"],
+            user["current_workspace_id"],
+            required_role="viewer",
+            require_seat=False,
+        )
 
     # Check OpenAI availability: user has external API key or env var set
     openai_available = False

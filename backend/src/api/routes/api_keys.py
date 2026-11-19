@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.api_keys import APIKeyManager
+from auth.api_keys import APIKeyManager, key_owner_holds_workspace
 from auth.connector_keys import CONNECTOR_KEY_REGENERATE_MESSAGE, reject_reserved_key_name
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
@@ -58,6 +58,18 @@ async def get_api_key_manager(db: AsyncSession = Depends(get_db)) -> APIKeyManag
 # ============================================================================
 # Pydantic Models
 # ============================================================================
+
+
+async def _key_workspace_held(db: AsyncSession, key: APIKey) -> bool:
+    """Whether the key's owner holds the key's workspace (#2928).
+
+    True for a key without a workspace (global or public-bound). A
+    workspace-scoped key needs the condition key verification applies: a live
+    workspace its owner owns or has a membership row in.
+    """
+    if key.workspace_id is None:
+        return True
+    return await key_owner_holds_workspace(db, user_id=key.user_id, workspace_id=key.workspace_id)
 
 
 def _record_workspace_key(db: AsyncSession, key: APIKey, actor: str, operation: str) -> None:
@@ -362,7 +374,10 @@ async def delete_api_key(
                 detail="API key not found or not owned by you",
             )
 
-        if target_key.revoked_at is None:
+        # #2928: one's own key is always deletable; the history record goes to
+        # its workspace only while the owner holds it (like a global key, a
+        # key whose owner does not is not recorded).
+        if target_key.revoked_at is None and await _key_workspace_held(db, target_key):
             _record_workspace_key(db, target_key, user_id, "credential.revoked")
         await db.delete(target_key)
         await db.commit()
@@ -411,7 +426,9 @@ async def revoke_api_key(
         # Revoke the key
         if target_key.revoked_at is not None:
             return
-        _record_workspace_key(db, target_key, user_id, "credential.revoked")
+        # #2928: recorded into the key's workspace only while the owner holds it.
+        if await _key_workspace_held(db, target_key):
+            _record_workspace_key(db, target_key, user_id, "credential.revoked")
         target_key.revoked_at = utcnow()
         await db.commit()
 
@@ -516,7 +533,8 @@ async def regenerate_api_key(
     """Regenerate an API key (revokes old key, creates new one with same name).
 
     Issue #169: Secret regeneration feature. Issue #1752: the owner is emailed
-    a security notice after the commit.
+    a security notice after the commit. #2928: a workspace-scoped key needs its
+    owner to hold the workspace (404 otherwise, as for a key that is not yours).
 
     WARNING: This immediately invalidates the old key. Update all applications.
     """
@@ -534,7 +552,10 @@ async def regenerate_api_key(
         )
         old_key = result.scalar_one_or_none()
 
-        if not old_key:
+        # #2928: a workspace-scoped key is rotated only while its owner holds
+        # the workspace, the condition key verification applies; otherwise the
+        # same 404, before anything is minted or recorded.
+        if not old_key or not await _key_workspace_held(db, old_key):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="API key not found or not owned by you",

@@ -98,6 +98,13 @@ def _new_key(name: str = "deploy") -> SimpleNamespace:
 
 
 class TestApiKeyRoutes:
+    @pytest.fixture(autouse=True)
+    def _owner_holds_workspace(self, monkeypatch) -> None:
+        """The key's owner holds its workspace (#2928); covered on real rows."""
+        monkeypatch.setattr(
+            api_keys_routes, "key_owner_holds_workspace", AsyncMock(return_value=True)
+        )
+
     @pytest.mark.asyncio
     async def test_create_schedules_after_commit_and_email_carries_no_key(
         self, monkeypatch
@@ -219,6 +226,11 @@ async def _fake_factory() -> AsyncIterator[MagicMock]:
 
 
 class TestMemberCredentialRoutes:
+    @pytest.fixture(autouse=True)
+    def _path_workspace_member(self, monkeypatch) -> None:
+        """Membership of the path workspace is covered on real rows (#2928)."""
+        monkeypatch.setattr(mc, "_require_path_workspace_member", AsyncMock())
+
     @pytest.mark.asyncio
     async def test_admin_regenerate_names_the_admin(self, monkeypatch) -> None:
         monkeypatch.setattr(mc, "check_permission", AsyncMock())
