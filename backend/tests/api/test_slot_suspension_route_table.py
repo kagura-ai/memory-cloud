@@ -333,6 +333,29 @@ SLOT_STATE_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/me/workspaces/{workspace_id}/access"): "read=false",
 }
 
+# GATED routes whose handler gates on some paths only, reviewed one by one:
+# every other path returns no workspace data. Each must still fail the
+# every-path check (a stale row fails the test).
+CONDITIONAL_GATE_REVIEWED: dict[tuple[str, str], str] = {
+    # No context_id: an empty graph.
+    ("GET", "/api/v1/graph/stats"): "no context: empty answer",
+    # No workspace row for the caller: empty stats.
+    ("GET", "/api/v1/workspace/stats"): "no workspace: empty answer",
+    # Without a context the query goes through reachable_memory_filter, which
+    # leaves suspended workspaces out.
+    ("GET", "/api/v1/memory/list"): "target-less: reachable_memory_filter",
+    ("GET", "/api/v1/memory/stats"): "target-less: reachable_memory_filter",
+    ("GET", "/api/v1/memory/access-patterns"): "target-less: reachable_memory_filter",
+    ("POST", "/api/v1/memory/recall"): "target-less: reachable_memory_filter",
+    # A public context without a workspace row: nothing can be suspended.
+    ("GET", "/api/v1/public/{context_id}/info"): "no workspace row: nothing to gate",
+    # TEMPORARY: the session path of this route is not gated yet; it is gated
+    # in a follow-up commit of this branch, which removes this row.
+    ("GET", "/api/v1/workspaces/{workspace_id}/members/{user_id}/credentials"): (
+        "TEMPORARY: session path not gated yet"
+    ),
+}
+
 # Where an exception route's own gate (or opt-out) lives when the handler does
 # not name it.
 EXCEPTION_GATED_IN: dict[tuple[str, str], str] = {
@@ -401,6 +424,27 @@ SLOT_KEYWORD_SITES: dict[tuple[str, str], int] = {
     # A log field of the service-token key rotation, not the gate.
     ("auth.dependencies", "_require_service_operator"): 1,
 }
+# Every ``policy=`` handed to ``ensure_slot_active`` that is not BLOCKED.
+POLICY_KEYWORD_SITES: dict[tuple[str, str], int] = {
+    # REVOCATION: the member-credential revoke routes.
+    ("api.routes.member_credentials", "delete_api_key"): 1,
+    ("api.routes.member_credentials", "delete_api_key_by_id"): 1,
+    ("api.routes.member_credentials", "delete_oauth_app"): 1,
+    # policy=slot: the primitives hand their caller's policy on.
+    ("services.context_service", "ContextService.get_context"): 1,
+    ("services.permission_service", "PermissionService.check_workspace_access"): 1,
+    ("services.permission_service", "PermissionService.resolve_context_for_workspace_read"): 1,
+}
+# Every ``sync_authority`` call without a principal, and every function whose
+# ``principal`` defaults to ``None``: the internal billing and sync control
+# path (``/internal``), which skips the gate.
+NO_PRINCIPAL_SYNC_SITES: dict[tuple[str, str], int] = {
+    ("services.sync_continuity", "observe_established"): 1,
+    ("services.sync_continuity", "validate_reconnect"): 1,
+    ("services.sync_installations", "activate_installation"): 1,
+    ("services.sync_installations", "observe_activation"): 1,
+    ("services.sync_installations", "validate_authorization"): 1,
+}
 # ``export_context`` hard-codes the owner's opt-out: its callers are pinned.
 EXPORT_CALLERS: dict[tuple[str, str], int] = {
     ("api.routes.contexts", "export_context"): 1,
@@ -442,11 +486,13 @@ def _category(key: tuple[str, str], module: str) -> str | None:
 
 
 def _is_policy(value: ast.expr, member: str) -> bool:
+    """``<policy enum>.<member>``: ``SlotPolicy.X``, an alias of it (``SP.X``)
+    or a module-qualified name (``gate.SlotPolicy.X``). The member names are
+    distinctive; no other enum under ``backend/src`` uses them."""
     return (
         isinstance(value, ast.Attribute)
         and value.attr == member
-        and isinstance(value.value, ast.Name)
-        and value.value.id == "SlotPolicy"
+        and isinstance(value.value, (ast.Name, ast.Attribute))
     )
 
 
@@ -547,10 +593,43 @@ def _owner_class(func) -> type | None:
     return owner if isinstance(owner, type) else None
 
 
-def _reaches_gate(func, gates: dict[int, str], *, _seen: set[int] | None = None) -> bool:
+def _opts_out(call: ast.Call) -> bool:
+    """The call hands a policy other than BLOCKED (or ``None``) to its callee."""
+    return any(
+        kw.arg in ("slot", "policy") and not _is_policy(kw.value, "BLOCKED") for kw in call.keywords
+    )
+
+
+def _helper_of(call: ast.Call, namespace: dict, module: str | None, owner: type | None):
+    """A helper of ``func``'s own module (a ``Name`` call) or own class
+    (``self.x(...)``) that ``call`` invokes, else ``None``."""
+    helper = None
+    if isinstance(call.func, ast.Name):
+        helper = namespace.get(call.func.id)
+        if getattr(inspect.unwrap(helper), "__module__", None) != module:
+            helper = None
+    elif (
+        owner is not None
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id in ("self", "cls")
+    ):
+        helper = getattr(owner, call.func.attr, None)
+    return helper if callable(helper) else None
+
+
+def _reaches_gate(
+    func, gates: dict[int, str], *, strict: bool = False, _seen: set[int] | None = None
+) -> bool:
     """Whether ``func``'s own body calls a gate, directly or through a helper
     of its own module (a ``Name`` call) or its own class (``self.x(...)``).
-    The function's name plays no part."""
+    The function's name plays no part. A helper called with a ``slot=`` or
+    ``policy=`` other than BLOCKED is not followed: what it reaches runs
+    under the caller's opt-out.
+
+    ``strict``: the gate must run on every path that returns (``_flow``), not
+    on some branch only.
+    """
     seen = _seen if _seen is not None else set()
     raw = inspect.unwrap(func)
     if id(raw) in seen:
@@ -559,31 +638,111 @@ def _reaches_gate(func, gates: dict[int, str], *, _seen: set[int] | None = None)
     namespace = _namespace(func)
     module = getattr(raw, "__module__", None)
     owner = _owner_class(func)
-    for call in _live_calls(_own_body(func)):
+
+    def is_gate(call: ast.Call) -> bool:
         if _gating_call(call, namespace, gates):
             return True
-        helper = None
-        if isinstance(call.func, ast.Name):
-            helper = namespace.get(call.func.id)
-            if getattr(inspect.unwrap(helper), "__module__", None) != module:
-                helper = None
-        elif (
-            owner is not None
-            and isinstance(call.func, ast.Attribute)
-            and isinstance(call.func.value, ast.Name)
-            and call.func.value.id in ("self", "cls")
+        if _opts_out(call):
+            return False
+        helper = _helper_of(call, namespace, module, owner)
+        return helper is not None and _reaches_gate(helper, gates, strict=strict, _seen=seen)
+
+    if strict:
+        return _flow(_own_body(func), is_gate) == _GATED
+    return any(is_gate(call) for call in _live_calls(_own_body(func)))
+
+
+# Outcomes of a statement list for ``_flow``.
+_GATED, _EXIT, _CONTINUE = "gated", "exit", "continue"
+
+
+def _expr_gates(node: ast.AST, is_gate) -> bool:
+    """A call ``is_gate`` accepts that runs whenever ``node`` runs (not in a
+    nested function, a branch of ``a if c else b``, the right side of
+    ``and`` / ``or``, or a comprehension's element)."""
+    found = False
+
+    def visit(n: ast.AST) -> None:
+        nonlocal found
+        if found or isinstance(
+            n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
         ):
-            helper = getattr(owner, call.func.attr, None)
-        if callable(helper) and _reaches_gate(helper, gates, _seen=seen):
-            return True
-    return False
+            return
+        if isinstance(n, ast.IfExp):
+            visit(n.test)
+            return
+        if isinstance(n, ast.BoolOp):
+            visit(n.values[0])
+            return
+        if isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            visit(n.generators[0].iter)
+            return
+        if isinstance(n, ast.Call) and is_gate(n):
+            found = True
+            return
+        for child in ast.iter_child_nodes(n):
+            visit(child)
+
+    visit(node)
+    return found
 
 
-def _route_gated(route, extra, gates: dict[int, str]) -> bool:
+def _flow(stmts: list[ast.stmt], is_gate) -> str:
+    """``_GATED`` when every path through ``stmts`` passes a gate before it
+    returns (a path that raises returns nothing and counts as gated),
+    ``_EXIT`` when some path returns before any gate, else ``_CONTINUE``.
+    ``try`` and ``with`` bodies and ``finally`` count; ``except`` handlers and
+    loop bodies (which may not run) do not."""
+    for stmt in stmts:
+        outcome = _stmt_flow(stmt, is_gate)
+        if outcome != _CONTINUE:
+            return outcome
+    return _CONTINUE
+
+
+def _stmt_flow(stmt: ast.stmt, is_gate) -> str:
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return _CONTINUE
+    if isinstance(stmt, ast.Raise):
+        return _GATED
+    if isinstance(stmt, ast.Return):
+        return _GATED if stmt.value is not None and _expr_gates(stmt.value, is_gate) else _EXIT
+    if isinstance(stmt, ast.If):
+        if isinstance(stmt.test, ast.Constant):
+            return _flow(stmt.body if stmt.test.value else stmt.orelse, is_gate)
+        if _expr_gates(stmt.test, is_gate):
+            return _GATED
+        branches = (_flow(stmt.body, is_gate), _flow(stmt.orelse, is_gate))
+        if _EXIT in branches:
+            return _EXIT
+        return _GATED if branches == (_GATED, _GATED) else _CONTINUE
+    if isinstance(stmt, ast.Try):
+        outcomes = (_flow(stmt.body, is_gate), _flow(stmt.finalbody, is_gate))
+        if _GATED in outcomes:
+            return _GATED
+        return _EXIT if _EXIT in outcomes else _CONTINUE
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        if any(_expr_gates(item.context_expr, is_gate) for item in stmt.items):
+            return _GATED
+        return _flow(stmt.body, is_gate)
+    if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+        head = stmt.test if isinstance(stmt, ast.While) else stmt.iter
+        if _expr_gates(head, is_gate):
+            return _GATED
+        return _EXIT if _flow(stmt.body, is_gate) == _EXIT else _CONTINUE
+    if isinstance(stmt, ast.Match):
+        if _expr_gates(stmt.subject, is_gate):
+            return _GATED
+        cases = [_flow(case.body, is_gate) for case in stmt.cases]
+        return _EXIT if _EXIT in cases else _CONTINUE
+    return _GATED if _expr_gates(stmt, is_gate) else _CONTINUE
+
+
+def _route_gated(route, extra, gates: dict[int, str], *, strict: bool = True) -> bool:
     for dep in route_dependency_calls(route, extra):
-        if id(inspect.unwrap(dep)) in gates or _reaches_gate(dep, gates):
+        if id(inspect.unwrap(dep)) in gates or _reaches_gate(dep, gates, strict=strict):
             return True
-    return _reaches_gate(route.endpoint, gates)
+    return _reaches_gate(route.endpoint, gates, strict=strict)
 
 
 def _calls_by_name(func, name: str) -> bool:
@@ -689,9 +848,26 @@ def test_every_gated_route_reaches_a_gate() -> None:
             if not _calls_by_name(route.endpoint, "slot_suspended"):
                 ungated.append((key, "slot_suspended not called"))
             continue
+        if key in CONDITIONAL_GATE_REVIEWED:
+            if not _route_gated(route, extra, gates, strict=False):
+                ungated.append((key, "reviewed as conditional but reaches no gate"))
+            continue
         if not _route_gated(route, extra, gates):
             ungated.append(key)
-    assert not ungated, f"GATED routes that reach no slot gate: {ungated}"
+    assert not ungated, f"GATED routes that do not gate every path: {ungated}"
+
+
+def test_the_reviewed_conditional_routes_are_still_conditional() -> None:
+    """A row of ``CONDITIONAL_GATE_REVIEWED`` whose route now gates every path
+    (or no longer exists) is removed."""
+    gates = _gate_objects()
+    routes = _routes()
+    stale = sorted(
+        key
+        for key in CONDITIONAL_GATE_REVIEWED
+        if key not in routes or _route_gated(routes[key][1], routes[key][2], gates)
+    )
+    assert not stale, f"rows that now gate every path or are gone: {stale}"
 
 
 def test_declared_sets_name_gated_routes() -> None:
@@ -754,11 +930,64 @@ async def _gated(perm) -> None:
     await perm.check_workspace_access("u", None)
 
 
+async def _one_branch(perm, user: dict) -> dict:
+    if user.get("programmatic"):
+        await perm.check_workspace_access("u", None)
+    return {"data": 1}
+
+
+async def _early_return(perm, user: dict) -> dict:
+    if user.get("cached"):
+        return {"data": 1}
+    await perm.check_workspace_access("u", None)
+    return {"data": 2}
+
+
+async def _both_branches(perm, user: dict) -> dict:
+    if user.get("programmatic"):
+        await perm.check_workspace_access("u", None)
+    else:
+        await perm.check_workspace_owner("u", None)
+    return {"data": 1}
+
+
+async def _refused_or_gated(perm, user: dict) -> dict:
+    if not user.get("user_id"):
+        raise ValueError("no user")
+    await perm.check_workspace_access("u", None)
+    return {"data": 1}
+
+
+async def _helper_with_a_policy(slot=None) -> None:
+    await _gated_helper(slot=slot)
+
+
+async def _gated_helper(perm=None, slot=None) -> None:
+    await perm.check_workspace_access("u", None, slot=slot)
+
+
+async def _revocation_through_a_helper() -> None:
+    await _gated_helper(slot=SlotPolicyAlias.REVOCATION)
+
+
+class SlotPolicyAlias:  # stands in for an alias of SlotPolicy
+    REVOCATION = "revocation"
+
+
 def test_the_matcher_is_exact() -> None:
     gates = _gate_objects()
     for fake in (check_workspace_access, _nested_gate, _dead_gate, _opted_out):
         assert not _reaches_gate(fake, gates), fake.__name__
     assert _reaches_gate(_gated, gates)
+    # Every path: one branch or an early return is not enough; both branches,
+    # or a refusal on the other path, is.
+    for fake in (_one_branch, _early_return):
+        assert _reaches_gate(fake, gates), fake.__name__
+        assert not _reaches_gate(fake, gates, strict=True), fake.__name__
+    for good in (_both_branches, _refused_or_gated):
+        assert _reaches_gate(good, gates, strict=True), good.__name__
+    # A helper called with a policy other than BLOCKED is not a gate.
+    assert not _reaches_gate(_revocation_through_a_helper, gates)
 
 
 def _mentions(func, member: str) -> bool:
@@ -793,6 +1022,26 @@ def test_owner_management_and_revocation_routes_reach_their_opt_out() -> None:
     assert not missing, f"opt-out rows without their SlotPolicy: {missing}"
 
 
+def test_the_revocation_owner_dependency_serves_revocation_rows_only() -> None:
+    """``WorkspaceOwnerRevocation`` never refuses: every route depending on it
+    is a REVOCATION row, and these are exactly the three revoke routes that act
+    on the caller's current workspace."""
+    from auth.dependencies import require_workspace_owner_for_revocation
+
+    target = id(inspect.unwrap(require_workspace_owner_for_revocation))
+    users = sorted(
+        key
+        for key, (_module, route, extra) in _routes().items()
+        if any(id(inspect.unwrap(d)) == target for d in route_dependency_calls(route, extra))
+    )
+    assert users == [
+        ("DELETE", "/api/v1/observation-credentials/{credential_id}"),
+        ("DELETE", "/api/v1/resource-management-grants/{grant_id}"),
+        ("DELETE", "/api/v1/resource-tokens/{token_id}"),
+    ]
+    assert all(EXCEPTIONS.get(key) == REVOCATION for key in users)
+
+
 def test_public_outsider_routes_reach_a_gate() -> None:
     gates = _gate_objects()
     routes = _routes()
@@ -805,7 +1054,7 @@ def test_public_outsider_routes_reach_a_gate() -> None:
             target = _resolve(EXCEPTION_GATED_IN[key])
             if id(inspect.unwrap(target)) in gates:
                 continue
-        if not _route_gated(route, extra, gates):
+        if not _route_gated(route, extra, gates, strict=key not in CONDITIONAL_GATE_REVIEWED):
             missing.append(key)
     assert not missing, f"PUBLIC_OUTSIDER rows that reach no slot gate: {missing}"
 
@@ -832,6 +1081,8 @@ def _scan() -> dict[str, dict[tuple[str, str], int]]:
         "revocation": {},
         "dynamic": {},
         "slot": {},
+        "policy": {},
+        "no_principal": {},
         "export": {},
     }
 
@@ -895,6 +1146,36 @@ def _visit(module: str, node: ast.AST, scope: tuple[str, ...], bump) -> None:
                     bump("slot", (module, ".".join(inner)))
         if isinstance(child, ast.Call) and call_name(child) == "export_context":
             bump("export", site)
+        # ``ensure_slot_active(..., policy=X)`` with X other than BLOCKED.
+        if isinstance(child, ast.Call) and call_name(child) == "ensure_slot_active":
+            for kw in child.keywords:
+                if kw.arg == "policy" and not _is_policy(kw.value, "BLOCKED"):
+                    bump("policy", site)
+        # ``sync_authority`` without a principal skips the gate (internal).
+        if isinstance(child, ast.Call) and call_name(child) == "sync_authority":
+            principal = child.args[2] if len(child.args) >= 3 else None
+            for kw in child.keywords:
+                if kw.arg == "principal":
+                    principal = kw.value
+            if principal is None or (
+                isinstance(principal, ast.Constant) and principal.value is None
+            ):
+                bump("no_principal", site)
+        # A function whose ``principal`` defaults to ``None`` hands that on.
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = child.args
+            params = [*args.posonlyargs, *args.args]
+            defaults = [None] * (len(params) - len(args.defaults)) + list(args.defaults)
+            pairs = list(zip(params, defaults, strict=True)) + list(
+                zip(args.kwonlyargs, args.kw_defaults, strict=True)
+            )
+            for arg, default in pairs:
+                if (
+                    arg.arg == "principal"
+                    and isinstance(default, ast.Constant)
+                    and default.value is None
+                ):
+                    bump("no_principal", (module, ".".join(inner)))
         _visit(module, child, inner, bump)
 
 
@@ -906,4 +1187,6 @@ def test_every_opt_out_is_pinned() -> None:
     assert found["owner"] == OWNER_MANAGEMENT_SITES, found["owner"]
     assert found["revocation"] == REVOCATION_SITES, found["revocation"]
     assert found["slot"] == SLOT_KEYWORD_SITES, found["slot"]
+    assert found["policy"] == POLICY_KEYWORD_SITES, found["policy"]
+    assert found["no_principal"] == NO_PRINCIPAL_SYNC_SITES, found["no_principal"]
     assert found["export"] == EXPORT_CALLERS, found["export"]
