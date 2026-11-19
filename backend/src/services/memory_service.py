@@ -754,7 +754,9 @@ class MemoryService:
         if not context_id:
             return None, None, None
 
-        context = await self.context_service.get_context(user_id, context_id)
+        # The slot gate runs below, after the key's workspace and the agent
+        # binding confine the caller.
+        context = await self.context_service.get_context(user_id, context_id, slot=None)
 
         if key_workspace_id is not None and context.workspace_id != key_workspace_id:
             raise NotFoundException("Context", str(context_id))
@@ -773,6 +775,11 @@ class MemoryService:
             from services.permission_service import PermissionService
 
             await PermissionService(self.db).ensure_memory_write_role(user_id, context.workspace_id)
+
+        # #2918: the slot gate, after every confinement and authorization step.
+        from services.workspace_slot_gate import ensure_slot_active
+
+        await ensure_slot_active(self.db, context.workspace_id, user_id=user_id)
 
         return context, str(context.workspace_id), str(context_id)
 

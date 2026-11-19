@@ -1008,3 +1008,55 @@ async def test_the_owner_deletes_a_suspended_workspace_and_an_admin_cannot(world
     w.session.expire_all()
     deleted = await w.session.scalar(select(Workspace.deleted_at).where(Workspace.id == w.ws["s"]))
     assert deleted is not None
+
+
+# ---------------------------------------------------------------------------
+# The write resolver over REST: confinement before the gate
+# ---------------------------------------------------------------------------
+
+
+async def test_rest_remember_confines_a_key_and_a_binding_before_the_gate(world: World) -> None:
+    """A key scoped to the active K naming a context of the suspended S, and an
+    enforce-mode agent key whose binding does not name the context, get the
+    uniform 404 rather than S's suspension."""
+    w = world
+    body = {
+        "summary": "a slot gate note",
+        "content": "a slot gate note body",
+        "type": "decision",
+        "context": {"context_id": str(w.ctx["s2"])},
+    }
+    cases = {
+        "key scoped to K": (
+            {
+                "user_id": w.owner,
+                "auth_type": "api_key",
+                "api_key_workspace_id": w.ws["k"],
+                "current_workspace_id": w.ws["k"],
+                "role": "user",
+            },
+            None,
+        ),
+        "agent key of S": (
+            {
+                "user_id": w.admin,
+                "auth_type": "api_key",
+                "api_key_workspace_id": w.ws["s"],
+                "current_workspace_id": w.ws["s"],
+                "role": "user",
+            },
+            AgentScope(
+                agent_id=w.agents["s"].id, enforcement_mode="enforce", workspace_id=w.ws["s"]
+            ),
+        ),
+    }
+    for label, (principal, scope) in cases.items():
+        set_agent_scope(scope)
+        try:
+            with _mode("enforce"):
+                async with _rest(w, principal) as client:
+                    resp = await client.post("/api/v1/memory/remember", json=body)
+        finally:
+            set_agent_scope(None)
+        assert resp.status_code == 404, (label, resp.text)
+        assert resp.json()["error"] != "SLOT-001", label

@@ -444,3 +444,43 @@ async def test_a_session_scoped_tool_naming_its_target_is_refused_by_its_handler
     with _mode("enforce"):
         body = await _tool(tool, _target_args(w, "s")[tool], w.owner, w.ws["s"])
     assert _error(body) == "workspace_suspended", body
+
+
+# ---------------------------------------------------------------------------
+# The write resolver: confinement before the gate
+# ---------------------------------------------------------------------------
+
+
+async def test_a_key_of_an_active_workspace_naming_a_suspended_context_gets_not_found(
+    live,
+) -> None:
+    """A key scoped to K is confined to K before the gate looks at S: the
+    caller gets the uniform not-found, never S's suspension."""
+    from mcp_server.tools import execute_tool_call
+
+    w: World = live
+    args = _target_args(w, "s")["remember"]
+    token = _mcp_key_workspace_scope.set(w.ws["k"])
+    try:
+        with _mode("enforce"):
+            result = await execute_tool_call("remember", args, w.owner, w.ws["k"])
+    finally:
+        _mcp_key_workspace_scope.reset(token)
+    body = json.loads(result[0].text)
+    assert _error(body) == "context_not_found", body
+
+
+async def test_an_agent_binding_hiding_a_suspended_context_gets_not_found(live) -> None:
+    """An enforce-mode agent key whose binding does not name the context gets
+    the uniform not-found, also when the context's workspace is suspended."""
+    from auth.agent_scope import AgentScope
+
+    w: World = live
+    scope = AgentScope(agent_id=w.agents["s"], enforcement_mode="enforce", workspace_id=w.ws["s"])
+    set_agent_scope(scope)
+    try:
+        with _mode("enforce"):
+            body = await _tool("remember", _target_args(w, "s")["remember"], w.owner, w.ws["s"])
+    finally:
+        set_agent_scope(None)
+    assert _error(body) == "context_not_found", body

@@ -387,6 +387,9 @@ SLOT_KEYWORD_SITES: dict[tuple[str, str], int] = {
     # internal billing service (no principal); the OIDC inspection answers
     # read=false; resource ingest refuses the token holder in the redacted form.
     ("services.permission_service", "PermissionService.resolve_context_for_workspace_read"): 1,
+    # The write resolvers gate after the key's workspace and the agent binding.
+    ("mcp_server.tools._helpers", "_resolve_context"): 1,
+    ("services.memory_service", "MemoryService._get_context_isolation_params"): 1,
     ("services.sync_authority", "sync_authority"): 2,  # None for no principal, else slot=slot
     ("api.routes.me_workspaces", "workspace_access"): 1,
     ("api.routes.resource_ingest", "_enforce_workspace_membership"): 1,

@@ -605,7 +605,13 @@ class ContextService:
                 raise ContextListingFailedError(str(e)) from e
             return []
 
-    async def get_context(self, user_id: str, context_id: UUID) -> Context:
+    async def get_context(
+        self,
+        user_id: str,
+        context_id: UUID,
+        *,
+        slot: SlotPolicy | None = SlotPolicy.BLOCKED,
+    ) -> Context:
         """Get context by ID.
 
         Issue #115 Phase B: Verifies context access via workspace membership.
@@ -615,6 +621,10 @@ class ContextService:
         Args:
             user_id: User ID (for access verification via workspace membership)
             context_id: Context UUID
+            slot: The slot gate's policy (#2918), applied once the caller is
+                known to reach the context. ``None`` leaves the gate to the
+                caller, which runs it after its own confinement checks (the
+                key's workspace, the agent binding).
 
         Returns:
             Context instance
@@ -656,7 +666,8 @@ class ContextService:
             raise NotFoundException("Context", str(context_id))
 
         # #2918: the slot gate, once the caller is known to reach the context.
-        await ensure_slot_active(self.db, context.workspace_id, user_id=user_id)
+        if slot is not None:
+            await ensure_slot_active(self.db, context.workspace_id, user_id=user_id, policy=slot)
 
         return context
 
