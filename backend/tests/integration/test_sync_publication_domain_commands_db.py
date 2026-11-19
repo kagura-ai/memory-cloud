@@ -851,6 +851,54 @@ async def test_an_unlink_after_admission_makes_the_command_stale(env, action):
         ]
 
 
+@pytest.mark.parametrize("action", ACTIONS)
+async def test_every_admission_reads_the_installation_row_again(env, action):
+    """The write admission compares the binding with the row, not with an instance in memory.
+
+    The installation the pre-admission loaded stays referenced (and so in the
+    session's identity map) while another session unlinks it: the write
+    admission must still see the new generation.
+    """
+    store = env.store
+    target = await installed(store)
+    domain_id = None
+    if action != "claim":
+        _hostname, domain_id = await claimed(env, target)
+    held: list[Any] = []
+    original = commands.bound_installation
+
+    async def keep(*args: Any, **kwargs: Any) -> Any:
+        selected = await original(*args, **kwargs)
+        held.append(selected)
+        return selected
+
+    env.monkeypatch.setattr(commands, "bound_installation", keep)
+
+    async def unlink() -> None:
+        response = await fixtures.http(
+            store, "DELETE", f"sync-installations/{target['installation_id']}"
+        )
+        assert response.status_code == 200, response.text
+
+    once_after(env, commands, "_precheck", unlink)
+    body = (
+        claim_body(target, name("cached"))
+        if action == "claim"
+        else row_body(target, domain_id, "pending")
+    )
+    response = await command(store, target, action, body)
+    assert (response.status_code, response.json()) == (409, STALE)
+    # The pre-admission's selection and the write admission's, the latter at the new generation.
+    assert len(held) >= 2 and held[-1][1].generation == target["generation"] + 1
+    rows = await rows_of(store)
+    if action == "claim":
+        assert rows == []
+    else:
+        assert [(str(row.id), row.state, row.check_seq) for row in rows] == [
+            (domain_id, "pending", 0)
+        ]
+
+
 # ----------------------------------------------------------------------------
 # Duplicate submission and the retry hazards
 # ----------------------------------------------------------------------------

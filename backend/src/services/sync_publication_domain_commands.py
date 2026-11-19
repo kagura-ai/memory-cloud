@@ -78,7 +78,8 @@ async def bound_installation(
     The one selection the observation and the commands share. The installation
     row and its authorization are read ``FOR SHARE NOWAIT``; the caller decides
     what a busy row answers. No such installation, or a target that is not live
-    and exact, is a 404 (never repaired).
+    and exact, is a 404 (never repaired). The row is read into the session as
+    it is now, also when an earlier admission of the same session loaded it.
     """
     installation = await db.scalar(
         select(SyncInstallation)
@@ -92,6 +93,7 @@ async def bound_installation(
             SyncAuthorization.service_generation == service.generation,
         )
         .with_for_update(read=True, nowait=True)
+        .execution_options(populate_existing=True)
     )
     if installation is None:
         raise NotFoundException("Synchronization installation")
