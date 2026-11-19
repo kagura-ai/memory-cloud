@@ -253,9 +253,18 @@ class TestOrderedSnapshot:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(slots, "_reconcile", broken)
-        with slot_mode("enforce"), pytest.raises(RuntimeError):
+        with (
+            slot_mode("enforce"),
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(RuntimeError),
+        ):
             await _deliver(slot_world, maxed, 2, "free")
         assert await slot_world.plan_of(maxed) == ("promax", "external_billing")
+        # The alert the runbook names: one line per failed delivery, per owner.
+        (failed,) = [e for e in logs if e["event"] == "workspace_slots_reconcile_failed"]
+        assert failed["owner_user_id"] == owner
+        assert failed["workspace_id"] == str(maxed)
+        assert (failed["cause"], failed["error_class"]) == ("billing_snapshot", "RuntimeError")
 
     async def test_a_delivery_rolled_back_after_the_reconcile_leaves_no_rows(
         self, slot_world: SlotWorld

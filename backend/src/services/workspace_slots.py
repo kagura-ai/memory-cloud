@@ -1382,7 +1382,8 @@ async def finish_plan_change(
       sweep finishes the resume.
     - Non-decreasing change in ``enforce``: in a savepoint; any error rolls
       the savepoint back and is deferred the same way.
-    - Any other change in ``enforce``: an error fails the delivery.
+    - Any other change in ``enforce``: an error fails the delivery and is
+      logged as ``workspace_slots_reconcile_failed``.
     - ``shadow``: ``reconcile_workspace_slots`` never fails its caller.
     """
     if prepared is None:
@@ -1405,14 +1406,25 @@ async def finish_plan_change(
         except Exception as exc:  # noqa: BLE001 — a resume may wait for the sweep
             _log_deferred(prepared, "error", type(exc).__name__)
             return None
-    return await reconcile_workspace_slots(
-        db,
-        prepared.owner_user_id,
-        cause=prepared.cause,
-        allow_suspend=True,
-        change=prepared.change,
-        mode=prepared.mode,
-    )
+    try:
+        return await reconcile_workspace_slots(
+            db,
+            prepared.owner_user_id,
+            cause=prepared.cause,
+            allow_suspend=True,
+            change=prepared.change,
+            mode=prepared.mode,
+        )
+    except Exception as exc:
+        # The delivery fails as a whole; one line per owner to alert on.
+        logger.warning(
+            "workspace_slots_reconcile_failed",
+            owner_user_id=prepared.owner_user_id,
+            workspace_id=str(prepared.change.workspace_id),
+            cause=prepared.cause,
+            error_class=type(exc).__name__,
+        )
+        raise
 
 
 async def reconcile_plan_change(

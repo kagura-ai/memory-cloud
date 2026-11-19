@@ -117,17 +117,33 @@ not exist).
 
 | Event | Meaning |
 |---|---|
+| `workspace_slot_suspension_mode` | Start-up: the mode in effect (`shadow` or `enforce`; nothing is logged for `off`). |
 | `workspace_slots_reconciled` | `enforce`: an owner's suspensions changed (`suspended`, `resumed`, `pruned`, `drop`, `cap`, `allowance`, `cause`). |
 | `workspace_slots_would_change` | `shadow`: what `enforce` would have done (`would_suspend`, `resumed`). |
 | `workspace_slots_deferred` | A resume could not run now (`reason: lock_busy` or `error`); the sweep finishes it. Repeated `error` for one owner needs a look. |
 | `workspace_slots_busy` | A change that may lower an allowance found the owner lock busy and was refused with the retryable 409. |
+| `workspace_slots_reconcile_failed` | `enforce`: the reconcile of a change that may lower the allowance raised (`owner_user_id`, `workspace_id`, `cause`, `error_class`); the delivery or the admin request failed as a whole and nothing was committed. |
 | `workspace_slots_shadow_failed` | `shadow` reconcile raised; the caller was not affected. Fix before `enforce`: in `enforce` the same error fails allowance-lowering deliveries. |
 | `workspace_transfer_refused_no_slot` | A voluntary transfer was refused with `SLOT-004`. |
-| `workspace_slot_sweep_done` | Sweep counts (`owners`, `resumed`, `pruned`, `busy`, `failed`). |
+| `workspace_slot_selection_saved` | An owner saved a selection on the account page (`selected`: how many ids). |
+| `workspace_slot_refused` | The gate refused a call for a suspended workspace (`audience`: owner, member or outsider; `policy`). |
+| `workspace_slot_sweep_done` | Sweep counts (`owners`, `resumed`, `pruned`, `busy`, `failed`, `batches`). |
+| `workspace_slots_sweep_owner_failed` | The sweep's reconcile of one owner raised (`owner_user_id`, `error_class`); the sweep goes on with the next owner. |
+| `workspace_slot_sweep_failed` | A sweep run failed as a whole (`error_class`); the next run starts again. |
+| `workspace_slot_sweep_skipped` | Another process holds the sweep's single-flight lock; this run did nothing. |
+| `workspace_slot_sweep_disabled` | Start-up with the mode `off`: the sweep is not scheduled. |
 
-Alert on `workspace_slots_deferred` with `reason: error` repeating for one owner,
-and on `workspace_slots_busy` repeating: one owner's deterministic reconcile
-error blocks every allowance-lowering delivery for that owner.
+Alert on:
+
+- `workspace_slots_reconcile_failed` for one owner: that owner's reconcile fails
+  deterministically, and every delivery that may lower their allowance fails
+  with it (the payment service retries and keeps failing) until it is fixed;
+- `workspace_slots_sweep_owner_failed` repeating for one owner (their deferred
+  resumes never finish);
+- `workspace_slots_deferred` with `reason: error` repeating for one owner;
+- `workspace_slots_busy` repeating for one owner (their lock is held by long
+  transactions; the deliveries are refused meanwhile);
+- `workspace_slot_sweep_failed` on consecutive runs.
 
 ## What the payment service must retry
 
