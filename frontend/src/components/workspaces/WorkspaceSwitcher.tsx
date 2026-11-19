@@ -44,6 +44,8 @@ export function WorkspaceSwitcher() {
   ];
 
   const handleSwitchWorkspace = async (workspaceId: string) => {
+    // #2919: a suspended workspace is shown but never switched to.
+    if (workspaces.find(ws => ws.id === workspaceId)?.slot_suspended) return;
     try {
       await switchWorkspace(workspaceId);
       setIsOpen(false);

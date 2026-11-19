@@ -5,12 +5,17 @@
  *
  * Issue #276: Full-screen workspace selection for users with multiple workspaces.
  * Displayed when user has multiple workspaces and current_workspace_id is not set.
+ * Issue #2919: a suspended workspace is listed but cannot be selected; its
+ * card links an owner to Workspace management. Signing out is always offered,
+ * so a member whose only workspace is suspended is never stuck here.
  */
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
-import { Plus } from 'lucide-react';
+import { LogOut, Plus } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { useAuth } from '@/contexts/AuthContext';
 import { WorkspaceCard, WorkspaceInfo } from './WorkspaceCard';
 
 const LAST_WORKSPACE_KEY = 'kagura_last_workspace_id';
@@ -27,6 +32,8 @@ export function WorkspaceSelectionScreen({
   onCreateNew,
 }: WorkspaceSelectionScreenProps) {
   const t = useTranslations('workspace');
+  const tSidebar = useTranslations('sidebar');
+  const { logout } = useAuth();
   const router = useRouter();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -34,7 +41,7 @@ export function WorkspaceSelectionScreen({
   // Check localStorage for last used workspace
   useEffect(() => {
     const lastWorkspaceId = localStorage.getItem(LAST_WORKSPACE_KEY);
-    if (lastWorkspaceId && workspaces.some(w => w.id === lastWorkspaceId)) {
+    if (lastWorkspaceId && workspaces.some(w => w.id === lastWorkspaceId && !w.slot_suspended)) {
       setSelectedId(lastWorkspaceId);
     }
   }, [workspaces]);
@@ -42,6 +49,8 @@ export function WorkspaceSelectionScreen({
   const handleSelect = async (workspaceId: string) => {
     // Validate workspace still exists before switching
     const workspace = workspaces.find(w => w.id === workspaceId);
+    // A suspended workspace is never switched to (the server refuses it).
+    if (workspace?.slot_suspended) return;
     if (!workspace) {
       console.error('Workspace not found:', workspaceId);
       localStorage.removeItem(LAST_WORKSPACE_KEY);
@@ -128,6 +137,18 @@ export function WorkspaceSelectionScreen({
             {t('lastUsedWorkspace')}
           </p>
         )}
+
+        <div className="mt-6 text-center">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => void logout('all')}
+            disabled={loading}
+          >
+            <LogOut className="mr-2 h-4 w-4" aria-hidden="true" />
+            {tSidebar('logOut')}
+          </Button>
+        </div>
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import en from "@/messages/en.json";
 import ja from "@/messages/ja.json";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
@@ -33,3 +33,36 @@ describe("workspace switcher", () => {
     },
   );
 });
+
+describe("workspace switcher — suspended workspaces (#2919)", () => {
+  const extra = [
+    { id: "three", name: "Archive", current_user_role: "owner", plan_name: "free", context_count: 0, member_count: 1, slot_suspended: true },
+    { id: "four", name: "Club", current_user_role: "member", plan_name: "free", context_count: 0, member_count: 5, slot_suspended: true },
+  ];
+  afterEach(() => {
+    workspaces.splice(2);
+    switchWorkspace.mockReset();
+  });
+
+  it.each([["ja", ja], ["en", en]] as const)(
+    "%s: lists them labelled and disabled; the owner gets the page link, a member the ask-the-owner text",
+    (locale, messages) => {
+      workspaces.push(...extra);
+      render(<NextIntlClientProvider locale={locale} messages={messages}><WorkspaceSwitcher /></NextIntlClientProvider>);
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(messages.workspace.currentWorkspaceCaption) }));
+      const group = screen.getByRole("group", { name: messages.workspace.title });
+      const archive = within(group).getByRole("button", { name: /Archive/ });
+      const club = within(group).getByRole("button", { name: /Club/ });
+      for (const button of [archive, club]) {
+        expect(button).toBeDisabled();
+        expect(button).toHaveTextContent(messages.workspaceSlots.card.suspended);
+      }
+      expect(within(group).getByRole("link", { name: messages.workspaceSlots.card.manage })).toHaveAttribute("href", "/profile/workspaces");
+      expect(within(group).getAllByRole("link")).toHaveLength(1);
+      expect(within(group).getByText(messages.workspaceSlots.card.askOwner)).toBeInTheDocument();
+      fireEvent.click(archive);
+      expect(switchWorkspace).not.toHaveBeenCalled();
+    },
+  );
+});
+

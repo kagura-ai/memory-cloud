@@ -27,6 +27,7 @@ import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { sidebarNavigationGroups as navigationGroups, type NavItem } from "@/lib/navigation/featureNavigation";
 import { useBetaInvites } from "@/hooks/useBetaInvites";
+import { WORKSPACE_MANAGEMENT_PATH } from "@/lib/navigation/workspaceManagement";
 import {
   hasRole,
   isSystemAdmin,
@@ -51,7 +52,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 import { apiClient } from "@/lib/api/base";
-import { LogOut, UserCircle, Menu, ChevronDown, AlertTriangle, Info, ExternalLink, UserPlus, MailPlus, Check } from "lucide-react";
+import { LogOut, UserCircle, Menu, ChevronDown, AlertTriangle, Info, ExternalLink, UserPlus, MailPlus, Check, Building2 } from "lucide-react";
 // Issue #246: ContextSelector removed - use /contexts link instead
 import { WorkspaceSwitcher } from "@/components/workspaces/WorkspaceSwitcher";
 import { InviteFriendCard } from "@/components/beta-invites/InviteFriendCard";
@@ -80,6 +81,7 @@ export function Sidebar() {
   const t = useTranslations("sidebar");
   const tNav = useTranslations("navigation");
   const tInvite = useTranslations("betaInvites");
+  const tSlots = useTranslations("workspaceSlots");
 
   const [collapsedSections, setCollapsedSections] = useState<
     Record<string, boolean>
@@ -193,6 +195,9 @@ export function Sidebar() {
   // no card, no menu entry, no dialog, and the hook makes no request. The one
   // hook instance feeds the card, the menu counter and the dialog alike.
   const betaInvitesEnabled = systemFeatures?.beta_invites === true;
+  // Issue #2919: Workspace management, served only while the deployment
+  // suspends owned workspaces over the allowance (`features.workspace_slots`).
+  const workspaceSlotsEnabled = systemFeatures?.workspace_slots === true;
   const betaInvites = useBetaInvites();
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const openInviteDialog = () => {
@@ -789,6 +794,19 @@ export function Sidebar() {
                 <UserCircle className="mr-2 h-4 w-4" />
                 <span>{t("profileSettings")}</span>
               </DropdownMenuItem>
+
+              {/* Workspace management (#2919): the owner's allowance and suspended workspaces */}
+              {workspaceSlotsEnabled && (
+                <DropdownMenuItem
+                  onClick={() => {
+                    router.push(WORKSPACE_MANAGEMENT_PATH);
+                    setIsOpen(false);
+                  }}
+                >
+                  <Building2 className="mr-2 h-4 w-4" />
+                  <span>{tSlots("menuEntry")}</span>
+                </DropdownMenuItem>
+              )}
 
               {/* Invite a friend (#1582) — permanent, so the dialog stays
                   reachable at the cap and after the card was dismissed. No
