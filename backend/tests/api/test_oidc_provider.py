@@ -594,6 +594,11 @@ def test_consent_page_escapes_client_name_account_and_query_values(api, store):
     action = urlsplit(form["action"] or "")
     assert (action.scheme, action.netloc, action.path) == ("", "", "/oidc/authorize")
     assert parse_qs(action.query)["state"] == [params["state"]]
+    # The raw attribute text: the query arrives percent-encoded, so the escape
+    # that shows is its ``&`` separators written as ``&amp;``.
+    (raw_action,) = re.findall(r'<form method="post" action="([^"]*)">', page.text)
+    assert raw_action.count("&amp;") == len(params) - 1
+    assert re.findall(r"&(?!amp;)", raw_action) == []
 
 
 def test_consent_page_style_nonce_is_fresh_per_response_and_the_only_style_source(api):
