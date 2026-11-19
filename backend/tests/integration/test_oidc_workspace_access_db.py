@@ -336,12 +336,15 @@ async def test_public_eligibility_requires_max_plan_canonical_owner_and_owner_me
         assert str(store.wid) not in await listed()
         assert_private(await request(store, path=access), 404)
     await change(store, Workspace, store.wid, plan_name="promax")
-    # Canonical owner whose membership is not the owner role.
+    # Canonical owner whose own membership is not the owner role, while another
+    # member holds the owner role: the owner role must be the caller's own.
+    await change(store, WorkspaceMember, store.member_ids["admin"], role="owner")
     await change(store, WorkspaceMember, store.member_ids["owner"], role="admin")
     assert str(store.wid) not in await listed()
     assert_private(await request(store, path=access), 404)
     assert_private(await request(store, path=access.split("?")[0]), 200)
     await change(store, WorkspaceMember, store.member_ids["owner"], role="owner")
+    await change(store, WorkspaceMember, store.member_ids["admin"], role="admin")
     # Owner-role membership without being the canonical owner.
     await change(store, WorkspaceMember, store.member_ids["admin"], role="owner")
     assert await listed("admin") == []
