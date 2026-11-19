@@ -144,13 +144,19 @@ def _query(request: Request, allowed: set[str]) -> dict[str, str]:
 
 EligibleFor = Literal["kagura-public"]
 
+_ELIGIBLE_RULE = (
+    "`kagura-public` selects the workspaces the subject owns as canonical owner "
+    "with an owner membership, on the Max plan now."
+)
+
 
 def _eligibility(user_id: str, eligible_for: EligibleFor | None) -> list[ColumnElement[bool]]:
     """The ``eligible_for`` rule, one definition for the listing and the access check.
 
     ``kagura-public``: the subject is the workspace's canonical owner, holds
     the owner role in its membership row, and the workspace is on the Max plan
-    now (``plan_name`` is the current plan; Max is the highest tier). Applied
+    now (``plan_name`` is the current plan; Max is the highest tier; the
+    billing access window and integration licenses are not consulted). Applied
     in SQL next to the membership join, so it filters before the page is cut.
     No value adds nothing.
     """
@@ -170,7 +176,10 @@ async def list_workspaces(
     db: Database,
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     cursor: UUID | None = None,
-    eligible_for: EligibleFor | None = None,
+    eligible_for: Annotated[
+        EligibleFor | None,
+        Query(description=_ELIGIBLE_RULE + " Only those workspaces are listed and paged."),
+    ] = None,
 ) -> WorkspaceList:
     """List only the subject's live memberships, without consulting the UI workspace."""
     _query(request, {"limit", "cursor", "eligible_for"})
@@ -205,7 +214,13 @@ async def workspace_access(
     principal: Principal,
     db: Database,
     context_id: UUID | None = None,
-    eligible_for: EligibleFor | None = None,
+    eligible_for: Annotated[
+        EligibleFor | None,
+        Query(
+            description=_ELIGIBLE_RULE
+            + " A workspace that does not meet it answers 404, as one the subject cannot reach."
+        ),
+    ] = None,
 ) -> WorkspaceAccess:
     """Inspect membership and optional resource eligibility with the existing RBAC gates.
 
