@@ -51,6 +51,7 @@ from utils.exceptions import (
     MemoryCloudException,
     QuotaExceededError,
     RateLimitError,
+    WorkspaceSlotSuspendedError,
 )
 from utils.geo_location import LocationValidationError
 from utils.logger import get_logger
@@ -188,7 +189,30 @@ _REFUSAL_HELP: dict[str, str] = {
         "The workspace is over its Free plan capacity. list, forget, delete_context, "
         "delete_file and get_usage still work; remove data or re-subscribe from the web UI."
     ),
+    # #2918: the real help is built per refusal (``_slot_help``); this is the fallback.
+    "workspace_suspended": (
+        "The workspace is suspended because its owner has more workspaces than their plan "
+        "allows; its data is kept. The owner can resume it from the account page."
+    ),
 }
+
+
+def _slot_help(exc: WorkspaceSlotSuspendedError) -> str:
+    """The next step for an MCP caller refused by the slot gate (#2918)."""
+    manage_url = exc.details.get("manage_url")
+    if manage_url:
+        return (
+            f"Choose which workspaces stay active, or add slots, at {manage_url}. Until then "
+            "you can export a context or delete the workspace from the web UI; contexts in "
+            "your other workspaces keep working."
+        )
+    if exc.details.get("workspace_id"):
+        return (
+            "Ask the workspace owner to resume it. Contexts in your other workspaces keep "
+            "working: pass their context_id."
+        )
+    return _REFUSAL_HELP["workspace_suspended"]
+
 
 _READ_ONLY = "This tool only reads, so"
 _RETRY_TRANSIENT = (
@@ -313,6 +337,14 @@ def _refusal(exc: BaseException) -> tuple[str, str, dict[str, Any]]:
         details = {k: v for k, v in exc.details.items() if v is not None}
         details["help"] = exc.help_text
         return "capacity_locked", exc.message, details
+    if isinstance(exc, WorkspaceSlotSuspendedError):
+        # #2918: before the 401/403 arm as well — a suspension is not a role
+        # denial; its details were already cut to what the caller may learn.
+        details = {
+            k: v for k, v in exc.details.items() if v is not None and k not in _RESERVED_KEYS
+        }
+        details["help"] = _slot_help(exc)
+        return "workspace_suspended", exc.message, details
     if isinstance(exc, ContentSizeExceededError):
         from mcp_server.tools.memory import PAYLOAD_HELP
 
@@ -433,9 +465,10 @@ def describe_tool_exception(
     Returns:
         The failure, for ``.response()`` (tool result) or ``.jsonrpc_data()``.
     """
-    if isinstance(exc, CapacityLockedError):
-        # #1941: one code on every door — a handler's legacy ``<tool>_error``
-        # must not hide the lock when the service-level check raised it.
+    if isinstance(exc, (CapacityLockedError, WorkspaceSlotSuspendedError)):
+        # #1941 / #2918: one code on every door — a handler's legacy
+        # ``<tool>_error`` must not hide the lock or the suspension when the
+        # service-level check raised it.
         error = None
     if _is_refusal(exc, echo_value_error=echo_value_error):
         code, message, details = _refusal(exc)

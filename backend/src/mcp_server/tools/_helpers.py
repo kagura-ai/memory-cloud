@@ -19,6 +19,7 @@ from config.settings import get_settings
 from mcp_server.tools._constants import T, get_tool_timeout
 from services import plan_seats
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
+from services.workspace_slot_gate import ensure_slot_active
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -894,6 +895,9 @@ async def _get_workspace_member_role(
     member = result.scalar_one_or_none()
     if member is None:
         return None
+    # #2918: a slot-suspended workspace refuses every member (SLOT-001, MCP
+    # ``workspace_suspended``), after membership so a non-member learns nothing.
+    await ensure_slot_active(db, workspace_id, user_id=user_id)
     # #1943: a member without a seat on the plan is refused (FEAT-001), after
     # membership — the dispatcher's exception mapper renders the same envelope
     # as the other plan pauses.
