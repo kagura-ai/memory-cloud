@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -146,9 +146,10 @@ async def list_workspaces(
     db: Database,
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     cursor: UUID | None = None,
+    eligible_for: Literal["kagura-public"] | None = None,
 ) -> WorkspaceList:
     """List only the subject's live memberships, without consulting the UI workspace."""
-    _query(request, {"limit", "cursor"})
+    _query(request, {"limit", "cursor", "eligible_for"})
     stmt = (
         select(Workspace.id, Workspace.name, WorkspaceMember.role)
         .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
@@ -156,6 +157,12 @@ async def list_workspaces(
         .order_by(Workspace.id)
         .limit(limit + 1)
     )
+    if eligible_for is not None:
+        stmt = stmt.where(
+            Workspace.plan_name == "promax",
+            Workspace.owner_user_id == principal.user_id,
+            WorkspaceMember.role == WorkspaceRole.OWNER,
+        )
     if cursor is not None:
         stmt = stmt.where(Workspace.id > cursor)
     rows = (await db.execute(stmt)).all()
@@ -177,16 +184,24 @@ async def workspace_access(
     principal: Principal,
     db: Database,
     context_id: UUID | None = None,
+    eligible_for: Literal["kagura-public"] | None = None,
 ) -> WorkspaceAccess:
     """Inspect membership and optional resource eligibility with the existing RBAC gates."""
-    _query(request, {"context_id"})
+    _query(request, {"context_id", "eligible_for"})
     wid = workspace_id
     permissions = PermissionService(db)
     member = await permissions.check_workspace_access(
         principal.user_id, wid, required_role=WorkspaceRole.VIEWER, require_seat=False
     )
     workspace = await db.get(Workspace, wid)
-    if workspace is None:
+    if workspace is None or (
+        eligible_for is not None
+        and (
+            workspace.plan_name != "promax"
+            or workspace.owner_user_id != principal.user_id
+            or member.role != WorkspaceRole.OWNER
+        )
+    ):
         raise NotFoundException("Workspace")
     resource = None
     if context_id is not None:
