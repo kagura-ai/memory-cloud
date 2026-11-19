@@ -2,15 +2,17 @@
 
 Every 15 minutes, while ``WORKSPACE_SLOT_SUSPENSION`` is ``shadow`` or
 ``enforce``: ``services.workspace_slots.sweep_workspace_slots`` visits the
-owners with suspension rows (a bounded batch, continuing where the previous
-run stopped), tries each owner's slot lock once and resumes and prunes; it
-never suspends. It finishes what a deferred or lost post-commit reconcile
+owners with suspension rows in bounded batches, one after another, for up to
+about a minute per run (the next run continues where this one stopped), tries
+each owner's slot lock once and resumes and prunes; it never suspends. It finishes what a deferred or lost post-commit reconcile
 left (a workspace deleted or transferred, a non-decreasing billing change
 that found the lock busy) and removes rows of workspaces that are gone.
 Single-flight across API processes; does nothing in mode ``off``.
 """
 
 from __future__ import annotations
+
+from time import monotonic
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -25,6 +27,10 @@ logger = get_logger(__name__)
 
 JOB_ID = "workspace_slot_sweep"
 SWEEP_INTERVAL_MINUTES = 15
+# How long one run keeps taking batches. Every owner with rows is visited once
+# per run unless there are more than one minute's worth; then the next run
+# continues after the last one visited.
+SWEEP_TIME_BUDGET_SECONDS = 60.0
 _LOCK_KEY = "workspace_slot_sweep"
 
 # Where the next run continues (an owner id; "" = from the start). Per
@@ -33,7 +39,7 @@ _cursor = {"after": ""}
 
 
 async def workspace_slot_sweep() -> JobResult:
-    """The scheduled job: one bounded batch; integer counts or ``job_failed``."""
+    """The scheduled job: batches for up to a minute; integer counts or ``job_failed``."""
     if workspace_slot_mode() == "off":
         return {"skipped": 1}
     try:
@@ -41,17 +47,35 @@ async def workspace_slot_sweep() -> JobResult:
             if not acquired:
                 logger.info("workspace_slot_sweep_skipped", reason="single_flight")
                 return {"skipped": 1}
-            counts: dict[str, int] = {}
+            counts: dict[str, int] = dict.fromkeys(
+                ("owners", "resumed", "pruned", "busy", "failed", "batches"), 0
+            )
+            started = monotonic()
             async for db in get_db():
-                outcome = await sweep_workspace_slots(db, after=_cursor["after"])
-                _cursor["after"] = outcome.next_after
-                counts = {
-                    "owners": outcome.owners,
-                    "resumed": outcome.resumed,
-                    "pruned": outcome.pruned,
-                    "busy": outcome.busy,
-                    "failed": outcome.failed,
-                }
+                # One full pass at most: from the cursor to the last owner,
+                # then from the first owner up to the cursor; never the same
+                # owner twice in a run. Out of time: the next run continues.
+                first = _cursor["after"]
+                after, second_lap = first, False
+                while monotonic() - started < SWEEP_TIME_BUDGET_SECONDS:
+                    outcome = await sweep_workspace_slots(
+                        db, after=after, until=first if second_lap else None
+                    )
+                    after = outcome.next_after
+                    _cursor["after"] = after
+                    counts["batches"] += 1
+                    counts["owners"] += outcome.owners
+                    counts["resumed"] += outcome.resumed
+                    counts["pruned"] += outcome.pruned
+                    counts["busy"] += outcome.busy
+                    counts["failed"] += outcome.failed
+                    if second_lap and after == first:
+                        after = ""  # the second lap reached the cursor
+                    if after == "":
+                        if second_lap or first == "":
+                            _cursor["after"] = ""
+                            break  # a full pass
+                        second_lap = True
             logger.info("workspace_slot_sweep_done", **counts)
             return counts
     except Exception as exc:

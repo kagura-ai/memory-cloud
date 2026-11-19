@@ -50,26 +50,67 @@ async def test_skips_when_another_process_holds_the_lock() -> None:
     sweep.assert_not_awaited()
 
 
+def _sweep_over(owners: list[str], limit: int, calls: list[tuple[str, str | None]]):
+    """A fake sweep over sorted ``owners`` honouring ``after`` / ``until`` / ``limit``."""
+
+    async def sweep(db, *, after: str = "", until: str | None = None, limit: int = limit):
+        calls.append((after, until))
+        page = [o for o in owners if o > after and (until is None or o <= until)][:limit]
+        return SweepOutcome(
+            owners=len(page),
+            resumed=0,
+            pruned=0,
+            busy=0,
+            failed=0,
+            next_after=page[-1] if len(page) == limit else "",
+        )
+
+    return sweep
+
+
 @pytest.mark.asyncio
-async def test_runs_one_batch_and_continues_after_the_cursor(monkeypatch) -> None:
-    db = MagicMock()
+async def test_one_run_makes_a_full_pass_in_batches(monkeypatch) -> None:
+    owners = [f"owner-{i}" for i in range(5)]
+    calls: list[tuple[str, str | None]] = []
     monkeypatch.setitem(workspace_slot_tasks._cursor, "after", "")
-    outcomes = [
-        SweepOutcome(owners=2, resumed=1, pruned=1, busy=0, failed=0, next_after="owner-b"),
-        SweepOutcome(owners=1, resumed=0, pruned=0, busy=1, failed=0, next_after=""),
-    ]
-    sweep = AsyncMock(side_effect=outcomes)
     with (
         _mode("shadow"),
         patch.object(workspace_slot_tasks, "single_flight", _single_flight(True)),
-        patch.object(workspace_slot_tasks, "get_db", mock_get_db_factory(db)),
-        patch.object(workspace_slot_tasks, "sweep_workspace_slots", new=sweep),
+        patch.object(workspace_slot_tasks, "get_db", mock_get_db_factory(MagicMock())),
+        patch.object(workspace_slot_tasks, "sweep_workspace_slots", _sweep_over(owners, 2, calls)),
+    ):
+        counts = await workspace_slot_tasks.workspace_slot_sweep()
+    assert counts["owners"] == 5
+    assert calls == [("", None), ("owner-1", None), ("owner-3", None)]
+    assert workspace_slot_tasks._cursor["after"] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_run_out_of_time_continues_and_the_next_one_wraps_once(monkeypatch) -> None:
+    owners = [f"owner-{i}" for i in range(5)]
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setitem(workspace_slot_tasks._cursor, "after", "")
+    clock = iter([0.0, 0.0, 61.0])  # started, first check, second check: out of time
+    with (
+        _mode("enforce"),
+        patch.object(workspace_slot_tasks, "single_flight", _single_flight(True)),
+        patch.object(workspace_slot_tasks, "get_db", mock_get_db_factory(MagicMock())),
+        patch.object(workspace_slot_tasks, "sweep_workspace_slots", _sweep_over(owners, 2, calls)),
+        patch.object(workspace_slot_tasks, "monotonic", lambda: next(clock)),
     ):
         first = await workspace_slot_tasks.workspace_slot_sweep()
+    assert (first["owners"], workspace_slot_tasks._cursor["after"]) == (2, "owner-1")
+    calls.clear()
+    with (
+        _mode("enforce"),
+        patch.object(workspace_slot_tasks, "single_flight", _single_flight(True)),
+        patch.object(workspace_slot_tasks, "get_db", mock_get_db_factory(MagicMock())),
+        patch.object(workspace_slot_tasks, "sweep_workspace_slots", _sweep_over(owners, 2, calls)),
+    ):
         second = await workspace_slot_tasks.workspace_slot_sweep()
-    assert first == {"owners": 2, "resumed": 1, "pruned": 1, "busy": 0, "failed": 0}
-    assert second["busy"] == 1
-    assert [c.kwargs["after"] for c in sweep.await_args_list] == ["", "owner-b"]
+    # owner-2..4 after the cursor, then owner-0..1 up to it: every owner once.
+    assert second["owners"] == 5
+    assert calls == [("owner-1", None), ("owner-3", None), ("", "owner-1")]
     assert workspace_slot_tasks._cursor["after"] == ""
 
 

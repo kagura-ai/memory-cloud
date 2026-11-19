@@ -15,7 +15,7 @@ given: run that before switching from ``off`` back to ``shadow`` or
 ``enforce``, so rows left from an earlier ``enforce`` period that should no
 longer hold (a workspace upgraded or deleted meanwhile) are gone first.
 
-Exit codes: 0 ok · 1 error · 2 refused (mode off without --even-when-off, or
+Exit codes: 0 ok · 1 an owner was skipped or failed (the others ran) · 2 refused (mode off without --even-when-off, or
 the tables are missing).
 """
 
@@ -80,8 +80,8 @@ async def _reconcile(owner: str | None, even_when_off: bool) -> int:
             "WORKSPACE_SLOT_SUSPENSION=off: nothing runs. Pass --even-when-off to resume and prune."
         )
         return 2
-    # Resume and prune only in every mode; while off, with enforce semantics
-    # for the deletes (shadow would still log only).
+    # Resume and prune only, in every mode (shadow deletes the rows that should
+    # resume too); while off, run as enforce does with no suspension.
     mode: SlotMode = "enforce" if configured == "off" else configured
     async for db in get_db():
         if not await slot_tables_present(db):
@@ -100,20 +100,24 @@ async def _reconcile(owner: str | None, even_when_off: bool) -> int:
                 ).scalars()
             )
         await db.commit()
-        failed = 0
+        skipped = failed = 0
         for one in owners:
-            async with isolated_session(db) as session:
-                if not await owner_slot_lock(session, one, wait=True):
-                    print(f"  {one}: busy, skipped")
-                    failed += 1
-                    continue
-                outcome = await reconcile_workspace_slots(
-                    session, one, cause="cli", allow_suspend=False, mode=mode
-                )
-                await session.commit()
-                print(f"  {one}: resumed {len(outcome.resumed)}, pruned {outcome.pruned}")
-        print(f"owners: {len(owners)}, skipped: {failed}")
-        return 1 if failed else 0
+            try:
+                async with isolated_session(db) as session:
+                    if not await owner_slot_lock(session, one, wait=True):
+                        print(f"  {one}: busy, skipped")
+                        skipped += 1
+                        continue
+                    outcome = await reconcile_workspace_slots(
+                        session, one, cause="cli", allow_suspend=False, mode=mode
+                    )
+                    await session.commit()
+                    print(f"  {one}: resumed {len(outcome.resumed)}, pruned {outcome.pruned}")
+            except Exception as exc:  # noqa: BLE001 — one owner never stops the run
+                print(f"  {one}: failed ({type(exc).__name__})")
+                failed += 1
+        print(f"owners: {len(owners)}, skipped: {skipped}, failed: {failed}")
+        return 1 if skipped or failed else 0
     return 0
 
 
