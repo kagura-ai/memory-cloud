@@ -79,7 +79,7 @@ async def sync_authority(
     Internal activation checks the current owner without reusing a human grant.
 
     #2918: a human principal is refused for a slot-suspended workspace
-    (``slot``; ``OWNER_MANAGEMENT`` only for withdrawing an authorization).
+    (``slot``; ``REVOCATION`` only for withdrawing an authorization).
     The internal billing service (no principal) is never refused by it: the
     payment service keeps reading and writing a suspended workspace.
     """

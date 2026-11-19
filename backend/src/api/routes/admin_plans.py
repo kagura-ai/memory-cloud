@@ -632,6 +632,10 @@ async def update_workspace_plan(
 
     Raises:
         404: Workspace not found
+        409: ``RES-002`` with ``details.reason: workspace_slots_busy`` (#2918,
+            ``WORKSPACE_SLOT_SUSPENSION=enforce``): a change that may lower
+            the owner's workspace allowance found another change for that
+            owner in progress; nothing was saved, retry.
         422: Invalid plan tier
     """
     async with db_transaction(db, "update_workspace_plan", "Failed to update workspace plan"):

@@ -656,3 +656,28 @@ class TestFeatureOffOtherMethodsAndTheTrailingSlash:
         assert followed.status_code == 404
         assert followed.json() == NOT_FOUND
         assert db_opened == []
+
+    @pytest.mark.parametrize("value", ["off", "shadow"])
+    def test_a_malformed_path_id_gets_the_same_404(self, anonymous, db_opened, mode, value) -> None:
+        mode(value)
+        response = anonymous.get(f"{BASE}/workspaces/not-a-uuid/contexts")
+        assert response.status_code == 404
+        assert response.json() == NOT_FOUND
+        assert db_opened == []
+
+    @pytest.mark.parametrize("value", ["off", "shadow"])
+    @pytest.mark.parametrize(
+        ("method", "path"), [("POST", f"{BASE}/preview"), ("PUT", f"{BASE}/selection")]
+    )
+    def test_a_body_that_is_not_json_is_422_before_the_404(
+        self, anonymous, db_opened, mode, value, method, path
+    ) -> None:
+        """The framework reads the JSON body before any dependency runs, so a
+        body it cannot parse answers its 422 as on every route."""
+        mode(value)
+        response = anonymous.request(
+            method, path, content=b"{not json", headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 422
+        assert response.json()["error"] == "VAL-001"
+        assert db_opened == []

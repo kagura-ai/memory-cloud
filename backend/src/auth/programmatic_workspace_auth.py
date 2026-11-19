@@ -103,7 +103,7 @@ async def authorize_workspace_management(
             endpoint (unchanged per-endpoint semantics). Ignored for API-key
             principals, which are always owner-gated.
         slot: The workspace slot gate (#2918) of the permission check:
-            ``OWNER_MANAGEMENT`` only for the revocation routes (pinned by
+            ``REVOCATION`` only for the credential revoke routes (pinned by
             ``tests/api/test_slot_suspension_route_table.py``).
 
     Returns:

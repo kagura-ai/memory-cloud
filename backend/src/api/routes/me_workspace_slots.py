@@ -14,9 +14,10 @@ The surface is **experimental**: it may change in a minor release.
 - Served only while ``WORKSPACE_SLOT_SUSPENSION=enforce``. In ``off`` and
   ``shadow`` every route of this surface answers 404 ``HTTP-404`` "Not Found"
   (the body of an unknown path), from a router-level dependency evaluated
-  before authentication, and no statement runs. A method a route does not
-  serve (405) and the trailing-slash redirect (307) come from the framework's
-  routing as on any other path.
+  before authentication, and no statement runs (a malformed path id gets the
+  same 404). A method a route does not serve (405), the trailing-slash
+  redirect (307) and a body that is not JSON (422, read before any
+  dependency) come from the framework as on any other path.
 - Ownership is ``Workspace.owner_user_id``; membership in somebody else's
   workspace takes no slot and is not listed.
 """

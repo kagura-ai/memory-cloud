@@ -1629,6 +1629,11 @@ async def transfer_workspace_ownership(
     session). The owner check binds to the **path** ``workspace_id``, never the
     caller's current workspace. Atomic single-owner invariant under a row lock,
     idempotent, and writes an audit row + bumps the ownership epoch on success.
+
+    #2918, with ``WORKSPACE_SLOT_SUSPENSION=enforce``: a slot-suspended
+    workspace answers 403 ``SLOT-001``; 409 ``SLOT-004`` when the new owner
+    has no free workspace slot; 409 ``RES-002`` (``workspace_slots_busy``)
+    while another change for the new owner is in progress (retry).
     """
     user_id = get_user_id(user)
     # Owner-only against the explicit path workspace_id (#389 cross-tenant guard).
