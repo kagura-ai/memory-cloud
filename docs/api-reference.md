@@ -2637,7 +2637,7 @@ Kagura Memory Cloud provides MCP tools for memory, contexts, agents, files, reso
 | Request | Status | `WWW-Authenticate` |
 |---------|--------|--------------------|
 | No credentials | `401` | `Bearer realm="Kagura Memory Cloud", resource_metadata="<origin>/.well-known/oauth-protected-resource"` — no error code (RFC 6750 §3.1) |
-| Unknown, expired or revoked token, or an OAuth token issued for another resource | `401` | `Bearer realm="…", error="invalid_token", error_description="…", resource_metadata="…"` |
+| Unknown, expired or revoked token, a workspace-scoped key whose owner does not hold its workspace, or an OAuth token issued for another resource | `401` | `Bearer realm="…", error="invalid_token", error_description="…", resource_metadata="…"` |
 | Malformed `Authorization` header: not `Bearer <token>` (the scheme is case-insensitive), or an empty token or one containing whitespace | `401` | `Bearer realm="…", error="invalid_request", error_description="…", resource_metadata="…"` |
 | OAuth token without the scope a `tools/call` needs | `403` | `Bearer realm="…", error="insufficient_scope", error_description="…", scope="<granted scopes plus the required one>", resource_metadata="…"` |
 

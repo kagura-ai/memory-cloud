@@ -874,8 +874,9 @@ async def _get_workspace_member_role(
         user_id: User ID
         workspace_id: Workspace ID
         require_seat: Refuse a member without a seat on the plan (#1943).
-            ``False`` for the readers of the workspace's usage and resource
-            stats (#2928), as the REST usage readouts (#2632).
+            ``False`` for ``get_usage``, as the REST usage readouts (#2632),
+            and for ``get_resource_impact`` / ``get_resource_schema``, which
+            keep the access they had for members (#2928).
 
     Returns:
         Role string ('owner', 'admin', 'member', 'viewer') or ``None`` if
@@ -932,8 +933,9 @@ async def _check_workspace_membership(
         workspace_id: Workspace ID (None = skip check).
         operation: Operation description for error message.
         require_seat: Also refuse a member without a seat on the plan.
-            ``False`` for ``get_usage`` and the resource stats of the session
-            workspace (#2928): a member without a seat still gets the answer.
+            ``False`` for ``get_usage``, as the REST usage readouts (#2632),
+            and for ``get_resource_impact`` / ``get_resource_schema``, which
+            keep the access they had for members (#2928).
 
     Returns:
         Error response if the caller is NOT a member of the

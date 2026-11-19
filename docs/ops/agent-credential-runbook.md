@@ -237,8 +237,10 @@ Semantics on the programmatic (owner-key) path:
 
 1. An authenticated call with the revoked key returns 401. Revocation and expiry take effect
    at the next verification — `APIKeyManager.verify_key` (`backend/src/auth/api_keys.py`)
-   consults the database row and returns `None` for revoked or expired keys; there is no
-   token cache to purge.
+   consults the database row and returns `None` for revoked or expired keys, and for a
+   workspace-scoped key whose owner does not hold its workspace (the workspace is deleted,
+   or the owner is neither its owner nor has a membership row in it; #2928, logged as
+   `api_key_rejected_owner_not_in_workspace`); there is no token cache to purge.
 2. `GET .../credentials` shows `revoked_at` set on the key.
 3. An `audit_logs` row exists with `action = 'member_api_key_revoked'`,
    `user_metadata.revoked_key_prefix`, and `user_metadata.self_revoke`.
@@ -498,7 +500,10 @@ All rows/events below are shipped and verifiable in the tree:
 - **Structured log events**: `member_api_key_provisioned`, `member_api_key_revoked`,
   `api_key_created`, `api_key_deleted`, `workspace_mgmt_owner_key_disabled` (kill-switch),
   `workspace_mgmt_scoped_key_confined` (#963), `workspace_mgmt_oauth_denied`,
-  `workspace_mgmt_unrecognized_principal`. The key events carry both the integer `key_id`
+  `workspace_mgmt_unrecognized_principal`, `api_key_rejected_owner_not_in_workspace` (a
+  workspace-scoped key refused at verification because its owner does not hold the
+  workspace; carries the key prefix and the workspace id, #2928). The key events carry both
+  the integer `key_id`
   and the `public_id` (#1008), so a search on either side of the mapping above finds them.
 - **Auto-hide sweeper**: hourly job (`backend/src/tasks/credentials_tasks.py` →
   `backend/src/background/auto_hide_credentials.py`) clears plaintext visibility for

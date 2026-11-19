@@ -4844,6 +4844,12 @@ A key whose link points at a connector outside its own workspace is refused at
 verification with the warning `api_key_rejected_connector_workspace_mismatch`;
 only a direct write to the table can produce one.
 
+A workspace-scoped key, a connector's write key included, is also refused (`401`)
+while its owner does not hold the workspace — the workspace is deleted, or the
+owner has no membership row in it and is not its owner — with the warning
+`api_key_rejected_owner_not_in_workspace` (#2928). For a connector, rotating its
+key mints the replacement under a current member or the workspace owner.
+
 ### Migration `f14_1963_memories_ws_ctx_fk` (#1963)
 
 A memory now has to live in its context's workspace: the foreign key
