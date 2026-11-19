@@ -262,3 +262,18 @@ async def test_the_dispatcher_fails_closed() -> None:
     body = json.loads(refusal[0].text)
     assert body["error"] in {"service_unavailable", "internal_error"}
     assert "correlation_id" in body
+
+
+@pytest.mark.asyncio
+async def test_any_object_carrying_a_workspace_id_is_gated() -> None:
+    """A workspace-like object (not the ORM row) is never read as "no id"."""
+    from types import SimpleNamespace
+
+    db = _db()
+    wid = uuid4()
+    with _mode("enforce"), _suspended(wid), pytest.raises(WorkspaceSlotSuspendedError) as exc:
+        await gate.ensure_slot_active(
+            db, SimpleNamespace(id=wid, owner_user_id=OWNER), user_id=OWNER
+        )
+    assert exc.value.details["manage_url"] == gate.manage_url()
+    db.scalar.assert_not_awaited()

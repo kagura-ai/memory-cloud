@@ -657,3 +657,55 @@ async def test_sleep_skips_a_suspended_workspace(world: World) -> None:
         assert await orchestrator._get_sleep_mode(str(w.ctx["k1"])) == "full"
     with _mode("shadow"):
         assert await orchestrator._get_sleep_mode(str(w.ctx["s1"])) == "full"
+
+
+# ---------------------------------------------------------------------------
+# Owner management over REST: revoking a credential
+# ---------------------------------------------------------------------------
+
+
+async def test_revoking_a_credential_works_for_the_owner_only(world: World) -> None:
+    import httpx
+
+    from api.main import app
+    from auth.dependencies import require_session_auth
+    from db.base import get_db
+    from models.auth import APIKey
+
+    w = world
+
+    async def _key() -> str:
+        key = APIKey(
+            user_id=w.member,
+            name=f"slot-{uuid4().hex[:6]}",
+            key_hash=uuid4().hex + uuid4().hex,
+            key_prefix="kmc_" + uuid4().hex[:8],
+            workspace_id=w.ws["s"],
+        )
+        w.session.add(key)
+        await w.session.commit()
+        return key.public_id
+
+    async def _db() -> AsyncIterator[AsyncSession]:
+        async with w.factory() as s:
+            yield s
+            await s.commit()
+
+    url = f"/api/v1/workspaces/{w.ws['s']}/members/{w.member}/credentials/api-key"
+    app.dependency_overrides[get_db] = _db
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as client:
+            await _key()
+            with _mode("enforce"):
+                app.dependency_overrides[require_session_auth] = lambda: {"user_id": w.admin}
+                refused = await client.delete(url)
+                app.dependency_overrides[require_session_auth] = lambda: {"user_id": w.owner}
+                revoked = await client.delete(url)
+    finally:
+        app.dependency_overrides.clear()
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["error"] == "SLOT-001"
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["status"] == "deleted"

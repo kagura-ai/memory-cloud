@@ -95,9 +95,10 @@ def _as_uuid(value: object) -> UUID | None:
 def _workspace_id_of(workspace_or_id: Workspace | UUID | str | None) -> UUID | None:
     if workspace_or_id is None:
         return None
-    if isinstance(workspace_or_id, Workspace):
-        return _as_uuid(workspace_or_id.id)
-    return _as_uuid(workspace_or_id)
+    if isinstance(workspace_or_id, (UUID, str)):
+        return _as_uuid(workspace_or_id)
+    # A workspace row (or any object carrying one's ``id``): never read as "no id".
+    return _as_uuid(getattr(workspace_or_id, "id", None))
 
 
 async def slot_suspended(db: AsyncSession, workspace_or_id: Workspace | UUID | str | None) -> bool:
@@ -152,12 +153,13 @@ async def ensure_slot_active(
     if outsider or user_id is None:
         _log_refusal(workspace_id, user_id, audience="outsider", policy=policy)
         raise WorkspaceSlotSuspendedError.for_outsider()
-    if isinstance(workspace_or_id, Workspace):
-        owner_user_id: str | None = workspace_or_id.owner_user_id
-    else:
+    owner_user_id: str | None
+    if isinstance(workspace_or_id, (UUID, str)):
         owner_user_id = await db.scalar(
             select(Workspace.owner_user_id).where(Workspace.id == workspace_id)
         )
+    else:
+        owner_user_id = getattr(workspace_or_id, "owner_user_id", None)
     if owner_user_id is not None and owner_user_id == user_id:
         # Only the enum member lets the owner through; anything else fails closed.
         if policy is SlotPolicy.OWNER_MANAGEMENT:
