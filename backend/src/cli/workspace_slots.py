@@ -39,11 +39,13 @@ from services.workspace_slots import (  # noqa: E402
     owner_slot_lock,
     reconcile_workspace_slots,
     slot_tables_present,
+    workspace_slot_mode,
 )
 
 
 async def _status(owner: str | None) -> int:
-    mode = require_settings().workspace_slot_suspension
+    require_settings()
+    mode = workspace_slot_mode()
     print(f"WORKSPACE_SLOT_SUSPENSION={mode}")
     async for db in get_db():
         if not await slot_tables_present(db):
@@ -74,7 +76,8 @@ async def _status(owner: str | None) -> int:
 
 
 async def _reconcile(owner: str | None, even_when_off: bool) -> int:
-    configured = require_settings().workspace_slot_suspension
+    require_settings()
+    configured = workspace_slot_mode()
     if configured == "off" and not even_when_off:
         print(
             "WORKSPACE_SLOT_SUSPENSION=off: nothing runs. Pass --even-when-off to resume and prune."

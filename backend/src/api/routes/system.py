@@ -11,6 +11,7 @@ from auth.dependencies import APIKeyOrSessionUser
 from auth.system_admin_mode import session_admin_enabled
 from config.constants import APP_VERSION
 from db.base import get_db
+from services.workspace_slots import workspace_slots_enforced
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -224,7 +225,7 @@ async def system_info():
             # Issue #2918: true only with WORKSPACE_SLOT_SUSPENSION=enforce. The web
             # UI then shows the workspace management page and its menu item; the
             # /me/workspace-slots routes 404 otherwise.
-            "workspace_slots": settings.workspace_slot_suspension == "enforce",
+            "workspace_slots": workspace_slots_enforced(),
         },
     }
 
