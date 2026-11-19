@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { Page } from "@playwright/test";
+import type { Page, PlaywrightWorkerArgs } from "@playwright/test";
 import {
   API_URL,
   SLOT_OWNER_LOGIN_ID,
@@ -24,8 +24,10 @@ import en from "@/messages/en.json";
  *
  * Serial: the last test gives the owner two bonus slots through the admin API
  * (the "return to active" half of the check), which changes the state every
- * earlier test reads. sessionStorage is not part of a storageState, so each
- * test starts a fresh browser session (the redirect fires in each).
+ * earlier test reads; `afterAll` takes them back so a rerun on the same
+ * database starts from one slot again. sessionStorage is not part of a
+ * storageState, so each test starts a fresh browser session (the redirect
+ * fires in each).
  */
 
 const AUTH_DIR = path.join(__dirname, "..", ".auth");
@@ -52,6 +54,39 @@ async function openPage(page: Page) {
   await expect(page.locator("h1")).toHaveText(T.title);
 }
 
+/** Set once the bonus was granted, so `afterAll` takes it back only then. */
+let bonusGranted = false;
+
+async function patchSlotBonus(
+  playwright: PlaywrightWorkerArgs["playwright"],
+  data: { delta: number; reason?: string },
+) {
+  const admin = await playwright.request.newContext({ storageState: ADMIN_STATE });
+  try {
+    const userId = encodeURIComponent(`local:${SLOT_OWNER_LOGIN_ID}`);
+    const response = await admin.patch(
+      `${API_URL}/api/v1/admin/users/${userId}/workspace_slot_bonus`,
+      { data },
+    );
+    expect(
+      response.ok(),
+      `slot bonus ${data.delta} failed (${response.status()}): ${await response.text()}`,
+    ).toBe(true);
+  } finally {
+    await admin.dispose();
+  }
+}
+
+test.afterAll(async ({ playwright }) => {
+  if (!bonusGranted) return;
+  // The cap drops below the owned count again, so the API needs a reason.
+  await patchSlotBonus(playwright, {
+    delta: -2,
+    reason: "e2e: restore slot-owner allowance",
+  });
+  bonusGranted = false;
+});
+
 test.describe("/profile/workspaces (#2919)", () => {
   test("an owner who must choose lands on Workspace management", async ({
     page,
@@ -63,7 +98,7 @@ test.describe("/profile/workspaces (#2919)", () => {
     await expect(page.locator(ROWS).first()).toBeVisible({ timeout: 15_000 });
     await expect(page.locator("h1")).toHaveText(T.title);
     await expect(
-      page.getByText(T.selectionRequired.title, { exact: true }),
+      page.getByRole("alert").filter({ hasText: T.selectionRequired.title }),
     ).toBeVisible();
   });
 
@@ -142,13 +177,20 @@ test.describe("/profile/workspaces (#2919)", () => {
     await expect(focused).toHaveAttribute("aria-checked", "true");
     await expect(live).toBeVisible();
 
-    await page.getByRole("button", { name: T.keep.preview }).first().focus();
+    await page.getByRole("button", { name: T.keep.preview }).focus();
     await page.keyboard.press("Enter");
     const result = page.getByRole("region", { name: T.keep.previewTitle });
     await expect(result).toBeVisible({ timeout: 15_000 });
-    const lists = result.getByRole("list");
-    await expect(lists.nth(0).getByRole("listitem")).toHaveCount(1);
-    await expect(lists.nth(1).getByRole("listitem")).toHaveCount(2);
+    // One stays active; of the other two, the one kept so far will be
+    // suspended and the other stays suspended (design 12.7).
+    const outcome = (name: string) =>
+      result.getByRole("list", { name, exact: true }).getByRole("listitem");
+    await expect(outcome(T.keep.staysActive)).toHaveCount(1);
+    await expect(outcome(T.keep.willBeSuspended)).toHaveCount(1);
+    await expect(outcome(T.keep.staysSuspended)).toHaveCount(1);
+    await expect(
+      page.getByRole("button", { name: T.keep.save }),
+    ).toBeEnabled();
     expect(saves).toEqual([]);
   });
 
@@ -156,22 +198,8 @@ test.describe("/profile/workspaces (#2919)", () => {
     page,
     playwright,
   }) => {
-    const admin = await playwright.request.newContext({
-      storageState: ADMIN_STATE,
-    });
-    try {
-      const userId = encodeURIComponent(`local:${SLOT_OWNER_LOGIN_ID}`);
-      const response = await admin.patch(
-        `${API_URL}/api/v1/admin/users/${userId}/workspace_slot_bonus`,
-        { data: { delta: 2 } },
-      );
-      expect(
-        response.ok(),
-        `slot bonus failed (${response.status()}): ${await response.text()}`,
-      ).toBe(true);
-    } finally {
-      await admin.dispose();
-    }
+    await patchSlotBonus(playwright, { delta: 2 });
+    bonusGranted = true;
 
     await openPage(page);
     await expect(
@@ -184,6 +212,8 @@ test.describe("/profile/workspaces (#2919)", () => {
         .locator(ROWS)
         .filter({ has: page.getByText(T.status.active, { exact: true }) }),
     ).toHaveCount(3);
-    await expect(page.getByRole("button", { name: T.actions.resume })).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: new RegExp(`^${T.actions.resume} `) }),
+    ).toHaveCount(0);
   });
 });
