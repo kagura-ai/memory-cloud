@@ -3,9 +3,11 @@
 A connector's KMC write key is a workspace-scoped ``APIKey`` linked to the
 connector by ``api_keys.connector_id`` (#1952, ``ON DELETE CASCADE``) — the
 link ``verify_key``, ``delete_connector`` and ``rotate_kmc_key`` read. The
-name ``connector:{id}`` is display only (the UI and the worker config reply
-show it) plus a reserved prefix: the user-facing create endpoints refuse it,
-so no new user key can look like a connector key.
+link decides the pause while the workspace has no connector seats, the MCP
+notices and the default context. The name ``connector:{id}`` is shown by the
+UI and the worker config reply, and its prefix is reserved: the user-facing
+create endpoints refuse it, and the reserved name alone also puts a key under
+the connector key scope (``auth.connector_key_scope``, #2929).
 
 Leaf module — depends on ``uuid`` only — so the formatter and the reserved
 prefix are one source for every importer (routes, schemas, provisioning).

@@ -2169,6 +2169,32 @@ class Settings(BaseSettings):
             "Surfaced via GET /api/v1/system/info features.connector_channel_routing."
         ),
     )
+    # #2929: a connector key authenticates the MCP tools a connector worker
+    # uses and no REST route (``auth.connector_key_scope``). ``enforce``
+    # (default) refuses everything else; ``log`` serves the request and logs
+    # ``connector_key_scope_would_refuse`` for each request outside the lists,
+    # for an operator moving another client of a connector key to an ordinary
+    # key.
+    # No database statement depends on it.
+    connector_key_scope: Literal["enforce", "log"] = Field(
+        default="enforce",
+        description=(
+            "Where a connector key is accepted (#2929): enforce (default) refuses a "
+            "connector key outside the connector worker's MCP tools; log serves the "
+            "request and logs connector_key_scope_would_refuse instead"
+        ),
+    )
+
+    @field_validator("connector_key_scope", mode="before")
+    @classmethod
+    def _strip_connector_key_scope(cls, v: Any) -> Any:
+        """Trim whitespace only; the ``Literal`` refuses anything else (#2929).
+
+        An empty value refuses startup rather than meaning ``enforce``, and
+        case is not folded (``Log`` refuses), as ``SYSTEM_ADMIN_MODE`` does.
+        """
+        return v.strip() if isinstance(v, str) else v
+
     enable_owner_key_member_management: bool = Field(
         default=True,
         description=(

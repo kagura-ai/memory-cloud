@@ -413,10 +413,16 @@ async def handle_stateless_post(
             await _send_error(send, 400, request_id, -32602, e.message)
             return
 
+        # #2929: a connector key is offered the connector worker's tools only.
+        from mcp_server.tools._connector_scope import tools_for_credential
+
+        tools, narrowed = tools_for_credential(tools)
+
         # Caching hints are MUST on a complete tools/list result. The list
-        # varies by URL (the tool profile) and never by caller identity, so it
-        # is still shareable between callers of the same URL: "public" holds.
-        # Switch to "private" if it ever varies by plan, role or workspace.
+        # varies by URL (the tool profile) and, for a connector key only, by
+        # the credential: that list is "private"; every other caller of the
+        # same URL gets the same list, so "public" holds. Switch to "private"
+        # if it ever varies by plan, role or workspace.
         await _send_result(
             send,
             request_id,
@@ -424,7 +430,7 @@ async def handle_stateless_post(
                 {
                     "tools": tools,
                     "ttlMs": TOOLS_LIST_TTL_MS,
-                    "cacheScope": "public",
+                    "cacheScope": "private" if narrowed else "public",
                 }
             ),
         )

@@ -142,7 +142,7 @@ class TestCreateKeyBoundContextValidation:
             new=AsyncMock(return_value=bound_result),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                await verify_api_key_user(api_key="kagura_test", db=AsyncMock())
+                await verify_api_key_user(MagicMock(), api_key="kagura_test", db=AsyncMock())
 
         assert exc_info.value.status_code == 403
         assert "public-bound" in exc_info.value.detail.lower()

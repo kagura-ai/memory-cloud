@@ -153,9 +153,10 @@ EXCEPTIONS: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/me/workspaces"): ACCOUNT,
     ("GET", "/api/v1/workspaces/plans/available"): ACCOUNT,
     ("GET", "/api/v1/workspaces/plans/tiers"): ACCOUNT,
-    # The caller's own share keys; revoking is never blocked, and a share key
-    # of a suspended workspace is refused per call.
-    ("GET", "/api/v1/config/share-keys"): ACCOUNT,
+    # Revokes the caller's own share key, or any key bound to a context the
+    # caller may share (OWNER-level access, ``creator_can_share``): revoking is
+    # never blocked, and a share key of a suspended workspace is refused on
+    # every call.
     ("POST", "/api/v1/config/share-keys/{key_id}/revoke"): ACCOUNT,
     # ---- service to service ---------------------------------------------------
     # Deployment settings any signed-in user reads (admin-only categories are
@@ -365,6 +366,9 @@ CONDITIONAL_GATE_REVIEWED: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/memory/recall"): "target-less: reachable_memory_filter",
     # A public context without a workspace row: nothing can be suspended.
     ("GET", "/api/v1/public/{context_id}/info"): "no workspace row: nothing to gate",
+    # #2930: with context_id, every key bound to the context, decided like the
+    # mint (check_context_access, OWNER), which gates after the role decision.
+    ("GET", "/api/v1/config/share-keys"): "no context_id: the caller's own keys",
 }
 
 # Where an exception route's own gate (or opt-out) lives when the handler does

@@ -14,6 +14,7 @@ from uuid import UUID
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.connector_keys import CONNECTOR_KEY_PREFIX
 from config.settings import get_settings
 from models.auth import APIKey, Context, Workspace, WorkspaceMember
 from utils.datetime import utcnow
@@ -68,6 +69,13 @@ class VerifiedKey(NamedTuple):
             (``api_keys.default_context_id``), read from the same row — no
             extra query. ``None`` when unset; never set on a public-bound or
             agent-bound key (CHECK constraints).
+        connector_id: #2929: the connector the key is linked to
+            (``api_keys.connector_id``), or ``None``.
+        connector_scoped: #2929: the key is accepted only where
+            ``auth.connector_key_scope`` accepts a connector key: it is linked
+            to a connector, or it carries the reserved ``connector:`` name
+            without a link. ``is_connector_key`` means "linked", for the
+            readers that need the connector row.
     """
 
     id: int
@@ -80,6 +88,8 @@ class VerifiedKey(NamedTuple):
     is_connector_key: bool = False
     default_context_id: UUID | None = None
     public_id: str | None = None
+    connector_id: UUID | None = None
+    connector_scoped: bool = False
 
 
 async def key_owner_holds_workspace(db: AsyncSession, *, user_id: str, workspace_id: UUID) -> bool:
@@ -459,9 +469,11 @@ class APIKeyManager:
         # indexer) while the workspace has no connector seats, but the worker
         # also holds this workspace key for its legacy ``remember`` fallback,
         # so it is refused while ``connectors_suspended``. #1952: the
-        # ``api_keys.connector_id`` FK is the link — the ``connector:{id}``
-        # name is display and uniqueness only, so a user key that merely looks
-        # like one is an ordinary key. A link whose connector is not in the
+        # ``api_keys.connector_id`` FK is the link and decides this pause (and
+        # the MCP notices and default context); a key with only the reserved
+        # ``connector:`` name is not paused here, but the name alone puts it
+        # under the connector key scope (#2929, ``connector_scoped`` below,
+        # ``auth.connector_key_scope``). A link whose connector is not in the
         # key's workspace (tampered data: the CHECKs, the FK and the mint check
         # rule it out) is refused too, like the agent kill switch. ``None`` —
         # not an exception: the MCP transport turns an exception here into a
@@ -575,6 +587,11 @@ class APIKeyManager:
             is_connector_key=connector_id is not None,
             default_context_id=key_record.default_context_id,
             public_id=key_record.public_id,
+            connector_id=connector_id,
+            # #2929: the link, or the reserved name alone.
+            connector_scoped=(
+                connector_id is not None or key_record.name.startswith(CONNECTOR_KEY_PREFIX)
+            ),
         )
 
     async def list_keys(

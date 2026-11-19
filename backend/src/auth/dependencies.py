@@ -4,7 +4,7 @@ Based on: kagura-ai/src/kagura/api/dependencies.py
 Issue #82: Context-based multi-collection support
 """
 
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, Request
@@ -31,6 +31,10 @@ from utils.exceptions import (
     SystemAdminCredentialError,
 )
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from auth.share_keys import VerifiedShareKey
+    from models.auth import Context
 
 # HTTP method → required OAuth scope. GET/HEAD/OPTIONS → memory:read;
 # mutating verbs → memory:write. Routes that need finer enforcement
@@ -478,11 +482,48 @@ async def _build_oauth_user_dict(
     }
 
 
+def _apply_connector_key_scope(request: Request, verified: VerifiedKey) -> None:
+    """Refuse a connector key on a REST route that does not accept one (#2929).
+
+    Runs where a verified API key becomes a REST principal, after the key is
+    verified (an unknown, revoked or paused key keeps its 401) and after the
+    public-bound refusal, before the agent scope and the principal. The
+    decision reads the route template FastAPI matched, not the URL. In
+    ``CONNECTOR_KEY_SCOPE=log`` it logs and returns.
+
+    Raises:
+        ConnectorKeyScopeError: 403 ``AUTH-204``.
+    """
+    if not verified.connector_scoped:
+        return
+    from auth.connector_key_scope import (
+        check_connector_key_scope,
+        connector_key_rest_allowed,
+        matched_route_template,
+        rest_target,
+    )
+
+    template = matched_route_template(request.scope)
+    check_connector_key_scope(
+        surface="rest",
+        target=rest_target(request.method, template),
+        allowed=connector_key_rest_allowed(request.method, template),
+        key_prefix=verified.key_prefix,
+        connector_id=verified.connector_id,
+        workspace_id=verified.workspace_id,
+    )
+
+
 async def verify_api_key_user(
+    request: Request,
     api_key: str | None = Depends(get_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Verify API key and return user info. Raises 401 if missing/invalid.
+
+    #2929: a connector key is accepted only on the routes
+    ``auth.connector_key_scope`` lists (the REST list is empty): elsewhere 403
+    ``AUTH-204``.
 
     Example:
         @app.get("/api/v1/memories")
@@ -517,6 +558,9 @@ async def verify_api_key_user(
                 "they are only valid on /api/v1/public/{context_id}/* endpoints"
             ),
         )
+
+    # #2929: a connector key only where a connector key is accepted.
+    _apply_connector_key_scope(request, result)
 
     # Issue #1275: record the verified agent binding for the chokepoints.
     from auth.agent_scope import set_agent_scope_from_verified
@@ -701,6 +745,9 @@ async def get_user_from_api_key_or_session(
                         "they are only valid on /api/v1/public/{context_id}/* endpoints"
                     ),
                 )
+            # #2929: a connector key only where a connector key is accepted. A
+            # refusal raises here: the session branch below is never reached.
+            _apply_connector_key_scope(request, result)
             # Issue #1275: record the verified agent binding for the chokepoints.
             from auth.agent_scope import set_agent_scope_from_verified
 
@@ -1031,6 +1078,58 @@ async def require_workspace_member(
 # ============================================================================
 
 
+def _share_key_refused() -> HTTPException:
+    """The one answer of every share-key refusal: 401, one message (#1027, #2930)."""
+    return HTTPException(status_code=401, detail="Invalid or missing share key")
+
+
+async def _honoured_share_context(db: AsyncSession, verified: "VerifiedShareKey") -> "Context":
+    """The bound context of a verified share key, once every rule holds (#2930).
+
+    In order: the context is live and so is its workspace; the key's creator
+    can share the context (``auth.share_keys.creator_can_share``: the role
+    decision's own refusals are the uniform 401; any other failure of it
+    propagates as a server error and never accepts); the workspace is not
+    slot-suspended (#2918, the redacted outsider form, since a share-key
+    reader is never a member).
+
+    Raises:
+        HTTPException: the uniform 401 of ``_share_key_refused``.
+        WorkspaceSlotSuspendedError: 403 ``SLOT-001`` (outsider form).
+    """
+    from auth.share_keys import creator_can_share
+    from models.auth import Context, Workspace
+    from services.workspace_slot_gate import ensure_slot_active
+
+    # Effective workspace = the BOUND CONTEXT's workspace (never owner's current).
+    context = (
+        await db.execute(
+            select(Context)
+            .join(Workspace, Workspace.id == Context.workspace_id)
+            .where(
+                Context.id == verified.context_id,
+                Context.deleted_at.is_(None),
+                Workspace.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if context is None:
+        # A context that is gone, or one of a deleted workspace: invalid.
+        raise _share_key_refused()
+
+    # #2930: the creator must be able to share the bound context.
+    if not await creator_can_share(db, verified.user_id, context.id):
+        logger.info(
+            "share_key_refused_creator_cannot_share",
+            share_key_id=verified.id,
+            context_id=str(context.id),
+        )
+        raise _share_key_refused()
+
+    await ensure_slot_active(db, context.workspace_id, user_id=None, outsider=True)
+    return context
+
+
 async def get_share_key_principal(
     authorization: str | None = Header(None),
     db: AsyncSession = Depends(get_db),
@@ -1051,48 +1150,49 @@ async def get_share_key_principal(
       - ``current_context_id`` is forced to the bound context; the endpoint
         confines recall to exactly this context (#963/#150 non-regression).
 
+    #2930: a share key never outlives its creator's right to share the
+    context. On every request, after the key and its live context are
+    verified and before the slot gate, the creator must hold
+    OWNER-level access to the bound context under the role decision the mint
+    route applies (``auth.share_keys.creator_can_share``). A creator who left
+    the workspace, lost the context from their access list, lost the OWNER
+    role or has no plan seat ends every key they created for it at once; any
+    other failure of that check is a server error, never an accept. A key
+    bound to a context of a deleted workspace is refused like one of a deleted
+    context. Nothing is cached, and a refused request writes nothing: the
+    last-used stamp is written only once every rule held.
+
     Raises:
         HTTPException: 401 if the bearer is absent, is not a share key, fails
-            verification (not found / revoked / expired), or the bound context
-            no longer exists. The message is uniform so a holder cannot probe
-            which gate failed.
+            verification (not found / revoked / expired), the bound context or
+            its workspace is deleted, or its creator cannot share it. The
+            answer is uniform so a holder cannot probe which gate failed.
     """
     from auth.share_keys import SHARE_KEY_PREFIX, SHARE_KEY_SCOPE, ShareKeyManager
-    from models.auth import Context
 
     token = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization[7:]
 
     if not token or not token.startswith(SHARE_KEY_PREFIX):
-        raise HTTPException(status_code=401, detail="Invalid or missing share key")
+        raise _share_key_refused()
 
     manager = ShareKeyManager(db)
-    verified = await manager.verify_key(token)
+    # #2930: verify reads only; a refused request writes nothing.
+    verified = await manager.verify_key(token, stamp=False)
     if verified is None:
-        raise HTTPException(status_code=401, detail="Invalid or missing share key")
+        raise _share_key_refused()
 
-    # verify_key may have flushed last_used_at; persist it. A commit failure is
-    # non-critical metadata loss and must not fail auth.
+    context = await _honoured_share_context(db, verified)
+
+    # Every rule held: record the use (throttled, one guarded UPDATE). A
+    # failure here is non-critical metadata loss and must not fail auth.
     try:
+        await manager.stamp_last_used(verified)
         await db.commit()
     except Exception as commit_err:  # pragma: no cover - defensive
-        logger.warning("share_key_last_used_commit_failed", error=str(commit_err))
-
-    # Effective workspace = the BOUND CONTEXT's workspace (never owner's current).
-    ctx_result = await db.execute(
-        select(Context).where(Context.id == verified.context_id, Context.deleted_at.is_(None))
-    )
-    context = ctx_result.scalar_one_or_none()
-    if context is None:
-        # Key bound to a context that is gone/deleted → treat as invalid.
-        raise HTTPException(status_code=401, detail="Invalid or missing share key")
-
-    # #2918: a share-key reader is never a member: a slot-suspended workspace
-    # refuses it in the redacted form.
-    from services.workspace_slot_gate import ensure_slot_active
-
-    await ensure_slot_active(db, context.workspace_id, user_id=None, outsider=True)
+        logger.warning("share_key_last_used_commit_failed", error_type=type(commit_err).__name__)
+        await db.rollback()
 
     return {
         "user_id": verified.user_id,

@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,7 @@ from utils.datetime import utcnow
 from utils.exceptions import (
     AuthorizationError,
     BadRequestError,
+    FeatureNotAvailableError,
     NotFoundException,
     ValidationError,
 )
@@ -205,10 +206,43 @@ async def create_share_key(
 async def list_share_keys(
     user: SessionUser,
     manager: ShareKeyManager = Depends(get_share_key_manager),
+    db: AsyncSession = Depends(get_db),
+    context_id: UUID | None = Query(
+        None,
+        description=(
+            "List every share key bound to this context, whoever created it. Needs "
+            "OWNER-level access to the context, the rule minting applies: on a shared "
+            "context the workspace owner or an admin, or a member holding the context's "
+            "owner role whose access list reaches it; on a private context only its "
+            "creator (or an account linked to the creator). Without it: the caller's "
+            "own keys."
+        ),
+    ),
 ) -> list[ShareKeyResponse]:
-    """List the current user's share keys (newest first)."""
+    """List share keys, newest first.
+
+    Without ``context_id``: the current user's share keys. With it (#2930,
+    experimental): every share key bound to that context, all creators
+    (``user_id`` names each one), decided like minting
+    (``check_context_access`` with the context OWNER role): a caller who
+    cannot reach the context, has too low a role or has no plan seat gets the
+    context routes' uniform 404; a caller who passed that decision on a
+    slot-suspended workspace gets 403 ``SLOT-001``.
+    """
     user_id = get_user_id(user)
-    keys = await manager.list_keys(user_id=user_id)
+    if context_id is None:
+        keys = await manager.list_keys(user_id=user_id)
+    else:
+        try:
+            await PermissionService(db).check_context_access(
+                user_id,
+                context_id,
+                required_role=ContextRole.OWNER,
+                capacity=CapacityPolicy.ALLOWED,
+            )
+        except (AuthorizationError, FeatureNotAvailableError):
+            raise NotFoundException("Context") from None
+        keys = await manager.list_context_keys(context_id)
     return [_format_key_response(k) for k in keys]
 
 
@@ -219,7 +253,17 @@ async def revoke_share_key(
     manager: ShareKeyManager = Depends(get_share_key_manager),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Revoke a share key (soft delete; uniform 404 if not the user's active key)."""
+    """Revoke a share key (soft delete).
+
+    Allowed for the key's creator and (#2930) for a caller with OWNER-level
+    access to the key's bound context, the rule minting applies: on a shared
+    context the workspace owner or an admin, or a member holding the context's
+    owner role whose access list reaches it; on a private context only its
+    creator (or an account linked to the creator). Revoking is never blocked
+    by a slot suspension. An unknown id, an already revoked key and a key the
+    caller may not revoke all answer the same 404. The operation record names
+    the caller as actor and the creator as subject.
+    """
     user_id = get_user_id(user)
     revoked = await manager.revoke_key(public_id=key_id, user_id=user_id)
     if not revoked:

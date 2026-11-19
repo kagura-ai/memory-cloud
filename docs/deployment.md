@@ -1951,7 +1951,7 @@ then sends the DELETE with the selections. A workspace no other member is in
 cannot be handed over: the picker offers to delete it with the user instead,
 an explicit opt-in per workspace (`delete_workspaces`). API user
 deletion and the CLI both remove the account's OAuth clients, personal memories,
-keys and memberships, preserve live connector keys under the workspace owner,
+keys (share keys included, #2930) and memberships, preserve live connector keys under the workspace owner,
 and remove its identity link. Its agent-bound keys are deleted, never handed
 over; an agent left without a live key is suspended and the agents it
 registered name the workspace owner (#2373,
@@ -4807,8 +4807,10 @@ without changing anything and you rerun it, rather than every query on
 A connector's write key is linked to its connector by `api_keys.connector_id`
 (`ON DELETE CASCADE`) instead of by its name `connector:{id}`. The migration
 links every existing key of the same workspace whose name is exactly
-`connector:` + a connector id (revoked rows included) and leaves look-alikes as
-ordinary keys. From then on the link decides: the seat pause above, the MCP
+`connector:` + a connector id (revoked rows included) and leaves look-alikes
+unlinked (their reserved name puts them under the
+[connector key scope](#connector_key_scope-2929)). The link decides the seat
+pause above, the MCP
 connector-credential handling, and deleting the connector — the key row is
 removed with it (it disappears from the key list rather than showing as
 revoked). A connector's key cannot be regenerated from the API keys page or the
@@ -4818,7 +4820,9 @@ member credentials (`422`); rotate it through its connector
 **Re-run the backfill once after the traffic switch.** The migration runs from
 the new image before traffic moves, so the old image can still provision or
 rotate a connector in between (or again after a rollback) and mint a key with
-no link. Such a key is an ordinary workspace key: not paused with the seats.
+no link. Such a key has no link: it is not paused with the seats, but like
+every `connector:` key it is accepted only where a connector key is
+([`CONNECTOR_KEY_SCOPE`](#connector_key_scope-2929)).
 Rotating the connector, or deleting it, takes care of it, and so does this
 statement, which is idempotent and touches only unlinked rows:
 
@@ -4838,8 +4842,9 @@ UPDATE api_keys AS k
 
 Keys still named like a connector key but linked to none — the connector was
 deleted before the migration, or the key carries an agent or a default context
-— stay ordinary workspace write keys. List them and revoke the ones nobody
-uses:
+— are not paused with the seats, and are accepted only where a connector key
+is ([`CONNECTOR_KEY_SCOPE`](#connector_key_scope-2929)): the connector
+worker's MCP tools, no REST route. List them and revoke the ones nobody uses:
 
 ```sql
 SELECT public_id, workspace_id, user_id, created_at
@@ -5219,6 +5224,87 @@ the routes and set the switch back to `default` on every connector
 `{"channel_routes": [], "unrouted_private_channels": "default"}`), or stop the
 connector worker. The `f35` downgrade refuses to run while any connector still
 uses routing.
+
+### `CONNECTOR_KEY_SCOPE` (#2929)
+
+A connector key — the API key a connector's worker holds: linked to its
+connector by `api_keys.connector_id`, or carrying the reserved `connector:`
+name — authenticates the MCP tools a connector worker uses (`recall`,
+`remember`, `create_edge`, `reference`, `update_memory`, `list_edges`,
+`delete_edge`, `forget`, `get_context_info`) and no REST route. Every other
+MCP tool answers a `permission_denied` tool result with `error_code: "AUTH-204"`
+and `tools/list` leaves it out. A REST route that authenticates an API key
+answers `403 AUTH-204`, and a refused key is never tried as a browser session;
+the public context routes (`/api/v1/public/{context_id}/search`, `/info`)
+accept only public-bound keys and answer their own `403 AUTH-101`. Details: [MCP tools › Connector keys](mcp-tools.md#connector-keys)
+and [the connector ingest contract](connector-ingest-contract.md#what-the-connector-key-is-accepted-for-2929).
+No database statement depends on the setting.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CONNECTOR_KEY_SCOPE` | `enforce` | `enforce`: a connector key is refused outside the lists above, logged as `connector_key_scope_refused`. `log`: the request is served and logged as `connector_key_scope_would_refuse`. Both events carry `surface` (`rest` or `mcp`), `target` (`<METHOD> <route template>` or the tool name), `key_prefix` and `connector_id`, never the key. Surrounding blanks are trimmed; any other value, an empty one included, refuses to start. |
+
+**Upgrade:** the connector workers released so far call only the listed tools,
+so `enforce` needs no worker upgrade. The bridge's `corpus-ingest` command
+archives original files through the REST files routes, which do not accept a
+connector key: the archive step is skipped (the ingest reports it as partial)
+and a `connector_key_scope_refused` event names the route. A key named
+`connector:…` without a link is a connector key too: list them with the query
+in [Migration f13](#migration-f13_1952_api_keys_connector_id-1952) before
+upgrading. Their events carry `connector_id: null`, with `key_prefix` and
+`workspace_id` to find the key (`SELECT public_id, name, workspace_id, user_id
+FROM api_keys WHERE key_prefix = '<key_prefix>' AND workspace_id = '<workspace_id>';`).
+`log` exists for an operator whose own client uses a connector key in another
+way: run with `log`, read the `connector_key_scope_would_refuse` events, move
+that client to an ordinary API key, return to `enforce`.
+
+### Share keys and their creator (#2930)
+
+A share key is honoured only while the account that created it can share its
+context, checked on every request. Sharing a context takes OWNER-level access
+to it, the rule minting applies: on a shared context the workspace owner or an
+admin, or a member holding the context's owner role whose access list reaches
+it; on a private context only its creator (or an account linked to the
+creator). When the creator leaves the workspace, loses the owner role, loses
+the context from the access list or has no plan seat (until seated again), or
+when the context or its workspace is deleted, `/api/v1/share/recall` and
+`/api/v1/share/sessions` answer the same `401` as for an unknown key, and the
+refused request records no use of the key. Removing a member revokes that
+member's share keys for the workspace's contexts (one `credential.revoked`
+operation record per key); deleting or erasing an account deletes its share
+keys with its API keys. A caller with OWNER-level access to a context can list
+every share key bound to it (`GET /api/v1/config/share-keys?context_id=<id>`;
+`403 SLOT-001` while the workspace is slot-suspended) and revoke any of them
+(`POST /api/v1/config/share-keys/{key_id}/revoke`, never blocked by a slot
+suspension); both are session-only. Nothing needs to be configured.
+
+Log events:
+
+| Event | Level | Fields | Meaning |
+|---|---|---|---|
+| `share_key_refused_creator_cannot_share` | info | `share_key_id`, `context_id` | A share-key request was refused because the key's creator cannot share the context. The same request also logs the permission service's `context_access_denied` warning (`reason`, `context_id`, `user_id` = the key's creator). |
+| `share_keys_revoked_on_departure` | info | `user_id`, `workspace_id`, `count` | A member removal revoked that member's share keys for the workspace (`member_credentials_cleaned_up` and `removed_member_from_workspace` carry `share_keys_revoked`). |
+
+**Upgrade:** migration `f57_2930_share_key_creators` deletes the share keys
+whose creating account does not exist (`share_keys.user_id` has no foreign
+key), in one statement. It takes row locks on the deleted rows only (no table
+lock, no DDL), so it is safe while the previous release serves traffic and as
+part of the last `alembic upgrade head` step of the multi-step upgrade in
+[How each account was admitted](#how-each-account-was-admitted-issue-2803). It
+logs the number of rows deleted (`f57_2930 deleted share keys: N`) and nothing
+else; offline (`alembic upgrade --sql`) it emits the statement without a
+count. Its downgrade changes nothing. Run the same statement once more after
+the traffic switch, for accounts deleted meanwhile by the previous image:
+
+```sql
+DELETE FROM share_keys AS s
+ WHERE NOT EXISTS (SELECT 1 FROM users AS u WHERE u.user_id = s.user_id);
+```
+
+The upgrade revokes no share key: a key whose creator cannot share its
+context is refused on every request, shows `status: active` in the list until
+it is revoked or expires, and is honoured again if the creator regains that
+access; a key revoked by a member removal stays revoked.
 
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 

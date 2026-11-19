@@ -25162,6 +25162,22 @@
         "operationId": "list_share_keys_api_v1_config_share_keys_get",
         "parameters": [
           {
+            "in": "query",
+            "name": "context_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,

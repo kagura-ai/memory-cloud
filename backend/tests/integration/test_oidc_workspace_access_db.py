@@ -266,6 +266,166 @@ async def test_public_eligibility_filters_before_pagination_and_rechecks_access(
     assert (await request(store, path=path + eligible)).json()["workspaces"] == []
 
 
+PUBLIC = "eligible_for=kagura-public"
+
+
+async def test_public_eligibility_pages_are_full_and_the_cursor_walks_only_eligible_rows(store):
+    """The filter is part of the query: no page is short because rows were dropped after paging."""
+    extra = [uuid4() for _ in range(6)]
+    plans = ["pro", "promax", "free", "promax", "basic", "promax"]
+    async with store.factory() as db:
+        db.add_all(
+            [
+                Workspace(
+                    id=wid, name=f"Extra {i}", owner_user_id=store.users["owner"], plan_name=plan
+                )
+                for i, (wid, plan) in enumerate(zip(extra, plans, strict=True))
+            ]
+        )
+        await db.flush()
+        db.add_all(
+            [
+                WorkspaceMember(workspace_id=wid, user_id=store.users["owner"], role="owner")
+                for wid in extra
+            ]
+        )
+        await db.commit()
+    try:
+        eligible = sorted(
+            [store.wid, store.other_wid]
+            + [wid for wid, plan in zip(extra, plans, strict=True) if plan == "promax"]
+        )
+        seen, pages, cursor = [], [], None
+        while True:
+            path = "/api/v1/me/workspaces?limit=2&" + PUBLIC
+            if cursor is not None:
+                path += "&cursor=" + cursor
+            response = await request(store, path=path)
+            assert_private(response, 200)
+            body = response.json()
+            pages.append(len(body["workspaces"]))
+            seen += [item["workspace_id"] for item in body["workspaces"]]
+            cursor = body["next_cursor"]
+            if cursor is None:
+                break
+            assert cursor == body["workspaces"][-1]["workspace_id"]
+        assert seen == [str(wid) for wid in eligible]
+        assert pages == [2, 2, 1]
+        everything = (await request(store, path="/api/v1/me/workspaces")).json()["workspaces"]
+        assert len(everything) == 8
+    finally:
+        async with store.factory() as db:
+            await db.execute(delete(Workspace).where(Workspace.id.in_(extra)))
+            await db.commit()
+
+
+async def test_public_eligibility_requires_max_plan_canonical_owner_and_owner_membership(store):
+    listing = "/api/v1/me/workspaces?" + PUBLIC
+    access = f"/api/v1/me/workspaces/{store.wid}/access?" + PUBLIC
+
+    async def listed(role="owner"):
+        return [
+            item["workspace_id"]
+            for item in (await request(store, role, path=listing)).json()["workspaces"]
+        ]
+
+    assert str(store.wid) in await listed()
+    # Plan: every tier below Max is refused.
+    for plan in ("free", "basic", "pro"):
+        await change(store, Workspace, store.wid, plan_name=plan)
+        assert str(store.wid) not in await listed()
+        assert_private(await request(store, path=access), 404)
+    await change(store, Workspace, store.wid, plan_name="promax")
+    # Canonical owner whose own membership is not the owner role, while another
+    # member holds the owner role: the owner role must be the caller's own.
+    await change(store, WorkspaceMember, store.member_ids["admin"], role="owner")
+    await change(store, WorkspaceMember, store.member_ids["owner"], role="admin")
+    assert str(store.wid) not in await listed()
+    assert_private(await request(store, path=access), 404)
+    assert_private(await request(store, path=access.split("?")[0]), 200)
+    await change(store, WorkspaceMember, store.member_ids["owner"], role="owner")
+    await change(store, WorkspaceMember, store.member_ids["admin"], role="admin")
+    # Owner-role membership without being the canonical owner.
+    await change(store, WorkspaceMember, store.member_ids["admin"], role="owner")
+    assert await listed("admin") == []
+    assert_private(await request(store, "admin", path=access), 404)
+    await change(store, WorkspaceMember, store.member_ids["admin"], role="admin")
+    # Canonical owner without a membership row: neither listed nor accessible,
+    # with or without the filter (the membership check comes first).
+    async with store.factory() as db:
+        await db.execute(
+            delete(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == store.other_wid,
+                WorkspaceMember.user_id == store.users["owner"],
+            )
+        )
+        await db.commit()
+    assert str(store.other_wid) not in await listed()
+    other = f"/api/v1/me/workspaces/{store.other_wid}/access"
+    for path in (other, other + "?" + PUBLIC):
+        assert_private(await request(store, path=path), 404)
+    # Soft-deleted.
+    await change(store, Workspace, store.wid, deleted_at=utcnow())
+    assert await listed() == []
+    assert_private(await request(store, path=access), 404)
+
+
+async def test_ineligible_workspace_answers_exactly_like_an_unknown_one(store):
+    await change(store, Workspace, store.wid, plan_name="pro")
+    answers = []
+    for workspace in (store.wid, uuid4()):
+        response = await request(store, path=f"/api/v1/me/workspaces/{workspace}/access?" + PUBLIC)
+        answers.append(
+            (
+                response.status_code,
+                response.content,
+                {k: v for k, v in response.headers.items() if k != "date"},
+            )
+        )
+    assert answers[0] == answers[1]
+    assert answers[0][0] == 404 and answers[0][1] == b'{"error":"not_found"}'
+
+
+async def test_public_eligibility_keeps_reporting_a_slot_suspended_workspace(store):
+    """#2918's access contract holds under the filter: 200, nothing usable, billing kept."""
+    from models.workspace_slots import WorkspaceSlotSuspension
+    from tests.integration._slot_world import T0, slot_mode
+
+    async with store.factory() as db:
+        db.add(
+            WorkspaceSlotSuspension(
+                workspace_id=store.wid,
+                owner_user_id=store.users["owner"],
+                cause="admin_plan",
+                suspended_at=T0,
+            )
+        )
+        await db.commit()
+    access = f"/api/v1/me/workspaces/{store.wid}/access?context_id={store.shared}&" + PUBLIC
+    listing = "/api/v1/me/workspaces?" + PUBLIC
+    try:
+        for mode, usable in (("enforce", False), ("off", True)):
+            with slot_mode(mode):
+                listed = (await request(store, path=listing)).json()["workspaces"]
+                assert str(store.wid) in [item["workspace_id"] for item in listed]
+                response = await request(store, path=access)
+                assert_private(response, 200)
+                body = response.json()
+                assert body["workspace_permissions"] == {
+                    "billing.manage": True,
+                    "usage.read": usable,
+                }
+                assert body["resource"]["permissions"] == {"read": usable, "sync.manage": usable}
+    finally:
+        async with store.factory() as db:
+            await db.execute(
+                delete(WorkspaceSlotSuspension).where(
+                    WorkspaceSlotSuspension.workspace_id == store.wid
+                )
+            )
+            await db.commit()
+
+
 async def test_listing_keyset_pagination_and_current_membership(store):
     path = "/api/v1/me/workspaces?limit=1"
     first = await request(store, path=path)

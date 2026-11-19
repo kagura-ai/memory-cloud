@@ -32,9 +32,32 @@ than a transaction spanning requests, so membership changes can affect later pag
 An account without memberships receives an empty list. The account's selected
 workspace in the KMC UI is never used to scope this API.
 
+### Kagura Public eligibility
+
+Add `eligible_for=kagura-public` to list only the workspaces the account can
+connect to Kagura Public: the account is the canonical workspace owner, holds an
+`owner` membership, and the workspace is on the Max plan now. The filter runs in
+the query, so `limit` and `next_cursor` page through eligible workspaces only.
+The access route below takes the same parameter and answers `404 not_found` for
+a workspace that does not meet the rule, exactly as for one the account cannot
+reach. Any other value is `400 invalid_request`. Without the parameter both
+routes answer as before.
+
+"On the Max plan now" means the workspace's current plan name; the billing
+access window and integration licenses are not consulted by this filter.
+
+A slot-suspended workspace that meets the rule stays listed. While slot
+suspension is enforced, its access answer reports `read`, `sync.manage` and
+`usage.read` as `false` and keeps `billing.manage`, so a client checks the
+access route before offering a workspace as usable.
+
+A server without this parameter rejects it as an unknown query parameter
+(`400 invalid_request`). Deploy the server before any client sends it; a client
+must not retry without the parameter, which would return every membership.
+
 ## Inspect effective access
 
-`GET /api/v1/me/workspaces/{workspace_id}/access?context_id=<context UUID>`
+`GET /api/v1/me/workspaces/{workspace_id}/access?context_id=<context UUID>&eligible_for=kagura-public`
 
 ```json
 {
@@ -49,7 +72,7 @@ workspace in the KMC UI is never used to scope this API.
 }
 ```
 
-Omit `context_id` to inspect workspace membership alone (`resource` is then
+Both parameters are optional. Omit `context_id` to inspect workspace membership alone (`resource` is then
 `null`). `billing.manage` requires both the canonical workspace owner and an
 `owner` membership; admin or system-admin status alone never confers it.
 `usage.read` is available to existing members even when their plan has no seat.

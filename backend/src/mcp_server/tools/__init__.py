@@ -610,6 +610,16 @@ async def _execute_tool_call(
     if _TOOL_REGISTRY is None:
         _TOOL_REGISTRY = _build_registry()
 
+    # #2929: a connector key calls only the connector worker's tools. First of
+    # every per-call step: a refused call reaches no handler, charges no rate
+    # limit unit, reads no default context and writes no usage row. An unknown
+    # name is refused the same way.
+    from mcp_server.tools._connector_scope import connector_key_tool_refusal
+
+    connector_refusal = connector_key_tool_refusal(tool_name)
+    if connector_refusal is not None:
+        return connector_refusal
+
     # Validate tool exists before expensive checks (avoids DB query for unknown tools)
     handler = _TOOL_REGISTRY.get(tool_name)
     from mcp_server.tools._google_profile import UNKNOWN_TOOL_HELP, google_mode_active

@@ -341,21 +341,70 @@ class TestShareKeyPrincipalDependency:
         db = AsyncMock()
         db.execute = AsyncMock(return_value=_execute_result(context_row))
         db.commit = AsyncMock()
+        creator_check = AsyncMock(return_value=True)
 
-        with patch(
-            "auth.share_keys.ShareKeyManager.verify_key",
-            new=AsyncMock(return_value=verified),
+        with (
+            patch(
+                "auth.share_keys.ShareKeyManager.verify_key",
+                new=AsyncMock(return_value=verified),
+            ),
+            patch("auth.share_keys.creator_can_share", new=creator_check),
+            patch("services.workspace_slot_gate.ensure_slot_active", new=AsyncMock()),
         ):
             principal = await get_share_key_principal(
                 authorization=f"Bearer {SHARE_KEY_PREFIX}good", db=db
             )
 
+        # #2930: the creator's right to share the bound context, every request.
+        creator_check.assert_awaited_once_with(db, "owner-1", ctx_id)
         assert principal["user_id"] == "owner-1"
         assert principal["current_context_id"] == ctx_id
         assert principal["share_key_context_id"] == ctx_id
         assert principal["current_workspace_id"] == ws_id  # from bound context
         assert principal["scope"] == SHARE_KEY_SCOPE
         assert principal["role"] == "share-key"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", [False, RuntimeError("bug")], ids=["refused", "failed"])
+    async def test_a_creator_who_cannot_share_the_context_ends_the_key(self, outcome) -> None:
+        """#2930: the creator's lost right is the uniform 401; a failure of the
+        check itself propagates (a server error), never an accept."""
+        from fastapi import HTTPException
+
+        from auth.dependencies import get_share_key_principal
+
+        ctx_id = uuid.uuid4()
+        verified = VerifiedShareKey(id=7, user_id="owner-1", context_id=ctx_id)
+        context_row = SimpleNamespace(id=ctx_id, workspace_id=uuid.uuid4(), deleted_at=None)
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_execute_result(context_row))
+        db.commit = AsyncMock()
+        check = (
+            AsyncMock(side_effect=outcome)
+            if isinstance(outcome, Exception)
+            else AsyncMock(return_value=outcome)
+        )
+        slot = AsyncMock()
+        expected = type(outcome) if isinstance(outcome, Exception) else HTTPException
+
+        with (
+            patch(
+                "auth.share_keys.ShareKeyManager.verify_key",
+                new=AsyncMock(return_value=verified),
+            ),
+            patch("auth.share_keys.creator_can_share", new=check),
+            patch("services.workspace_slot_gate.ensure_slot_active", new=slot),
+        ):
+            with pytest.raises(expected) as exc:
+                await get_share_key_principal(authorization=f"Bearer {SHARE_KEY_PREFIX}good", db=db)
+
+        if expected is HTTPException:
+            assert (exc.value.status_code, exc.value.detail) == (
+                401,
+                "Invalid or missing share key",
+            )
+        slot.assert_not_awaited()
+        db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_bound_context_missing_rejected(self) -> None:

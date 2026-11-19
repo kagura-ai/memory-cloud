@@ -1269,6 +1269,7 @@ async def delete_user(
         admin_id=admin_id,
         memories_deleted=result.memories,
         api_keys_deleted=result.api_keys,
+        share_keys_deleted=result.share_keys,
         contexts_deleted=result.contexts,
         connector_api_keys_reowned=result.connector_api_keys,
         agent_api_keys_deleted=result.agent_api_keys,
