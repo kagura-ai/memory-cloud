@@ -43,6 +43,18 @@ a workspace that does not meet the rule, exactly as for one the account cannot
 reach. Any other value is `400 invalid_request`. Without the parameter both
 routes answer as before.
 
+"On the Max plan now" means the workspace's current plan name; the billing
+access window and integration licenses are not consulted by this filter.
+
+A slot-suspended workspace that meets the rule stays listed. While slot
+suspension is enforced, its access answer reports `read`, `sync.manage` and
+`usage.read` as `false` and keeps `billing.manage`, so a client checks the
+access route before offering a workspace as usable.
+
+A server without this parameter rejects it as an unknown query parameter
+(`400 invalid_request`). Deploy the server before any client sends it; a client
+must not retry without the parameter, which would return every membership.
+
 ## Inspect effective access
 
 `GET /api/v1/me/workspaces/{workspace_id}/access?context_id=<context UUID>&eligible_for=kagura-public`
