@@ -15,11 +15,15 @@ provisioning (``api_keys.connector_id`` set):
 * an ordinary key and an agent-bound key are not affected; a paused connector's
   key and a key linked to a connector of another workspace are still 401;
 * resource ingest, which authenticates by ``X-Resource-API-Key`` only, serves a
-  request that also carries a connector key as a bearer exactly as without it.
+  request that also carries a connector key as a bearer exactly as without it;
+* on ``POST /mcp`` a connector key (linked, or with only the reserved name)
+  calling a tool outside its list gets the ``AUTH-204`` tool result, with no
+  usage row and no count against the daily call limit; a listed tool runs.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -29,12 +33,12 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
-from models.auth import APIKey, Workspace
+from models.auth import APIKey, UsageStats, Workspace
 from tests.api._route_inventory import _iter_routes, route_dependency_calls
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -143,6 +147,7 @@ async def world(db_session: AsyncSession, connector_world, monkeypatch):
             owner=owner,
             connector_key=provisioned.plaintext_kmc_api_key,
             connector_id=provisioned.connector.id,
+            context_id=provisioned.context_id,
             resource_id=provisioned.resource_id,
             resource_token=provisioned.plaintext_token,
             ordinary=ordinary,
@@ -322,3 +327,69 @@ async def test_resource_ingest_never_reads_the_bearer(world, monkeypatch, mode) 
         answers.append((response.status_code, body))
     assert answers[0] == answers[1]
     assert answers[0][0] == 201
+
+
+MODERN = "2026-07-28"
+
+
+async def _mcp_call(world, key: str, name: str, arguments: dict):
+    """One stateless (MCP 2026-07-28) ``tools/call`` through the whole application."""
+    body = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": arguments,
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MODERN,
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+        },
+    }
+    headers = {
+        **_bearer(key),
+        "MCP-Protocol-Version": MODERN,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": name,
+        "Accept": "application/json, text/event-stream",
+    }
+    return await world.client.post("/mcp", json=body, headers=headers)
+
+
+async def _usage_rows(world) -> int:
+    world.db.expire_all()
+    return await world.db.scalar(
+        select(func.count()).select_from(UsageStats).where(UsageStats.user_id == world.owner)
+    )
+
+
+@pytest.mark.parametrize("key", ["connector_key", "legacy"])
+async def test_mcp_refuses_an_unlisted_tool_without_charging_or_recording_it(world, key) -> None:
+    """``list`` records a usage row when it runs; ``get_state`` counts against
+    the daily MCP call limit. Refused, neither does either."""
+    import mcp_server.tools as tools_mod
+
+    ws_id = world.ws.id
+    ctx = str(world.context_id)
+    tools_mod.invalidate_rate_limit_cache(ws_id)
+    before = await _usage_rows(world)
+    for name, arguments in (("list", {"context_id": ctx}), ("get_state", {"context_id": ctx})):
+        response = await _mcp_call(world, getattr(world, key), name, arguments)
+        assert response.status_code == 200
+        result = response.json()["result"]
+        assert result["isError"] is True, name
+        envelope = json.loads(result["content"][0]["text"])
+        assert (envelope["error"], envelope["error_code"]) == ("permission_denied", "AUTH-204")
+    assert ws_id not in tools_mod._RATE_LIMIT_CACHE
+    assert await _usage_rows(world) == before
+
+
+async def test_mcp_runs_a_listed_tool_for_a_connector_key(world) -> None:
+    response = await _mcp_call(
+        world, world.connector_key, "get_context_info", {"context_id": str(world.context_id)}
+    )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert "isError" not in result, result
+    assert str(world.context_id) in result["content"][0]["text"]

@@ -1,13 +1,18 @@
 """A connector key on the MCP endpoint (#2929).
 
 A connector key calls the MCP tools in ``CONNECTOR_KEY_MCP_TOOLS`` and no
-other. The tool dispatcher checks every ``tools/call`` first, before the
-rate limit, the default context, the slot and capacity gates and the handler,
-so a refused call charges nothing and writes nothing; the session stays usable
-for the listed tools. ``tools/list`` names only the listed tools, and the
-``initialize`` / ``server/discover`` instructions are the static base text.
-``CONNECTOR_KEY_SCOPE=log`` changes none of this except one log event per call
-outside the list. Any other credential sees no change.
+other. The tool dispatcher checks every ``tools/call`` first, before argument
+validation, the rate limit, the default context, the slot and capacity gates
+and the handler, so a refused call charges nothing to the daily call limit and
+records no usage; the session stays usable for the listed tools.
+``tools/list`` names only the listed tools, and the ``initialize`` /
+``server/discover`` instructions are the static base text of the URL's view.
+With ``CONNECTOR_KEY_SCOPE=log`` every tool is listed and dispatched, the
+instructions are built as for any credential, and each call outside the list
+logs one ``connector_key_scope_would_refuse`` event. Any other credential is
+not affected. The same call through the whole application on real rows (no
+usage row, no daily-limit count) is in
+``tests/integration/test_connector_key_scope_routes_db.py``.
 """
 
 from __future__ import annotations
@@ -125,10 +130,7 @@ def test_every_listed_tool_is_in_the_registry() -> None:
 async def test_every_unlisted_tool_refuses_a_connector_key_before_anything_runs(
     dispatch, scope_mode
 ) -> None:
-    with (
-        patch("auth.connector_key_scope.logger") as logger,
-        patch("utils.usage_logger.log_usage", new=AsyncMock()) as usage,
-    ):
+    with patch("auth.connector_key_scope.logger") as logger:
         for tool in UNLISTED:
             with as_connector():
                 result = await execute_tool_call(tool, _schema_args(tool), "u1", WS)
@@ -143,7 +145,6 @@ async def test_every_unlisted_tool_refuses_a_connector_key_before_anything_runs(
     dispatch.default.assert_not_awaited()
     dispatch.slot.assert_not_awaited()
     dispatch.capacity.assert_not_awaited()
-    usage.assert_not_awaited()
     events = [(c.args[0], c.kwargs["target"]) for c in logger.warning.call_args_list]
     assert events == [("connector_key_scope_refused", tool) for tool in UNLISTED]
     assert all(c.kwargs["surface"] == "mcp" for c in logger.warning.call_args_list)
@@ -159,10 +160,22 @@ async def test_every_listed_tool_is_dispatched_for_a_connector_key(dispatch, sco
             assert _envelope(result) == {"status": "success"}, tool
     assert dispatch.handled == LISTED
     logger.warning.assert_not_called()
-    # The rate limit counts the listed tools as before.
+    # The rate limit counts the listed tools.
     assert dispatch.rate.await_count == len(
         CONNECTOR_KEY_MCP_TOOLS - tools_mod._RATE_LIMIT_EXEMPT_TOOLS
     )
+
+
+@pytest.mark.asyncio
+async def test_the_check_runs_before_argument_validation(dispatch, scope_mode) -> None:
+    """An unlisted call with an argument its schema does not declare is the
+    connector key refusal, not ``invalid_argument`` naming the tool's arguments."""
+    with as_connector():
+        result = await execute_tool_call("setup_connector", {"no_such_argument": 1}, "u1", WS)
+    envelope = _envelope(result)
+    assert (envelope["error"], envelope["error_code"]) == ("permission_denied", "AUTH-204")
+    assert "allowed_arguments" not in envelope
+    assert dispatch.handled == []
 
 
 @pytest.mark.asyncio
@@ -274,7 +287,7 @@ async def test_tools_list_names_only_the_listed_tools_for_a_connector_key(
     assert _names(full) == [n for n in registry_order if n in CONNECTOR_KEY_MCP_TOOLS]
     assert set(_names(core)) < CONNECTOR_KEY_MCP_TOOLS
     if drive is _stateless:
-        # The list now depends on the credential: no shared cache may hold it.
+        # The list depends on the credential: no shared cache may hold it.
         assert full.body["result"]["cacheScope"] == "private"
 
 
@@ -331,6 +344,20 @@ async def test_a_connector_key_gets_the_base_instructions_without_any_read(scope
             user_id="u1", query_string=query, key_workspace_id=WS, era="legacy"
         )
     assert (text, private) == (SERVER_INSTRUCTIONS_BASE, False)
+
+
+@pytest.mark.asyncio
+async def test_a_connector_key_on_the_google_view_gets_its_base_text(scope_mode) -> None:
+    from mcp_server.tools._google_profile import GOOGLE_INSTRUCTIONS_BASE
+
+    with as_connector():
+        text, private = await build_instructions(
+            user_id="u1",
+            query_string=f"profile=google&context={CTX}".encode(),
+            key_workspace_id=WS,
+            era="stateless",
+        )
+    assert (text, private) == (GOOGLE_INSTRUCTIONS_BASE, False)
 
 
 @pytest.mark.asyncio
