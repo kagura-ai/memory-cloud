@@ -517,7 +517,11 @@ of the page that chooses which workspaces stay active; a member gets `workspace_
 `/api/v1/me/workspace-slots` (status, preview, selection, exportable contexts), which answers
 `SLOT-002` / `SLOT-003` (no `gate`, see the catalogue) and 422 `VAL-001` with
 `details: {"field": "workspace_ids", "invalid_ids": [...]}` for duplicate ids or ids of
-workspaces the caller does not own (one message whether or not the id exists).
+workspaces the caller does not own (one message whether or not the id exists). A request
+whose shape is wrong (more than 500 ids, a malformed UUID, a missing `expected_version`, an
+unknown `scenario`) is the framework's 422 `VAL-001` with `details.errors` instead. `PUT
+.../selection` answers 409 `RES-002` with `details.reason: "workspace_slots_busy"` while
+another change for the same owner is in progress: nothing was saved, retry the same request.
 
 ### `quota_type` vocabulary (frozen)
 
