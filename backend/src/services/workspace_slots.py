@@ -1070,17 +1070,33 @@ def plan_transition(
     ``owned`` is as the reader builds it (``suspended`` = an own row and not
     under a billing contract); ``own_row_ids`` are the owned workspaces that
     hold an own row, contracted ones included. The workspace the event changed
-    that still holds a row counts as suspended going in: it was not usable
-    before the event, so a suspended Free workspace bought as Basic swaps out
-    an active one instead of joining the active set for free (with
-    ``allow_suspend``; a resume-only path resumes it and suspends nothing).
+    counts as suspended going in when it holds a row and THIS event put it
+    under a billing contract: it was not usable before the event, so a
+    suspended Free workspace bought as Basic swaps out an active one instead
+    of joining the active set for free (with ``allow_suspend``; a resume-only
+    path resumes it and suspends nothing). A contracted workspace that still
+    holds a row from before (its resume was deferred) is active already: a
+    later event for it, a same-plan re-push say, swaps nothing.
     """
     rows = frozenset(own_row_ids)
     allowance = slot_allowance(owned, slot_bonus)
     drop = allow_suspend and is_allowance_drop(owned, slot_bonus, change)
-    held = change.workspace_id if change is not None else None
-    if held not in rows:
-        held = None
+    held = None
+    if change is not None and change.workspace_id in rows:
+        changed = next((w for w in owned if w.id == change.workspace_id), None)
+        if changed is not None and changed.under_billing_contract:
+            previous_plan = (
+                change.previous_plan_name
+                if change.previous_plan_name is not None
+                else changed.plan_name
+            )
+            previous_source = (
+                change.previous_entitlement_source
+                if change.previous_entitlement_source is not None
+                else changed.entitlement_source
+            )
+            if not billing_contract_active(previous_plan, previous_source):
+                held = changed.id
     planner_in = [dataclasses.replace(w, suspended=True) if w.id == held else w for w in owned]
     plan = plan_active_set(
         planner_in,
@@ -1771,7 +1787,12 @@ def _allowance_view(allowance: SlotAllowance) -> SlotAllowanceView:
 def _paid_plans_end_plan(
     state: _OwnerState, keep_ids: Sequence[UUID]
 ) -> tuple[SlotPlan, SlotAllowance]:
-    """Every contracted workspace back on Free (admin-granted tiers keep theirs)."""
+    """Every contracted workspace back on Free (admin-granted tiers keep theirs).
+
+    The end of a paid contract is a drop (``is_allowance_drop``): it cannot
+    raise the allowance, so with any contract the plan cuts to the allowance
+    after, as the contract-end events will.
+    """
     ended = [
         dataclasses.replace(w, plan_name=str(PlanName.FREE)) if w.under_billing_contract else w
         for w in state.owned
@@ -1781,7 +1802,7 @@ def _paid_plans_end_plan(
     plan = plan_active_set(
         ended,
         after.summary.cap,
-        drop=after.allowance < before.allowance,
+        drop=before.contracted_count > 0,
         keep_ids=keep_ids,
         current_workspace_id=state.current_workspace_id,
     )

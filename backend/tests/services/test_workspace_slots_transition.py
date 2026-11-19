@@ -91,6 +91,15 @@ class TestChangedWorkspaceHoldingARow:
         assert decision.drop is True
         assert _active(world, rows) == {2}
 
+    def test_a_same_plan_repush_before_the_sweep_swaps_nothing(self) -> None:
+        """The purchase was deferred: B is contracted and active but still
+        holds its row. A same-plan re-push for B suspends nothing."""
+        world = {1: ("free", "admin_grant"), 2: ("basic", "external_billing")}
+        rows = {U(2)}
+        world, rows, decision = _event(world, rows, 2, ("basic", "external_billing"))
+        assert decision.suspend == ()
+        assert _active(world, rows) == {1, 2}
+
     def test_a_deferred_purchase_that_ends_leaves_one_active(self) -> None:
         """Allowance 1: A active, B suspended. B is bought as Basic while the
         owner lock is busy, so only the resume runs (both active). When that
@@ -233,3 +242,50 @@ def test_the_active_count_never_depends_on_the_order_of_two_events() -> None:
                     pairs += 1
                     assert len(_active(w1, r1)) == len(_active(w2, r2)), (world, a, na, b, nb)
     assert pairs == 118_000
+
+
+def _state(world: dict[int, tuple[str, str]], rows: set[UUID]):
+    from services.workspace_slots import _OwnerState
+
+    return _OwnerState(
+        owned=tuple(_owned(world, rows)),
+        names={U(i): f"w{i}" for i in world},
+        slot_bonus=0,
+        current_workspace_id=U(1),
+        own_rows={wid: B for wid in rows},
+        foreign_rows=(),
+        orphan_rows=(),
+        has_state=False,
+        keep_ids=(),
+        selection_saved_at=None,
+        selection_required_since=None,
+        version=0,
+    )
+
+
+@pytest.mark.parametrize(
+    "world",
+    [
+        # Three Free and a billed Basic, all active (over the allowance).
+        {
+            1: ("free", "admin_grant"),
+            2: ("free", "admin_grant"),
+            3: ("free", "admin_grant"),
+            4: ("basic", "external_billing"),
+        },
+        # A Free and a billed Basic both active after a deferred purchase.
+        {1: ("free", "admin_grant"), 2: ("basic", "external_billing")},
+    ],
+)
+def test_if_paid_plans_end_shows_what_the_contract_end_does(world) -> None:
+    """The account page's "if your paid plans end" equals the transition of
+    the contract-end events."""
+    from services.workspace_slots import _overview
+
+    shown = _overview(_state(world, set())).if_paid_plans_end
+    after, rows = dict(world), set()
+    for wid, (plan, source) in world.items():
+        if billing_contract_active(plan, source):
+            after, rows, _ = _event(after, rows, wid, ("free", source))
+    assert set(shown.suspended) == {U(i) for i in world} - {U(i) for i in _active(after, rows)}
+    assert len(shown.suspended) == len(world) - 1
