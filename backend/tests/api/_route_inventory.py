@@ -15,14 +15,25 @@ from typing import Any
 
 from api.main import app
 
+# The route objects the walker knows. Anything else fails ``_iter_routes``: a
+# new kind of route must be enumerated on purpose, not skipped in silence.
+_KNOWN_ROUTE_TYPES = ("APIRoute", "Route")
 
-def _iter_routes() -> Iterator[tuple[str, str, Any, tuple[Any, ...]]]:
+# Routes outside the REST tables: the MCP transport mounts (classified by the
+# slot table only) and FastAPI's own documentation helpers.
+MCP_MOUNTS = frozenset({"/mcp/w/{workspace_id}{path:path}", "/mcp/public/{public_id}{path:path}"})
+_DOC_HELPERS = frozenset({"/openapi.json", "/docs/oauth2-redirect"})
+
+
+def _iter_routes(*, include_mcp: bool = False) -> Iterator[tuple[str, str, Any, tuple[Any, ...]]]:
     """Yield ``(method, path, route, include-time dependencies)`` per REST route.
 
     FastAPI registers included routers lazily (``_IncludedRouter``); the original
     router and its include prefix are read back, recursively (auth includes the
-    google/github routers). The MCP transport (``/mcp`` …), the OpenAPI document
-    and the OAuth2 redirect helper are left out.
+    google/github routers). The documentation helpers are left out, and so are
+    the MCP mounts unless ``include_mcp`` (the capacity table classifies the
+    REST surface only). Any other route without methods, or of a kind not in
+    ``_KNOWN_ROUTE_TYPES`` (subclasses included), raises.
     """
 
     def inner(routes, prefix: str, extra: tuple[Any, ...]):
@@ -36,17 +47,19 @@ def _iter_routes() -> Iterator[tuple[str, str, Any, tuple[Any, ...]]]:
                     extra + tuple(getattr(context, "dependencies", None) or ()),
                 )
                 continue
+            kinds = {cls.__name__ for cls in type(route).__mro__}
             methods = getattr(route, "methods", None)
             path = getattr(route, "path", None)
-            if not methods or path is None:
-                continue
+            if not kinds & set(_KNOWN_ROUTE_TYPES) or not methods or path is None:
+                raise AssertionError(f"unknown route object {type(route)!r} at {prefix}{path}")
             full = prefix + path
-            if (
-                full == "/mcp"
-                or full.startswith("/mcp/")
-                or full in ("/openapi.json", "/docs/oauth2-redirect")
-            ):
+            if full in _DOC_HELPERS:
                 continue
+            if full == "/mcp" or full.startswith("/mcp/"):
+                if full not in MCP_MOUNTS:
+                    raise AssertionError(f"unpinned MCP mount: {full}")
+                if not include_mcp:
+                    continue
             for method in methods - {"HEAD", "OPTIONS"}:
                 yield method, full, route, extra
 
