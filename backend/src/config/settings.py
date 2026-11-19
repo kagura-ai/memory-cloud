@@ -714,15 +714,6 @@ class Settings(BaseSettings):
         other_tokens = {
             token for token in (self.billing_service_token, self.worker_service_token) if token
         }
-        reporter = self.mcp_public_domains_tls_reporter_token
-        if reporter and (
-            is_placeholder_secret(reporter)
-            or len(reporter.strip()) < _PRODUCTION_SECRET_MIN_LEN
-            or reporter in (current, *previous, *other_tokens)
-        ):
-            raise ValueError(
-                "MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN needs a strong, dedicated value"
-            )
         if other_tokens.intersection([current, *previous]):
             raise ValueError(
                 "ENVIRONMENT=production refuses a system-admin service credential equal to "
@@ -1402,9 +1393,6 @@ class Settings(BaseSettings):
     # the API is reached under (``name`` = that host, ``.name`` = that host and
     # every name under it); RESERVED_SUFFIXES are never claimable and refused
     # on the request path from the first request after a restart.
-    mcp_public_domains_tls_reporter_token: str = Field(
-        default="", repr=False, description="Dedicated internal TLS observation reporter credential"
-    )
     mcp_public_domains_enabled: bool = Field(
         default=False,
         description="Serve verified custom domains as aliases of public MCP endpoints",
@@ -1443,6 +1431,56 @@ class Settings(BaseSettings):
         le=50,
         description="Custom domains (pending, active or suspended) per workspace",
     )
+    # #2941: the bearer credential of the certificate operator's reporter
+    # (PUT /internal/public-mcp-domains/tls-observation). Empty: reports are
+    # refused (404) and none is shown. Use: openssl rand -hex 32.
+    mcp_public_domains_tls_reporter_token: str = Field(
+        default="",
+        repr=False,
+        description=(
+            "Bearer credential of the edge certificate reporter; empty refuses every "
+            "report and shows none"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_tls_reporter_token(self) -> "Settings":
+        """Guard the reporter's credential like a service credential (#2941).
+
+        A value with a blank could never be presented as the bearer, so it
+        refuses start-up everywhere. Under ENVIRONMENT=production a set value
+        must be a private value of at least the secret guard's minimum length
+        and its own: not the system-admin service credential (current or a
+        previous one), nor the billing or worker service token. Only the
+        variable is named, never the value.
+        """
+        token = self.mcp_public_domains_tls_reporter_token
+        if not token:
+            return self
+        if any(ch.isspace() for ch in token):
+            raise ValueError(
+                "MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN must not contain blanks: use "
+                "openssl rand -hex 32."
+            )
+        if not self.is_production:
+            return self
+        others = {
+            self.system_admin_service_token,
+            *(part.strip() for part in self.system_admin_service_token_previous.split(",")),
+            self.billing_service_token,
+            self.worker_service_token,
+        } - {""}
+        if (
+            is_placeholder_secret(token)
+            or len(token) < _PRODUCTION_SECRET_MIN_LEN
+            or token in others
+        ):
+            raise ValueError(
+                "ENVIRONMENT=production refuses MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN unless "
+                f"it is a private value of at least {_PRODUCTION_SECRET_MIN_LEN} characters "
+                "that no other service credential uses (openssl rand -hex 32)."
+            )
+        return self
 
     @field_validator("mcp_public_domains_authority", mode="before")
     @classmethod
