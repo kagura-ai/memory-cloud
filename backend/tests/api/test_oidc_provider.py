@@ -9,6 +9,8 @@ import secrets
 import time
 from collections.abc import Iterator
 from datetime import timedelta
+from html.parser import HTMLParser
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -533,6 +535,172 @@ def test_consent_page_csp_lets_the_form_redirect_to_a_cross_origin_callback(api)
         assert key in query
         if confirm == "no":
             assert query["error"] == ["access_denied"]
+
+
+class _ConsentPage(HTMLParser):
+    """Collect the consent page's elements, attributes and stylesheet text."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tags: list[tuple[str, dict[str, str | None]]] = []
+        self.styles: list[str] = []
+        self.title = ""
+        self._in: str | None = None
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, dict(attrs)))
+        self._in = tag
+
+    def handle_endtag(self, tag):
+        self._in = None
+
+    def handle_data(self, data):
+        if self._in == "style":
+            self.styles.append(data)
+        elif self._in == "title":
+            self.title += data
+
+
+def _consent_page(api) -> tuple[_ConsentPage, object]:
+    _, params = authorization_params()
+    page = api.get("/oidc/authorize", params=params)
+    assert page.status_code == 200, page.text
+    parsed = _ConsentPage()
+    parsed.feed(page.text)
+    return parsed, page
+
+
+def _csp(page) -> dict[str, list[str]]:
+    directives = [part.split() for part in page.headers["content-security-policy"].split(";")]
+    return {name: values for name, *values in directives}
+
+
+def test_consent_page_escapes_client_name_account_and_query_values(api, store):
+    with store.factory() as db:
+        db.scalars(select(OIDCClient)).one().client_name = 'Shop <script>alert(1)</script> "x"'
+        db.scalars(select(User)).one().name = '<img src=x onerror=alert(2)> "me"'
+        db.commit()
+    _, params = authorization_params(state='"><script>alert(3)</script>')
+    page = api.get("/oidc/authorize", params=params)
+    assert page.status_code == 200, page.text
+    assert page.text.count("<script") == 0
+    assert page.text.count("<img src=x") == 0
+    assert page.text.count("Shop &lt;script&gt;alert(1)&lt;/script&gt; &#34;x&#34;") == 1
+    assert page.text.count("&lt;img src=x onerror=alert(2)&gt; &#34;me&#34;") == 1
+    parsed = _ConsentPage()
+    parsed.feed(page.text)
+    (form,) = [attrs for tag, attrs in parsed.tags if tag == "form"]
+    assert form["method"] == "post"
+    action = urlsplit(form["action"] or "")
+    assert (action.scheme, action.netloc, action.path) == ("", "", "/oidc/authorize")
+    assert parse_qs(action.query)["state"] == [params["state"]]
+
+
+def test_consent_page_style_nonce_is_fresh_per_response_and_the_only_style_source(api):
+    nonces = []
+    for _ in range(2):
+        parsed, page = _consent_page(api)
+        csp = _csp(page)
+        (style,) = [attrs for tag, attrs in parsed.tags if tag == "style"]
+        nonce = style["nonce"] or ""
+        assert csp["style-src"] == [f"'nonce-{nonce}'"]
+        # secrets.token_urlsafe(24): 192 bits from the CSPRNG.
+        assert re.fullmatch(r"[A-Za-z0-9_-]{32}", nonce)
+        assert all("style" not in attrs for _, attrs in parsed.tags)
+        assert "'unsafe-inline'" not in page.headers["content-security-policy"]
+        nonces.append(nonce)
+    assert nonces[0] != nonces[1]
+
+
+def test_consent_page_loads_only_same_origin_images_and_no_script(api):
+    parsed, page = _consent_page(api)
+    csp = _csp(page)
+    assert csp == {
+        "default-src": ["'none'"],
+        "frame-ancestors": ["'none'"],
+        "base-uri": ["'none'"],
+        "img-src": ["'self'"],
+        "style-src": csp["style-src"],
+    }
+    assert [tag for tag, _ in parsed.tags if tag in {"script", "iframe", "object", "embed"}] == []
+    urls = [
+        attrs[key] or ""
+        for tag, attrs in parsed.tags
+        for key in ("src", "href", "srcset")
+        if key in attrs
+    ]
+    assert urls and all(u.startswith("/") and not u.startswith("//") for u in urls)
+    stylesheet = "".join(parsed.styles)
+    assert stylesheet.count("url(") == 0 and stylesheet.count("@import") == 0
+    assert stylesheet.count("@font-face") == 0
+    # The favicon is the frontend's app icon, served on the issuer origin
+    # next to /login (the sign-in redirect above relies on the same origin).
+    assert set(urls) == {"/icon.png"}
+    repo = Path(__file__).resolve().parents[3]
+    assert (repo / "frontend" / "src" / "app" / "icon.png").is_file()
+
+
+def test_consent_page_structure_is_accessible(api):
+    parsed, page = _consent_page(api)
+    tags = [tag for tag, _ in parsed.tags]
+    (html_attrs,) = [attrs for tag, attrs in parsed.tags if tag == "html"]
+    assert html_attrs["lang"] == "en"
+    assert parsed.title.strip() == "Confirm sign in · Kagura Memory Cloud"
+    assert tags.count("main") == 1 and tags.count("h1") == 1
+    (img,) = [attrs for tag, attrs in parsed.tags if tag == "img"]
+    assert img["alt"] == ""  # decorative: the brand name follows as text
+    controls = [(tag, attrs) for tag, attrs in parsed.tags if tag in {"input", "button", "a"}]
+    assert [(tag, attrs.get("name"), attrs.get("value")) for tag, attrs in controls] == [
+        ("input", "csrf_token", controls[0][1]["value"]),
+        ("button", "confirm", "yes"),
+        ("button", "confirm", "no"),
+    ]
+    assert controls[0][1]["type"] == "hidden"
+    assert all(attrs.get("type", "submit") == "submit" for tag, attrs in controls[1:])
+    assert all("tabindex" not in attrs and "disabled" not in attrs for _, attrs in controls)
+    assert tags.index("form") < tags.index("button")
+    assert "button:focus-visible { outline: 3px solid" in "".join(parsed.styles)
+
+
+def _luminance(colour: str) -> float:
+    value = {"white": "ffffff", "#fff": "ffffff"}.get(colour, colour.lstrip("#"))
+    channels = [int(value[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(a: str, b: str) -> float:
+    high, low = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_consent_page_text_contrast_is_at_least_4_5_to_1(api):
+    parsed, _ = _consent_page(api)
+    rules = {
+        selector.strip(): {
+            key.strip(): value.strip()
+            for key, _, value in (decl.partition(":") for decl in body.split(";") if decl.strip())
+        }
+        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", "".join(parsed.styles))
+    }
+    text = rules[":root"]["color"]
+    card = rules["main"]["background"]
+    # (foreground, background) of every text the page shows, in each state.
+    pairs = {
+        "body on page": (text, rules[":root"]["background"]),
+        "body on card": (text, card),
+        "brand": (rules[".brand"]["color"], card),
+        "account": (rules[".account"]["color"], card),
+        "permissions": (text, rules["ul"]["background"]),
+        "cancel": (rules["button"]["color"], rules["button"]["background"]),
+        "cancel hover": (rules["button"]["color"], rules["button:hover"]["background"]),
+        "continue": (rules[".primary"]["color"], rules[".primary"]["background"]),
+        "continue hover": (rules[".primary"]["color"], rules[".primary:hover"]["background"]),
+    }
+    low = {name: round(_contrast(*pair), 2) for name, pair in pairs.items()}
+    assert {name: ratio for name, ratio in low.items() if ratio < 4.5} == {}
+    focus = rules["button:focus-visible"]["outline"].split()[-1]
+    assert _contrast(focus, card) >= 3
 
 
 @pytest.mark.parametrize(
