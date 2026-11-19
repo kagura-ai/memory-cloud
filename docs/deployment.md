@@ -4671,7 +4671,11 @@ grant (0 / 0 / 2 / 19) comes from the highest tier among the workspaces the
 user owns. Admin/referral slot bonuses stack on top. Only creating another
 workspace is gated — a user above the cap (e.g. after a downgrade) keeps
 every workspace. Enforcement is behind `ENFORCE_WORKSPACE_CAP` (default
-`false` = log-only); see `docs/ops/workspace-cap-rollback.md`.
+`false` = log-only); see `docs/ops/workspace-cap-rollback.md`. With
+`WORKSPACE_SLOT_SUSPENSION=enforce` (#2918, default `off`; needs
+`ENFORCE_WORKSPACE_CAP=true`) a drop of the allowance also suspends the excess
+owned workspaces, data kept, until slots return or the owner chooses others;
+see [Workspace slot suspension](ops/workspace-slots.md).
 
 Feature availability (the `features` set on each tier):
 
