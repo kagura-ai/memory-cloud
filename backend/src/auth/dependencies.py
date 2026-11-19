@@ -521,7 +521,8 @@ async def verify_api_key_user(
     """Verify API key and return user info. Raises 401 if missing/invalid.
 
     #2929: a connector key is accepted only on the routes
-    ``auth.connector_key_scope`` lists (none today): elsewhere 403 ``AUTH-204``.
+    ``auth.connector_key_scope`` lists (the REST list is empty): elsewhere 403
+    ``AUTH-204``.
 
     Example:
         @app.get("/api/v1/memories")
@@ -1158,7 +1159,7 @@ async def get_share_key_principal(
 
     #2930: a share key never outlives its creator's right to share the
     context. On every request, after the key and its live context are
-    verified and before the slot gate, the creator must still hold
+    verified and before the slot gate, the creator must hold
     OWNER-level access to the bound context under the role decision the mint
     route applies (``auth.share_keys.creator_can_share``). A creator who left
     the workspace, lost the context from their access list, lost the OWNER

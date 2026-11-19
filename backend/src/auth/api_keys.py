@@ -74,9 +74,8 @@ class VerifiedKey(NamedTuple):
         connector_scoped: #2929: the key is accepted only where
             ``auth.connector_key_scope`` accepts a connector key: it is linked
             to a connector, or it carries the reserved ``connector:`` name
-            (a key minted for a connector before the link existed).
-            ``is_connector_key`` keeps meaning "linked" for the readers that
-            need the connector row.
+            without a link. ``is_connector_key`` means "linked", for the
+            readers that need the connector row.
     """
 
     id: int
@@ -587,8 +586,7 @@ class APIKeyManager:
             default_context_id=key_record.default_context_id,
             public_id=key_record.public_id,
             connector_id=connector_id,
-            # #2929: the link, or the reserved name of a key minted for a
-            # connector before the link existed.
+            # #2929: the link, or the reserved name alone.
             connector_scoped=(
                 connector_id is not None or key_record.name.startswith(CONNECTOR_KEY_PREFIX)
             ),

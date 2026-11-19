@@ -13,7 +13,7 @@ provisioning (``api_keys.connector_id`` set):
 * ``CONNECTOR_KEY_SCOPE=log`` answers as if the rule did not exist and logs one
   ``connector_key_scope_would_refuse`` event, without key material;
 * an ordinary key and an agent-bound key are not affected; a paused connector's
-  key and a key linked to a connector of another workspace are still 401;
+  key and a key linked to a connector of another workspace are 401;
 * resource ingest, which authenticates by ``X-Resource-API-Key`` only, serves a
   request that also carries a connector key as a bearer exactly as without it;
 * on ``POST /mcp`` a connector key (linked, or with only the reserved name)
@@ -128,7 +128,7 @@ async def world(db_session: AsyncSession, connector_world, monkeypatch):
     ordinary, _ = await manager.create_key(name="cks-ordinary", user_id=owner, workspace_id=ws.id)
     agent = await connector_world.agent(ws, by=owner)
     agent_key, _ = await connector_world.agent_key(member, ws, agent)
-    # A key minted for a connector before the link existed: the reserved name, no link.
+    # A key with the reserved name and no link.
     legacy, _ = await manager.create_key(
         name=f"connector:{uuid4()}", user_id=owner, workspace_id=ws.id
     )

@@ -4806,8 +4806,10 @@ without changing anything and you rerun it, rather than every query on
 A connector's write key is linked to its connector by `api_keys.connector_id`
 (`ON DELETE CASCADE`) instead of by its name `connector:{id}`. The migration
 links every existing key of the same workspace whose name is exactly
-`connector:` + a connector id (revoked rows included) and leaves look-alikes as
-ordinary keys. From then on the link decides: the seat pause above, the MCP
+`connector:` + a connector id (revoked rows included) and leaves look-alikes
+unlinked (their reserved name puts them under the
+[connector key scope](#connector_key_scope-2929)). The link decides the seat
+pause above, the MCP
 connector-credential handling, and deleting the connector — the key row is
 removed with it (it disappears from the key list rather than showing as
 revoked). A connector's key cannot be regenerated from the API keys page or the
@@ -4817,7 +4819,9 @@ member credentials (`422`); rotate it through its connector
 **Re-run the backfill once after the traffic switch.** The migration runs from
 the new image before traffic moves, so the old image can still provision or
 rotate a connector in between (or again after a rollback) and mint a key with
-no link. Such a key is an ordinary workspace key: not paused with the seats.
+no link. Such a key has no link: it is not paused with the seats, but like
+every `connector:` key it is accepted only where a connector key is
+([`CONNECTOR_KEY_SCOPE`](#connector_key_scope-2929)).
 Rotating the connector, or deleting it, takes care of it, and so does this
 statement, which is idempotent and touches only unlinked rows:
 
@@ -4837,10 +4841,9 @@ UPDATE api_keys AS k
 
 Keys still named like a connector key but linked to none — the connector was
 deleted before the migration, or the key carries an agent or a default context
-— are not paused with the seats. Since #2929 they are accepted only where a
-connector key is ([`CONNECTOR_KEY_SCOPE`](#connector_key_scope-2929)): the
-connector worker's MCP tools, no REST route. List them and revoke the ones
-nobody uses:
+— are not paused with the seats, and are accepted only where a connector key
+is ([`CONNECTOR_KEY_SCOPE`](#connector_key_scope-2929)): the connector
+worker's MCP tools, no REST route. List them and revoke the ones nobody uses:
 
 ```sql
 SELECT public_id, workspace_id, user_id, created_at
@@ -5229,20 +5232,25 @@ name — authenticates the MCP tools a connector worker uses (`recall`,
 `remember`, `create_edge`, `reference`, `update_memory`, `list_edges`,
 `delete_edge`, `forget`, `get_context_info`) and no REST route. Every other
 MCP tool answers a `permission_denied` tool result with `error_code: "AUTH-204"`
-and `tools/list` leaves it out; every REST route that authenticates an API key
-answers `403 AUTH-204`. Details: [MCP tools › Connector keys](mcp-tools.md#connector-keys)
+and `tools/list` leaves it out. A REST route that authenticates an API key
+answers `403 AUTH-204`, and a refused key is never tried as a browser session;
+the public context routes (`/api/v1/public/{context_id}/search`, `/info`)
+accept only public-bound keys and answer their own `403 AUTH-101`. Details: [MCP tools › Connector keys](mcp-tools.md#connector-keys)
 and [the connector ingest contract](connector-ingest-contract.md#what-the-connector-key-is-accepted-for-2929).
 No database statement depends on the setting.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CONNECTOR_KEY_SCOPE` | `enforce` | `enforce`: a connector key is refused outside the lists above, logged as `connector_key_scope_refused`. `log`: the request is served as before and logged as `connector_key_scope_would_refuse`. Both events carry `surface` (`rest` or `mcp`), `target` (`<METHOD> <route template>` or the tool name), `key_prefix` and `connector_id`, never the key. Surrounding blanks are trimmed; any other value, an empty one included, refuses to start. |
+| `CONNECTOR_KEY_SCOPE` | `enforce` | `enforce`: a connector key is refused outside the lists above, logged as `connector_key_scope_refused`. `log`: the request is served and logged as `connector_key_scope_would_refuse`. Both events carry `surface` (`rest` or `mcp`), `target` (`<METHOD> <route template>` or the tool name), `key_prefix` and `connector_id`, never the key. Surrounding blanks are trimmed; any other value, an empty one included, refuses to start. |
 
 **Upgrade:** the connector workers released so far call only the listed tools,
-so `enforce` needs no worker upgrade. `log` exists for an operator whose own
-client uses a connector key in another way: run with `log`, read the
-`connector_key_scope_would_refuse` events, move that client to an ordinary API
-key, return to `enforce`.
+so `enforce` needs no worker upgrade. The bridge's `corpus-ingest` command
+archives original files through the REST files routes, which do not accept a
+connector key: the archive step is skipped (the ingest reports it as partial)
+and a `connector_key_scope_refused` event names the route. `log` exists for an
+operator whose own client uses a connector key in another way: run with `log`,
+read the `connector_key_scope_would_refuse` events, move that client to an
+ordinary API key, return to `enforce`.
 
 ### Share keys and their creator (#2930)
 

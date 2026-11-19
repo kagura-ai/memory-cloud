@@ -2,15 +2,14 @@
 
 A connector key is the workspace API key a chat or ingestion connector's worker
 holds: an ``api_keys`` row linked to its connector by ``connector_id``, or one
-minted for a connector before that link existed, which carries the reserved
-``connector:`` name (``auth.connector_keys``). Either is
-``VerifiedKey.connector_scoped``.
+that carries the reserved ``connector:`` name without that link
+(``auth.connector_keys``). Either is ``VerifiedKey.connector_scoped``.
 
 A connector key authenticates exactly what a connector worker calls:
 
 - the MCP tools in ``CONNECTOR_KEY_MCP_TOOLS`` (the MCP protocol methods
   around them, ``initialize``, ``ping``, notifications and a ``tools/list``
-  that names only these tools, stay available);
+  that names only these tools, are available);
 - the REST routes in ``CONNECTOR_KEY_REST_ROUTES``: none. No REST route that
   authenticates an API key accepts a connector key.
 
@@ -19,7 +18,7 @@ it where a verified API key becomes a principal (``auth.dependencies``), on the
 route template FastAPI matched; MCP applies it in the tool dispatcher before
 anything else runs for the call (``mcp_server.tools``). Everything else about
 the key (its owner, its workspace, the pause while its connector has no seat)
-is decided where it was before.
+is decided in ``auth.api_keys``, not here.
 
 ``CONNECTOR_KEY_SCOPE`` (``Settings.connector_key_scope``) picks what happens
 outside the lists: ``enforce`` (default) refuses with ``ConnectorKeyScopeError``

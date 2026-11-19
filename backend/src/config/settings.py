@@ -2119,9 +2119,10 @@ class Settings(BaseSettings):
     )
     # #2929: a connector key authenticates the MCP tools a connector worker
     # uses and no REST route (``auth.connector_key_scope``). ``enforce``
-    # (default) refuses everything else; ``log`` serves it as before and logs
-    # ``connector_key_scope_would_refuse`` for each such request, for an
-    # operator moving another client of a connector key to an ordinary key.
+    # (default) refuses everything else; ``log`` serves the request and logs
+    # ``connector_key_scope_would_refuse`` for each request outside the lists,
+    # for an operator moving another client of a connector key to an ordinary
+    # key.
     # No database statement depends on it.
     connector_key_scope: Literal["enforce", "log"] = Field(
         default="enforce",

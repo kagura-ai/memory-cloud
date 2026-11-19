@@ -241,7 +241,7 @@ async def test_a_creator_who_left_the_workspace_ends_the_key(world) -> None:
     )
     await world.db.commit()
     await _refused_like_an_unknown_key(world, world.keys["member"].plaintext)
-    # The same account's key in the workspace it still belongs to keeps working.
+    # The same account's key in the workspace it belongs to keeps working.
     assert (await _sessions(world, world.keys["member_y"].plaintext)).status_code == 200
 
 
@@ -377,7 +377,8 @@ async def test_removing_a_member_revokes_its_share_keys_for_the_workspace(world)
     assert again == 0
     assert len(await _revocations(world, key.public_id)) == 1
 
-    # Re-added as a workspace admin (OWNER-level access to every shared\n    # context): the key stays revoked.
+    # Re-added as a workspace admin (OWNER-level access to every shared
+    # context): the key stays revoked.
     world.db.add(
         WorkspaceMember(
             workspace_id=world.x.id,

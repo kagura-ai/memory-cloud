@@ -388,7 +388,7 @@ class MemberCredentialsService:
         - The member's live share keys bound to this workspace's contexts
           (``ShareKeyManager.revoke_creator_keys``: one ``credential.revoked``
           record per key, ``actor_user_id`` as actor); the member's share keys
-          in other workspaces stay
+          in other workspaces are not touched
 
         Args:
             workspace_id: Workspace ID

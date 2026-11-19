@@ -42,11 +42,13 @@ logger = get_logger(__name__)
 
 
 async def creator_can_share(db: AsyncSession, user_id: str, context_id: UUID) -> bool:
-    """Whether ``user_id`` may share ``context_id`` now (#2930).
+    """Whether ``user_id`` may share ``context_id`` (#2930).
 
     The rule the mint route applies: OWNER-level access to the context under
-    ``PermissionService``'s role decision (workspace owner or admin, or a
-    seated member who reaches the context with its OWNER role). ``False`` for
+    ``PermissionService``'s role decision. On a shared context the workspace
+    owner or an admin, or a member holding the context's owner role whose
+    access list reaches it; on a private context only its creator (or an
+    account linked to the creator); always with a plan seat. ``False`` for
     every refusal of that decision (not found, role too low, no seat). Any
     other failure propagates: the caller refuses on it, never allows.
     """
@@ -285,8 +287,10 @@ class ShareKeyManager:
         """Revoke a share key by its public id (soft delete, preserves audit trail).
 
         #2930: allowed for the key's creator, or for a caller who may share
-        the key's bound context (``creator_can_share``: workspace owner or
-        admin, or the context's owner). An unknown id, an already revoked key
+        the key's bound context (``creator_can_share``: on a shared context the
+        workspace owner or an admin, or a member holding the context's owner
+        role whose access list reaches it; on a private context only its
+        creator or an account linked to it). An unknown id, an already revoked key
         and a key the caller may not revoke all return ``False`` (the route
         maps it to the uniform 404). The operation record names the caller as
         actor and the creator as subject.

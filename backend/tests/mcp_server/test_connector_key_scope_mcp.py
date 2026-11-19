@@ -293,9 +293,7 @@ async def test_tools_list_names_only_the_listed_tools_for_a_connector_key(
 
 @DRIVERS
 @pytest.mark.asyncio
-async def test_tools_list_is_unchanged_in_log_mode_and_for_other_credentials(
-    drive, scope_mode
-) -> None:
+async def test_log_mode_and_other_credentials_get_the_full_tools_list(drive, scope_mode) -> None:
     plain = await drive(b"profile=full", "tools/list")
     scope_mode("log")
     with as_connector():

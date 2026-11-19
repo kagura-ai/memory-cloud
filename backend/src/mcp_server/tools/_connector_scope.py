@@ -6,8 +6,8 @@ REST and MCP); this module applies it to the three MCP surfaces that depend on t
 credential:
 
 - ``tools/call``: ``connector_key_tool_refusal`` runs first in the tool
-  dispatcher, before the rate limit, the default context, the slot and capacity
-  gates and the handler. A refused call is a tool result (``isError``), the
+  dispatcher, before argument validation, the rate limit, the default context,
+  the slot and capacity gates and the handler. A refused call is a tool result (``isError``), the
   ``permission_denied`` envelope a role refusal has, with ``error_code``
   ``AUTH-204``: the session stays usable for the listed tools.
 - ``tools/list``: ``tools_for_credential`` keeps only the listed tools of the
@@ -16,9 +16,10 @@ credential:
   instructions builder to serve the static base text, without the guardrail
   digest or the default context's name.
 
-``CONNECTOR_KEY_SCOPE=log`` leaves ``tools/list`` and the instructions as they
-were and dispatches every call, logging ``connector_key_scope_would_refuse``
-for each call outside the list.
+With ``CONNECTOR_KEY_SCOPE=log`` ``tools/list`` names every tool of the view,
+the instructions are built as for any credential, and every call is
+dispatched, logging ``connector_key_scope_would_refuse`` for each call outside
+the list.
 """
 
 from __future__ import annotations
@@ -79,7 +80,7 @@ def tools_for_credential(tools: list[dict[str, Any]]) -> tuple[list[dict[str, An
     Returns:
         ``(tools, narrowed)``: for a connector key under ``enforce`` only the
         listed tools of the view, and ``narrowed=True`` (the list then depends
-        on the credential); otherwise ``tools`` unchanged and ``False``.
+        on the credential); otherwise ``tools`` as given and ``False``.
     """
     if not connector_key_narrowed():
         return tools, False

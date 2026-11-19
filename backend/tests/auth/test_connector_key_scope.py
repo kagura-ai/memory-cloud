@@ -246,8 +246,8 @@ async def test_a_key_linked_to_a_connector_is_connector_scoped() -> None:
 
 @pytest.mark.asyncio
 async def test_a_key_with_the_reserved_name_and_no_link_is_connector_scoped() -> None:
-    """A key minted for a connector before the link existed: the reserved name
-    alone puts it under the connector key scope; the link-based flag stays off."""
+    """A key with the reserved name and no link: the name alone puts it under
+    the connector key scope; the link-based flag is off."""
     verified = await _verify(_key_record(connector_key_name(CONNECTOR_ID)))
     assert verified is not None
     assert verified.is_connector_key is False

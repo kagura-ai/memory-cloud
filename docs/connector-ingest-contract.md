@@ -54,14 +54,16 @@ the MCP endpoint (`initialize`, `tools/call`) for these tools only:
   ([MCP tools › Connector keys](mcp-tools.md#connector-keys)).
 - **No REST route accepts a connector key.** A REST route that authenticates an
   API key answers `403` with `{"error": "AUTH-204", "message": "This credential
-  is not accepted on this route", "details": {}}`. The resource-ingest route
-  above authenticates by `X-Resource-API-Key` only and does not read an
-  `Authorization` bearer, so a request that carries the connector key there as
-  well is served as without it.
-- The connector key's owner, its workspace and the pause while the workspace
-  has no connector seats are unchanged.
-- `CONNECTOR_KEY_SCOPE=log` serves every such request as before and logs
-  `connector_key_scope_would_refuse` instead
+  is not accepted on this route", "details": {}}`, and a refused key is never
+  tried as a browser session; the public context routes (`/api/v1/public/{context_id}/search`, `/info`) accept only public-bound keys and answer their own `403` `AUTH-101`. The
+  resource-ingest route above authenticates by `X-Resource-API-Key` only and
+  does not read an `Authorization` bearer, so a request that carries the
+  connector key there as well is served as without it.
+- The connector key keeps its owner, its workspace and the pause while the
+  workspace has no connector seats.
+- With `CONNECTOR_KEY_SCOPE=log` a connector key is also accepted on those REST
+  routes and MCP tools, `tools/list` names every tool, and each such request
+  logs `connector_key_scope_would_refuse`
   ([deployment](deployment.md#connector_key_scope-2929)).
 
 ## Event payload
