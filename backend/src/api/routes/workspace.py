@@ -344,11 +344,10 @@ async def get_workspace_stats(
 async def _require_workspace_member(db: AsyncSession, user: dict, workspace_id: UUID) -> None:
     """Refuse a caller who does not belong to the selected workspace (#2714, #2928).
 
-    ``current_workspace_id`` alone is not proof of membership (a workspace-scoped
-    API key puts its own workspace there), so every read of this router that
-    acts on it checks it first: the usage readouts and the embedding status.
-    The seat check is skipped: a seat-suspended member still reads the
-    non-monetary usage (#2632) and keeps the response they had.
+    Every read of this router that acts on ``current_workspace_id`` (the usage
+    readouts, the stats and the embedding status) checks membership of that
+    workspace first. The seat check is skipped: a seat-suspended member still
+    reads the non-monetary usage (#2632).
 
     Raises:
         AuthorizationError: 403 for a non-member or a deleted workspace.

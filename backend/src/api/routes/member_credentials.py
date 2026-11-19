@@ -10,9 +10,10 @@ Endpoints:
 - DELETE /workspaces/{workspace_id}/members/{user_id}/credentials/api-key
 - Similar for OAuth apps
 
-Every route requires the caller to be the owner or a member of the workspace in
-the path (#2928): a session caller through ``_require_path_workspace_member``,
-an API-key owner through ``authorize_workspace_management``.
+Every route requires the caller to hold a membership row (any role, the
+owner's included) in the workspace of the path (#2928): a session caller
+through ``_require_path_workspace_member``, an API-key owner through
+``authorize_workspace_management``.
 """
 
 from typing import Annotated
@@ -93,14 +94,16 @@ def _reject_oauth(user: dict, action: str) -> None:
 
 
 async def _require_path_workspace_member(db: AsyncSession, user: dict, workspace_id: UUID) -> None:
-    """Require the session caller to be the owner or a member of the path workspace.
+    """Require the session caller to hold a membership row in the path workspace.
 
-    Every session route of this router runs it before anything else it does
+    Any role, the owner's included: an owner whose membership row is missing
+    is refused here, as on the workspace switch and the usage readouts. Every
+    session route of this router runs it before anything else it does
     (#2928): before a lookup, a write or an operation-history record. A caller
-    who is not a member gets the uniform ``AUTH-101`` refusal the workspace
-    routes give, the same body whether the workspace exists or not. Membership
-    only, not the seat on the plan: a member without a seat still hides,
-    rotates and deletes their own credentials.
+    without a row gets the uniform ``AUTH-101`` refusal the workspace routes
+    give, the same body whether the workspace exists or not. Membership only,
+    not the seat on the plan: a member without a seat still hides, rotates and
+    deletes their own credentials.
 
     Raises:
         AuthorizationError: 403 for a non-member or a deleted or unknown workspace.

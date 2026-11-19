@@ -4,12 +4,14 @@ On real PostgreSQL rows, over HTTP: the session dependency and API-key
 authentication run as in the app, and every request gets its own session.
 
 * every self-service route (the caller acts on their own credentials) answers a
-  signed-in user who is not a member of the path workspace with the uniform
-  ``AUTH-101`` refusal — the same body for an unknown workspace id — and
-  changes nothing: no key is minted, hidden, rotated or deleted, no OAuth app
-  changes, no operation-history record is written;
+  signed-in user without a membership row in the path workspace with the
+  uniform ``AUTH-101`` refusal — the same status, body and headers for an
+  unknown and for a soft-deleted workspace, and for an owner whose membership
+  row is missing — and changes nothing: no key is minted, hidden, rotated or
+  deleted, no OAuth app changes, no operation-history record is written;
 * a member keeps minting, listing, hiding, rotating and deleting their own
-  key, and a member without a seat on the plan still hides and deletes theirs;
+  key and OAuth app, and a member without a seat on the plan still hides and
+  deletes theirs;
 * the owner-provisioned mint and the routes acting on another member keep
   requiring the owner or a manager role of the path workspace.
 """
@@ -33,6 +35,7 @@ from auth.workspace_roles import WorkspaceRole
 from models.auth import APIKey, OAuth2Client, User, Workspace, WorkspaceMember
 from models.operation_history import OperationHistory
 from services.plan_seats import member_seat_suspended
+from utils.datetime import utcnow
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -79,13 +82,15 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
     monkeypatch.setattr(member_credentials, "schedule_security_notification", MagicMock())
     factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
     tag = uuid4().hex[:8]
-    owner, member, outsider = (f"mc-{role}-{tag}" for role in ("owner", "member", "outsider"))
-    x, y, s = uuid4(), uuid4(), uuid4()
+    owner, member, outsider, rowless = (
+        f"mc-{role}-{tag}" for role in ("owner", "member", "outsider", "rowless")
+    )
+    x, y, s, n, d = uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
     async with factory() as db:
         db.add_all(
             [
                 User(user_id=uid, email=f"{uid}@example.test", name=uid, role="user")
-                for uid in (owner, member, outsider)
+                for uid in (owner, member, outsider, rowless)
             ]
         )
         await db.flush()
@@ -94,6 +99,16 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
                 Workspace(id=x, name=f"x-{tag}", owner_user_id=owner, plan_name="promax"),
                 Workspace(id=y, name=f"y-{tag}", owner_user_id=outsider, plan_name="promax"),
                 Workspace(id=s, name=f"s-{tag}", owner_user_id=owner, plan_name="free"),
+                # Owned by ``rowless``, who has no membership row in it.
+                Workspace(id=n, name=f"n-{tag}", owner_user_id=rowless, plan_name="promax"),
+                # Soft-deleted; the outsider was its owner.
+                Workspace(
+                    id=d,
+                    name=f"d-{tag}",
+                    owner_user_id=outsider,
+                    plan_name="promax",
+                    deleted_at=utcnow(),
+                ),
             ]
         )
         await db.flush()
@@ -104,6 +119,7 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
                 WorkspaceMember(workspace_id=y, user_id=outsider, role=WorkspaceRole.OWNER),
                 WorkspaceMember(workspace_id=s, user_id=owner, role=WorkspaceRole.OWNER),
                 WorkspaceMember(workspace_id=s, user_id=member, role=WorkspaceRole.MEMBER),
+                WorkspaceMember(workspace_id=d, user_id=outsider, role=WorkspaceRole.OWNER),
             ]
         )
         await db.flush()
@@ -145,6 +161,9 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
             x=x,
             y=y,
             s=s,
+            n=n,
+            d=d,
+            rowless=rowless,
             outsider_x_key=outsider_x_key.public_id,
             outsider_global_key=outsider_global_key.public_id,
             outsider_global_plain=outsider_global_plain,
@@ -152,13 +171,13 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
             member_x_key=member_x_key.public_id,
             member_s_key=member_s_key.public_id,
         )
-    users = [owner, member, outsider]
+    users = [owner, member, outsider, rowless]
     try:
         yield world
     finally:
         async with factory() as db:
             await db.execute(
-                delete(OperationHistory).where(OperationHistory.workspace_id.in_([x, y, s]))
+                delete(OperationHistory).where(OperationHistory.workspace_id.in_([x, y, s, n, d]))
             )
             await db.execute(delete(APIKey).where(APIKey.user_id.in_(users)))
             await db.execute(delete(OAuth2Client).where(OAuth2Client.owner_id.in_(users)))
@@ -166,9 +185,9 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
                 update(User).where(User.user_id.in_(users)).values(current_workspace_id=None)
             )
             await db.execute(
-                delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_([x, y, s]))
+                delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_([x, y, s, n, d]))
             )
-            await db.execute(delete(Workspace).where(Workspace.id.in_([x, y, s])))
+            await db.execute(delete(Workspace).where(Workspace.id.in_([x, y, s, n, d])))
             await db.execute(delete(User).where(User.user_id.in_(users)))
             await db.commit()
 
@@ -256,33 +275,60 @@ async def test_self_service_routes_require_membership_of_the_path_workspace(
     world, method, suffix, body
 ):
     """A signed-in user who is not a member of X gets the uniform refusal on
-    every self-service route of X, the same body as for an unknown workspace
-    id, and nothing changes."""
+    every self-service route of X: the same status, body and headers as for an
+    unknown workspace id and for a soft-deleted workspace they belonged to;
+    nothing changes."""
     suffix = suffix.replace("{key}", world.outsider_global_key)
     before = await _state(world)
     unknown = uuid4()
 
-    on_x = await _call(
-        world,
-        method,
-        _member_path(world.x, world.outsider, suffix),
-        session=world.outsider,
-        body=body,
+    responses = [
+        await _call(
+            world,
+            method,
+            _member_path(workspace_id, world.outsider, suffix),
+            session=world.outsider,
+            body=body,
+        )
+        for workspace_id in (world.x, unknown, world.d)
+    ]
+
+    assert [(r.status_code, r.json()) for r in responses] == [(403, REFUSAL)] * 3, (
+        f"{method} {suffix or '/'}"
     )
-    on_unknown = await _call(
+    assert responses[0].headers == responses[1].headers == responses[2].headers
+    assert await _state(world) == before, "a key or an OAuth app changed"
+    assert await _history_count(world, world.x, unknown, world.d) == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix", "body"),
+    [("GET", "", None), ("POST", "/api-keys", {"name": "rowless-mint"})],
+    ids=["GET /", "POST /api-keys"],
+)
+async def test_an_owner_without_a_membership_row_gets_the_uniform_refusal(
+    world, method, suffix, body
+):
+    """The routes require a membership row, the owner's included: an owner of
+    the path workspace whose row is missing is refused like a non-member."""
+    before = await _state(world)
+
+    response = await _call(
         world,
         method,
-        _member_path(unknown, world.outsider, suffix),
-        session=world.outsider,
+        _member_path(world.n, world.rowless, suffix),
+        session=world.rowless,
         body=body,
     )
 
-    assert (on_x.status_code, on_x.json()) == (403, REFUSAL), (
-        f"{method} {suffix or '/'} on a workspace the caller is not a member of"
-    )
-    assert (on_unknown.status_code, on_unknown.json()) == (403, REFUSAL)
-    assert await _state(world) == before, "a key or an OAuth app changed"
-    assert await _history_count(world, world.x, unknown) == 0
+    assert (response.status_code, response.json()) == (403, REFUSAL)
+    assert await _state(world) == before
+    async with world.factory() as db:
+        minted = await db.scalar(
+            select(func.count()).select_from(APIKey).where(APIKey.user_id == world.rowless)
+        )
+    assert minted == 0
+    assert await _history_count(world, world.n) == 0
 
 
 async def test_a_member_keeps_managing_their_own_key(world):
@@ -322,6 +368,15 @@ async def test_a_member_keeps_managing_their_own_key(world):
 
     oauth = await _call(world, "POST", path("/oauth/hide"), session=world.member)
     assert oauth.status_code == 200, oauth.text
+
+    secret = await _call(world, "POST", path("/oauth/regenerate"), session=world.member)
+    assert secret.status_code == 200, secret.text
+    assert secret.json()["client_secret"]
+    assert secret.json()["client_id"] == oauth.json()["client_id"]
+
+    removed = await _call(world, "DELETE", path("/oauth"), session=world.member)
+    assert removed.status_code == 200, removed.text
+    assert removed.json() == {"status": "deleted", "client_id": oauth.json()["client_id"]}
     assert await _history_count(world, world.x) > 0
 
 
