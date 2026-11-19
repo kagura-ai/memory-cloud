@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -137,6 +137,19 @@ def _upgrade() -> list[logging.LogRecord]:
 def _downgrade() -> None:
     with _alembic_at_test_db():
         command.downgrade(_get_alembic_config(), PRE_REV)
+
+
+def test_f57_emits_its_statement_offline_without_reading_a_result() -> None:
+    """``alembic upgrade --sql``: the bind's ``execute`` returns nothing; the
+    statement is emitted and no count is logged."""
+    bind = MagicMock()
+    bind.execute.return_value = None
+    with patch.object(MODULE, "op") as op, _captured_logs() as records:
+        op.get_bind.return_value = bind
+        MODULE.upgrade()
+    (call,) = bind.execute.call_args_list
+    assert str(call.args[0]) == MODULE.DELETE_SHARE_KEYS_WITHOUT_CREATOR
+    assert not any(_LINE.search(record.getMessage()) for record in records)
 
 
 def test_f57_follows_the_slot_tables_revision() -> None:

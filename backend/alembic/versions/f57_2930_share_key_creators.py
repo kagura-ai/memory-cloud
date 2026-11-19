@@ -9,8 +9,9 @@ number of rows deleted and nothing else.
 
 Locks: row locks on the deleted ``share_keys`` rows only (the ``users`` rows
 are read, not locked); no table lock and no DDL. It is safe while the
-previous release serves traffic: that release refuses such a key at every
-use, and nothing reads the deleted rows.
+previous release serves traffic: a request that carries a deleted key gets
+the answer of an unknown key, and nothing else reads these rows. Offline
+(``alembic upgrade --sql``) it emits the statement and logs no count.
 
 Downgrade does nothing: the deleted rows are not kept anywhere. Re-running the
 upgrade is safe; it deletes only what has no creator at that time.
@@ -20,10 +21,8 @@ is varchar(32).
 """
 
 import logging
-from typing import Any, cast
 
 import sqlalchemy as sa
-from sqlalchemy.engine import CursorResult
 
 from alembic import op
 
@@ -43,11 +42,12 @@ DELETE_SHARE_KEYS_WITHOUT_CREATOR = (
 
 def upgrade() -> None:
     """Delete the share keys whose creating account does not exist."""
-    result = cast(
-        CursorResult[Any], op.get_bind().execute(sa.text(DELETE_SHARE_KEYS_WITHOUT_CREATOR))
-    )
-    # The count only: no key, name, context or account.
-    log.info("f57_2930 deleted share keys: %d", int(result.rowcount or 0))
+    result = op.get_bind().execute(sa.text(DELETE_SHARE_KEYS_WITHOUT_CREATOR))
+    # Offline (``--sql``) there is no result to count.
+    rowcount = getattr(result, "rowcount", None)
+    if rowcount is not None:
+        # The count only: no key, name, context or account.
+        log.info("f57_2930 deleted share keys: %d", int(rowcount))
 
 
 def downgrade() -> None:
