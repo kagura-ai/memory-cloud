@@ -672,7 +672,8 @@ async def build_instructions(
 
     #2929: a connector key under ``CONNECTOR_KEY_SCOPE=enforce`` gets the base
     text of its view and nothing read from a workspace (no digest, no default
-    context's name), with no I/O; ``private`` is ``False``.
+    context's name), with no I/O; ``private`` is ``True`` when the URL carries
+    ``guardrails=`` or ``context=`` and ``False`` when it selects nothing.
     """
     from auth.agent_scope import get_agent_scope
     from mcp_server.auth import get_mcp_connector_credential
@@ -689,9 +690,15 @@ async def build_instructions(
     )
 
     if connector_key_narrowed():
+        # Pure parses, no I/O: the answer is public only when the URL selects
+        # nothing, since for any other caller such a URL's answer is private.
+        selects = (
+            select_guardrail_context(query_string).mode != "binding"
+            or select_default_context(query_string).mode != "none"
+        )
         return (
             GOOGLE_INSTRUCTIONS_BASE if is_google_view(query_string) else SERVER_INSTRUCTIONS_BASE
-        ), False
+        ), selects
 
     settings = get_settings()
     # One budget for the default-context name and the digest together.
