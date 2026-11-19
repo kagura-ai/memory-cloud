@@ -38,6 +38,7 @@ import models.sleep  # noqa: F401
 import models.terms  # noqa: F401  # Issue #1665: terms-of-service acceptance history
 import models.vector_erasure  # noqa: F401
 import models.worker_app  # noqa: F401  # Issue #1315: worker app identities
+import models.workspace_slots  # noqa: F401  # Issue #2918: workspace slot suspension
 from models.config import ContextSearchConfig
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from models.neural import NeuralConfig
