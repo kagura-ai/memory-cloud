@@ -59,6 +59,11 @@ TERMS_VERSION_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 # (the effective gap) instead.
 _DEFAULT_FREE_MEMORY_LIMIT = 1000
 _DEFAULT_BASIC_MEMORY_LIMIT = 10000
+# #2918: the tier defaults of ``owned_workspace_grant`` (``config/plan_tiers.py``),
+# lowest tier first, for the start-up check of the ``PLAN_*_OWNED_WORKSPACE_GRANT``
+# overrides. Pinned against the tiers by
+# ``tests/config/test_workspace_slot_settings.py``.
+_DEFAULT_OWNED_WORKSPACE_GRANTS: dict[str, int] = {"free": 0, "basic": 0, "pro": 2, "promax": 19}
 REFERRAL_TOTAL_PAYOUT_BUDGET_MEMORIES = _DEFAULT_BASIC_MEMORY_LIMIT - _DEFAULT_FREE_MEMORY_LIMIT
 
 # Issue #1569: the platform credential each API-key provider of the managed
@@ -2720,7 +2725,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_workspace_slot_suspension(self) -> "Settings":
-        """``enforce`` needs the owned-workspace cap enforced as well (#2918).
+        """``enforce`` needs the owned-workspace cap enforced as well (#2918),
+        and ``shadow`` / ``enforce`` need grants that never decrease along the
+        plan order.
 
         Suspending existing workspaces while new ones can still be created
         beyond the same allowance would let an owner replace a suspended
@@ -2731,6 +2738,35 @@ class Settings(BaseSettings):
                 "WORKSPACE_SLOT_SUSPENSION=enforce requires ENFORCE_WORKSPACE_CAP=true "
                 "(docs/ops/workspace-slots.md)."
             )
+        if self.workspace_slot_suspension != "off":
+            # A plan change is "non-decreasing" (deferrable without the owner
+            # lock) when the new tier's grant is not below the old one; that
+            # holds for the allowance only while grants never decrease along
+            # the tier order, because the allowance takes the grant of the
+            # highest tier owned.
+            grants = [
+                (name, override if override is not None else default)
+                for (name, default), override in zip(
+                    _DEFAULT_OWNED_WORKSPACE_GRANTS.items(),
+                    (
+                        self.plan_free_owned_workspace_grant,
+                        self.plan_basic_owned_workspace_grant,
+                        self.plan_pro_owned_workspace_grant,
+                        self.plan_promax_owned_workspace_grant,
+                    ),
+                    strict=True,
+                )
+            ]
+            for (lower, lower_grant), (higher, higher_grant) in zip(
+                grants, grants[1:], strict=False
+            ):
+                if higher_grant < lower_grant:
+                    raise ValueError(
+                        f"WORKSPACE_SLOT_SUSPENSION={self.workspace_slot_suspension} needs "
+                        "owned-workspace grants that never decrease along the plan order: "
+                        f"PLAN_{higher.upper()}_OWNED_WORKSPACE_GRANT ({higher_grant}) is below "
+                        f"PLAN_{lower.upper()}_OWNED_WORKSPACE_GRANT ({lower_grant})."
+                    )
         return self
 
     # Plan Display Names (customizable for SaaS forks)

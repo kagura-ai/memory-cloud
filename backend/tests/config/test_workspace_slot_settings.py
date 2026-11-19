@@ -53,3 +53,39 @@ def test_accessor_reads_the_setting_at_call_time(mode, enforced):
     with patch("config.settings.get_settings", return_value=fake):
         assert workspace_slot_mode() == mode
         assert workspace_slots_enforced() is enforced
+
+
+def test_the_grant_defaults_match_the_tiers():
+    from config.plan_tiers import PLAN_TIERS
+    from config.settings import _DEFAULT_OWNED_WORKSPACE_GRANTS
+
+    assert list(_DEFAULT_OWNED_WORKSPACE_GRANTS) == list(PLAN_TIERS)
+    assert {k: PLAN_TIERS[k].owned_workspace_grant for k in PLAN_TIERS} == (
+        _DEFAULT_OWNED_WORKSPACE_GRANTS
+    )
+
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_grants_decreasing_along_the_plan_order_refuse_to_start(monkeypatch, mode):
+    monkeypatch.setenv("WORKSPACE_SLOT_SUSPENSION", mode)
+    monkeypatch.setenv("ENFORCE_WORKSPACE_CAP", "true")
+    monkeypatch.setenv("PLAN_PRO_OWNED_WORKSPACE_GRANT", "5")
+    monkeypatch.setenv("PLAN_PROMAX_OWNED_WORKSPACE_GRANT", "3")
+    with pytest.raises(ValidationError, match="PLAN_PROMAX_OWNED_WORKSPACE_GRANT"):
+        Settings(_env_file=None)
+
+
+def test_decreasing_grants_are_only_refused_while_the_feature_is_on(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_SLOT_SUSPENSION", "off")
+    monkeypatch.setenv("PLAN_PRO_OWNED_WORKSPACE_GRANT", "5")
+    monkeypatch.setenv("PLAN_PROMAX_OWNED_WORKSPACE_GRANT", "3")
+    assert Settings(_env_file=None).plan_promax_owned_workspace_grant == 3
+
+
+@pytest.mark.parametrize(("pro", "promax"), [("2", "19"), ("4", "4"), ("0", "0")])
+def test_non_decreasing_grants_are_accepted(monkeypatch, pro, promax):
+    monkeypatch.setenv("WORKSPACE_SLOT_SUSPENSION", "enforce")
+    monkeypatch.setenv("ENFORCE_WORKSPACE_CAP", "true")
+    monkeypatch.setenv("PLAN_PRO_OWNED_WORKSPACE_GRANT", pro)
+    monkeypatch.setenv("PLAN_PROMAX_OWNED_WORKSPACE_GRANT", promax)
+    assert Settings(_env_file=None).workspace_slot_suspension == "enforce"
