@@ -174,6 +174,17 @@ export default function WorkspaceStatsPage() {
     );
   };
 
+  // When a refresh shows that the selected context is no longer in the
+  // workspace (it was deleted), go back to all contexts and drop the parameter.
+  useEffect(() => {
+    if (!stats || !selectedContextId) return;
+    if (!stats.contexts.some((ctx) => ctx.context_id === selectedContextId)) {
+      selectContext(null);
+    }
+    // selectContext is recreated each render; the check only depends on these.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stats, selectedContextId]);
+
   const fetchStats = async () => {
     try {
       setLoading(true);

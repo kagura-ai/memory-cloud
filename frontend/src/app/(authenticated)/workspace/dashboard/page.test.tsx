@@ -332,13 +332,51 @@ describe("dashboard context permalink (#2936)", () => {
   });
 
   it("ignores a value that is not a UUID, without a notice", async () => {
-    mockQuery = "context=ctx-1";
+    // A listed context's id with its hyphens removed is not a UUID.
+    mockQuery = `context=${CTX_A.replaceAll("-", "")}`;
     renderPage();
-    await screen.findByRole("combobox", { name: "filterByContext" });
+    const selector = await screen.findByRole("combobox", {
+      name: "filterByContext",
+    });
 
+    expect(selector).toHaveTextContent("allContexts");
     expect(screen.queryByText("contextLinkUnavailable")).toBeNull();
     expect(screen.queryByRole("link", { name: "openLinkedContext" })).toBeNull();
-    expect(mockGetTimeline).toHaveBeenLastCalledWith("ws-1", 30, undefined);
+    await waitFor(() =>
+      expect(mockGetTimeline).toHaveBeenLastCalledWith("ws-1", 30, undefined),
+    );
+    expect(mockGetTimeline).not.toHaveBeenCalledWith(
+      "ws-1",
+      30,
+      expect.anything(),
+    );
+  });
+
+  it("goes back to all contexts when the selected context is gone after a refresh", async () => {
+    mockQuery = `context=${CTX_B}`;
+    renderPage();
+    await waitFor(() =>
+      expect(mockGetTimeline).toHaveBeenLastCalledWith("ws-1", 30, CTX_B),
+    );
+
+    mockApiGet.mockResolvedValue({
+      ...statsFixture,
+      contexts: statsFixture.contexts.filter((c) => c.context_id !== CTX_B),
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /refresh/ }));
+    });
+
+    await waitFor(() =>
+      expect(mockGetTimeline).toHaveBeenLastCalledWith("ws-1", 30, undefined),
+    );
+    expect(mockReplace).toHaveBeenCalledWith("/workspace/dashboard", {
+      scroll: false,
+    });
+    expect(screen.queryByText("contextLinkUnavailable")).toBeNull();
+    expect(
+      screen.getByRole("combobox", { name: "filterByContext" }),
+    ).toHaveTextContent("allContexts");
   });
 
   it("sends a viewer with a linked context to that context's page", async () => {
