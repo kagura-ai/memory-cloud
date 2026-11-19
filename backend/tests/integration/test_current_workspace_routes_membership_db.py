@@ -17,7 +17,9 @@ keys (and a browser session), and through ``execute_tool_call`` for MCP:
 
 from __future__ import annotations
 
+import contextlib
 import json
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -237,11 +239,13 @@ async def _select_x_for(world, user_id: str) -> None:
 async def test_embedding_status_requires_membership_of_the_current_workspace(world):
     """A session whose stored current workspace is X gets the uniform refusal;
     a key scoped to X whose user is not a member of X does not authenticate."""
-    by_key = await _get(world, "/api/v1/workspace/embedding-status", bearer=world.outsider_key)
+    path = "/api/v1/workspace/embedding-status"
+    by_key = await _get(world, path, bearer=world.outsider_key)
+    unknown = await _get(world, path, bearer="kagura_" + "x" * 43)
     await _select_x_for(world, world.outsider)
-    by_session = await _get(world, "/api/v1/workspace/embedding-status", session=world.outsider)
+    by_session = await _get(world, path, session=world.outsider)
 
-    assert by_key.status_code == 401, by_key.text
+    assert (by_key.status_code, by_key.json()) == (401, unknown.json()), by_key.text
     assert (by_session.status_code, by_session.json()) == (403, REFUSAL)
 
 
@@ -263,10 +267,11 @@ async def test_embedding_status_for_a_member_is_unchanged(world):
 @pytest.mark.parametrize("path", ["/api/v1/workspace/stats", "/api/v1/system/embedding/models"])
 async def test_current_workspace_reads_require_membership(world, path):
     by_key = await _get(world, path, bearer=world.outsider_key)
+    unknown = await _get(world, path, bearer="kagura_" + "x" * 43)
     await _select_x_for(world, world.outsider)
     by_session = await _get(world, path, session=world.outsider)
 
-    assert by_key.status_code == 401, by_key.text
+    assert (by_key.status_code, by_key.json()) == (401, unknown.json()), by_key.text
     assert (by_session.status_code, by_session.json()) == (403, REFUSAL)
 
 
@@ -326,9 +331,10 @@ async def _get_usage(world, user_id: str) -> dict[str, Any]:
     return await _mcp(world, "get_usage", {}, user_id)
 
 
-@pytest_asyncio.fixture(loop_scope="session")
-async def resource(world):
-    """A resource of X (its context, its ``resources`` row and a schema)."""
+@contextlib.asynccontextmanager
+async def _resource_in(world, workspace_id: UUID) -> AsyncIterator[str]:
+    """A resource of the workspace (its context, its ``resources`` row and a
+    schema); removed on exit."""
     from models.resource import Resource, ResourceSchema
     from services.resource_lookup import upsert_resource
 
@@ -337,7 +343,7 @@ async def resource(world):
         db.add(
             Context(
                 id=uuid4(),
-                workspace_id=world.x,
+                workspace_id=workspace_id,
                 name=slug,
                 created_by=world.owner,
                 is_private=False,
@@ -347,7 +353,7 @@ async def resource(world):
         )
         await db.flush()
         pk = await upsert_resource(
-            db, workspace_id=world.x, resource_id=slug, name=slug, created_by=world.owner
+            db, workspace_id=workspace_id, resource_id=slug, name=slug, created_by=world.owner
         )
         db.add(
             ResourceSchema(
@@ -365,6 +371,13 @@ async def resource(world):
             await db.execute(delete(ResourceSchema).where(ResourceSchema.resource_pk == pk))
             await db.execute(delete(Resource).where(Resource.id == pk))
             await db.commit()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def resource(world):
+    """A resource of X."""
+    async with _resource_in(world, world.x) as slug:
+        yield slug
 
 
 @pytest.mark.parametrize("tool", ["get_resource_impact", "get_resource_schema"])
@@ -440,3 +453,12 @@ async def test_a_member_without_a_seat_keeps_the_stats_embedding_status_and_usag
     usage = await _mcp(world, "get_usage", {}, world.seatless, world.s)
     assert usage.get("error") is None, usage
     assert (usage["plan"], usage["memories"]["used"]) == ("free", 1)
+
+
+@pytest.mark.parametrize("tool", ["get_resource_impact", "get_resource_schema"])
+async def test_a_member_without_a_seat_keeps_the_resource_reads(world, tool):
+    async with _resource_in(world, world.s) as slug:
+        body = await _mcp(world, tool, {"resource_id": slug}, world.seatless, world.s)
+
+    assert body.get("error") is None, body
+    assert body["resource_id"] == slug

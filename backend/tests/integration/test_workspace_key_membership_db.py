@@ -8,10 +8,14 @@ On real PostgreSQL rows:
   identity, a connector key owned by an admin and one re-owned to the
   workspace owner;
 * a global key and a public-bound key run no membership statement;
-* a key scoped to a workspace its owner is not in, and a key of a
-  soft-deleted workspace, do not verify: the REST dependency answers 401, and
-  MCP refuses at authentication, before a usage row is written or the daily
-  MCP limit is counted.
+* a key scoped to a workspace its owner is not in (an owner who holds another
+  workspace of their own), and a key of a soft-deleted workspace, do not
+  verify: the REST dependency answers 401 with an unknown key's body, and MCP
+  refuses at authentication, before the dispatcher counts the call against
+  the daily MCP limit and before a served call would log a usage row;
+* an agent key and a connector key whose owner's membership row is gone do
+  not verify, and the refusal writes nothing (no agent ``last_seen_at``, no
+  ``last_used_at``).
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from auth.api_keys import APIKeyManager
+from models.agent import Agent
 from models.auth import APIKey, Context, UsageStats, Workspace, WorkspaceMember
 from services.plan_seats import member_seat_suspended
 from utils.datetime import utcnow
@@ -63,6 +68,7 @@ async def keys(connector_world, fernet_api_key_secret, async_engine):
         await w.user(f"vk-{role}") for role in ("admin", "admin2", "member", "viewer")
     ]
     svc_member, svc_viewer = await w.user("vk-svc-member"), await w.user("vk-svc-viewer")
+    svc_leaving, admin_leaving = await w.user("vk-svc-leaving"), await w.user("vk-admin-leaving")
     outsider, seatless = await w.user("vk-outsider"), await w.user("vk-seatless")
     owner2, gone_owner = await w.user("vk-owner2"), await w.user("vk-gone")
 
@@ -75,8 +81,12 @@ async def keys(connector_world, fernet_api_key_secret, async_engine):
             viewer: "viewer",
             svc_member: "member",
             svc_viewer: "viewer",
+            svc_leaving: "member",
+            admin_leaving: "admin",
         },
     )
+    # The outsider holds a workspace of their own (owner and membership row).
+    await w.workspace(outsider)
     # The owner of this workspace has no membership row.
     no_row = Workspace(
         id=uuid4(),
@@ -124,6 +134,7 @@ async def keys(connector_world, fernet_api_key_secret, async_engine):
         "member_without_seat": await mint(seatless, one_seat),
         "agent_of_member": await mint(svc_member, x, agent_id=agent.id),
         "agent_of_viewer": await mint(svc_viewer, x, agent_id=agent.id),
+        "agent_of_leaving_member": await mint(svc_leaving, x, agent_id=agent.id),
         "global": await mint(outsider, None),
         "public_bound": await mint(member, None, bound_context_id=public.id),
         # Inserted directly: the owner of this key is not in X.
@@ -135,6 +146,9 @@ async def keys(connector_world, fernet_api_key_secret, async_engine):
     by_admin2 = await w.connector(x, admin2)
     plain["connector_reowned_to_owner"] = by_admin2.plaintext_kmc_api_key
     reowned_connector_id = by_admin2.connector.id
+    by_leaving_admin = await w.connector(x, admin_leaving)
+    plain["connector_of_leaving_admin"] = by_leaving_admin.plaintext_kmc_api_key
+    agent_id = agent.id
     x_id, no_row_id, one_seat_id, gone_id = x.id, no_row.id, one_seat.id, gone.id
     await w.db.commit()
     # Removing the admin re-owns the live connector keys to the workspace owner.
@@ -166,6 +180,11 @@ async def keys(connector_world, fernet_api_key_secret, async_engine):
         factory=async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False),
         plain=plain,
         workspace_of=workspace_of,
+        agent_id=agent_id,
+        leaving={
+            "agent_of_leaving_member": svc_leaving,
+            "connector_of_leaving_admin": admin_leaving,
+        },
     )
 
 
@@ -212,6 +231,7 @@ async def test_a_key_without_a_workspace_scope_runs_no_membership_statement(keys
         verified = await APIKeyManager(keys.db).verify_key(keys.plain[case])
 
     assert verified is not None and verified.workspace_id is None
+    assert [s for s in statements if "FROM api_keys" in s], "the recorder saw no key lookup"
     assert _membership_statements(statements) == []
     assert not [s for s in statements if "FROM workspaces" in s]
 
@@ -229,6 +249,38 @@ async def test_a_key_whose_owner_does_not_hold_the_workspace_does_not_verify(key
     assert "user_id" not in events[0]
     row = await keys.db.scalar(select(APIKey).where(APIKey.key_prefix == events[0]["key_prefix"]))
     assert row is not None and row.last_used_at is None
+
+
+@pytest.mark.parametrize("case", ["agent_of_leaving_member", "connector_of_leaving_admin"])
+async def test_a_refused_agent_or_connector_key_writes_nothing(keys, case):
+    """The membership condition runs before the agent and connector gates: once
+    the owner's membership row is gone the key does not verify, and neither the
+    agent's ``last_seen_at`` nor the key's ``last_used_at`` is written."""
+    db = keys.db
+    plaintext = keys.plain[case]
+    key = await db.scalar(select(APIKey).where(APIKey.key_prefix == plaintext[:16]))
+    assert key is not None
+    key_id, last_used = key.id, key.last_used_at
+    seen_before = await db.scalar(select(Agent.last_seen_at).where(Agent.id == keys.agent_id))
+    await db.execute(
+        delete(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == keys.workspace_of[case],
+            WorkspaceMember.user_id == keys.leaving[case],
+        )
+    )
+    await db.flush()
+
+    with structlog.testing.capture_logs() as logs:
+        assert await APIKeyManager(db).verify_key(plaintext) is None
+
+    assert [e["event"] for e in logs if e["event"].startswith("api_key_rejected")] == [
+        REJECTED_EVENT
+    ]
+    db.expire_all()
+    assert await db.scalar(select(APIKey.last_used_at).where(APIKey.id == key_id)) == last_used
+    assert (
+        await db.scalar(select(Agent.last_seen_at).where(Agent.id == keys.agent_id)) == seen_before
+    )
 
 
 def _rest_app(factory) -> FastAPI:
@@ -293,8 +345,7 @@ async def _usage_rows(keys, workspace_id: UUID) -> int:
         )
 
 
-@pytest.mark.parametrize("case", [*REFUSED, "member"])
-async def test_mcp_refuses_at_authentication_before_usage_is_counted(keys, mcp_state, case):
+async def _mcp_call(keys, case: str, tool: str, arguments: dict):
     import mcp_server.transport as transport
     from tests.mcp_server.test_transport_tool_profiles import (
         _modern_headers,
@@ -303,30 +354,40 @@ async def test_mcp_refuses_at_authentication_before_usage_is_counted(keys, mcp_s
         _Recorder,
     )
 
-    workspace_id = keys.workspace_of[case]
-    rows_before = await _usage_rows(keys, workspace_id)
-    # ``remember`` counts against the daily MCP limit; without a context it
-    # stops right after the count.
-    body = _modern_request("tools/call", name="remember", arguments={"summary": "x"})
+    body = _modern_request("tools/call", name=tool, arguments=arguments)
     headers = list(_modern_headers(body).items())
     headers.append((b"authorization", f"Bearer {keys.plain[case]}".encode()))
     send = _Recorder()
+    await transport.mcp_asgi_app(
+        {"type": "http", "method": "POST", "path": "/mcp/", "headers": headers},
+        _receive_for(body),
+        send,
+    )
+    return send
+
+
+@pytest.mark.parametrize("case", [*REFUSED, "member"])
+async def test_mcp_refuses_at_authentication_before_the_call_is_counted_or_logged(
+    keys, mcp_state, case
+):
+    """Two probes: ``remember`` without a context is counted against the daily
+    MCP limit and then stops; ``get_usage`` is served and logs a usage row. A
+    member's key shows both effects, a refused key neither."""
+    workspace_id = keys.workspace_of[case]
+    rows_before = await _usage_rows(keys, workspace_id)
     rate_limit = AsyncMock(return_value=(True, 0, 1000))
     with patch("mcp_server.tools._check_rate_limit", new=rate_limit):
-        await transport.mcp_asgi_app(
-            {"type": "http", "method": "POST", "path": "/mcp/", "headers": headers},
-            _receive_for(body),
-            send,
-        )
+        counted = await _mcp_call(keys, case, "remember", {"summary": "x"})
+        logged = await _mcp_call(keys, case, "get_usage", {})
 
     if case == "member":
-        # The call is served: the limit is counted for the key's workspace (the
-        # tool then asks for a context).
-        assert send.status == 200, send.raw
+        assert (counted.status, logged.status) == (200, 200), (counted.raw, logged.raw)
+        # get_usage is exempt from the limit: only the remember call counted.
         rate_limit.assert_awaited_once_with(workspace_id)
-        assert json.loads(send.body["result"]["content"][0]["text"])["status"] == "error"
+        assert json.loads(logged.body["result"]["content"][0]["text"])["plan"] == "promax"
+        assert await _usage_rows(keys, workspace_id) == rows_before + 1
         return
-    assert send.status == 401, send.raw
+    assert (counted.status, logged.status) == (401, 401), (counted.raw, logged.raw)
     rate_limit.assert_not_awaited()
     assert await _usage_rows(keys, workspace_id) == rows_before
 
