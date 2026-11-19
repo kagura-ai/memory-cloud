@@ -1,8 +1,9 @@
 """Workspace slot suspension state (Issue #2918).
 
-When an owner's allowance falls below the number of workspaces they own, the
-excess owned workspaces are suspended, with their data kept, and resumed when
-slots return. ``services.workspace_slots`` writes both tables: the reconcile
+An event that ends a paid contract, lowers a plan's owned-workspace grant or
+lowers the slot bonus, and does not raise the allowance, suspends the owner's
+excess owned workspaces over the allowance, with their data kept; they resume
+when slots return. ``services.workspace_slots`` writes both tables: the reconcile
 (the only writer of suspension rows outside the end-to-end seed and account
 deletion), the owner's saved selection, and the erasure of an account.
 

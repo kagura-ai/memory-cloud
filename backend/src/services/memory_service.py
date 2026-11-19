@@ -750,6 +750,8 @@ class MemoryService:
             NotFoundException: If context not found, key-workspace-confined, or
                 the binding denies it.
             AuthorizationError: 403 on a write by a workspace viewer.
+            WorkspaceSlotSuspendedError: 403 ``SLOT-001`` for a context in a
+                slot-suspended workspace, after every check above.
         """
         if not context_id:
             return None, None, None

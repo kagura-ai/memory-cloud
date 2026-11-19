@@ -2236,7 +2236,7 @@ Session cookie only. Records a new answer with source `settings`; an unchanged a
 
 ## Workspace slots (experimental)
 
-Issue #2918. **Experimental**: these routes may change in a minor release. When an owner's workspace allowance falls below the number of workspaces they own (a subscription ended, an admin lowered a plan or the slot bonus), the excess owned workspaces are suspended with their data kept. These routes let the owner see the allowance, choose which workspaces stay active, and list what they can export from a suspended workspace.
+Issue #2918. **Experimental**: these routes may change in a minor release. An event that ends a paid contract, lowers a plan's owned-workspace grant or lowers the slot bonus (a subscription ended, an admin lowered a plan or the slot bonus), and does not raise the allowance, suspends the owner's excess owned workspaces over the allowance, with their data kept. These routes let the owner see the allowance, choose which workspaces stay active, and list what they can export from a suspended workspace.
 
 Session cookie only (an API key or bearer token gets `403`, no session `401`). Every route of this surface answers `404 HTTP-404` "Not Found" before authentication unless the deployment sets `WORKSPACE_SLOT_SUSPENSION=enforce` (a body that is not JSON gets the framework's `422` first); `GET /api/v1/system/info` says which as `features.workspace_slots`. Response models: [`api-surface-1.0/rest-response-models.md`](api-surface-1.0/rest-response-models.md#me_workspace_slotspy); refusals: [`SLOT-001`..`SLOT-004`](api-surface-1.0/error-responses.md#slot-001-403--workspace-slot-gate-2918).
 

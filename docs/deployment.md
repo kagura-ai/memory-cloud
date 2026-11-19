@@ -4676,8 +4676,8 @@ every workspace. Enforcement is behind `ENFORCE_WORKSPACE_CAP` (default
 `false` = log-only); see `docs/ops/workspace-cap-rollback.md`. With
 `WORKSPACE_SLOT_SUSPENSION=enforce` (#2918, default `off`; needs
 `ENFORCE_WORKSPACE_CAP=true`) an event that ends a paid contract or lowers a
-plan's grant or the slot bonus also suspends the excess owned workspaces over the
-allowance, data kept, until slots return or the owner chooses others;
+plan's grant or the slot bonus, and does not raise the allowance, also suspends
+the excess owned workspaces over the allowance, data kept, until slots return or the owner chooses others;
 see [Workspace slot suspension](ops/workspace-slots.md).
 
 Feature availability (the `features` set on each tier):

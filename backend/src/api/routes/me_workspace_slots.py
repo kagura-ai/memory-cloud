@@ -1,8 +1,9 @@
 """Account routes for the workspace slots of the signed-in owner (Issue #2918).
 
-Routes under ``/api/v1/me/workspace-slots``. When an owner's workspace
-allowance falls below the number of workspaces they own, the excess ones are
-suspended with their data kept (``services.workspace_slots``). Here the owner
+Routes under ``/api/v1/me/workspace-slots``. An event that ends a paid
+contract, lowers a plan's owned-workspace grant or lowers the slot bonus, and
+does not raise the allowance, suspends the owner's excess owned workspaces
+with their data kept (``services.workspace_slots``). Here the owner
 reads their allowance and the status of every workspace they own, previews and
 saves which workspaces to keep active, and lists the contexts of an owned
 workspace they can export, also while it is suspended.

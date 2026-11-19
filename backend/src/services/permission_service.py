@@ -225,9 +225,10 @@ class PermissionService:
             slot: The workspace slot gate (#2918), after membership and role
                 and before the seat: ``BLOCKED`` refuses a suspended workspace
                 (403 ``SLOT-001``), ``OWNER_MANAGEMENT`` lets its owner through.
-                ``None`` skips it: only the context resolvers, which run the
-                gate themselves after their reach check, and internal callers
-                without a principal. Every non-default value is pinned by
+                ``None`` skips it, for callers that run the gate themselves
+                after their own checks or must not refuse (the context
+                resolvers, a membership-only check, the internal billing
+                service). Every non-default value is pinned by
                 ``tests/api/test_slot_suspension_route_table.py``.
 
         Returns:

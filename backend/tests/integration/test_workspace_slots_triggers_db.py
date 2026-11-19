@@ -498,6 +498,26 @@ class TestSlotBonus:
         assert recorder.touching_slot_tables() == []
         assert await slot_world.rows(owner) == {}
 
+    async def test_a_failed_bonus_reconcile_fails_the_request_and_is_logged(
+        self, slot_world: SlotWorld, monkeypatch
+    ) -> None:
+        owner = await slot_world.user("bonus-fail", bonus=1)
+        await slot_world.workspace(owner)
+        await slot_world.workspace(owner)
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(slots, "_reconcile", broken)
+        with (
+            slot_mode("enforce"),
+            structlog.testing.capture_logs() as logs,
+            pytest.raises((RuntimeError, HTTPException)),
+        ):
+            await _bonus(slot_world, owner, -1)
+        (failed,) = [e for e in logs if e["event"] == "workspace_slots_reconcile_failed"]
+        assert (failed["owner_user_id"], failed["cause"]) == (owner, "slot_bonus")
+
     async def test_a_bonus_change_waits_for_the_owner_lock(self, slot_world: SlotWorld) -> None:
         owner = await slot_world.user("bonus-wait", bonus=1)
         await slot_world.workspace(owner)

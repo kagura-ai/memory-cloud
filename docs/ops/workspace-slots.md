@@ -9,8 +9,9 @@ workspace takes no slot.
 
 An event that ends a paid contract, lowers a plan's owned-workspace grant or
 lowers the slot bonus (a subscription ends, a system admin lowers a plan or the
-slot bonus) suspends the excess owned workspaces over the allowance; nothing
-else suspends. A suspended workspace keeps its data, nothing is deleted, and
+slot bonus), and does not raise the allowance, suspends the excess owned
+workspaces over the allowance; nothing else suspends except the two swaps
+below (a suspended workspace that gets a paid contract, a saved selection). A suspended workspace keeps its data, nothing is deleted, and
 every member and every credential is refused with `SLOT-001` (MCP:
 `workspace_suspended`) until the workspace is resumed. The owner keeps a
 management path: they see the status on the account page
@@ -39,7 +40,7 @@ extra slot (Basic), the lowest-priority uncontracted active workspace is
 suspended in its place (a swap); when it does (Pro, Max), the others resume too.
 
 Every other event (a purchase, an upgrade, a saved selection, a delete, a
-transfer) only resumes. An owner who is already over the allowance (created
+transfer) only resumes, except the two swaps above. An owner who is already over the allowance (created
 before `ENFORCE_WORKSPACE_CAP`, or after a plan change while the feature was
 off) keeps every workspace until their next drop: the end of one of their paid
 contracts, or a lowered grant or bonus, then cuts them to the allowance even
@@ -88,7 +89,7 @@ the new code.
 | System-admin plan change (`PUT /api/v1/admin/plans/workspaces/{id}/plan`) | yes | as above | as above (`409` to the admin) | as above |
 | Slot-bonus change (`PATCH /api/v1/admin/users/{id}/workspace_slot_bonus`) | yes | waited for (5 s) first | `503` as before | the request fails |
 | Owner's selection (account page) | swap only | waited for (5 s) first, then the owner's account row (a save during the account's erasure waits for it and answers 404) | `409 RES-002`, `workspace_slots_busy` | the request fails |
-| Workspace delete, voluntary transfer, force transfer and its dual-control approval | no (resume only) | after the commit, tried with the short backoff (it is on the response path; for a delete, after the storage and vector cleanup) | logged `workspace_slots_deferred`, left to the sweep | logged, left to the sweep (a database pool timeout too); the delete or transfer is never failed by it |
+| Workspace delete, voluntary transfer, force transfer and its dual-control approval | no (resume only) | after the commit, tried with the short backoff, once in `shadow` (it is on the response path; for a delete, after the storage and vector cleanup); a slot row lock held by another transaction counts as busy | logged `workspace_slots_deferred`, left to the sweep | logged, left to the sweep (a database pool timeout too); the delete or transfer is never failed by it |
 | Sweep (every 15 minutes, owners with suspension rows) | no | one try per owner | that owner is skipped this round | logged, the next owner continues |
 
 Converge **only by the sweep**: account erasure's automatic ownership hand-over,
@@ -182,7 +183,10 @@ creation, which can hold it for seconds, or the sweep). Retry with backoff.
   ```
 
   `status --over-allowance` lists the owners with more workspaces active than
-  their allowance. `reconcile` resumes and prunes only, never suspends. While
+  their allowance; it ignores `--owner`. A workspace with a suspension row
+  counts as not active even while the mode is `off`, when nothing honours the
+  rows, so rows left from an earlier `enforce` period make it list fewer
+  owners (run `reconcile --even-when-off` first). `reconcile` resumes and prunes only, never suspends. While
   the setting is `off` it refuses unless `--even-when-off` is given. An owner
   whose reconcile fails (in every mode) or whose lock stays busy is reported and
   the run goes on; the exit code is then 1.
@@ -218,6 +222,10 @@ creation, which can hold it for seconds, or the sweep). Retry with backoff.
   refusal.
 - Only plan changes and slot-bonus reductions suspend: deleting or transferring
   a workspace never suspends another.
+- For an owner who is already over the allowance, which event cuts them to it
+  can depend on the order in which deliveries arrive (a comp that ends a
+  contract without changing the allowance cuts them; the same comp after an
+  upgrade that raised the allowance does not).
 - Revoking a resource token, an observation credential or a management grant
   acts on the caller's current workspace, and a suspended workspace cannot be
   made current: the owner revokes those after the resume, or with an API key of
