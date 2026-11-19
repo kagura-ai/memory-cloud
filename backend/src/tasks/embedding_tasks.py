@@ -151,6 +151,7 @@ async def sweep_pending_embeddings() -> JobResult:
         embedding_retry_eligible_clause,
         process_pending_embedding,
     )
+    from services.workspace_slot_gate import active_workspace_predicate
     from utils.datetime import utcnow
 
     outcome: JobResult = None
@@ -176,9 +177,13 @@ async def sweep_pending_embeddings() -> JobResult:
             # and the line's presence is itself the signal.
             await _log_unsearchable_backlog(db)
 
+            # #2918: a slot-suspended workspace's memories wait for its resume
+            # (nothing is added unless the mode is enforce).
+            slot_active = active_workspace_predicate(Memory.workspace_id)
             result = await db.execute(
                 select(Memory.id)
                 .where(
+                    *([slot_active] if slot_active is not None else []),
                     Memory.deleted_at.is_(None),
                     Memory.embedding_suppressed_at.is_(None),
                     or_(

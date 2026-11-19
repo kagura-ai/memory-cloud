@@ -51,6 +51,7 @@ from services.capacity_lock import (
     lock_candidate_predicate,
 )
 from services.context_service import CAPACITY_PURGE_ACTOR, ContextService, WorkspacePurgeReport
+from services.workspace_slot_gate import slot_suspended
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
@@ -249,8 +250,14 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
 
 async def _stamp_one(db: AsyncSession, ws: Workspace, *, now: datetime) -> str | None:
     """Set / keep / clear one workspace's stamp; returns what it did (``None``:
-    within capacity and not stamped). Does not commit."""
-    lock = await capacity_lock_state(db, ws) if is_lock_candidate(ws) else None
+    within capacity and not stamped). Does not commit.
+
+    #2918: a slot-suspended workspace is no candidate: it is never stamped and
+    an existing stamp is cleared (its owner cannot clean it up while it is
+    suspended), so the lock clock starts afresh once it is resumed.
+    """
+    candidate = is_lock_candidate(ws) and not await slot_suspended(db, ws)
+    lock = await capacity_lock_state(db, ws) if candidate else None
     if lock is None:
         if ws.capacity_locked_since is None:
             return None
@@ -644,16 +651,18 @@ class PurgeCounts:
 async def _workspace_state(db: AsyncSession, ws: Workspace) -> str:
     """Re-read the workspace row: ``"purgeable"``, ``"left"`` or ``"gone"``.
 
-    ``"left"``: re-subscribed (no longer Free + billing-managed) or
-    soft-deleted. ``"gone"``: the row no longer exists (hard-deleted by an
-    erasure) — the instance must not be touched again, its attributes are
-    expired.
+    ``"left"``: re-subscribed (no longer Free + billing-managed), soft-deleted
+    or slot-suspended (#2918: the purge pauses). ``"gone"``: the row no longer
+    exists (hard-deleted by an erasure) — the instance must not be touched
+    again, its attributes are expired.
     """
     try:
         await db.refresh(ws)
     except InvalidRequestError:
         return "gone"
-    return "purgeable" if ws.deleted_at is None and is_lock_candidate(ws) else "left"
+    if ws.deleted_at is None and is_lock_candidate(ws) and not await slot_suspended(db, ws):
+        return "purgeable"
+    return "left"
 
 
 async def _owner_cleaned_up(db: AsyncSession, ws_id: UUID, *, since: datetime) -> bool:
@@ -709,10 +718,10 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
     before each context and after every memory chunk whether the row is still
     live and a candidate and whether the owner deleted a memory or a context
     themselves since the purge started (:func:`_owner_cleaned_up`), and stops
-    if not (re-subscribe / erasure / the owner's own cleanup mid-run): the
-    stamp is cleared, the audit row says ``aborted`` with its
-    ``aborted_reason`` (``resubscribed`` / ``erased`` / ``owner_cleanup``),
-    and no completion mail goes out.
+    if not (re-subscribe / erasure / the owner's own cleanup / a slot
+    suspension mid-run): the stamp is cleared, the audit row says ``aborted``
+    with its ``aborted_reason`` (``resubscribed`` / ``erased`` /
+    ``owner_cleanup`` / ``slot_suspended``), and no completion mail goes out.
 
     Before any deletion a ``capacity_purge_started`` audit row (lock start,
     over counts, purge start) is written and committed; if that commit fails
@@ -795,7 +804,8 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
             continue
         contact = await _owner_contact(db, ws)
         last_state = ["purgeable"]
-        # Why the purge stopped, if it did: "resubscribed", "erased" or "owner_cleanup".
+        # Why the purge stopped, if it did: "resubscribed", "erased",
+        # "owner_cleanup" or "slot_suspended" (#2918).
         reason: list[str | None] = [None]
         purge_started_at = utcnow()
 
@@ -811,7 +821,12 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
                 reason[0] = "erased"
                 return False
             if last_state[0] == "left":
-                reason[0] = "erased" if ws.deleted_at is not None else "resubscribed"
+                if ws.deleted_at is not None:
+                    reason[0] = "erased"
+                elif await slot_suspended(db, ws):
+                    reason[0] = "slot_suspended"
+                else:
+                    reason[0] = "resubscribed"
                 return False
             if await _owner_cleaned_up(db, ws_id, since=started):
                 reason[0] = "owner_cleanup"
