@@ -506,8 +506,9 @@ def test_consent_page_csp_lets_the_form_redirect_to_a_cross_origin_callback(api)
     _, params = authorization_params()
     page = api.get("/oidc/authorize", params=params)
     assert page.status_code == 200, page.text
+    nonce = re.search(r'<style nonce="([a-zA-Z0-9_-]+)">', page.text)[1]
     assert page.headers["content-security-policy"] == (
-        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        f"default-src 'none'; frame-ancestors 'none'; base-uri 'none'; img-src 'self'; style-src 'nonce-{nonce}'"
     )
     directives = [part.split()[0] for part in page.headers["content-security-policy"].split(";")]
     assert "form-action" not in directives
