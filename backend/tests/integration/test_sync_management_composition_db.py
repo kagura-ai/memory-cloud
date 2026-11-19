@@ -1,8 +1,9 @@
 """Lifecycle access, guarded stop/finalize and receipt lookup share one fence (#2871 #2873 #2875).
 
 Each operation is held inside its own authoritative transaction while the other two run on
-fresh sessions. The held operation's locks make every concurrent one fail fast with the fixed
-409 instead of waiting, deadlocking, reporting a typed absence or observing a half transition.
+fresh sessions. A held transition makes every concurrent operation fail fast with the fixed
+409 instead of waiting, deadlocking, reporting a typed absence or observing a half transition;
+a held read refuses the transitions and lets the other read through (#2925).
 """
 
 from uuid import UUID, uuid4
@@ -95,7 +96,7 @@ async def test_in_flight_guarded_transition_fences_access_and_receipt_until_it_c
 
 
 @pytest.mark.parametrize("action", ["stop", "finalize"])
-async def test_in_flight_access_read_fences_guarded_controls_and_receipt(
+async def test_in_flight_access_read_fences_guarded_controls_but_not_the_receipt(
     managed, monkeypatch, action
 ):
     if action == "finalize":
@@ -115,8 +116,10 @@ async def test_in_flight_access_read_fences_guarded_controls_and_receipt(
     monkeypatch.setattr(sync_provisioning, "installation_view", original)
     assert profile.status_code == 200, profile.text
     assert {key: profile.json()["management"][key] for key in STATE} == expected
-    for response in seen.values():
-        busy(response)
+    busy(seen["control"])
+    # Both are reads: they share the workspace and installation rows (#2925).
+    observed = seen["receipt"]
+    assert observed.status_code == 200 and observed.json()["result"] == "not_found", observed.text
     # The refused attempt left no receipt: the same operation now applies once.
     assert await expected_state(managed) == expected
     applied = await control(managed, action, body)
@@ -125,7 +128,7 @@ async def test_in_flight_access_read_fences_guarded_controls_and_receipt(
 
 
 @pytest.mark.parametrize("action", ["stop", "finalize"])
-async def test_in_flight_receipt_lookup_fences_guarded_controls_and_access(
+async def test_in_flight_receipt_lookup_fences_guarded_controls_but_not_access(
     managed, monkeypatch, action
 ):
     if action == "finalize":
@@ -133,7 +136,7 @@ async def test_in_flight_receipt_lookup_fences_guarded_controls_and_access(
     expected = await expected_state(managed)
     body = {"operation_id": str(uuid4()), "expected": expected}
     question = lookup(managed)
-    original = sync_resume_receipt.locked
+    original = sync_resume_receipt.share_locked
     seen = {}
 
     async def observed_mid_lookup(db, model, *conditions, **kwargs):
@@ -143,13 +146,14 @@ async def test_in_flight_receipt_lookup_fences_guarded_controls_and_access(
             seen["access"] = await access(managed)
         return row
 
-    monkeypatch.setattr(sync_resume_receipt, "locked", observed_mid_lookup)
+    monkeypatch.setattr(sync_resume_receipt, "share_locked", observed_mid_lookup)
     observed = await receipt(managed, question)
-    monkeypatch.setattr(sync_resume_receipt, "locked", original)
+    monkeypatch.setattr(sync_resume_receipt, "share_locked", original)
     assert observed.status_code == 200 and observed.json()["result"] == "not_found", observed.text
     assert set(seen) == {"control", "access"}
-    for response in seen.values():
-        busy(response)
+    busy(seen["control"])
+    # Both are reads: they share the workspace and installation rows (#2925).
+    assert seen["access"].status_code == 200, seen["access"].text
     assert await expected_state(managed) == expected
     applied = await control(managed, action, body)
     assert applied.status_code == 200, applied.text

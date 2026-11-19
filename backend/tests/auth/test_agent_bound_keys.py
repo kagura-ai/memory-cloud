@@ -73,6 +73,16 @@ def _patch_hash(key_record):
     return patch.object(APIKeyManager, "_hash_key", return_value=key_record.key_hash)
 
 
+@pytest.fixture
+def owner_holds_workspace():
+    """The key's owner holds its workspace (#2928). The mocked db below serves
+    rows by call ORDER; the membership condition is covered on real rows in
+    ``tests/integration/test_workspace_key_membership_db.py``."""
+    with patch("auth.api_keys.key_owner_holds_workspace", new=AsyncMock(return_value=True)):
+        yield
+
+
+@pytest.mark.usefixtures("owner_holds_workspace")
 class TestVerifyKeyKillSwitch:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("status", ["suspended", "retired"])

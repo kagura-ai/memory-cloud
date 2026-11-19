@@ -349,11 +349,6 @@ CONDITIONAL_GATE_REVIEWED: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/memory/recall"): "target-less: reachable_memory_filter",
     # A public context without a workspace row: nothing can be suspended.
     ("GET", "/api/v1/public/{context_id}/info"): "no workspace row: nothing to gate",
-    # TEMPORARY: the session path of this route is not gated yet; it is gated
-    # in a follow-up commit of this branch, which removes this row.
-    ("GET", "/api/v1/workspaces/{workspace_id}/members/{user_id}/credentials"): (
-        "TEMPORARY: session path not gated yet"
-    ),
 }
 
 # Where an exception route's own gate (or opt-out) lives when the handler does
@@ -416,6 +411,9 @@ SLOT_KEYWORD_SITES: dict[tuple[str, str], int] = {
     ("services.sync_authority", "sync_authority"): 2,  # None for no principal, else slot=slot
     ("api.routes.me_workspaces", "workspace_access"): 1,
     ("api.routes.resource_ingest", "_enforce_workspace_membership"): 1,
+    # Membership of the path workspace only: each member-credential route
+    # runs the gate itself after its own authorization.
+    ("api.routes.member_credentials", "_require_path_workspace_member"): 1,
     # slot=slot: wrappers handing their caller's policy on.
     ("services.permission_service", "PermissionService.check_workspace_owner"): 1,
     ("services.permission_service", "PermissionService.check_workspace_admin"): 1,

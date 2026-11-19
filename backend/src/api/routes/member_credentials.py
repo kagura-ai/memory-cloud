@@ -9,6 +9,11 @@ Endpoints:
 - POST /workspaces/{workspace_id}/members/{user_id}/credentials/api-key/regenerate
 - DELETE /workspaces/{workspace_id}/members/{user_id}/credentials/api-key
 - Similar for OAuth apps
+
+Every route requires the caller to hold a membership row (any role, the
+owner's included) in the workspace of the path (#2928): a session caller
+through ``_require_path_workspace_member``, an API-key owner through
+``authorize_workspace_management``.
 """
 
 from typing import Annotated
@@ -39,6 +44,7 @@ from models.schemas import (
 )
 from services.credential_default_context import readable_context
 from services.member_credentials_service import MemberCredentialsService
+from services.permission_service import PermissionService
 from services.security_notification_service import (
     SecurityEvent,
     schedule_security_notification,
@@ -51,6 +57,7 @@ from utils.exceptions import (
     FeatureNotAvailableError,
     NotFoundException,
     ValidationError,
+    WorkspaceSlotSuspendedError,
 )
 from utils.logger import get_logger
 from utils.public_id import APIKeyPublicId, PublicIdPrefix, public_id_pattern
@@ -86,6 +93,34 @@ def _reject_oauth(user: dict, action: str) -> None:
         raise AuthorizationError(
             message=f"OAuth access tokens cannot {action}. Use a workspace-owner API key."
         )
+
+
+async def _require_path_workspace_member(db: AsyncSession, user: dict, workspace_id: UUID) -> None:
+    """Require the session caller to hold a membership row in the path workspace.
+
+    Any role, the owner's included: an owner whose membership row is missing
+    is refused here, as on the workspace switch and the usage readouts. Every
+    session route of this router runs it before anything else it does
+    (#2928): before a lookup, a write or an operation-history record. A caller
+    without a row gets the uniform ``AUTH-101`` refusal the workspace routes
+    give, the same body whether the workspace exists or not. Membership only,
+    not the seat on the plan: a member without a seat still hides, rotates and
+    deletes their own credentials.
+
+    Membership only, also for a slot-suspended workspace (#2918): each route
+    runs the slot gate itself after its own authorization, and a revoke route
+    with the ``REVOCATION`` policy, so revoking stays possible.
+
+    Raises:
+        AuthorizationError: 403 for a non-member or a deleted or unknown workspace.
+    """
+    await PermissionService(db).check_workspace_access(
+        user.get("user_id"),
+        workspace_id,
+        required_role=WorkspaceRole.VIEWER,
+        require_seat=False,
+        slot=None,
+    )
 
 
 def _minted_key_response(
@@ -363,16 +398,23 @@ async def get_member_credentials(
     _reject_oauth(user, "view member credentials")
     programmatic = is_api_key_principal(user)
     caller_role: str | None = None
+    service = MemberCredentialsService(db)
     if programmatic:
         # authorize_workspace_management already fetched the caller's owner
         # WorkspaceMember row; reuse its role so the view-permission check below
-        # does not re-SELECT the same row (max code-review, PR #1171).
+        # does not re-SELECT the same row (max code-review, PR #1171). It also
+        # runs the slot gate (#2918).
         principal = await authorize_workspace_management(
             user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
         )
         caller_role = principal.member.role
-
-    service = MemberCredentialsService(db)
+    else:
+        await _require_path_workspace_member(db, user, workspace_id)
+        # #2918: membership, then the view permission (403 for a member who
+        # may not view another member), then the slot gate, before anything
+        # of the workspace is read or created.
+        await service.check_can_view(user["user_id"], workspace_id, user_id)
+        await ensure_slot_active(db, workspace_id, user_id=user["user_id"])
 
     try:
         credentials = await service.get_or_create_credentials(
@@ -402,7 +444,9 @@ async def get_member_credentials(
             raise HTTPException(status_code=404, detail="Member not found")
 
         return MemberCredentialsResponse(**credentials, target_user_role=target_role)
-    except HTTPException:
+    except (HTTPException, AuthorizationError, WorkspaceSlotSuspendedError):
+        # A caller without the owner or admin role viewing another member is
+        # the uniform 403, not a server error; a slot refusal is SLOT-001.
         raise
     except ValueError as e:
         logger.error("get_member_credentials_invalid", error=str(e), user_id=user_id)
@@ -435,6 +479,7 @@ async def hide_api_key(
     Raises:
         HTTPException: If not owner or key not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     # Permission check: owner only
     if user["user_id"] != user_id:
         raise AuthorizationError(message="Only owner can hide API key")
@@ -526,6 +571,7 @@ async def regenerate_api_key(
     Raises:
         HTTPException: If not authorized or key not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     # Permission check: hierarchical
     service = MemberCredentialsService(db)
     await check_permission(service, user["user_id"], workspace_id, user_id, "regenerate")
@@ -709,6 +755,8 @@ async def create_api_key(
     # requires it) (v0.42 max review).
     if not is_session_principal(user):
         raise AuthorizationError(message="Unrecognized principal for API key creation")
+
+    await _require_path_workspace_member(db, user, workspace_id)
 
     # Session path (#252 unchanged): self-mint only.
     if user["user_id"] != user_id:
@@ -960,6 +1008,7 @@ async def delete_api_key(
     Raises:
         HTTPException: If not authorized or key not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     service = MemberCredentialsService(db)
 
     # Permission check
@@ -1066,6 +1115,7 @@ async def delete_api_key_by_id(
         # carry the OIDC ``sub`` (v0.42 max review).
         if not is_session_principal(user):
             raise AuthorizationError(message="Unrecognized principal for API key deletion")
+        await _require_path_workspace_member(db, user, workspace_id)
         if caller_id != user_id:
             # Session path (#252 unchanged): self-only.
             raise AuthorizationError(
@@ -1266,6 +1316,7 @@ async def hide_oauth_app(
     Raises:
         HTTPException: If not owner or app not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     # Permission check: owner only
     if user["user_id"] != user_id:
         raise AuthorizationError(message="Only owner can hide OAuth app")
@@ -1339,6 +1390,7 @@ async def regenerate_oauth_secret(
     Raises:
         HTTPException: If not authorized or app not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     # Permission check: hierarchical
     service = MemberCredentialsService(db)
     can_regenerate = await service.check_can_manage(
@@ -1449,6 +1501,7 @@ async def delete_oauth_app(
     Raises:
         HTTPException: If not authorized or app not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     service = MemberCredentialsService(db)
 
     # Permission check

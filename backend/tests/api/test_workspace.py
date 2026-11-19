@@ -36,6 +36,39 @@ from utils.exceptions import AuthenticationError, AuthorizationError
 class TestWorkspaceStats:
     """Test workspace stats endpoint."""
 
+    @pytest.fixture(autouse=True)
+    def workspace_access(self):
+        """The caller is a member of the selected workspace (#2928); the
+        tests below drive the endpoint by query ORDER."""
+        with patch(
+            "services.permission_service.PermissionService.check_workspace_access",
+            new=AsyncMock(),
+        ) as access:
+            yield access
+
+    @pytest.mark.asyncio
+    async def test_a_non_member_is_refused_before_the_contexts_are_read(
+        self, mock_db, mock_user, workspace_access
+    ):
+        """#2928: membership of the selected workspace is checked right after
+        the workspace is resolved, before anything of it is read."""
+        workspace = MagicMock()
+        workspace.id = uuid4()
+        mock_db.execute.side_effect = [
+            MagicMock(one_or_none=MagicMock(return_value=(MagicMock(), workspace))),
+        ]
+        workspace_access.side_effect = AuthorizationError(
+            "Insufficient permissions", reason="not_a_member"
+        )
+
+        with pytest.raises(AuthorizationError):
+            await get_workspace_stats(user=mock_user, db=mock_db)
+
+        workspace_access.assert_awaited_once_with(
+            mock_user["user_id"], workspace.id, required_role="viewer", require_seat=False
+        )
+        assert mock_db.execute.await_count == 1
+
     @pytest.fixture
     def mock_db(self):
         """Create mock database session."""

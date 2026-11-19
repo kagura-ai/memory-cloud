@@ -408,7 +408,7 @@ async def test_delete_connector_revokes_an_unlinked_key_of_its_name(db_session: 
     from models.auth import APIKey
 
     user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
-    _other_user, other_workspace = await _seed_workspace(db_session, plan_name="promax")
+    other_user, other_workspace = await _seed_workspace(db_session, plan_name="promax")
     service = ConnectorProvisioningService(db_session)
     result = await service.provision_connector(
         workspace_id=workspace.id,
@@ -422,13 +422,21 @@ async def test_delete_connector_revokes_an_unlinked_key_of_its_name(db_session: 
     name = f"connector:{connector_id}"
     manager = APIKeyManager(db_session)
     # The old image's mint: same name, same workspace, no link (another
-    # minter, since the name is unique per active user + workspace).
-    unlinked_plain, unlinked = await manager.create_key(
-        name=name, user_id=f"user-{uuid4().hex}", workspace_id=workspace.id
+    # member of the workspace, since the name is unique per active user +
+    # workspace). It verifies until it is revoked.
+    second_member = f"user-{uuid4().hex}"
+    await _add_user(db_session, second_member)
+    db_session.add(
+        WorkspaceMember(workspace_id=workspace.id, user_id=second_member, role=WorkspaceRole.MEMBER)
     )
-    # Same name in another workspace: not this connector's key.
+    await db_session.flush()
+    unlinked_plain, unlinked = await manager.create_key(
+        name=name, user_id=second_member, workspace_id=workspace.id
+    )
+    assert await manager.verify_key(unlinked_plain) is not None
+    # Same name in another workspace (its owner's key): not this connector's key.
     elsewhere_plain, elsewhere = await manager.create_key(
-        name=name, user_id=user_id, workspace_id=other_workspace.id
+        name=name, user_id=other_user, workspace_id=other_workspace.id
     )
     # Another key of the workspace.
     laptop_plain, laptop = await manager.create_key(

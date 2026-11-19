@@ -16,9 +16,8 @@ from models.sync_resume_receipt_schemas import (
 )
 from services.capacity_lock import CapacityPolicy
 from services.permission_service import PermissionService
-from services.sync_feed_authority import locked
 from services.sync_managed_guard import target_fence
-from services.sync_management import management_boundary
+from services.sync_management import management_boundary, share_locked
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException
 
@@ -36,7 +35,9 @@ async def read_resume_receipt(
     The current Editor may reconcile a previous Editor's operation without using
     or renewing that original person's credentials. Errors never imply absence.
     """
-    async with management_boundary(db, wid, iid, principal) as (
+    # A lookup changes nothing: it shares the workspace and installation rows
+    # with other reads and still excludes every transition (#2925).
+    async with management_boundary(db, wid, iid, principal, shared=True) as (
         installation,
         _workspace,
         _fence,
@@ -57,7 +58,7 @@ async def read_resume_receipt(
         # Refresh and retain this metadata lock through observation/commit, then
         # recheck reach. Unlike exact_target, this does not require a live public
         # endpoint or a published resource slug to recover historical outcomes.
-        context = await locked(db, Context, Context.id == installation.context_id)
+        context = await share_locked(db, Context, Context.id == installation.context_id)
         if context is None or context.deleted_at is not None:
             raise NotFoundException("Synchronization target")
         if context.is_private and context.created_by != principal.user_id:
@@ -69,7 +70,7 @@ async def read_resume_receipt(
                 raise NotFoundException("Synchronization target")
             groups = set()
             for user_id in sorted({principal.user_id, context.created_by}):
-                link = await locked(db, IdentityLink, IdentityLink.user_id == user_id)
+                link = await share_locked(db, IdentityLink, IdentityLink.user_id == user_id)
                 if link is None:
                     raise NotFoundException("Synchronization target")
                 groups.add(link.group_id)

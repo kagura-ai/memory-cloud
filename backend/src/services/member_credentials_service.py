@@ -282,6 +282,16 @@ class MemberCredentialsService:
         # Member/Viewer: No management of others
         return False
 
+    async def check_can_view(
+        self, requester_id: str, workspace_id: UUID, target_user_id: str
+    ) -> None:
+        """``_check_can_view`` for a caller that authorizes before it reads.
+
+        Raises:
+            AuthorizationError: If not allowed (403)
+        """
+        await self._check_can_view(requester_id, workspace_id, target_user_id)
+
     async def _check_can_view(
         self,
         requester_id: str,

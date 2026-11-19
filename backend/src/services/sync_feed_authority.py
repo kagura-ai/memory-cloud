@@ -90,7 +90,9 @@ async def feed_fence(db: AsyncSession) -> AsyncIterator[FeedFence]:
         event.remove(db.sync_session, "before_commit", fence.check)
 
 
-async def _retried(db: AsyncSession, model: type[T], *conditions: Any, write: bool) -> T | None:
+async def locked_retried(
+    db: AsyncSession, model: type[T], *conditions: Any, write: bool
+) -> T | None:
     """The lock :func:`locked` takes, tried again for a moment through ``retry_nowait``."""
 
     async def lock() -> T | None:
@@ -113,9 +115,9 @@ async def exact_target(db: AsyncSession, row: SyncInstallation, *, retry: bool =
     instead of the second answering 409.
     """
     if retry:
-        resource = await _retried(db, Resource, Resource.id == row.resource_pk, write=True)
-        context = await _retried(db, Context, Context.id == row.context_id, write=True)
-        endpoint = await _retried(
+        resource = await locked_retried(db, Resource, Resource.id == row.resource_pk, write=True)
+        context = await locked_retried(db, Context, Context.id == row.context_id, write=True)
+        endpoint = await locked_retried(
             db, PublicMcpEndpoint, PublicMcpEndpoint.id == row.endpoint_id, write=False
         )
     else:
