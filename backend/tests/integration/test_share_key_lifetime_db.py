@@ -3,16 +3,20 @@
 On real PostgreSQL rows, over HTTP with the share-key and session dependencies:
 
 * a share key is honoured while the account that created it holds OWNER-level
-  access to the bound context (workspace owner or admin, or a member with the
-  context's OWNER role it reaches); once the creator leaves the workspace,
-  loses that role or loses the context from their access list, both share
-  surfaces answer the uniform 401, byte-identical to an unknown key's;
+  access to the bound context, the rule minting applies: on a shared context
+  the workspace owner or an admin, or a member holding the context's owner role
+  whose access list reaches it; on a private context only its creator (or an
+  account linked to the creator). When the creator leaves the workspace, loses
+  that role, loses the context from their access list or has no plan seat, or
+  the context or its workspace is deleted, both share surfaces answer the
+  uniform 401, byte-identical to an unknown key's, and record no use of the key;
 * removing a member revokes that member's share keys for the workspace's
   contexts (a key of the same account in another workspace stays), with one
   ``credential.revoked`` record per key, idempotently; deleting or erasing the
   account deletes its share keys, as it deletes its API keys;
 * a caller with OWNER-level access to a context revokes and lists every share
-  key bound to it; anyone else gets the uniform 404.
+  key bound to it; anyone else gets the uniform 404. The list applies the slot
+  gate after that decision; revoking is never blocked by it.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from auth.share_keys import ShareKeyManager
 from auth.workspace_roles import ContextRole, WorkspaceRole
-from models.auth import Context, ContextMember, ShareKey, WorkspaceMember
+from models.auth import Context, ContextMember, ShareKey, Workspace, WorkspaceMember
 from models.operation_history import OperationHistory
 from utils.datetime import utcnow
 
@@ -79,14 +83,28 @@ async def world(async_engine, db_session: AsyncSession, connector_world):
     member = await w.user("sk-member")
     plain = await w.user("sk-plain")
     stranger = await w.user("sk-stranger")
+    viewer = await w.user("sk-viewer")
     x = await w.workspace(
         owner,
-        **{admin: WorkspaceRole.ADMIN, member: WorkspaceRole.MEMBER, plain: WorkspaceRole.MEMBER},
+        **{
+            admin: WorkspaceRole.ADMIN,
+            member: WorkspaceRole.MEMBER,
+            plain: WorkspaceRole.MEMBER,
+            viewer: WorkspaceRole.VIEWER,
+        },
     )
     y = await w.workspace(stranger, **{member: WorkspaceRole.MEMBER})
-    c, d = uuid4(), uuid4()
+    c, d, p = uuid4(), uuid4(), uuid4()
     db_session.add_all(
         [
+            # A private context of the member's own (inserted directly).
+            Context(
+                id=p,
+                workspace_id=x.id,
+                name=f"sk-p-{p.hex[:6]}",
+                created_by=member,
+                is_private=True,
+            ),
             Context(
                 id=c,
                 workspace_id=x.id,
@@ -111,11 +129,11 @@ async def world(async_engine, db_session: AsyncSession, connector_world):
             ContextMember(context_id=d, user_id=member, role=ContextRole.OWNER),
         ]
     )
-    for ws, uid, ctx in ((x, member, c), (x, plain, c), (y, member, d)):
+    for ws, uid, ctxs in ((x, member, [c, p]), (x, plain, [c]), (y, member, [d])):
         await db_session.execute(
             update(WorkspaceMember)
             .where(WorkspaceMember.workspace_id == ws.id, WorkspaceMember.user_id == uid)
-            .values(allowed_context_ids=[ctx])
+            .values(allowed_context_ids=ctxs)
         )
     manager = ShareKeyManager(db_session)
     keys = {}
@@ -124,6 +142,7 @@ async def world(async_engine, db_session: AsyncSession, connector_world):
         ("admin", admin, c),
         ("owner", owner, c),
         ("member_y", member, d),
+        ("private", member, p),
     ):
         plaintext, row = await manager.create_key(
             name=f"sk-{label}", user_id=creator, context_id=ctx
@@ -142,17 +161,19 @@ async def world(async_engine, db_session: AsyncSession, connector_world):
             member=member,
             plain=plain,
             stranger=stranger,
+            viewer=viewer,
             x=SimpleNamespace(id=x.id),
             y=SimpleNamespace(id=y.id),
             c=c,
             d=d,
+            p=p,
             keys=keys,
         )
     await db_session.rollback()
     await db_session.execute(
-        delete(OperationHistory).where(OperationHistory.context_id.in_([c, d]))
+        delete(OperationHistory).where(OperationHistory.context_id.in_([c, d, p]))
     )
-    await db_session.execute(delete(Context).where(Context.id.in_([c, d])))
+    await db_session.execute(delete(Context).where(Context.id.in_([c, d, p])))
     await db_session.commit()
 
 
@@ -183,6 +204,11 @@ async def _revoked_at(world, key_id: int):
     return await world.db.scalar(select(ShareKey.revoked_at).where(ShareKey.id == key_id))
 
 
+async def _last_used_at(world, key_id: int):
+    world.db.expire_all()
+    return await world.db.scalar(select(ShareKey.last_used_at).where(ShareKey.id == key_id))
+
+
 async def _revocations(world, public_id: str) -> list[OperationHistory]:
     return list(
         (
@@ -202,7 +228,7 @@ async def _revocations(world, public_id: str) -> list[OperationHistory]:
 
 
 async def test_a_key_is_honoured_while_its_creator_can_share_the_context(world) -> None:
-    for label in ("member", "admin", "owner", "member_y"):
+    for label in ("member", "admin", "owner", "member_y", "private"):
         response = await _sessions(world, world.keys[label].plaintext)
         assert response.status_code == 200, label
 
@@ -263,6 +289,49 @@ async def test_a_deleted_context_ends_the_key_with_the_same_answer(world) -> Non
     await _refused_like_an_unknown_key(world, world.keys["owner"].plaintext)
 
 
+@pytest.mark.parametrize("label", ["owner", "member"])
+async def test_a_deleted_workspace_ends_the_key_with_the_same_answer(world, label) -> None:
+    await world.db.execute(
+        update(Workspace).where(Workspace.id == world.x.id).values(deleted_at=utcnow())
+    )
+    await world.db.commit()
+    await _refused_like_an_unknown_key(world, world.keys[label].plaintext)
+
+
+async def test_a_creator_without_a_plan_seat_ends_the_key_until_seated_again(world) -> None:
+    # One seat: the owner keeps it, the member creator has none.
+    await world.db.execute(
+        update(Workspace).where(Workspace.id == world.x.id).values(plan_name="free")
+    )
+    await world.db.commit()
+    await _refused_like_an_unknown_key(world, world.keys["member"].plaintext)
+    assert (await _sessions(world, world.keys["owner"].plaintext)).status_code == 200
+    await world.db.execute(
+        update(Workspace).where(Workspace.id == world.x.id).values(plan_name="promax")
+    )
+    await world.db.commit()
+    assert (await _sessions(world, world.keys["member"].plaintext)).status_code == 200
+
+
+async def test_a_refused_request_records_no_use_of_the_key(world) -> None:
+    await world.db.execute(
+        update(ContextMember)
+        .where(ContextMember.context_id == world.c, ContextMember.user_id == world.member)
+        .values(role=ContextRole.EDITOR)
+    )
+    await world.db.commit()
+    await _refused_like_an_unknown_key(world, world.keys["member"].plaintext)
+    assert await _last_used_at(world, world.keys["member"].id) is None
+    # A key of a deleted context: refused, no use recorded either.
+    await world.db.execute(update(Context).where(Context.id == world.d).values(deleted_at=utcnow()))
+    await world.db.commit()
+    await _refused_like_an_unknown_key(world, world.keys["member_y"].plaintext)
+    assert await _last_used_at(world, world.keys["member_y"].id) is None
+    # An honoured request records its use.
+    assert (await _sessions(world, world.keys["owner"].plaintext)).status_code == 200
+    assert await _last_used_at(world, world.keys["owner"].id) is not None
+
+
 async def test_a_failed_role_decision_is_a_refusal(world) -> None:
     from services.permission_service import PermissionService
 
@@ -308,7 +377,7 @@ async def test_removing_a_member_revokes_its_share_keys_for_the_workspace(world)
     assert again == 0
     assert len(await _revocations(world, key.public_id)) == 1
 
-    # Re-added with the context's OWNER role later: the key stays revoked.
+    # Re-added as a workspace admin (OWNER-level access to every shared\n    # context): the key stays revoked.
     world.db.add(
         WorkspaceMember(
             workspace_id=world.x.id,
@@ -410,6 +479,84 @@ async def test_anyone_else_gets_the_uniform_404(world) -> None:
     assert answers[0].content == answers[-1].content
 
 
+@pytest.mark.parametrize("caller", ["viewer", "plain", "stranger"])
+async def test_a_caller_without_owner_level_access_gets_404_for_list_and_revoke(
+    world, caller
+) -> None:
+    as_user = getattr(world, caller)
+    listed = await world.client.get(
+        "/api/v1/config/share-keys",
+        params={"context_id": str(world.c)},
+        headers={"x-test-session": as_user},
+    )
+    revoked = await _revoke(world, as_user, world.keys["owner"].public_id)
+    assert (listed.status_code, listed.json()) == (404, CONTEXT_NOT_FOUND)
+    assert (revoked.status_code, revoked.json()) == (404, NOT_FOUND)
+    assert await _revoked_at(world, world.keys["owner"].id) is None
+
+
+async def test_a_private_context_is_shared_by_its_creator_only(world) -> None:
+    """The workspace owner does not reach a member's private context: its
+    share keys are listed and revoked by their creator."""
+    key = world.keys["private"]
+    listed = await world.client.get(
+        "/api/v1/config/share-keys",
+        params={"context_id": str(world.p)},
+        headers={"x-test-session": world.owner},
+    )
+    assert (listed.status_code, listed.json()) == (404, CONTEXT_NOT_FOUND)
+    assert (await _revoke(world, world.owner, key.public_id)).status_code == 404
+    assert (await _sessions(world, key.plaintext)).status_code == 200
+    own = await world.client.get(
+        "/api/v1/config/share-keys",
+        params={"context_id": str(world.p)},
+        headers={"x-test-session": world.member},
+    )
+    assert [k["id"] for k in own.json()] == [key.public_id]
+
+
+async def test_the_context_list_of_a_suspended_workspace_is_refused_after_access(world) -> None:
+    from models.workspace_slots import WorkspaceSlotSuspension
+    from tests.integration._slot_world import T0, slot_mode
+
+    world.db.add(
+        WorkspaceSlotSuspension(
+            workspace_id=world.x.id,
+            owner_user_id=world.owner,
+            cause="billing_snapshot",
+            suspended_at=T0,
+        )
+    )
+    await world.db.commit()
+    try:
+        with slot_mode("enforce"):
+            listed = await world.client.get(
+                "/api/v1/config/share-keys",
+                params={"context_id": str(world.c)},
+                headers={"x-test-session": world.owner},
+            )
+            own = await world.client.get(
+                "/api/v1/config/share-keys", headers={"x-test-session": world.owner}
+            )
+            outsider = await world.client.get(
+                "/api/v1/config/share-keys",
+                params={"context_id": str(world.c)},
+                headers={"x-test-session": world.plain},
+            )
+            revoked = await _revoke(world, world.owner, world.keys["admin"].public_id)
+        assert listed.status_code == 403 and listed.json()["error"] == "SLOT-001"
+        assert own.status_code == 200
+        assert (outsider.status_code, outsider.json()) == (404, CONTEXT_NOT_FOUND)
+        assert revoked.status_code == 204
+    finally:
+        await world.db.execute(
+            delete(WorkspaceSlotSuspension).where(
+                WorkspaceSlotSuspension.workspace_id == world.x.id
+            )
+        )
+        await world.db.commit()
+
+
 async def test_the_context_owner_lists_every_key_bound_to_the_context(world) -> None:
     for viewer in (world.owner, world.admin, world.member):
         response = await world.client.get(
@@ -446,4 +593,5 @@ async def test_without_the_filter_the_list_is_the_callers_own_keys(world) -> Non
     assert {k["id"] for k in response.json()} == {
         world.keys["member"].public_id,
         world.keys["member_y"].public_id,
+        world.keys["private"].public_id,
     }
