@@ -60,7 +60,9 @@ ROUTER_DEFAULTS: dict[str, str] = {
     # #2809: the proxy's certificate permission call; reads one domain row
     "internal_public_mcp_domains": NOT_APPLICABLE,
     "internal_sync_installations": NOT_APPLICABLE,  # #2802: provisioning applies its creation gates
-    "sync_installations": NOT_APPLICABLE,  # #2802: control metadata; provisioning checks capacity
+    # #2802: control metadata; provisioning checks capacity.
+    # #2921: domain commands touch no memory content.
+    "sync_installations": NOT_APPLICABLE,
     "sync_worker": NOT_APPLICABLE,  # #2806: operational identity only; no memory content
     "invitations": NOT_APPLICABLE,
     "mcp": NOT_APPLICABLE,

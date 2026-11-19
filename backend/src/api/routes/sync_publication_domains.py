@@ -13,11 +13,9 @@ from api.routes.public_mcp_domains import PublicMcpDomainResponse, domain_respon
 from auth.sync_identity import SyncPrincipal
 from models.api_base import TZAwareBaseModel
 from models.public_mcp_domain import PublicMcpDomain
-from models.sync_installation import SyncAuthorization, SyncInstallation
 from services.sync_authority import registered_service, sync_authority
-from services.sync_provisioning import installation_view
+from services.sync_publication_domain_commands import bound_installation
 from utils.datetime import utcnow
-from utils.exceptions import NotFoundException
 
 
 class CertificateObservation(BaseModel):
@@ -61,24 +59,11 @@ async def observe_publication_domain(
     """Read current owner, registered client, target identity and one domain in the transaction."""
     async with sync_authority(db, workspace_id, principal) as authority:
         service = await registered_service(db, browser_client_id=principal.client_id)
-        installation = await db.scalar(
-            select(SyncInstallation)
-            .join(SyncAuthorization, SyncAuthorization.id == SyncInstallation.authorization_id)
-            .where(
-                SyncInstallation.id == installation_id,
-                SyncInstallation.workspace_id == workspace_id,
-                SyncInstallation.service_id == service.service_id,
-                SyncInstallation.service_client_id == service.service_client_id,
-                SyncAuthorization.browser_client_id == principal.client_id,
-                SyncAuthorization.service_generation == service.generation,
-            )
-            .with_for_update(read=True, nowait=True)
+        # The selection the domain commands admit with (#2921).
+        _installation, target = await bound_installation(
+            db, workspace_id, installation_id, principal, service
         )
-        if installation is None:
-            raise NotFoundException("Synchronization installation")
-        target = await installation_view(db, installation)
-        if not target.public_id:
-            raise NotFoundException("Publication target")
+        assert target.public_id is not None
 
         # Cooldown is per workspace. The same owner may already have verified
         # this hostname on a different endpoint, even before cooldown ends.
