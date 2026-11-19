@@ -20,6 +20,7 @@ from models.oidc import OIDCClient
 from models.sync_installation import SyncInstallation, SyncService
 from services.permission_service import PermissionService
 from services.workspace_locks import lock_workspace_for_update, lock_workspace_nowait
+from services.workspace_slot_gate import SlotPolicy
 from utils.datetime import utcnow
 from utils.db_helpers import is_lock_not_available
 from utils.exceptions import ConflictError, NotFoundException
@@ -66,6 +67,7 @@ async def sync_authority(
     principal: SyncPrincipal | None,
     *,
     paid_guarded: bool = False,
+    slot: SlotPolicy = SlotPolicy.BLOCKED,
 ) -> AsyncIterator[SyncAuthority]:
     """Fence user erasure, ownership and scopes; the mutation owns the commit.
 
@@ -75,6 +77,11 @@ async def sync_authority(
     row again for a moment so a short holder is not a conflict (#2914). Neither
     order waits while holding the opposing authority lock.
     Internal activation checks the current owner without reusing a human grant.
+
+    #2918: a human principal is refused for a slot-suspended workspace
+    (``slot``; ``OWNER_MANAGEMENT`` only for withdrawing an authorization).
+    The internal billing service (no principal) is never refused by it: the
+    payment service keeps reading and writing a suspended workspace.
     """
     authority = None
     try:
@@ -101,9 +108,24 @@ async def sync_authority(
             )
             if principal.user_id != owner_id or principal.client_id != original_client:
                 raise NotFoundException("Workspace")
-        member = await PermissionService(db).check_workspace_access(
-            owner_id, workspace_id, required_role=WorkspaceRole.OWNER, require_seat=False
-        )
+        if principal is None:
+            # #2918: the internal billing service keeps reading and writing a
+            # slot-suspended workspace; it never receives SLOT-001.
+            member = await PermissionService(db).check_workspace_access(
+                owner_id,
+                workspace_id,
+                required_role=WorkspaceRole.OWNER,
+                require_seat=False,
+                slot=None,
+            )
+        else:
+            member = await PermissionService(db).check_workspace_access(
+                owner_id,
+                workspace_id,
+                required_role=WorkspaceRole.OWNER,
+                require_seat=False,
+                slot=slot,
+            )
         try:
             member = await db.scalar(
                 select(WorkspaceMember)

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.sync_bearer import sync_service_token
 from db.base import get_db
 from services.sync_credentials import SyncCredentialError, sync_token_boundary
+from services.workspace_slot_gate import ensure_slot_active
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
@@ -92,6 +93,8 @@ async def inspect_sync_target(
         db, token, installation_id, operation="results:read"
     ) as authority:
         row = authority.installation
+        # #2918: a slot-suspended workspace is refused to the worker.
+        await ensure_slot_active(db, row.workspace_id, user_id=None, outsider=True)
         result = SyncWorkerInstallationView(
             installation_id=row.id,
             workspace_id=row.workspace_id,

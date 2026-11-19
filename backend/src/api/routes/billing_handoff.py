@@ -38,6 +38,7 @@ from db.redis import incrby_counter
 from models.api_base import TZAwareBaseModel
 from models.auth import Workspace
 from services.permission_service import PermissionService
+from services.workspace_slot_gate import SlotPolicy
 from utils.auth_helpers import get_user_id
 from utils.exceptions import RateLimitError
 from utils.logger import get_logger
@@ -173,7 +174,10 @@ async def mint_billing_handoff(
     # raises AuthorizationError (403) for non-owners and never trusts
     # current_workspace_id, so a multi-workspace member cannot mint for a
     # workspace they merely belong to (#389 guard).
-    await PermissionService(db).check_workspace_owner(user_id, body.workspace_id)
+    # #2918: the billing page is the owner's way out of a slot suspension too.
+    await PermissionService(db).check_workspace_owner(
+        user_id, body.workspace_id, slot=SlotPolicy.OWNER_MANAGEMENT
+    )
 
     # Rate-limit the owner's mint rate per workspace (#1104), AFTER the owner gate
     # (non-owners 403 without consuming quota) and BEFORE mint. 429 on exceed.

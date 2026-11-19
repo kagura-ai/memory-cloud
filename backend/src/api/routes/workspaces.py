@@ -45,6 +45,7 @@ from services.permission_service import PermissionService
 from services.plan_seats import seat_limit
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
+from services.workspace_slot_gate import SlotPolicy
 from utils.auth_helpers import get_user_id
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, ValidationError
@@ -596,7 +597,10 @@ async def delete_workspace(
     # SECURITY: Workspace boundary check for destructive operation
     # Issue #269: check_workspace_owner verifies ownership (sufficient for security)
     # Additional owner_user_id check for extra safety on destructive operations
-    await perm_service.check_workspace_owner(user["user_id"], workspace_id)
+    # #2918: deleting is the owner's way out of a slot suspension too.
+    await perm_service.check_workspace_owner(
+        user["user_id"], workspace_id, slot=SlotPolicy.OWNER_MANAGEMENT
+    )
 
     # Double verification for destructive operation
     from models.auth import Workspace
