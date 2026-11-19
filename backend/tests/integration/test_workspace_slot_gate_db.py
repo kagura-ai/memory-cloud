@@ -715,6 +715,29 @@ async def test_revoking_a_credential_is_never_blocked(world: World) -> None:
 
                 app.dependency_overrides[get_user_from_api_key_or_session] = lambda: principal
                 results.append(await client.delete(f"{base}/api-keys/{own}"))
+                # A member deleting their own OAuth app.
+                from models.auth import OAuth2Client
+
+                w.session.add(
+                    OAuth2Client(
+                        client_id=f"c-{uuid4().hex[:12]}",
+                        client_secret_hash="x" * 64,
+                        client_name="Slot member app",
+                        redirect_uris=["http://127.0.0.1/cb"],
+                        grant_types=["authorization_code"],
+                        response_types=["code"],
+                        scope="memory:read",
+                        token_endpoint_auth_method="none",
+                        owner_id=w.member,
+                        workspace_id=w.ws["s"],
+                    )
+                )
+                await w.session.commit()
+                app.dependency_overrides[require_session_auth] = lambda: {
+                    "user_id": w.member,
+                    "sub": w.member,
+                }
+                results.append(await client.delete(f"{base}/oauth"))
                 # Minting stays blocked.
                 app.dependency_overrides[require_session_auth] = lambda: {"user_id": w.member}
                 minted = await client.post(f"{base}/api-key/regenerate")

@@ -720,7 +720,12 @@ def _stmt_flow(stmt: ast.stmt, is_gate) -> str:
             return _EXIT
         return _GATED if branches == (_GATED, _GATED) else _CONTINUE
     if isinstance(stmt, ast.Try):
-        outcomes = (_flow(stmt.body, is_gate), _flow(stmt.finalbody, is_gate))
+        body = _flow(stmt.body, is_gate)
+        if body == _GATED and not all(_reraises(h) for h in stmt.handlers if _catches_refusal(h)):
+            # A handler that catches the refusal and does not re-raise it
+            # turns the gate's answer into something else.
+            body = _CONTINUE
+        outcomes = (body, _flow(stmt.finalbody, is_gate))
         if _GATED in outcomes:
             return _GATED
         return _EXIT if _EXIT in outcomes else _CONTINUE
@@ -739,6 +744,30 @@ def _stmt_flow(stmt: ast.stmt, is_gate) -> str:
         cases = [_flow(case.body, is_gate) for case in stmt.cases]
         return _EXIT if _EXIT in cases else _CONTINUE
     return _GATED if _expr_gates(stmt, is_gate) else _CONTINUE
+
+
+# Exception classes a handler can name that also catch the slot refusal.
+_REFUSAL_CATCHERS = {
+    "Exception",
+    "BaseException",
+    "MemoryCloudException",
+    "WorkspaceSlotSuspendedError",
+}
+
+
+def _catches_refusal(handler: ast.ExceptHandler) -> bool:
+    if handler.type is None:
+        return True
+    names = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return any(
+        (n.id if isinstance(n, ast.Name) else getattr(n, "attr", None)) in _REFUSAL_CATCHERS
+        for n in names
+    )
+
+
+def _reraises(handler: ast.ExceptHandler) -> bool:
+    """The handler ends by raising (the refusal or another error)."""
+    return bool(handler.body) and isinstance(handler.body[-1], ast.Raise)
 
 
 def _route_gated(route, extra, gates: dict[int, str], *, strict: bool = True) -> bool:
@@ -961,6 +990,22 @@ async def _refused_or_gated(perm, user: dict) -> dict:
     return {"data": 1}
 
 
+async def _swallowed(perm) -> dict:
+    try:
+        await perm.check_workspace_access("u", None)
+    except Exception:
+        pass
+    return {"data": 1}
+
+
+async def _reraised(perm) -> dict:
+    try:
+        await perm.check_workspace_access("u", None)
+    except (ValueError, Exception) as exc:
+        raise RuntimeError("wrapped") from exc
+    return {"data": 1}
+
+
 async def _helper_with_a_policy(slot=None) -> None:
     await _gated_helper(slot=slot)
 
@@ -987,8 +1032,10 @@ def test_the_matcher_is_exact() -> None:
     for fake in (_one_branch, _early_return):
         assert _reaches_gate(fake, gates), fake.__name__
         assert not _reaches_gate(fake, gates, strict=True), fake.__name__
-    for good in (_both_branches, _refused_or_gated):
+    for good in (_both_branches, _refused_or_gated, _reraised):
         assert _reaches_gate(good, gates, strict=True), good.__name__
+    # A gate whose refusal a handler swallows gates nothing.
+    assert not _reaches_gate(_swallowed, gates, strict=True)
     # A helper called with a policy other than BLOCKED is not a gate.
     assert not _reaches_gate(_revocation_through_a_helper, gates)
 
@@ -1007,6 +1054,32 @@ def _dependency_names(route, extra) -> set[str]:
         f"{getattr(inspect.unwrap(d), '__module__', '')}:{getattr(d, '__name__', '')}"
         for d in route_dependency_calls(route, extra)
     }
+
+
+def test_revocation_routes_reach_no_blocking_gate() -> None:
+    """A REVOCATION route, its dependencies and its service reach no gate that
+    could refuse: only the REVOCATION policy (or membership with ``slot=None``)."""
+    gates = _gate_objects()
+    routes = _routes()
+    blocking = []
+    for key, category in EXCEPTIONS.items():
+        if category != REVOCATION:
+            continue
+        _module, route, extra = routes[key]
+        callables = [route.endpoint, *route_dependency_calls(route, extra)]
+        if key in EXCEPTION_GATED_IN:
+            callables.append(_resolve(EXCEPTION_GATED_IN[key]))
+        blocking += [(key, c.__name__) for c in callables if _reaches_gate(c, gates)]
+    assert not blocking, f"REVOCATION rows that reach a refusing gate: {blocking}"
+
+
+def test_the_embedding_models_list_is_gated_with_a_selected_workspace() -> None:
+    """``GET /api/v1/system/embedding/models`` (an ACCOUNT router) reads the
+    selected workspace's key settings only after ``check_workspace_access``,
+    which gates; without a selected workspace it reads no workspace data."""
+    from api.routes.system import list_embedding_models
+
+    assert _reaches_gate(list_embedding_models, _gate_objects())
 
 
 def test_owner_management_and_revocation_routes_reach_their_opt_out() -> None:
