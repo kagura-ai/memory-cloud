@@ -91,6 +91,38 @@ def set_mcp_connector_credential(value: bool) -> None:
     _mcp_connector_credential.set(value)
 
 
+@dataclass(frozen=True)
+class ConnectorScopedCredential:
+    """The request's credential is under the connector key scope (#2929).
+
+    ``VerifiedKey.connector_scoped``: linked to a connector, or carrying the
+    reserved ``connector:`` name. What the scope decision logs about the key;
+    never the key itself.
+    """
+
+    key_prefix: str | None
+    connector_id: "UUID | None"
+
+
+# #2929: set once per request by ``authenticate_mcp_request`` for a key under
+# the connector key scope, ``None`` for every other credential. The tool
+# dispatcher, ``tools/list`` and the handshake instructions read it; it does
+# not depend on a connector row (a key with only the reserved name counts).
+_mcp_connector_scope: ContextVar[ConnectorScopedCredential | None] = ContextVar(
+    "mcp_connector_scope", default=None
+)
+
+
+def get_mcp_connector_scope() -> ConnectorScopedCredential | None:
+    """The request's connector-scoped key, or ``None`` for any other credential."""
+    return _mcp_connector_scope.get()
+
+
+def set_mcp_connector_scope(value: ConnectorScopedCredential | None) -> None:
+    """Record the request's connector-scoped key (tests and the auth seam only)."""
+    _mcp_connector_scope.set(value)
+
+
 # #2762: whether the current request's credential speaks for the person who
 # reads the session, so a service notice they opted into may be delivered to
 # it. A positive allow: ``False`` by default (a direct handler call, any
@@ -225,6 +257,7 @@ async def authenticate_mcp_request(
     set_history_principal()
     _mcp_oauth_scopes.set(None)
     _mcp_connector_credential.set(False)
+    _mcp_connector_scope.set(None)
     _mcp_notice_eligible.set(False)
     # #2129: only a user API key or an OAuth grant carries one (set below).
     set_mcp_credential_default_context(None)
@@ -359,6 +392,14 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         workspace_id = result.workspace_id
         context_id = None  # Issue #245: context_id is now in tool args
         _mcp_connector_credential.set(result.is_connector_key)
+        # #2929: a connector key calls only the connector worker's tools.
+        _mcp_connector_scope.set(
+            ConnectorScopedCredential(
+                key_prefix=result.key_prefix, connector_id=result.connector_id
+            )
+            if result.connector_scoped
+            else None
+        )
         # #2762: an agent-bound key has no person reading at session start,
         # and a connector key's owner is not the person on the other end.
         _mcp_notice_eligible.set(not result.is_connector_key and result.agent_id is None)
