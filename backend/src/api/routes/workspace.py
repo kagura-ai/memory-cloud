@@ -43,7 +43,7 @@ from services.memory_counts import count_live_memories
 from services.permission_service import PermissionService
 from services.plan_seats import member_seat_suspended
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthenticationError
+from utils.exceptions import AuthenticationError, AuthorizationError
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,8 @@ async def get_workspace_stats(
 ) -> WorkspaceStatsResponse:
     """Get aggregated statistics across all user's contexts.
 
-    Returns total memory count and per-context breakdown.
+    Returns total memory count and per-context breakdown. Requires membership
+    of the selected workspace (#2928): anyone else gets the uniform 403.
 
     Args:
         user: Authenticated user from session or API key
@@ -164,6 +165,8 @@ async def get_workspace_stats(
             )
 
         _, workspace = row
+        # #2928: the caller must be a member before anything of it is read.
+        await _require_workspace_member(db, user, workspace.id)
 
         contexts_result = await db.execute(
             select(Context)
@@ -320,7 +323,7 @@ async def get_workspace_stats(
             erased_memories=total_erased,
         )
 
-    except HTTPException:
+    except (HTTPException, AuthorizationError):
         raise
     except Exception as e:
         logger.exception(

@@ -3,17 +3,22 @@
 The authentication dependency puts a workspace-scoped key's own workspace in
 ``current_workspace_id``; these routes read that workspace and go through the
 shared workspace access check first. On real PostgreSQL rows, over HTTP with
-real API keys (and a browser session):
+real API keys (and a browser session), and through ``execute_tool_call`` for
+MCP:
 
-* ``GET /workspace/embedding-status`` answers a key scoped to workspace X
-  whose user is not a member of X (and a session whose stored current
-  workspace is X) with the uniform refusal;
+* ``GET /workspace/embedding-status``, ``GET /workspace/stats`` and
+  ``GET /system/embedding/models``, and the MCP ``get_usage`` tool, answer a
+  key scoped to workspace X whose user is not a member of X (and a session
+  whose stored current workspace is X) with the uniform refusal;
 * a member's key and a member's session keep the response they get today.
 """
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -219,3 +224,82 @@ async def test_embedding_status_for_a_member_is_unchanged(world):
         assert body["total"] == 2
         assert body["by_status"] == {"success": 1, "failed": 1}
         assert [m["summary"] for m in body["failed_memories"]] == [FAILED_SUMMARY]
+
+
+# ---------------------------------------------------------------------------
+# GET /workspace/stats and GET /system/embedding/models
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/api/v1/workspace/stats", "/api/v1/system/embedding/models"])
+async def test_current_workspace_reads_require_membership(world, path):
+    by_key = await _get(world, path, bearer=world.outsider_key)
+    await _select_x_for(world, world.outsider)
+    by_session = await _get(world, path, session=world.outsider)
+
+    assert [(r.status_code, r.json()) for r in (by_key, by_session)] == [(403, REFUSAL)] * 2
+
+
+async def test_workspace_stats_for_a_member_is_unchanged(world):
+    for kwargs in ({"bearer": world.member_key}, {"session": world.member}):
+        response = await _get(world, "/api/v1/workspace/stats", **kwargs)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["total_memories"] == 2
+        assert body["context_count"] == 1
+        assert [c["context_name"] for c in body["contexts"]] == ["shared"]
+        assert body["plan_name"] == "promax"
+
+
+async def test_embedding_models_for_a_member_is_unchanged(world):
+    for kwargs in ({"bearer": world.member_key}, {"session": world.member}):
+        response = await _get(world, "/api/v1/system/embedding/models", **kwargs)
+        assert response.status_code == 200, response.text
+        openai = [m for m in response.json()["models"] if m["provider"] == "openai"]
+        assert openai, response.text
+        # The workspace's enabled OpenAI key makes the OpenAI models available.
+        assert all(m["available"] is True for m in openai)
+
+
+# ---------------------------------------------------------------------------
+# MCP get_usage (the session workspace, no named target)
+# ---------------------------------------------------------------------------
+
+
+async def _get_usage(world, user_id: str) -> dict[str, Any]:
+    from mcp_server.tools import execute_tool_call
+    from mcp_server.tools._helpers import _mcp_key_workspace_scope
+
+    async def _db():
+        async with world.factory() as db:
+            yield db
+
+    # The transport sets the session workspace to a scoped key's own workspace.
+    token = _mcp_key_workspace_scope.set(world.x)
+    try:
+        with (
+            patch("db.base.get_db", new=_db),
+            patch("mcp_server.tools.usage._log_tool_usage", new=AsyncMock()),
+        ):
+            result = await execute_tool_call("get_usage", {}, user_id, world.x)
+    finally:
+        _mcp_key_workspace_scope.reset(token)
+    return json.loads(result[0].text)
+
+
+async def test_mcp_get_usage_requires_membership_of_the_session_workspace(world):
+    body = await _get_usage(world, world.outsider)
+
+    assert body.get("error") == "permission_denied", body
+    assert body.get("your_role") == "not_a_member"
+    assert "plan" not in body and "memories" not in body
+
+
+async def test_mcp_get_usage_for_a_member_is_unchanged(world):
+    body = await _get_usage(world, world.member)
+
+    assert body.get("error") is None, body
+    assert body["plan"] == "promax"
+    assert body["memories"]["used"] == 2
+    assert body["contexts"]["used"] == 1
+    assert body["members"]["used"] == 2

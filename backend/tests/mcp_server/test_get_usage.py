@@ -1,11 +1,55 @@
 """Tests for get_usage MCP tool handler."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
 from mcp_server.tools.usage import handle_get_usage
+from utils.exceptions import AuthorizationError
+
+
+@pytest.fixture(autouse=True)
+def workspace_member():
+    """The caller is a member of the session workspace (#2928).
+
+    The tests below drive the handler by query ORDER; the membership check
+    itself is covered on real rows in
+    ``tests/integration/test_current_workspace_routes_membership_db.py``.
+    """
+    with patch(
+        "services.permission_service.PermissionService.check_workspace_access",
+        new=AsyncMock(),
+    ) as access:
+        yield access
+
+
+class TestGetUsageMembership:
+    """#2928: the session workspace's membership is checked before any read."""
+
+    @pytest.mark.asyncio
+    async def test_a_non_member_is_refused_before_any_read(self, workspace_member):
+        workspace_member.side_effect = AuthorizationError(
+            "Insufficient permissions", reason="not_a_member"
+        )
+        workspace_id = uuid4()
+        mock_db = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handle_get_usage({}, "u1", workspace_id)
+
+        data = json.loads(result[0].text)
+        assert data["error"] == "permission_denied"
+        assert data["your_role"] == "not_a_member"
+        assert "plan" not in data and "memories" not in data
+        workspace_member.assert_awaited_once_with(
+            "u1", workspace_id, required_role="viewer", require_seat=False
+        )
+        mock_db.execute.assert_not_awaited()
 
 
 class TestGetUsage:

@@ -9,7 +9,12 @@ from uuid import UUID
 from mcp.types import TextContent
 
 from mcp_server.tools._errors import _tool_exception_response
-from mcp_server.tools._helpers import _error_response, _log_tool_usage, _success_response
+from mcp_server.tools._helpers import (
+    _error_response,
+    _log_tool_usage,
+    _success_response,
+    _workspace_not_accessible,
+)
 
 
 async def handle_get_usage(
@@ -17,7 +22,10 @@ async def handle_get_usage(
 ) -> list[TextContent]:
     """Get current workspace usage and quota limits.
 
-    Returns memory, context, and member usage with effective limits.
+    Returns memory, context, and member usage with effective limits. Requires
+    membership of the session workspace (#2928), as the REST usage readouts
+    do: a non-member gets the uniform ``permission_denied``. A member without
+    a seat on the plan still reads the usage.
     """
     from sqlalchemy import func, select
 
@@ -26,7 +34,9 @@ async def handle_get_usage(
     from services.capacity_lock import capacity_lock_state
     from services.effective_quota_service import EffectiveQuotaService
     from services.memory_counts import count_live_memories
+    from services.permission_service import PermissionService
     from services.quota_service import QuotaService
+    from utils.exceptions import AuthorizationError
 
     start_time = time.time()
 
@@ -35,6 +45,15 @@ async def handle_get_usage(
 
     async for db in get_db():
         try:
+            # #2928: under a workspace-scoped key the session workspace is the
+            # key's own; membership is checked before anything of it is read.
+            try:
+                await PermissionService(db).check_workspace_access(
+                    user_id, workspace_id, required_role="viewer", require_seat=False
+                )
+            except AuthorizationError:
+                return _workspace_not_accessible("get usage", "viewer")
+
             ws_result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
             workspace = ws_result.scalar_one_or_none()
 
