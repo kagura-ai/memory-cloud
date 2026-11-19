@@ -7,9 +7,10 @@ billing contract when that is higher, because a workspace somebody pays for is
 never suspended. Only owned workspaces count; membership in someone else's
 workspace takes no slot.
 
-When an event **lowers** that allowance below the number of workspaces the owner
-has active (a subscription ends, a system admin lowers a plan or the slot
-bonus), the excess owned workspaces are **suspended**: their data is kept,
+An event that ends a paid contract, lowers a plan's owned-workspace grant or
+lowers the slot bonus (a subscription ends, a system admin lowers a plan or the
+slot bonus) suspends the excess owned workspaces over the allowance; nothing
+else suspends. Suspended workspaces keep their data,
 nothing is deleted, and every member and every credential is refused with
 `SLOT-001` (MCP: `workspace_suspended`) until the workspace is resumed. The
 owner keeps a management path: they can see the status on the account page
@@ -35,9 +36,12 @@ A suspended workspace that gets a paid plan comes back. When that plan grants no
 extra slot (Basic), the lowest-priority uncontracted active workspace is
 suspended in its place (a swap); when it does (Pro, Max), the others resume too.
 
-Events that are not a drop only resume. An owner who is already over the
-allowance (created before `ENFORCE_WORKSPACE_CAP`, or after a plan change while
-the feature was off) keeps every workspace until their next drop.
+Every other event (a purchase, an upgrade, a saved selection, a delete, a
+transfer) only resumes. An owner who is already over the allowance (created
+before `ENFORCE_WORKSPACE_CAP`, or after a plan change while the feature was
+off) keeps every workspace until their next drop: the end of one of their paid
+contracts, or a lowered grant or bonus, then cuts them to the allowance even
+when the allowance itself did not change.
 
 ## The setting
 

@@ -517,6 +517,43 @@ class TestChangedWorkspaceHoldingARow:
         assert await slot_world.rows(owner) == {kept: owner}
         assert await slot_world.plan_of(bought) == ("free", "external_billing")
 
+    async def test_a_purchase_deferred_by_a_busy_lock_ends_with_one_active(
+        self, slot_world: SlotWorld
+    ) -> None:
+        """Allowance 1. The purchase is deferred (busy lock), the sweep only
+        resumes, so both are active; the end of that contract keeps the
+        allowance at 1 and cuts the excess."""
+        owner = await slot_world.user("deferred")
+        kept = await slot_world.workspace(owner, current=True)
+        bought = await slot_world.workspace(owner)
+        await slot_world.suspend_row(bought, owner)
+        release = await slot_world.hold_owner_lock(owner)
+        try:
+            with slot_mode("enforce"):
+                await _deliver(slot_world, bought, 1, "basic")
+        finally:
+            await release()
+        with slot_mode("enforce"):
+            async with slot_world.maker() as s:
+                await sweep_workspace_slots(s)
+            assert await slot_world.rows(owner) == {}
+            await _deliver(slot_world, bought, 2, "free")
+        assert await slot_world.rows(owner) == {bought: owner}
+        assert kept not in await slot_world.rows(owner)
+
+    async def test_an_owner_over_the_allowance_is_cut_when_a_paid_contract_ends(
+        self, slot_world: SlotWorld
+    ) -> None:
+        owner = await slot_world.user("over")
+        await slot_world.workspace(owner, current=True)
+        others = [await slot_world.workspace(owner) for _ in range(2)]
+        billed = await slot_world.workspace(owner)
+        with slot_mode("enforce"):
+            await _deliver(slot_world, billed, 1, "basic")
+            assert await slot_world.rows(owner) == {}  # a purchase never suspends
+            await _deliver(slot_world, billed, 2, "free")
+        assert set(await slot_world.rows(owner)) == {*others, billed}
+
     @pytest.mark.parametrize("first", ["cancel", "buy"])
     async def test_a_cancellation_and_a_basic_purchase_end_alike_in_either_order(
         self, slot_world: SlotWorld, first: str

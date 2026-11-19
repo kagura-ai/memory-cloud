@@ -2,7 +2,9 @@
 
 ``plan_active_set`` decides which owned workspaces stay active;
 ``slot_allowance`` / ``is_allowance_drop`` / ``change_is_non_decreasing`` say
-what the allowance is and whether an event lowered it. The exhaustive test
+what the allowance is and whether an event is a drop: an event that ends a paid
+contract, lowers a plan's owned-workspace grant or lowers the slot bonus, and
+does not raise the allowance. The exhaustive test
 walks every combination over up to four workspaces (under contract or not,
 active or suspended now, selected or not, the owner's current one), caps 1..4,
 drop and non-drop, and asserts the invariants the transition relies on.
@@ -315,8 +317,25 @@ class TestAllowanceAndDrop:
         assert slot_allowance(owned, 0).allowance == 3
         assert not is_allowance_drop(owned, 0, change)
 
-    def test_same_tier_comp_is_not_a_drop(self) -> None:
+    def test_same_tier_comp_is_a_drop(self) -> None:
+        # The contract ends and the allowance stays 1: the excess is cut.
         owned = [OwnedWorkspace(IDS[0], "basic", "admin_grant", BASE), _ws(2)]
+        assert is_allowance_drop(owned, 0, SlotChange(IDS[0], "basic", "external_billing"))
+
+    def test_a_contract_ending_with_an_unchanged_allowance_is_a_drop(self) -> None:
+        # Basic (contract, allowance max(1, 1) = 1) ends as Free: still 1.
+        owned = [OwnedWorkspace(IDS[0], "free", "external_billing", BASE), _ws(2)]
+        assert slot_allowance(owned, 0).allowance == 1
+        assert is_allowance_drop(owned, 0, SlotChange(IDS[0], "basic", "external_billing"))
+
+    def test_a_granted_tier_going_down_is_a_drop(self) -> None:
+        owned = [OwnedWorkspace(IDS[0], "free", "admin_grant", BASE), _ws(2)]
+        assert is_allowance_drop(owned, 0, SlotChange(IDS[0], "pro", "admin_grant"))
+
+    def test_an_upgrade_or_a_purchase_is_never_a_drop(self) -> None:
+        owned = [OwnedWorkspace(IDS[0], "basic", "external_billing", BASE), _ws(2), _ws(3)]
+        assert not is_allowance_drop(owned, 0, SlotChange(IDS[0], "free", "admin_grant"))
+        owned = [OwnedWorkspace(IDS[0], "pro", "external_billing", BASE), _ws(2)]
         assert not is_allowance_drop(owned, 0, SlotChange(IDS[0], "basic", "external_billing"))
 
     def test_same_plan_repush_is_not_a_drop(self) -> None:
@@ -331,10 +350,12 @@ class TestAllowanceAndDrop:
         assert is_allowance_drop(owned, 0, SlotChange(previous_slot_bonus=2))
         assert not is_allowance_drop(owned, 2, SlotChange(previous_slot_bonus=0))
 
-    def test_bonus_reduction_covered_by_contracts_is_not_a_drop(self) -> None:
+    def test_bonus_reduction_covered_by_contracts_is_a_drop(self) -> None:
         owned = [_ws(0, contracted=True), _ws(3, contracted=True)]
-        # cap 1 + 1 bonus = 2 before, 1 after; two contracts keep the allowance 2.
-        assert not is_allowance_drop(owned, 0, SlotChange(previous_slot_bonus=1))
+        # cap 1 + 1 bonus = 2 before, 1 after; two contracts keep the allowance
+        # 2. The bonus went down and the allowance did not rise: a drop, which
+        # cuts only what exceeds the allowance (here nothing).
+        assert is_allowance_drop(owned, 0, SlotChange(previous_slot_bonus=1))
 
     def test_a_change_to_a_workspace_no_longer_owned_is_ignored(self) -> None:
         owned = [_ws(0), _ws(2)]

@@ -3,11 +3,12 @@
 An owner's allowance is the #1550 cap (``utils.plan_resolver``: 1 + slot bonus
 + the grant of the highest tier they own) or, when more of their workspaces are
 under a billing contract than that, the number of contracted workspaces: a
-workspace somebody pays for is never suspended. When an event lowers the
-allowance below the number of workspaces the owner has active (a subscription
-ended, an admin lowered a plan or the slot bonus), the excess owned workspaces
-are suspended, their data kept; whenever slots return they resume. Only owned
-workspaces count; membership in somebody else's workspace takes no slot.
+workspace somebody pays for is never suspended. An event that ends a paid
+contract, lowers a plan's owned-workspace grant or lowers the slot bonus (and
+does not raise the allowance) suspends the excess owned workspaces over the
+allowance, their data kept; nothing else suspends, and whenever slots return
+they resume. Only owned workspaces count; membership in somebody else's
+workspace takes no slot.
 
 Pieces:
 
@@ -264,44 +265,54 @@ def slot_allowance(owned: Sequence[OwnedWorkspace], slot_bonus: int) -> SlotAllo
 def is_allowance_drop(
     owned: Sequence[OwnedWorkspace], slot_bonus: int, change: SlotChange | None
 ) -> bool:
-    """True when the event lowered the owner's effective allowance. Pure.
+    """True when the event is a drop: it may suspend the excess. Pure.
+
+    A drop is an event that can lower the allowance (the changed workspace
+    stopped being under a billing contract or its plan's owned-workspace
+    grant went down, see ``change_is_non_decreasing``; or the slot bonus went
+    down) and did not raise it. An owner above the allowance is then cut to
+    it, also when the allowance stayed the same; an event that raises the
+    allowance (a billed Basic comped to a granted Pro) never suspends.
 
     ``owned`` and ``slot_bonus`` are the state AFTER the event; the "before"
     side substitutes ``change``'s previous plan and entitlement source of the
     changed workspace (when the owner still owns it) or the previous bonus.
-    Ending a workspace's contract alone is not a drop: an admin comp from a
-    billed Basic to a granted Pro raises the allowance.
     """
-    after = slot_allowance(owned, slot_bonus).allowance
     if change is None:
         return False
     before_owned = list(owned)
+    can_lower = False
     if change.workspace_id is not None:
-        before_owned = [
-            OwnedWorkspace(
-                id=w.id,
-                plan_name=(
-                    change.previous_plan_name
-                    if change.previous_plan_name is not None
-                    else w.plan_name
-                ),
-                entitlement_source=(
-                    change.previous_entitlement_source
-                    if change.previous_entitlement_source is not None
-                    else w.entitlement_source
-                ),
-                created_at=w.created_at,
-                suspended=w.suspended,
+        changed = next((w for w in owned if w.id == change.workspace_id), None)
+        if changed is not None:
+            previous_plan = (
+                change.previous_plan_name
+                if change.previous_plan_name is not None
+                else changed.plan_name
             )
-            if w.id == change.workspace_id
-            else w
-            for w in owned
-        ]
-    before_bonus = (
-        change.previous_slot_bonus if change.previous_slot_bonus is not None else slot_bonus
-    )
+            previous_source = (
+                change.previous_entitlement_source
+                if change.previous_entitlement_source is not None
+                else changed.entitlement_source
+            )
+            can_lower = not change_is_non_decreasing(
+                previous_plan, previous_source, changed.plan_name, changed.entitlement_source
+            )
+            before_owned = [
+                dataclasses.replace(w, plan_name=previous_plan, entitlement_source=previous_source)
+                if w.id == change.workspace_id
+                else w
+                for w in owned
+            ]
+    before_bonus = slot_bonus
+    if change.previous_slot_bonus is not None:
+        before_bonus = change.previous_slot_bonus
+        can_lower = can_lower or slot_bonus < before_bonus
+    if not can_lower:
+        return False
+    after = slot_allowance(owned, slot_bonus).allowance
     before = slot_allowance(before_owned, before_bonus).allowance
-    return after < before
+    return after <= before
 
 
 def change_is_non_decreasing(
@@ -388,7 +399,7 @@ def plan_active_set(
     Args:
         owned: The owner's live owned workspaces (unique ids).
         cap: The owner's #1550 cap (``slot_allowance(...).summary.cap``).
-        drop: The event lowered the allowance (``is_allowance_drop``).
+        drop: The event was a drop (``is_allowance_drop``).
         keep_ids: The owner's ordered selection.
         current_workspace_id: The owner's ``users.current_workspace_id``.
 
@@ -553,7 +564,7 @@ class ReconcileOutcome:
     Attributes:
         mode: The mode it ran in (``off``: nothing ran).
         cause: The triggering event.
-        drop: Whether the event lowered the allowance.
+        drop: Whether the event was a drop (``is_allowance_drop``).
         suspended: Workspaces suspended by this call (``shadow``: would be).
         resumed: Workspaces resumed by this call.
         pruned: Rows removed for workspaces the owner no longer owns.
@@ -1006,7 +1017,7 @@ class TransitionPlan:
 
     Attributes:
         plan: The planner's result.
-        drop: Whether the event lowered the allowance.
+        drop: Whether the event was a drop (``is_allowance_drop``).
         clear: Workspaces planned active that hold an own suspension row (the
             row goes; contracted ones included).
         resumed: Of those, the ones that were not usable before the event
