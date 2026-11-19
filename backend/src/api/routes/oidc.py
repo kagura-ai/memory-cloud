@@ -5,20 +5,22 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import hmac
-import html
 import json
 import re
+import secrets
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC
+from pathlib import Path
 from typing import Annotated, TypeVar, cast
 from urllib.parse import parse_qsl, urlencode
 
 from authlib.common.urls import add_params_to_uri
 from authlib.oauth2.rfc6749.errors import OAuth2Error
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +53,7 @@ from utils.logger import get_logger
 
 router = APIRouter(tags=["oidc"])
 logger = get_logger(__name__)
+_TEMPLATES = Jinja2Templates(directory=Path(__file__).resolve().parents[3] / "templates")
 _EXECUTOR = ThreadPoolExecutor(max_workers=10, thread_name_prefix="oidc-sync")
 T = TypeVar("T")
 _NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
@@ -273,29 +276,30 @@ async def authorize(request: Request) -> Response:
                         "integrations:manage": "Manage integrations within your current KMC permissions",
                         "sync.records:read": "Read approved synchronized product and FAQ records within your current KMC permissions",
                     }
-                    scope_items = "".join(
-                        f"<li>{html.escape(descriptions[scope])}</li>"
-                        for scope in dict.fromkeys(request.query_params["scope"].split())
-                    )
-                    page = (
-                        '<!doctype html><html lang="en"><meta charset="utf-8"><title>Confirm sign in</title>'
-                        f"<h1>Sign in to {html.escape(cast(OIDCClient, oauth_request.client).client_name)}</h1>"
-                        f"<p>Continue as {html.escape(user.name or 'your current KMC account')}.</p>"
-                        f"<p>Allow this application to:</p><ul>{scope_items}</ul>"
-                        f'<form method="post" action="{html.escape(action, quote=True)}">'
-                        f'<input type="hidden" name="csrf_token" value="{csrf}">'
-                        '<button name="confirm" value="yes">Continue</button>'
-                        '<button name="confirm" value="no">Cancel</button></form></html>'
-                    )
+                    client_name = cast(OIDCClient, oauth_request.client).client_name
+                    account = user.name or "your current KMC account"
+                    style_nonce = secrets.token_urlsafe(24)
                     db.rollback()
                     # No form-action (#2909): browsers apply it to every
                     # redirect that follows the form POST, and the answer
                     # redirects to the client's callback on another origin.
-                    return HTMLResponse(
-                        page,
+                    return _TEMPLATES.TemplateResponse(
+                        request=request,
+                        name="oidc_consent.html",
+                        context={
+                            "style_nonce": style_nonce,
+                            "client_name": client_name,
+                            "account": account,
+                            "permissions": [
+                                descriptions[s]
+                                for s in dict.fromkeys(request.query_params["scope"].split())
+                            ],
+                            "action": action,
+                            "csrf": csrf,
+                        },
                         headers={
                             **_NO_STORE,
-                            "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+                            "Content-Security-Policy": f"default-src 'none'; frame-ancestors 'none'; base-uri 'none'; img-src 'self'; style-src 'nonce-{style_nonce}'",
                             "Referrer-Policy": "no-referrer",
                             "X-Content-Type-Options": "nosniff",
                         },
