@@ -114,6 +114,7 @@ _MODEL_MODULES: tuple[str, ...] = (
     "models.resource",
     "models.signup_gate",
     "models.sleep",
+    "models.workspace_slots",
 )
 for _model_module_name in _MODEL_MODULES:
     importlib.import_module(_model_module_name)

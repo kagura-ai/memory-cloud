@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from auth.dependencies import get_user_from_api_key_or_session
+from services.workspace_slot_gate import SlotPolicy
 from utils.exceptions import AuthorizationError
 
 _WS = uuid.uuid4()
@@ -289,7 +290,9 @@ class TestMemberContextAccessProgrammatic:
             "user_id": "target",
             "allowed_context_ids": [str(_CTX)],
         }
-        perm.check_workspace_owner.assert_awaited_once_with("owner-key", _WS)
+        perm.check_workspace_owner.assert_awaited_once_with(
+            "owner-key", _WS, slot=SlotPolicy.BLOCKED
+        )
         rows = _audit_rows(fake_db)
         assert len(rows) == 1
         assert rows[0].action == "workspace_member_context_access_set"
@@ -350,7 +353,7 @@ class TestMemberContextAccessProgrammatic:
         r = client.put(ACCESS_URL, json={"allowed_context_ids": [str(_CTX)]})
         assert r.status_code == 200, r.text
         perm.check_workspace_access.assert_awaited_once_with(
-            "admin-1", _WS, required_role=WorkspaceRole.ADMIN
+            "admin-1", _WS, required_role=WorkspaceRole.ADMIN, slot=SlotPolicy.BLOCKED
         )
         assert _audit_rows(fake_db) == []
 

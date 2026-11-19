@@ -23,6 +23,7 @@ from config.plan_tiers import has_feature
 from models.auth import User, Workspace, WorkspaceInvitation, WorkspaceMember
 from services.email_service import EmailService, get_email_service
 from services.workspace_locks import lock_workspace_for_update
+from services.workspace_slot_gate import ensure_slot_active
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     FeatureNotAvailableError,
@@ -450,6 +451,11 @@ class InvitationService:
         # #2564: the workspace row first, as in add_member, held to the commit.
         # Raises NotFoundException for a missing / soft-deleted workspace.
         workspace = await lock_workspace_for_update(self.db, invitation.workspace_id)
+
+        # #2918: a slot-suspended workspace takes no new member (no seat, no
+        # current workspace moved there). The accepter is not a member yet:
+        # the redacted refusal. Reads only, under the workspace row lock.
+        await ensure_slot_active(self.db, workspace, user_id=None, outsider=True)
 
         # #2621: the plan gate of creating an invitation and of add_member. An
         # invitation issued before a downgrade admits no one once the plan has

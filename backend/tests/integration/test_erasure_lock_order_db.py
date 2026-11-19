@@ -1845,6 +1845,10 @@ def _locked_table(sql: str, lock_at: int) -> str:
 
 def _classify(statement: str, parameters: object) -> _Lock | None:
     sql = " ".join(statement.split())
+    if "advisory_xact_lock" in sql and "workspace_create:" in repr(parameters):
+        # #2918: the per-owner slot lock (the workspace-creation gate's);
+        # ``pg_try_advisory_xact_lock`` never waits.
+        return _Lock("owner_slot", "pg_try_advisory_xact_lock" in sql, sql)
     if "pg_advisory_xact_lock" in sql:
         if "identity_links" in repr(parameters):
             return _Lock("link", False, sql)
@@ -1932,6 +1936,15 @@ def _order_violations(transaction: list[_Lock]) -> list[str]:
                 user_before_link = True
         if lock.kind == "link":
             linked = True
+        if (
+            lock.kind == "owner_slot"
+            and not lock.nowait
+            and seen
+            & {"users", "users_dml", "ws_live", "ws_soft", "contexts", "memories", "other", "child"}
+        ):
+            # #2918: the owner slot lock is waited on only by a transaction
+            # that holds no row lock; under a row lock it is tried.
+            problems.append(f"waits on the owner slot lock holding a row lock: {lock.sql[:160]}")
         if lock.kind == "ws_live" and holds_user and not lock.nowait:
             problems.append(f"waits on a live workspace holding a users row: {lock.sql[:160]}")
         if lock.kind == "ws_live" and "ws_soft" in seen and "ws_live" not in seen:
@@ -1977,6 +1990,16 @@ def test_the_rules_catch_each_inversion():
     )
     # ... not its rows first: it would hold them while waiting on a users row
     assert _order_violations(tx(("ws_live", False), ("child", False), ("users_dml", False)))
+    # #2918: the owner slot lock is tried under a workspace or users row ...
+    assert _order_violations(tx(("ws_live", False), ("owner_slot", True), ("child", False))) == []
+    assert _order_violations(tx(("users", False), ("ws_live", True), ("owner_slot", True))) == []
+    # ... waited on only first ...
+    assert (
+        _order_violations(tx(("owner_slot", False), ("users_dml", False), ("child", False))) == []
+    )
+    # ... never while a row is held
+    assert _order_violations(tx(("ws_live", False), ("owner_slot", False)))
+    assert _order_violations(tx(("users", False), ("owner_slot", False)))
 
 
 @pytest.mark.asyncio

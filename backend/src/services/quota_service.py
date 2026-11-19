@@ -735,7 +735,9 @@ class QuotaService:
             lock plus the single SELECT round-trip (typically <2 ms
             without contention).
         """
-        lock_key = f"workspace_create:{user_id}"
+        from services.workspace_locks import owner_lock_key
+
+        lock_key = owner_lock_key(user_id)
 
         # SET LOCAL applies to the rest of the current transaction, not
         # just to the immediately-following statement. The caller's

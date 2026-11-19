@@ -42,6 +42,7 @@ from services.plan_suspension import ensure_ingest_allowed
 from services.resource_ingest_service import IngestItemError
 from services.resource_lookup import resolve_resource_pk
 from services.resource_quota_service import check_event_quota
+from services.workspace_slot_gate import ensure_slot_active
 from utils.datetime import utcnow
 from utils.exceptions import (
     AuthorizationError,
@@ -279,6 +280,9 @@ async def _enforce_workspace_membership(
             user_id=token_record.created_by,
             workspace_id=context.workspace_id,
             required_role="member",
+            # #2918: checked below in the redacted form; the caller is the
+            # token's holder, not its creator.
+            slot=None,
         )
     except (AuthorizationError, FeatureNotAvailableError) as auth_error:
         logger.warning(
@@ -348,6 +352,10 @@ async def _enforce_workspace_membership(
                 "the context's workspace for this resource."
             ),
         )
+
+    # #2918: a slot-suspended workspace takes no ingest, after every check
+    # above. The token's holder learns nothing about it (redacted refusal).
+    await ensure_slot_active(db, context.workspace_id, user_id=None, outsider=True)
 
 
 # ============================================================================

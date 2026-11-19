@@ -498,6 +498,20 @@ class APIKeyManager:
                     connector_id=str(connector_id),
                 )
                 return None
+            # #2918: nor while the workspace is slot-suspended: a connector key
+            # reaches no route of a suspended workspace, the owner's
+            # management routes included. No statement unless the mode is
+            # enforce.
+            from services.workspace_slot_gate import slot_suspended
+
+            if await slot_suspended(self.db, key_record.workspace_id):
+                logger.info(
+                    "api_key_rejected_workspace_slot_suspended",
+                    key_prefix=key_record.key_prefix,
+                    workspace_id=str(key_record.workspace_id),
+                    connector_id=str(connector_id),
+                )
+                return None
 
         # Issue #1275 (RFC-0002 P0-2): agent-bound key gates. Only bound keys
         # pay the extra agents SELECT — unbound keys (every credential

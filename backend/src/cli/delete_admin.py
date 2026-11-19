@@ -179,6 +179,8 @@ async def _transfer(
             current_owner_id=admin_id,
             target_user_id=targets[ws.id],
             performed_by_email=AUDIT_ACTOR_EMAIL,
+            # #2918: admin deletion transfers are exempt from the slot check.
+            check_recipient_slots=False,
         )
         # Notify each committed transfer even if a later workspace fails.
         await notify_new_owner_best_effort(db, ws.id, targets[ws.id])

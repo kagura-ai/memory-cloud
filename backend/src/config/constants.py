@@ -311,13 +311,26 @@ GATE_ALLOWLIST = "allowlist"
 # for one feature: search and saving pause until the workspace is cleaned up
 # or re-subscribed, while listing, deleting and export keep working.
 GATE_CAPACITY = "capacity"
+# #2918: the workspace is suspended because its owner owns more workspaces
+# than their allowance (a subscription ended). Every member and every
+# credential is refused until the owner resumes it within the allowance or
+# slots return; the data is kept. ``SLOT-001`` carries it.
+GATE_WORKSPACE_SLOT = "workspace_slot"
 # ``GATE_ROLE`` is a vocabulary member only — never serialized. Role refusals
 # (``AUTH-101``) have their ``details`` stripped by
 # ``api.main.memory_cloud_exception_handler`` as CWE-639 defence in depth, and
 # #1644 does not touch that; a client identifies them by the error code.
 GATE_ROLE = "role"
 GATE_KINDS: frozenset[str] = frozenset(
-    {GATE_PLAN, GATE_QUOTA, GATE_DEPLOYMENT, GATE_ALLOWLIST, GATE_CAPACITY, GATE_ROLE}
+    {
+        GATE_PLAN,
+        GATE_QUOTA,
+        GATE_DEPLOYMENT,
+        GATE_ALLOWLIST,
+        GATE_CAPACITY,
+        GATE_WORKSPACE_SLOT,
+        GATE_ROLE,
+    }
 )
 
 # Every ``details.quota_type`` a quota refusal may carry. Frozen: a later

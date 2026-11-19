@@ -19,6 +19,7 @@ from config.settings import get_settings
 from mcp_server.tools._constants import T, get_tool_timeout
 from services import plan_seats
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
+from services.workspace_slot_gate import ensure_slot_active
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -581,7 +582,9 @@ async def _resolve_context(
 
     context_service = ContextService(db)
     try:
-        context = await context_service.get_context(user_id, context_id)
+        # The slot gate runs below, after the key's workspace and the agent
+        # binding confine the caller.
+        context = await context_service.get_context(user_id, context_id, slot=None)
     except (NotFoundException, AuthorizationError) as e:
         raise _ContextNotFoundError(
             context_id, "Context not found or you don't have access to it."
@@ -656,6 +659,9 @@ async def _resolve_context(
         refusal = await _check_viewer_permission(db, user_id, context.workspace_id, write_role)
         if refusal:
             raise _WriteRoleRefusedError(context_id, refusal)
+
+    # #2918: the slot gate, after every confinement and authorization step.
+    await ensure_slot_active(db, context.workspace_id, user_id=user_id)
 
     # #1954: the capacity-over lock, after every authorization step above, so
     # it never answers for a context the caller could not reach. Membership
@@ -898,6 +904,9 @@ async def _get_workspace_member_role(
     member = result.scalar_one_or_none()
     if member is None:
         return None
+    # #2918: a slot-suspended workspace refuses every member (SLOT-001, MCP
+    # ``workspace_suspended``), after membership so a non-member learns nothing.
+    await ensure_slot_active(db, workspace_id, user_id=user_id)
     # #1943: a member without a seat on the plan is refused (FEAT-001), after
     # membership — the dispatcher's exception mapper renders the same envelope
     # as the other plan pauses.

@@ -43,7 +43,7 @@ from services.memory_counts import count_live_memories
 from services.permission_service import PermissionService
 from services.plan_seats import member_seat_suspended
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthenticationError, AuthorizationError
+from utils.exceptions import AuthenticationError, AuthorizationError, WorkspaceSlotSuspendedError
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,8 @@ async def get_workspace_stats(
             )
 
         _, workspace = row
-        # #2928: the caller must be a member before anything of it is read.
+        # #2928: the caller must be a member before anything of it is read;
+        # #2918: the same check refuses a slot-suspended workspace after it.
         await _require_workspace_member(db, user, workspace.id)
 
         contexts_result = await db.execute(
@@ -323,7 +324,7 @@ async def get_workspace_stats(
             erased_memories=total_erased,
         )
 
-    except (HTTPException, AuthorizationError):
+    except (HTTPException, AuthorizationError, WorkspaceSlotSuspendedError):
         raise
     except Exception as e:
         logger.exception(
@@ -347,10 +348,13 @@ async def _require_workspace_member(db: AsyncSession, user: dict, workspace_id: 
     Every read of this router that acts on ``current_workspace_id`` (the usage
     readouts, the stats and the embedding status) checks membership of that
     workspace first. The seat check is skipped: a seat-suspended member still
-    reads the non-monetary usage (#2632).
+    reads the non-monetary usage (#2632). The check is ``check_workspace_access``,
+    so a slot-suspended workspace is refused after the membership (#2918).
 
     Raises:
         AuthorizationError: 403 for a non-member or a deleted workspace.
+        WorkspaceSlotSuspendedError: 403 ``SLOT-001`` for a member of a
+            slot-suspended workspace.
     """
     await PermissionService(db).check_workspace_access(
         user["user_id"], workspace_id, required_role="viewer", require_seat=False
@@ -858,7 +862,8 @@ async def get_embedding_status(
     workspace_id = user.get("current_workspace_id")
     if not workspace_id:
         raise HTTPException(status_code=400, detail="No active workspace")
-    # #2928: the caller must be a member of the workspace before anything of it is read.
+    # #2928: the caller must be a member of the workspace before anything of it is read;
+    # #2918: the same check refuses a slot-suspended workspace after it.
     await _require_workspace_member(db, user, workspace_id)
 
     # Use indexed Memory.workspace_id directly (no member_ids round-trip)

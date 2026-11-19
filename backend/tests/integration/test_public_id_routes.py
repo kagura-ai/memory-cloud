@@ -31,6 +31,7 @@ from auth.dependencies import (
     get_user_from_api_key_or_session,
     require_session_auth,
     require_workspace_owner,
+    require_workspace_owner_for_revocation,
 )
 from auth.resource_tokens import ResourceTokenManager
 from auth.workspace_roles import WorkspaceRole
@@ -173,6 +174,7 @@ async def owners(async_engine, db_session: AsyncSession) -> AsyncIterator[dict[s
     app.dependency_overrides[require_session_auth] = _user
     app.dependency_overrides[get_user_from_api_key_or_session] = _user
     app.dependency_overrides[require_workspace_owner] = _owner
+    app.dependency_overrides[require_workspace_owner_for_revocation] = _owner
     try:
         yield {"a": a, "b": b}
     finally:

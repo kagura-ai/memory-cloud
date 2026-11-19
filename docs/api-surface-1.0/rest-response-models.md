@@ -11,6 +11,7 @@
 > Changed by #1678: new `password.py` models (email + password recovery and settings); `PasswordLoginRequest.login_id` now also accepts a verified email address (field name unchanged); `/auth/me` gains `has_password` (defined in `models/schemas.py`, outside this enumeration's scope).
 > Changed by #1868: `FailedMemoryInfo` gains the optional `embedding_attempted_at` (the time the embedding last failed); `updated_at` there is the last edit and is null for a never-edited memory. `failed_memories` is ordered latest failure first.
 > Changed by #565: `FileObjectOut` gains the required `scan_status` (`unscanned` | `pending` | `clean` | `infected` | `error`, the file's malware-scan state), returned by the file list, the upload confirm and the dedup 409's `existing_file`. It is the only response change while `FILE_SCAN_ENABLED` is off; the download-url refusals it explains (409 `SCAN-001` / `SCAN-002`) are in `error-responses.md`. The field list below also gains `context_id`, which the model already had.
+> Changed by #2918 (**experimental**, may change in a minor release): new `me_workspace_slots.py` models for `/api/v1/me/workspace-slots` (below; the routes 404 unless `WORKSPACE_SLOT_SUSPENSION=enforce`); `WorkspaceResponse` gains `slot_suspended` (filled by `GET /workspaces` on every row, false elsewhere and unless enforced); `/auth/me` gains `user.workspace_selection_required` and `/system/info` gains `features.workspace_slots` (plain dicts, outside this enumeration's scope). The refusals (`SLOT-001`..`SLOT-004`) are in `error-responses.md`.
 
 Notes:
 
@@ -919,6 +920,97 @@ Notes:
 - `authorization_url: str` — required
 - `state: str` — required
 
+## me_workspace_slots.py
+
+> #2918, **experimental** (may change in a minor release). Routes under `/api/v1/me/workspace-slots`, browser session only; every route of the surface answers 404 `HTTP-404` "Not Found", before authentication, unless `WORKSPACE_SLOT_SUSPENSION=enforce` (a body that is not JSON gets the framework's 422 first). Request-shape errors (more than 500 ids, a malformed UUID, a missing `expected_version`, an unknown `scenario`) are 422 `VAL-001` with `details.errors`; ids that are not owned or are duplicated are 422 `VAL-001` with `details: {"field": "workspace_ids", "invalid_ids": [...]}` (one message whether or not an id exists). `PUT .../selection` also answers 409 `SLOT-003` (stale `expected_version`), 409 `SLOT-002` (paid subscriptions hold every slot) and 409 `RES-002` with `details.reason: "workspace_slots_busy"` while another change for the same owner is in progress (retry the same request). Every model inherits `TZAwareBaseModel` (datetimes end in `Z`). Workspace references in arrays are id strings in the planner's priority order.
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /api/v1/me/workspace-slots` | — | `WorkspaceSlotsResponse` |
+| `POST /api/v1/me/workspace-slots/preview` | `SlotPreviewRequest` | `SlotPreviewResponse` |
+| `PUT /api/v1/me/workspace-slots/selection` | `SlotSelectionRequest` | `WorkspaceSlotsResponse` (after applying) |
+| `GET /api/v1/me/workspace-slots/workspaces/{workspace_id}/contexts` | — | `SlotContextsResponse` |
+
+### SlotAllowanceResponse (TZAwareBaseModel)
+> The owner's workspace cap (#1550), its parts and the next tier that adds slots.
+- `cap: int` — required
+- `base: int` — required
+- `slot_bonus: int` — required
+- `tier_grant: int` — required
+- `tier: str` — required
+- `next_tier: str | None` — required (null on the top tier)
+- `cap_on_next_tier: int | None` — required (null when `next_tier` is null)
+
+### SlotSelectionResponse (TZAwareBaseModel)
+> The saved selection.
+- `workspace_ids: list[UUID]` — required (saved order; live owned workspaces only)
+- `saved_at: datetime | None` — required
+
+### PaidPlansEndResponse (TZAwareBaseModel)
+> What would be active if every paid subscription of the owner ended (contracted workspaces become Free, admin-granted plans stay; the saved selection applies).
+- `cap: int` — required
+- `active: list[UUID]` — required
+- `suspended: list[UUID]` — required
+
+### SlotWorkspaceResponse (TZAwareBaseModel)
+> One live workspace the owner owns.
+- `id: UUID` — required
+- `name: str` — required
+- `plan_name: str` — required
+- `status: "active" | "slot_suspended"` — required
+- `suspended_at: datetime | None` — required
+- `under_billing_contract: bool` — required (a paid subscription runs, a scheduled cancellation included; never suspended)
+- `is_current: bool` — required
+- `created_at: datetime` — required
+
+### WorkspaceSlotsResponse (TZAwareBaseModel)
+> The owner's allowance, selection and owned workspaces. An owner of nothing gets `workspaces: []`.
+- `allowance: SlotAllowanceResponse` — required
+- `owned_count: int` — required
+- `active_count: int` — required
+- `active_slots: int` — required (`max(cap, contracted_count, active_count)`: "active `active_count` of `active_slots`")
+- `contracted_count: int` — required
+- `selection_required: bool` — required
+- `selection: SlotSelectionResponse` — required
+- `version: int` — required (sent back as `expected_version`; unchanged when a save repeats the stored list)
+- `if_paid_plans_end: PaidPlansEndResponse | None` — required (null when no owned workspace is under a billing contract)
+- `workspaces: list[SlotWorkspaceResponse]` — required (`created_at` ascending, then `id`)
+
+### SlotChangesResponse (TZAwareBaseModel)
+> Differences from the active set now.
+- `suspend: list[UUID]` — required
+- `resume: list[UUID]` — required
+
+### SlotPreviewResponse (TZAwareBaseModel)
+> The outcome of a selection; nothing is saved. `active` / `suspended` are the complete sets after applying.
+- `scenario: "current" | "paid_plans_end"` — required
+- `cap: int` — required
+- `active_slots: int` — required
+- `active: list[UUID]` — required
+- `suspended: list[UUID]` — required
+- `unmet: list[UUID]` — required (selected ids that stay suspended)
+- `changes: SlotChangesResponse` — required
+
+### SlotContextResponse (TZAwareBaseModel)
+> One context the owner can export (the rule of `GET /contexts/{id}/export`).
+- `id: UUID` — required
+- `name: str` — required
+- `display_name: str | None` — required (show it, or `name` when null)
+- `is_private: bool` — required
+
+### SlotContextsResponse (TZAwareBaseModel)
+> The exportable contexts of one owned live workspace, active or suspended (deleted contexts and other creators' private contexts left out).
+- `workspace_id: UUID` — required
+- `contexts: list[SlotContextResponse]` — required (ordered by `name`, then `id`)
+
+### SlotPreviewRequest (BaseModel) (request model)
+- `workspace_ids: list[UUID]` — required (at most 500; duplicates and not-owned ids are a 422 `VAL-001` from the service)
+- `scenario: "current" | "paid_plans_end"` — required
+
+### SlotSelectionRequest (BaseModel) (request model)
+- `workspace_ids: list[UUID]` — required (at most 500; ordered; an empty list means the default order, which clears `selection_required` now but not at a later drop)
+- `expected_version: int` — required (`>= 0`)
+
 ## memory.py
 
 ### MemoryListItem (BaseModel, L443)
@@ -1658,6 +1750,7 @@ Notes:
 - `created_at: str` — required
 - `current_user_role: str | None` — optional
 - `analyses_enabled: bool` — optional (default `False`)
+- `slot_suspended: bool` — optional (default `False`). #2918: the workspace is suspended because its owner owns more workspaces than their allowance. Set by `GET /workspaces` on every row (members' rows too); false on the other routes and always false unless `WORKSPACE_SLOT_SUSPENSION=enforce`.
 
 ### CredentialsStatusInfo (BaseModel, L89)
 > Credentials status information for member.

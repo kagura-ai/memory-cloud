@@ -2234,6 +2234,45 @@ Session cookie only. Records a new answer with source `settings`; an unchanged a
 
 ---
 
+## Workspace slots (experimental)
+
+Issue #2918. **Experimental**: these routes may change in a minor release. An event that ends a paid contract, lowers a plan's owned-workspace grant or lowers the slot bonus (a subscription ended, an admin lowered a plan or the slot bonus), and does not raise the allowance, suspends the owner's excess owned workspaces over the allowance, with their data kept. These routes let the owner see the allowance, choose which workspaces stay active, and list what they can export from a suspended workspace.
+
+Session cookie only (an API key or bearer token gets `403`, no session `401`). Every route of this surface answers `404 HTTP-404` "Not Found" before authentication unless the deployment sets `WORKSPACE_SLOT_SUSPENSION=enforce` (a body that is not JSON gets the framework's `422` first); `GET /api/v1/system/info` says which as `features.workspace_slots`. Response models: [`api-surface-1.0/rest-response-models.md`](api-surface-1.0/rest-response-models.md#me_workspace_slotspy); refusals: [`SLOT-001`..`SLOT-004`](api-surface-1.0/error-responses.md#slot-001-403--workspace-slot-gate-2918).
+
+### GET /api/v1/me/workspace-slots
+
+The allowance (`cap`, `base`, `slot_bonus`, `tier_grant`, `tier`, `next_tier`, `cap_on_next_tier`), `owned_count`, `active_count`, `active_slots` ("active `active_count` of `active_slots`"), `contracted_count`, `selection_required`, the saved `selection`, `version`, `if_paid_plans_end` (`null` unless an owned workspace has a paid subscription) and `workspaces[]` (`id`, `name`, `plan_name`, `status` `active` | `slot_suspended`, `suspended_at`, `under_billing_contract`, `is_current`, `created_at`), oldest first. An owner of nothing gets `200` with `workspaces: []`.
+
+### POST /api/v1/me/workspace-slots/preview
+
+**Request:** `{"workspace_ids": ["<uuid>", ...], "scenario": "current" | "paid_plans_end"}` (at most 500 ids, in priority order). Saves nothing and checks no version.
+
+**Response (200):** `{scenario, cap, active_slots, active[], suspended[], unmet[], changes: {suspend[], resume[]}}`: `active` / `suspended` are the complete sets after applying, `unmet` the selected ids that stay suspended, `changes` the differences from now.
+
+### PUT /api/v1/me/workspace-slots/selection
+
+**Request:** `{"workspace_ids": [...], "expected_version": 4}`. Replaces the saved ordered selection and applies it at once while anything is suspended (a swap, or a resume within the allowance). An empty list means the default order: it clears `selection_required` now, but it is not a choice, so a later drop that suspends something sets it again. Saving the list that is already stored changes nothing and answers `200` with the same `version` and `saved_at`.
+
+**Response (200):** the body of `GET` after applying.
+
+### GET /api/v1/me/workspace-slots/workspaces/{workspace_id}/contexts
+
+**Response (200):** `{workspace_id, contexts: [{id, name, display_name, is_private}]}` for a live workspace the caller owns, active or suspended: the contexts the caller can export with `GET /api/v1/contexts/{context_id}/export` (deleted contexts and other creators' private contexts are left out), ordered by `name`, then `id`.
+
+| Status | When |
+|---|---|
+| `422 VAL-001`, `details.errors` | the request shape is wrong: more than 500 ids, a malformed UUID, a missing `expected_version`, an unknown `scenario` |
+| `422 VAL-001`, `details: {field: "workspace_ids", invalid_ids}` | ids that are duplicated or not workspaces the caller owns (one message whether or not an id exists); preview and selection |
+| `409 SLOT-003` | `expected_version` is stale; nothing was saved (`details: {expected_version, current_version}`) |
+| `409 SLOT-002` | the selection names a suspended workspace while workspaces with a paid subscription hold every active slot (`details`: `cap`, `active_slots`, `active_count`, `contracted_count`, `next_tier`, `cap_on_next_tier`, `unmet`) |
+| `409 RES-002`, `details.reason: "workspace_slots_busy"` | another change for the same owner is in progress; retry the same request |
+| `404 RES-001` | contexts route: the workspace is not a live one the caller owns (one body for not owned, deleted and unknown); selection: the account was erased meanwhile (nothing was saved) |
+| `404 HTTP-404` | the deployment does not enforce workspace slots |
+| `401` / `403` | no session / an API key or bearer token instead of a session |
+
+---
+
 ## Memory Health
 
 The per-context memory health report (#1211, #1225), for the contexts the

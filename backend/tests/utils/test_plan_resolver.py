@@ -245,6 +245,10 @@ RESOLVER_CALL_SITE_ALLOW_LIST = {
     "services/quota_service.py",
     "api/routes/usage.py",
     "api/routes/admin.py",
+    # #2918: the slot planner's allowance (which owned workspaces stay active
+    # when the cap falls) and the account page's allowance block. It never
+    # gates creation; the create gate stays the quota service's.
+    "services/workspace_slots.py",
 }
 _RESOLVER_CALL = re.compile(r"\b(get_user_workspace_cap_summary|resolve_workspace_cap)\(")
 

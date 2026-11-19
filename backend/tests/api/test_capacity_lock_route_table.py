@@ -21,7 +21,7 @@ resolver gate itself by ``tests/services/test_permission_capacity_policy.py``.
 
 from __future__ import annotations
 
-from api.main import app
+from tests.api._route_inventory import _registered_routes, _walk
 
 BLOCKED = "blocked"
 ALLOWED = "allowed"
@@ -69,6 +69,8 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "me_oauth": NOT_APPLICABLE,
     "me_oauth_grants": NOT_APPLICABLE,  # #2129: grant settings; names a context only
     "me_terms": NOT_APPLICABLE,
+    # #2918: the owner's allowance and selection; the context list is names only
+    "me_workspace_slots": NOT_APPLICABLE,
     "member_credentials": NOT_APPLICABLE,
     "memory_health": NOT_APPLICABLE,  # #2764: the caller's own health signals, no memory content
     "mfa_settings": NOT_APPLICABLE,
@@ -453,47 +455,6 @@ SERVICE_GATED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/agents/{agent_id}/bootstrap"),
     }
 )
-
-
-def _walk():
-    """Yield ``(method, path, endpoint)`` for every REST route of the app.
-
-    FastAPI registers included routers lazily (``_IncludedRouter``); the original
-    router and its include prefix are read back, recursively (auth includes the
-    google/github routers), so this needs no application startup.
-    """
-
-    def inner(routes, prefix: str):
-        for route in routes:
-            original = getattr(route, "original_router", None)
-            if original is not None:
-                yield from inner(
-                    original.routes, prefix + (getattr(route.include_context, "prefix", "") or "")
-                )
-                continue
-            methods = getattr(route, "methods", None)
-            path = getattr(route, "path", None)
-            if not methods or path is None:
-                continue
-            full = prefix + path
-            if (
-                full == "/mcp"
-                or full.startswith("/mcp/")
-                or full in ("/openapi.json", "/docs/oauth2-redirect")
-            ):
-                continue
-            for method in methods - {"HEAD", "OPTIONS"}:
-                yield method, full, route.endpoint
-
-    yield from inner(app.routes, "")
-
-
-def _registered_routes() -> dict[tuple[str, str], str]:
-    """``{(method, path): router module}`` for every REST route of the app."""
-    return {
-        (method, path): endpoint.__module__.removeprefix("api.routes.")
-        for method, path, endpoint in _walk()
-    }
 
 
 def _gates_in(func) -> bool:

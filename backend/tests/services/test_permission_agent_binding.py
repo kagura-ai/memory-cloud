@@ -109,7 +109,7 @@ class TestCheckContextAccessWrapper:
     async def test_access_kind_derived_from_required_role(self, required_role, expected_access):
         set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce"))
         perm = _perm()
-        context = SimpleNamespace(id=uuid.uuid4())
+        context = SimpleNamespace(id=uuid.uuid4(), workspace_id=uuid.uuid4())
         perm._check_context_access_rbac = AsyncMock(return_value=(context, "owner"))
         perm._apply_agent_binding_filter = AsyncMock()
 

@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import event, select, text
@@ -206,6 +206,7 @@ async def apply_integration_entitlements(
             raise ConflictError("Entitlement revision was already used")
         if state is not None and body.revision < state.revision:
             outcome = "stale"
+    plan_change: dict[str, Any] | None = None
     if outcome == "applied":
         if state is None:
             state = WorkspaceIntegrationState(workspace_id=workspace_id)
@@ -214,7 +215,6 @@ async def apply_integration_entitlements(
         state.source, state.source_ref = "external_billing", body.source_ref
         if ordered:
             state.ordered_billing = True
-        plan_change = None
         if billing_plan is not None:
             plan_change = {
                 "old_plan_name": workspace.plan_name,
@@ -260,8 +260,27 @@ async def apply_integration_entitlements(
     view = await read_integration_entitlements(db, workspace_id)
     if outcome == "applied":
         from services.sync_management import stop_ineligible_workspace
+        from services.workspace_slots import finish_plan_change, prepare_plan_change
 
+        # #2918: the owner's slot lock by try-lock BEFORE the sync stop, so
+        # only this workspace row is held while it backs off; the reconcile
+        # after it. A plan change that may lower the allowance answers 409
+        # ``workspace_slots_busy`` (nothing committed) when the lock stays
+        # busy. Duplicate and stale snapshots never get here.
+        slot_change = None
+        if plan_change is not None:
+            slot_change = await prepare_plan_change(
+                db,
+                workspace_id=workspace_id,
+                owner_user_id=workspace.owner_user_id,
+                cause="billing_snapshot",
+                previous_plan_name=plan_change["old_plan_name"],
+                previous_entitlement_source=plan_change["old_entitlement_source"],
+                new_plan_name=workspace.plan_name,
+                new_entitlement_source=workspace.entitlement_source,
+            )
         await stop_ineligible_workspace(db, workspace_id)
+        await finish_plan_change(db, slot_change)
     return IntegrationEntitlementResult(
         **view.model_dump(), applied=outcome == "applied", outcome=outcome
     )
