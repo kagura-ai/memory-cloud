@@ -23,7 +23,7 @@ Downgrade drops the table and the stored reports with it; every report is
 finite evidence that the reporter sends again.
 
 Revision ID: f58_2941_domain_tls_reports
-Revises: f56_2918_workspace_slots
+Revises: f57_2930_share_key_creators
 """
 
 import sqlalchemy as sa
@@ -33,7 +33,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "f58_2941_domain_tls_reports"
-down_revision: str | None = "f56_2918_workspace_slots"
+down_revision: str | None = "f57_2930_share_key_creators"
 branch_labels: str | None = None
 depends_on: str | None = None
 

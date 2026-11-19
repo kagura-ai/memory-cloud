@@ -20,7 +20,7 @@ from tests.integration.test_alembic_migrations import (
     _upgrade_to,
 )
 
-BEFORE = "f56_2918_workspace_slots"
+BEFORE = "f57_2930_share_key_creators"
 REVISION = "f58_2941_domain_tls_reports"
 TABLE = "public_mcp_domain_tls_reports"
 
