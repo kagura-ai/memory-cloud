@@ -483,6 +483,9 @@ class TestAgentBoundMint:
     def test_session_self_mint_rejects_agent_id(self, client, monkeypatch):
         """agent_id is owner-provisioned-only — session self-mint 400s
         (same posture as expires_days)."""
+        from api.routes import member_credentials as mc
+
+        monkeypatch.setattr(mc, "_require_path_workspace_member", AsyncMock())
         _override(
             {
                 "user_id": "target-user",

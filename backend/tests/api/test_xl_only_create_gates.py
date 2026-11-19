@@ -524,6 +524,7 @@ class TestBoundPublicKeyCreate:
         mgr = MagicMock()
         mgr.create_key = AsyncMock(return_value=("kagura_PLAINTEXT", new_key))
         monkeypatch.setattr(mc, "APIKeyManager", lambda db: mgr)
+        monkeypatch.setattr(mc, "_require_path_workspace_member", AsyncMock())
         self._ctx = ctx
         return mgr
 
@@ -584,6 +585,7 @@ class TestBoundPublicKeyCreate:
         mgr.create_key = AsyncMock(return_value=("kagura_PLAIN", new_key))
 
         with (
+            patch("api.routes.member_credentials._require_path_workspace_member", new=AsyncMock()),
             patch("api.routes.member_credentials.check_permission", new=AsyncMock()),
             patch("api.routes.member_credentials.MemberCredentialsService"),
             patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),

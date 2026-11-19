@@ -9,6 +9,10 @@ Endpoints:
 - POST /workspaces/{workspace_id}/members/{user_id}/credentials/api-key/regenerate
 - DELETE /workspaces/{workspace_id}/members/{user_id}/credentials/api-key
 - Similar for OAuth apps
+
+Every route requires the caller to be the owner or a member of the workspace in
+the path (#2928): a session caller through ``_require_path_workspace_member``,
+an API-key owner through ``authorize_workspace_management``.
 """
 
 from typing import Annotated
@@ -39,6 +43,7 @@ from models.schemas import (
 )
 from services.credential_default_context import readable_context
 from services.member_credentials_service import MemberCredentialsService
+from services.permission_service import PermissionService
 from services.security_notification_service import (
     SecurityEvent,
     schedule_security_notification,
@@ -85,6 +90,27 @@ def _reject_oauth(user: dict, action: str) -> None:
         raise AuthorizationError(
             message=f"OAuth access tokens cannot {action}. Use a workspace-owner API key."
         )
+
+
+async def _require_path_workspace_member(db: AsyncSession, user: dict, workspace_id: UUID) -> None:
+    """Require the session caller to be the owner or a member of the path workspace.
+
+    Every session route of this router runs it before anything else it does
+    (#2928): before a lookup, a write or an operation-history record. A caller
+    who is not a member gets the uniform ``AUTH-101`` refusal the workspace
+    routes give, the same body whether the workspace exists or not. Membership
+    only, not the seat on the plan: a member without a seat still hides,
+    rotates and deletes their own credentials.
+
+    Raises:
+        AuthorizationError: 403 for a non-member or a deleted or unknown workspace.
+    """
+    await PermissionService(db).check_workspace_access(
+        user.get("user_id"),
+        workspace_id,
+        required_role=WorkspaceRole.VIEWER,
+        require_seat=False,
+    )
 
 
 def _minted_key_response(
@@ -370,6 +396,8 @@ async def get_member_credentials(
             user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
         )
         caller_role = principal.member.role
+    else:
+        await _require_path_workspace_member(db, user, workspace_id)
 
     service = MemberCredentialsService(db)
 
@@ -434,6 +462,7 @@ async def hide_api_key(
     Raises:
         HTTPException: If not owner or key not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     # Permission check: owner only
     if user["user_id"] != user_id:
         raise AuthorizationError(message="Only owner can hide API key")
@@ -523,6 +552,7 @@ async def regenerate_api_key(
     Raises:
         HTTPException: If not authorized or key not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     # Permission check: hierarchical
     service = MemberCredentialsService(db)
     await check_permission(service, user["user_id"], workspace_id, user_id, "regenerate")
@@ -704,6 +734,8 @@ async def create_api_key(
     # requires it) (v0.42 max review).
     if not is_session_principal(user):
         raise AuthorizationError(message="Unrecognized principal for API key creation")
+
+    await _require_path_workspace_member(db, user, workspace_id)
 
     # Session path (#252 unchanged): self-mint only.
     if user["user_id"] != user_id:
@@ -953,6 +985,7 @@ async def delete_api_key(
     Raises:
         HTTPException: If not authorized or key not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     service = MemberCredentialsService(db)
 
     # Permission check
@@ -1050,6 +1083,7 @@ async def delete_api_key_by_id(
         # carry the OIDC ``sub`` (v0.42 max review).
         if not is_session_principal(user):
             raise AuthorizationError(message="Unrecognized principal for API key deletion")
+        await _require_path_workspace_member(db, user, workspace_id)
         if caller_id != user_id:
             # Session path (#252 unchanged): self-only.
             raise AuthorizationError(
@@ -1248,6 +1282,7 @@ async def hide_oauth_app(
     Raises:
         HTTPException: If not owner or app not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     # Permission check: owner only
     if user["user_id"] != user_id:
         raise AuthorizationError(message="Only owner can hide OAuth app")
@@ -1319,6 +1354,7 @@ async def regenerate_oauth_secret(
     Raises:
         HTTPException: If not authorized or app not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     # Permission check: hierarchical
     service = MemberCredentialsService(db)
     can_regenerate = await service.check_can_manage(
@@ -1427,6 +1463,7 @@ async def delete_oauth_app(
     Raises:
         HTTPException: If not authorized or app not found
     """
+    await _require_path_workspace_member(db, user, workspace_id)
     service = MemberCredentialsService(db)
 
     # Permission check

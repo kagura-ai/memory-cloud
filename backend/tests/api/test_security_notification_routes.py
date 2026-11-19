@@ -219,6 +219,11 @@ async def _fake_factory() -> AsyncIterator[MagicMock]:
 
 
 class TestMemberCredentialRoutes:
+    @pytest.fixture(autouse=True)
+    def _path_workspace_member(self, monkeypatch) -> None:
+        """Membership of the path workspace is covered on real rows (#2928)."""
+        monkeypatch.setattr(mc, "_require_path_workspace_member", AsyncMock())
+
     @pytest.mark.asyncio
     async def test_admin_regenerate_names_the_admin(self, monkeypatch) -> None:
         monkeypatch.setattr(mc, "check_permission", AsyncMock())
