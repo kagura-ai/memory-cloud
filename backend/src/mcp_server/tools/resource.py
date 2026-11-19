@@ -26,8 +26,8 @@ from mcp_server.tools._errors import (
     new_correlation_id,
 )
 from mcp_server.tools._helpers import (
-    _check_session_workspace_member,
     _check_viewer_permission,
+    _check_workspace_membership,
     _context_cap_error_response,
     _error_response,
     _get_workspace_member_role,
@@ -291,8 +291,8 @@ async def handle_get_resource_impact(
     start_time = time.time()
     async for db in get_db():
         try:
-            denied = await _check_session_workspace_member(
-                db, user_id, workspace_id, "get resource impact"
+            denied = await _check_workspace_membership(
+                db, user_id, workspace_id, "get resource impact", require_seat=False
             )
             if denied:
                 return denied
@@ -420,8 +420,8 @@ async def handle_get_resource_schema(
     start_time = time.time()
     async for db in get_db():
         try:
-            denied = await _check_session_workspace_member(
-                db, user_id, workspace_id, "get resource schema"
+            denied = await _check_workspace_membership(
+                db, user_id, workspace_id, "get resource schema", require_seat=False
             )
             if denied:
                 return denied

@@ -40,7 +40,7 @@ def _session_workspace_member():
     drive the handlers by query ORDER. The membership check itself is covered on
     real rows in ``tests/integration/test_current_workspace_routes_membership_db.py``."""
     with patch(
-        "mcp_server.tools.resource._check_session_workspace_member",
+        "mcp_server.tools.resource._check_workspace_membership",
         new=AsyncMock(return_value=None),
     ) as member:
         yield member
@@ -70,6 +70,7 @@ class TestResourceReadsRequireMembership:
         assert data["error"] == "permission_denied"
         assert data["your_role"] == "not_a_member"
         assert _session_workspace_member.await_args.args[1:3] == ("user", workspace_id)
+        assert _session_workspace_member.await_args.kwargs == {"require_seat": False}
         mock_db.execute.assert_not_awaited()
 
 

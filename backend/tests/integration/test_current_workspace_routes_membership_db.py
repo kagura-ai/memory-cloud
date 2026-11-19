@@ -91,15 +91,18 @@ def _app(factory: async_sessionmaker[AsyncSession]) -> FastAPI:
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def world(async_engine, monkeypatch, fernet_api_key_secret):
-    """Workspace X (owner + member) with a shared context holding one embedded
-    and one failed memory, and an enabled OpenAI key; an outsider whose own
-    workspace is Y, holding a key row scoped to X."""
+    """Workspace X (owner, member, viewer) with a shared context holding one
+    embedded and one failed memory, and an enabled OpenAI key; a one-seat
+    workspace S whose member has no seat, with one failed memory; an outsider
+    whose own workspace is Y, holding a key row scoped to X."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
     tag = uuid4().hex[:8]
-    owner, member, outsider = (f"cw-{role}-{tag}" for role in ("owner", "member", "outsider"))
-    users = [owner, member, outsider]
-    x, y, shared = uuid4(), uuid4(), uuid4()
+    owner, member, outsider, viewer, seatless = (
+        f"cw-{role}-{tag}" for role in ("owner", "member", "outsider", "viewer", "seatless")
+    )
+    users = [owner, member, outsider, viewer, seatless]
+    x, y, s, shared, s_shared = uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
     async with factory() as db:
         db.add_all(
             [User(user_id=uid, email=f"{uid}@example.test", name=uid, role="user") for uid in users]
@@ -109,6 +112,7 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
             [
                 Workspace(id=x, name=f"x-{tag}", owner_user_id=owner, plan_name="promax"),
                 Workspace(id=y, name=f"y-{tag}", owner_user_id=outsider, plan_name="promax"),
+                Workspace(id=s, name=f"s-{tag}", owner_user_id=owner, plan_name="free"),
             ]
         )
         await db.flush()
@@ -122,6 +126,13 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
                     allowed_context_ids=[shared],
                 ),
                 WorkspaceMember(workspace_id=y, user_id=outsider, role=WorkspaceRole.OWNER),
+                WorkspaceMember(workspace_id=x, user_id=viewer, role=WorkspaceRole.VIEWER),
+                # One seat: the owner holds it, the member has none.
+                WorkspaceMember(workspace_id=s, user_id=owner, role=WorkspaceRole.OWNER),
+                WorkspaceMember(workspace_id=s, user_id=seatless, role=WorkspaceRole.MEMBER),
+                Context(
+                    id=s_shared, workspace_id=s, name="s-shared", created_by=owner, is_private=False
+                ),
                 Context(
                     id=shared, workspace_id=x, name="shared", created_by=owner, is_private=False
                 ),
@@ -140,9 +151,15 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
             [
                 _memory(x, shared, owner, "Shared row that embedded", "success"),
                 _memory(x, shared, owner, FAILED_SUMMARY, "failed"),
+                _memory(s, s_shared, owner, FAILED_SUMMARY, "failed"),
             ]
         )
-        await db.execute(update(User).where(User.user_id == member).values(current_workspace_id=x))
+        await db.execute(
+            update(User).where(User.user_id.in_([member, viewer])).values(current_workspace_id=x)
+        )
+        await db.execute(
+            update(User).where(User.user_id == seatless).values(current_workspace_id=s)
+        )
         await db.execute(
             update(User).where(User.user_id == outsider).values(current_workspace_id=y)
         )
@@ -152,6 +169,10 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
             name="outside-x", user_id=outsider, workspace_id=x
         )
         member_key, _ = await manager.create_key(name="member-x", user_id=member, workspace_id=x)
+        viewer_key, _ = await manager.create_key(name="viewer-x", user_id=viewer, workspace_id=x)
+        seatless_key, _ = await manager.create_key(
+            name="seatless-s", user_id=seatless, workspace_id=s
+        )
         await db.commit()
     try:
         yield SimpleNamespace(
@@ -164,20 +185,25 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
             y=y,
             outsider_key=outsider_key,
             member_key=member_key,
+            viewer=viewer,
+            viewer_key=viewer_key,
+            seatless=seatless,
+            seatless_key=seatless_key,
+            s=s,
         )
     finally:
         async with factory() as db:
-            await db.execute(delete(Memory).where(Memory.workspace_id.in_([x, y])))
+            await db.execute(delete(Memory).where(Memory.workspace_id.in_([x, y, s])))
             await db.execute(delete(APIKey).where(APIKey.user_id.in_(users)))
             await db.execute(delete(ExternalAPIKey).where(ExternalAPIKey.workspace_id.in_([x, y])))
             await db.execute(
                 update(User).where(User.user_id.in_(users)).values(current_workspace_id=None)
             )
-            await db.execute(delete(Context).where(Context.workspace_id.in_([x, y])))
+            await db.execute(delete(Context).where(Context.workspace_id.in_([x, y, s])))
             await db.execute(
-                delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_([x, y]))
+                delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_([x, y, s]))
             )
-            await db.execute(delete(Workspace).where(Workspace.id.in_([x, y])))
+            await db.execute(delete(Workspace).where(Workspace.id.in_([x, y, s])))
             await db.execute(delete(User).where(User.user_id.in_(users)))
             await db.commit()
 
@@ -271,7 +297,9 @@ async def test_embedding_models_for_a_member_is_unchanged(world):
 # ---------------------------------------------------------------------------
 
 
-async def _mcp(world, tool: str, args: dict[str, Any], user_id: str) -> dict[str, Any]:
+async def _mcp(
+    world, tool: str, args: dict[str, Any], user_id: str, workspace_id: UUID | None = None
+) -> dict[str, Any]:
     from mcp_server.tools import execute_tool_call
     from mcp_server.tools._helpers import _mcp_key_workspace_scope
 
@@ -280,14 +308,15 @@ async def _mcp(world, tool: str, args: dict[str, Any], user_id: str) -> dict[str
             yield db
 
     # The transport sets the session workspace to a scoped key's own workspace.
-    token = _mcp_key_workspace_scope.set(world.x)
+    workspace_id = workspace_id or world.x
+    token = _mcp_key_workspace_scope.set(workspace_id)
     try:
         with (
             patch("db.base.get_db", new=_db),
             patch("mcp_server.tools.usage._log_tool_usage", new=AsyncMock()),
             patch("mcp_server.tools.resource._log_tool_usage", new=AsyncMock()),
         ):
-            result = await execute_tool_call(tool, args, user_id, world.x)
+            result = await execute_tool_call(tool, args, user_id, workspace_id)
     finally:
         _mcp_key_workspace_scope.reset(token)
     return json.loads(result[0].text)
@@ -374,4 +403,40 @@ async def test_mcp_get_usage_for_a_member_is_unchanged(world):
     assert body["plan"] == "promax"
     assert body["memories"]["used"] == 2
     assert body["contexts"]["used"] == 1
-    assert body["members"]["used"] == 2
+    assert body["members"]["used"] == 3  # owner, member, viewer
+
+
+# ---------------------------------------------------------------------------
+# A viewer, and a member without a seat on the plan, keep their reads
+# ---------------------------------------------------------------------------
+
+
+async def test_a_viewer_keeps_the_stats_embedding_status_and_usage(world):
+    for kwargs in ({"bearer": world.viewer_key}, {"session": world.viewer}):
+        stats = await _get(world, "/api/v1/workspace/stats", **kwargs)
+        assert stats.status_code == 200, stats.text
+        # A viewer without a context access list reaches every shared context.
+        assert [c["context_name"] for c in stats.json()["contexts"]] == ["shared"]
+        status = await _get(world, "/api/v1/workspace/embedding-status", **kwargs)
+        assert status.status_code == 200, status.text
+        assert status.json()["by_status"] == {"success": 1, "failed": 1}
+
+    usage = await _get_usage(world, world.viewer)
+    assert usage.get("error") is None, usage
+    assert usage["memories"]["used"] == 2
+
+
+async def test_a_member_without_a_seat_keeps_the_stats_embedding_status_and_usage(world):
+    for kwargs in ({"bearer": world.seatless_key}, {"session": world.seatless}):
+        stats = await _get(world, "/api/v1/workspace/stats", **kwargs)
+        assert stats.status_code == 200, stats.text
+        body = stats.json()
+        # Totals stay; without a seat no context is named.
+        assert (body["total_memories"], body["contexts"], body["plan_name"]) == (1, [], "free")
+        status = await _get(world, "/api/v1/workspace/embedding-status", **kwargs)
+        assert status.status_code == 200, status.text
+        assert status.json()["by_status"] == {"failed": 1}
+
+    usage = await _mcp(world, "get_usage", {}, world.seatless, world.s)
+    assert usage.get("error") is None, usage
+    assert (usage["plan"], usage["memories"]["used"]) == ("free", 1)

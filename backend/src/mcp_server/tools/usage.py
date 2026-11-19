@@ -10,7 +10,7 @@ from mcp.types import TextContent
 
 from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import (
-    _check_session_workspace_member,
+    _check_workspace_membership,
     _error_response,
     _log_tool_usage,
     _success_response,
@@ -44,7 +44,9 @@ async def handle_get_usage(
     async for db in get_db():
         try:
             # #2928: membership of the session workspace before anything of it is read.
-            denied = await _check_session_workspace_member(db, user_id, workspace_id, "get usage")
+            denied = await _check_workspace_membership(
+                db, user_id, workspace_id, "get usage", require_seat=False
+            )
             if denied:
                 return denied
 

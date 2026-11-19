@@ -861,7 +861,7 @@ def _validate_memory_id(
 
 
 async def _get_workspace_member_role(
-    db: "AsyncSession", user_id: str, workspace_id: UUID
+    db: "AsyncSession", user_id: str, workspace_id: UUID, *, require_seat: bool = True
 ) -> str | None:
     """Get user's role in workspace.
 
@@ -873,6 +873,9 @@ async def _get_workspace_member_role(
         db: Database session
         user_id: User ID
         workspace_id: Workspace ID
+        require_seat: Refuse a member without a seat on the plan (#1943).
+            ``False`` for the readers of the workspace's usage and resource
+            stats (#2928), as the REST usage readouts (#2632).
 
     Returns:
         Role string ('owner', 'admin', 'member', 'viewer') or ``None`` if
@@ -897,7 +900,8 @@ async def _get_workspace_member_role(
     # #1943: a member without a seat on the plan is refused (FEAT-001), after
     # membership — the dispatcher's exception mapper renders the same envelope
     # as the other plan pauses.
-    await plan_seats.ensure_member_seated(db, workspace_id, member)
+    if require_seat:
+        await plan_seats.ensure_member_seated(db, workspace_id, member)
     return member.role
 
 
@@ -906,6 +910,8 @@ async def _check_workspace_membership(
     user_id: str,
     workspace_id: UUID | None,
     operation: str,
+    *,
+    require_seat: bool = True,
 ) -> list[TextContent] | None:
     """Membership-only gate for READ-ONLY MCP tools.
 
@@ -925,6 +931,9 @@ async def _check_workspace_membership(
         user_id: User ID.
         workspace_id: Workspace ID (None = skip check).
         operation: Operation description for error message.
+        require_seat: Also refuse a member without a seat on the plan.
+            ``False`` for ``get_usage`` and the resource stats of the session
+            workspace (#2928): a member without a seat still gets the answer.
 
     Returns:
         Error response if the caller is NOT a member of the
@@ -934,43 +943,10 @@ async def _check_workspace_membership(
         return None
     if _outside_key_workspace(workspace_id):
         return _workspace_not_accessible(operation, "viewer")
-    user_role = await _get_workspace_member_role(db, user_id, workspace_id)
+    user_role = await _get_workspace_member_role(
+        db, user_id, workspace_id, require_seat=require_seat
+    )
     if user_role is None:
-        return _workspace_not_accessible(operation, "viewer")
-    return None
-
-
-async def _check_session_workspace_member(
-    db: "AsyncSession",
-    user_id: str,
-    workspace_id: UUID,
-    operation: str,
-) -> list[TextContent] | None:
-    """Membership of the session workspace for a tool that reads it (#2928).
-
-    A tool that reads the session workspace with no context to resolve proves
-    the caller's membership here first, as the REST readouts of the current
-    workspace do. Membership only: a member without a seat on the plan keeps
-    the answer they had. A non-member, or a deleted workspace, gets the answer
-    of the membership gates above.
-
-    Args:
-        db: Database session.
-        user_id: User ID.
-        workspace_id: The session workspace.
-        operation: Operation description for the error message.
-
-    Returns:
-        Error response if the caller is not a member, otherwise ``None``.
-    """
-    from services.permission_service import PermissionService
-    from utils.exceptions import AuthorizationError
-
-    try:
-        await PermissionService(db).check_workspace_access(
-            user_id, workspace_id, required_role="viewer", require_seat=False
-        )
-    except AuthorizationError:
         return _workspace_not_accessible(operation, "viewer")
     return None
 
