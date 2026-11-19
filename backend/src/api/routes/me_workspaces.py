@@ -234,7 +234,8 @@ async def workspace_access(
         workspace_permissions=WorkspacePermissions(
             billing_manage=workspace.owner_user_id == principal.user_id
             and member.role == WorkspaceRole.OWNER,
-            usage_read=True,
+            # #2918: the usage routes refuse a slot-suspended workspace.
+            usage_read=not suspended,
         ),
         resource=resource,
     )

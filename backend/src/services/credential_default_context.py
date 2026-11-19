@@ -144,7 +144,12 @@ async def readable_context_options(
     name, then context name; capped at ``limit``.
     """
     from services.permission_service import PermissionService
-    from utils.exceptions import AuthorizationError, FeatureNotAvailableError, NotFoundException
+    from utils.exceptions import (
+        AuthorizationError,
+        FeatureNotAvailableError,
+        NotFoundException,
+        WorkspaceSlotSuspendedError,
+    )
 
     rows = (
         await db.execute(
@@ -159,7 +164,13 @@ async def readable_context_options(
     for workspace_id, workspace_name in rows:
         try:
             contexts = await permissions.get_accessible_contexts(user_id, workspace_id)
-        except (AuthorizationError, FeatureNotAvailableError, NotFoundException):
+        except (
+            AuthorizationError,
+            FeatureNotAvailableError,
+            NotFoundException,
+            # #2918: a slot-suspended workspace offers no default context.
+            WorkspaceSlotSuspendedError,
+        ):
             continue
         for context in sorted(contexts, key=lambda c: (c.name or "").lower()):
             options.append(ContextOption(context.id, context.name, workspace_name, workspace_id))

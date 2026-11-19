@@ -52,6 +52,7 @@ from services.capacity_lock import (
 )
 from services.context_service import CAPACITY_PURGE_ACTOR, ContextService, WorkspacePurgeReport
 from services.workspace_slot_gate import slot_suspended
+from services.workspace_slots import suspended_workspace_ids
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
@@ -216,6 +217,9 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
     # an instance a savepoint rollback may have expired (a lazy load there is
     # MissingGreenlet on AsyncSession and would end the pass).
     batch = [(ws, ws.id) for ws in rows.scalars().all()]
+    # #2918: the slot-suspended ones among them, in one statement (none
+    # unless the mode is enforce).
+    suspended = await suspended_workspace_ids(db, [ws_id for _ws, ws_id in batch])
     evaluated = stamped = cleared = kept = failed = 0
     for ws, ws_id in batch:
         evaluated += 1
@@ -223,7 +227,7 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
             await db.commit()  # keep the transaction short
         try:
             async with db.begin_nested():
-                outcome = await _stamp_one(db, ws, now=now)
+                outcome = await _stamp_one(db, ws, now=now, suspended=ws_id in suspended)
         except Exception:  # noqa: BLE001 — one workspace must not stop the pass
             logger.exception("capacity_lock_stamp_failed", workspace_id=str(ws_id))
             failed += 1
@@ -248,15 +252,20 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
     )
 
 
-async def _stamp_one(db: AsyncSession, ws: Workspace, *, now: datetime) -> str | None:
+async def _stamp_one(
+    db: AsyncSession, ws: Workspace, *, now: datetime, suspended: bool | None = None
+) -> str | None:
     """Set / keep / clear one workspace's stamp; returns what it did (``None``:
     within capacity and not stamped). Does not commit.
 
     #2918: a slot-suspended workspace is no candidate: it is never stamped and
     an existing stamp is cleared (its owner cannot clean it up while it is
     suspended), so the lock clock starts afresh once it is resumed.
+    ``suspended`` is the sweep's batch answer; ``None`` looks it up.
     """
-    candidate = is_lock_candidate(ws) and not await slot_suspended(db, ws)
+    if suspended is None:
+        suspended = await slot_suspended(db, ws)
+    candidate = is_lock_candidate(ws) and not suspended
     lock = await capacity_lock_state(db, ws) if candidate else None
     if lock is None:
         if ws.capacity_locked_since is None:
@@ -421,9 +430,16 @@ async def send_due_purge_notices(
     # instance, and a lazy load outside a try (MissingGreenlet on AsyncSession)
     # would end the pass. After one, each later row is refreshed first.
     batch = [(ws, ws.id) for ws in await _stamped_workspaces(db)]
+    # #2918: no countdown mail and no notice record for a slot-suspended
+    # workspace (its stamp is cleared by the next stamp pass).
+    suspended = await suspended_workspace_ids(db, [ws_id for _ws, ws_id in batch])
     expired = False
     for ws, ws_id in batch:
         considered += 1
+        if ws_id in suspended:
+            skipped += 1
+            logger.info("capacity_purge_notice_skipped_slot_suspended", workspace_id=str(ws_id))
+            continue
         if expired:
             try:
                 await db.refresh(ws)
