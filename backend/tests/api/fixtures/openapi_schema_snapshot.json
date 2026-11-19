@@ -2368,6 +2368,16 @@
         ],
         "type": "object"
       },
+      "CertificateObservation": {
+        "properties": {
+          "status": {
+            "const": "unreported",
+            "default": "unreported",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ClusterListResponse": {
         "properties": {
           "items": {
@@ -6986,6 +6996,39 @@
         ],
         "type": "object"
       },
+      "LiveDomain": {
+        "properties": {
+          "created_at": {},
+          "domain_id": {},
+          "hostname": {},
+          "last_check": {},
+          "proof_missing_checks": {},
+          "proof_ok_at": {},
+          "routing": {},
+          "serve_until": {},
+          "serving": {},
+          "state": {},
+          "suspended_reason": {},
+          "tls": {},
+          "url": {},
+          "verification": {},
+          "verified_at": {}
+        },
+        "required": [
+          "created_at",
+          "domain_id",
+          "hostname",
+          "last_check",
+          "proof_missing_checks",
+          "routing",
+          "serving",
+          "state",
+          "tls",
+          "url",
+          "verification"
+        ],
+        "type": "object"
+      },
       "LlmLaneV1": {
         "properties": {
           "calls_last_day": {},
@@ -10656,6 +10699,40 @@
         ],
         "type": "object"
       },
+      "PublicationDomainObservation": {
+        "properties": {
+          "application_id": {},
+          "context_id": {},
+          "domain": {},
+          "endpoint_id": {},
+          "generation": {},
+          "installation_id": {},
+          "observed_at": {},
+          "public_id": {},
+          "resource_id": {},
+          "resource_pk": {},
+          "schema_version": {},
+          "subject": {},
+          "valid_until": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "application_id",
+          "context_id",
+          "domain",
+          "endpoint_id",
+          "generation",
+          "installation_id",
+          "observed_at",
+          "public_id",
+          "resource_id",
+          "resource_pk",
+          "subject",
+          "valid_until",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "PublicationV1": {
         "additionalProperties": false,
         "properties": {
@@ -11340,6 +11417,22 @@
         "required": [
           "count",
           "tag"
+        ],
+        "type": "object"
+      },
+      "ReleasedDomain": {
+        "properties": {
+          "cooldown_until": {},
+          "domain_id": {},
+          "hostname": {},
+          "released_at": {},
+          "state": {}
+        },
+        "required": [
+          "cooldown_until",
+          "domain_id",
+          "hostname",
+          "released_at"
         ],
         "type": "object"
       },
@@ -42832,6 +42925,122 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-domains": {
+      "get": {
+        "operationId": "read_publication_domain_api_v1_workspaces__workspace_id__sync_installations__installation_id__publication_domains_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicationDomainObservation"
                 }
               }
             }

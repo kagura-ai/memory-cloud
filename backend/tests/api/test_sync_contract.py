@@ -174,3 +174,20 @@ def test_prerequisite_disable_cannot_advertise_dependent_capability(flag, remove
     assert not removed & advertised
     with pytest.raises(SyncContractUnsupported):
         require_sync_contract(sync_configuration(configured).model_dump())
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "oidc_enabled",
+        "sync_integrations_enabled",
+        "mcp_public_endpoints_enabled",
+        "mcp_public_usage_budget_enabled",
+        "mcp_public_domains_enabled",
+    ],
+)
+def test_domain_observation_requires_owner_controls_and_domains(flag):
+    assert (
+        "public.domains.observation.v1"
+        not in sync_configuration(settings(**{flag: False})).capabilities
+    )
