@@ -635,17 +635,19 @@ async def update_workspace_plan(
         422: Invalid plan tier
     """
     async with db_transaction(db, "update_workspace_plan", "Failed to update workspace plan"):
-        # Get workspace, row locked as both billing writers lock it (#2918):
-        # the old plan and entitlement source below are then the values this
-        # write replaces, and a billing delivery cannot interleave.
-        # populate_existing: a row already in the identity map is re-read.
+        # Get workspace, row locked (#2918): the old plan and entitlement
+        # source below are then the values this write replaces, and a billing
+        # delivery (FOR UPDATE) cannot interleave. FOR NO KEY UPDATE: it still
+        # serializes with both billing writers, the delete and a memory create,
+        # and does not block foreign-key inserts of rows of this workspace for
+        # the whole handler. populate_existing: an identity-map row is re-read.
         workspace_result = await db.execute(
             select(Workspace)
             .where(
                 Workspace.id == workspace_id,
                 Workspace.deleted_at.is_(None),  # #687 / #681 pattern: soft-delete safe
             )
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
         workspace = workspace_result.scalar_one_or_none()

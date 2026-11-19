@@ -211,8 +211,16 @@ async def set_workspace_plan_from_billing(
 
     # FOR UPDATE serializes with ``WorkspaceService.delete_workspace``, which
     # checks the billing contract under the same row lock (#1940).
+    # populate_existing: a row already in this session's identity map is
+    # re-read under the lock (#2918: the previous plan below must be the
+    # locked one).
     workspace = (
-        await db.execute(select(Workspace).where(Workspace.id == ws_uuid).with_for_update())
+        await db.execute(
+            select(Workspace)
+            .where(Workspace.id == ws_uuid)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if workspace is None:
         raise NotFoundException("Workspace")
