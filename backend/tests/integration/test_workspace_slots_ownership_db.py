@@ -191,6 +191,30 @@ class TestTransfer:
         assert await slot_world.owner_of(x) == target
         assert await slot_world.rows(owner) == {z: owner}
 
+    async def test_an_approved_dual_control_transfer_reconciles_both_owners(
+        self, slot_world: SlotWorld
+    ) -> None:
+        owner, x, y, z = await _owner_over_cap(slot_world, "approved")
+        target = await slot_world.user("approved-target")
+        with slot_mode("enforce"):
+            async with slot_world.maker() as s:
+                request = await WorkspaceOwnershipService(s).initiate_force_transfer(
+                    workspace_id=x,
+                    target_user_id=target,
+                    performed_by_user_id="slot-admin-1",
+                    performed_by_email="admin1@example.com",
+                    reason="owner unavailable",
+                )
+            async with slot_world.maker() as s:
+                result = await WorkspaceOwnershipService(s).approve_force_transfer(
+                    request_id=request.id,
+                    approver_user_id="slot-admin-2",
+                    approver_email="admin2@example.com",
+                )
+        assert result.changed
+        assert await slot_world.owner_of(x) == target
+        assert await slot_world.rows(owner) == {z: owner}
+
 
 class TestErasureAndUserDeletion:
     async def test_erasure_removes_the_subjects_rows_in_every_mode(
