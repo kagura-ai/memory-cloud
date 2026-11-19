@@ -247,6 +247,25 @@ async def test_owner_requires_both_canonical_owner_and_membership_role(store):
     ] is False
 
 
+async def test_public_eligibility_filters_before_pagination_and_rechecks_access(store):
+    path = "/api/v1/me/workspaces"
+    eligible = "?eligible_for=kagura-public"
+    await change(store, Workspace, store.other_wid, plan_name="free")
+    page = (await request(store, path=path + eligible + "&limit=1")).json()
+    assert [item["workspace_id"] for item in page["workspaces"]] == [str(store.wid)]
+    assert page["next_cursor"] is None
+    assert len((await request(store, path=path)).json()["workspaces"]) == 2
+    access = f"{path}/{store.wid}/access"
+    assert_private(await request(store, path=access + eligible), 200)
+    for role in ("admin", "member", "viewer"):
+        assert (await request(store, role, path=path + eligible)).json()["workspaces"] == []
+        assert_private(await request(store, role, path=access + eligible), 404)
+    await change(store, Workspace, store.wid, plan_name="pro")
+    assert_private(await request(store, path=access + eligible), 404)
+    assert_private(await request(store, path=access), 200)
+    assert (await request(store, path=path + eligible)).json()["workspaces"] == []
+
+
 async def test_listing_keyset_pagination_and_current_membership(store):
     path = "/api/v1/me/workspaces?limit=1"
     first = await request(store, path=path)

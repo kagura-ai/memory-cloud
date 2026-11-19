@@ -29899,6 +29899,22 @@
                 }
               ]
             }
+          },
+          {
+            "in": "query",
+            "name": "eligible_for",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "const": "kagura-public",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
           }
         ],
         "responses": {
@@ -30006,6 +30022,22 @@
               "anyOf": [
                 {
                   "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "eligible_for",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "const": "kagura-public",
                   "type": "string"
                 },
                 {
