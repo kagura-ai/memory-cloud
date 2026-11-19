@@ -52,11 +52,14 @@ was later removed: account deletion clears the saved actor of the receipt, so th
 original subject can no longer match. A typed answer for that case is an open
 decision.
 
-The lookup shares current identity/membership and NOWAIT workspace/installation
-locks with management transitions and validates the retained ownership binding.
+The lookup shares current identity/membership checks with management transitions,
+takes the workspace and installation rows with NOWAIT shared locks (other reads
+pass, every transition is excluded; a busy workspace row is tried again for under
+a second) and validates the retained ownership binding.
 The Context metadata and, for private linked-owner reach, both actual identity-link
-rows remain locked through the final reach check and observation commit. Contention
-is refused without waiting; lookup does not take the global link mutation mutex.
+rows remain locked through the final reach check and observation commit (NOWAIT
+shared locks, a busy row tried again for under a second). Other contention is
+refused without waiting; lookup does not take the global link mutation mutex.
 It never calls confirmation, paid publication, enrollment or allocation; content,
 preview, candidate, request, receipt, generation, quota and indexing state remain
 unchanged. No original preview or credential is required to observe a receipt.

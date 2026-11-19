@@ -44,6 +44,8 @@ API keys come in three scoping shapes:
 
 Public-bound keys are immutable: to change which context a key attributes to, revoke the key and create a new one. They cannot also be workspace-scoped (DB CHECK constraint).
 
+A workspace-scoped key (agent and connector keys included) authenticates only while its owner holds the workspace: the workspace is not deleted, and the owner is the workspace's owner or has a membership row in it (any role, with or without a plan seat). Otherwise it answers like an unknown key: `401` on REST, and MCP refuses the request at authentication ([#2928](https://github.com/kagura-ai/memory-cloud/issues/2928)). Minting one requires a membership row in the workspace of the path.
+
 A workspace-scoped key you mint for yourself (session only) takes an optional `default_context_id` ([#2188](https://github.com/kagura-ai/memory-cloud/issues/2188)), the key's MCP default context with the same rules as the [config route](#patch-apiv1configapi-keyskey_id): a context you cannot read within the key's workspace is `404` `Context not found` and no key is created, and a public-bound key cannot carry one (`422`). An owner-provisioned key for another member cannot carry one either (`400`). The member key list and create responses carry `default_context_id`, `default_context_name` (`null` when none is set or when you, the viewer, cannot read the context) and `agent_id` (`null` unless the key is agent-bound). A default is changed later with `PATCH /api/v1/config/api-keys/{key_id}`.
 
 ### 2. OAuth2 Access Token
@@ -1876,6 +1878,8 @@ Permanently delete an API key (Admin only).
 
 `key_id` is the key's public id from the list or create response: `akey_` followed by 22 letters and digits. The integer database id is not accepted (an integer path id returns `422`), and a key that is not yours returns the same `404` as one that does not exist. The same applies to `/revoke`, `/regenerate` and `/stats`, to the share-key, resource-token and invitation routes (`skey_…`, `rtok_…`, `winv_…`), and to `DELETE /api/v1/workspaces/{workspace_id}/members/{user_id}/credentials/api-keys/{key_id}`.
 
+`/regenerate` of a workspace-scoped key also returns that `404` while the key's owner does not hold the workspace (the condition under which the key authenticates, [#2928](https://github.com/kagura-ai/memory-cloud/issues/2928)). Deleting or revoking your own key always works; the workspace's operation history records it only while you hold that workspace.
+
 **Response:**
 
 ```json
@@ -2633,7 +2637,7 @@ Kagura Memory Cloud provides MCP tools for memory, contexts, agents, files, reso
 | Request | Status | `WWW-Authenticate` |
 |---------|--------|--------------------|
 | No credentials | `401` | `Bearer realm="Kagura Memory Cloud", resource_metadata="<origin>/.well-known/oauth-protected-resource"` — no error code (RFC 6750 §3.1) |
-| Unknown, expired or revoked token, or an OAuth token issued for another resource | `401` | `Bearer realm="…", error="invalid_token", error_description="…", resource_metadata="…"` |
+| Unknown, expired or revoked token, a workspace-scoped key whose owner does not hold its workspace, or an OAuth token issued for another resource | `401` | `Bearer realm="…", error="invalid_token", error_description="…", resource_metadata="…"` |
 | Malformed `Authorization` header: not `Bearer <token>` (the scheme is case-insensitive), or an empty token or one containing whitespace | `401` | `Bearer realm="…", error="invalid_request", error_description="…", resource_metadata="…"` |
 | OAuth token without the scope a `tools/call` needs | `403` | `Bearer realm="…", error="insufficient_scope", error_description="…", scope="<granted scopes plus the required one>", resource_metadata="…"` |
 

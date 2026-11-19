@@ -36,6 +36,15 @@ OLD_PID = "akey_" + "o" * 22
 NEW_PID = "akey_" + "n" * 22
 
 
+@pytest.fixture(autouse=True)
+def _owner_holds_workspace():
+    """The key's owner holds its workspace (#2928); the db below is mocked.
+    The condition itself is covered on real rows in
+    ``tests/integration/test_config_api_keys_workspace_membership_db.py``."""
+    with patch("api.routes.api_keys.key_owner_holds_workspace", new=AsyncMock(return_value=True)):
+        yield
+
+
 def _old_key(**over) -> SimpleNamespace:
     base = {
         "id": 7,

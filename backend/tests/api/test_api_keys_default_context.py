@@ -402,6 +402,7 @@ async def test_member_regenerate_keeps_the_default_context():
     mgr = MagicMock()
     mgr.create_key = AsyncMock(return_value=("kagura_PLAIN", new_key))
     with (
+        patch("api.routes.member_credentials._require_path_workspace_member", new=AsyncMock()),
         patch("api.routes.member_credentials.check_permission", new=AsyncMock()),
         patch("api.routes.member_credentials.MemberCredentialsService"),
         patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
@@ -445,6 +446,7 @@ async def test_member_regenerate_refuses_a_connector_key_with_422():
     mgr = MagicMock()
     mgr.create_key = AsyncMock()
     with (
+        patch("api.routes.member_credentials._require_path_workspace_member", new=AsyncMock()),
         patch("api.routes.member_credentials.check_permission", new=AsyncMock()),
         patch("api.routes.member_credentials.MemberCredentialsService"),
         patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
@@ -494,6 +496,7 @@ async def _member_mint(body: dict, mgr, readable_result):
     db.commit = AsyncMock()
     reader = AsyncMock(return_value=readable_result)
     with (
+        patch("api.routes.member_credentials._require_path_workspace_member", new=AsyncMock()),
         patch("api.routes.member_credentials.readable_context", new=reader),
         patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
         patch("api.routes.member_credentials.schedule_security_notification"),
@@ -576,6 +579,7 @@ async def test_member_self_mint_refuses_a_default_on_a_public_bound_key():
     )
     reader = AsyncMock()
     with (
+        patch("api.routes.member_credentials._require_path_workspace_member", new=AsyncMock()),
         patch("api.routes.member_credentials.readable_context", new=reader),
         patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
         patch("config.plan_tiers.has_feature", return_value=True),

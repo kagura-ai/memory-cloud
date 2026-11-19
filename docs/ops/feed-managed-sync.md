@@ -107,6 +107,17 @@ generic writers take the target fence before side effects. Index batches retain
 the shared fence through vectors and SQL commit. Existing orphan-safe, globally
 fenced point cleanup runs after commit and cannot delete a current manual point.
 
+The management reads (`GET .../management`, `GET .../management/access` and
+`POST .../management/resume/receipt`) share the Workspace and installation rows
+(`FOR SHARE NOWAIT`): parallel reads from one browser or several members do not
+exclude each other, and neither do writes that only reference the workspace.
+When the Workspace row is busy a read tries again for under a second before it
+answers 409 (`RES-002`), so a short holder such as a memory being saved in the
+same workspace no longer turns a read into a conflict. Ownership transfer, role
+change, an ownership-epoch change, workspace deletion and every management
+control (stop, finalize, resume preview, diff and confirm, reconnect) still
+exclude an open read, and the controls keep the Workspace row to themselves.
+
 ## Human control contract
 
 Base: `/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/management`.
@@ -188,8 +199,10 @@ they neither grant a new scope nor prove that draining/indexing can complete.
 The Context is refreshed under a NOWAIT shared row lock before the final role
 check. Private linked-owner reach also locks both ownership-witness link rows in
 user order. Those locks remain through observation commit, so concurrent privacy
-changes or unlink cannot return stale capabilities. Contention remains an error;
-this does not require a live public endpoint or take the global link mutex.
+changes or unlink cannot return stale capabilities. A busy Context or link row
+(a human feed read holds the Context row until it commits) is tried again for
+under a second; contention past that remains an error. This does not require a
+live public endpoint or take the global link mutex.
 Stop/finalize still require a separately authorized `integrations:manage` token
 and revalidate current authority at the mutation boundary. Resume, source writes,
 canonical content reads and paid service operations retain their normal gates.

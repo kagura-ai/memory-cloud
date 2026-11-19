@@ -109,6 +109,16 @@ async def _verify(db: MagicMock):
         return await APIKeyManager(db).verify_key(API_KEY)
 
 
+@pytest.fixture
+def owner_holds_workspace():
+    """The key's owner holds its workspace (#2928). The mocked db below serves
+    rows by call ORDER; the membership condition is covered on real rows in
+    ``tests/integration/test_workspace_key_membership_db.py``."""
+    with patch("auth.api_keys.key_owner_holds_workspace", new=AsyncMock(return_value=True)):
+        yield
+
+
+@pytest.mark.usefixtures("owner_holds_workspace")
 class TestVerifyKeyConnectorGate:
     @pytest.mark.asyncio
     async def test_suspended_connector_key_is_refused(self) -> None:
@@ -412,6 +422,7 @@ class TestConnectorKeyPauseDB:
         assert await manager.verify_key(plaintext) is None
 
 
+@pytest.mark.usefixtures("owner_holds_workspace")
 class TestVerifiedKeyConnectorFlag:
     """``VerifiedKey.is_connector_key``: the MCP transport withholds the
     last-used guardrail digest from a connector's shared key, whose owner is
