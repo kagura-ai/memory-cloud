@@ -37,6 +37,7 @@ import contextlib
 import secrets
 from datetime import UTC
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import ValidationError
@@ -52,7 +53,11 @@ from mcp_server.public.publication import (
     public_endpoints_enabled,
 )
 from models.public_mcp_domain import PublicMcpDomain
-from services.domain_tls_observations import DomainTLSReport
+from services.domain_tls_observations import (
+    DomainTLSReport,
+    reporting_configured,
+    store_report,
+)
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -69,37 +74,74 @@ PERMISSION_TIMEOUT_SECONDS: float = 3
 _SLOTS = asyncio.Semaphore(PERMISSION_CONCURRENCY)
 
 
-@router.put("/public-mcp-domains/tls-observation", include_in_schema=False)
+REPORT_PATH = "/public-mcp-domains/tls-observation"
+# A report body is far smaller; a larger one is refused before it is parsed.
+REPORT_BODY_LIMIT = 4096
+
+
+def _refused(reason: str, status_code: int, domain_id: UUID | None = None) -> Response:
+    """A bodyless refusal of a report, logged without the credential or a host name."""
+    logger.warning(
+        "public_mcp_domain_tls_report_refused",
+        reason=reason,
+        domain_id=str(domain_id) if domain_id else None,
+    )
+    return Response(status_code=status_code)
+
+
+async def _bounded(request: Request) -> bytes | None:
+    """The body, or ``None`` once it exceeds ``REPORT_BODY_LIMIT``."""
+    payload = bytearray()
+    async for part in request.stream():
+        payload.extend(part)
+        if len(payload) > REPORT_BODY_LIMIT:
+            return None
+    return bytes(payload)
+
+
+@router.put(REPORT_PATH, include_in_schema=False)
 async def receive_tls_observation(
-    request: Request, report: DomainTLSReport, db: Annotated[AsyncSession, Depends(get_db)]
+    request: Request, db: Annotated[AsyncSession, Depends(get_db)]
 ) -> Response:
-    """Accept the dedicated reporter's latest observation; never authorize serving."""
-    token = get_settings().mcp_public_domains_tls_reporter_token
-    if not token or not public_domains_enabled() or not public_endpoints_enabled():
-        return Response(status_code=404)
+    """Accept the reporter's latest certificate report of one claim; never authorize serving.
+
+    Checked in this order, each answered with an empty body: not configured
+    (404), the credential (401), the size (413), the body (422), the binding
+    to a claim that holds its name (404), then the report's freshness and its
+    order against the stored one (409); else stored (204). Nothing of a
+    request without the credential is parsed, and no statement runs before
+    the binding is read. The domain row is read without a lock and never
+    written.
+    """
+    settings = get_settings()
+    if not reporting_configured(settings):
+        return _refused("disabled", 404)
+    token = settings.mcp_public_domains_tls_reporter_token
     authorization = sole_authorization(request) or ""
     if not secrets.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
-        return Response(status_code=401)
-    row = await db.scalar(
-        select(PublicMcpDomain).where(PublicMcpDomain.id == report.domain_id).with_for_update()
-    )
+        return _refused("credential", 401)
+    payload = await _bounded(request)
+    if payload is None:
+        return _refused("size", 413)
+    try:
+        report = DomainTLSReport.model_validate_json(payload)
+    except ValidationError:
+        return _refused("invalid", 422)
+    row = await db.scalar(select(PublicMcpDomain).where(PublicMcpDomain.id == report.domain_id))
     if row is None or not report.matches(row):
-        return Response(status_code=404)
+        return _refused("binding", 404, report.domain_id)
     now = utcnow().replace(tzinfo=UTC)
     if not report.tls.observed_at <= now < report.tls.valid_until:
-        return Response(status_code=409)
-    if row.tls_report is not None:
-        try:
-            previous = DomainTLSReport.model_validate(row.tls_report)
-        except ValidationError:
-            previous = None
-        if previous is not None and previous.matches(row):
-            if previous == report:
-                return Response(status_code=204)
-            if previous.tls.observed_at >= report.tls.observed_at:
-                return Response(status_code=409)
-    row.tls_report = report.model_dump(mode="json")
+        return _refused("stale", 409, report.domain_id)
+    stored = await store_report(db, report)
     await db.commit()
+    if not stored:
+        return _refused("stale", 409, report.domain_id)
+    logger.info(
+        "public_mcp_domain_tls_report_stored",
+        domain_id=str(report.domain_id),
+        status=report.tls.status,
+    )
     return Response(status_code=204)
 
 

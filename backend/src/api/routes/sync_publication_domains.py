@@ -1,6 +1,6 @@
 """Private, finite observations of the exact publication bound to an installation."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -10,12 +10,15 @@ from sqlalchemy.orm import aliased
 
 from api.routes.public_mcp_domains import PublicMcpDomainResponse, domain_response
 from auth.sync_identity import SyncPrincipal
+from config.settings import get_settings
 from models.api_base import TZAwareBaseModel
 from models.public_mcp_domain import PublicMcpDomain
 from services.domain_tls_observations import (
     CertificateObservation,
     ObservedCertificate,
     current_certificate,
+    load_report,
+    reporting_configured,
 )
 from services.sync_authority import registered_service, sync_authority
 from services.sync_publication_domain_commands import bound_installation
@@ -106,9 +109,17 @@ async def observe_publication_domain(
             until = min(until, row.cooldown_until)
         elif row is not None:
             live = await domain_response(db, row)
-            domain = LiveDomain(**live.model_dump(), tls=current_certificate(row, observed))
+            tls: CertificateObservation | ObservedCertificate = CertificateObservation()
+            # #2941: the certificate report is read only while reporting is configured.
+            if reporting_configured(get_settings()):
+                tls = current_certificate(row, await load_report(db, row.id), observed)
+            domain = LiveDomain(**live.model_dump(), tls=tls)
             if live.serving and row.serve_until is not None:
                 until = min(until, row.serve_until)
+            if isinstance(tls, ObservedCertificate):
+                # The answer never outlives the evidence it carries (shown
+                # evidence is current, so this deadline is still ahead).
+                until = min(until, tls.valid_until.astimezone(UTC).replace(tzinfo=None))
         authority.deadlines.append(until)
         result = PublicationDomainObservation(
             subject=principal.user_id,

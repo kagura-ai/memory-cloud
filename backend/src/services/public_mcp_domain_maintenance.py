@@ -13,6 +13,10 @@ One run of the scheduler job ``public_mcp_domain_maintenance``
    - rows that are not ``released`` whose workspace row is gone, or whose
      publication is gone, revoked or of another workspace: ``pending`` rows
      are deleted, holders are ``released`` with the cooldown.
+   - while edge certificate reports are configured (#2941): reports whose
+     ``valid_until`` has passed are deleted (``public_mcp_domain_tls_reports``;
+     nothing else touches that table here, and nothing at all while the
+     feature is not configured).
 
 2. Up to ``MAINTENANCE_BATCH`` held rows (``active`` / ``suspended``) whose
    last check is older than ``RECHECK_AGE_SECONDS`` (or that were never
@@ -57,6 +61,7 @@ from models.public_mcp_domain import (
     PublicMcpDomain,
 )
 from services import public_mcp_domains as domain_service
+from services.domain_tls_observations import reporting_configured
 from services.public_mcp_domains import SYSTEM_ACTOR, _audit
 from utils.logger import get_logger
 
@@ -143,6 +148,17 @@ _RELEASE_ORPHAN_HOLDERS = text(
 )
 
 
+# Edge certificate reports past their own valid_until (#2941): never shown
+# again, so deleted. A report row locked by a reporter's write is skipped.
+_PURGE_TLS_REPORTS = text(
+    "DELETE FROM public_mcp_domain_tls_reports WHERE domain_id IN ("
+    "  SELECT domain_id FROM public_mcp_domain_tls_reports"
+    "  WHERE valid_until <= now()"
+    "  ORDER BY valid_until LIMIT :limit FOR UPDATE SKIP LOCKED"
+    ") RETURNING domain_id"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class DueDomain:
     """A held row to check: the fence (``check_seq``) and what the lookup needs."""
@@ -194,6 +210,8 @@ async def _committed(db: AsyncSession, statement: TextClause, **params: object) 
 async def housekeeping(db: AsyncSession, counts: MaintenanceCounts) -> None:
     """Expire claims, purge cooled-down rows and release orphans (one batch each).
 
+    Then, while certificate reports are configured, delete expired reports.
+
     Each step commits on its own; the audit row of a removed or released row
     is written in the step's transaction (``public_mcp_domain.released``,
     reason ``expired`` or ``orphaned``). Deleting a row whose cooldown has
@@ -231,6 +249,9 @@ async def housekeeping(db: AsyncSession, counts: MaintenanceCounts) -> None:
         },
     )
     counts.orphans_released += claims + holders
+
+    if reporting_configured(get_settings()):
+        await _committed(db, _PURGE_TLS_REPORTS, limit=limit)
 
 
 async def _audited(
