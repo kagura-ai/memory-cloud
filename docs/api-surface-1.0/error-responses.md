@@ -201,6 +201,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `AUTH-201` | `APIKeyError` — exceptions.py:129 | 401 | Invalid or missing API key. |
 | `AUTH-202` | `APIKeyRevokedError` — exceptions.py:139 | 401 | API key revoked. |
 | `AUTH-203` | `APIKeyExpiredError` — exceptions.py:146 | 401 | API key expired. |
+| `AUTH-204` | `ConnectorKeyScopeError` — exceptions.py | 403 | #2929: a connector key (linked to a connector, or named `connector:…`) on a REST route that authenticates an API key: no REST route accepts one. Message "This credential is not accepted on this route"; `details` is empty. On MCP the same code is the `error_code` of a `permission_denied` tool result for a tool outside the connector worker's tools ([mcp-tools.md › Connector keys](../mcp-tools.md#connector-keys)). Not raised under `CONNECTOR_KEY_SCOPE=log`. |
 | `ADMIN-001` | `AdminProtectionError` — exceptions.py:117 | 403 | System-admin invariant blocks operation (initial/last admin); `details` always stripped. |
 | `SYSADMIN-001` | `SystemAdminNotConfiguredError` — exceptions.py | 503 | #2767: `SYSTEM_ADMIN_MODE=service` and `SYSTEM_ADMIN_SERVICE_TOKEN` is empty; every system-admin route fails closed. |
 | `SYSADMIN-002` | `SystemAdminCredentialError` (an `AuthenticationError`) — exceptions.py | 401 | #2767: in `service` mode the bearer credential is missing, uses another scheme, or is wrong (one message for all). Sends `WWW-Authenticate: Bearer`. A session cookie alone gets it too. |

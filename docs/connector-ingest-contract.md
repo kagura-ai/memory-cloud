@@ -40,6 +40,30 @@ connector token. `{resource_id}` is the human-readable slug of the connector's
 resource (e.g. `slack-acme-eng`); the server resolves slug + authenticated
 workspace → internal UUID. The worker never sees or sends the UUID.
 
+### What the connector key is accepted for (#2929)
+
+The `kmc` block's key (the connector key: linked to its connector by
+`api_keys.connector_id`, or carrying the reserved `connector:` name) authenticates
+the MCP endpoint (`initialize`, `tools/call`) for these tools only:
+
+`recall`, `remember`, `create_edge`, `reference`, `update_memory`, `list_edges`,
+`delete_edge`, `forget`, `get_context_info`
+
+- Any other MCP tool answers a `permission_denied` tool result with
+  `error_code: "AUTH-204"`, and `tools/list` names only the tools above
+  ([MCP tools › Connector keys](mcp-tools.md#connector-keys)).
+- **No REST route accepts a connector key.** A REST route that authenticates an
+  API key answers `403` with `{"error": "AUTH-204", "message": "This credential
+  is not accepted on this route", "details": {}}`. The resource-ingest route
+  above authenticates by `X-Resource-API-Key` only and does not read an
+  `Authorization` bearer, so a request that carries the connector key there as
+  well is served as without it.
+- The connector key's owner, its workspace and the pause while the workspace
+  has no connector seats are unchanged.
+- `CONNECTOR_KEY_SCOPE=log` serves every such request as before and logs
+  `connector_key_scope_would_refuse` instead
+  ([deployment](deployment.md#connector_key_scope-2929)).
+
 ## Event payload
 
 Single event (`ResourceClient.ingest_event`):

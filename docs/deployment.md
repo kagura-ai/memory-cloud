@@ -1951,7 +1951,7 @@ then sends the DELETE with the selections. A workspace no other member is in
 cannot be handed over: the picker offers to delete it with the user instead,
 an explicit opt-in per workspace (`delete_workspaces`). API user
 deletion and the CLI both remove the account's OAuth clients, personal memories,
-keys and memberships, preserve live connector keys under the workspace owner,
+keys (share keys included, #2930) and memberships, preserve live connector keys under the workspace owner,
 and remove its identity link. Its agent-bound keys are deleted, never handed
 over; an agent left without a live key is suspended and the agents it
 registered name the workspace owner (#2373,
@@ -4837,8 +4837,10 @@ UPDATE api_keys AS k
 
 Keys still named like a connector key but linked to none — the connector was
 deleted before the migration, or the key carries an agent or a default context
-— stay ordinary workspace write keys. List them and revoke the ones nobody
-uses:
+— are not paused with the seats. Since #2929 they are accepted only where a
+connector key is ([`CONNECTOR_KEY_SCOPE`](#connector_key_scope-2929)): the
+connector worker's MCP tools, no REST route. List them and revoke the ones
+nobody uses:
 
 ```sql
 SELECT public_id, workspace_id, user_id, created_at
@@ -5218,6 +5220,45 @@ the routes and set the switch back to `default` on every connector
 `{"channel_routes": [], "unrouted_private_channels": "default"}`), or stop the
 connector worker. The `f35` downgrade refuses to run while any connector still
 uses routing.
+
+### `CONNECTOR_KEY_SCOPE` (#2929)
+
+A connector key — the API key a connector's worker holds: linked to its
+connector by `api_keys.connector_id`, or carrying the reserved `connector:`
+name — authenticates the MCP tools a connector worker uses (`recall`,
+`remember`, `create_edge`, `reference`, `update_memory`, `list_edges`,
+`delete_edge`, `forget`, `get_context_info`) and no REST route. Every other
+MCP tool answers a `permission_denied` tool result with `error_code: "AUTH-204"`
+and `tools/list` leaves it out; every REST route that authenticates an API key
+answers `403 AUTH-204`. Details: [MCP tools › Connector keys](mcp-tools.md#connector-keys)
+and [the connector ingest contract](connector-ingest-contract.md#what-the-connector-key-is-accepted-for-2929).
+No database statement depends on the setting.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CONNECTOR_KEY_SCOPE` | `enforce` | `enforce`: a connector key is refused outside the lists above, logged as `connector_key_scope_refused`. `log`: the request is served as before and logged as `connector_key_scope_would_refuse`. Both events carry `surface` (`rest` or `mcp`), `target` (`<METHOD> <route template>` or the tool name), `key_prefix` and `connector_id`, never the key. Surrounding blanks are trimmed; any other value, an empty one included, refuses to start. |
+
+**Upgrade:** the connector workers released so far call only the listed tools,
+so `enforce` needs no worker upgrade. `log` exists for an operator whose own
+client uses a connector key in another way: run with `log`, read the
+`connector_key_scope_would_refuse` events, move that client to an ordinary API
+key, return to `enforce`.
+
+### Share keys and their creator (#2930)
+
+A share key is honoured only while the account that created it can still share
+its context: OWNER-level access to the bound context (workspace owner or admin,
+or a member with the context's owner role whose context access list reaches
+it), checked on every request. Once the creator leaves the workspace, loses the
+owner role or loses the context from the access list, `/api/v1/share/recall`
+and `/api/v1/share/sessions` answer the same `401` as for an unknown key.
+Removing a member also revokes that member's share keys for the workspace's
+contexts (one `credential.revoked` operation record per key); deleting or
+erasing an account deletes its share keys with its API keys. A caller with
+OWNER-level access to a context can list every share key bound to it
+(`GET /api/v1/config/share-keys?context_id=<id>`) and revoke any of them
+(`POST /api/v1/config/share-keys/{key_id}/revoke`); both are session-only.
+Nothing needs to be configured.
 
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 

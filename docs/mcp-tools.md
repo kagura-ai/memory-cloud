@@ -115,6 +115,19 @@ With an OAuth access token, `tools/call` checks the token's scope before the too
 
 The 401 challenges, the token audience rule and session handling on `/mcp` are in [API Reference › Authentication and sessions on /mcp](api-reference.md#authentication-and-sessions-on-mcp).
 
+## Connector keys
+
+A connector key — the API key a chat or ingestion connector's worker holds (an `api_keys` row linked to its connector, or one carrying the reserved `connector:` name) — calls these tools and no other ([#2929](https://github.com/kagura-ai/memory-cloud/issues/2929)):
+
+`recall`, `remember`, `create_edge`, `reference`, `update_memory`, `list_edges`, `delete_edge`, `forget`, `get_context_info`
+
+- `tools/call` for any other tool, or for a name no tool has, is a tool result with `isError: true`: `{"status": "error", "error": "permission_denied", "error_code": "AUTH-204", "message": "This credential is not accepted for this tool", "help": "…"}`. The check runs before anything else for the call: nothing is charged to the daily MCP call limit and nothing is written. The session stays usable for the tools above.
+- `tools/list` names only those of the tools above that the URL's view lists (on stateless connections with `cacheScope: "private"`).
+- `initialize` and `server/discover` answer the static instructions text, without a guardrail digest or a default context's name.
+- `ping`, notifications and `DELETE /mcp` (ending the session) work as for any credential. The role checks of each tool apply as before.
+- Every other credential (API keys, agent-bound keys, OAuth tokens, session cookies) is unaffected.
+- With `CONNECTOR_KEY_SCOPE=log` ([deployment](deployment.md#connector_key_scope-2929)) every tool stays callable and listed, and each call outside the list logs `connector_key_scope_would_refuse`.
+
 ## Guide (2)
 
 | Tool | Description | Required Role |
@@ -622,7 +635,7 @@ Branch on `error`; it is stable. `message` is written for people and may change.
 |---------|---------|-----------|
 | `invalid_argument`, `validation_error`, `invalid_arguments`, `missing_fields`, `invalid_context_id_format`, `invalid_memory_id_format` | An argument is missing, malformed or out of range; `message` names it | Fix the argument |
 | `context_not_found`, `memory_not_found`, `not_found` | The id does not exist or is not visible to you (the two cases are deliberately indistinguishable) | `list_contexts`, `recall` or the matching `list_*` tool |
-| `permission_denied` | Your workspace or context role does not allow the operation | Ask a workspace owner for a higher role |
+| `permission_denied` | Your workspace or context role does not allow the operation. With `error_code: "AUTH-204"`: the connection authenticates with a [connector key](#connector-keys), which does not call this tool | Ask a workspace owner for a higher role; for `AUTH-204`, use an ordinary API key or sign in |
 | `quota_exceeded`, `rate_limit_exceeded` | A plan quota or the daily MCP call limit is used up; `quota_type`, `limit`, `resets_at` and similar fields say which ([`plan_headroom`](#plan-headroom--plan_headroom) warns at 80 %) | `get_usage`; wait for the reset |
 | `payload_too_large` | One memory's text (summary + context_summary + content + details) is over 1,000,000 characters; `limit` and `actual` give the numbers | Split the material into several memories, one topic each, or shorten it |
 | `plan_required`, `feature_not_available` | The workspace's plan or an operator switch does not include the feature (`gate`, `required_plan`) | None from the model; the workspace owner decides |
