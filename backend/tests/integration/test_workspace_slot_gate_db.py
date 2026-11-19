@@ -1060,3 +1060,80 @@ async def test_rest_remember_confines_a_key_and_a_binding_before_the_gate(world:
             set_agent_scope(None)
         assert resp.status_code == 404, (label, resp.text)
         assert resp.json()["error"] != "SLOT-001", label
+
+
+# ---------------------------------------------------------------------------
+# Account routes that name a default context in a suspended workspace
+# ---------------------------------------------------------------------------
+
+
+async def test_a_default_context_in_a_suspended_workspace_reads_as_no_name(world: World) -> None:
+    """Listing keys and OAuth grants and regenerating a global key keep working
+    when the default context sits in a suspended workspace; setting such a
+    default answers the uniform not-found."""
+    from auth.api_keys import APIKeyManager
+    from auth.dependencies import require_session_auth
+    from models.auth import APIKey, OAuth2Client, OAuthGrantSetting
+
+    w = world
+    for caller in (w.owner, w.member):
+        client_id = f"c-{uuid4().hex[:12]}"
+        w.session.add(
+            OAuth2Client(
+                client_id=client_id,
+                client_secret_hash="x" * 64,
+                client_name="Slot client",
+                redirect_uris=["http://127.0.0.1/cb"],
+                grant_types=["authorization_code"],
+                response_types=["code"],
+                scope="memory:read",
+                token_endpoint_auth_method="none",
+            )
+        )
+        await w.session.flush()
+        w.session.add(
+            OAuthGrantSetting(user_id=caller, client_id=client_id, default_context_id=w.ctx["s1"])
+        )
+        _, key = await APIKeyManager(w.session).create_key(
+            name=f"slot-{uuid4().hex[:6]}", user_id=caller, default_context_id=w.ctx["s1"]
+        )
+        await w.session.commit()
+        session = {require_session_auth: lambda c=caller: {"user_id": c, "sub": c}}
+        try:
+            async with _client(w, session) as client:
+                with _mode("enforce"):
+                    keys = await client.get("/api/v1/config/api-keys")
+                    grants = await client.get("/api/v1/me/oauth/grants")
+                    regenerated = await client.post(
+                        f"/api/v1/config/api-keys/{key.public_id}/regenerate"
+                    )
+                    created = await client.post(
+                        "/api/v1/config/api-keys",
+                        json={
+                            "name": f"slot-{uuid4().hex[:6]}",
+                            "default_context_id": str(w.ctx["s1"]),
+                        },
+                    )
+                    put_default = await client.put(
+                        f"/api/v1/me/oauth/grants/{client_id}/default-context",
+                        json={"default_context_id": str(w.ctx["s1"])},
+                    )
+        finally:
+            await w.session.rollback()
+            await w.session.execute(
+                delete(OAuthGrantSetting).where(OAuthGrantSetting.client_id == client_id)
+            )
+            await w.session.execute(delete(OAuth2Client).where(OAuth2Client.client_id == client_id))
+            await w.session.execute(delete(APIKey).where(APIKey.user_id == caller))
+            await w.session.commit()
+        assert keys.status_code == 200, (caller, keys.text)
+        listed = {k["id"]: k for k in keys.json()}
+        assert listed[key.public_id]["default_context_name"] is None, caller
+        assert grants.status_code == 200, (caller, grants.text)
+        (grant,) = [g for g in grants.json() if g["client_id"] == client_id]
+        assert grant["default_context_name"] is None, caller
+        assert regenerated.status_code in (200, 201), (caller, regenerated.text)
+        assert regenerated.json()["api_key"], caller
+        assert regenerated.json()["default_context_name"] is None, caller
+        assert created.status_code == 404, (caller, created.text)
+        assert put_default.status_code == 404, (caller, put_default.text)
