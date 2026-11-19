@@ -396,3 +396,13 @@ async def test_routes_acting_on_another_member_require_a_manager_role(world, met
     assert response.json()["error"] == "AUTH-101"
     assert await _state(world) == before
     assert await _history_count(world, world.x) == 0
+
+
+async def test_a_member_without_a_manager_role_gets_a_403_for_another_members_list(world):
+    """Viewing another member's credentials needs the owner or an admin role;
+    a plain member gets the uniform refusal, not a server error."""
+    response = await _call(
+        world, "GET", _member_path(world.x, world.owner, ""), session=world.member
+    )
+
+    assert (response.status_code, response.json()) == (403, REFUSAL)

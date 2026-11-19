@@ -429,7 +429,9 @@ async def get_member_credentials(
             raise HTTPException(status_code=404, detail="Member not found")
 
         return MemberCredentialsResponse(**credentials, target_user_role=target_role)
-    except HTTPException:
+    except (HTTPException, AuthorizationError):
+        # A caller without the owner or admin role viewing another member is
+        # the uniform 403, not a server error.
         raise
     except ValueError as e:
         logger.error("get_member_credentials_invalid", error=str(e), user_id=user_id)
