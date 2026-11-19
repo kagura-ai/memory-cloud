@@ -1265,3 +1265,48 @@ async def test_the_member_credentials_page_is_gated_after_membership(world: Worl
         users = [w.owner, w.admin, w.member]
         await w.session.execute(delete(APIKey).where(APIKey.user_id.in_(users)))
         await w.session.commit()
+
+
+async def test_a_public_bound_key_of_a_suspended_workspace_is_not_regenerated(
+    world: World,
+) -> None:
+    """A public-bound key has no workspace of its own: the gate reads the
+    workspace of its bound context."""
+    from auth.dependencies import require_session_auth
+    from models.auth import APIKey
+
+    w = world
+    public = Context(
+        id=uuid4(),
+        workspace_id=w.ws["s"],
+        name=f"slot-public-{uuid4().hex[:6]}",
+        created_by=w.owner,
+        is_private=False,
+        is_public=True,
+    )
+    w.session.add(public)
+    await w.session.flush()
+    key = APIKey(
+        user_id=w.owner,
+        name=f"slot-{uuid4().hex[:6]}",
+        key_hash=uuid4().hex + uuid4().hex,
+        key_prefix="kmc_" + uuid4().hex[:8],
+        bound_context_id=public.id,
+    )
+    w.session.add(key)
+    await w.session.commit()
+    session = {require_session_auth: lambda: {"user_id": w.owner, "sub": w.owner}}
+    try:
+        async with _client(w, session) as client:
+            with _mode("enforce"):
+                refused = await client.post(f"/api/v1/config/api-keys/{key.public_id}/regenerate")
+            with _mode("off"):
+                served = await client.post(f"/api/v1/config/api-keys/{key.public_id}/regenerate")
+    finally:
+        await w.session.rollback()
+        await w.session.execute(delete(APIKey).where(APIKey.bound_context_id == public.id))
+        await w.session.execute(delete(Context).where(Context.id == public.id))
+        await w.session.commit()
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["error"] == "SLOT-001"
+    assert served.status_code in (200, 201), served.text

@@ -21,13 +21,14 @@ from auth.connector_keys import CONNECTOR_KEY_REGENERATE_MESSAGE, reject_reserve
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import APIKey
+from models.auth import APIKey, Context
 from services.credential_default_context import default_context_names, readable_context
 from services.security_notification_service import (
     SecurityEvent,
     schedule_security_notification,
 )
 from services.workspace_slot_gate import ensure_slot_active
+from services.workspace_slots import workspace_slots_enforced
 from utils import db_transaction, get_user_id
 from utils.datetime import utcnow
 from utils.exceptions import (
@@ -577,8 +578,18 @@ async def regenerate_api_key(
         if old_key.connector_id is not None:
             raise HTTPException(status_code=422, detail=CONNECTOR_KEY_REGENERATE_MESSAGE)
         # #2918: a slot-suspended workspace issues no new secret (deleting the
-        # key stays possible).
-        await ensure_slot_active(db, old_key.workspace_id, user_id=user_id)
+        # key stays possible): the key's workspace, or for a public-bound key
+        # the workspace of its bound context (read only in enforce).
+        gated_workspace = old_key.workspace_id
+        if (
+            gated_workspace is None
+            and old_key.bound_context_id is not None
+            and workspace_slots_enforced()
+        ):
+            gated_workspace = await db.scalar(
+                select(Context.workspace_id).where(Context.id == old_key.bound_context_id)
+            )
+        await ensure_slot_active(db, gated_workspace, user_id=user_id)
 
         # Store old key info. agent_id / bound_context_id are immutable
         # bindings — the replacement must keep them, otherwise regenerating an
