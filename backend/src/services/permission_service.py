@@ -45,6 +45,7 @@ from services.workspace_slot_gate import (
     ensure_slot_active,
     slot_suspended,
 )
+from services.workspace_slots import workspace_slots_enforced
 from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 from utils.logger import get_logger
 
@@ -1287,7 +1288,10 @@ class PermissionService:
         return allowed
 
     async def _slot_suspended_once(self, workspace_id: UUID) -> bool:
-        """``slot_suspended`` for ``workspace_id``, read once per instance."""
+        """``slot_suspended`` for ``workspace_id``, read once per instance
+        while the mode is ``enforce`` (otherwise ``False``, nothing kept)."""
+        if not workspace_slots_enforced():
+            return False
         memo: dict[UUID, bool] = self.__dict__.setdefault("_slot_suspended_memo", {})
         if workspace_id not in memo:
             memo[workspace_id] = await slot_suspended(self.db, workspace_id)

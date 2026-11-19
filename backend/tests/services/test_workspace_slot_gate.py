@@ -319,6 +319,7 @@ async def test_a_batch_over_one_workspace_reads_the_suspension_once() -> None:
     with (
         patch.object(PermissionService, "_can_access_memory_rbac", AsyncMock(return_value=True)),
         patch("services.permission_service.slot_suspended", lookup),
+        patch("services.permission_service.workspace_slots_enforced", return_value=True),
     ):
         answers = [
             await perm.can_access_memory(
