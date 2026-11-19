@@ -494,7 +494,9 @@ minutes) and once when the scheduler starts. It is registered only while
      release was audited);
    - rows that are not `released` whose workspace row is gone, or whose
      publication is gone, revoked or of another workspace: `pending` rows are
-     deleted, held rows are released with the cooldown.
+     deleted, held rows are released with the cooldown;
+   - while edge certificate reports are configured, reports whose `valid_until`
+     has passed are deleted (a fifth statement, not counted in the job status).
 2. Reads up to 200 held rows whose last check is older than 1 hour (or that
    were never checked): rows whose last lookup was `unavailable` after all
    others, then the oldest check first. The connection is released.
@@ -559,6 +561,7 @@ python -m src.cli.public_mcp_domains release --domain-id <id> --skip-cooldown --
 | `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` | *(empty)* | Names never claimable, nor any name under them, comma-separated (no leading dot). Refused on the request path from the first request after a restart, whatever the domain's row says; the next check suspends the domain (`reserved`). |
 | `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | Hours a released name stays closed to other workspaces (0–2160). |
 | `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | Domains (`pending`, `active`, `suspended`) per workspace (1–50). |
+| `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` | *(empty)* | Bearer credential of the edge certificate reporter ("Edge certificate reports"). Empty: every report is `404`, nothing reads or writes `public_mcp_domain_tls_reports`, every certificate is `unreported`. No blanks; under `ENVIRONMENT=production` at least 32 characters and not another service credential. Never logged. |
 | `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` | `false` | Experimental. The owner's claim, verify and remove through an installation's browser client ("Installation-bound owner operations"), advertised as `public.domains.operations.v1`. Takes effect only while `public.domains.observation.v1` is advertised (`OIDC_ENABLED`, `MCP_PUBLIC_ENDPOINTS_ENABLED`, `SYNC_INTEGRATIONS_ENABLED`, `MCP_PUBLIC_USAGE_BUDGET_ENABLED` and this file's switch); off: the three routes answer `404` before authentication and run no statement. No cross-check at start-up, so turning `MCP_PUBLIC_DOMAINS_ENABLED` off alone still closes everything. |
 
 A malformed host name in the routing target, an application host or a
@@ -715,6 +718,9 @@ data: never exported, nothing in it for account erasure.
   rows with the cooldown and deletes claims, then deletes the released rows
   when the cooldown ends.
 - Unpublish: released in the same transaction (above).
+- Edge certificate reports (`public_mcp_domain_tls_reports`): one row per claim
+  id, no person column and no foreign key; deleted by the maintenance pass once
+  past their `valid_until`, and never shown for a released or removed claim.
 
 ## Audit and log events
 
@@ -744,6 +750,8 @@ installation-bound command also carries `client_id` (the browser client) and
 | `public_mcp_domain_maintenance_failed` | warning | `error_class` | a job run raised |
 | `scheduled_public_mcp_domain_maintenance` / `public_mcp_domain_maintenance_disabled` | info | `interval_seconds` / — | job registration at scheduler start |
 | `public_mcp_alias_not_served` | debug | — | an alias lookup found nothing |
+| `public_mcp_domain_tls_report_stored` | info | `domain_id`, `status` | an edge certificate report was stored |
+| `public_mcp_domain_tls_report_refused` | warning | `reason`, `domain_id` (when known) | an edge certificate report was refused |
 
 No log line, usage event, job count or audit row carries a host name, a token,
 a DNS answer, a resolved address or the `Origin` of an alias request.
@@ -760,7 +768,8 @@ The maximum lifetime is 30 seconds and a positive serving observation ends
 by the lease deadline. A released row exposes only release and cooldown
 metadata during its remaining cooldown. A missing binding has no domain
 facts. DNS proof, routing, and serving are independent. TLS is
-`{"status":"unreported"}` until a trusted edge supplies certificate evidence.
+`{"status":"unreported"}` unless a current certificate report of the edge
+names this claim ("Edge certificate reports").
 
 ### Installation-bound owner operations
 
@@ -927,22 +936,45 @@ A `401`, `403` or `404` of a caller whose token was already verified is
 recorded as `sync.authority.denied` (best effort, after the rollback), as on
 every synchronization control route; a `409` or `429` writes none.
 
-### Edge certificate reports (DevOps #464)
+### Edge certificate reports
 
-The certificate operator sends an HTTPS `PUT /internal/public-mcp-domains/tls-observation`
-on the private network using one `Authorization: Bearer <reporter-token>` header.
-Keep the public proxy's existing denial of all `/internal` routes. The KMC API
-and reporter alone receive `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` through
-secret injection. Use an independent random credential of at least 32 characters.
-Both public endpoint and domain switches must be enabled. Rotate by pausing
-delivery, replacing the token on both services and restarting them, then sending
-a fresh report. KMC never needs the certificate private key.
+The certificate operator of the edge (#2941) reports what it observed about the
+certificate of one claim; the owner's installation-bound observation shows the
+report as the domain's `tls`. A report never authorizes serving, never changes
+the domain row, the standard endpoint, the permission call or the right, and KMC
+never holds a certificate's private key.
+
+**The route.** `PUT /internal/public-mcp-domains/tls-observation`, one
+`Authorization: Bearer <MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN>` header, a JSON
+body of at most 4,096 bytes. It is internal: the same ingress rule that answers
+`404` for every `/internal` path from outside keeps it private, and the reporter
+reaches the API on the private network. The deployment provides a transport that
+keeps the bearer confidential between the reporter and the API (the private
+network of one host, or TLS between hosts). The route answers with an empty
+body, and checks in this order:
+
+| Answer | When |
+|---|---|
+| `404` | not configured: `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` empty, or `MCP_PUBLIC_DOMAINS_ENABLED` or `MCP_PUBLIC_ENDPOINTS_ENABLED` off |
+| `401` | no `Authorization` header, more than one, or another credential |
+| `413` | a body over 4,096 bytes |
+| `422` | an invalid body (a missing or unknown key, a status outside the five, a time without an offset or outside the representable range, a window longer than five minutes, `valid` without a future certificate end, `expired` without an elapsed one) |
+| `404` | the binding: no claim with this id, a claim that does not hold its name (`pending` or `released`), another host name or endpoint, or a report observed before the claim was created |
+| `409` | a report observed in the future or already past its `valid_until` at receipt; an older report than the stored one; another report observed at the same instant as the stored one |
+| `204` | stored, or the stored report sent again unchanged |
+
+Nothing of a request without the credential is read, and no statement runs
+before the binding is read. Refusals are logged as
+`public_mcp_domain_tls_report_refused` with a reason (`disabled`, `credential`,
+`size`, `invalid`, `binding` or `stale`) and the domain id when it is known; a
+stored report as `public_mcp_domain_tls_report_stored` with the domain id and
+the status. No log line carries the credential or a host name.
 
 ```json
 {
-  "domain_id": "39d777eb-73ff-446f-9f10-6df15ddf495c",
+  "domain_id": "8d0f6c1e-2c4b-4c47-9f39-3a3a1c1f2b10",
   "hostname": "mcp.example.org",
-  "endpoint_id": "83ee7e0e-c715-4089-8642-378acf8415da",
+  "endpoint_id": "e0f1a2b3-c4d5-4e6f-8a7b-9c0d1e2f3a4b",
   "tls": {
     "status": "renewal_failed",
     "observed_at": "2026-11-19T12:00:00Z",
@@ -952,32 +984,58 @@ a fresh report. KMC never needs the certificate private key.
 }
 ```
 
-Capture the KMC claim UUID, exact normalized hostname and publication endpoint
-**before** the edge probe or certificate operation. Keep that tuple with its
-result. Use the operator domain inventory (`show --domain-id` with a known claim)
-to confirm it. If the binding is ambiguous, skip the observation. Looking up
-the current holder to label a past hostname-only event could attribute another
-brand's certificate to it. A successful permission check is insufficient.
+**Statuses.** `pending` (no certificate yet), `valid` (a certificate whose end
+is `certificate_not_after`), `issuance_failed`, `renewal_failed` (shown as such
+even while the previous certificate is still valid) and `expired`. All four
+`tls` keys are always sent; `certificate_not_after` is `null` when unknown.
+Times carry an offset; KMC stores and shows them in UTC.
 
-Send `pending`, `valid`, `issuance_failed`, `renewal_failed` or `expired`;
-include all three timestamps, using null for an unknown certificate expiry
-on pending/failed reports. A valid certificate needs a future expiry and
-an expired one an elapsed expiry at observation time. Use UTC, synchronized
-clocks, and a freshness window of at most five minutes. Refresh before the
-window ends; stop refreshing on provider outage.
+**The binding.** A report names the claim's `domain_id`, its canonical
+`hostname` and its `endpoint_id`, and is accepted only for a claim in state
+`active` or `suspended`: a `pending` claim holds nothing, so no certificate can
+be its own. The reporter reads that tuple from the operator command, which runs
+where the API runs: `python -m src.cli.public_mcp_domains show --hostname <name>`
+lists every row of the name with its `domain_id`, `state`, `endpoint_id`,
+`created_at` and `check_seq`. Read it right before the probe and again after
+it, and skip the report when the row changed. A successful permission call alone
+is never evidence of a certificate.
 
-204 acknowledges a stored report or its exact fresh retry. 401 indicates a
-credential problem. 404 means disabled or an unknown, released or mismatched
-binding. 409 rejects a stale, future, out-of-order or conflicting observation.
-422 indicates invalid report fields. Retry a lost acknowledgement with the
-original report; never advance its timestamps to pass freshness checks.
+**Freshness and retries.** `valid_until` is at most five minutes after
+`observed_at`. Refresh before the window ends; stop when the certificate state
+cannot be observed, and the report then expires on its own. Retry a lost
+acknowledgement with the same report (`204`); never move its times forward to
+pass a check. A report from the future is refused: keep the reporter's clock
+synchronised.
 
-Migration `f57_2941_domain_tls` adds one nullable JSONB column with no backfill.
-Apply it before rolling out the new API; the previous API ignores the column.
-Only the latest observation is retained, with the domain row, across restarts.
-Releasing the claim hides it immediately; pruning the row deletes it. Stopping
-the reporter lets evidence expire within five minutes. Malformed, stale or
-misbound evidence yields `unreported`. A still-fresh valid observation becomes
-`expired` when the certificate expires. Clients validate both the outer and
-TLS deadlines and check DNS, routing and serving separately. Reporting does
-not change the publication, entitlement, DNS, or the standard MCP endpoint.
+**What the observation shows.** The stored report of the claim the
+observation shows, while that row holds its name, names it exactly, was
+observed at or after the row's `created_at` and not after the observation's own
+`observed_at`, and is before its `valid_until`. A `valid` report whose
+`certificate_not_after` has passed is shown as `expired`; `valid` without
+`certificate_not_after` and everything that is not provably current (no
+report, the feature not configured, another row, a pending or released row, a
+report past its `valid_until`) are `{"status":"unreported"}`. A shown report
+shortens the observation's own `valid_until` to the report's when that is
+sooner. The `tls` object has exactly the keys above; `schema_version` and the
+capabilities are unchanged.
+
+**Reassignment.** Evidence is the claim's: a removed or released claim shows
+nothing, and a new claim of the same name is a new row that starts
+`unreported` until a report names it and was observed after it was created.
+
+**Rotation.** One credential at a time: pause reports, replace
+`MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` on the API and on the reporter, restart
+both colours, then send a fresh report. Reports stored before stay valid until
+their own `valid_until`.
+
+**Restarts.** Stored reports survive an API restart; a report whose
+`valid_until` has passed is `unreported`, whether or not it was deleted yet.
+
+**Data and migration.** Reports live in `public_mcp_domain_tls_reports`, one
+row per claim id: the host name and endpoint id the report named, the status and
+four times. No person column and no foreign key; never exported, nothing in it
+for account erasure. The domain maintenance pass deletes reports whose
+`valid_until` has passed. The table is created by the revision
+`f58_2941_domain_tls_reports`, which locks no existing table. While the feature
+is not configured nothing reads or writes the table, so the code runs before
+the revision is applied; apply it before setting the credential.

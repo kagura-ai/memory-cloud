@@ -4272,6 +4272,7 @@ call, job, CLI, data lifecycle, log events):
 | `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` | *(empty)* | Names never claimable, nor any name under them, comma-separated. Refused on the request path from the first request after a restart; the next check suspends a domain under them (`reserved`). |
 | `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | `0`–`2160`. Hours a released name stays closed to other workspaces (the releasing workspace may take it back at once). |
 | `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | `1`–`50`. Domains (`pending`, `active`, `suspended`) per workspace; one per publication in any case. |
+| `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` | *(empty)* | Bearer credential of the edge certificate reporter ([#2941](https://github.com/kagura-ai/memory-cloud/issues/2941), "Edge certificate reports" in [Public MCP custom domains](public-mcp-domains.md)). Empty: every report is refused (`404`), no statement runs on `public_mcp_domain_tls_reports` and every certificate is `unreported`. Set (with both switches on): reports are accepted and shown; apply the revision `f58_2941_domain_tls_reports` first. A value with a blank refuses start-up; under `ENVIRONMENT=production` it must be at least 32 characters and differ from the system-admin, billing and worker service credentials. Never logged. |
 
 A malformed host name in the routing target, an application host or a
 reserved suffix stops the process at start-up; the message names the
