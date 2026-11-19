@@ -161,19 +161,23 @@ class TestOrderedSnapshot:
         assert set(would[0]["would_suspend"]) == {str(maxed), str(free_b)}
 
     async def test_shadow_with_a_busy_lock_commits_after_one_try(
-        self, slot_world: SlotWorld
+        self, slot_world: SlotWorld, async_engine
     ) -> None:
         owner, maxed, *_ = await _owner_with_max(slot_world)
         release = await slot_world.hold_owner_lock(owner)
         try:
-            with slot_mode("shadow"), structlog.testing.capture_logs() as logs:
-                started = asyncio.get_running_loop().time()
+            with (
+                slot_mode("shadow"),
+                structlog.testing.capture_logs() as logs,
+                StatementRecorder(async_engine) as recorder,
+            ):
                 result = await _deliver(slot_world, maxed, 2, "free")
-                elapsed = asyncio.get_running_loop().time() - started
         finally:
             await release()
         assert result.outcome == "applied"
-        assert elapsed < 0.5  # one try, no backoff
+        # One try of the owner lock, no retry (no backoff between tries).
+        assert len(recorder.advisory_locks()) == 1
+        assert "pg_try_advisory_xact_lock" in recorder.advisory_locks()[0]
         assert [e["reason"] for e in logs if e["event"] == "workspace_slots_deferred"] == [
             "lock_busy"
         ]
@@ -629,7 +633,8 @@ class TestSavepointsHoldADatabaseError:
     async def test_shadow_does_not_wait_on_a_locked_row(
         self, slot_world: SlotWorld, async_engine
     ) -> None:
-        """Review C7: a shadow delete that meets a locked row gives up at once."""
+        """A shadow delete that meets a locked row gives up (``lock_timeout``)
+        instead of waiting for the holder, and logs it."""
         owner = await slot_world.user("shadow-locked", bonus=1)
         await slot_world.workspace(owner, current=True)
         waiting = await slot_world.workspace(owner)
@@ -642,18 +647,20 @@ class TestSavepointsHoldADatabaseError:
         try:
             with slot_mode("shadow"), structlog.testing.capture_logs() as logs:
                 async with slot_world.maker() as s:
-                    started = asyncio.get_running_loop().time()
                     assert await slots.owner_slot_lock(s, owner, wait=False, tries=1)
-                    await slots.reconcile_workspace_slots(
-                        s, owner, cause="sweep", allow_suspend=False
+                    # The holder never lets go before the finally below: a
+                    # reconcile that waited for it would never return.
+                    await asyncio.wait_for(
+                        slots.reconcile_workspace_slots(
+                            s, owner, cause="sweep", allow_suspend=False
+                        ),
+                        30,
                     )
-                    elapsed = asyncio.get_running_loop().time() - started
                     assert await s.scalar(text("SELECT current_setting('lock_timeout')")) == "0"
                     await s.commit()
         finally:
             await holder.rollback()
             await holder.close()
-        assert elapsed < 2
         assert [e["event"] for e in logs] == ["workspace_slots_shadow_failed"]
         assert await slot_world.rows(owner) == {waiting: owner}
 

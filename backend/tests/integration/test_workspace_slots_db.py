@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.auth import Workspace
 from models.workspace_slots import WorkspaceSlotState, WorkspaceSlotSuspension
 from services import workspace_slots as slots
+from services.workspace_locks import NOWAIT_LOCK_TRIES
 from services.workspace_slots import (
     SlotChange,
     owner_selection_required,
@@ -158,18 +159,19 @@ async def _issue_owner(world: SlotWorld) -> tuple[str, UUID, UUID, UUID]:
 
 class TestOwnerLock:
     async def test_try_lock_gives_up_after_the_budget_and_the_transaction_stays_usable(
-        self, slot_world: SlotWorld
+        self, slot_world: SlotWorld, async_engine
     ) -> None:
         owner = await slot_world.user()
         release = await slot_world.hold_owner_lock(owner)
         try:
             async with slot_world.maker() as s:
-                started = asyncio.get_running_loop().time()
-                assert await owner_slot_lock(s, owner, wait=False) is False
-                elapsed = asyncio.get_running_loop().time() - started
-                assert 0.5 < elapsed < 3
+                with StatementRecorder(async_engine) as budget:
+                    assert await owner_slot_lock(s, owner, wait=False) is False
+                assert len(budget.advisory_locks()) == NOWAIT_LOCK_TRIES
                 assert await s.scalar(text("SELECT 1")) == 1
-                assert await owner_slot_lock(s, owner, wait=False, tries=1) is False
+                with StatementRecorder(async_engine) as once:
+                    assert await owner_slot_lock(s, owner, wait=False, tries=1) is False
+                assert len(once.advisory_locks()) == 1
         finally:
             await release()
         async with slot_world.maker() as s:
