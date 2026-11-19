@@ -478,11 +478,46 @@ async def _build_oauth_user_dict(
     }
 
 
+def _apply_connector_key_scope(request: Request, verified: VerifiedKey) -> None:
+    """Refuse a connector key on a REST route that does not accept one (#2929).
+
+    Runs where a verified API key becomes a REST principal, after the key is
+    verified (an unknown, revoked or paused key keeps its 401) and after the
+    public-bound refusal, before the agent scope and the principal. The
+    decision reads the route template FastAPI matched, not the URL. In
+    ``CONNECTOR_KEY_SCOPE=log`` it logs and returns.
+
+    Raises:
+        ConnectorKeyScopeError: 403 ``AUTH-204``.
+    """
+    if not verified.connector_scoped:
+        return
+    from auth.connector_key_scope import (
+        check_connector_key_scope,
+        connector_key_rest_allowed,
+        matched_route_template,
+        rest_target,
+    )
+
+    template = matched_route_template(request.scope)
+    check_connector_key_scope(
+        surface="rest",
+        target=rest_target(request.method, template),
+        allowed=connector_key_rest_allowed(request.method, template),
+        key_prefix=verified.key_prefix,
+        connector_id=verified.connector_id,
+    )
+
+
 async def verify_api_key_user(
+    request: Request,
     api_key: str | None = Depends(get_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Verify API key and return user info. Raises 401 if missing/invalid.
+
+    #2929: a connector key is accepted only on the routes
+    ``auth.connector_key_scope`` lists (none today): elsewhere 403 ``AUTH-204``.
 
     Example:
         @app.get("/api/v1/memories")
@@ -517,6 +552,9 @@ async def verify_api_key_user(
                 "they are only valid on /api/v1/public/{context_id}/* endpoints"
             ),
         )
+
+    # #2929: a connector key only where a connector key is accepted.
+    _apply_connector_key_scope(request, result)
 
     # Issue #1275: record the verified agent binding for the chokepoints.
     from auth.agent_scope import set_agent_scope_from_verified
@@ -701,6 +739,9 @@ async def get_user_from_api_key_or_session(
                         "they are only valid on /api/v1/public/{context_id}/* endpoints"
                     ),
                 )
+            # #2929: a connector key only where a connector key is accepted. A
+            # refusal raises here: the session branch below is never reached.
+            _apply_connector_key_scope(request, result)
             # Issue #1275: record the verified agent binding for the chokepoints.
             from auth.agent_scope import set_agent_scope_from_verified
 
