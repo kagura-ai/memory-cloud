@@ -111,21 +111,22 @@ def matched_route_template(scope: Mapping[str, Any]) -> str | None:
 
     FastAPI includes routers lazily: ``scope["route"]`` is the route object as
     its own router declared it (``/memory/remember``), and the template with
-    every include prefix (``/api/v1/memory/remember``) is the path format of the
-    effective route context FastAPI records for the request. A route registered
-    on the application itself has no such context; its own ``path`` is already
-    the full template. A route of a mounted sub-application resolves to its
-    path inside the mount, which no list entry names. ``None`` when no route
+    every include prefix (``/api/v1/memory/remember``) is the ``path`` of the
+    effective route context FastAPI records for the request (with path
+    converters as declared: ``{name:path}``). A route registered on the
+    application itself has no such context; its own ``path`` is already the
+    full template. A route of a mounted sub-application resolves to its path
+    inside the mount, which no list entry names. ``None`` when no route
     matched. The sweep test pins the result for every route of the app.
     """
     fastapi_scope = scope.get("fastapi")
     if isinstance(fastapi_scope, Mapping):
         context = fastapi_scope.get("effective_route_context")
-        template = getattr(context, "path_format", None)
+        template = getattr(context, "path", None)
         if isinstance(template, str) and template:
             return template
     route = scope.get("route")
-    template = getattr(route, "path_format", None) or getattr(route, "path", None)
+    template = getattr(route, "path", None)
     return template if isinstance(template, str) and template else None
 
 
