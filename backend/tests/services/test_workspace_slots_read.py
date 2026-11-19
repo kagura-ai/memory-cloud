@@ -52,3 +52,43 @@ async def test_enforced_lookup_is_one_statement() -> None:
     with _mode("enforce"):
         assert await suspended_workspace_ids(db, [wid, wid, uuid4()]) == frozenset({wid})
     assert db.execute.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Startup check
+# ---------------------------------------------------------------------------
+
+
+def _get_db_yielding(db):
+    async def get_db():
+        yield db
+
+    return get_db
+
+
+@pytest.mark.asyncio
+async def test_startup_check_needs_no_database_while_off() -> None:
+    from services.workspace_slots import assert_slot_tables_ready
+
+    def unreachable():
+        raise AssertionError("no database access while off")
+
+    with _mode("off"), patch("db.base.get_db", unreachable):
+        await assert_slot_tables_ready()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+async def test_startup_check_refuses_without_the_tables(mode: str) -> None:
+    from services.workspace_slots import assert_slot_tables_ready
+
+    result = MagicMock()
+    result.scalar.return_value = False
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    with _mode(mode), patch("db.base.get_db", _get_db_yielding(db)):
+        with pytest.raises(RuntimeError, match="f56_2918_workspace_slots"):
+            await assert_slot_tables_ready()
+    result.scalar.return_value = True
+    with _mode(mode), patch("db.base.get_db", _get_db_yielding(db)):
+        await assert_slot_tables_ready()

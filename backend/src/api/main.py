@@ -133,6 +133,12 @@ async def lifespan(app: FastAPI):
 
     assert_oauth_endpoints_safe()
 
+    # #2918: WORKSPACE_SLOT_SUSPENSION=shadow|enforce refuses to start before
+    # migration f56 created the slot tables (no database access while off).
+    from services.workspace_slots import assert_slot_tables_ready
+
+    await assert_slot_tables_ready()
+
     # Migrations are managed by Alembic: `alembic upgrade head`
 
     # Initialize auth routes (Issue #13, #31)
