@@ -510,6 +510,7 @@ def _apply_connector_key_scope(request: Request, verified: VerifiedKey) -> None:
         allowed=connector_key_rest_allowed(request.method, template),
         key_prefix=verified.key_prefix,
         connector_id=verified.connector_id,
+        workspace_id=verified.workspace_id,
     )
 
 
@@ -1086,10 +1087,11 @@ async def _honoured_share_context(db: AsyncSession, verified: "VerifiedShareKey"
     """The bound context of a verified share key, once every rule holds (#2930).
 
     In order: the context is live and so is its workspace; the key's creator
-    can share the context (``auth.share_keys.creator_can_share``; a failure of
-    that check is a refusal too, logged); the workspace is not slot-suspended
-    (#2918, the redacted outsider form, since a share-key reader is never a
-    member).
+    can share the context (``auth.share_keys.creator_can_share``: the role
+    decision's own refusals are the uniform 401; any other failure of it
+    propagates as a server error and never accepts); the workspace is not
+    slot-suspended (#2918, the redacted outsider form, since a share-key
+    reader is never a member).
 
     Raises:
         HTTPException: the uniform 401 of ``_share_key_refused``.
@@ -1116,16 +1118,7 @@ async def _honoured_share_context(db: AsyncSession, verified: "VerifiedShareKey"
         raise _share_key_refused()
 
     # #2930: the creator must be able to share the bound context.
-    try:
-        creator_shares = await creator_can_share(db, verified.user_id, context.id)
-    except Exception as exc:  # noqa: BLE001 - a failed check refuses, never allows
-        logger.warning(
-            "share_key_creator_check_failed",
-            share_key_id=verified.id,
-            error_type=type(exc).__name__,
-        )
-        raise _share_key_refused() from None
-    if not creator_shares:
+    if not await creator_can_share(db, verified.user_id, context.id):
         logger.info(
             "share_key_refused_creator_cannot_share",
             share_key_id=verified.id,
@@ -1163,11 +1156,11 @@ async def get_share_key_principal(
     OWNER-level access to the bound context under the role decision the mint
     route applies (``auth.share_keys.creator_can_share``). A creator who left
     the workspace, lost the context from their access list, lost the OWNER
-    role or has no plan seat ends every key they created for it at once; a
-    failure of the check itself is a refusal too (logged). A key bound to a
-    context of a deleted workspace is refused like one of a deleted context.
-    Nothing is cached, and a refused request records no use of the key (its
-    last-used stamp is committed only once every rule held).
+    role or has no plan seat ends every key they created for it at once; any
+    other failure of that check is a server error, never an accept. A key
+    bound to a context of a deleted workspace is refused like one of a deleted
+    context. Nothing is cached, and a refused request writes nothing: the
+    last-used stamp is written only once every rule held.
 
     Raises:
         HTTPException: 401 if the bearer is absent, is not a share key, fails
@@ -1185,24 +1178,21 @@ async def get_share_key_principal(
         raise _share_key_refused()
 
     manager = ShareKeyManager(db)
-    verified = await manager.verify_key(token)
+    # #2930: verify reads only; a refused request writes nothing.
+    verified = await manager.verify_key(token, stamp=False)
     if verified is None:
         raise _share_key_refused()
 
-    # #2930: ``verify_key`` may have flushed the throttled last_used_at. It is
-    # committed only for an honoured request: every refusal below rolls the
-    # session back first, so a refused request records no use of the key.
-    try:
-        context = await _honoured_share_context(db, verified)
-    except Exception:
-        await db.rollback()
-        raise
+    context = await _honoured_share_context(db, verified)
 
-    # A commit failure is non-critical metadata loss and must not fail auth.
+    # Every rule held: record the use (throttled, one guarded UPDATE). A
+    # failure here is non-critical metadata loss and must not fail auth.
     try:
+        await manager.stamp_last_used(verified)
         await db.commit()
     except Exception as commit_err:  # pragma: no cover - defensive
-        logger.warning("share_key_last_used_commit_failed", error=str(commit_err))
+        logger.warning("share_key_last_used_commit_failed", error_type=type(commit_err).__name__)
+        await db.rollback()
 
     return {
         "user_id": verified.user_id,

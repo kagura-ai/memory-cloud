@@ -25,8 +25,9 @@ outside the lists: ``enforce`` (default) refuses with ``ConnectorKeyScopeError``
 (403 ``AUTH-204``) and logs ``connector_key_scope_refused``; ``log`` serves the
 request as if the rule did not exist and logs
 ``connector_key_scope_would_refuse``. Both events carry the surface, the target
-(``"<METHOD> <route template>"`` or the tool name), the key's non-secret prefix
-and its connector id, never the key.
+(``"<METHOD> <route template>"`` or the tool name), the key's non-secret prefix,
+its connector id (``None`` for a key with only the reserved name) and its
+workspace, never the key.
 """
 
 from __future__ import annotations
@@ -141,6 +142,7 @@ def check_connector_key_scope(
     allowed: bool,
     key_prefix: str | None,
     connector_id: UUID | None,
+    workspace_id: UUID | None,
 ) -> None:
     """Apply the connector key rule to one request of a connector key.
 
@@ -155,6 +157,7 @@ def check_connector_key_scope(
         allowed: The list decision for ``target``.
         key_prefix: The key's non-secret prefix (``VerifiedKey.key_prefix``).
         connector_id: The key's connector, when the key is linked to one.
+        workspace_id: The key's workspace (finds a key without a link).
 
     Raises:
         ConnectorKeyScopeError: 403 ``AUTH-204`` in ``enforce`` mode.
@@ -168,6 +171,7 @@ def check_connector_key_scope(
         target=target[:200],
         key_prefix=key_prefix,
         connector_id=str(connector_id) if connector_id is not None else None,
+        workspace_id=str(workspace_id) if workspace_id is not None else None,
     )
     if enforced:
         raise ConnectorKeyScopeError(_MESSAGES[surface])

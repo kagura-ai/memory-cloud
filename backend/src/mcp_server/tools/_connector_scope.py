@@ -63,6 +63,7 @@ def connector_key_tool_refusal(tool_name: object) -> ToolErrorContent | None:
             allowed=connector_key_mcp_tool_allowed(tool_name),
             key_prefix=scoped.key_prefix,
             connector_id=scoped.connector_id,
+            workspace_id=scoped.workspace_id,
         )
     except ConnectorKeyScopeError as exc:
         return _error_response(

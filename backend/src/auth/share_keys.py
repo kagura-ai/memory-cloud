@@ -23,11 +23,11 @@ caller who may share a context revokes and lists every key bound to it.
 from __future__ import annotations
 
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, NamedTuple
 from uuid import UUID
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -98,11 +98,14 @@ class VerifiedShareKey(NamedTuple):
             inherits the owner's workspace — confinement is via context_id).
         context_id: The single context this key is confined to. The
             share-recall surface forces recall to exactly this context.
+        last_used_at: The stored last-used stamp, as read (#2930: the
+            share-key dependency stamps after its checks, ``stamp_last_used``).
     """
 
     id: int
     user_id: str
     context_id: UUID
+    last_used_at: datetime | None = None
 
 
 class ShareKeyManager:
@@ -218,7 +221,7 @@ class ShareKeyManager:
 
         return share_key, new_key
 
-    async def verify_key(self, share_key: str) -> VerifiedShareKey | None:
+    async def verify_key(self, share_key: str, *, stamp: bool = True) -> VerifiedShareKey | None:
         """Verify a plaintext share key.
 
         Returns ``None`` (not an exception) for every rejection — not found,
@@ -227,6 +230,9 @@ class ShareKeyManager:
 
         Args:
             share_key: Plaintext key (``kagura_sk_...``).
+            stamp: Write the throttled ``last_used_at`` here. ``False`` reads
+                only (#2930: the share-key dependency stamps once every rule
+                held, with ``stamp_last_used``).
 
         Returns:
             ``VerifiedShareKey`` if valid, else ``None``.
@@ -251,17 +257,42 @@ class ShareKeyManager:
         if utcnow() > record.expires_at:
             return None
 
-        # Throttled last_used_at write (#947) — at most one UPDATE per window.
-        now = utcnow()
-        throttle = timedelta(seconds=get_settings().api_key_last_used_throttle_seconds)
-        if record.last_used_at is None or now - record.last_used_at >= throttle:
-            record.last_used_at = now
-            await self.db.flush()
+        last_used_at = record.last_used_at
+        if stamp:
+            # Throttled last_used_at write (#947) — at most one UPDATE per window.
+            now = utcnow()
+            throttle = timedelta(seconds=get_settings().api_key_last_used_throttle_seconds)
+            if record.last_used_at is None or now - record.last_used_at >= throttle:
+                record.last_used_at = now
+                await self.db.flush()
 
         return VerifiedShareKey(
             id=record.id,
             user_id=record.user_id,
             context_id=record.context_id,
+            last_used_at=last_used_at,
+        )
+
+    async def stamp_last_used(self, verified: VerifiedShareKey) -> None:
+        """Record one use of an honoured share key, at most once per window (#2930).
+
+        Nothing is written while the stamp read at verification is fresher
+        than ``API_KEY_LAST_USED_THROTTLE_SECONDS``; otherwise one guarded
+        UPDATE writes it, and a concurrent request that already stamped the
+        window makes it a no-op. The caller commits.
+        """
+        now = utcnow()
+        throttle = timedelta(seconds=get_settings().api_key_last_used_throttle_seconds)
+        if verified.last_used_at is not None and now - verified.last_used_at < throttle:
+            return
+        await self.db.execute(
+            update(ShareKey)
+            .where(
+                ShareKey.id == verified.id,
+                or_(ShareKey.last_used_at.is_(None), ShareKey.last_used_at <= now - throttle),
+            )
+            .values(last_used_at=now)
+            .execution_options(synchronize_session=False)
         )
 
     async def list_keys(self, user_id: str) -> list[ShareKey]:

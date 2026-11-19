@@ -56,7 +56,9 @@ CAPS_KEY = "io.modelcontextprotocol/clientCapabilities"
 @contextmanager
 def as_connector(prefix: str = "kagura_conn", connector_id: UUID | None = CONNECTOR_ID):
     """The request authenticated with a connector key (set by the MCP auth seam)."""
-    set_mcp_connector_scope(ConnectorScopedCredential(key_prefix=prefix, connector_id=connector_id))
+    set_mcp_connector_scope(
+        ConnectorScopedCredential(key_prefix=prefix, connector_id=connector_id, workspace_id=WS)
+    )
     try:
         yield
     finally:
@@ -149,6 +151,7 @@ async def test_every_unlisted_tool_refuses_a_connector_key_before_anything_runs(
     assert events == [("connector_key_scope_refused", tool) for tool in UNLISTED]
     assert all(c.kwargs["surface"] == "mcp" for c in logger.warning.call_args_list)
     assert all(c.kwargs["connector_id"] == str(CONNECTOR_ID) for c in logger.warning.call_args_list)
+    assert all(c.kwargs["workspace_id"] == str(WS) for c in logger.warning.call_args_list)
 
 
 @pytest.mark.asyncio
@@ -328,8 +331,22 @@ async def test_a_refused_tools_call_is_a_tool_result_and_the_session_stays_usabl
 
 
 @pytest.mark.asyncio
-async def test_a_connector_key_gets_the_base_instructions_without_any_read(scope_mode) -> None:
-    query = f"guardrails={CTX}&context={CTX}".encode()
+@pytest.mark.parametrize(
+    ("query", "private"),
+    [
+        (b"", False),
+        (b"profile=core", False),
+        (f"guardrails={CTX}&context={CTX}".encode(), True),
+        (f"context={CTX}".encode(), True),
+        (b"guardrails=off", True),
+        (b"context=not-a-uuid", True),
+    ],
+)
+async def test_a_connector_key_gets_the_base_instructions_without_any_read(
+    scope_mode, query, private
+) -> None:
+    """Public only when the URL selects nothing: a URL that selects a guardrail
+    or a default context gives every other caller a private answer."""
     with (
         as_connector(),
         patch("mcp_server.transport._read_digest", new=AsyncMock(side_effect=AssertionError)),
@@ -338,10 +355,10 @@ async def test_a_connector_key_gets_the_base_instructions_without_any_read(scope
             new=AsyncMock(side_effect=AssertionError),
         ),
     ):
-        text, private = await build_instructions(
+        answer = await build_instructions(
             user_id="u1", query_string=query, key_workspace_id=WS, era="legacy"
         )
-    assert (text, private) == (SERVER_INSTRUCTIONS_BASE, False)
+    assert answer == (SERVER_INSTRUCTIONS_BASE, private)
 
 
 @pytest.mark.asyncio
@@ -355,7 +372,7 @@ async def test_a_connector_key_on_the_google_view_gets_its_base_text(scope_mode)
             key_workspace_id=WS,
             era="stateless",
         )
-    assert (text, private) == (GOOGLE_INSTRUCTIONS_BASE, False)
+    assert (text, private) == (GOOGLE_INSTRUCTIONS_BASE, True)
 
 
 @pytest.mark.asyncio
@@ -390,11 +407,13 @@ def _verified(**fields) -> VerifiedKey:
                 connector_id=CONNECTOR_ID,
                 connector_scoped=True,
             ),
-            ConnectorScopedCredential(key_prefix="kagura_link", connector_id=CONNECTOR_ID),
+            ConnectorScopedCredential(
+                key_prefix="kagura_link", connector_id=CONNECTOR_ID, workspace_id=WS
+            ),
         ),
         (
             _verified(key_prefix="kagura_name", connector_scoped=True),
-            ConnectorScopedCredential(key_prefix="kagura_name", connector_id=None),
+            ConnectorScopedCredential(key_prefix="kagura_name", connector_id=None, workspace_id=WS),
         ),
         (_verified(key_prefix="kagura_mine"), None),
     ],
@@ -411,7 +430,9 @@ async def test_the_auth_seam_records_a_connector_scoped_key(verified, expected) 
 async def test_every_request_starts_without_a_connector_scope() -> None:
     from mcp_server.auth import MissingCredentialsError
 
-    set_mcp_connector_scope(ConnectorScopedCredential(key_prefix="stale", connector_id=None))
+    set_mcp_connector_scope(
+        ConnectorScopedCredential(key_prefix="stale", connector_id=None, workspace_id=None)
+    )
     with pytest.raises(MissingCredentialsError):
         await authenticate_mcp_request(None, None)
     assert get_mcp_connector_scope() is None

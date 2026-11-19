@@ -223,6 +223,7 @@ async def _delete_admin_rows(
         workspaces_transferred=[str(ws_id) for ws_id in transferred or []],
         workspaces_deleted=[str(ws.id) for ws in result.purged_workspaces],
         contexts_deleted=result.contexts,
+        share_keys_deleted=result.share_keys,
         connector_api_keys_reowned=result.connector_api_keys,
         agent_api_keys_deleted=result.agent_api_keys,
         agents_suspended=result.agents_suspended,

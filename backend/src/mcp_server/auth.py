@@ -102,6 +102,7 @@ class ConnectorScopedCredential:
 
     key_prefix: str | None
     connector_id: "UUID | None"
+    workspace_id: "UUID | None"
 
 
 # #2929: set once per request by ``authenticate_mcp_request`` for a key under
@@ -395,7 +396,9 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         # #2929: a connector key calls only the connector worker's tools.
         _mcp_connector_scope.set(
             ConnectorScopedCredential(
-                key_prefix=result.key_prefix, connector_id=result.connector_id
+                key_prefix=result.key_prefix,
+                connector_id=result.connector_id,
+                workspace_id=result.workspace_id,
             )
             if result.connector_scoped
             else None

@@ -47,7 +47,13 @@ CONTEXT_NOT_FOUND = {"error": "RES-001", "message": "Context not found", "detail
 
 
 def _app(factory) -> FastAPI:
-    from api.main import http_exception_handler, memory_cloud_exception_handler
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from api.main import (
+        http_exception_handler,
+        memory_cloud_exception_handler,
+        sqlalchemy_exception_handler,
+    )
     from api.routes import share_keys
     from db.base import get_db
     from utils.exceptions import MemoryCloudException
@@ -57,6 +63,7 @@ def _app(factory) -> FastAPI:
     app.include_router(share_keys.recall_router, prefix="/api/v1")
     app.add_exception_handler(MemoryCloudException, memory_cloud_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)  # type: ignore[arg-type]
 
     @app.middleware("http")
     async def browser_session(request: Request, call_next):
@@ -150,12 +157,15 @@ async def world(async_engine, db_session: AsyncSession, connector_world):
         keys[label] = SimpleNamespace(plaintext=plaintext, public_id=row.public_id, id=row.id)
     await db_session.commit()
     factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    app = _app(factory)
     async with AsyncClient(
-        transport=ASGITransport(app=_app(factory)), base_url="http://testserver"
+        transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
         yield SimpleNamespace(
             db=db_session,
             client=client,
+            app=app,
+            engine=async_engine,
             owner=owner,
             admin=admin,
             member=member,
@@ -313,14 +323,23 @@ async def test_a_creator_without_a_plan_seat_ends_the_key_until_seated_again(wor
     assert (await _sessions(world, world.keys["member"].plaintext)).status_code == 200
 
 
+def _share_key_writes(recorder) -> list[str]:
+    return [s for s in recorder.statements if s.upper().startswith("UPDATE SHARE_KEYS")]
+
+
 async def test_a_refused_request_records_no_use_of_the_key(world) -> None:
+    from tests.integration._slot_world import StatementRecorder
+
     await world.db.execute(
         update(ContextMember)
         .where(ContextMember.context_id == world.c, ContextMember.user_id == world.member)
         .values(role=ContextRole.EDITOR)
     )
     await world.db.commit()
-    await _refused_like_an_unknown_key(world, world.keys["member"].plaintext)
+    with StatementRecorder(world.engine) as recorder:
+        await _refused_like_an_unknown_key(world, world.keys["member"].plaintext)
+    # No write at all, so no row lock: the stamp is written only once every rule held.
+    assert _share_key_writes(recorder) == []
     assert await _last_used_at(world, world.keys["member"].id) is None
     # A key of a deleted context: refused, no use recorded either.
     await world.db.execute(update(Context).where(Context.id == world.d).values(deleted_at=utcnow()))
@@ -332,18 +351,59 @@ async def test_a_refused_request_records_no_use_of_the_key(world) -> None:
     assert await _last_used_at(world, world.keys["owner"].id) is not None
 
 
-async def test_a_failed_role_decision_is_a_refusal(world) -> None:
+async def test_an_honoured_key_is_stamped_once_per_throttle_window(world) -> None:
+    from datetime import timedelta
+
+    from config.settings import get_settings
+    from tests.integration._slot_world import StatementRecorder
+
+    key = world.keys["owner"]
+    with StatementRecorder(world.engine) as recorder:
+        for _ in range(2):
+            assert (await _sessions(world, key.plaintext)).status_code == 200
+    # Two requests in one window: one write.
+    assert len(_share_key_writes(recorder)) == 1
+    stamped = await _last_used_at(world, key.id)
+    assert stamped is not None
+
+    # Past the window, the next honoured request stamps again.
+    throttle = timedelta(seconds=get_settings().api_key_last_used_throttle_seconds)
+    older = stamped - throttle - timedelta(seconds=1)
+    await world.db.execute(update(ShareKey).where(ShareKey.id == key.id).values(last_used_at=older))
+    await world.db.commit()
+    with StatementRecorder(world.engine) as recorder:
+        assert (await _sessions(world, key.plaintext)).status_code == 200
+    assert len(_share_key_writes(recorder)) == 1
+    assert await _last_used_at(world, key.id) > older
+
+
+async def test_a_database_error_in_the_creator_check_is_a_server_error(world) -> None:
+    from sqlalchemy.exc import OperationalError
+
     from services.permission_service import PermissionService
 
-    with (
-        patch.object(
-            PermissionService, "check_context_rbac", AsyncMock(side_effect=RuntimeError("db"))
-        ),
-        patch("auth.dependencies.logger") as logger,
-    ):
+    failure = OperationalError("SELECT 1", {}, Exception("connection lost"))
+    with patch.object(PermissionService, "check_context_rbac", AsyncMock(side_effect=failure)):
         response = await _sessions(world, world.keys["owner"].plaintext)
-    assert (response.status_code, response.json()) == (401, UNIFORM_401)
-    assert logger.warning.call_args.args[0] == "share_key_creator_check_failed"
+    assert response.status_code == 503
+    assert response.json()["error"] == "DB-002"
+
+
+async def test_a_programming_error_in_the_creator_check_is_a_server_error(world) -> None:
+    from services.permission_service import PermissionService
+
+    with patch.object(
+        PermissionService, "check_context_rbac", AsyncMock(side_effect=RuntimeError("bug"))
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=world.app, raise_app_exceptions=False),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(
+                "/api/v1/share/sessions",
+                headers={"Authorization": f"Bearer {world.keys['owner'].plaintext}"},
+            )
+    assert response.status_code == 500
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +454,10 @@ async def test_deleting_an_account_deletes_its_share_keys(world) -> None:
     from api.routes.admin import delete_user
 
     await world.db.commit()
-    await delete_user(world.admin, {"user_id": "admin-runner"}, world.db)
+    with patch("api.routes.admin.logger") as logger:
+        await delete_user(world.admin, {"user_id": "admin-runner"}, world.db)
+    (line,) = [c for c in logger.info.call_args_list if c.args[0] == "admin_delete_user"]
+    assert line.kwargs["share_keys_deleted"] == 1
     world.db.expire_all()
     left = await world.db.scalar(
         select(func.count()).select_from(ShareKey).where(ShareKey.user_id == world.admin)

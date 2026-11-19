@@ -106,6 +106,7 @@ def _check(allowed: bool) -> None:
         allowed=allowed,
         key_prefix="kagura_abcd",
         connector_id=CONNECTOR_ID,
+        workspace_id=WORKSPACE_ID,
     )
 
 
@@ -133,6 +134,7 @@ def test_enforce_refuses_with_the_typed_error_and_one_event(scope_mode) -> None:
         "target": "POST /api/v1/resource-tokens",
         "key_prefix": "kagura_abcd",
         "connector_id": str(CONNECTOR_ID),
+        "workspace_id": str(WORKSPACE_ID),
     }
 
 
@@ -154,6 +156,7 @@ def test_the_mcp_refusal_names_a_tool(scope_mode) -> None:
             allowed=False,
             key_prefix=None,
             connector_id=None,
+            workspace_id=None,
         )
     assert exc_info.value.message == "This credential is not accepted for this tool"
 
@@ -367,6 +370,8 @@ def test_a_connector_key_is_refused_by_the_api_key_or_session_dependency(
     # The decision read the template FastAPI matched, prefixes included.
     assert logger.warning.call_args.kwargs["target"] == "GET /api/v1/probe/items/{item_id}"
     assert logger.warning.call_args.kwargs["key_prefix"] == "kagura_conn"
+    # The key's workspace: a key with only the reserved name has no connector id.
+    assert logger.warning.call_args.kwargs["workspace_id"] == str(WORKSPACE_ID)
 
 
 def test_a_refused_connector_key_never_falls_back_to_the_session(probe, scope_mode) -> None:

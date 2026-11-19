@@ -213,6 +213,9 @@ async def test_a_key_with_the_reserved_name_is_refused_like_a_linked_one(world) 
     assert (response.status_code, response.json()) == (403, REFUSAL)
     assert seen.handlers == 0
     assert seen.events[0][1]["connector_id"] is None
+    # The key's workspace and prefix find a key that has no connector link.
+    assert seen.events[0][1]["workspace_id"] == str(world.ws.id)
+    assert seen.events[0][1]["key_prefix"] == world.legacy[:16]
 
 
 async def test_log_mode_answers_as_the_route_does_and_logs_once(world, monkeypatch) -> None:
@@ -234,6 +237,7 @@ async def test_log_mode_answers_as_the_route_does_and_logs_once(world, monkeypat
                 "target": "GET /api/v1/resource-tokens",
                 "key_prefix": world.connector_key[:16],
                 "connector_id": str(world.connector_id),
+                "workspace_id": str(world.ws.id),
             },
         )
     ]

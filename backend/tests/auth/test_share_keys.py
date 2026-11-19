@@ -365,9 +365,10 @@ class TestShareKeyPrincipalDependency:
         assert principal["role"] == "share-key"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("outcome", [False, RuntimeError("db")], ids=["refused", "failed"])
+    @pytest.mark.parametrize("outcome", [False, RuntimeError("bug")], ids=["refused", "failed"])
     async def test_a_creator_who_cannot_share_the_context_ends_the_key(self, outcome) -> None:
-        """#2930: the creator's lost right and a failed check are the same 401."""
+        """#2930: the creator's lost right is the uniform 401; a failure of the
+        check itself propagates (a server error), never an accept."""
         from fastapi import HTTPException
 
         from auth.dependencies import get_share_key_principal
@@ -384,6 +385,7 @@ class TestShareKeyPrincipalDependency:
             else AsyncMock(return_value=outcome)
         )
         slot = AsyncMock()
+        expected = type(outcome) if isinstance(outcome, Exception) else HTTPException
 
         with (
             patch(
@@ -393,11 +395,16 @@ class TestShareKeyPrincipalDependency:
             patch("auth.share_keys.creator_can_share", new=check),
             patch("services.workspace_slot_gate.ensure_slot_active", new=slot),
         ):
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(expected) as exc:
                 await get_share_key_principal(authorization=f"Bearer {SHARE_KEY_PREFIX}good", db=db)
 
-        assert (exc.value.status_code, exc.value.detail) == (401, "Invalid or missing share key")
+        if expected is HTTPException:
+            assert (exc.value.status_code, exc.value.detail) == (
+                401,
+                "Invalid or missing share key",
+            )
         slot.assert_not_awaited()
+        db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_bound_context_missing_rejected(self) -> None:
