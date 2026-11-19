@@ -10,7 +10,7 @@
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: clamp(12px, 4vw, 32px); }
     main { width: min(100%, 30rem); min-width: 0; padding: clamp(22px, 5vw, 36px); background: #fff; border: 1px solid #dce5df; border-radius: 16px; overflow-wrap: anywhere; }
-    .brand { margin: 0 0 28px; color: #00664b; font-weight: 700; font-size: 1rem; }
+    .brand { display: flex; align-items: center; gap: 10px; margin: 0 0 28px; color: #00664b; font-weight: 700; font-size: 1rem; }
     h1 { margin: 0 0 10px; font-size: clamp(1.5rem, 5vw, 2rem); line-height: 1.22; letter-spacing: -.025em; }
     .account { margin: 0; color: #526058; line-height: 1.55; }
     h2 { margin: 26px 0 10px; font-size: 1rem; }
@@ -27,7 +27,7 @@
 </head>
 <body>
   <main>
-    <p class="brand">Kagura Memory Cloud</p>
+    <p class="brand"><img src="/icon.png" width="36" height="36" alt="">Kagura Memory Cloud</p>
     <h1>Sign in to {{ client_name }}</h1>
     <p class="account">Continue as <strong>{{ account }}</strong>.</p>
     <h2>Allow this application to:</h2>
