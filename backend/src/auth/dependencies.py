@@ -1039,6 +1039,12 @@ async def get_share_key_principal(
         # Key bound to a context that is gone/deleted → treat as invalid.
         raise HTTPException(status_code=401, detail="Invalid or missing share key")
 
+    # #2918: a share-key reader is never a member: a slot-suspended workspace
+    # refuses it in the redacted form.
+    from services.workspace_slot_gate import ensure_slot_active
+
+    await ensure_slot_active(db, context.workspace_id, user_id=None, outsider=True)
+
     return {
         "user_id": verified.user_id,
         "email": f"{verified.user_id}@share",
