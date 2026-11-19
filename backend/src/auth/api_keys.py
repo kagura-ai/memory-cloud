@@ -469,9 +469,11 @@ class APIKeyManager:
         # indexer) while the workspace has no connector seats, but the worker
         # also holds this workspace key for its legacy ``remember`` fallback,
         # so it is refused while ``connectors_suspended``. #1952: the
-        # ``api_keys.connector_id`` FK is the link — the ``connector:{id}``
-        # name is display and uniqueness only, so a user key that merely looks
-        # like one is an ordinary key. A link whose connector is not in the
+        # ``api_keys.connector_id`` FK is the link and decides this pause (and
+        # the MCP notices and default context); a key with only the reserved
+        # ``connector:`` name is not paused here, but the name alone puts it
+        # under the connector key scope (#2929, ``connector_scoped`` below,
+        # ``auth.connector_key_scope``). A link whose connector is not in the
         # key's workspace (tampered data: the CHECKs, the FK and the mint check
         # rule it out) is refused too, like the agent kill switch. ``None`` —
         # not an exception: the MCP transport turns an exception here into a

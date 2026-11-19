@@ -5247,10 +5247,15 @@ No database statement depends on the setting.
 so `enforce` needs no worker upgrade. The bridge's `corpus-ingest` command
 archives original files through the REST files routes, which do not accept a
 connector key: the archive step is skipped (the ingest reports it as partial)
-and a `connector_key_scope_refused` event names the route. `log` exists for an
-operator whose own client uses a connector key in another way: run with `log`,
-read the `connector_key_scope_would_refuse` events, move that client to an
-ordinary API key, return to `enforce`.
+and a `connector_key_scope_refused` event names the route. A key named
+`connector:…` without a link is a connector key too: list them with the query
+in [Migration f13](#migration-f13_1952_api_keys_connector_id-1952) before
+upgrading. Their events carry `connector_id: null`, with `key_prefix` and
+`workspace_id` to find the key (`SELECT public_id, name, workspace_id, user_id
+FROM api_keys WHERE key_prefix = '<key_prefix>' AND workspace_id = '<workspace_id>';`).
+`log` exists for an operator whose own client uses a connector key in another
+way: run with `log`, read the `connector_key_scope_would_refuse` events, move
+that client to an ordinary API key, return to `enforce`.
 
 ### Share keys and their creator (#2930)
 
@@ -5276,8 +5281,7 @@ Log events:
 
 | Event | Level | Fields | Meaning |
 |---|---|---|---|
-| `share_key_refused_creator_cannot_share` | info | `share_key_id`, `context_id` | A share-key request was refused because the key's creator cannot share the context. |
-| `share_key_creator_check_failed` | warning | `share_key_id`, `error_type` | The creator check itself failed; the request was refused. |
+| `share_key_refused_creator_cannot_share` | info | `share_key_id`, `context_id` | A share-key request was refused because the key's creator cannot share the context. The same request also logs the permission service's `context_access_denied` warning (`reason`, `context_id`, `user_id` = the key's creator). |
 | `share_keys_revoked_on_departure` | info | `user_id`, `workspace_id`, `count` | A member removal revoked that member's share keys for the workspace (`member_credentials_cleaned_up` and `removed_member_from_workspace` carry `share_keys_revoked`). |
 
 **Upgrade:** migration `f57_2930_share_key_creators` deletes the share keys
@@ -5285,9 +5289,21 @@ whose creating account does not exist (`share_keys.user_id` has no foreign
 key), in one statement. It takes row locks on the deleted rows only (no table
 lock, no DDL), so it is safe while the previous release serves traffic and as
 part of the last `alembic upgrade head` step of the multi-step upgrade in
-[How each account was admitted](#how-each-account-was-admitted-issue-2803). It logs
-the number of rows deleted (`f57_2930 deleted share keys: N`) and nothing
-else, can be re-run, and its downgrade changes nothing.
+[How each account was admitted](#how-each-account-was-admitted-issue-2803). It
+logs the number of rows deleted (`f57_2930 deleted share keys: N`) and nothing
+else; offline (`alembic upgrade --sql`) it emits the statement without a
+count. Its downgrade changes nothing. Run the same statement once more after
+the traffic switch, for accounts deleted meanwhile by the previous image:
+
+```sql
+DELETE FROM share_keys AS s
+ WHERE NOT EXISTS (SELECT 1 FROM users AS u WHERE u.user_id = s.user_id);
+```
+
+The upgrade revokes no share key: a key whose creator cannot share its
+context is refused on every request, shows `status: active` in the list until
+it is revoked or expires, and is honoured again if the creator regains that
+access; a key revoked by a member removal stays revoked.
 
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 
