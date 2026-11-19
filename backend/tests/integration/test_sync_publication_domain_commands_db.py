@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 from collections.abc import Awaitable, Callable
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -1404,6 +1404,74 @@ async def test_a_domain_changed_during_the_lookup_answers_changed(env):
         before.check_seq + 1,
         before.last_checked_at,
     )
+
+
+async def test_a_certificate_report_stays_with_its_claim_through_remove_and_claim(env):
+    """#2941: a report is the claim's; a removed claim shows nothing and a new claim
+    of the same name starts unreported until a report names it."""
+    from api.routes import internal_public_mcp_domains
+
+    store = env.store
+    token = "reporter-" + "r" * 40
+    env.monkeypatch.setattr(get_settings(), "mcp_public_domains_tls_reporter_token", token)
+    store.app.include_router(internal_public_mcp_domains.router)
+    target = await installed(store)
+    hostname, first = await activated(env, target, "tls")
+
+    def report(domain_id: str) -> dict:
+        observed = datetime.now(UTC)  # after the claim, not after the receipt
+        return {
+            "domain_id": domain_id,
+            "hostname": hostname,
+            "endpoint_id": target["endpoint_id"],
+            "tls": {
+                "status": "valid",
+                "observed_at": observed.isoformat().replace("+00:00", "Z"),
+                "valid_until": (observed + timedelta(minutes=3)).isoformat().replace("+00:00", "Z"),
+                "certificate_not_after": (observed + timedelta(days=30))
+                .isoformat()
+                .replace("+00:00", "Z"),
+            },
+        }
+
+    async def send(domain_id: str) -> int:
+        async with AsyncClient(
+            transport=ASGITransport(app=store.app), base_url="https://test"
+        ) as client:
+            response = await client.put(
+                "/internal/public-mcp-domains/tls-observation",
+                json=report(domain_id),
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        return response.status_code
+
+    assert await send(first) == 204
+    assert (await observe(store, target)).json()["domain"]["tls"]["status"] == "valid"
+
+    removed = await command(store, target, "remove", row_body(target, first, "active"))
+    assert removed.status_code == 200, removed.text
+    assert await send(first) == 404  # released: no longer a holder
+
+    again = await command(store, target, "claim", claim_body(target, hostname))
+    assert again.status_code == 200, again.text
+    second = again.json()["domain"]["domain_id"]
+    assert second != first
+    seen = (await observe(store, target)).json()["domain"]
+    assert (seen["domain_id"], seen["tls"]) == (second, {"status": "unreported"})
+    assert await send(second) == 404  # pending: holds nothing
+
+    env.dns.publish(hostname, await token_of(store, second))
+    verified = await command(store, target, "verify", row_body(target, second, "pending"))
+    assert verified.json()["domain"] == {"domain_id": second, "state": "active"}
+    assert (await observe(store, target)).json()["domain"]["tls"] == {"status": "unreported"}
+    assert await send(second) == 204
+    assert (await observe(store, target)).json()["domain"]["tls"]["status"] == "valid"
+    async with store.factory() as db:
+        await db.execute(
+            text("DELETE FROM public_mcp_domain_tls_reports WHERE domain_id IN (:a, :b)"),
+            {"a": first, "b": second},
+        )
+        await db.commit()
 
 
 # ----------------------------------------------------------------------------

@@ -11,9 +11,10 @@ expired reports. Every test uses its own host names and deletes its rows.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
@@ -567,3 +568,155 @@ async def test_a_reassigned_publication_starts_unreported(edge):
     fresh = report(new)
     assert (await put(edge, fresh)).status_code == 204
     assert (await observe(edge))["domain"]["tls"] == fresh["tls"]
+
+
+# ----------------------------------------------------------------------------
+# The consumer's shapes, and what evidence leaves unchanged
+# ----------------------------------------------------------------------------
+
+UTC_INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$")
+TOP_KEYS = {
+    "schema_version",
+    "subject",
+    "workspace_id",
+    "installation_id",
+    "application_id",
+    "resource_id",
+    "resource_pk",
+    "context_id",
+    "endpoint_id",
+    "public_id",
+    "generation",
+    "observed_at",
+    "valid_until",
+    "domain",
+}
+DOMAIN_KEYS = {
+    "domain_id",
+    "hostname",
+    "url",
+    "state",
+    "suspended_reason",
+    "serving",
+    "verification",
+    "routing",
+    "last_check",
+    "proof_ok_at",
+    "proof_missing_checks",
+    "serve_until",
+    "created_at",
+    "verified_at",
+    "tls",
+}
+TLS_KEYS = {"status", "observed_at", "valid_until", "certificate_not_after"}
+
+
+def _instants(observation: dict) -> list[str]:
+    domain = observation["domain"]
+    values = [observation["observed_at"], observation["valid_until"]]
+    values += [domain[k] for k in ("proof_ok_at", "serve_until", "created_at", "verified_at")]
+    values.append(domain["last_check"]["checked_at"])
+    values += [
+        domain["tls"].get(k) for k in ("observed_at", "valid_until", "certificate_not_after")
+    ]
+    return [value for value in values if value is not None]
+
+
+async def test_evidence_in_another_offset_keeps_the_consumers_exact_shape(edge):
+    row = await held(edge)
+    tokyo = timezone(timedelta(hours=9))
+    observed = (now() - timedelta(seconds=5)).astimezone(tokyo)
+    body = report(row)
+    body["tls"] = {
+        "status": "valid",
+        "observed_at": observed.isoformat(),
+        "valid_until": (observed + timedelta(minutes=3)).isoformat(),
+        "certificate_not_after": (observed + timedelta(days=30)).isoformat(),
+    }
+    assert body["tls"]["observed_at"].endswith("+09:00")
+    assert (await put(edge, body)).status_code == 204
+    observation = await observe(edge)
+    assert set(observation) == TOP_KEYS
+    domain = observation["domain"]
+    assert set(domain) == DOMAIN_KEYS
+    assert set(domain["verification"]) == {"record_type", "record_name", "record_value"}
+    assert set(domain["routing"]) == {"target", "status"}
+    assert set(domain["last_check"]) == {"result", "checked_at"}
+    assert set(domain["tls"]) == TLS_KEYS
+    assert observation["schema_version"] == "public-domain-observation-v1"
+    for value in _instants(observation):
+        assert UTC_INSTANT.match(value), value
+    assert domain["tls"]["observed_at"] == iso(observed)
+
+
+CONSUMER_SHAPES = {
+    "unreported": None,
+    "pending": {"status": "pending", "certificate_not_after": None},
+    "valid": {"status": "valid"},
+    "issuance_failed": {"status": "issuance_failed", "certificate_not_after": None},
+    "renewal_failed": {"status": "renewal_failed"},
+    "expired": {"status": "expired", "certificate_not_after": "ELAPSED"},
+}
+
+
+@pytest.mark.parametrize("shape", sorted(CONSUMER_SHAPES))
+async def test_each_shape_the_consumer_accepts(edge, shape):
+    row = await held(edge)
+    change = CONSUMER_SHAPES[shape]
+    if change is not None:
+        observed = now() - timedelta(seconds=5)
+        if change.get("certificate_not_after") == "ELAPSED":
+            change = {**change, "certificate_not_after": observed - timedelta(days=1)}
+        assert (await put(edge, report(row, observed_at=observed, **change))).status_code == 204
+    tls = (await observe(edge))["domain"]["tls"]
+    if shape == "unreported":
+        assert tls == {"status": "unreported"}
+        return
+    assert set(tls) == TLS_KEYS and tls["status"] == shape
+    for key in ("observed_at", "valid_until"):
+        assert UTC_INSTANT.match(tls[key])
+    if change.get("certificate_not_after", "set") is None:
+        assert tls["certificate_not_after"] is None
+    else:
+        assert UTC_INSTANT.match(tls["certificate_not_after"])
+
+
+async def _surfaces(edge, row) -> dict:
+    """What a report must never change: the standard endpoint, the alias, the
+    permission call, the owner API's domain object and the paid right."""
+    from api.routes.public_mcp_domains import domain_response
+    from mcp_server.public.publication import (
+        load_serving_endpoint,
+        load_serving_endpoint_for_alias,
+    )
+    from services.integration_entitlements import inspect_paid_integration
+
+    async with edge.store.factory() as db:
+        standard = await load_serving_endpoint(db, edge.target["public_id"])
+        alias = await load_serving_endpoint_for_alias(db, row.hostname)
+        current = await db.get(PublicMcpDomain, row.id)
+        assert current is not None
+        owner_view = (await domain_response(db, current)).model_dump(mode="json")
+        right = await inspect_paid_integration(db, edge.store.wid, edge.store.service_id)
+    async with AsyncClient(
+        transport=ASGITransport(app=edge.store.app), base_url="https://test"
+    ) as client:
+        permission = await client.get(
+            "/internal/public-mcp-domains/tls-permission", params={"domain": row.hostname}
+        )
+    return {
+        "standard": standard.id if standard else None,
+        "alias": alias.id if alias else None,
+        "permission": (permission.status_code, permission.content),
+        "owner_view": owner_view,
+        "right": (right.allowed, right.reason, right.revision, right.valid_until),
+    }
+
+
+async def test_the_standard_endpoint_permissions_and_rights_are_the_same_with_evidence(edge):
+    row = await held(edge)
+    before = await _surfaces(edge, row)
+    assert before["standard"] is not None and before["alias"] is not None
+    assert before["permission"] == (200, b"")
+    assert (await put(edge, report(row, status="renewal_failed"))).status_code == 204
+    assert await _surfaces(edge, row) == before
