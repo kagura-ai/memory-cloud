@@ -926,3 +926,58 @@ the actor; its metadata also carries `client_id` (the browser client) and
 A `401`, `403` or `404` of a caller whose token was already verified is
 recorded as `sync.authority.denied` (best effort, after the rollback), as on
 every synchronization control route; a `409` or `429` writes none.
+
+### Edge certificate reports (DevOps #464)
+
+The certificate operator sends an HTTPS `PUT /internal/public-mcp-domains/tls-observation`
+on the private network using one `Authorization: Bearer <reporter-token>` header.
+Keep the public proxy's existing denial of all `/internal` routes. The KMC API
+and reporter alone receive `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` through
+secret injection. Use an independent random credential of at least 32 characters.
+Both public endpoint and domain switches must be enabled. Rotate by pausing
+delivery, replacing the token on both services and restarting them, then sending
+a fresh report. KMC never needs the certificate private key.
+
+```json
+{
+  "domain_id": "39d777eb-73ff-446f-9f10-6df15ddf495c",
+  "hostname": "mcp.example.org",
+  "endpoint_id": "83ee7e0e-c715-4089-8642-378acf8415da",
+  "tls": {
+    "status": "renewal_failed",
+    "observed_at": "2026-11-19T12:00:00Z",
+    "valid_until": "2026-11-19T12:05:00Z",
+    "certificate_not_after": "2026-11-23T12:00:00Z"
+  }
+}
+```
+
+Capture the KMC claim UUID, exact normalized hostname and publication endpoint
+**before** the edge probe or certificate operation. Keep that tuple with its
+result. Use the operator domain inventory (`show --domain-id` with a known claim)
+to confirm it. If the binding is ambiguous, skip the observation. Looking up
+the current holder to label a past hostname-only event could attribute another
+brand's certificate to it. A successful permission check is insufficient.
+
+Send `pending`, `valid`, `issuance_failed`, `renewal_failed` or `expired`;
+include all three timestamps, using null for an unknown certificate expiry
+on pending/failed reports. A valid certificate needs a future expiry and
+an expired one an elapsed expiry at observation time. Use UTC, synchronized
+clocks, and a freshness window of at most five minutes. Refresh before the
+window ends; stop refreshing on provider outage.
+
+204 acknowledges a stored report or its exact fresh retry. 401 indicates a
+credential problem. 404 means disabled or an unknown, released or mismatched
+binding. 409 rejects a stale, future, out-of-order or conflicting observation.
+422 indicates invalid report fields. Retry a lost acknowledgement with the
+original report; never advance its timestamps to pass freshness checks.
+
+Migration `f57_2941_domain_tls` adds one nullable JSONB column with no backfill.
+Apply it before rolling out the new API; the previous API ignores the column.
+Only the latest observation is retained, with the domain row, across restarts.
+Releasing the claim hides it immediately; pruning the row deletes it. Stopping
+the reporter lets evidence expire within five minutes. Malformed, stale or
+misbound evidence yields `unreported`. A still-fresh valid observation becomes
+`expired` when the certificate expires. Clients validate both the outer and
+TLS deadlines and check DNS, routing and serving separately. Reporting does
+not change the publication, entitlement, DNS, or the standard MCP endpoint.

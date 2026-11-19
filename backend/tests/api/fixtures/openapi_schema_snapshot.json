@@ -8985,6 +8985,47 @@
         },
         "type": "object"
       },
+      "ObservedCertificate": {
+        "additionalProperties": false,
+        "properties": {
+          "certificate_not_after": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "valid",
+              "issuance_failed",
+              "renewal_failed",
+              "expired"
+            ],
+            "type": "string"
+          },
+          "valid_until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "certificate_not_after",
+          "observed_at",
+          "status",
+          "valid_until"
+        ],
+        "type": "object"
+      },
       "OfferedEmbeddingModel": {
         "additionalProperties": false,
         "properties": {

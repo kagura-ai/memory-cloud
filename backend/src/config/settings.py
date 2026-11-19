@@ -714,6 +714,15 @@ class Settings(BaseSettings):
         other_tokens = {
             token for token in (self.billing_service_token, self.worker_service_token) if token
         }
+        reporter = self.mcp_public_domains_tls_reporter_token
+        if reporter and (
+            is_placeholder_secret(reporter)
+            or len(reporter.strip()) < _PRODUCTION_SECRET_MIN_LEN
+            or reporter in (current, *previous, *other_tokens)
+        ):
+            raise ValueError(
+                "MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN needs a strong, dedicated value"
+            )
         if other_tokens.intersection([current, *previous]):
             raise ValueError(
                 "ENVIRONMENT=production refuses a system-admin service credential equal to "
@@ -1393,6 +1402,9 @@ class Settings(BaseSettings):
     # the API is reached under (``name`` = that host, ``.name`` = that host and
     # every name under it); RESERVED_SUFFIXES are never claimable and refused
     # on the request path from the first request after a restart.
+    mcp_public_domains_tls_reporter_token: str = Field(
+        default="", repr=False, description="Dedicated internal TLS observation reporter credential"
+    )
     mcp_public_domains_enabled: bool = Field(
         default=False,
         description="Serve verified custom domains as aliases of public MCP endpoints",
