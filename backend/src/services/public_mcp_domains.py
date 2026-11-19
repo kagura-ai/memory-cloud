@@ -46,8 +46,10 @@ Invariants:
   every write transaction of the command admits it as its first locking
   statement and keeps it open through the commit; every row the command
   touches belongs to ``guard.endpoint_id``; verify and detach require
-  ``guard.expected_state``. Without a guard every function runs the
-  statements it ran before.
+  ``guard.expected_state``. A guarded check of a held row without the right
+  admits twice: once on its own when the paid entry refuses, then in the
+  fallback write. Without a guard every function runs the statements it ran
+  before.
 
 The database clock decides every time: no entry point takes a time argument
 or reads the application clock. The writer reads the database clock once in

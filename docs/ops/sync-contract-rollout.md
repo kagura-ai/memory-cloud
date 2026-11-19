@@ -36,8 +36,8 @@ advertise no enabled capabilities. A release version is never evidence of suppor
 
 These profiles conservatively describe support for complete consumer workflows;
 they do not remove diagnostic reads which intentionally survive worker shutdown.
-Public's standard-URL profile requires every listed capability except custom
-domains. Starting without a custom domain must not wait for optional DNS/TLS
+Public's standard-URL profile requires every listed capability except the
+three `public.domains.*` ones. Starting without a custom domain must not wait for optional DNS/TLS
 setup. A domain operation additionally requires `public.domains.v1` and its
 current independent entitlement/proof/TLS checks. Reading an installation's
 domain through scoped OIDC needs `public.domains.observation.v1`; claiming,

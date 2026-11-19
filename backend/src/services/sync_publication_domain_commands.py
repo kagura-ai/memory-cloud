@@ -12,10 +12,16 @@ with a command guard (I8 there): every write transaction admits the caller
 again as its first locking statement, with the owner, the token, the
 installation, the binding and the ownership epoch the first admission saw. A
 caller who is not admitted gets one 404 before any counter, lookup or paid
-check (the pre-admission). Lock order of an admission (all ``NOWAIT``), after
-the paid guard's workspace row when there is one: ``users`` row, workspace row,
-the OIDC rows, the owner's membership, the service registration and its
-client, the installation and its authorization.
+check (the pre-admission).
+
+Lock order of an admission. Outside the paid guard: the ``users`` row
+``FOR KEY SHARE NOWAIT``, then the workspace row ``FOR UPDATE NOWAIT`` (tried
+again for a moment), then the OIDC client, grant and token rows, the owner's
+membership, the service registration and its client, the installation and its
+authorization (all ``FOR SHARE NOWAIT``). Inside the paid guard: the workspace
+row ``FOR UPDATE`` (the guard's, which waits), the same row again ``NOWAIT``,
+the ``users`` row ``NOWAIT``, then the same rest. No transaction holding a
+``users`` row waits on a workspace row.
 
 This module creates, republishes or rebinds no publication, resource, context
 or installation: an unavailable target is a 404 and is never repaired.
