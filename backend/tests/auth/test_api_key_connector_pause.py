@@ -449,6 +449,7 @@ class TestVerifiedKeyConnectorFlag:
         assert verified.public_id == record.public_id
 
 
+@pytest.mark.usefixtures("owner_holds_workspace")
 class TestVerifyKeySlotSuspension:
     """#2918: a connector key of a slot-suspended workspace fails
     verification, so it reaches no route, the owner's management routes
