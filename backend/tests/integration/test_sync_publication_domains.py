@@ -4,7 +4,9 @@ from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
+from api.routes.internal_public_mcp_domains import router as internal_domains
 from config.settings import get_settings
 from models.public_mcp_domain import PublicMcpDomain
 from models.sync_installation import SyncService
@@ -83,6 +85,42 @@ async def test_owner_observes_only_current_binding_and_lease(store, monkeypatch)
     assert facts["serving"] and facts["tls"] == {"status": "unreported"}
     assert facts["last_check"]["result"] == "ok" and facts["routing"]["status"] == "mismatch"
     assert response.json()["valid_until"] == facts["serve_until"]
+    # A dedicated edge reporter writes to the same binding read by the owner.
+    store.app.include_router(internal_domains)
+    token = uuid4().hex
+    report = {
+        "domain_id": str(rid),
+        "hostname": name,
+        "endpoint_id": target["endpoint_id"],
+        "tls": {
+            "status": "valid",
+            "observed_at": now.isoformat() + "Z",
+            "valid_until": (now + timedelta(minutes=3)).isoformat() + "Z",
+            "certificate_not_after": (now + timedelta(days=1)).isoformat() + "Z",
+        },
+    }
+    async with AsyncClient(transport=ASGITransport(app=store.app), base_url="https://test") as edge:
+        route = "/internal/public-mcp-domains/tls-observation"
+        auth = {"Authorization": f"Bearer {token}"}
+        assert (await edge.put(route, json=report, headers=auth)).status_code == 404
+        monkeypatch.setattr(settings, "mcp_public_domains_tls_reporter_token", token)
+        assert (await edge.put(route, json=report)).status_code == 401
+        for mismatch in (
+            {"hostname": "other.example.org"},
+            {"endpoint_id": str(uuid4())},
+            {"domain_id": str(uuid4())},
+        ):
+            assert (await edge.put(route, json=report | mismatch, headers=auth)).status_code == 404
+        for _ in range(2):
+            assert (await edge.put(route, json=report, headers=auth)).status_code == 204
+        changed = report | {"tls": report["tls"] | {"status": "renewal_failed"}}
+        assert (await edge.put(route, json=changed, headers=auth)).status_code == 409
+        assert (await read()).json()["domain"]["tls"] == report["tls"]
+        assert (await read(role="member")).status_code == 404
+        changed["tls"]["observed_at"] = utcnow().isoformat() + "Z"
+        assert (await edge.put(route, json=changed, headers=auth)).status_code == 204
+        assert (await edge.put(route, json=report, headers=auth)).status_code == 409
+        assert (await read()).json()["domain"]["tls"]["status"] == "renewal_failed"
     await fixtures.change(store, PublicMcpDomain, rid, serve_until=now)
     assert (await read()).json()["domain"]["serving"] is False
     await fixtures.change(
@@ -94,6 +132,8 @@ async def test_owner_observes_only_current_binding_and_lease(store, monkeypatch)
         cooldown_until=now + timedelta(hours=1),
     )
     released = (await read()).json()["domain"]
+    async with AsyncClient(transport=ASGITransport(app=store.app), base_url="https://test") as edge:
+        assert (await edge.put(route, json=report, headers=auth)).status_code == 404
     assert set(released) == {"state", "domain_id", "hostname", "released_at", "cooldown_until"}
     assert released["state"] == "released"
     # A same-workspace reassignment is possible even during cooldown.

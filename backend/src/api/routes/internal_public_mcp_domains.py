@@ -34,15 +34,26 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import secrets
+from datetime import UTC
+from typing import Annotated
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
+from pydantic import ValidationError
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.single_authorization import sole_authorization
+from config.settings import get_settings
 from db.base import get_db
 from mcp_server.public.domains import claimable_hostname, public_domains_enabled
 from mcp_server.public.publication import (
     load_serving_endpoint_for_alias,
     public_endpoints_enabled,
 )
+from models.public_mcp_domain import PublicMcpDomain
+from services.domain_tls_observations import DomainTLSReport
+from utils.datetime import utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -56,6 +67,40 @@ PERMISSION_TIMEOUT_SECONDS: float = 3
 # Taken only when a slot is free at once (``locked()`` first), so a call never
 # waits for one and the semaphore never binds to an event loop.
 _SLOTS = asyncio.Semaphore(PERMISSION_CONCURRENCY)
+
+
+@router.put("/public-mcp-domains/tls-observation", include_in_schema=False)
+async def receive_tls_observation(
+    request: Request, report: DomainTLSReport, db: Annotated[AsyncSession, Depends(get_db)]
+) -> Response:
+    """Accept the dedicated reporter's latest observation; never authorize serving."""
+    token = get_settings().mcp_public_domains_tls_reporter_token
+    if not token or not public_domains_enabled() or not public_endpoints_enabled():
+        return Response(status_code=404)
+    authorization = sole_authorization(request) or ""
+    if not secrets.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
+        return Response(status_code=401)
+    row = await db.scalar(
+        select(PublicMcpDomain).where(PublicMcpDomain.id == report.domain_id).with_for_update()
+    )
+    if row is None or not report.matches(row):
+        return Response(status_code=404)
+    now = utcnow().replace(tzinfo=UTC)
+    if not report.tls.observed_at <= now < report.tls.valid_until:
+        return Response(status_code=409)
+    if row.tls_report is not None:
+        try:
+            previous = DomainTLSReport.model_validate(row.tls_report)
+        except ValidationError:
+            previous = None
+        if previous is not None and previous.matches(row):
+            if previous == report:
+                return Response(status_code=204)
+            if previous.tls.observed_at >= report.tls.observed_at:
+                return Response(status_code=409)
+    row.tls_report = report.model_dump(mode="json")
+    await db.commit()
+    return Response(status_code=204)
 
 
 async def _lookup(hostname: str) -> bool:

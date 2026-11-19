@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -14,20 +13,19 @@ from auth.sync_identity import SyncPrincipal
 from models.api_base import TZAwareBaseModel
 from models.public_mcp_domain import PublicMcpDomain
 from models.sync_installation import SyncAuthorization, SyncInstallation
+from services.domain_tls_observations import (
+    CertificateObservation,
+    ObservedCertificate,
+    current_certificate,
+)
 from services.sync_authority import registered_service, sync_authority
 from services.sync_provisioning import installation_view
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException
 
 
-class CertificateObservation(BaseModel):
-    """No authenticated certificate issuer or edge observations are available."""
-
-    status: Literal["unreported"] = "unreported"
-
-
 class LiveDomain(PublicMcpDomainResponse):
-    tls: CertificateObservation
+    tls: CertificateObservation | ObservedCertificate
 
 
 class ReleasedDomain(TZAwareBaseModel):
@@ -123,7 +121,7 @@ async def observe_publication_domain(
             until = min(until, row.cooldown_until)
         elif row is not None:
             live = await domain_response(db, row)
-            domain = LiveDomain(**live.model_dump(), tls=CertificateObservation())
+            domain = LiveDomain(**live.model_dump(), tls=current_certificate(row, observed))
             if live.serving and row.serve_until is not None:
                 until = min(until, row.serve_until)
         authority.deadlines.append(until)
