@@ -62,26 +62,20 @@ from utils.datetime import utcnow  # noqa: E402
 from utils.utf8 import is_utf8_encodable  # noqa: E402
 
 
-def _credentials(login_env: str, password_env: str) -> tuple[str, str]:
-    """The login id and password from the environment, or exit 1 with a reason."""
-    login_id = os.environ.get(login_env, "").strip()
-    password = os.environ.get(password_env, "")
+def seed_e2e_admin() -> None:
+    login_id = os.environ.get("E2E_ADMIN_LOGIN_ID", "").strip()
+    password = os.environ.get("E2E_ADMIN_PASSWORD", "")
     if not login_id or not password:
-        print(f"✗ {login_env} and {password_env} must be set.")
+        print("✗ E2E_ADMIN_LOGIN_ID and E2E_ADMIN_PASSWORD must be set.")
         sys.exit(1)
     if not is_utf8_encodable(password):
         # A non-UTF-8 byte in the environment reads as a lone surrogate (#1718).
-        print(f"✗ {password_env}: {PASSWORD_NOT_ENCODABLE_MESSAGE}")
+        print(f"✗ E2E_ADMIN_PASSWORD: {PASSWORD_NOT_ENCODABLE_MESSAGE}")
         sys.exit(1)
     if is_password_too_long(password):
         # bcrypt hashes at most 72 bytes (#1707); fail before touching the DB.
-        print(f"✗ {password_env}: {PASSWORD_TOO_LONG_MESSAGE}")
+        print(f"✗ E2E_ADMIN_PASSWORD: {PASSWORD_TOO_LONG_MESSAGE}")
         sys.exit(1)
-    return login_id, password
-
-
-def seed_e2e_admin() -> None:
-    login_id, password = _credentials("E2E_ADMIN_LOGIN_ID", "E2E_ADMIN_PASSWORD")
 
     # The production secret guard (#2239) before any DB work.
     require_settings()
@@ -269,7 +263,15 @@ async def _seed_slot_owner_in_database(login_id: str, password_hash: str) -> Slo
 
 def seed_e2e_slot_owner() -> None:
     """``--slot-owner``: the workspace management fixture (#2918)."""
-    login_id, password = _credentials("E2E_SLOT_OWNER_LOGIN_ID", "E2E_SLOT_OWNER_PASSWORD")
+    login_id = os.environ.get("E2E_SLOT_OWNER_LOGIN_ID", "").strip()
+    password = os.environ.get("E2E_SLOT_OWNER_PASSWORD", "")
+    if not login_id or not password:
+        print("✗ E2E_SLOT_OWNER_LOGIN_ID and E2E_SLOT_OWNER_PASSWORD must be set.")
+        sys.exit(1)
+    if not is_utf8_encodable(password) or is_password_too_long(password):
+        # The two limits of the admin seed (#1718, #1707), before touching the DB.
+        print("✗ E2E_SLOT_OWNER_PASSWORD must be valid UTF-8 and at most 72 bytes.")
+        sys.exit(1)
 
     # The production secret guard (#2239) before any DB work.
     require_settings()
