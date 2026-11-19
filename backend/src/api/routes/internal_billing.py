@@ -233,6 +233,10 @@ async def set_workspace_plan_from_billing(
             "Workspace requires an ordered billing snapshot", reason="ordered_billing_required"
         )
 
+    # #2918: the values the slot drop test compares against, before the write.
+    previous_plan_name = workspace.plan_name
+    previous_entitlement_source = workspace.entitlement_source
+
     # Apply entitlement (absolute set → idempotent). Mark provenance as
     # billing-owned (#1095) so the external reconciler may reconcile this row;
     # a prior admin/comp grant is overwritten here by an explicit billing push.
@@ -247,6 +251,25 @@ async def set_workspace_plan_from_billing(
             setattr(workspace, col, 0)
         for key, value in body.addons.items():
             setattr(workspace, _ADDON_COLUMNS[key], value)
+    # #2918: owned-workspace slots, under this row lock and in this
+    # transaction (a soft-deleted workspace owns no slot). A change that may
+    # lower the allowance answers 409 ``workspace_slots_busy`` when the
+    # owner's slot lock stays busy, and nothing is committed.
+    if workspace.deleted_at is None:
+        from services.workspace_slots import reconcile_plan_change
+
+        # The reconcile's reads autoflush the plan change into this
+        # transaction first; in mode off it runs no statement.
+        await reconcile_plan_change(
+            db,
+            workspace_id=ws_uuid,
+            owner_user_id=workspace.owner_user_id,
+            cause="billing_plan",
+            previous_plan_name=previous_plan_name,
+            previous_entitlement_source=previous_entitlement_source,
+            new_plan_name=workspace.plan_name,
+            new_entitlement_source=workspace.entitlement_source,
+        )
     await db.commit()
 
     current_addons = {key: getattr(workspace, col) for key, col in _ADDON_COLUMNS.items()}

@@ -616,7 +616,14 @@ class WorkspaceService:
                 workspace_id=str(workspace_id),
             )
 
+        owner_user_id = workspace.owner_user_id
         await self.db.commit()
+
+        # #2918: a freed slot resumes a suspended workspace of the owner, in a
+        # transaction of its own; a failure is logged and left to the sweep.
+        from services.workspace_slots import reconcile_after_commit
+
+        await reconcile_after_commit(self.db, [owner_user_id], cause="workspace_delete")
 
         from services import storage_quota_service
 

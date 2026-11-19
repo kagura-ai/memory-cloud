@@ -635,12 +635,18 @@ async def update_workspace_plan(
         422: Invalid plan tier
     """
     async with db_transaction(db, "update_workspace_plan", "Failed to update workspace plan"):
-        # Get workspace
+        # Get workspace, row locked as both billing writers lock it (#2918):
+        # the old plan and entitlement source below are then the values this
+        # write replaces, and a billing delivery cannot interleave.
+        # populate_existing: a row already in the identity map is re-read.
         workspace_result = await db.execute(
-            select(Workspace).where(
+            select(Workspace)
+            .where(
                 Workspace.id == workspace_id,
                 Workspace.deleted_at.is_(None),  # #687 / #681 pattern: soft-delete safe
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         workspace = workspace_result.scalar_one_or_none()
 
@@ -655,6 +661,7 @@ async def update_workspace_plan(
 
         # Store old values for audit
         old_plan = workspace.plan_name
+        old_entitlement_source = workspace.entitlement_source
         # #805: memory_limit is no longer a Workspace column — source the audit
         # "old" value from the old plan tier (before plan_name mutates below).
         old_memory_limit = get_plan_tier(old_plan).memory_limit
@@ -760,6 +767,24 @@ async def update_workspace_plan(
                 count=len(selector_deactivated),
                 context_ids=[str(context_id) for context_id in selector_deactivated],
             )
+
+        # #2918: owned-workspace slots, under the row lock, in every mode
+        # after the flush. A change that may lower the owner's allowance
+        # answers 409 ``workspace_slots_busy`` when the owner's slot lock
+        # stays busy, and nothing is committed.
+        from services.workspace_slots import reconcile_plan_change
+
+        await db.flush()
+        await reconcile_plan_change(
+            db,
+            workspace_id=workspace.id,
+            owner_user_id=workspace.owner_user_id,
+            cause="admin_plan",
+            previous_plan_name=old_plan,
+            previous_entitlement_source=old_entitlement_source,
+            new_plan_name=workspace.plan_name,
+            new_entitlement_source=workspace.entitlement_source,
+        )
 
         await db.commit()
 

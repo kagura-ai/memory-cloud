@@ -88,6 +88,17 @@ class OwnershipTransferResult(NamedTuple):
     changed: bool
 
 
+async def _reconcile_both_owners(
+    db: AsyncSession, previous_owner_id: str, new_owner_id: str
+) -> None:
+    """#2918: after a committed transfer, resume (never suspend) the slots of
+    both owners, each in a transaction of its own; a failure is logged and
+    left to the sweep, never turned into an error of the transfer."""
+    from services.workspace_slots import reconcile_after_commit
+
+    await reconcile_after_commit(db, [previous_owner_id, new_owner_id], cause="ownership_transfer")
+
+
 class WorkspaceOwnershipService:
     """Transactional workspace ownership transfer."""
 
@@ -127,6 +138,7 @@ class WorkspaceOwnershipService:
         performed_by_email: str,
         commit: bool = True,
         performed_by_user_id: str | None = None,
+        check_recipient_slots: bool = True,
     ) -> OwnershipTransferResult:
         """Transfer ownership of ``workspace_id`` to ``target_user_id``.
 
@@ -152,6 +164,10 @@ class WorkspaceOwnershipService:
             target_user_id: The member to promote to owner.
             performed_by_email: Email of the actor, for the audit row.
             commit: False when a caller commits transfer with a larger operation.
+            check_recipient_slots: Refuse when the recipient has no free
+                workspace slot (#2918, only while slot suspension is
+                enforced). False for the admin-deletion transfers, which are
+                exempt.
 
         Returns:
             The transfer outcome (``changed=False`` for the idempotent no-op).
@@ -160,6 +176,10 @@ class WorkspaceOwnershipService:
             NotFoundException: workspace missing or soft-deleted (404).
             ConflictError: ownership changed concurrently (409).
             BadRequestError: target is not a member of this workspace (400).
+            WorkspaceSlotTransferRefusedError: the recipient has no free
+                workspace slot (409 ``SLOT-004``).
+            WorkspaceSlotsBusyError: the recipient's slot lock stayed busy
+                (409 ``RES-002``, retryable).
         """
         # 1. Fence account deletion, then take the workspace synchronization point,
         # shared with update_member_role + account_erasure via lock_workspace_for_update
@@ -213,6 +233,17 @@ class WorkspaceOwnershipService:
         # Demote the previous owner's member row to ADMIN — if it exists. Some
         # legacy workspaces carry owner_user_id without a matching member row;
         # there is nothing to demote in that case, so flip ownership regardless.
+        # #2918: in ``enforce`` the recipient must have a free workspace slot
+        # for it (otherwise a transfer round trip would resume everything).
+        # Under the recipient's slot lock, taken without waiting: this
+        # transaction holds users rows and the workspace row.
+        if check_recipient_slots:
+            from services.workspace_slots import check_transfer_recipient
+
+            await check_transfer_recipient(
+                self.db, workspace_id=workspace_id, recipient_user_id=target_user_id
+            )
+
         previous_member = members_by_user.get(previous_owner_id)
         if previous_member is not None:
             previous_member.role = WorkspaceRole.ADMIN
@@ -259,6 +290,7 @@ class WorkspaceOwnershipService:
             )
         if commit:
             await self.db.commit()
+            await _reconcile_both_owners(self.db, previous_owner_id, target_user_id)
         else:
             await self.db.flush()
 
@@ -337,6 +369,7 @@ class WorkspaceOwnershipService:
         )
         if result.changed:
             await self.db.commit()
+            await _reconcile_both_owners(self.db, result.previous_owner_id, result.new_owner_id)
             logger.info(
                 "workspace_ownership_force_transferred",
                 workspace_id=str(workspace_id),
@@ -718,6 +751,8 @@ class WorkspaceOwnershipService:
         request.decided_by_email = approver_email
         request.decided_at = utcnow()
         await self.db.commit()
+        if result.changed:
+            await _reconcile_both_owners(self.db, result.previous_owner_id, result.new_owner_id)
 
         logger.info(
             "workspace_ownership_force_transfer_approved",

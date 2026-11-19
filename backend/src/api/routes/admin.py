@@ -1090,6 +1090,18 @@ async def update_workspace_slot_bonus(
             },
         )
         db.add(audit)
+        # #2918: owned-workspace slots for the new bonus. The owner lock is
+        # held since the top of this handler; a reduction below the active
+        # count suspends, an increase resumes.
+        from services.workspace_slots import SlotChange, reconcile_workspace_slots
+
+        await reconcile_workspace_slots(
+            db,
+            user_id,
+            cause="slot_bonus",
+            allow_suspend=True,
+            change=SlotChange(previous_slot_bonus=before_value),
+        )
         await db.commit()
 
     logger.info(
