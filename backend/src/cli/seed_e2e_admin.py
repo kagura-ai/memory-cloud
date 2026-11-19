@@ -18,15 +18,33 @@ re-used CI database are safe.
 Usage (CI):
     E2E_ADMIN_LOGIN_ID=e2e-admin E2E_ADMIN_PASSWORD='...' \\
         python -m src.cli.seed_e2e_admin
+
+``--slot-owner`` (#2918) seeds a SEPARATE fixture for the workspace management
+page instead: a password user (role user, no MFA) from
+``E2E_SLOT_OWNER_LOGIN_ID`` / ``E2E_SLOT_OWNER_PASSWORD`` owning three Free
+workspaces, two of them suspended as a drop of the allowance to one would
+leave them (``services.workspace_slots.seed_default_suspension``), with the
+selection still required, and one shared context without memories in a
+suspended workspace. Never seeded onto the admin: the dashboard specs need the
+admin's Pro workspace active. Idempotent like the admin seed::
+
+    E2E_SLOT_OWNER_LOGIN_ID=e2e-slot-owner E2E_SLOT_OWNER_PASSWORD='...' \\
+        python -m src.cli.seed_e2e_admin --slot-owner
 """
 
+import argparse
+import asyncio
 import os
 import sys
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
+from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import create_engine, func, select  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.password import (  # noqa: E402
@@ -37,25 +55,33 @@ from auth.password import (  # noqa: E402
 )
 from cli._env_guard import require_settings  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
-from models.auth import User, Workspace, WorkspaceMember  # noqa: E402
+from db.base import close_db, get_db  # noqa: E402
+from models.auth import Context, User, Workspace, WorkspaceMember  # noqa: E402
+from services.workspace_slots import seed_default_suspension  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
 from utils.utf8 import is_utf8_encodable  # noqa: E402
 
 
-def seed_e2e_admin() -> None:
-    login_id = os.environ.get("E2E_ADMIN_LOGIN_ID", "").strip()
-    password = os.environ.get("E2E_ADMIN_PASSWORD", "")
+def _credentials(login_env: str, password_env: str) -> tuple[str, str]:
+    """The login id and password from the environment, or exit 1 with a reason."""
+    login_id = os.environ.get(login_env, "").strip()
+    password = os.environ.get(password_env, "")
     if not login_id or not password:
-        print("✗ E2E_ADMIN_LOGIN_ID and E2E_ADMIN_PASSWORD must be set.")
+        print(f"✗ {login_env} and {password_env} must be set.")
         sys.exit(1)
     if not is_utf8_encodable(password):
         # A non-UTF-8 byte in the environment reads as a lone surrogate (#1718).
-        print(f"✗ E2E_ADMIN_PASSWORD: {PASSWORD_NOT_ENCODABLE_MESSAGE}")
+        print(f"✗ {password_env}: {PASSWORD_NOT_ENCODABLE_MESSAGE}")
         sys.exit(1)
     if is_password_too_long(password):
         # bcrypt hashes at most 72 bytes (#1707); fail before touching the DB.
-        print(f"✗ E2E_ADMIN_PASSWORD: {PASSWORD_TOO_LONG_MESSAGE}")
+        print(f"✗ {password_env}: {PASSWORD_TOO_LONG_MESSAGE}")
         sys.exit(1)
+    return login_id, password
+
+
+def seed_e2e_admin() -> None:
+    login_id, password = _credentials("E2E_ADMIN_LOGIN_ID", "E2E_ADMIN_PASSWORD")
 
     # The production secret guard (#2239) before any DB work.
     require_settings()
@@ -125,5 +151,153 @@ def seed_e2e_admin() -> None:
         engine.dispose()
 
 
+# ---------------------------------------------------------------------------
+# --slot-owner (#2918)
+# ---------------------------------------------------------------------------
+
+# Oldest first: the page lists owned workspaces by creation time.
+SLOT_OWNER_WORKSPACES = ("E2E Slots Personal", "E2E Slots Research", "E2E Slots Side")
+SLOT_OWNER_CONTEXT = "e2e-slots-papers"
+
+
+@dataclass(frozen=True)
+class SlotOwnerSeed:
+    """What ``seed_slot_owner`` wrote (``created=False``: the user existed)."""
+
+    created: bool
+    user_id: str
+    workspace_ids: tuple[UUID, ...] = ()
+    suspended: tuple[UUID, ...] = ()
+    context_id: UUID | None = None
+
+
+async def seed_slot_owner(db: AsyncSession, login_id: str, password_hash: str) -> SlotOwnerSeed:
+    """Create the slot owner fixture in ``db`` and commit; nothing when it exists.
+
+    Three Free workspaces with owner memberships (the first is the current
+    one), then the rows a drop of the allowance to one writes, through the
+    planner's default order (``seed_default_suspension``: the two others are
+    suspended and the selection is required), then one shared context
+    without memories in the first suspended workspace.
+
+    Args:
+        db: An async session; committed here.
+        login_id: The password login id.
+        password_hash: The bcrypt hash of the password.
+
+    Returns:
+        What was written.
+    """
+    user_id = f"local:{login_id}"
+    existing = await db.execute(
+        select(func.count())
+        .select_from(User)
+        .where(User.login_id == login_id, User.auth_method == "password")
+    )
+    if existing.scalar():
+        return SlotOwnerSeed(created=False, user_id=user_id)
+
+    owner = User(
+        login_id=login_id,
+        email=f"{login_id}@local",
+        user_id=user_id,
+        name=login_id,
+        role="user",
+        auth_method="password",
+        password_hash=password_hash,
+        totp_secret=None,
+        totp_enabled=False,
+        is_initial_admin=False,
+        last_login_at=utcnow(),
+        admitted_via="admin_cli",
+    )
+    db.add(owner)
+    await db.flush()
+
+    start = utcnow() - timedelta(minutes=len(SLOT_OWNER_WORKSPACES))
+    workspaces = [
+        Workspace(
+            name=name,
+            owner_user_id=user_id,
+            plan_name="free",
+            created_at=start + timedelta(minutes=index),
+        )
+        for index, name in enumerate(SLOT_OWNER_WORKSPACES)
+    ]
+    db.add_all(workspaces)
+    await db.flush()
+    db.add_all(
+        WorkspaceMember(workspace_id=workspace.id, user_id=user_id, role="owner")
+        for workspace in workspaces
+    )
+    owner.current_workspace_id = workspaces[0].id
+    await db.flush()
+
+    plan = await seed_default_suspension(db, user_id)
+    if not plan.suspended:
+        raise RuntimeError("the slot owner fixture expected suspended workspaces")
+    context = Context(
+        workspace_id=plan.suspended[0],
+        name=SLOT_OWNER_CONTEXT,
+        display_name="Papers",
+        created_by=user_id,
+        is_private=False,
+    )
+    db.add(context)
+    await db.flush()
+    await db.commit()
+    return SlotOwnerSeed(
+        created=True,
+        user_id=user_id,
+        workspace_ids=tuple(workspace.id for workspace in workspaces),
+        suspended=tuple(plan.suspended),
+        context_id=context.id,
+    )
+
+
+async def _seed_slot_owner_in_database(login_id: str, password_hash: str) -> SlotOwnerSeed:
+    try:
+        result: SlotOwnerSeed | None = None
+        async for db in get_db():
+            result = await seed_slot_owner(db, login_id, password_hash)
+        if result is None:
+            raise RuntimeError("no database session")
+        return result
+    finally:
+        await close_db()
+
+
+def seed_e2e_slot_owner() -> None:
+    """``--slot-owner``: the workspace management fixture (#2918)."""
+    login_id, password = _credentials("E2E_SLOT_OWNER_LOGIN_ID", "E2E_SLOT_OWNER_PASSWORD")
+
+    # The production secret guard (#2239) before any DB work.
+    require_settings()
+
+    seeded = asyncio.run(_seed_slot_owner_in_database(login_id, hash_password(password)))
+    if not seeded.created:
+        print(f"✓ Slot owner '{login_id}' already exists — nothing to do.")
+        return
+    print(
+        f"✓ Seeded slot owner '{login_id}': {len(seeded.workspace_ids)} Free workspaces, "
+        f"{len(seeded.suspended)} suspended, selection required"
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Seed the e2e admin, or with ``--slot-owner`` the slot owner fixture."""
+    parser = argparse.ArgumentParser(prog="python -m src.cli.seed_e2e_admin")
+    parser.add_argument(
+        "--slot-owner",
+        action="store_true",
+        help="seed the workspace-slot owner (E2E_SLOT_OWNER_*) instead of the admin",
+    )
+    args = parser.parse_args(argv)
+    if args.slot_owner:
+        seed_e2e_slot_owner()
+    else:
+        seed_e2e_admin()
+
+
 if __name__ == "__main__":
-    seed_e2e_admin()
+    main()

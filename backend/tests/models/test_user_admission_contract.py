@@ -109,7 +109,7 @@ def test_every_users_row_writer_passes_admitted_via() -> None:
         "cli/create_admin.py",
         "cli/seed_e2e_admin.py",
     ]
-    assert len(calls) == 4
+    assert len(calls) == 5
     missing = [(path, line) for path, line, keywords in calls if "admitted_via" not in keywords]
     assert missing == []
 
