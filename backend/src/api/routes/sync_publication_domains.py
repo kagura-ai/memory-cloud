@@ -117,9 +117,14 @@ async def observe_publication_domain(
             if live.serving and row.serve_until is not None:
                 until = min(until, row.serve_until)
             if isinstance(tls, ObservedCertificate):
-                # The answer never outlives the evidence it carries (shown
-                # evidence is current, so this deadline is still ahead).
+                # The answer never outlives the evidence it carries, and a
+                # valid answer never outlives the certificate. Both are more
+                # than the show margin ahead, so these deadlines are still
+                # ahead at the commit.
                 until = min(until, tls.valid_until.astimezone(UTC).replace(tzinfo=None))
+                if tls.status == "valid" and tls.certificate_not_after is not None:
+                    end = tls.certificate_not_after.astimezone(UTC).replace(tzinfo=None)
+                    until = min(until, end)
         authority.deadlines.append(until)
         result = PublicationDomainObservation(
             subject=principal.user_id,

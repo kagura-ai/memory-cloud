@@ -13,10 +13,6 @@ One run of the scheduler job ``public_mcp_domain_maintenance``
    - rows that are not ``released`` whose workspace row is gone, or whose
      publication is gone, revoked or of another workspace: ``pending`` rows
      are deleted, holders are ``released`` with the cooldown.
-   - while edge certificate reports are configured (#2941): reports whose
-     ``valid_until`` has passed are deleted (``public_mcp_domain_tls_reports``;
-     nothing else touches that table here, and nothing at all while the
-     feature is not configured).
 
 2. Up to ``MAINTENANCE_BATCH`` held rows (``active`` / ``suspended``) whose
    last check is older than ``RECHECK_AGE_SECONDS`` (or that were never
@@ -31,6 +27,12 @@ One run of the scheduler job ``public_mcp_domain_maintenance``
    an active right, renews the lease of an ``active`` row. A row whose
    lookup would start after the budget is counted ``budget_skipped`` and
    stays due.
+
+4. While edge certificate reports are configured (#2941), reports whose
+   ``valid_until`` has passed are deleted (``public_mcp_domain_tls_reports``,
+   one bounded statement in a session of its own). A failure there is logged
+   (``public_mcp_domain_tls_report_purge_failed``) and never fails the run;
+   nothing touches that table while the feature is not configured.
 
 The run returns integer counts only. Every time is the database clock; no
 host name, token or DNS answer is logged. Audit rows of the job carry the
@@ -74,6 +76,7 @@ __all__ = [
     "MaintenanceCounts",
     "due_domains",
     "housekeeping",
+    "purge_expired_reports",
     "run_maintenance",
 ]
 
@@ -210,8 +213,6 @@ async def _committed(db: AsyncSession, statement: TextClause, **params: object) 
 async def housekeeping(db: AsyncSession, counts: MaintenanceCounts) -> None:
     """Expire claims, purge cooled-down rows and release orphans (one batch each).
 
-    Then, while certificate reports are configured, delete expired reports.
-
     Each step commits on its own; the audit row of a removed or released row
     is written in the step's transaction (``public_mcp_domain.released``,
     reason ``expired`` or ``orphaned``). Deleting a row whose cooldown has
@@ -249,9 +250,6 @@ async def housekeeping(db: AsyncSession, counts: MaintenanceCounts) -> None:
         },
     )
     counts.orphans_released += claims + holders
-
-    if reporting_configured(get_settings()):
-        await _committed(db, _PURGE_TLS_REPORTS, limit=limit)
 
 
 async def _audited(
@@ -382,6 +380,22 @@ async def _check_all(
         raise failures[0]
 
 
+async def purge_expired_reports(sessions: SessionFactory) -> None:
+    """Delete certificate reports past their ``valid_until`` (#2941); never fails the run.
+
+    Only while reporting is configured. One bounded statement in a session of
+    its own, after the checks: a failure (the table missing, say) is logged
+    and the run goes on.
+    """
+    if not reporting_configured(get_settings()):
+        return
+    try:
+        async with sessions() as db:
+            await _committed(db, _PURGE_TLS_REPORTS, limit=HOUSEKEEPING_LIMIT)
+    except Exception as exc:  # noqa: BLE001 - the optional table never stops the checks
+        logger.error("public_mcp_domain_tls_report_purge_failed", error_type=type(exc).__name__)
+
+
 async def run_maintenance(session_factory: SessionFactory | None = None) -> MaintenanceCounts:
     """One maintenance run: housekeeping, then the due checks within the budget.
 
@@ -403,5 +417,6 @@ async def run_maintenance(session_factory: SessionFactory | None = None) -> Main
         due = await due_domains(db)
         await db.commit()  # I3: no connection is held during the lookups
     await _check_all(sessions, due, deadline, counts)
+    await purge_expired_reports(sessions)
     logger.info("public_mcp_domain_maintenance_run", **counts.as_dict())
     return counts

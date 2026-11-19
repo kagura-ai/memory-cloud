@@ -88,8 +88,13 @@ REPORT_BODY_LIMIT = 4096
 
 
 def _refused(reason: str, status_code: int, domain_id: UUID | None = None) -> Response:
-    """A bodyless refusal of a report, logged without the credential or a host name."""
-    logger.warning(
+    """A bodyless refusal of a report, logged without the credential or a host name.
+
+    ``disabled`` is a debug line: an installation that does not use reports
+    writes no warning for them.
+    """
+    log = logger.debug if reason == "disabled" else logger.warning
+    log(
         "public_mcp_domain_tls_report_refused",
         reason=reason,
         domain_id=str(domain_id) if domain_id else None,
@@ -139,12 +144,14 @@ async def receive_tls_observation(
     if row is None or not report.matches(row):
         return _refused("binding", 404, report.domain_id)
     now = utcnow().replace(tzinfo=UTC)
-    if not report.tls.observed_at <= now < report.tls.valid_until:
-        return _refused("stale", 409, report.domain_id)
+    if report.tls.observed_at > now:
+        return _refused("future", 409, report.domain_id)
+    if now >= report.tls.valid_until:
+        return _refused("expired", 409, report.domain_id)
     stored = await store_report(db, report)
     await db.commit()
     if not stored:
-        return _refused("stale", 409, report.domain_id)
+        return _refused("older", 409, report.domain_id)
     logger.info(
         "public_mcp_domain_tls_report_stored",
         domain_id=str(report.domain_id),

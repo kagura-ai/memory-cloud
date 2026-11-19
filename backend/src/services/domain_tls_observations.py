@@ -23,6 +23,7 @@ installation-bound observation shows the report as the domain's ``tls``.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Self
 from uuid import UUID
@@ -45,6 +46,7 @@ from models.public_mcp_domain import HELD_STATES, PublicMcpDomain
 from models.public_mcp_domain_tls import REPORT_FRESHNESS_SECONDS, PublicMcpDomainTlsReport
 
 __all__ = [
+    "SHOW_MARGIN_SECONDS",
     "CertificateObservation",
     "DomainTLSReport",
     "ObservedCertificate",
@@ -55,6 +57,15 @@ __all__ = [
 ]
 
 TlsStatus = Literal["pending", "valid", "issuance_failed", "renewal_failed", "expired"]
+
+# Evidence is shown only while its valid_until is more than this after the
+# observation, and a certificate is shown as valid only while its end is more
+# than this ahead: every deadline the observation then registers is still
+# ahead when it commits and when the answer arrives.
+SHOW_MARGIN_SECONDS = 5
+
+# A report time: date, "T", time with optional fraction, and "Z" or an offset.
+_RFC3339 = re.compile(r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})")
 
 
 def reporting_configured(settings: Settings) -> bool:
@@ -86,6 +97,16 @@ class ObservedCertificate(BaseModel):
     observed_at: AwareDatetime
     valid_until: AwareDatetime
     certificate_not_after: AwareDatetime | None
+
+    @field_validator("observed_at", "valid_until", "certificate_not_after", mode="before")
+    @classmethod
+    def rfc3339(cls, value: object) -> object:
+        """RFC 3339 strings with an offset; a number is never read as seconds since the epoch."""
+        if value is None or isinstance(value, datetime):
+            return value
+        if isinstance(value, str) and _RFC3339.fullmatch(value):
+            return value
+        raise ValueError("A time is an RFC 3339 string with an offset")
 
     @field_validator("observed_at", "valid_until", "certificate_not_after")
     @classmethod
@@ -206,9 +227,10 @@ def current_certificate(
 
     ``unreported`` unless the report names this row (its id, host name and
     endpoint), the row holds its name, the report was observed at or after the
-    row was created and not after ``observed``, and ``observed`` is before the
-    report's ``valid_until``. A ``valid`` report whose certificate end has
-    passed is ``expired``; ``valid`` without an end is ``unreported``.
+    row was created and not after ``observed``, and its ``valid_until`` is more
+    than ``SHOW_MARGIN_SECONDS`` after ``observed``. A ``valid`` report whose
+    certificate end is not more than the margin ahead is ``expired``; ``valid``
+    without an end is ``unreported``.
     """
     if report is None:
         return CertificateObservation()
@@ -217,16 +239,17 @@ def current_certificate(
     valid_until = _utc(report.valid_until)
     if not _binds(row, report.domain_id, report.endpoint_id, report.hostname, observed_at):
         return CertificateObservation()
+    margin = timedelta(seconds=SHOW_MARGIN_SECONDS)
     if observed_at > instant:
         return CertificateObservation()
-    if instant >= valid_until:
+    if instant + margin >= valid_until:
         return CertificateObservation()
     not_after = _utc(report.certificate_not_after) if report.certificate_not_after else None
     status = report.status
     if status == "valid":
         if not_after is None:
             return CertificateObservation()
-        if not_after <= instant:
+        if not_after <= instant + margin:
             status = "expired"
     try:
         return ObservedCertificate.model_validate(

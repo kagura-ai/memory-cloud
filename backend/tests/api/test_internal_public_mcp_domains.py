@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -29,11 +30,15 @@ from uuid import uuid4
 import httpx
 import pytest
 import structlog
+from fastapi import FastAPI
 from sqlalchemy.exc import OperationalError
 
 from api.routes import internal_public_mcp_domains as permission
 from config.settings import get_settings
+from db.base import get_db
 from mcp_server.public.publication import ServingEndpoint
+from models.public_mcp_domain import PublicMcpDomain
+from utils.datetime import utcnow
 
 PATH = "/internal/public-mcp-domains/tls-permission"
 ALIAS = "alias.example.org"
@@ -442,3 +447,141 @@ def test_the_route_is_not_in_the_openapi_document() -> None:
     from api.main import app
 
     assert not [path for path in app.openapi()["paths"] if "public-mcp-domains" in path]
+
+
+# ----------------------------------------------------------------------------
+# The edge certificate report (#2941): one log event per outcome
+# ----------------------------------------------------------------------------
+
+REPORT_PATH = "/internal/public-mcp-domains/tls-observation"
+REPORTER = "reporter-" + "c" * 40
+REPORTED = "cert.example.org"
+
+
+class _ReportSession:
+    """Stands in for the route's session: the claim row it reads, whether the write stores."""
+
+    def __init__(self, row: PublicMcpDomain | None, stored: bool) -> None:
+        self._row = row
+        self._stored = stored
+
+    async def scalar(self, *_args: Any, **_kwargs: Any) -> PublicMcpDomain | None:
+        return self._row
+
+    async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+        stored = self._stored
+
+        class _Result:
+            def scalar_one_or_none(self) -> object | None:
+                return uuid4() if stored else None
+
+        return _Result()
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+def _sessions(session: _ReportSession) -> Any:
+    async def db() -> AsyncIterator[_ReportSession]:
+        yield session
+
+    return db
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _report(row: PublicMcpDomain, observed: datetime, until: datetime | None = None) -> dict:
+    return {
+        "domain_id": str(row.id),
+        "hostname": row.hostname,
+        "endpoint_id": str(row.endpoint_id),
+        "tls": {
+            "status": "valid",
+            "observed_at": _iso(observed),
+            "valid_until": _iso(until or observed + timedelta(minutes=3)),
+            "certificate_not_after": _iso(observed + timedelta(days=30)),
+        },
+    }
+
+
+async def _put(token: str, headers: dict, body: Any, session: _ReportSession) -> Any:
+    get_settings().mcp_public_domains_tls_reporter_token = token
+    app = FastAPI()
+    app.include_router(permission.router)
+    app.dependency_overrides[get_db] = _sessions(session)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=f"http://{INTERNAL_HOST}"
+    ) as c:
+        if isinstance(body, bytes):
+            return await c.put(
+                REPORT_PATH, content=body, headers={**headers, "Content-Type": "application/json"}
+            )
+        return await c.put(REPORT_PATH, json=body, headers=headers)
+
+
+async def test_each_report_outcome_logs_one_event_without_secrets(
+    domains_on, monkeypatch, caplog
+) -> None:
+    """One line per outcome, named for it; ``disabled`` only at debug level; never a secret."""
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_tls_reporter_token", REPORTER)
+    row = PublicMcpDomain(
+        id=uuid4(),
+        endpoint_id=uuid4(),
+        hostname=REPORTED,
+        state="active",
+        created_at=utcnow() - timedelta(hours=1),
+    )
+    now = datetime.now(UTC)
+    fresh = _report(row, now - timedelta(seconds=5))
+    future = _report(row, now + timedelta(seconds=60))
+    expired = _report(row, now - timedelta(minutes=4), now - timedelta(minutes=1))
+    bearer = {"Authorization": f"Bearer {REPORTER}"}
+    wrong = {"Authorization": "Bearer wrong"}
+    oversized = b"{" + b" " * 5000 + b"}"
+    # (token, headers, body, claim row, stored, status, event, reason, level)
+    cases: list[tuple[Any, ...]] = [
+        ("", bearer, fresh, row, True, 404, "refused", "disabled", "debug"),
+        (REPORTER, wrong, fresh, row, True, 401, "refused", "credential", "warning"),
+        (REPORTER, bearer, oversized, row, True, 413, "refused", "size", "warning"),
+        (REPORTER, bearer, {}, row, True, 422, "refused", "invalid", "warning"),
+        (REPORTER, bearer, fresh, None, True, 404, "refused", "binding", "warning"),
+        (REPORTER, bearer, future, row, True, 409, "refused", "future", "warning"),
+        (REPORTER, bearer, expired, row, True, 409, "refused", "expired", "warning"),
+        (REPORTER, bearer, fresh, row, False, 409, "refused", "older", "warning"),
+        (REPORTER, bearer, fresh, row, True, 204, "stored", None, "info"),
+    ]
+    caplog.set_level(logging.DEBUG)
+    lines: list[str] = []
+    for token, headers, body, claim, stored, status, event, reason, level in cases:
+        with structlog.testing.capture_logs() as events:
+            r = await _put(token, headers, body, _ReportSession(claim, stored))
+        assert (r.status_code, r.content) == (status, b""), (reason, r.status_code)
+        lines.extend(repr(e) for e in events)
+        reports = [e for e in events if e["event"].startswith("public_mcp_domain_tls_report_")]
+        if level == "debug":
+            # Below the default log level: no warning or info line at all; when
+            # debug lines are kept, the one line says why.
+            assert all((e["log_level"], e.get("reason")) == ("debug", reason) for e in reports)
+            continue
+        assert len(reports) == 1, (reason, events)
+        assert reports[0]["event"] == f"public_mcp_domain_tls_report_{event}"
+        assert reports[0]["log_level"] == level, reason
+        if event == "refused":
+            assert reports[0]["reason"] == reason
+        else:
+            assert (reports[0]["status"], reports[0]["domain_id"]) == ("valid", str(row.id))
+    lines.extend(
+        f"{record.name} {record.getMessage()} {record.__dict__!r}"
+        for record in caplog.records
+        if not record.name.startswith("httpx")
+    )
+    assert len([line for line in lines if "public_mcp_domain_tls_report_" in line]) >= 8
+    assert not [line for line in lines if REPORTER in line or REPORTED in line]

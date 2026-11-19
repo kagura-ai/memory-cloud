@@ -28,6 +28,7 @@ from api.routes import internal_public_mcp_domains
 from config.settings import get_settings
 from models.public_mcp_domain import PublicMcpDomain
 from models.public_mcp_domain_tls import PublicMcpDomainTlsReport
+from models.public_usage_budget import PublicUsageBudget
 from services import public_mcp_domain_maintenance as maintenance
 from services import public_mcp_domains as lifecycle
 from tests.integration import sync_installation_fixtures as fixtures
@@ -280,6 +281,7 @@ async def test_nothing_touches_the_report_table_while_not_configured(edge, switc
             assert observation["domain"]["tls"] == {"status": "unreported"}
         async with edge.store.factory() as db:
             await maintenance.housekeeping(db, maintenance.MaintenanceCounts())
+        await maintenance.purge_expired_reports(edge.store.factory)
     assert seen and on_table(seen) == []
 
 
@@ -366,8 +368,7 @@ async def test_the_maintenance_pass_deletes_expired_reports_only(edge):
             {"id": old.id},
         )
         await db.commit()
-    async with edge.store.factory() as db:
-        await maintenance.housekeeping(db, maintenance.MaintenanceCounts())
+    await maintenance.purge_expired_reports(edge.store.factory)
     assert await stored(edge, old.id) is None
     assert await stored(edge, fresh.id) is not None
 
@@ -377,6 +378,7 @@ async def test_the_maintenance_pass_deletes_expired_reports_only(edge):
 # ----------------------------------------------------------------------------
 
 INVALID = {"domain_id": "x"}
+OVERSIZED = b'{"x":"' + b"a" * 5000 + b'"}'
 
 
 @pytest.mark.parametrize(
@@ -393,7 +395,8 @@ async def test_a_report_is_404_while_not_configured_even_with_an_invalid_body(ed
         for body in (INVALID, report(nowhere())):
             response = await put(edge, body)
             assert (response.status_code, response.content) == (404, b"")
-        assert (await put(edge, None, raw=b"{not json")).status_code == 404
+        for raw in (b"{not json", OVERSIZED, b""):
+            assert (await put(edge, None, raw=raw)).status_code == 404
     assert seen == []
 
 
@@ -408,7 +411,8 @@ async def test_a_missing_or_wrong_credential_is_401_even_with_an_invalid_body(ed
         for body in (INVALID, report(nowhere())):
             response = await put(edge, body, token=token)
             assert (response.status_code, response.content) == (401, b"")
-        assert (await put(edge, None, token=token, raw=b"{not json")).status_code == 401
+        for raw in (b"{not json", OVERSIZED, b""):
+            assert (await put(edge, None, token=token, raw=raw)).status_code == 401
     assert seen == []
 
 
@@ -472,6 +476,7 @@ async def test_each_identifier_mismatched_on_its_own_is_404(edge, field):
     response = await put(edge, body)
     assert (response.status_code, response.content) == (404, b"")
     assert await stored(edge, row.id) is None
+    assert await stored(edge, UUID(body["domain_id"])) is None
 
 
 @pytest.mark.parametrize("state", ["pending", "released"])
@@ -698,6 +703,7 @@ async def _surfaces(edge, row) -> dict:
         assert current is not None
         owner_view = (await domain_response(db, current)).model_dump(mode="json")
         right = await inspect_paid_integration(db, edge.store.wid, edge.store.service_id)
+        budget = await db.get(PublicUsageBudget, edge.store.wid, populate_existing=True)
     async with AsyncClient(
         transport=ASGITransport(app=edge.store.app), base_url="https://test"
     ) as client:
@@ -710,13 +716,77 @@ async def _surfaces(edge, row) -> dict:
         "permission": (permission.status_code, permission.content),
         "owner_view": owner_view,
         "right": (right.allowed, right.reason, right.revision, right.valid_until),
+        "budget": (
+            (budget.period_started_at, budget.calls_used, budget.period_seq, budget.updated_at)
+            if budget
+            else None
+        ),
     }
 
 
-async def test_the_standard_endpoint_permissions_and_rights_are_the_same_with_evidence(edge):
+@pytest.mark.parametrize("status", ["valid", "renewal_failed"])
+async def test_the_standard_endpoint_permissions_and_rights_are_the_same_with_evidence(
+    edge, status
+):
     row = await held(edge)
+    async with edge.store.factory() as db:
+        start = await db.scalar(text("SELECT timezone('UTC', statement_timestamp())"))
+        db.add(
+            PublicUsageBudget(
+                workspace_id=edge.store.wid,
+                period_started_at=start,
+                calls_used=7,
+                period_seq=1,
+                updated_at=start,
+            )
+        )
+        await db.commit()
     before = await _surfaces(edge, row)
     assert before["standard"] is not None and before["alias"] is not None
     assert before["permission"] == (200, b"")
-    assert (await put(edge, report(row, status="renewal_failed"))).status_code == 204
+    assert before["budget"] is not None and before["budget"][1] == 7
+    assert (await put(edge, report(row, status=status))).status_code == 204
+    assert (await observe(edge))["domain"]["tls"]["status"] == status
     assert await _surfaces(edge, row) == before
+
+
+# ----------------------------------------------------------------------------
+# Close to the end of the evidence; report times
+# ----------------------------------------------------------------------------
+
+
+async def test_evidence_about_to_end_is_unreported_and_registers_no_deadline(edge):
+    """A report with less than the margin left is not shown, so the answer never
+    carries (or fails on) a deadline that passes before it arrives."""
+    row = await held(edge)
+    end = now() + timedelta(seconds=3)
+    body = report(row, observed_at=end - timedelta(minutes=3), valid_until=end)
+    assert (await put(edge, body)).status_code == 204
+    observation = await observe(edge)
+    assert observation["domain"]["tls"] == {"status": "unreported"}
+    lifetime = datetime.fromisoformat(observation["valid_until"]) - datetime.fromisoformat(
+        observation["observed_at"]
+    )
+    assert timedelta(seconds=25) <= lifetime <= timedelta(seconds=30)
+
+
+async def test_a_valid_answer_lasts_no_longer_than_the_certificate(edge):
+    row = await held(edge)
+    observed = now() - timedelta(seconds=5)
+    body = report(row, observed_at=observed, certificate_not_after=now() + timedelta(seconds=15))
+    assert (await put(edge, body)).status_code == 204
+    observation = await observe(edge)
+    assert observation["domain"]["tls"]["status"] == "valid"
+    assert observation["valid_until"] == body["tls"]["certificate_not_after"]
+
+
+@pytest.mark.parametrize("field", ["observed_at", "valid_until", "certificate_not_after"])
+@pytest.mark.parametrize("kind", ["number", "numeric string"])
+async def test_a_report_time_that_is_not_an_rfc3339_string_is_422(edge, field, kind):
+    row = await held(edge)
+    body = report(row)
+    seconds = int(datetime.fromisoformat(body["tls"][field]).timestamp())
+    body["tls"][field] = seconds if kind == "number" else str(seconds)
+    response = await put(edge, body)
+    assert (response.status_code, response.content) == (422, b"")
+    assert await stored(edge, row.id) is None

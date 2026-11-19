@@ -10,7 +10,10 @@ reported. The request body's own rules follow.
 
 from __future__ import annotations
 
+import ast
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -18,6 +21,7 @@ from pydantic import ValidationError
 
 from models.public_mcp_domain import PublicMcpDomain
 from models.public_mcp_domain_tls import PublicMcpDomainTlsReport
+from services import domain_tls_observations as observations
 from services.domain_tls_observations import (
     CertificateObservation,
     DomainTLSReport,
@@ -121,8 +125,17 @@ def test_a_report_past_its_valid_until_is_unreported():
     row = _row()
     report = _report(row, valid_until=SEEN.replace(tzinfo=UTC))
     assert _shown(row, report) == UNREPORTED
-    report = _report(row, valid_until=SEEN.replace(tzinfo=UTC) + timedelta(microseconds=1))
-    assert _shown(row, report)["status"] == "valid"
+
+
+def test_a_report_within_the_margin_of_its_valid_until_is_unreported():
+    """Shown only while valid_until is more than the margin ahead: a deadline it
+    registers is still ahead when the observation commits and when it arrives."""
+    row = _row()
+    edge = SEEN.replace(tzinfo=UTC) + timedelta(seconds=observations.SHOW_MARGIN_SECONDS)
+    assert observations.SHOW_MARGIN_SECONDS == 5
+    assert _shown(row, _report(row, valid_until=edge)) == UNREPORTED
+    just_outside = _report(row, valid_until=edge + timedelta(microseconds=1))
+    assert _shown(row, just_outside)["status"] == "valid"
 
 
 def test_valid_past_the_certificate_end_is_shown_as_expired():
@@ -131,6 +144,14 @@ def test_valid_past_the_certificate_end_is_shown_as_expired():
     shown = _shown(row, report)
     assert shown["status"] == "expired"
     assert shown["certificate_not_after"] == "2026-11-01T12:10:00Z"
+
+
+def test_valid_within_the_margin_of_its_certificate_end_is_shown_as_expired():
+    row = _row()
+    edge = SEEN.replace(tzinfo=UTC) + timedelta(seconds=observations.SHOW_MARGIN_SECONDS)
+    assert _shown(row, _report(row, certificate_not_after=edge))["status"] == "expired"
+    just_outside = _report(row, certificate_not_after=edge + timedelta(microseconds=1))
+    assert _shown(row, just_outside)["status"] == "valid"
 
 
 def test_valid_without_a_certificate_end_is_unreported():
@@ -246,3 +267,44 @@ def test_report_times_are_normalised_to_utc():
     )
     assert report.tls.observed_at == datetime(2026, 11, 1, 12, 9, 40, tzinfo=UTC)
     assert ObservedCertificate.model_validate(report.tls.model_dump()).observed_at.tzinfo == UTC
+
+
+def _epoch(value: str) -> int:
+    return int(datetime.fromisoformat(value).timestamp())
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"observed_at": _epoch("2026-11-01T12:09:40+00:00")},
+        {"valid_until": float(_epoch("2026-11-01T12:12:40+00:00"))},
+        {"certificate_not_after": str(_epoch("2026-12-01T12:09:40+00:00"))},
+        {"observed_at": str(_epoch("2026-11-01T12:09:40+00:00"))},
+    ],
+)
+def test_report_times_are_rfc3339_strings_only(change):
+    """A JSON number or a numeric string is never read as seconds since the epoch."""
+    payload = json.dumps(_body(_row(), **change))
+    with pytest.raises(ValidationError):
+        DomainTLSReport.model_validate_json(payload)
+    # The same instants as RFC 3339 strings are a valid report.
+    assert DomainTLSReport.model_validate_json(json.dumps(_body(_row())))
+
+
+def test_the_lifecycle_and_the_owner_api_never_import_the_reports():
+    """The domain lifecycle, its command line and the owner API know nothing of reports."""
+    src = Path(__file__).resolve().parents[2] / "src"
+    forbidden = {"models.public_mcp_domain_tls", "services.domain_tls_observations"}
+    for relative in (
+        "services/public_mcp_domains.py",
+        "cli/public_mcp_domains.py",
+        "api/routes/public_mcp_domains.py",
+    ):
+        imported: set[str] = set()
+        for node in ast.walk(ast.parse((src / relative).read_text())):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+                imported.update(f"{node.module}.{alias.name}" for alias in node.names)
+            elif isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+        assert imported & forbidden == set(), relative
