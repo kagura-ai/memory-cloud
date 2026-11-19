@@ -737,3 +737,17 @@ ended); `suspended` carries the suspension reason.
 
 No log line, usage event, job count or audit row carries a host name, a token,
 a DNS answer, a resolved address or the `Origin` of an alias request.
+
+### Installation-bound owner observation
+
+Public discovers `public.domains.observation.v1` alongside `public.domains.v1`
+and reads `GET /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-domains`
+with the registered browser client's `workspaces:read` OIDC access token.
+The current canonical owner receives the subject, application, installation,
+generation, and exact resource, context and endpoint identifiers. Clients
+must match the entire binding and discard the receipt at `valid_until`.
+The maximum lifetime is 30 seconds and a positive serving observation ends
+by the lease deadline. A released row exposes only release and cooldown
+metadata during its remaining cooldown. A missing binding has no domain
+facts. DNS proof, routing, and serving are independent. TLS is
+`{"status":"unreported"}` until a trusted edge supplies certificate evidence.

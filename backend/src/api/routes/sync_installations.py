@@ -14,6 +14,10 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.sync_feeds import bounded_body, exact_query, json_body
+from api.routes.sync_publication_domains import (
+    PublicationDomainObservation,
+    observe_publication_domain,
+)
 from auth.oidc_bearer import identity_access_token
 from auth.oidc_server import credential_hash
 from auth.sync_identity import SyncPrincipal, load_sync_identity, sync_manager, sync_reader
@@ -26,6 +30,7 @@ from models.sync_installation_schemas import (
     SyncInstallationView,
 )
 from models.sync_setup_handoff_schemas import SyncSetupHandoffCreate, SyncSetupHandoffView
+from services.sync_contract import sync_configuration
 from services.sync_installations import (
     activate_installation,
     create_authorization,
@@ -180,3 +185,17 @@ async def remove_sync(
 ) -> SyncInstallationView:
     """Revoke and advance generation, retaining the target and public endpoint."""
     return await unlink_installation(db, workspace_id, principal, installation_id)
+
+
+@router.get(
+    "/sync-installations/{installation_id}/publication-domains",
+    response_model=PublicationDomainObservation,
+)
+async def read_publication_domain(
+    workspace_id: UUID, installation_id: UUID, request: Request, principal: Reader, db: Database
+) -> PublicationDomainObservation:
+    """Observe only this owner's fixed publication target through scoped OIDC."""
+    exact_query(request)
+    if "public.domains.observation.v1" not in sync_configuration(get_settings()).capabilities:
+        raise NotFoundException("Publication domain observation")
+    return await observe_publication_domain(db, workspace_id, installation_id, principal)

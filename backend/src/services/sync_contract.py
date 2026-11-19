@@ -47,6 +47,7 @@ def sync_configuration(settings: Settings) -> SyncConfigurationV1:
         "public.mcp.v1": public,
         "public.budget.v1": budget,
         "public.domains.v1": budget and settings.mcp_public_domains_enabled,
+        "public.domains.observation.v1": controls and budget and settings.mcp_public_domains_enabled,
     }
     return SyncConfigurationV1(
         protocol="kmc.sync.v1",

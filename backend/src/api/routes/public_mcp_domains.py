@@ -162,7 +162,7 @@ class PublicMcpDomainList(BaseModel):
     domains: list[PublicMcpDomainResponse]
 
 
-async def _response(db: AsyncSession, row: PublicMcpDomain) -> PublicMcpDomainResponse:
+async def domain_response(db: AsyncSession, row: PublicMcpDomain) -> PublicMcpDomainResponse:
     serving = False
     if row.state == "active":
         endpoint = await load_serving_endpoint_for_alias(db, row.hostname)
@@ -203,7 +203,7 @@ async def list_public_mcp_domains(
     """List the custom domains of the resource's live public MCP endpoint."""
     _, workspace_id = owner
     rows = await list_domains(db, workspace_id, resource_id)
-    return PublicMcpDomainList(domains=[await _response(db, row) for row in rows])
+    return PublicMcpDomainList(domains=[await domain_response(db, row) for row in rows])
 
 
 @router.post(
@@ -223,7 +223,7 @@ async def add_public_mcp_domain(
     """
     user_id, workspace_id = owner
     row = await attach_domain(db, user_id, workspace_id, resource_id, body.hostname)
-    return await _response(db, row)
+    return await domain_response(db, row)
 
 
 @router.post(
@@ -243,7 +243,7 @@ async def verify_public_mcp_domain(
     """
     user_id, workspace_id = owner
     row = await verify_domain(db, user_id, workspace_id, resource_id, domain_id)
-    return await _response(db, row)
+    return await domain_response(db, row)
 
 
 @router.delete("/{resource_id}/public-mcp/domains/{domain_id}", status_code=204)
