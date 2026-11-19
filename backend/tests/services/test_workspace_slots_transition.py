@@ -244,6 +244,43 @@ def test_the_active_count_never_depends_on_the_order_of_two_events() -> None:
     assert pairs == 118_000
 
 
+def _sweep(world: dict[int, tuple[str, str]], rows: set[UUID]) -> set[UUID]:
+    """The sweep: a resume-only reconcile with no event."""
+    decision = plan_transition(
+        _owned(world, rows),
+        rows,
+        0,
+        change=None,
+        allow_suspend=False,
+        keep_ids=(),
+        current_workspace_id=U(1),
+    )
+    return (set(rows) - set(decision.clear)) | set(decision.suspend)
+
+
+def test_after_a_deferred_event_and_the_sweep_a_drop_still_cuts_to_the_allowance() -> None:
+    """From every state within the allowance (any rows): a first event on a
+    resume-only path (its lock was busy) and the sweep, then a second event
+    that can lower the allowance and does not raise it leaves no more
+    workspaces active than the allowance."""
+    checks = 0
+    for n in (2, 3):
+        for start in itertools.product(range(len(PLANS)), repeat=n):
+            world = {i + 1: PLANS[k] for i, k in enumerate(start)}
+            if len(world) > slot_allowance(_owned(world, set()), 0).allowance:
+                continue
+            for bits in itertools.product((0, 1), repeat=n):
+                rows = {U(i + 1) for i, bit in enumerate(bits) if bit}
+                for a, b in itertools.permutations(world, 2):
+                    for na, nb in itertools.product(PLANS, repeat=2):
+                        if na == world[a] or nb == world[b]:
+                            continue
+                        w1, r1, _ = _event(world, rows, a, na, allow_suspend=False)
+                        _checked(w1, _sweep(w1, r1), b, nb)
+                        checks += 1
+    assert checks == 233_600
+
+
 def _state(world: dict[int, tuple[str, str]], rows: set[UUID]):
     from services.workspace_slots import _OwnerState
 
@@ -252,7 +289,7 @@ def _state(world: dict[int, tuple[str, str]], rows: set[UUID]):
         names={U(i): f"w{i}" for i in world},
         slot_bonus=0,
         current_workspace_id=U(1),
-        own_rows={wid: B for wid in rows},
+        own_rows=dict.fromkeys(rows, B),
         foreign_rows=(),
         orphan_rows=(),
         has_state=False,
