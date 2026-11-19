@@ -5246,19 +5246,40 @@ key, return to `enforce`.
 
 ### Share keys and their creator (#2930)
 
-A share key is honoured only while the account that created it can still share
-its context: OWNER-level access to the bound context (workspace owner or admin,
-or a member with the context's owner role whose context access list reaches
-it), checked on every request. Once the creator leaves the workspace, loses the
-owner role or loses the context from the access list, `/api/v1/share/recall`
-and `/api/v1/share/sessions` answer the same `401` as for an unknown key.
-Removing a member also revokes that member's share keys for the workspace's
-contexts (one `credential.revoked` operation record per key); deleting or
-erasing an account deletes its share keys with its API keys. A caller with
-OWNER-level access to a context can list every share key bound to it
-(`GET /api/v1/config/share-keys?context_id=<id>`) and revoke any of them
-(`POST /api/v1/config/share-keys/{key_id}/revoke`); both are session-only.
-Nothing needs to be configured.
+A share key is honoured only while the account that created it can share its
+context, checked on every request. Sharing a context takes OWNER-level access
+to it, the rule minting applies: on a shared context the workspace owner or an
+admin, or a member holding the context's owner role whose access list reaches
+it; on a private context only its creator (or an account linked to the
+creator). When the creator leaves the workspace, loses the owner role, loses
+the context from the access list or has no plan seat (until seated again), or
+when the context or its workspace is deleted, `/api/v1/share/recall` and
+`/api/v1/share/sessions` answer the same `401` as for an unknown key, and the
+refused request records no use of the key. Removing a member revokes that
+member's share keys for the workspace's contexts (one `credential.revoked`
+operation record per key); deleting or erasing an account deletes its share
+keys with its API keys. A caller with OWNER-level access to a context can list
+every share key bound to it (`GET /api/v1/config/share-keys?context_id=<id>`;
+`403 SLOT-001` while the workspace is slot-suspended) and revoke any of them
+(`POST /api/v1/config/share-keys/{key_id}/revoke`, never blocked by a slot
+suspension); both are session-only. Nothing needs to be configured.
+
+Log events:
+
+| Event | Level | Fields | Meaning |
+|---|---|---|---|
+| `share_key_refused_creator_cannot_share` | info | `share_key_id`, `context_id` | A share-key request was refused because the key's creator cannot share the context. |
+| `share_key_creator_check_failed` | warning | `share_key_id`, `error_type` | The creator check itself failed; the request was refused. |
+| `share_keys_revoked_on_departure` | info | `user_id`, `workspace_id`, `count` | A member removal revoked that member's share keys for the workspace (`member_credentials_cleaned_up` and `removed_member_from_workspace` carry `share_keys_revoked`). |
+
+**Upgrade:** migration `f57_2930_share_key_creators` deletes the share keys
+whose creating account does not exist (`share_keys.user_id` has no foreign
+key), in one statement. It takes row locks on the deleted rows only (no table
+lock, no DDL), so it is safe while the previous release serves traffic and as
+part of the last `alembic upgrade head` step of the multi-step upgrade in
+[How each account was admitted](#how-each-account-was-admitted-issue-2803). It logs
+the number of rows deleted (`f57_2930 deleted share keys: N`) and nothing
+else, can be re-run, and its downgrade changes nothing.
 
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 
