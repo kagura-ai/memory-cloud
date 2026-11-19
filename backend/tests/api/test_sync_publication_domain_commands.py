@@ -274,8 +274,9 @@ def test_the_command_module_creates_no_publication():
         "activate_installation",
     }
     assert names & forbidden == set()
-    assert "services.integration_entitlements" not in modules
-    assert "api.routes.public_mcp_endpoints" not in modules
+    assert (
+        modules & {"services.integration_entitlements", "api.routes.public_mcp_endpoints"} == set()
+    )
 
 
 def _calls(tree: ast.Module, names: set[str]) -> list[ast.Call]:
