@@ -37,22 +37,46 @@ workspace or ``users`` row lock.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final, Literal
 from uuid import UUID
 
-from sqlalchemy import and_, exists, not_, select
+from sqlalchemy import and_, delete, exists, not_, or_, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 import config.settings as _config_settings
 from config.plan_tiers import PLAN_ORDER, PlanName, get_plan_tier, plan_rank
-from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Workspace
-from models.workspace_slots import WorkspaceSlotState, WorkspaceSlotSuspension
-from services.workspace_locks import NOWAIT_LOCK_TRIES
-from utils.plan_resolver import WorkspaceCapSummary, resolve_workspace_cap
+from db.base import isolated_session
+from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, User, Workspace
+from models.workspace_slots import (
+    SLOT_SUSPENSION_REASON_ALLOWANCE,
+    WorkspaceSlotState,
+    WorkspaceSlotSuspension,
+)
+from services.workspace_locks import NOWAIT_LOCK_BACKOFF_SECONDS, NOWAIT_LOCK_TRIES
+from utils.datetime import utcnow
+from utils.db_helpers import is_lock_not_available
+from utils.exceptions import (
+    ValidationError,
+    WorkspaceSlotsBusyError,
+    WorkspaceSlotsFullError,
+    WorkspaceSlotTransferRefusedError,
+    WorkspaceSlotVersionConflictError,
+)
+from utils.logger import get_logger
+from utils.plan_resolver import (
+    WorkspaceCapSummary,
+    cap_on_tier,
+    next_tier_with_more_workspaces,
+    resolve_workspace_cap,
+)
 
 __all__ = [
     "OWNER_SLOT_LOCK_PREFIX",
@@ -89,7 +113,22 @@ __all__ = [
     "suspension_in_force",
     "workspace_slot_mode",
     "workspace_slots_enforced",
+    # Step 2 (lane A's triggers, sweep, CLI and erasure).
+    "PlanChangeSlots",
+    "SWEEP_BATCH",
+    "SweepOutcome",
+    "assert_slot_tables_ready",
+    "check_transfer_recipient",
+    "delete_owner_slot_rows",
+    "finish_plan_change",
+    "prepare_plan_change",
+    "reconcile_after_commit",
+    "reconcile_plan_change",
+    "slot_tables_present",
+    "sweep_workspace_slots",
 ]
+
+logger = get_logger(__name__)
 
 SlotMode = Literal["off", "shadow", "enforce"]
 # The event a reconcile runs for. The first five may suspend (and are what a
@@ -599,8 +638,228 @@ async def owner_selection_required(db: AsyncSession, owner_user_id: str) -> bool
 
 
 # ---------------------------------------------------------------------------
-# Transition (owner lock, reconcile) and the account API's operations
+# Owner state reader (column selects, no row locks)
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnerState:
+    """One owner's slot inputs, read with column selects (fresh values).
+
+    ``owned[i].suspended`` follows the read-time rule: an own row on a
+    workspace not under a billing contract. ``own_rows`` holds every own row
+    on an owned workspace (contracted ones included) with its time;
+    ``foreign_rows`` the rows another owner left on an owned workspace;
+    ``orphan_rows`` this owner's rows on workspaces they no longer own.
+    """
+
+    owned: tuple[OwnedWorkspace, ...]
+    names: dict[UUID, str]
+    slot_bonus: int
+    current_workspace_id: UUID | None
+    own_rows: dict[UUID, datetime]
+    foreign_rows: tuple[UUID, ...]
+    orphan_rows: tuple[UUID, ...]
+    has_state: bool
+    keep_ids: tuple[UUID, ...]
+    selection_saved_at: datetime | None
+    selection_required_since: datetime | None
+    version: int
+
+    @property
+    def owned_ids(self) -> frozenset[UUID]:
+        return frozenset(w.id for w in self.owned)
+
+    @property
+    def suspended_now(self) -> frozenset[UUID]:
+        return frozenset(w.id for w in self.owned if w.suspended)
+
+
+async def _read_owner(db: AsyncSession, owner_user_id: str) -> _OwnerState:
+    user = (
+        await db.execute(
+            select(User.workspace_slot_bonus, User.current_workspace_id).where(
+                User.user_id == owner_user_id
+            )
+        )
+    ).one_or_none()
+    rows = (
+        await db.execute(
+            select(
+                Workspace.id,
+                Workspace.name,
+                Workspace.plan_name,
+                Workspace.entitlement_source,
+                Workspace.created_at,
+            ).where(Workspace.owner_user_id == owner_user_id, Workspace.deleted_at.is_(None))
+        )
+    ).all()
+    owned_ids = [r.id for r in rows]
+    suspension_rows = (
+        await db.execute(
+            select(
+                WorkspaceSlotSuspension.workspace_id,
+                WorkspaceSlotSuspension.owner_user_id,
+                WorkspaceSlotSuspension.suspended_at,
+            ).where(
+                or_(
+                    WorkspaceSlotSuspension.owner_user_id == owner_user_id,
+                    WorkspaceSlotSuspension.workspace_id.in_(owned_ids),
+                )
+            )
+        )
+    ).all()
+    state = (
+        await db.execute(
+            select(
+                WorkspaceSlotState.keep_workspace_ids,
+                WorkspaceSlotState.selection_saved_at,
+                WorkspaceSlotState.selection_required_since,
+                WorkspaceSlotState.version,
+            ).where(WorkspaceSlotState.owner_user_id == owner_user_id)
+        )
+    ).one_or_none()
+
+    owned_set = set(owned_ids)
+    own_rows: dict[UUID, datetime] = {}
+    foreign: list[UUID] = []
+    orphans: list[UUID] = []
+    for row in suspension_rows:
+        if row.workspace_id in owned_set:
+            if row.owner_user_id == owner_user_id:
+                own_rows[row.workspace_id] = row.suspended_at
+            else:
+                foreign.append(row.workspace_id)
+        elif row.owner_user_id == owner_user_id:
+            orphans.append(row.workspace_id)
+    owned = tuple(
+        OwnedWorkspace(
+            id=r.id,
+            plan_name=r.plan_name,
+            entitlement_source=r.entitlement_source,
+            created_at=r.created_at,
+            suspended=(
+                r.id in own_rows and not billing_contract_active(r.plan_name, r.entitlement_source)
+            ),
+        )
+        for r in rows
+    )
+    return _OwnerState(
+        owned=owned,
+        names={r.id: r.name for r in rows},
+        slot_bonus=int(user.workspace_slot_bonus) if user is not None else 0,
+        current_workspace_id=user.current_workspace_id if user is not None else None,
+        own_rows=own_rows,
+        foreign_rows=tuple(sorted(foreign)),
+        orphan_rows=tuple(sorted(orphans)),
+        has_state=state is not None,
+        keep_ids=tuple(state.keep_workspace_ids or ()) if state is not None else (),
+        selection_saved_at=state.selection_saved_at if state is not None else None,
+        selection_required_since=state.selection_required_since if state is not None else None,
+        version=int(state.version) if state is not None else 0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Row writers (Core statements; multi-row deletes lock in workspace_id order)
+# ---------------------------------------------------------------------------
+
+
+async def _delete_suspensions(db: AsyncSession, *conditions: ColumnElement[bool]) -> int:
+    """Delete the matching rows, locking them in ``workspace_id`` order first."""
+    locked = (
+        select(WorkspaceSlotSuspension.workspace_id)
+        .where(*conditions)
+        .order_by(WorkspaceSlotSuspension.workspace_id)
+        .with_for_update()
+    )
+    result = await db.execute(
+        delete(WorkspaceSlotSuspension).where(WorkspaceSlotSuspension.workspace_id.in_(locked))
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+async def _insert_suspensions(
+    db: AsyncSession,
+    owner_user_id: str,
+    workspace_ids: Iterable[UUID],
+    *,
+    cause: SlotCause,
+    now: datetime,
+    replace: bool,
+) -> None:
+    values = [
+        {
+            "workspace_id": wid,
+            "owner_user_id": owner_user_id,
+            "reason": SLOT_SUSPENSION_REASON_ALLOWANCE,
+            "cause": cause,
+            "suspended_at": now,
+        }
+        for wid in sorted(workspace_ids)
+    ]
+    if not values:
+        return
+    stmt = pg_insert(WorkspaceSlotSuspension).values(values)
+    if replace:
+        # A row another owner left on the workspace (an ownership move whose
+        # cleanup has not run yet) is taken over, never a key error.
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[WorkspaceSlotSuspension.workspace_id],
+            set_={
+                "owner_user_id": stmt.excluded.owner_user_id,
+                "cause": stmt.excluded.cause,
+                "suspended_at": stmt.excluded.suspended_at,
+            },
+        )
+    else:
+        stmt = stmt.on_conflict_do_nothing(index_elements=[WorkspaceSlotSuspension.workspace_id])
+    await db.execute(stmt)
+
+
+async def _write_state(
+    db: AsyncSession,
+    owner_user_id: str,
+    *,
+    now: datetime,
+    version: int,
+    selection_required_since: datetime | None,
+    keep_ids: Sequence[UUID] | None = None,
+    selection_saved_at: datetime | None = None,
+) -> None:
+    """Insert or update the owner's state row (``keep_ids=None`` keeps the selection)."""
+    values: dict[str, object] = {
+        "owner_user_id": owner_user_id,
+        "selection_required_since": selection_required_since,
+        "version": version,
+        "updated_at": now,
+    }
+    update_set: dict[str, object] = {
+        "selection_required_since": selection_required_since,
+        "version": version,
+        "updated_at": now,
+    }
+    if keep_ids is not None:
+        values["keep_workspace_ids"] = list(keep_ids)
+        values["selection_saved_at"] = selection_saved_at
+        update_set["keep_workspace_ids"] = list(keep_ids)
+        update_set["selection_saved_at"] = selection_saved_at
+    stmt = pg_insert(WorkspaceSlotState).values(values)
+    await db.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[WorkspaceSlotState.owner_user_id], set_=update_set
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Owner lock
+# ---------------------------------------------------------------------------
+
+_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"
+_TRY_LOCK_SQL = "SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"
+# How long a waiting acquire may wait: the workspace-creation gate's value.
+_WAIT_LOCK_TIMEOUT = "5s"
 
 
 def owner_slot_lock_key(owner_user_id: str) -> str:
@@ -629,7 +888,152 @@ async def owner_slot_lock(
     Returns:
         True when the lock is held, False when it stayed busy.
     """
-    raise NotImplementedError("#2918 step 2")
+    key = owner_slot_lock_key(owner_user_id)
+    if wait:
+        previous = (await db.execute(text("SELECT current_setting('lock_timeout')"))).scalar()
+        try:
+            # The savepoint keeps the transaction usable after a timeout; a
+            # lock taken inside a released savepoint stays with the
+            # transaction.
+            async with db.begin_nested():
+                await db.execute(
+                    text("SELECT set_config('lock_timeout', :value, true)"),
+                    {"value": _WAIT_LOCK_TIMEOUT},
+                )
+                await db.execute(text(_LOCK_SQL), {"key": key})
+        except DBAPIError as exc:
+            if not is_lock_not_available(exc):
+                raise
+            return False
+        await db.execute(
+            text("SELECT set_config('lock_timeout', :value, true)"), {"value": previous}
+        )
+        return True
+    attempts = max(tries, 1)
+    for attempt in range(attempts):
+        if (await db.execute(text(_TRY_LOCK_SQL), {"key": key})).scalar():
+            return True
+        if attempt + 1 < attempts:
+            await asyncio.sleep(NOWAIT_LOCK_BACKOFF_SECONDS * 2**attempt)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# The transition
+# ---------------------------------------------------------------------------
+
+
+def _selection_is_valid(state: _OwnerState) -> bool:
+    """The owner saved a selection that still names something they own (or
+    chose the default order explicitly with an empty list)."""
+    if state.selection_saved_at is None:
+        return False
+    return not state.keep_ids or any(k in state.owned_ids for k in state.keep_ids)
+
+
+async def _reconcile(
+    db: AsyncSession,
+    owner_user_id: str,
+    *,
+    cause: SlotCause,
+    allow_suspend: bool,
+    change: SlotChange | None,
+    mode: SlotMode,
+) -> ReconcileOutcome:
+    now = utcnow()
+    state = await _read_owner(db, owner_user_id)
+    allowance = slot_allowance(state.owned, state.slot_bonus)
+    drop = allow_suspend and is_allowance_drop(state.owned, state.slot_bonus, change)
+    plan = plan_active_set(
+        state.owned,
+        allowance.summary.cap,
+        drop=drop,
+        keep_ids=state.keep_ids,
+        current_workspace_id=state.current_workspace_id,
+    )
+    suspended_now = state.suspended_now
+    # Rows of workspaces that are (or stay) active go, contracted ones included.
+    clear_ids = [wid for wid in plan.active if wid in state.own_rows]
+    resumed = tuple(wid for wid in plan.active if wid in suspended_now)
+    to_suspend = tuple(wid for wid in plan.suspended if wid not in suspended_now)
+    shadow = mode == "shadow"
+    inserted = to_suspend if allow_suspend and not shadow else ()
+
+    pruned = 0
+    if state.foreign_rows:
+        pruned += await _delete_suspensions(
+            db,
+            WorkspaceSlotSuspension.workspace_id.in_(state.foreign_rows),
+            WorkspaceSlotSuspension.owner_user_id != owner_user_id,
+        )
+    if clear_ids or state.orphan_rows:
+        await _delete_suspensions(
+            db,
+            WorkspaceSlotSuspension.workspace_id.in_([*clear_ids, *state.orphan_rows]),
+            WorkspaceSlotSuspension.owner_user_id == owner_user_id,
+        )
+        pruned += len(state.orphan_rows)
+    if inserted:
+        await _insert_suspensions(db, owner_user_id, inserted, cause=cause, now=now, replace=True)
+
+    suspended_after = (suspended_now - set(resumed)) | set(inserted)
+    since = state.selection_required_since
+    if inserted and cause != "selection" and not _selection_is_valid(state):
+        since = since or now
+    if not suspended_after:
+        since = None
+    changed = bool(inserted or resumed)
+    version: int | None = state.version if state.has_state else None
+    write_state = changed or since != state.selection_required_since
+    if write_state and (state.has_state or not shadow):
+        version = state.version + (1 if changed else 0)
+        await _write_state(
+            db, owner_user_id, now=now, version=version, selection_required_since=since
+        )
+
+    fields = {
+        "owner_user_id": owner_user_id,
+        "cause": cause,
+        "drop": drop,
+        "cap": allowance.summary.cap,
+        "allowance": allowance.allowance,
+        "active_slots": plan.active_slots,
+        "resumed": [str(w) for w in resumed],
+        "pruned": pruned,
+    }
+    if shadow:
+        would = to_suspend if allow_suspend else ()
+        if would or resumed or pruned:
+            logger.info(
+                "workspace_slots_would_change",
+                would_suspend=[str(w) for w in would],
+                **fields,
+            )
+        return ReconcileOutcome(
+            mode=mode,
+            cause=cause,
+            drop=drop,
+            suspended=would,
+            resumed=resumed,
+            pruned=pruned,
+            version=version,
+        )
+    if changed or pruned:
+        logger.info(
+            "workspace_slots_reconciled",
+            suspended=[str(w) for w in inserted],
+            version=version,
+            **fields,
+        )
+    return ReconcileOutcome(
+        mode=mode,
+        cause=cause,
+        drop=drop,
+        suspended=inserted,
+        resumed=resumed,
+        pruned=pruned,
+        version=version,
+    )
 
 
 async def reconcile_workspace_slots(
@@ -673,18 +1077,554 @@ async def reconcile_workspace_slots(
             ``--even-when-off``); ``None`` = the setting.
 
     Returns:
-        What changed.
+        What changed (``shadow``: ``suspended`` lists what would have been).
     """
-    raise NotImplementedError("#2918 step 2")
+    mode = mode or workspace_slot_mode()
+    if mode == "off":
+        return ReconcileOutcome(mode="off", cause=cause)
+    if mode == "shadow":
+        try:
+            async with db.begin_nested():
+                return await _reconcile(
+                    db,
+                    owner_user_id,
+                    cause=cause,
+                    allow_suspend=allow_suspend,
+                    change=change,
+                    mode=mode,
+                )
+        except Exception as exc:  # noqa: BLE001 — shadow must never fail its caller
+            logger.warning(
+                "workspace_slots_shadow_failed",
+                owner_user_id=owner_user_id,
+                cause=cause,
+                error_class=type(exc).__name__,
+            )
+            return ReconcileOutcome(mode=mode, cause=cause)
+    return await _reconcile(
+        db,
+        owner_user_id,
+        cause=cause,
+        allow_suspend=allow_suspend,
+        change=change,
+        mode=mode,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Triggers that hold the changed workspace's row (snapshot, legacy push, admin plan)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PlanChangeSlots:
+    """A plan change's slot work, between the owner try-lock and the reconcile.
+
+    Attributes:
+        owner_user_id: The changed workspace's owner.
+        cause: ``billing_snapshot``, ``billing_plan`` or ``admin_plan``.
+        change: The previous plan and entitlement source of the workspace.
+        non_decreasing: The change cannot lower the allowance
+            (``change_is_non_decreasing``): the reconcile may be deferred.
+        mode: The mode read once when the trigger started.
+        locked: Whether the owner lock was obtained.
+    """
+
+    owner_user_id: str
+    cause: SlotCause
+    change: SlotChange
+    non_decreasing: bool
+    mode: SlotMode
+    locked: bool
+
+
+async def prepare_plan_change(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    owner_user_id: str,
+    cause: SlotCause,
+    previous_plan_name: str,
+    previous_entitlement_source: str,
+    new_plan_name: str,
+    new_entitlement_source: str,
+) -> PlanChangeSlots | None:
+    """Take the owner lock for a plan change of a workspace whose row is held.
+
+    Called after the change is written to the locked workspace row and before
+    any other lock (the snapshot path calls it before
+    ``stop_ineligible_workspace``). Try-lock only: ``enforce`` with the
+    ``retry_nowait`` budget, ``shadow`` once. ``None`` in mode ``off`` (no
+    statement).
+
+    Raises:
+        WorkspaceSlotsBusyError: ``enforce``, the lock stayed busy and the
+            change may lower the allowance (409 ``RES-002``, retryable;
+            nothing is committed).
+    """
+    mode = workspace_slot_mode()
+    if mode == "off":
+        return None
+    non_decreasing = change_is_non_decreasing(
+        previous_plan_name,
+        previous_entitlement_source,
+        new_plan_name,
+        new_entitlement_source,
+    )
+    locked = await owner_slot_lock(
+        db,
+        owner_user_id,
+        wait=False,
+        tries=NOWAIT_LOCK_TRIES if mode == "enforce" else 1,
+    )
+    if not locked and mode == "enforce" and not non_decreasing:
+        logger.warning(
+            "workspace_slots_busy",
+            owner_user_id=owner_user_id,
+            workspace_id=str(workspace_id),
+            cause=cause,
+        )
+        raise WorkspaceSlotsBusyError()
+    return PlanChangeSlots(
+        owner_user_id=owner_user_id,
+        cause=cause,
+        change=SlotChange(
+            workspace_id=workspace_id,
+            previous_plan_name=previous_plan_name,
+            previous_entitlement_source=previous_entitlement_source,
+        ),
+        non_decreasing=non_decreasing,
+        mode=mode,
+        locked=locked,
+    )
+
+
+def _log_deferred(prepared: PlanChangeSlots, reason: str, error_class: str | None = None) -> None:
+    logger.warning(
+        "workspace_slots_deferred",
+        owner_user_id=prepared.owner_user_id,
+        workspace_id=str(prepared.change.workspace_id),
+        cause=prepared.cause,
+        reason=reason,
+        error_class=error_class,
+    )
+
+
+async def finish_plan_change(
+    db: AsyncSession, prepared: PlanChangeSlots | None
+) -> ReconcileOutcome | None:
+    """Reconcile after ``prepare_plan_change``, in the same transaction.
+
+    - Lock not obtained (only a non-decreasing change or ``shadow`` gets
+      here): log ``workspace_slots_deferred``; the delivery commits and the
+      sweep finishes the resume.
+    - Non-decreasing change in ``enforce``: in a savepoint; any error rolls
+      the savepoint back and is deferred the same way.
+    - Any other change in ``enforce``: an error fails the delivery.
+    - ``shadow``: ``reconcile_workspace_slots`` never fails its caller.
+    """
+    if prepared is None:
+        return None
+    if not prepared.locked:
+        _log_deferred(prepared, "lock_busy")
+        return None
+    if prepared.mode == "enforce" and prepared.non_decreasing:
+        await db.flush()
+        try:
+            async with db.begin_nested():
+                return await reconcile_workspace_slots(
+                    db,
+                    prepared.owner_user_id,
+                    cause=prepared.cause,
+                    allow_suspend=True,
+                    change=prepared.change,
+                    mode=prepared.mode,
+                )
+        except Exception as exc:  # noqa: BLE001 — a resume may wait for the sweep
+            _log_deferred(prepared, "error", type(exc).__name__)
+            return None
+    return await reconcile_workspace_slots(
+        db,
+        prepared.owner_user_id,
+        cause=prepared.cause,
+        allow_suspend=True,
+        change=prepared.change,
+        mode=prepared.mode,
+    )
+
+
+async def reconcile_plan_change(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    owner_user_id: str,
+    cause: SlotCause,
+    previous_plan_name: str,
+    previous_entitlement_source: str,
+    new_plan_name: str,
+    new_entitlement_source: str,
+) -> ReconcileOutcome | None:
+    """``prepare_plan_change`` then ``finish_plan_change`` (legacy push, admin plan)."""
+    prepared = await prepare_plan_change(
+        db,
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        cause=cause,
+        previous_plan_name=previous_plan_name,
+        previous_entitlement_source=previous_entitlement_source,
+        new_plan_name=new_plan_name,
+        new_entitlement_source=new_entitlement_source,
+    )
+    return await finish_plan_change(db, prepared)
+
+
+# ---------------------------------------------------------------------------
+# Post-commit triggers (delete, transfers), transfer pre-check, erasure
+# ---------------------------------------------------------------------------
+
+
+async def reconcile_after_commit(
+    db: AsyncSession, owner_user_ids: Iterable[str | None], *, cause: SlotCause
+) -> None:
+    """Resume and prune for each owner after the caller committed. Never raises.
+
+    Each owner in a fresh transaction of its own (``isolated_session``) under
+    the owner lock taken waiting; no suspension. A busy lock or an error is
+    logged as ``workspace_slots_deferred`` and left to the sweep: the
+    caller's committed change never turns into an error. No statement in
+    mode ``off``.
+    """
+    mode = workspace_slot_mode()
+    if mode == "off":
+        return
+    for owner in dict.fromkeys(o for o in owner_user_ids if o):
+        try:
+            async with isolated_session(db) as session:
+                if not await owner_slot_lock(session, owner, wait=True):
+                    logger.warning(
+                        "workspace_slots_deferred",
+                        owner_user_id=owner,
+                        cause=cause,
+                        reason="lock_busy",
+                    )
+                    continue
+                await reconcile_workspace_slots(
+                    session, owner, cause=cause, allow_suspend=False, mode=mode
+                )
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001 — never fail a committed change
+            logger.warning(
+                "workspace_slots_deferred",
+                owner_user_id=owner,
+                cause=cause,
+                reason="error",
+                error_class=type(exc).__name__,
+            )
+
+
+async def check_transfer_recipient(
+    db: AsyncSession, *, workspace_id: UUID, recipient_user_id: str
+) -> None:
+    """Refuse a voluntary transfer the recipient has no free slot for (``enforce``).
+
+    Runs under the transferred workspace's row lock, before the owner flip:
+    takes the RECIPIENT's owner lock without waiting (``retry_nowait``
+    budget), then plans the recipient's workspaces with the incoming one
+    added and not counted as active now. No statement unless ``enforce``.
+
+    Raises:
+        WorkspaceSlotsBusyError: The recipient's owner lock stayed busy (409).
+        WorkspaceSlotTransferRefusedError: The incoming workspace would not
+            be active (409 ``SLOT-004``).
+    """
+    if workspace_slot_mode() != "enforce":
+        return
+    if not await owner_slot_lock(db, recipient_user_id, wait=False):
+        raise WorkspaceSlotsBusyError()
+    state = await _read_owner(db, recipient_user_id)
+    incoming = (
+        await db.execute(
+            select(Workspace.plan_name, Workspace.entitlement_source, Workspace.created_at).where(
+                Workspace.id == workspace_id
+            )
+        )
+    ).one()
+    owned = [w for w in state.owned if w.id != workspace_id]
+    owned.append(
+        OwnedWorkspace(
+            id=workspace_id,
+            plan_name=incoming.plan_name,
+            entitlement_source=incoming.entitlement_source,
+            created_at=incoming.created_at,
+            suspended=True,
+        )
+    )
+    allowance = slot_allowance(owned, state.slot_bonus)
+    plan = plan_active_set(
+        owned,
+        allowance.summary.cap,
+        drop=False,
+        keep_ids=state.keep_ids,
+        current_workspace_id=state.current_workspace_id,
+    )
+    if workspace_id not in plan.active:
+        logger.info(
+            "workspace_transfer_refused_no_slot",
+            workspace_id=str(workspace_id),
+            recipient_user_id=recipient_user_id,
+        )
+        raise WorkspaceSlotTransferRefusedError()
+
+
+async def slot_tables_present(db: AsyncSession) -> bool:
+    """Whether both slot tables exist (catalog lookup only)."""
+    return bool(
+        (
+            await db.execute(
+                text(
+                    "SELECT to_regclass('workspace_slot_states') IS NOT NULL "
+                    "AND to_regclass('workspace_slot_suspensions') IS NOT NULL"
+                )
+            )
+        ).scalar()
+    )
+
+
+async def delete_owner_slot_rows(db: AsyncSession, owner_user_id: str) -> dict[str, int]:
+    """Delete ``owner_user_id``'s rows of both slot tables (erasure, user deletion).
+
+    In every mode: rows written while the feature was on must not outlive the
+    account. Guarded with ``to_regclass``, so it runs before the migration
+    too (returns ``{}`` then). Locks the suspension rows in ``workspace_id``
+    order. The caller commits.
+
+    Returns:
+        Deleted row counts per table (``{}`` when the tables do not exist).
+    """
+    if not await slot_tables_present(db):
+        return {}
+    suspensions = await _delete_suspensions(
+        db, WorkspaceSlotSuspension.owner_user_id == owner_user_id
+    )
+    states = await db.execute(
+        delete(WorkspaceSlotState).where(WorkspaceSlotState.owner_user_id == owner_user_id)
+    )
+    return {
+        "workspace_slot_suspensions": suspensions,
+        "workspace_slot_states": int(getattr(states, "rowcount", 0) or 0),
+    }
+
+
+async def assert_slot_tables_ready() -> None:
+    """Startup check: ``shadow`` / ``enforce`` refuse to start without the tables.
+
+    No database access in mode ``off``.
+
+    Raises:
+        RuntimeError: The mode is on and migration ``f56_2918_workspace_slots``
+            has not run.
+    """
+    mode = workspace_slot_mode()
+    if mode == "off":
+        return
+    from db.base import get_db
+
+    async for db in get_db():
+        present = await slot_tables_present(db)
+    if not present:
+        raise RuntimeError(
+            f"WORKSPACE_SLOT_SUSPENSION={mode} needs the workspace slot tables "
+            "(migration f56_2918_workspace_slots): run `alembic upgrade head` first, "
+            "or set WORKSPACE_SLOT_SUSPENSION=off."
+        )
+    logger.info("workspace_slot_suspension_mode", mode=mode)
+
+
+# ---------------------------------------------------------------------------
+# Sweep (resume and prune only)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class SweepOutcome:
+    """One sweep run: owners visited, what changed, and where to continue."""
+
+    owners: int = 0
+    resumed: int = 0
+    pruned: int = 0
+    busy: int = 0
+    failed: int = 0
+    next_after: str = ""
+
+
+SWEEP_BATCH = 200
+
+
+async def sweep_workspace_slots(
+    db: AsyncSession, *, after: str = "", limit: int = SWEEP_BATCH
+) -> SweepOutcome:
+    """Resume and prune for owners with suspension rows; never suspends.
+
+    Visits at most ``limit`` owners with ``owner_user_id > after`` (in id
+    order), each in a transaction of its own after ONE try of the owner lock
+    (busy = skipped this run). ``next_after`` is where the next run continues
+    (``""`` after the last owner). Finishes resumes a deferred or lost
+    post-commit reconcile left, and prunes rows of workspaces deleted or
+    moved. No statement in mode ``off``.
+    """
+    mode = workspace_slot_mode()
+    if mode == "off":
+        return SweepOutcome()
+    owners = list(
+        (
+            await db.execute(
+                select(WorkspaceSlotSuspension.owner_user_id)
+                .where(WorkspaceSlotSuspension.owner_user_id > after)
+                .group_by(WorkspaceSlotSuspension.owner_user_id)
+                .order_by(WorkspaceSlotSuspension.owner_user_id)
+                .limit(limit)
+            )
+        ).scalars()
+    )
+    # Release this read's connection before the per-owner sessions.
+    await db.commit()
+    resumed = pruned = busy = failed = 0
+    for owner in owners:
+        try:
+            async with isolated_session(db) as session:
+                if not await owner_slot_lock(session, owner, wait=False, tries=1):
+                    busy += 1
+                    continue
+                outcome = await reconcile_workspace_slots(
+                    session, owner, cause="sweep", allow_suspend=False, mode=mode
+                )
+                await session.commit()
+                resumed += len(outcome.resumed)
+                pruned += outcome.pruned
+        except Exception as exc:  # noqa: BLE001 — one owner never stops the sweep
+            failed += 1
+            logger.warning(
+                "workspace_slots_sweep_owner_failed",
+                owner_user_id=owner,
+                error_class=type(exc).__name__,
+            )
+    return SweepOutcome(
+        owners=len(owners),
+        resumed=resumed,
+        pruned=pruned,
+        busy=busy,
+        failed=failed,
+        next_after=owners[-1] if len(owners) == limit else "",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Account API: overview, preview, selection, and the end-to-end seed
+# ---------------------------------------------------------------------------
+
+
+def _allowance_view(allowance: SlotAllowance) -> SlotAllowanceView:
+    summary = allowance.summary
+    next_tier = next_tier_with_more_workspaces(summary.tier)
+    return SlotAllowanceView(
+        cap=summary.cap,
+        base=summary.base,
+        slot_bonus=summary.slot_bonus,
+        tier_grant=summary.tier_grant,
+        tier=summary.tier,
+        next_tier=next_tier,
+        cap_on_next_tier=cap_on_tier(summary, next_tier) if next_tier is not None else None,
+    )
+
+
+def _paid_plans_end_plan(
+    state: _OwnerState, keep_ids: Sequence[UUID]
+) -> tuple[SlotPlan, SlotAllowance]:
+    """Every contracted workspace back on Free (admin-granted tiers keep theirs)."""
+    ended = [
+        dataclasses.replace(w, plan_name=str(PlanName.FREE)) if w.under_billing_contract else w
+        for w in state.owned
+    ]
+    after = slot_allowance(ended, state.slot_bonus)
+    before = slot_allowance(state.owned, state.slot_bonus)
+    plan = plan_active_set(
+        ended,
+        after.summary.cap,
+        drop=after.allowance < before.allowance,
+        keep_ids=keep_ids,
+        current_workspace_id=state.current_workspace_id,
+    )
+    return plan, after
+
+
+def _overview(state: _OwnerState) -> SlotOverview:
+    allowance = slot_allowance(state.owned, state.slot_bonus)
+    ordered = sorted(state.owned, key=lambda w: (w.created_at, w.id))
+    workspaces = tuple(
+        SlotWorkspace(
+            id=w.id,
+            name=state.names[w.id],
+            plan_name=w.plan_name,
+            status="slot_suspended" if w.suspended else "active",
+            suspended_at=state.own_rows.get(w.id) if w.suspended else None,
+            under_billing_contract=w.under_billing_contract,
+            is_current=w.id == state.current_workspace_id,
+            created_at=w.created_at,
+        )
+        for w in ordered
+    )
+    active_count = sum(1 for w in state.owned if not w.suspended)
+    if_paid_plans_end = None
+    if allowance.contracted_count:
+        plan, after = _paid_plans_end_plan(state, state.keep_ids)
+        if_paid_plans_end = PaidPlansEndOutcome(
+            cap=after.summary.cap, active=plan.active, suspended=plan.suspended
+        )
+    return SlotOverview(
+        allowance=_allowance_view(allowance),
+        owned_count=len(state.owned),
+        active_count=active_count,
+        active_slots=max(allowance.allowance, active_count),
+        contracted_count=allowance.contracted_count,
+        selection_required=(
+            state.selection_required_since is not None and bool(state.suspended_now)
+        ),
+        selection=SlotSelection(
+            workspace_ids=tuple(k for k in state.keep_ids if k in state.owned_ids),
+            saved_at=state.selection_saved_at,
+        ),
+        version=state.version,
+        if_paid_plans_end=if_paid_plans_end,
+        workspaces=workspaces,
+    )
+
+
+def _validate_selection(workspace_ids: Sequence[UUID], owned_ids: frozenset[UUID]) -> None:
+    seen: set[UUID] = set()
+    invalid: list[str] = []
+    for wid in workspace_ids:
+        if (wid in seen or wid not in owned_ids) and str(wid) not in invalid:
+            invalid.append(str(wid))
+        seen.add(wid)
+    if invalid:
+        # One message whether the id exists or not: nothing about other
+        # people's workspaces is disclosed.
+        raise ValidationError(
+            "Only workspaces you own can be selected, each once.",
+            field="workspace_ids",
+            invalid_ids=invalid,
+        )
 
 
 async def get_slot_overview(db: AsyncSession, owner_user_id: str) -> SlotOverview:
     """The account API's ``GET``: the owner's allowance, selection and workspaces.
 
-    Read only (no lock). The route calls it only in mode ``enforce``. A user
-    who owns nothing gets ``workspaces=()`` and the base allowance.
+    Read only (column selects, no lock). The route calls it only in mode
+    ``enforce``. A user who owns nothing gets ``workspaces=()`` and the base
+    allowance. ``workspaces`` is ordered by ``created_at``, then id; statuses
+    follow the read-time rule (a contracted workspace is always active).
     """
-    raise NotImplementedError("#2918 step 2")
+    return _overview(await _read_owner(db, owner_user_id))
 
 
 async def preview_selection(
@@ -695,16 +1635,43 @@ async def preview_selection(
 ) -> SelectionPreview:
     """What ``workspace_ids`` as the selection would make active. Saves nothing.
 
-    ``current``: now (a swap or a resume within the allowance);
-    ``paid_plans_end``: after every subscription of the owner ended. No
-    version check.
+    ``current``: now, exactly what ``save_selection`` would apply (a swap, or
+    a resume within the allowance); ``paid_plans_end``: after every
+    subscription of the owner ended. ``active`` / ``suspended`` are the
+    complete sets after applying, in priority order; ``changes`` only the
+    differences from the active set now. No version check.
 
     Raises:
         ValidationError: An id is duplicated or not a live workspace the owner
             owns (422 ``VAL-001``, ``details.field = "workspace_ids"``,
             ``details.invalid_ids``; one message whether or not the id exists).
     """
-    raise NotImplementedError("#2918 step 2")
+    state = await _read_owner(db, owner_user_id)
+    _validate_selection(workspace_ids, state.owned_ids)
+    if scenario == "paid_plans_end":
+        plan, allowance = _paid_plans_end_plan(state, workspace_ids)
+    else:
+        allowance = slot_allowance(state.owned, state.slot_bonus)
+        plan = plan_active_set(
+            state.owned,
+            allowance.summary.cap,
+            drop=False,
+            keep_ids=workspace_ids,
+            current_workspace_id=state.current_workspace_id,
+        )
+    suspended_now = state.suspended_now
+    return SelectionPreview(
+        scenario=scenario,
+        cap=allowance.summary.cap,
+        active_slots=plan.active_slots,
+        active=plan.active,
+        suspended=plan.suspended,
+        unmet=plan.unmet,
+        changes=SlotChanges(
+            suspend=tuple(w for w in plan.suspended if w not in suspended_now),
+            resume=tuple(w for w in plan.active if w in suspended_now),
+        ),
+    )
 
 
 async def save_selection(
@@ -715,11 +1682,13 @@ async def save_selection(
 ) -> SlotOverview:
     """Store the owner's ordered selection and apply it at once; commit.
 
-    Takes ``owner_slot_lock`` waiting, as the first statement of the
-    transaction (the caller must hold no row lock), then validates, compares
-    the version, stores the list (an empty list = the default order), clears
-    ``selection_required_since`` and reconciles with ``cause="selection"``
-    (a swap when something is suspended). Commits, then returns the overview.
+    Ends whatever transaction the session has open (the route's
+    authentication only reads), then takes ``owner_slot_lock`` waiting as the
+    first statement of a new one, so no row lock is ever held while it
+    waits. Then it validates, compares the version, stores the list (an empty
+    list = the default order), clears ``selection_required_since`` and
+    reconciles with ``cause="selection"``: a swap when something is
+    suspended, else only stored. Commits, then returns the overview.
 
     Raises:
         ValidationError: As ``preview_selection`` (422 ``VAL-001``).
@@ -730,7 +1699,57 @@ async def save_selection(
         WorkspaceSlotsBusyError: The owner lock stayed busy for 5 s (409
             ``RES-002``, retryable).
     """
-    raise NotImplementedError("#2918 step 2")
+    if db.in_transaction():
+        await db.commit()
+    if not await owner_slot_lock(db, owner_user_id, wait=True):
+        raise WorkspaceSlotsBusyError()
+    state = await _read_owner(db, owner_user_id)
+    _validate_selection(workspace_ids, state.owned_ids)
+    if expected_version != state.version:
+        raise WorkspaceSlotVersionConflictError(
+            expected_version=expected_version, current_version=state.version
+        )
+    allowance = slot_allowance(state.owned, state.slot_bonus)
+    suspended_now = state.suspended_now
+    if any(wid in suspended_now for wid in workspace_ids):
+        active_count = len(state.owned) - len(suspended_now)
+        active_slots = max(allowance.allowance, active_count)
+        if allowance.contracted_count >= active_slots:
+            plan = plan_active_set(
+                state.owned,
+                allowance.summary.cap,
+                drop=False,
+                keep_ids=workspace_ids,
+                current_workspace_id=state.current_workspace_id,
+            )
+            view = _allowance_view(allowance)
+            raise WorkspaceSlotsFullError(
+                cap=view.cap,
+                active_slots=active_slots,
+                active_count=active_count,
+                contracted_count=allowance.contracted_count,
+                next_tier=view.next_tier,
+                cap_on_next_tier=view.cap_on_next_tier,
+                unmet=[str(w) for w in plan.unmet],
+            )
+    now = utcnow()
+    await _write_state(
+        db,
+        owner_user_id,
+        now=now,
+        version=state.version + 1,
+        selection_required_since=None,
+        keep_ids=list(workspace_ids),
+        selection_saved_at=now,
+    )
+    await reconcile_workspace_slots(db, owner_user_id, cause="selection", allow_suspend=True)
+    await db.commit()
+    logger.info(
+        "workspace_slot_selection_saved",
+        owner_user_id=owner_user_id,
+        selected=len(workspace_ids),
+    )
+    return _overview(await _read_owner(db, owner_user_id))
 
 
 async def seed_default_suspension(
@@ -751,4 +1770,33 @@ async def seed_default_suspension(
     Returns:
         The plan that was written.
     """
-    raise NotImplementedError("#2918 step 2")
+    now = now or utcnow()
+    state = await _read_owner(db, owner_user_id)
+    everything_active = [dataclasses.replace(w, suspended=False) for w in state.owned]
+    allowance = slot_allowance(everything_active, state.slot_bonus)
+    plan = plan_active_set(
+        everything_active,
+        allowance.summary.cap,
+        drop=True,
+        current_workspace_id=state.current_workspace_id,
+    )
+    if plan.suspended:
+        await _insert_suspensions(
+            db,
+            owner_user_id,
+            plan.suspended,
+            cause="billing_snapshot",
+            now=now,
+            replace=False,
+        )
+        await db.execute(
+            pg_insert(WorkspaceSlotState)
+            .values(
+                owner_user_id=owner_user_id,
+                selection_required_since=now,
+                version=1,
+                updated_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[WorkspaceSlotState.owner_user_id])
+        )
+    return plan
