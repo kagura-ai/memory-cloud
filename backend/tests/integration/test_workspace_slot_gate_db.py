@@ -1137,3 +1137,34 @@ async def test_a_default_context_in_a_suspended_workspace_reads_as_no_name(world
         assert regenerated.json()["default_context_name"] is None, caller
         assert created.status_code == 404, (caller, created.text)
         assert put_default.status_code == 404, (caller, put_default.text)
+
+
+async def test_a_contracted_sibling_keeps_the_deletion_guard(world: World) -> None:
+    """Enforce: a workspace under a billing contract next to a suspended one
+    still answers 409 BILLING-005 to its owner's delete (a suspended workspace
+    is never under a contract and deletes)."""
+    from sqlalchemy import update
+
+    w = world
+    await w.session.execute(
+        update(Workspace)
+        .where(Workspace.id == w.ws["k"])
+        .values(plan_name="pro", entitlement_source="external_billing")
+    )
+    await w.session.commit()
+    with (
+        _mode("enforce"),
+        patch(
+            "api.routes.workspaces.get_current_user",
+            AsyncMock(return_value={"user_id": w.owner}),
+        ),
+    ):
+        async with _client(w, {}) as client:
+            resp = await client.delete(f"/api/v1/workspaces/{w.ws['k']}")
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"] == "BILLING-005"
+    w.session.expire_all()
+    assert (
+        await w.session.scalar(select(Workspace.deleted_at).where(Workspace.id == w.ws["k"]))
+        is None
+    )
