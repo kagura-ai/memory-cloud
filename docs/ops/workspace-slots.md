@@ -26,7 +26,14 @@ flagged `selection_required` (shown on the account page at the next sign-in):
 the owner's current workspace first, then the higher plan, then the older
 workspace. A saved selection (the account page, `PUT
 /api/v1/me/workspace-slots/selection`) is applied first; while something is
-suspended a save applies at once (a swap).
+suspended a save applies at once (a swap). Saving the same list again changes
+nothing (the same `version`). An empty saved list means the default order: saving
+it clears the prompt, but it is not a choice, so a later drop that suspends
+something prompts again (as does a saved list whose workspaces are all gone).
+
+A suspended workspace that gets a paid plan comes back. When that plan grants no
+extra slot (Basic), the lowest-priority uncontracted active workspace is
+suspended in its place (a swap); when it does (Pro, Max), the others resume too.
 
 Events that are not a drop only resume. An owner who is already over the
 allowance (created before `ENFORCE_WORKSPACE_CAP`, or after a plan change while
@@ -39,11 +46,15 @@ the feature was off) keeps every workspace until their next drop.
 | Value | Behaviour |
 |---|---|
 | `off` (default) | Nothing changes. No statement touches the slot tables; the sweep is not scheduled; the account API answers 404. |
-| `shadow` | Triggers compute what they would do and log `workspace_slots_would_change`; they never suspend. Rows that should resume are still deleted. The gates ignore every row, so nobody is refused. |
+| `shadow` | Triggers compute what they would do and log `workspace_slots_would_change`; they never suspend. They do resume: rows that should resume are deleted (a row lock that is not free at once makes them give up and log `workspace_slots_shadow_failed`; the caller is never delayed or failed). The gates ignore every row, so nobody is refused. |
 | `enforce` | Drops suspend, everything else resumes; the gates refuse suspended workspaces; the account API and page are available. Requires `ENFORCE_WORKSPACE_CAP=true` (startup refuses otherwise). |
 
 `shadow` and `enforce` refuse to start until migration
-`f56_2918_workspace_slots` has created the two tables (`alembic upgrade head`).
+`f56_2918_workspace_slots` has created the two tables (`alembic upgrade head`),
+and when the `PLAN_*_OWNED_WORKSPACE_GRANT` overrides decrease along the plan
+order (Free, Basic, Pro, Max): a plan change whose tier grant does not go down
+is treated as one that cannot lower the allowance, which holds only for grants
+that never decrease.
 The migration takes no lock on an existing table, so it can run before or after
 the new code.
 
@@ -67,18 +78,29 @@ the new code.
 | Legacy plan push (`PUT /internal/workspaces/{id}/plan`) | yes | as above | as above | as above |
 | System-admin plan change (`PUT /api/v1/admin/plans/workspaces/{id}/plan`) | yes | as above | as above (`409` to the admin) | as above |
 | Slot-bonus change (`PATCH /api/v1/admin/users/{id}/workspace_slot_bonus`) | yes | waited for (5 s) first | `503` as before | the request fails |
-| Owner's selection (account page) | swap only | waited for (5 s) first | `409 RES-002`, `workspace_slots_busy` | the request fails |
-| Workspace delete, voluntary transfer, force transfer and its dual-control approval | no (resume only) | after the commit, waited for (5 s) | logged `workspace_slots_deferred`, left to the sweep | logged, left to the sweep; the delete or transfer is never failed by it |
+| Owner's selection (account page) | swap only | waited for (5 s) first, then the owner's account row (a save during the account's erasure waits for it and answers 404) | `409 RES-002`, `workspace_slots_busy` | the request fails |
+| Workspace delete, voluntary transfer, force transfer and its dual-control approval | no (resume only) | after the commit, tried with the short backoff (it is on the response path; for a delete, after the storage and vector cleanup) | logged `workspace_slots_deferred`, left to the sweep | logged, left to the sweep (a database pool timeout too); the delete or transfer is never failed by it |
 | Sweep (every 15 minutes, owners with suspension rows) | no | one try per owner | that owner is skipped this round | logged, the next owner continues |
 
 Converge **only by the sweep**: account erasure's automatic ownership hand-over,
 admin user deletion (`DELETE /api/v1/admin/users/{id}` and
-`python -m src.cli.delete_admin`), and a change of the
-`PLAN_*_OWNED_WORKSPACE_GRANT` settings (it moves every allowance with no event).
-A resume can therefore take up to one sweep interval.
+`python -m src.cli.delete_admin`), and a RAISED `PLAN_*_OWNED_WORKSPACE_GRANT`
+(it moves every allowance with no event; the sweep resumes within it). A
+LOWERED grant suspends nothing: owners above the new allowance keep their
+workspaces until their next drop.
 
-A **voluntary transfer** in `enforce` needs a free slot at the recipient:
-otherwise `409 SLOT-004` ("the new owner has no free workspace slot"; nothing
+Each sweep run visits every owner with suspension rows once, in batches, for up
+to about a minute; with more owners than a minute's worth, the next run
+continues where it stopped. A resume left to the sweep therefore happens within
+one sweep interval (15 minutes) unless a run cannot visit every owner in its
+minute.
+
+A **voluntary transfer** in `enforce` needs a free slot at the recipient: the
+recipient's allowance after the transfer (counting the incoming workspace's
+tier and contract, so an incoming Pro or Max can make room) must be above the
+number of workspaces they have active now. Their saved selection plays no part,
+and a workspace under a billing contract into a full account is refused too.
+Otherwise `409 SLOT-004` ("the new owner has no free workspace slot"; nothing
 about the recipient's workspaces is disclosed). A busy recipient lock answers
 the retryable `409 RES-002`. Force transfers, their approval, erasure and admin
 deletion transfers are exempt.
@@ -130,7 +152,9 @@ creation, which can hold it for seconds, or the sweep). Retry with backoff.
   ```
 
   `reconcile` resumes and prunes only, never suspends. While the setting is
-  `off` it refuses unless `--even-when-off` is given.
+  `off` it refuses unless `--even-when-off` is given. An owner whose reconcile
+  fails or whose lock stays busy is reported and the run goes on; the exit code
+  is then 1.
 
 ## Mode switches
 
