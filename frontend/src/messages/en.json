@@ -5802,7 +5802,7 @@
       "description": "If all your paid subscriptions end, up to {cap, plural, one {# workspace} other {# workspaces}} can stay active from the end of the paid term. The billing page shows the date.",
       "openBilling": "Open the billing page",
       "wouldSuspend": "With your current choice, these would be suspended then:",
-      "optional": "Choosing now is optional. If you cancel without choosing, the default order decides which workspaces stay active. You can change this on this page at any time."
+      "optional": "Choosing now is optional. If you cancel without choosing, the default order decides which workspaces stay active: the one you are using now first, then higher plans, then older workspaces. You can change this on this page at any time."
     },
     "full": {
       "title": "No slot can be freed",

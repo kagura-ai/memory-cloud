@@ -81,24 +81,30 @@ export function ExportWorkspaceDialog({
           />
         ) : (
           <ul className="max-h-80 divide-y divide-slate-200 overflow-y-auto dark:divide-slate-700">
-            {contexts.map((c) => (
-              <li key={c.id} className="flex items-center justify-between gap-3 py-2">
-                <span className="flex min-w-0 items-center gap-2">
-                  <span className="break-words">{c.name}</span>
-                  {c.is_private && (
-                    <Badge variant="outline" className="shrink-0">
-                      <Lock className="mr-1 h-3 w-3" aria-hidden="true" />
-                      {t("export.private")}
-                    </Badge>
-                  )}
-                </span>
-                <ExportContextButton
-                  contextId={c.id}
-                  contextName={c.name}
-                  ariaLabel={t("actions.exportNamed", { name: c.name })}
-                />
-              </li>
-            ))}
+            {contexts.map((c) => {
+              const shown = c.display_name || c.name;
+              return (
+                <li
+                  key={c.id}
+                  className="flex items-center justify-between gap-3 py-2"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="break-words">{shown}</span>
+                    {c.is_private && (
+                      <Badge variant="outline" className="shrink-0">
+                        <Lock className="mr-1 h-3 w-3" aria-hidden="true" />
+                        {t("export.private")}
+                      </Badge>
+                    )}
+                  </span>
+                  <ExportContextButton
+                    contextId={c.id}
+                    contextName={shown}
+                    ariaLabel={t("actions.exportNamed", { name: shown })}
+                  />
+                </li>
+              );
+            })}
           </ul>
         )}
       </DialogContent>

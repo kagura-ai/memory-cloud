@@ -94,8 +94,12 @@ export default function WorkspaceManagementPage() {
   const info = useSystemInfo();
   const enabled = info?.features?.workspace_slots === true;
   const planPage = info?.features?.plan_page === true;
-  const { currentWorkspaceId, switchWorkspace, refreshWorkspaces } =
-    useWorkspace();
+  const {
+    currentWorkspaceId,
+    workspaces: listed,
+    switchWorkspace,
+    refreshWorkspaces,
+  } = useWorkspace();
   const slots = useWorkspaceSlots(enabled);
   const baseId = useId();
   const tableHeading = useRef<HTMLHeadingElement>(null);
@@ -108,14 +112,32 @@ export default function WorkspaceManagementPage() {
   const [deleting, setDeleting] = useState<SlotWorkspace | null>(null);
   const [resuming, setResuming] = useState<SlotWorkspace | null>(null);
   const [openingPlanFor, setOpeningPlanFor] = useState<string | null>(null);
-  const [savedTick, setSavedTick] = useState(0);
+  const [focusTick, setFocusTick] = useState(0);
 
-  // After a save the selection control is rebuilt from the new answer: put
-  // focus on its section heading (the table's when the section is gone).
+  // After a save (or a refetch on SLOT-003) the selection control is rebuilt
+  // from the new answer: put focus on its section heading (the table's when
+  // the section is gone).
   useEffect(() => {
-    if (savedTick === 0) return;
+    if (focusTick === 0) return;
     (selectionHeading.current ?? tableHeading.current)?.focus();
-  }, [savedTick]);
+  }, [focusTick]);
+
+  // Whenever the allowance answer changes after the first load (a save, a
+  // delete, a refetch on focus after an upgrade), the workspace list the
+  // switcher and the guard read is reloaded quietly, so neither keeps an old
+  // suspended flag (#2919).
+  const slotsKey = slots.data
+    ? `${slots.data.version}|${slots.data.workspaces.map((w) => `${w.id}:${w.status}`).join(",")}`
+    : null;
+  const seenKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (slotsKey === null) return;
+    const previous = seenKey.current;
+    seenKey.current = slotsKey;
+    if (previous !== null && previous !== slotsKey) {
+      void refreshWorkspaces({ quiet: true });
+    }
+  }, [slotsKey, refreshWorkspaces]);
 
   const header = (
     <>
@@ -163,7 +185,16 @@ export default function WorkspaceManagementPage() {
 
   const data = slots.data;
   if (slots.loading && data === null) return page(<TableLoadingState rows={3} />);
-  if (data === null) return page(<ErrorBanner error={t("loadFailed")} />);
+  if (data === null) {
+    return page(
+      <>
+        <ErrorBanner error={t("loadFailed")} />
+        <Button variant="outline" onClick={() => void slots.reload()}>
+          {access("retry")}
+        </Button>
+      </>,
+    );
+  }
   if (data.workspaces.length === 0) {
     return page(
       <EmptyState
@@ -176,17 +207,17 @@ export default function WorkspaceManagementPage() {
     );
   }
 
-  // The active set changed: the switcher and the guard read the workspace
-  // list, so it is reloaded too, quietly (the page stays mounted).
+  // The workspace list follows through the effect on `slotsKey`.
   const applied = (next: WorkspaceSlots) => {
     setStale("none");
     slots.replace(next);
-    void refreshWorkspaces({ quiet: true });
   };
-  const onStale = () => {
+  const onStale = (refocus: boolean) => {
     setStale("pending");
     void slots.reload({ background: true }).then((fresh) => {
-      if (fresh) setStale("refreshed");
+      if (!fresh) return;
+      setStale("refreshed");
+      if (refocus) setFocusTick((n) => n + 1);
     });
   };
 
@@ -236,9 +267,14 @@ export default function WorkspaceManagementPage() {
 
   // The plan page is scoped to the current workspace: an active workspace is
   // switched to first; a suspended one cannot be, so it goes through billing.
+  // Either list saying "suspended" is enough; a refused switch pushes nothing
+  // (it throws before the push).
   const changePlan = (w: SlotWorkspace) =>
     planAction(w.id, async () => {
-      if (w.status === "slot_suspended") {
+      const suspended =
+        w.status === "slot_suspended" ||
+        listed.some((l) => l.id === w.id && l.slot_suspended === true);
+      if (suspended) {
         await openBilling(w.id);
         return;
       }
@@ -253,7 +289,7 @@ export default function WorkspaceManagementPage() {
   const contracted = data.workspaces.filter((w) => w.under_billing_contract);
   const onSaved = (next: WorkspaceSlots) => {
     applied(next);
-    setSavedTick((n) => n + 1);
+    setFocusTick((n) => n + 1);
   };
 
   return page(
@@ -329,7 +365,7 @@ export default function WorkspaceManagementPage() {
             lockedIds={contracted.map((w) => w.id)}
             version={data.version}
             onSaved={onSaved}
-            onStale={onStale}
+            onStale={() => onStale(true)}
           />
         </PageSection>
       )}
@@ -380,7 +416,7 @@ export default function WorkspaceManagementPage() {
                   max={ifEnd.cap}
                   version={data.version}
                   onSaved={onSaved}
-                  onStale={onStale}
+                  onStale={() => onStale(true)}
                 />
               </>
             )}
@@ -404,7 +440,6 @@ export default function WorkspaceManagementPage() {
           returnFocus.current = null;
           setDeleting(null);
           void slots.reload({ background: true });
-          void refreshWorkspaces({ quiet: true });
         }}
       />
       <ResumeWorkspaceDialog
@@ -419,7 +454,7 @@ export default function WorkspaceManagementPage() {
           setResuming(null);
           applied(next);
         }}
-        onStale={onStale}
+        onStale={() => onStale(false)}
       />
     </>,
   );

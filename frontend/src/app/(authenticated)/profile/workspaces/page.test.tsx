@@ -50,9 +50,11 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
 
 const mockSwitchWorkspace = vi.fn();
 const mockRefreshWorkspaces = vi.fn();
+let mockListed: { id: string; slot_suspended?: boolean }[] = [];
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({
     currentWorkspaceId: "w1",
+    workspaces: mockListed,
     switchWorkspace: mockSwitchWorkspace,
     refreshWorkspaces: mockRefreshWorkspaces,
   }),
@@ -204,6 +206,7 @@ beforeEach(() => {
   mockInfo = { features: { workspace_slots: true, plan_page: true } };
   mockInfoUnavailable = false;
   mockSwitchWorkspace.mockResolvedValue(undefined);
+  mockListed = [];
   mockRefreshWorkspaces.mockResolvedValue(undefined);
 });
 
@@ -260,10 +263,14 @@ describe("states", () => {
     await waitFor(() => expect(mockGetSlots).toHaveBeenCalledTimes(1));
   });
 
-  it("a failed load is an error banner", async () => {
-    mockGetSlots.mockRejectedValue(new Error("boom"));
+  it("a failed load is an error banner with a retry", async () => {
+    mockGetSlots.mockRejectedValueOnce(new Error("boom"));
     render(<WorkspaceManagementPage />);
     expect(await screen.findByRole("alert")).toHaveTextContent("loadFailed");
+    mockGetSlots.mockResolvedValue(afterTermEnd());
+    fireEvent.click(screen.getByRole("button", { name: "retry" }));
+    expect(await screen.findByTestId("slot-row-w1")).toBeInTheDocument();
+    expect(screen.queryByText("loadFailed")).toBeNull();
   });
 
   it("a 404 from the API although the flag is on reads as not available, not as an error", async () => {
@@ -366,6 +373,28 @@ describe("AC1 list, slots, owned only, plan link", () => {
         expect.objectContaining({ title: "planUnavailable" }),
       ),
     );
+  });
+
+  it("a refused switch opens no plan page", async () => {
+    mockSwitchWorkspace.mockRejectedValue(new Error("refused"));
+    await renderLoaded(beforeTermEnd());
+    fireEvent.click(rowButton("w2", "changePlanNamed", "Research"));
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "destructive", title: "refused" }),
+      ),
+    );
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it("a workspace the workspace list already marks suspended goes through the billing handoff", async () => {
+    mockListed = [{ id: "w3", slot_suspended: true }];
+    mockHandoff.mockResolvedValue({ url: null });
+    await renderLoaded(beforeTermEnd());
+    fireEvent.click(rowButton("w3", "changePlanNamed", "Side project"));
+    await waitFor(() => expect(mockHandoff).toHaveBeenCalledWith("w3"));
+    expect(mockSwitchWorkspace).not.toHaveBeenCalled();
+    expect(mockPush).not.toHaveBeenCalled();
   });
 
   it("no plan link when the deployment serves no plan page", async () => {
@@ -560,6 +589,11 @@ describe("AC2 cancellation: which workspaces to keep", () => {
       refetched(beforeTermEnd({ version: 8 }));
     });
     expect(await screen.findByText("staleRefreshed")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "cancellation.title" }),
+      ).toHaveFocus(),
+    );
     expect(mockToast).not.toHaveBeenCalledWith(
       expect.objectContaining({ variant: "destructive" }),
     );
@@ -720,8 +754,8 @@ describe("AC4 a suspended workspace", () => {
     mockListContexts.mockResolvedValue({
       workspace_id: "w2",
       contexts: [
-        { id: "c1", name: "Papers", is_private: false },
-        { id: "c2", name: "My drafts", is_private: true },
+        { id: "c1", name: "papers", display_name: "Papers", is_private: false },
+        { id: "c2", name: "My drafts", display_name: null, is_private: true },
       ],
     });
     await renderLoaded(afterTermEnd());
@@ -758,6 +792,13 @@ describe("AC4 a suspended workspace", () => {
   it("delete asks first, deletes, refreshes quietly and puts focus on the table heading", async () => {
     mockDeleteWorkspace.mockResolvedValue(undefined);
     await renderLoaded(afterTermEnd());
+    const after = afterTermEnd();
+    mockGetSlots.mockResolvedValue({
+      ...after,
+      version: 5,
+      owned_count: 2,
+      workspaces: after.workspaces.filter((w) => w.id !== "w3"),
+    });
     fireEvent.click(rowButton("w3", "deleteNamed", "Side project"));
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText("deleteConfirmTitle")).toBeInTheDocument();
@@ -974,5 +1015,17 @@ describe("AC5 resumed after an upgrade", () => {
     }
     expect(screen.queryByRole("button", { name: /resumeNamed/ })).toBeNull();
     expect(screen.queryByText("selectionRequired.title")).toBeNull();
+    // The switcher and the guard read the workspace list: reloaded quietly.
+    expect(mockRefreshWorkspaces).toHaveBeenCalledTimes(1);
+    expect(mockRefreshWorkspaces).toHaveBeenCalledWith({ quiet: true });
+  });
+
+  it("a refetch that changes nothing does not reload the workspace list", async () => {
+    await renderLoaded(afterTermEnd());
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(mockGetSlots).toHaveBeenCalledTimes(2));
+    expect(mockRefreshWorkspaces).not.toHaveBeenCalled();
   });
 });

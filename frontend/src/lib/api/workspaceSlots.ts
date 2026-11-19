@@ -84,6 +84,8 @@ export interface WorkspaceSlotPreview {
 export interface SlotWorkspaceContext {
   id: string;
   name: string;
+  /** The name to show when set (design 12.7); `name` otherwise. */
+  display_name: string | null;
   is_private: boolean;
 }
 
