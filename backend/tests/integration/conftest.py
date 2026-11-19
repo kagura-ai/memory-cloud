@@ -225,3 +225,20 @@ def vectors():
         patch("db.qdrant.delete_context_points_everywhere", AsyncMock(return_value={})) as points,
     ):
         yield points
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def slot_world(async_engine):
+    """Committed users, owned workspaces and slot rows for the #2918 tests."""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from ._slot_world import SlotWorld
+
+    world = SlotWorld(async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False))
+    try:
+        yield world
+    finally:
+        try:
+            await world.cleanup()
+        except Exception:  # noqa: BLE001 — a failed cleanup must not hide the result
+            pass
