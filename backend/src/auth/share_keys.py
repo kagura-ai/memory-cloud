@@ -11,26 +11,68 @@ hashing, same constant-time verify gate (#964), and the same throttled
 ``last_used_at`` write (#947). It diverges only where the share-key semantics
 require it — a mandatory ``context_id`` binding and a mandatory, clamped
 ``expires_at``.
+
+#2930: a share key never outlives its creator's right to share the context.
+The share-key dependency honours a key only while ``creator_can_share`` holds
+for its creator and bound context (checked per request, nothing cached); a
+member's removal revokes that member's share keys for the workspace's contexts
+(``revoke_creator_keys``), an account's deletion or erasure deletes them; and a
+caller who may share a context revokes and lists every key bound to it.
 """
 
 from __future__ import annotations
 
 import secrets
 from datetime import timedelta
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from config.settings import get_settings
-from models.auth import ShareKey
+from models.auth import Context, ShareKey
 from services.operation_history_writer import record_operation
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+async def creator_can_share(db: AsyncSession, user_id: str, context_id: UUID) -> bool:
+    """Whether ``user_id`` may share ``context_id`` now (#2930).
+
+    The rule the mint route applies: OWNER-level access to the context under
+    ``PermissionService``'s role decision (workspace owner or admin, or a
+    seated member who reaches the context with its OWNER role). ``False`` for
+    every refusal of that decision (not found, role too low, no seat). Any
+    other failure propagates: the caller refuses on it, never allows.
+    """
+    from auth.workspace_roles import ContextRole
+    from services.permission_service import PermissionService
+    from utils.exceptions import AuthorizationError, FeatureNotAvailableError, NotFoundException
+
+    try:
+        await PermissionService(db).check_context_rbac(user_id, context_id, ContextRole.OWNER)
+    except (NotFoundException, AuthorizationError, FeatureNotAvailableError):
+        return False
+    return True
+
+
+def _record_revocation(db: AsyncSession, record: ShareKey, *, actor_user_id: str | None) -> None:
+    """The ``credential.revoked`` operation record of one share key."""
+    record_operation(
+        db,
+        operation="credential.revoked",
+        actor_user_id=actor_user_id,
+        context_id=record.context_id,
+        target_id=record.public_id,
+        subject_user_id=record.user_id,
+        event_key=f"share-key-revoked:{record.public_id}",
+    )
+
 
 # Distinct prefix so a share key is visually identifiable and so it never
 # collides with a personal ``kagura_`` API key in the ``api_keys`` table.
@@ -227,17 +269,32 @@ class ShareKeyManager:
         )
         return list(result.scalars().all())
 
+    async def list_context_keys(self, context_id: UUID) -> list[ShareKey]:
+        """Every share key bound to ``context_id``, all creators, newest first (#2930).
+
+        The caller has checked that the requester may share the context.
+        """
+        result = await self.db.execute(
+            select(ShareKey)
+            .where(ShareKey.context_id == context_id)
+            .order_by(ShareKey.created_at.desc(), ShareKey.id.desc())
+        )
+        return list(result.scalars().all())
+
     async def revoke_key(self, public_id: str, user_id: str) -> bool:
         """Revoke a share key by its public id (soft delete, preserves audit trail).
 
-        Ownership is enforced in the query — an id that is not the user's
-        active key returns ``False`` (the route maps that to a uniform 404).
+        #2930: allowed for the key's creator, or for a caller who may share
+        the key's bound context (``creator_can_share``: workspace owner or
+        admin, or the context's owner). An unknown id, an already revoked key
+        and a key the caller may not revoke all return ``False`` (the route
+        maps it to the uniform 404). The operation record names the caller as
+        actor and the creator as subject.
         """
         result = await self.db.execute(
             select(ShareKey).where(
                 and_(
                     ShareKey.public_id == public_id,
-                    ShareKey.user_id == user_id,
                     ShareKey.revoked_at.is_(None),
                 )
             )
@@ -245,17 +302,89 @@ class ShareKeyManager:
         record = result.scalar_one_or_none()
         if record is None:
             return False
+        if record.user_id != user_id and not await creator_can_share(
+            self.db, user_id, record.context_id
+        ):
+            return False
 
         record.revoked_at = utcnow()
-        record_operation(
-            self.db,
-            operation="credential.revoked",
-            actor_user_id=user_id,
-            context_id=record.context_id,
-            target_id=record.public_id,
-            subject_user_id=record.user_id,
-            event_key=f"share-key-revoked:{record.public_id}",
-        )
+        _record_revocation(self.db, record, actor_user_id=user_id)
         await self.db.flush()
         logger.info("share_key_revoked", key_id=record.id, public_id=public_id, user_id=user_id)
         return True
+
+    async def revoke_creator_keys(
+        self, user_id: str, *, workspace_id: UUID, actor_user_id: str | None
+    ) -> int:
+        """Revoke ``user_id``'s live share keys bound to contexts of ``workspace_id``.
+
+        #2930: the member-removal path, inside its transaction. One
+        ``credential.revoked`` record per key (actor ``actor_user_id``, subject
+        the creator). Idempotent: a second run matches no live key and records
+        nothing. Locks the matching ``share_keys`` rows in id order
+        (``FOR UPDATE``) before the UPDATE; the contexts are read, not locked.
+
+        Returns:
+            How many keys were revoked.
+        """
+
+        def live(k: Any) -> tuple[Any, ...]:
+            return (
+                k.user_id == user_id,
+                k.revoked_at.is_(None),
+                k.context_id.in_(select(Context.id).where(Context.workspace_id == workspace_id)),
+            )
+
+        locked = aliased(ShareKey)
+        rows = (
+            await self.db.execute(
+                update(ShareKey)
+                .where(
+                    ShareKey.id.in_(
+                        select(locked.id).where(*live(locked)).order_by(locked.id).with_for_update()
+                    ),
+                    *live(ShareKey),
+                )
+                .values(revoked_at=utcnow())
+                .returning(ShareKey)
+                .execution_options(synchronize_session=False)
+            )
+        ).scalars()
+        revoked = list(rows)
+        for record in revoked:
+            _record_revocation(self.db, record, actor_user_id=actor_user_id)
+        if revoked:
+            await self.db.flush()
+            logger.info(
+                "share_keys_revoked_on_departure",
+                user_id=user_id,
+                workspace_id=str(workspace_id),
+                count=len(revoked),
+            )
+        return len(revoked)
+
+    async def delete_creator_keys(self, user_id: str) -> int:
+        """Delete every share key ``user_id`` created (#2930).
+
+        The account deletion path, next to its API keys' delete. Locks the
+        rows in id order (``FOR UPDATE``) before the DELETE.
+
+        Returns:
+            How many keys were deleted.
+        """
+        from sqlalchemy import delete
+
+        locked = aliased(ShareKey)
+        result = await self.db.execute(
+            delete(ShareKey)
+            .where(
+                ShareKey.id.in_(
+                    select(locked.id)
+                    .where(locked.user_id == user_id)
+                    .order_by(locked.id)
+                    .with_for_update()
+                )
+            )
+            .returning(ShareKey.id)
+        )
+        return len(result.scalars().all())

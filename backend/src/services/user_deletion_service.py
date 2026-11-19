@@ -167,6 +167,8 @@ class UserDeletionResult:
     agent_api_keys: int = 0
     agents_suspended: int = 0
     agents_reowned: int = 0
+    # #2930: the share keys the user created, deleted with its API keys.
+    share_keys: int = 0
     contexts: int = 0
     released_bytes: dict[UUID, int] = field(default_factory=dict)
     purged_workspaces: list[PurgedWorkspace] = field(default_factory=list)
@@ -867,6 +869,11 @@ async def delete_user_rows(
         delete(APIKey).where(APIKey.id.in_(locked_ids(APIKey, lambda k: (k.user_id == user_id,))))
     )
     result.api_keys = cast(CursorResult[Any], keys).rowcount or 0
+    # #2930: the user's share keys go with its API keys (no foreign key on
+    # ``share_keys.user_id`` would take them).
+    from auth.share_keys import ShareKeyManager
+
+    result.share_keys = await ShareKeyManager(db).delete_creator_keys(user_id)
     await db.execute(delete(OAuth2Client).where(OAuth2Client.owner_id == user_id))
     ctx_ids = list((await db.execute(locked_ids(Context, doomed))).scalars())
     result.contexts = len(ctx_ids)

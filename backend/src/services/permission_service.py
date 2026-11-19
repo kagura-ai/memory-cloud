@@ -837,6 +837,29 @@ class PermissionService:
 
         return context, effective_role
 
+    async def check_context_rbac(
+        self,
+        user_id: str,
+        context_id: UUID,
+        required_role: ContextRole | str = ContextRole.VIEWER,
+    ) -> tuple[Context, ContextRole]:
+        """The role decision of ``check_context_access`` alone (#2930).
+
+        The membership, seat, context access list, privacy and context-role
+        rules exactly as ``check_context_access`` decides them, without the
+        agent-binding filter, the slot gate or the capacity lock: for a caller
+        that decides about another credential (a share key's creator) or only
+        revokes one, not for a content read or write.
+
+        Raises:
+            NotFoundException: 404 when the context does not exist or the
+                caller cannot reach it.
+            AuthorizationError: 403 when the caller reaches it with too low a role.
+            FeatureNotAvailableError: 403 ``FEAT-001`` for a member without a
+                plan seat (``ensure_member_seated``).
+        """
+        return await self._check_context_access_rbac(user_id, context_id, required_role)
+
     async def _seated_member(self, workspace_id: UUID, user_id: str) -> WorkspaceMember | None:
         """The caller's membership row once their plan seat is confirmed.
 

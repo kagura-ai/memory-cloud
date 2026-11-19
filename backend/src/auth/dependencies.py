@@ -1072,6 +1072,11 @@ async def require_workspace_member(
 # ============================================================================
 
 
+def _share_key_refused() -> HTTPException:
+    """The one answer of every share-key refusal: 401, one message (#1027, #2930)."""
+    return HTTPException(status_code=401, detail="Invalid or missing share key")
+
+
 async def get_share_key_principal(
     authorization: str | None = Header(None),
     db: AsyncSession = Depends(get_db),
@@ -1092,13 +1097,27 @@ async def get_share_key_principal(
       - ``current_context_id`` is forced to the bound context; the endpoint
         confines recall to exactly this context (#963/#150 non-regression).
 
+    #2930: a share key never outlives its creator's right to share the
+    context. On every request, after the key and its live context are
+    verified and before the slot gate, the creator must still hold
+    OWNER-level access to the bound context under the role decision the mint
+    route applies (``auth.share_keys.creator_can_share``). A creator who left
+    the workspace, lost the context from their access list or lost the OWNER
+    role ends every key they created for it at once; a failure of the check
+    itself is a refusal too (logged). Nothing is cached.
+
     Raises:
         HTTPException: 401 if the bearer is absent, is not a share key, fails
-            verification (not found / revoked / expired), or the bound context
-            no longer exists. The message is uniform so a holder cannot probe
-            which gate failed.
+            verification (not found / revoked / expired), the bound context
+            no longer exists, or its creator can no longer share it. The
+            answer is uniform so a holder cannot probe which gate failed.
     """
-    from auth.share_keys import SHARE_KEY_PREFIX, SHARE_KEY_SCOPE, ShareKeyManager
+    from auth.share_keys import (
+        SHARE_KEY_PREFIX,
+        SHARE_KEY_SCOPE,
+        ShareKeyManager,
+        creator_can_share,
+    )
     from models.auth import Context
 
     token = None
@@ -1106,12 +1125,12 @@ async def get_share_key_principal(
         token = authorization[7:]
 
     if not token or not token.startswith(SHARE_KEY_PREFIX):
-        raise HTTPException(status_code=401, detail="Invalid or missing share key")
+        raise _share_key_refused()
 
     manager = ShareKeyManager(db)
     verified = await manager.verify_key(token)
     if verified is None:
-        raise HTTPException(status_code=401, detail="Invalid or missing share key")
+        raise _share_key_refused()
 
     # verify_key may have flushed last_used_at; persist it. A commit failure is
     # non-critical metadata loss and must not fail auth.
@@ -1127,7 +1146,25 @@ async def get_share_key_principal(
     context = ctx_result.scalar_one_or_none()
     if context is None:
         # Key bound to a context that is gone/deleted → treat as invalid.
-        raise HTTPException(status_code=401, detail="Invalid or missing share key")
+        raise _share_key_refused()
+
+    # #2930: the creator must still be able to share the bound context.
+    try:
+        creator_shares = await creator_can_share(db, verified.user_id, context.id)
+    except Exception as exc:  # noqa: BLE001 - a failed check refuses, never allows
+        logger.warning(
+            "share_key_creator_check_failed",
+            share_key_id=verified.id,
+            error_type=type(exc).__name__,
+        )
+        raise _share_key_refused() from None
+    if not creator_shares:
+        logger.info(
+            "share_key_refused_creator_cannot_share",
+            share_key_id=verified.id,
+            context_id=str(context.id),
+        )
+        raise _share_key_refused()
 
     # #2918: a share-key reader is never a member: a slot-suspended workspace
     # refuses it in the redacted form.

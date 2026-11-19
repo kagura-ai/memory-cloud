@@ -21,12 +21,12 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser, ShareKeyUser
-from auth.share_keys import ShareKeyManager
+from auth.share_keys import ShareKeyManager, creator_can_share
 from auth.workspace_roles import ContextRole
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -205,10 +205,30 @@ async def create_share_key(
 async def list_share_keys(
     user: SessionUser,
     manager: ShareKeyManager = Depends(get_share_key_manager),
+    db: AsyncSession = Depends(get_db),
+    context_id: UUID | None = Query(
+        None,
+        description=(
+            "List every share key bound to this context, whoever created it "
+            "(needs OWNER-level access to the context: workspace owner or admin, "
+            "or the context's owner). Without it: the caller's own keys."
+        ),
+    ),
 ) -> list[ShareKeyResponse]:
-    """List the current user's share keys (newest first)."""
+    """List share keys, newest first.
+
+    Without ``context_id``: the current user's share keys. With it (#2930,
+    experimental): every share key bound to that context, all creators
+    (``user_id`` names each one), for a caller who may share the context;
+    anyone else gets the context routes' uniform 404.
+    """
     user_id = get_user_id(user)
-    keys = await manager.list_keys(user_id=user_id)
+    if context_id is None:
+        keys = await manager.list_keys(user_id=user_id)
+    else:
+        if not await creator_can_share(db, user_id, context_id):
+            raise NotFoundException("Context")
+        keys = await manager.list_context_keys(context_id)
     return [_format_key_response(k) for k in keys]
 
 
@@ -219,7 +239,14 @@ async def revoke_share_key(
     manager: ShareKeyManager = Depends(get_share_key_manager),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Revoke a share key (soft delete; uniform 404 if not the user's active key)."""
+    """Revoke a share key (soft delete).
+
+    Allowed for the key's creator and (#2930) for a caller with OWNER-level
+    access to the key's bound context (workspace owner or admin, or the
+    context's owner). An unknown id, an already revoked key and a key the
+    caller may not revoke all answer the same 404. The operation record names
+    the caller as actor and the creator as subject.
+    """
     user_id = get_user_id(user)
     revoked = await manager.revoke_key(public_id=key_id, user_id=user_id)
     if not revoked:
