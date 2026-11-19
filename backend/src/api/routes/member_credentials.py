@@ -413,7 +413,7 @@ async def get_member_credentials(
         # #2918: membership, then the view permission (403 for a member who
         # may not view another member), then the slot gate, before anything
         # of the workspace is read or created.
-        await service.check_can_view(user["user_id"], workspace_id, user_id)
+        caller_role = await service.check_can_view(user["user_id"], workspace_id, user_id)
         await ensure_slot_active(db, workspace_id, user_id=user["user_id"])
 
     try:
