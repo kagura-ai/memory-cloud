@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 
 from api.routes.internal_public_mcp_domains import router as internal_domains
 from config.settings import get_settings
@@ -161,6 +162,9 @@ async def test_owner_observes_only_current_binding_and_lease(store, monkeypatch)
     async with store.factory() as db:
         for key in (rid, other_id):
             await db.delete(await db.get(PublicMcpDomain, key))
+        await db.execute(
+            text("DELETE FROM public_mcp_domain_tls_reports WHERE domain_id = :rid"), {"rid": rid}
+        )
         await db.commit()
     await fixtures.change(
         store, SyncService, store.service_id, service_client_id="replacement-" + uuid4().hex
