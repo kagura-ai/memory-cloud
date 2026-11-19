@@ -494,9 +494,7 @@ minutes) and once when the scheduler starts. It is registered only while
      release was audited);
    - rows that are not `released` whose workspace row is gone, or whose
      publication is gone, revoked or of another workspace: `pending` rows are
-     deleted, held rows are released with the cooldown;
-   - while edge certificate reports are configured, reports whose `valid_until`
-     has passed are deleted (a fifth statement, not counted in the job status).
+     deleted, held rows are released with the cooldown.
 2. Reads up to 200 held rows whose last check is older than 1 hour (or that
    were never checked): rows whose last lookup was `unavailable` after all
    others, then the oldest check first. The connection is released.
@@ -504,6 +502,11 @@ minutes) and once when the scheduler starts. It is registered only while
    applied by the same writer an owner's verify uses. Every completed lookup is
    applied, `unavailable` included. No check starts once 120 s have passed
    since the run started; the rest is counted `budget_skipped` and stays due.
+4. While edge certificate reports are configured, deletes up to 500 reports
+   whose `valid_until` has passed, in a session of its own (not counted in the
+   job status). A failure there is logged as
+   `public_mcp_domain_tls_report_purge_failed` and never stops the run or the
+   checks before it.
 
 The job status (`GET /api/v1/admin/operations/status`, see
 [Operations status](deployment.md#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768))
@@ -709,9 +712,10 @@ which stays authoritative for the application.
 One row per claim in `public_mcp_domains`: the host name, the workspace and
 publication ids, the verification token, the state, the lease, the check
 results and times. No person column and no foreign key. The host name lives on
-the row only and is deleted with it (a `pending` row after 7 days or on
-remove, a `released` row when its cooldown ends). The table is operational
-data: never exported, nothing in it for account erasure.
+the row and is deleted with it (a `pending` row after 7 days or on remove, a
+`released` row when its cooldown ends), and in the claim's edge certificate
+report until the maintenance pass deletes that report (below). The table is
+operational data: never exported, nothing in it for account erasure.
 
 - Workspace soft delete: aliases answer `404` at once (see the right above).
 - Workspace hard delete: the rows stay (no foreign key); the job releases held
@@ -719,8 +723,12 @@ data: never exported, nothing in it for account erasure.
   when the cooldown ends.
 - Unpublish: released in the same transaction (above).
 - Edge certificate reports (`public_mcp_domain_tls_reports`): one row per claim
-  id, no person column and no foreign key; deleted by the maintenance pass once
-  past their `valid_until`, and never shown for a released or removed claim.
+  id with the host name the report named, no person column and no foreign key;
+  never shown for a released or removed claim. The maintenance pass deletes a
+  report once past its `valid_until`, and only while reporting is configured:
+  after the credential is emptied (or a switch is turned off) the remaining
+  rows are neither shown nor deleted until it is configured again. To clear
+  them: `DELETE FROM public_mcp_domain_tls_reports;`.
 
 ## Audit and log events
 
@@ -751,7 +759,8 @@ installation-bound command also carries `client_id` (the browser client) and
 | `scheduled_public_mcp_domain_maintenance` / `public_mcp_domain_maintenance_disabled` | info | `interval_seconds` / — | job registration at scheduler start |
 | `public_mcp_alias_not_served` | debug | — | an alias lookup found nothing |
 | `public_mcp_domain_tls_report_stored` | info | `domain_id`, `status` | an edge certificate report was stored |
-| `public_mcp_domain_tls_report_refused` | warning | `reason`, `domain_id` (when known) | an edge certificate report was refused |
+| `public_mcp_domain_tls_report_refused` | warning (`disabled`: debug) | `reason`, `domain_id` (when known) | an edge certificate report was refused |
+| `public_mcp_domain_tls_report_purge_failed` | error | `error_type` | the maintenance pass could not delete expired reports; the run goes on |
 
 No log line, usage event, job count or audit row carries a host name, a token,
 a DNS answer, a resolved address or the `Origin` of an alias request.
@@ -948,7 +957,11 @@ never holds a certificate's private key.
 `Authorization: Bearer <MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN>` header, a JSON
 body of at most 4,096 bytes. It is internal: the same ingress rule that answers
 `404` for every `/internal` path from outside keeps it private, and the reporter
-reaches the API on the private network. The deployment provides a transport that
+reaches the API on the private network under an application or internal Host,
+for example `http://api-blue:8080/internal/public-mcp-domains/tls-observation`
+(a dotted internal name must be listed in `MCP_PUBLIC_DOMAINS_APP_HOSTS`).
+Under any other Host the answer is the Host guard's `404` with a JSON body, and
+no report event is logged. The deployment provides a transport that
 keeps the bearer confidential between the reporter and the API (the private
 network of one host, or TLS between hosts). The route answers with an empty
 body, and checks in this order:
@@ -958,17 +971,20 @@ body, and checks in this order:
 | `404` | not configured: `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` empty, or `MCP_PUBLIC_DOMAINS_ENABLED` or `MCP_PUBLIC_ENDPOINTS_ENABLED` off |
 | `401` | no `Authorization` header, more than one, or another credential |
 | `413` | a body over 4,096 bytes |
-| `422` | an invalid body (a missing or unknown key, a status outside the five, a time without an offset or outside the representable range, a window longer than five minutes, `valid` without a future certificate end, `expired` without an elapsed one) |
+| `422` | an invalid body (a missing or unknown key, a status outside the five, a time that is not an RFC 3339 string with an offset (a number or a numeric string included) or is outside the representable range, a window longer than five minutes, `valid` without a future certificate end, `expired` without an elapsed one) |
 | `404` | the binding: no claim with this id, a claim that does not hold its name (`pending` or `released`), another host name or endpoint, or a report observed before the claim was created |
 | `409` | a report observed in the future or already past its `valid_until` at receipt; an older report than the stored one; another report observed at the same instant as the stored one |
 | `204` | stored, or the stored report sent again unchanged |
 
 Nothing of a request without the credential is read, and no statement runs
 before the binding is read. Refusals are logged as
-`public_mcp_domain_tls_report_refused` with a reason (`disabled`, `credential`,
-`size`, `invalid`, `binding` or `stale`) and the domain id when it is known; a
-stored report as `public_mcp_domain_tls_report_stored` with the domain id and
-the status. No log line carries the credential or a host name.
+`public_mcp_domain_tls_report_refused` with a reason and the domain id when it
+is known: `disabled` (at debug level, so an installation that does not use
+reports writes no warning), `credential`, `size`, `invalid`, `binding`,
+`future` (observed after the server's clock), `expired` (already past its
+`valid_until` at receipt) or `older` (not newer than the stored report). A
+stored report is logged as `public_mcp_domain_tls_report_stored` with the
+domain id and the status. No log line carries the credential or a host name.
 
 ```json
 {
@@ -1010,13 +1026,15 @@ synchronised.
 **What the observation shows.** The stored report of the claim the
 observation shows, while that row holds its name, names it exactly, was
 observed at or after the row's `created_at` and not after the observation's own
-`observed_at`, and is before its `valid_until`. A `valid` report whose
-`certificate_not_after` has passed is shown as `expired`; `valid` without
-`certificate_not_after` and everything that is not provably current (no
-report, the feature not configured, another row, a pending or released row, a
-report past its `valid_until`) are `{"status":"unreported"}`. A shown report
-shortens the observation's own `valid_until` to the report's when that is
-sooner. The `tls` object has exactly the keys above; `schema_version` and the
+`observed_at`, and has more than 5 seconds left before its `valid_until`. A
+`valid` report whose `certificate_not_after` is not more than 5 seconds ahead is
+shown as `expired`; `valid` without `certificate_not_after` and everything that
+is not provably current (no report, the feature not configured, another row, a
+pending or released row, a report past or within 5 seconds of its
+`valid_until`) are `{"status":"unreported"}`. A shown report shortens the
+observation's own `valid_until` to the report's, and a `valid` one also to
+`certificate_not_after`, when that is sooner; the 5-second margin keeps every
+such deadline ahead when the answer arrives. The `tls` object has exactly the keys above; `schema_version` and the
 capabilities are unchanged.
 
 **Reassignment.** Evidence is the claim's: a removed or released claim shows
@@ -1035,7 +1053,14 @@ their own `valid_until`.
 row per claim id: the host name and endpoint id the report named, the status and
 four times. No person column and no foreign key; never exported, nothing in it
 for account erasure. The domain maintenance pass deletes reports whose
-`valid_until` has passed. The table is created by the revision
-`f58_2941_domain_tls_reports`, which locks no existing table. While the feature
-is not configured nothing reads or writes the table, so the code runs before
-the revision is applied; apply it before setting the credential.
+`valid_until` has passed, only while reporting is configured; after the
+credential is emptied the remaining rows are neither shown nor deleted (clear
+them with `DELETE FROM public_mcp_domain_tls_reports;`). The table is created by
+the revision `f58_2941_domain_tls_reports`, which locks no existing table.
+While the feature is not configured nothing reads or writes the table, so the
+code runs before the revision is applied. Set the credential only after the
+revision is applied, and empty it before downgrading the revision: with the
+credential set and the table missing, the report route and the owner
+observation of a live domain answer errors, and the maintenance pass logs
+`public_mcp_domain_tls_report_purge_failed` on every run (its domain checks
+still run).
