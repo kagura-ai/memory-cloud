@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from api.routes import well_known
 from config.settings import Settings
 from models.sync_feed_schemas import FeedRecord
 from services.sync_contract import (
+    DOMAIN_OPERATIONS_CAPABILITY,
     REQUIRED_SYNC_CAPABILITIES,
     SyncContractUnsupported,
     require_sync_contract,
@@ -29,7 +31,9 @@ FLAGS = (
     "mcp_public_endpoints_enabled",
     "mcp_public_usage_budget_enabled",
     "mcp_public_domains_enabled",
+    "sync_publication_domain_operations_enabled",
 )
+ROLLOUT_DOC = Path(__file__).resolve().parents[3] / "docs" / "ops" / "sync-contract-rollout.md"
 
 
 def settings(**changes):
@@ -191,3 +195,62 @@ def test_domain_observation_requires_owner_controls_and_domains(flag):
         "public.domains.observation.v1"
         not in sync_configuration(settings(**{flag: False})).capabilities
     )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "oidc_enabled",
+        "sync_integrations_enabled",
+        "mcp_public_endpoints_enabled",
+        "mcp_public_usage_budget_enabled",
+        "mcp_public_domains_enabled",
+        "sync_publication_domain_operations_enabled",
+    ],
+)
+def test_domain_operations_capability_needs_its_switch_and_the_observation_prerequisites(flag):
+    """#2921: advertised only with its own switch and while the observation is."""
+    assert DOMAIN_OPERATIONS_CAPABILITY == "public.domains.operations.v1"
+    assert DOMAIN_OPERATIONS_CAPABILITY in sync_configuration(settings()).capabilities
+    without = sync_configuration(settings(**{flag: False})).capabilities
+    assert DOMAIN_OPERATIONS_CAPABILITY not in without
+
+
+def test_without_the_switch_the_capability_list_is_the_previous_one(monkeypatch):
+    configured = settings(sync_publication_domain_operations_enabled=False)
+    assert sync_configuration(configured).capabilities == [
+        "identity.oidc.v1",
+        "workspace.access.v1",
+        "sync.installations.v1",
+        "sync.credentials.v1",
+        "sync.feeds.v1",
+        "sync.managed.v1",
+        "sync.activity.v1",
+        "public.mcp.v1",
+        "public.budget.v1",
+        "public.domains.v1",
+        "public.domains.observation.v1",
+    ]
+    # Off unless the operator sets it.
+    monkeypatch.delenv("SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED", raising=False)
+    assert Settings(_env_file=None).sync_publication_domain_operations_enabled is False
+    # The capability is optional for a consumer.
+    assert DOMAIN_OPERATIONS_CAPABILITY not in REQUIRED_SYNC_CAPABILITIES
+    assert require_sync_contract(sync_configuration(configured).model_dump(), custom_domain=True)
+
+
+def _rollout_capabilities() -> set[str]:
+    """The capability names in the first column of the rollout doc's capability table."""
+    lines = ROLLOUT_DOC.read_text().splitlines()
+    start = lines.index("| Capability | Required deployment switches |")
+    names: set[str] = set()
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        names |= set(re.findall(r"`([^`]+)`", line.split("|")[1]))
+    return names
+
+
+def test_every_capability_is_listed_in_the_rollout_doc():
+    advertised = sync_configuration(settings()).capabilities
+    assert set(advertised) - _rollout_capabilities() == set()

@@ -31,6 +31,8 @@ advertise no enabled capabilities. A release version is never evidence of suppor
 | `sync.activity.v1` | Installations, `SYNC_RUNS_ENABLED`, `SYNC_OBSERVABILITY_ENABLED` |
 | `public.budget.v1` | Public MCP, `MCP_PUBLIC_USAGE_BUDGET_ENABLED` |
 | `public.domains.v1` | Public budget, `MCP_PUBLIC_DOMAINS_ENABLED` |
+| `public.domains.observation.v1` | Installations, public budget, `MCP_PUBLIC_DOMAINS_ENABLED` |
+| `public.domains.operations.v1` (experimental) | Domain observation, `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` |
 
 These profiles conservatively describe support for complete consumer workflows;
 they do not remove diagnostic reads which intentionally survive worker shutdown.
