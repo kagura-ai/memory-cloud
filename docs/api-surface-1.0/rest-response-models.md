@@ -972,7 +972,7 @@ Notes:
 - `contracted_count: int` — required
 - `selection_required: bool` — required
 - `selection: SlotSelectionResponse` — required
-- `version: int` — required (sent back as `expected_version`)
+- `version: int` — required (sent back as `expected_version`; unchanged when a save repeats the stored list)
 - `if_paid_plans_end: PaidPlansEndResponse | None` — required (null when no owned workspace is under a billing contract)
 - `workspaces: list[SlotWorkspaceResponse]` — required (`created_at` ascending, then `id`)
 
@@ -1008,7 +1008,7 @@ Notes:
 - `scenario: "current" | "paid_plans_end"` — required
 
 ### SlotSelectionRequest (BaseModel) (request model)
-- `workspace_ids: list[UUID]` — required (at most 500; ordered; an empty list means the default order)
+- `workspace_ids: list[UUID]` — required (at most 500; ordered; an empty list means the default order, which clears `selection_required` now but not at a later drop)
 - `expected_version: int` — required (`>= 0`)
 
 ## memory.py

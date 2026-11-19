@@ -2248,7 +2248,7 @@ The allowance (`cap`, `base`, `slot_bonus`, `tier_grant`, `tier`, `next_tier`, `
 
 ### PUT /api/v1/me/workspace-slots/selection
 
-**Request:** `{"workspace_ids": [...], "expected_version": 4}`. Replaces the saved ordered selection (an empty list means the default order) and applies it at once while anything is suspended (a swap, or a resume within the allowance).
+**Request:** `{"workspace_ids": [...], "expected_version": 4}`. Replaces the saved ordered selection and applies it at once while anything is suspended (a swap, or a resume within the allowance). An empty list means the default order: it clears `selection_required` now, but it is not a choice, so a later drop that suspends something sets it again. Saving the list that is already stored changes nothing and answers `200` with the same `version` and `saved_at`.
 
 **Response (200):** the body of `GET` after applying.
 
@@ -2263,7 +2263,7 @@ The allowance (`cap`, `base`, `slot_bonus`, `tier_grant`, `tier`, `next_tier`, `
 | `409 SLOT-003` | `expected_version` is stale; nothing was saved (`details: {expected_version, current_version}`) |
 | `409 SLOT-002` | the selection names a suspended workspace while workspaces with a paid subscription hold every active slot (`details`: `cap`, `active_slots`, `active_count`, `contracted_count`, `next_tier`, `cap_on_next_tier`, `unmet`) |
 | `409 RES-002`, `details.reason: "workspace_slots_busy"` | another change for the same owner is in progress; retry the same request |
-| `404 RES-001` | contexts route: the workspace is not a live one the caller owns (one body for not owned, deleted and unknown) |
+| `404 RES-001` | contexts route: the workspace is not a live one the caller owns (one body for not owned, deleted and unknown); selection: the account was erased meanwhile (nothing was saved) |
 | `404 HTTP-404` | the deployment does not enforce workspace slots |
 | `401` / `403` | no session / an API key or bearer token instead of a session |
 

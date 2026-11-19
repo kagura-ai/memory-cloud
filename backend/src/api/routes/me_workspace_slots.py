@@ -325,12 +325,15 @@ async def preview_workspace_selection(
     response_model=WorkspaceSlotsResponse,
     summary="Save which workspaces stay active",
     description=(
-        "Replaces the saved ordered selection (an empty list means the default order) "
-        "and applies it at once while anything is suspended (a swap or a resume within "
-        "the allowance). Answers the full overview. 422 VAL-001 for duplicate or "
-        "not-owned ids; 409 SLOT-003 when expected_version is stale; 409 SLOT-002 when "
-        "workspaces with a paid subscription hold every active slot; 409 RES-002 "
-        "(reason workspace_slots_busy) to retry. " + _EXPERIMENTAL
+        "Replaces the saved ordered selection (an empty list means the default order; "
+        "it clears selection_required now but not at a later drop) and applies it at "
+        "once while anything is suspended (a swap or a resume within the allowance). "
+        "Saving the list already stored keeps version and saved_at. Answers the full "
+        "overview. 422 VAL-001 for duplicate or not-owned ids; 409 SLOT-003 when "
+        "expected_version is stale; 409 SLOT-002 when workspaces with a paid "
+        "subscription hold every active slot; 409 RES-002 (reason "
+        "workspace_slots_busy) to retry; 404 RES-001 when the account was erased "
+        "meanwhile. " + _EXPERIMENTAL
     ),
 )
 async def save_workspace_selection(
