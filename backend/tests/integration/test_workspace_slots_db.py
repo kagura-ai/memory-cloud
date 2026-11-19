@@ -483,7 +483,7 @@ class TestRowLocksInOneOrderedStatement:
     async def test_foreign_and_own_rows_are_locked_together_in_workspace_order(
         self, slot_world: SlotWorld, async_engine
     ) -> None:
-        """Review C1: workspaces moved both ways between two owners leave rows
+        """Workspaces moved both ways between two owners leave rows
         that both owners' reconciles delete; each locks all of them in ONE
         ordered statement, so the two never lock them in opposite orders."""
         a = await slot_world.user("cross-a")

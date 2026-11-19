@@ -1181,7 +1181,7 @@ def _visit(module: str, node: ast.AST, scope: tuple[str, ...], bump) -> None:
 
 def test_every_opt_out_is_pinned() -> None:
     """Every reference to a non-default policy and every ``slot=`` that is not
-    ``SlotPolicy.BLOCKED`` is a reviewed decision (design 12.4, owner 2026-11-19)."""
+    ``SlotPolicy.BLOCKED`` is pinned to the exact set of call sites below."""
     found = _scan()
     assert found["dynamic"] == {}, f"SlotPolicy built dynamically: {found['dynamic']}"
     assert found["owner"] == OWNER_MANAGEMENT_SITES, found["owner"]

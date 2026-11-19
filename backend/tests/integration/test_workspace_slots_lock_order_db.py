@@ -1,4 +1,4 @@
-"""The workspace slot paths take the global lock order (#2918, design 3 / 12.5).
+"""The workspace slot paths take the global lock order (#2918).
 
 Order: the changed workspace row, then the owner slot lock (tried, never
 waited on, while a row is held), then the slot-table rows. Reconcile takes no

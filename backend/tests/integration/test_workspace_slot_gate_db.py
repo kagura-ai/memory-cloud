@@ -561,7 +561,7 @@ async def test_observability_principals_are_refused_for_a_suspended_workspace(
 
 
 async def test_internal_sync_control_keeps_working(world: World) -> None:
-    """The payment service (no principal) never receives SLOT-001 (#2918 M11)."""
+    """The payment service (no principal) never receives SLOT-001 (#2918)."""
     from services.sync_authority import sync_authority
 
     w = world
@@ -727,7 +727,7 @@ async def test_revoking_a_credential_is_never_blocked(world: World) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Review round: membership, health, jobs, notices, keys, admin, consent
+# Membership, health, jobs, notices, keys, admin, consent
 # ---------------------------------------------------------------------------
 
 

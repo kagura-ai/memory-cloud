@@ -233,10 +233,11 @@ class WorkspaceOwnershipService:
         # Demote the previous owner's member row to ADMIN — if it exists. Some
         # legacy workspaces carry owner_user_id without a matching member row;
         # there is nothing to demote in that case, so flip ownership regardless.
-        # #2918: in ``enforce`` the recipient must have a free workspace slot
-        # for it (otherwise a transfer round trip would resume everything).
-        # Under the recipient's slot lock, taken without waiting: this
-        # transaction holds users rows and the workspace row.
+        # #2918: in ``enforce`` a voluntary transfer needs a free workspace
+        # slot at the recipient: an owner's active workspaces stay within an
+        # allowance on either side of the transfer. Under the recipient's slot
+        # lock, taken without waiting: this transaction holds users rows and
+        # the workspace row.
         if check_recipient_slots:
             from services.workspace_slots import check_transfer_recipient
 

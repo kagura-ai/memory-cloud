@@ -1,8 +1,8 @@
 """The account operations of workspace slots on real PostgreSQL (#2918).
 
 ``get_slot_overview``, ``preview_selection`` and ``save_selection``: the
-issue's example (term end, selection, upgrade), the errors of design 12.1
-(422, ``SLOT-002``, ``SLOT-003``) and two selections at once.
+issue's example (term end, selection, upgrade), the refusals (422,
+``SLOT-002``, ``SLOT-003``) and two selections at once.
 """
 
 from __future__ import annotations
@@ -294,7 +294,7 @@ class TestSelectionVersionAndEmptyList:
     async def test_saving_the_same_selection_again_keeps_the_version(
         self, slot_world: SlotWorld
     ) -> None:
-        """Review A3: a retried or repeated save is not a conflict."""
+        """A retried or repeated save is not a conflict."""
         owner, personal, research, side = await _issue_owner(slot_world)
         with slot_mode("enforce"):
             first = await _save(slot_world, owner, [side], 0)
@@ -319,7 +319,7 @@ class TestSelectionVersionAndEmptyList:
     async def test_an_empty_saved_list_does_not_stop_a_later_prompt(
         self, slot_world: SlotWorld
     ) -> None:
-        """Review A4: an empty list is the default order, not a choice."""
+        """An empty list is the default order, not a choice."""
         owner, personal, research, side = await _issue_owner(slot_world)
         with slot_mode("enforce"):
             await _save(slot_world, owner, [], 0)

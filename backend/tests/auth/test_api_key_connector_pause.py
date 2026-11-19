@@ -439,10 +439,9 @@ class TestVerifiedKeyConnectorFlag:
 
 
 class TestVerifyKeySlotSuspension:
-    """#2918: a connector key carries the user id of whoever set the connector
-    up, so for a slot-suspended workspace it fails verification (the owner's
-    opt-outs, such as export, would otherwise serve it). Only in ``enforce``,
-    and only connector keys pay the lookup."""
+    """#2918: a connector key of a slot-suspended workspace fails
+    verification, so it reaches no route, the owner's management routes
+    included. Only in ``enforce``, and only connector keys pay the lookup."""
 
     @staticmethod
     def _mode(mode: str):

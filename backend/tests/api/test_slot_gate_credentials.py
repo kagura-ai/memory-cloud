@@ -121,7 +121,7 @@ async def test_the_worker_config_is_not_ready_for_a_suspended_workspace() -> Non
             team_id="T1",
             app_key=None,
             capabilities=None,
-            # A matching ETag would otherwise keep the worker on a cached config.
+            # The suspended answer comes before the ETag check.
             if_none_match='"cached"',
             _=None,
             db=MagicMock(),

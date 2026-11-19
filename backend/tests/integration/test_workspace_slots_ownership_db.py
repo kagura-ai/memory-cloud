@@ -138,7 +138,7 @@ class TestTransfer:
     async def test_a_contracted_workspace_into_a_full_account_is_refused(
         self, slot_world: SlotWorld
     ) -> None:
-        """Review A2: the recipient needs a truly free slot; a contracted
+        """The recipient needs a truly free slot; a contracted
         workspace would only be active by pushing an active one out."""
         owner = await slot_world.user("giver")
         recipient = await slot_world.user("taker")
@@ -165,7 +165,7 @@ class TestTransfer:
     async def test_a_round_trip_through_an_empty_account_gains_nothing(
         self, slot_world: SlotWorld, variant: str
     ) -> None:
-        """Review A2 (a) and (b): W1 leaves, W2 resumes, W1 cannot come back."""
+        """W1 leaves, W2 resumes, W1 cannot come back."""
         owner = await slot_world.user("trip")
         second = await slot_world.user("trip-second")
         if variant == "billed_basic":
@@ -456,7 +456,7 @@ class TestCli:
 
 
 class TestNoRowsOutliveAnErasedAccount:
-    """Review B: a reconcile racing the erasure of its owner never re-creates
+    """A reconcile racing the erasure of its owner never re-creates
     the owner's state row; a selection save waits for the erasure and finds
     the account gone."""
 

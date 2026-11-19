@@ -2733,9 +2733,9 @@ class Settings(BaseSettings):
         and ``shadow`` / ``enforce`` need grants that never decrease along the
         plan order.
 
-        Suspending existing workspaces while new ones can still be created
-        beyond the same allowance would let an owner replace a suspended
-        workspace with a fresh one; the two switches move together.
+        Rule: while suspension is enforced, creating a workspace beyond the
+        allowance is refused as well (``ENFORCE_WORKSPACE_CAP``), so the
+        allowance bounds the active workspaces both ways.
         """
         if self.workspace_slot_suspension == "enforce" and not self.enforce_workspace_cap:
             raise ValueError(

@@ -1,7 +1,7 @@
 """The account routes of workspace slots, with the service patched (#2918).
 
-``/api/v1/me/workspace-slots`` is the contract of design 12.1: the JSON of
-every route is pinned here field for field (``Z`` timestamps on nested models
+The JSON of every route of ``/api/v1/me/workspace-slots`` is pinned here
+field for field (``Z`` timestamps on nested models
 too), with every refusal body. The service functions are patched; the same
 routes on real rows are in ``tests/integration/test_me_workspace_slots_db.py``.
 
@@ -64,7 +64,7 @@ ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
 
 
 def _after_term_overview(**overrides: Any) -> SlotOverview:
-    """Design V3's first example: three owned Free workspaces, one slot."""
+    """Three owned Free workspaces after a term end: one slot, two suspended."""
     values: dict[str, Any] = {
         "allowance": SlotAllowanceView(
             cap=1,

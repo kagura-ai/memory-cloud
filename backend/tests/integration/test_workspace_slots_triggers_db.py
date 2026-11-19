@@ -2,8 +2,8 @@
 
 Ordered billing snapshot, legacy plan push, admin plan change, slot-bonus
 PATCH: a drop suspends per the planner, other changes only resume, ``off``
-touches nothing, ``shadow`` never suspends. The busy-lock and error table of
-design 12.5 is driven with a second real session holding the owner lock:
+touches nothing, ``shadow`` never suspends. The busy-lock and error cases are
+driven with a second real session holding the owner lock:
 a change that may lower the allowance answers the retryable 409 and commits
 nothing; a non-decreasing one commits and defers; an unexpected error fails
 the first and is deferred for the second.
@@ -452,7 +452,7 @@ class TestAdminPlan:
         with slot_mode("off"), StatementRecorder(async_engine) as recorder:
             await _admin_plan(slot_world, pro, "free")
         assert recorder.touching_slot_tables() == []
-        # FOR NO KEY UPDATE (review C2): serializes with the billing writers'
+        # FOR NO KEY UPDATE: serializes with the billing writers'
         # FOR UPDATE without blocking foreign-key inserts of child rows.
         locking = [
             s for s in recorder.statements if s.startswith("SELECT") and "FOR NO KEY UPDATE" in s
@@ -513,7 +513,7 @@ class TestSlotBonus:
 
 
 class TestChangedWorkspaceHoldingARow:
-    """Review A1: a suspended workspace that gets a paid plan with no extra
+    """A suspended workspace that gets a paid plan with no extra
     slot swaps out an active one; it is not counted as active already."""
 
     async def test_a_suspended_free_workspace_bought_as_basic_swaps_and_its_end_keeps_one(
@@ -598,7 +598,7 @@ def _failing_inside_the_savepoint(monkeypatch) -> None:
 
 
 class TestSavepointsHoldADatabaseError:
-    """Review D: the savepoint branches with an error raised by the database."""
+    """The savepoint branches with an error raised by the database."""
 
     async def test_a_non_decreasing_snapshot_commits_after_a_database_error(
         self, slot_world: SlotWorld, monkeypatch
@@ -669,7 +669,7 @@ class TestLockBeforeTheSyncStop:
     async def test_the_owner_lock_is_tried_before_the_sync_stop(
         self, slot_world: SlotWorld, monkeypatch
     ) -> None:
-        """Review D: only the workspace row is held while the try-lock backs off."""
+        """Only the workspace row is held while the try-lock backs off."""
         import services.sync_management as sync_management
 
         owner, maxed, *_ = await _owner_with_max(slot_world)
@@ -692,7 +692,7 @@ class TestLockBeforeTheSyncStop:
 
 
 class TestLegacyAndAdminBranches:
-    """Review D: the busy and error branches of the legacy push and the admin
+    """The busy and error branches of the legacy push and the admin
     plan route, as the snapshot tests drive them."""
 
     @pytest.mark.parametrize("route", ["legacy", "admin"])

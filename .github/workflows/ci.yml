@@ -572,7 +572,7 @@ jobs:
       E2E_ADMIN_LOGIN_ID: e2e-admin
       # #2918: the workspace management spec signs in as a second, separate
       # user whose allowance dropped to one of its three Free workspaces.
-      # Slot suspension is enforced in this lane only (enforce needs the
+      # Slot suspension is enforced in this job only (enforce needs the
       # workspace cap enforced; the admin owns one Pro workspace, cap 3, so the
       # other specs see no change).
       E2E_SLOT_OWNER_LOGIN_ID: e2e-slot-owner

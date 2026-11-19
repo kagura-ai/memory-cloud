@@ -2005,7 +2005,7 @@ class TestTheWorkspaceSlotGate:
 
 
 class TestTheWorkspaceSlotRaiseSites:
-    """Lane B of #2918: every SLOT-001 is raised by the gate module alone.
+    """#2918: every SLOT-001 is raised by the gate module alone.
 
     Surfaces call ``ensure_slot_active`` (or a primitive that does), so the
     three audiences (owner / member / outsider) are worded in one place and the

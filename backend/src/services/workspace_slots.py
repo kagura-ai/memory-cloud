@@ -123,7 +123,7 @@ __all__ = [
     "suspension_in_force",
     "workspace_slot_mode",
     "workspace_slots_enforced",
-    # Step 2 (lane A's triggers, sweep, CLI and erasure).
+    # Triggers, sweep, CLI and erasure.
     "PlanChangeSlots",
     "SWEEP_BATCH",
     "SweepOutcome",
@@ -512,7 +512,7 @@ class SlotWorkspace:
 
 @dataclass(frozen=True, slots=True)
 class SlotOverview:
-    """Everything ``GET /api/v1/me/workspace-slots`` returns (design 12.1).
+    """Everything ``GET /api/v1/me/workspace-slots`` returns.
 
     Attributes:
         allowance: The cap, its parts and the next tier.

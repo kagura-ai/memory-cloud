@@ -5,7 +5,7 @@ this module drives the same states through ``/api/v1/me/workspace-slots``
 with one real session per request (committed or rolled back like
 ``db.base.get_db``) and an authentication dependency that reads the
 ``users`` row on that session first, as ``require_session_auth`` does. It
-checks the JSON of design 12.1 / 12.7, the statuses, the concurrency of two
+checks the JSON of every route, the statuses, the concurrency of two
 saves, and the ``/auth/me`` and ``GET /workspaces`` flags.
 
 Run on a private database only (``REQUIRE_TEST_DATABASE=1 TEST_DATABASE_URL=...``).
@@ -217,7 +217,7 @@ class TestIssueExampleThroughTheApi:
     async def test_resume_with_the_active_ids_in_any_order_is_a_swap(
         self, slot_world: SlotWorld
     ) -> None:
-        """The page sends ``[id, ...currently active ids]`` (12.7)."""
+        """A resume sends ``[id, ...currently active ids]``, in any order."""
         owner, personal, research, side = await _issue_owner(slot_world)
         with slot_mode("enforce"):
             await _term_end(slot_world, owner, research)

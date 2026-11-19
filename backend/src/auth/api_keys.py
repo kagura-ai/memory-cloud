@@ -451,10 +451,10 @@ class APIKeyManager:
                     connector_id=str(connector_id),
                 )
                 return None
-            # #2918: nor while the workspace is slot-suspended. A connector key
-            # carries the user id of whoever set the connector up, so the
-            # owner's opt-outs (export, …) would otherwise serve it. No
-            # statement unless the mode is enforce.
+            # #2918: nor while the workspace is slot-suspended: a connector key
+            # reaches no route of a suspended workspace, the owner's
+            # management routes included. No statement unless the mode is
+            # enforce.
             from services.workspace_slot_gate import slot_suspended
 
             if await slot_suspended(self.db, key_record.workspace_id):
