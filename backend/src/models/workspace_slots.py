@@ -2,8 +2,9 @@
 
 When an owner's allowance falls below the number of workspaces they own, the
 excess owned workspaces are suspended, with their data kept, and resumed when
-slots return. ``services.workspace_slots.reconcile_workspace_slots`` is the only
-writer of both tables.
+slots return. ``services.workspace_slots`` writes both tables: the reconcile
+(the only writer of suspension rows outside the end-to-end seed and account
+deletion), the owner's saved selection, and the erasure of an account.
 
 - ``workspace_slot_states``: one row per owner, created lazily: the owner's
   ordered selection of workspaces to keep active, when it was saved, since when

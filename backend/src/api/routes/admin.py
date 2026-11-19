@@ -44,6 +44,7 @@ from models.schemas import (
 )
 from services.email_service import get_email_service
 from services.system_admin_service import SystemAdminService
+from services.workspace_locks import owner_lock_key
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
@@ -960,7 +961,7 @@ async def update_workspace_slot_bonus(
     try:
         await db.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
-                key=f"workspace_create:{user_id}"
+                key=owner_lock_key(user_id)
             )
         )
     except DBAPIError as exc:

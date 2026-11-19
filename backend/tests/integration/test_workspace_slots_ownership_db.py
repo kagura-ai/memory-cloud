@@ -450,15 +450,53 @@ class TestNoRowsOutliveAnErasedAccount:
         erasure = await self._erasing(slot_world, user)
         try:
             with slot_mode("enforce"):
-                sweep = asyncio.create_task(_sweep_one(slot_world, user))
-                await asyncio.sleep(0.5)
-                assert not sweep.done()  # waiting on the erasure's row locks
+                # The erasure holds the rows: the sweep skips the owner (busy)
+                # without waiting for it and writes nothing.
+                async with slot_world.maker() as s:
+                    during = await slots.sweep_workspace_slots(s, after=user[:-1], until=user)
+                assert (during.owners, during.busy, during.failed) == (1, 1, 0)
                 await erasure.commit()
-                await asyncio.wait_for(sweep, 10)
+                async with slot_world.maker() as s:
+                    later = await slots.sweep_workspace_slots(s, after=user[:-1], until=user)
+                assert later.owners == 0  # nothing left to visit
         finally:
             await erasure.close()
         assert await slot_world.state(user) is None
         assert await slot_world.rows(user) == {}
+
+    async def test_a_post_commit_reconcile_racing_the_erasure_is_deferred(
+        self, slot_world: SlotWorld
+    ) -> None:
+        user = await slot_world.user("racing-post", bonus=1)
+        await slot_world.workspace(user, current=True)
+        waiting = await slot_world.workspace(user)
+        await slot_world.suspend_row(waiting, user)
+        erasure = await self._erasing(slot_world, user)
+        try:
+            with slot_mode("enforce"), structlog.testing.capture_logs() as logs:
+                async with slot_world.maker() as s:
+                    await slots.reconcile_after_commit(s, [user], cause="workspace_delete")
+        finally:
+            await erasure.rollback()
+            await erasure.close()
+        deferred = [e for e in logs if e["event"] == "workspace_slots_deferred"]
+        assert [e["reason"] for e in deferred] == ["lock_busy"]
+        assert await slot_world.rows(user) == {waiting: user}
+
+    async def test_shadow_tries_the_owner_lock_once_after_a_commit(
+        self, slot_world: SlotWorld, async_engine
+    ) -> None:
+        user = await slot_world.user("shadow-post")
+        await slot_world.workspace(user, current=True)
+        release = await slot_world.hold_owner_lock(user)
+        try:
+            with slot_mode("shadow"), StatementRecorder(async_engine) as recorder:
+                async with slot_world.maker() as s:
+                    await slots.reconcile_after_commit(s, [user], cause="workspace_delete")
+        finally:
+            await release()
+        assert len(recorder.advisory_locks()) == 1
+        assert "pg_try_advisory_xact_lock" in recorder.advisory_locks()[0]
 
     async def test_a_selection_save_during_the_erasure_finds_the_account_gone(
         self, slot_world: SlotWorld
@@ -488,13 +526,6 @@ class TestNoRowsOutliveAnErasedAccount:
         finally:
             await erasure.close()
         assert await slot_world.state(user) is None
-
-
-async def _sweep_one(world: SlotWorld, owner: str) -> None:
-    async with world.maker() as s:
-        assert await slots.owner_slot_lock(s, owner, wait=True)
-        await slots.reconcile_workspace_slots(s, owner, cause="sweep", allow_suspend=False)
-        await s.commit()
 
 
 async def _save_selection(world: SlotWorld, owner: str):

@@ -20,7 +20,7 @@ from contextlib import aclosing
 from typing import Any
 from uuid import UUID
 
-from mcp_server.tools._capacity_gate import _names_a_target
+from mcp_server.tools._capacity_gate import names_a_target
 from mcp_server.tools._errors import describe_tool_exception
 from mcp_server.tools._helpers import ToolErrorContent
 from services.workspace_slots import workspace_slots_enforced
@@ -49,7 +49,7 @@ async def slot_suspension_refusal(
     """
     if tool_name in SLOT_GATE_EXEMPT_TOOLS or workspace_id is None:
         return None
-    if not workspace_slots_enforced() or _names_a_target(args):
+    if not workspace_slots_enforced() or names_a_target(args):
         return None
 
     from db.base import get_db

@@ -311,7 +311,9 @@ def _argument_targets(args: dict[str, Any]) -> tuple[set[UUID], UUID | None, UUI
     return _target_context_ids(args), _uuid(args.get("workspace_id")), _uuid(args.get("file_id"))
 
 
-def _names_a_target(args: dict[str, Any]) -> bool:
+def names_a_target(args: dict[str, Any]) -> bool:
+    """Whether a tool call names its target (a context, a workspace, a file or
+    a report): the target's own resolver then gates it, not the dispatcher."""
     context_ids, workspace_arg, file_id = _argument_targets(args)
     if any(_uuid(args.get(key)) is not None for key in _REPORT_ARGS):
         return True
@@ -348,7 +350,7 @@ async def capacity_lock_refusal(
     """
     if tool_name not in CAPACITY_LOCK_BLOCKED_TOOLS:
         return None
-    if tool_name not in CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS and _names_a_target(args):
+    if tool_name not in CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS and names_a_target(args):
         return None
     if workspace_id is None or _known_not_candidate(workspace_id):
         return None

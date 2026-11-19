@@ -61,7 +61,12 @@ from models.workspace_slots import (
     WorkspaceSlotState,
     WorkspaceSlotSuspension,
 )
-from services.workspace_locks import NOWAIT_LOCK_BACKOFF_SECONDS, NOWAIT_LOCK_TRIES
+from services.workspace_locks import (
+    NOWAIT_LOCK_BACKOFF_SECONDS,
+    NOWAIT_LOCK_TRIES,
+    OWNER_LOCK_PREFIX,
+    owner_lock_key,
+)
 from utils.datetime import utcnow
 from utils.db_helpers import is_lock_not_available
 from utils.exceptions import (
@@ -152,7 +157,7 @@ SlotStatus = Literal["active", "slot_suspended"]
 # The per-owner advisory lock is the workspace-creation gate's lock
 # (``QuotaService._acquire_workspace_create_lock``) and the slot-bonus PATCH's:
 # every path that changes what the owner's allowance or owned set is takes it.
-OWNER_SLOT_LOCK_PREFIX: Final = "workspace_create:"
+OWNER_SLOT_LOCK_PREFIX: Final = OWNER_LOCK_PREFIX
 
 
 # ---------------------------------------------------------------------------
@@ -935,13 +940,15 @@ _LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"
 _TRY_LOCK_SQL = "SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"
 # How long a waiting acquire may wait: the workspace-creation gate's value.
 _WAIT_LOCK_TIMEOUT = "5s"
-# How long a shadow reconcile may wait on a slot-table row lock.
-_SHADOW_LOCK_TIMEOUT = "100ms"
+# How long a shadow reconcile, the sweep or a post-commit reconcile may wait on
+# a slot-table row lock (an uncommitted erasure holds them, for example); a
+# timeout counts as busy and the next sweep finishes the work.
+_SLOT_ROW_LOCK_TIMEOUT = "100ms"
 
 
 def owner_slot_lock_key(owner_user_id: str) -> str:
-    """The advisory-lock key of ``owner_user_id`` (``workspace_create:<owner>``)."""
-    return f"{OWNER_SLOT_LOCK_PREFIX}{owner_user_id}"
+    """The advisory-lock key of ``owner_user_id`` (``workspace_locks.owner_lock_key``)."""
+    return owner_lock_key(owner_user_id)
 
 
 async def owner_slot_lock(
@@ -998,6 +1005,18 @@ async def owner_slot_lock(
 # ---------------------------------------------------------------------------
 # The transition
 # ---------------------------------------------------------------------------
+
+
+async def _bound_row_lock_waits(session: AsyncSession) -> None:
+    """Cap this transaction's waits on slot-table row locks (resume-only paths).
+
+    A wait longer than ``_SLOT_ROW_LOCK_TIMEOUT`` raises ``lock_not_available``,
+    which the caller counts as busy. Transaction-scoped: ends with the commit.
+    """
+    await session.execute(
+        text("SELECT set_config('lock_timeout', :value, true)"),
+        {"value": _SLOT_ROW_LOCK_TIMEOUT},
+    )
 
 
 def _selection_is_valid(state: _OwnerState) -> bool:
@@ -1241,7 +1260,7 @@ async def reconcile_workspace_slots(
                 # is restored before the savepoint is released.
                 await db.execute(
                     text("SELECT set_config('lock_timeout', :value, true)"),
-                    {"value": _SHADOW_LOCK_TIMEOUT},
+                    {"value": _SLOT_ROW_LOCK_TIMEOUT},
                 )
                 outcome = await _reconcile(
                     db,
@@ -1463,19 +1482,22 @@ async def reconcile_after_commit(
     """Resume and prune for each owner after the caller committed. Never raises.
 
     Each owner in a fresh transaction of its own (``isolated_session``) under
-    the owner lock, tried with the short ``retry_nowait`` budget (this runs
-    on the response path); no suspension. A busy lock or any error (a pool
-    timeout included) is logged as ``workspace_slots_deferred`` and left to
-    the sweep: the caller's committed change never turns into an error. No
-    statement in mode ``off``.
+    the owner lock, tried with the short ``retry_nowait`` budget in
+    ``enforce`` and once in ``shadow`` (this runs on the response path); no
+    suspension. Waits on slot-table row locks are capped. A busy owner lock or
+    row lock is logged as ``workspace_slots_deferred`` (``lock_busy``), any
+    other error (a pool timeout included) the same way (``error``); the sweep
+    finishes the work and the caller's committed change never turns into an
+    error. No statement in mode ``off``.
     """
     mode = workspace_slot_mode()
     if mode == "off":
         return
+    tries = 1 if mode == "shadow" else NOWAIT_LOCK_TRIES
     for owner in dict.fromkeys(o for o in owner_user_ids if o):
         try:
             async with isolated_session(db) as session:
-                if not await owner_slot_lock(session, owner, wait=False):
+                if not await owner_slot_lock(session, owner, wait=False, tries=tries):
                     logger.warning(
                         "workspace_slots_deferred",
                         owner_user_id=owner,
@@ -1483,10 +1505,24 @@ async def reconcile_after_commit(
                         reason="lock_busy",
                     )
                     continue
+                await _bound_row_lock_waits(session)
                 await reconcile_workspace_slots(
                     session, owner, cause=cause, allow_suspend=False, mode=mode
                 )
                 await session.commit()
+        except DBAPIError as exc:
+            if not is_lock_not_available(exc):
+                logger.warning(
+                    "workspace_slots_deferred",
+                    owner_user_id=owner,
+                    cause=cause,
+                    reason="error",
+                    error_class=type(exc).__name__,
+                )
+                continue
+            logger.warning(
+                "workspace_slots_deferred", owner_user_id=owner, cause=cause, reason="lock_busy"
+            )
         except Exception as exc:  # noqa: BLE001 — never fail a committed change
             logger.warning(
                 "workspace_slots_deferred",
@@ -1644,10 +1680,11 @@ async def sweep_workspace_slots(
 
     Visits at most ``limit`` owners with ``after < owner_user_id`` (and
     ``<= until`` when given) in id order, each in a transaction of its own
-    after ONE try of the owner lock (busy = skipped this run). ``next_after``
-    is where the next batch continues (``""`` after the last owner). Finishes resumes a deferred or lost
-    post-commit reconcile left, and prunes rows of workspaces deleted or
-    moved. No statement in mode ``off``.
+    after ONE try of the owner lock, with waits on slot-table row locks
+    capped (a busy owner lock or row lock = skipped this run). ``next_after``
+    is where the next batch continues (``""`` after the last owner). Finishes
+    the resumes a deferred or lost post-commit reconcile left, and prunes rows
+    of workspaces deleted or moved. No statement in mode ``off``.
     """
     mode = workspace_slot_mode()
     if mode == "off":
@@ -1675,12 +1712,23 @@ async def sweep_workspace_slots(
                 if not await owner_slot_lock(session, owner, wait=False, tries=1):
                     busy += 1
                     continue
+                await _bound_row_lock_waits(session)
                 outcome = await reconcile_workspace_slots(
                     session, owner, cause="sweep", allow_suspend=False, mode=mode
                 )
                 await session.commit()
                 resumed += len(outcome.resumed)
                 pruned += outcome.pruned
+        except DBAPIError as exc:
+            if not is_lock_not_available(exc):
+                failed += 1
+                logger.warning(
+                    "workspace_slots_sweep_owner_failed",
+                    owner_user_id=owner,
+                    error_class=type(exc).__name__,
+                )
+                continue
+            busy += 1  # a row lock held by another transaction: the next run
         except Exception as exc:  # noqa: BLE001 — one owner never stops the sweep
             failed += 1
             logger.warning(
