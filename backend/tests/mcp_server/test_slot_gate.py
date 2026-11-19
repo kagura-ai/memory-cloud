@@ -407,6 +407,9 @@ TARGETED = sorted(
         "init_file_upload",
         "complete_file_upload",
         "get_agent_bootstrap",
+        # A named context goes through the read resolver (the caller's own
+        # key metadata otherwise).
+        "describe_binding",
     }
 )
 
