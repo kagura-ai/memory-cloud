@@ -32,6 +32,14 @@ logger = get_logger(__name__)
 # session workspace.
 SLOT_GATE_EXEMPT_TOOLS: frozenset[str] = frozenset({"guide", "describe_tools"})
 
+# Target-less tools whose handlers check membership of the session workspace
+# and then the slot gate themselves (``_check_workspace_membership``): the
+# dispatcher leaves them to it, so a caller who is not a member gets the
+# membership answer whether the workspace is suspended or not.
+HANDLER_GATED_TOOLS: frozenset[str] = frozenset(
+    {"get_usage", "get_resource_impact", "get_resource_schema"}
+)
+
 
 async def slot_suspension_refusal(
     tool_name: str,
@@ -41,13 +49,17 @@ async def slot_suspension_refusal(
 ) -> ToolErrorContent | None:
     """The ``workspace_suspended`` envelope for a target-less call on a suspended session workspace.
 
-    ``None`` (go on) for an exempt tool, a call that names its target (the
-    resolvers check that target), a call with no session workspace, and
+    ``None`` (go on) for an exempt tool, a tool whose handler gates after its
+    own membership check (``HANDLER_GATED_TOOLS``), a call that names its
+    target (the resolvers check that target), a call with no session
+    workspace, and
     whenever the mode is not ``enforce`` — then without opening a session.
     Fails closed: an error while checking refuses the call
     (``service_unavailable`` / ``internal_error`` with a correlation id).
     """
-    if tool_name in SLOT_GATE_EXEMPT_TOOLS or workspace_id is None:
+    if tool_name in SLOT_GATE_EXEMPT_TOOLS or tool_name in HANDLER_GATED_TOOLS:
+        return None
+    if workspace_id is None:
         return None
     if not workspace_slots_enforced() or names_a_target(args):
         return None

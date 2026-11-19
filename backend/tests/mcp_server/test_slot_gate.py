@@ -333,11 +333,19 @@ def _error(body: dict) -> str | None:
     return body.get("error")
 
 
+# Required arguments of target-less tools that are checked before the session
+# workspace (the resource tools name a resource, not a target workspace).
+_TARGET_LESS_ARGS: dict[str, dict[str, Any]] = {
+    "get_resource_impact": {"resource_id": "slot-probe"},
+    "get_resource_schema": {"resource_id": "slot-probe"},
+}
+
+
 @pytest.mark.parametrize("tool", GATED_TOOLS)
 async def test_a_target_less_call_on_a_suspended_session_is_refused(live, tool) -> None:
     w: World = live
     with _mode("enforce"):
-        body = await _tool(tool, {}, w.owner, w.ws["s"])
+        body = await _tool(tool, _TARGET_LESS_ARGS.get(tool, {}), w.owner, w.ws["s"])
     assert _error(body) == "workspace_suspended", body
     # The owner is told where to resume it.
     assert body.get("workspace_id") == str(w.ws["s"]), body
@@ -487,3 +495,58 @@ async def test_an_agent_binding_hiding_a_suspended_context_gets_not_found(live) 
     finally:
         set_agent_scope(None)
     assert _error(body) == "context_not_found", body
+
+
+# ---------------------------------------------------------------------------
+# Tools that check membership of the session workspace themselves
+# ---------------------------------------------------------------------------
+
+
+def test_the_handler_gated_tools_are_pinned() -> None:
+    from mcp_server.tools._slot_gate import HANDLER_GATED_TOOLS
+
+    assert HANDLER_GATED_TOOLS == {"get_usage", "get_resource_impact", "get_resource_schema"}
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("get_usage", {}),
+        ("get_resource_impact", {"resource_id": "slot-probe"}),
+        ("get_resource_schema", {"resource_id": "slot-probe"}),
+    ],
+)
+async def test_a_non_member_session_gets_the_membership_answer_alike(live, tool, args) -> None:
+    """A caller whose session workspace is one they do not belong to gets the
+    same answer for a suspended and an active workspace: membership first."""
+    w: World = live
+    stranger = f"slot-stranger-{uuid4().hex[:8]}"
+    w.session.add(
+        User(email=f"{stranger}@example.test", user_id=stranger, name=stranger, role="user")
+    )
+    await w.session.commit()
+    try:
+        with _mode("enforce"):
+            on_suspended = await _tool(tool, args, stranger, w.ws["s"])
+            on_active = await _tool(tool, args, stranger, w.ws["k"])
+    finally:
+        await w.session.execute(delete(User).where(User.user_id == stranger))
+        await w.session.commit()
+    assert _error(on_suspended) != "workspace_suspended", on_suspended
+    assert on_suspended == on_active
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("get_usage", {}),
+        ("get_resource_impact", {"resource_id": "slot-probe"}),
+        ("get_resource_schema", {"resource_id": "slot-probe"}),
+    ],
+)
+async def test_the_owner_still_gets_the_refusal_from_the_handler(live, tool, args) -> None:
+    w: World = live
+    with _mode("enforce"):
+        body = await _tool(tool, args, w.owner, w.ws["s"])
+    assert _error(body) == "workspace_suspended", body
+    assert body.get("workspace_id") == str(w.ws["s"]), body
