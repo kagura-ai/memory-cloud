@@ -940,6 +940,41 @@ async def _check_workspace_membership(
     return None
 
 
+async def _check_session_workspace_member(
+    db: "AsyncSession",
+    user_id: str,
+    workspace_id: UUID,
+    operation: str,
+) -> list[TextContent] | None:
+    """Membership of the session workspace for a tool that reads it (#2928).
+
+    A tool that reads the session workspace with no context to resolve proves
+    the caller's membership here first, as the REST readouts of the current
+    workspace do. Membership only: a member without a seat on the plan keeps
+    the answer they had. A non-member, or a deleted workspace, gets the answer
+    of the membership gates above.
+
+    Args:
+        db: Database session.
+        user_id: User ID.
+        workspace_id: The session workspace.
+        operation: Operation description for the error message.
+
+    Returns:
+        Error response if the caller is not a member, otherwise ``None``.
+    """
+    from services.permission_service import PermissionService
+    from utils.exceptions import AuthorizationError
+
+    try:
+        await PermissionService(db).check_workspace_access(
+            user_id, workspace_id, required_role="viewer", require_seat=False
+        )
+    except AuthorizationError:
+        return _workspace_not_accessible(operation, "viewer")
+    return None
+
+
 def _outside_key_workspace(workspace_id: UUID) -> bool:
     """#963: the request uses a workspace-scoped key for another workspace.
 

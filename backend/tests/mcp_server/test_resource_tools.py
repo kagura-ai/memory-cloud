@@ -34,6 +34,45 @@ def _ingest_not_suspended():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _session_workspace_member():
+    """The caller is a member of the session workspace (#2928); the tests below
+    drive the handlers by query ORDER. The membership check itself is covered on
+    real rows in ``tests/integration/test_current_workspace_routes_membership_db.py``."""
+    with patch(
+        "mcp_server.tools.resource._check_session_workspace_member",
+        new=AsyncMock(return_value=None),
+    ) as member:
+        yield member
+
+
+class TestResourceReadsRequireMembership:
+    """#2928: the session workspace's membership is checked before any read."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("handler", [handle_get_resource_impact, handle_get_resource_schema])
+    async def test_a_non_member_is_refused_before_any_read(
+        self, handler, _session_workspace_member
+    ):
+        from mcp_server.tools._helpers import _workspace_not_accessible
+
+        _session_workspace_member.return_value = _workspace_not_accessible("read", "viewer")
+        workspace_id = uuid4()
+        mock_db = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handler({"resource_id": "res1"}, "user", workspace_id)
+
+        data = _json_of(result)
+        assert data["error"] == "permission_denied"
+        assert data["your_role"] == "not_a_member"
+        assert _session_workspace_member.await_args.args[1:3] == ("user", workspace_id)
+        mock_db.execute.assert_not_awaited()
+
+
 # ============================================================================
 # workspace_required
 # ============================================================================

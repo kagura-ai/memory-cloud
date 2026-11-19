@@ -10,10 +10,10 @@ from mcp.types import TextContent
 
 from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import (
+    _check_session_workspace_member,
     _error_response,
     _log_tool_usage,
     _success_response,
-    _workspace_not_accessible,
 )
 
 
@@ -34,9 +34,7 @@ async def handle_get_usage(
     from services.capacity_lock import capacity_lock_state
     from services.effective_quota_service import EffectiveQuotaService
     from services.memory_counts import count_live_memories
-    from services.permission_service import PermissionService
     from services.quota_service import QuotaService
-    from utils.exceptions import AuthorizationError
 
     start_time = time.time()
 
@@ -45,14 +43,10 @@ async def handle_get_usage(
 
     async for db in get_db():
         try:
-            # #2928: under a workspace-scoped key the session workspace is the
-            # key's own; membership is checked before anything of it is read.
-            try:
-                await PermissionService(db).check_workspace_access(
-                    user_id, workspace_id, required_role="viewer", require_seat=False
-                )
-            except AuthorizationError:
-                return _workspace_not_accessible("get usage", "viewer")
+            # #2928: membership of the session workspace before anything of it is read.
+            denied = await _check_session_workspace_member(db, user_id, workspace_id, "get usage")
+            if denied:
+                return denied
 
             ws_result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
             workspace = ws_result.scalar_one_or_none()

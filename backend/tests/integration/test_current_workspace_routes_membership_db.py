@@ -7,9 +7,10 @@ real API keys (and a browser session), and through ``execute_tool_call`` for
 MCP:
 
 * ``GET /workspace/embedding-status``, ``GET /workspace/stats`` and
-  ``GET /system/embedding/models``, and the MCP ``get_usage`` tool, answer a
-  key scoped to workspace X whose user is not a member of X (and a session
-  whose stored current workspace is X) with the uniform refusal;
+  ``GET /system/embedding/models``, and the MCP ``get_usage``,
+  ``get_resource_impact`` and ``get_resource_schema`` tools, answer a key
+  scoped to workspace X whose user is not a member of X (and a session whose
+  stored current workspace is X) with the uniform refusal;
 * a member's key and a member's session keep the response they get today.
 """
 
@@ -262,11 +263,12 @@ async def test_embedding_models_for_a_member_is_unchanged(world):
 
 
 # ---------------------------------------------------------------------------
-# MCP get_usage (the session workspace, no named target)
+# MCP tools on the session workspace: get_usage, get_resource_impact,
+# get_resource_schema
 # ---------------------------------------------------------------------------
 
 
-async def _get_usage(world, user_id: str) -> dict[str, Any]:
+async def _mcp(world, tool: str, args: dict[str, Any], user_id: str) -> dict[str, Any]:
     from mcp_server.tools import execute_tool_call
     from mcp_server.tools._helpers import _mcp_key_workspace_scope
 
@@ -280,11 +282,78 @@ async def _get_usage(world, user_id: str) -> dict[str, Any]:
         with (
             patch("db.base.get_db", new=_db),
             patch("mcp_server.tools.usage._log_tool_usage", new=AsyncMock()),
+            patch("mcp_server.tools.resource._log_tool_usage", new=AsyncMock()),
         ):
-            result = await execute_tool_call("get_usage", {}, user_id, world.x)
+            result = await execute_tool_call(tool, args, user_id, world.x)
     finally:
         _mcp_key_workspace_scope.reset(token)
     return json.loads(result[0].text)
+
+
+async def _get_usage(world, user_id: str) -> dict[str, Any]:
+    return await _mcp(world, "get_usage", {}, user_id)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def resource(world):
+    """A resource of X (its context, its ``resources`` row and a schema)."""
+    from models.resource import Resource, ResourceSchema
+    from services.resource_lookup import upsert_resource
+
+    slug = f"res-{uuid4().hex[:10]}"
+    async with world.factory() as db:
+        db.add(
+            Context(
+                id=uuid4(),
+                workspace_id=world.x,
+                name=slug,
+                created_by=world.owner,
+                is_private=False,
+                is_public=True,
+                resource_id=slug,
+            )
+        )
+        await db.flush()
+        pk = await upsert_resource(
+            db, workspace_id=world.x, resource_id=slug, name=slug, created_by=world.owner
+        )
+        db.add(
+            ResourceSchema(
+                resource_pk=pk,
+                resource_id=slug,
+                schema_version=1,
+                field_definitions=[{"name": "title", "type": "string"}],
+            )
+        )
+        await db.commit()
+    try:
+        yield slug
+    finally:
+        async with world.factory() as db:
+            await db.execute(delete(ResourceSchema).where(ResourceSchema.resource_pk == pk))
+            await db.execute(delete(Resource).where(Resource.id == pk))
+            await db.commit()
+
+
+@pytest.mark.parametrize("tool", ["get_resource_impact", "get_resource_schema"])
+async def test_mcp_resource_reads_require_membership_of_the_session_workspace(
+    world, resource, tool
+):
+    body = await _mcp(world, tool, {"resource_id": resource}, world.outsider)
+
+    assert body.get("error") == "permission_denied", body
+    assert body.get("your_role") == "not_a_member"
+    assert "field_definitions" not in body and "memory_count" not in body
+
+
+async def test_mcp_resource_reads_for_a_member_are_unchanged(world, resource):
+    impact = await _mcp(world, "get_resource_impact", {"resource_id": resource}, world.member)
+    schema = await _mcp(world, "get_resource_schema", {"resource_id": resource}, world.member)
+
+    assert impact.get("error") is None, impact
+    assert (impact["memory_count"], impact["current_schema_version"]) == (0, 1)
+    assert schema.get("error") is None, schema
+    assert schema["field_definitions"] == [{"name": "title", "type": "string"}]
 
 
 async def test_mcp_get_usage_requires_membership_of_the_session_workspace(world):
