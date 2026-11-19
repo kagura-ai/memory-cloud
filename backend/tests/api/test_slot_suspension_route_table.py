@@ -298,6 +298,11 @@ SLOT_SERVICE_GATED: dict[tuple[str, str], str | tuple[str, ...]] = {
         "services.sync_installations:activate_installation"
     ),
     ("GET", _WS_SYNC): "services.sync_installations:inspect_installation",
+    # The owner's publication-domain observation: sync_authority (the owner
+    # check, then the gate), like its neighbours.
+    ("GET", f"{_WS_SYNC}/publication-domains"): (
+        "api.routes.sync_publication_domains:observe_publication_domain"
+    ),
     ("DELETE", _WS_SYNC): "services.sync_installations:unlink_installation",
     ("GET", f"{_WS_SYNC}/management"): "services.sync_management:control_mode",
     ("POST", f"{_WS_SYNC}/management/stop"): "services.sync_management:control_mode",
