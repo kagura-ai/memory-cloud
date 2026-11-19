@@ -431,6 +431,7 @@ another workspace.
 | `409` | `public_mcp_domain_held` | another domain holds the name (only after the caller's own proof was found) |
 | `409` | `public_mcp_domain_in_cooldown` (`details.available_after`, ISO UTC with `Z`) | another workspace released the name recently (only after the caller's own proof was found) |
 | `409` | `public_mcp_domain_changed` | the domain changed during the check; retry |
+| `409` | `public_mcp_domain_command_stale` | installation-bound operations only (experimental): the binding or the named domain is no longer as the command sent it (see "Installation-bound owner operations") |
 | `429` | `RATE-001` (`Retry-After` header, `details.retry_after`, `details.limit`) | over 20 verify calls per hour or 6 activation attempts per day |
 | `503` | `public_mcp_domain_verification_unavailable` | the lookup was indeterminate, or a counter could not be read |
 
@@ -444,6 +445,12 @@ request-validation `422`, without `Cache-Control: no-store`.
 `GET /api/v1/system/info` reports `features.public_mcp_domains`: `true` while
 `MCP_PUBLIC_DOMAINS_ENABLED` is on. It says only that the deployment offers
 the feature, never which hosts it uses.
+
+For an installation's browser client, `GET /.well-known/kmc-sync-configuration`
+lists `public.domains.observation.v1` (reading the installation's domain) and,
+while `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` is also on,
+`public.domains.operations.v1` (claim, verify and remove; experimental). See
+the two "Installation-bound" sections below.
 
 ## Certificate permission call
 
@@ -552,6 +559,7 @@ python -m src.cli.public_mcp_domains release --domain-id <id> --skip-cooldown --
 | `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` | *(empty)* | Names never claimable, nor any name under them, comma-separated (no leading dot). Refused on the request path from the first request after a restart, whatever the domain's row says; the next check suspends the domain (`reserved`). |
 | `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | Hours a released name stays closed to other workspaces (0–2160). |
 | `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | Domains (`pending`, `active`, `suspended`) per workspace (1–50). |
+| `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` | `false` | Experimental. The owner's claim, verify and remove through an installation's browser client ("Installation-bound owner operations"), advertised as `public.domains.operations.v1`. Takes effect only while `public.domains.observation.v1` is advertised (`OIDC_ENABLED`, `MCP_PUBLIC_ENDPOINTS_ENABLED`, `SYNC_INTEGRATIONS_ENABLED`, `MCP_PUBLIC_USAGE_BUDGET_ENABLED` and this file's switch); off: the three routes answer `404` before authentication and run no statement. No cross-check at start-up, so turning `MCP_PUBLIC_DOMAINS_ENABLED` off alone still closes everything. |
 
 A malformed host name in the routing target, an application host or a
 reserved suffix stops the process at start-up; the error names the variable,
@@ -720,7 +728,9 @@ id and e-mail; the job writes `system:public-mcp-domains`, the command line
 `cli:public-mcp-domains` (both columns). `released` carries the reason
 `unpublished`, `expired` (a claim older than 7 days), `orphaned` (workspace or
 publication gone), `operator` (the CLI), or `null` (a 30-day suspension
-ended); `suspended` carries the suspension reason.
+ended); `suspended` carries the suspension reason. The audit row of an
+installation-bound command also carries `client_id` (the browser client) and
+`installation_id` in its metadata.
 
 | Event | Level | Fields | When |
 |---|---|---|---|
@@ -751,3 +761,168 @@ by the lease deadline. A released row exposes only release and cooldown
 metadata during its remaining cooldown. A missing binding has no domain
 facts. DNS proof, routing, and serving are independent. TLS is
 `{"status":"unreported"}` until a trusted edge supplies certificate evidence.
+
+### Installation-bound owner operations
+
+Experimental (#2921): the three routes, their bodies and answers, the error
+code `public_mcp_domain_command_stale`, the capability and the switch may
+change in a minor release.
+
+The workspace's canonical owner can also claim, verify and remove the custom
+domain of an installation's public endpoint through the installation's
+registered browser client. Discovery advertises `public.domains.operations.v1`
+while `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` is on and
+`public.domains.observation.v1` is advertised; otherwise the three routes
+answer `404` before authentication and run no statement. A client decides
+only from the capability and treats any `404` on these routes as "not
+available": a server without these routes also answers `404`, with the global
+error envelope instead of `{"error": …}`.
+
+| Route | Body | Success |
+|---|---|---|
+| `POST /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-domains/claim` | `{"expected": …, "hostname": "<name>"}` | `200`, `domain` = the new `pending` claim |
+| `POST …/publication-domains/verify` | `{"expected": …, "domain": {"domain_id": …, "state": …}}` | `200`, `domain` = the state the check left; `null` when the check released the domain |
+| `POST …/publication-domains/remove` | as verify | `200`, `domain: null` |
+
+**Who.** The current canonical owner (the workspace's `owner_user_id` and an
+`OWNER` member) with an access token of the installation's registered browser
+client whose token, grant and client carry `integrations:manage` (the
+Authorization Code + PKCE flow with `scope=openid integrations:manage`). A
+`workspaces:read` token reads the observation and gets `403`
+`insufficient_scope` here. KMC does not bind a token to one operation: a token
+with `integrations:manage` for that client also authorizes unlinking the
+installation and the mode controls, so asking for one authorization per
+operation is the client's obligation.
+
+**Bodies.** `expected` is the binding the client last read in the
+observation, all seven fields: `application_id`, `resource_id`,
+`resource_pk`, `context_id`, `endpoint_id`, `public_id`, `generation`. Verify
+and remove also name the domain and the state it was read in (`pending`,
+`active` or `suspended`). An unknown or repeated key, a missing field, a
+`domain` in a claim, an unknown query parameter or a body that is not JSON is
+`400` `invalid_request`; a body over 8,192 bytes is `413` `request_too_large`.
+
+```json
+POST /api/v1/workspaces/3f0c2a7e-5a52-4a0e-9a3e-2f3d6c1b7a10/sync-installations/9a1e4c22-6d1b-4f0a-8a0e-0d2b6f1c9e77/publication-domains/claim
+Authorization: Bearer kmc_oidc_at_...
+Content-Type: application/json
+
+{
+  "expected": {
+    "application_id": "0b7c9a52-1f6e-4a3b-9c1d-7e2f4a6b8c90",
+    "resource_id": "sync-5d0c7d0e1f3b4a6c8e9f0a1b2c3d4e5f",
+    "resource_pk": "5d0c7d0e-1f3b-4a6c-8e9f-0a1b2c3d4e5f",
+    "context_id": "c1a2b3c4-d5e6-4f70-8a9b-0c1d2e3f4a5b",
+    "endpoint_id": "e0f1a2b3-c4d5-4e6f-8a7b-9c0d1e2f3a4b",
+    "public_id": "pmcp_AbCdEfGhIjKlMnOpQrStUv",
+    "generation": 1
+  },
+  "hostname": "mcp.example.org"
+}
+
+200
+{"schema_version": "public-domain-command-v1", "action": "claim",
+ "domain": {"domain_id": "8d0f6c1e-2c4b-4c47-9f39-3a3a1c1f2b10", "state": "pending"}}
+```
+
+```json
+POST .../publication-domains/verify   (remove takes the same body)
+
+{"expected": { ...the seven fields... },
+ "domain": {"domain_id": "8d0f6c1e-2c4b-4c47-9f39-3a3a1c1f2b10", "state": "pending"}}
+
+verify 200  {"schema_version": "public-domain-command-v1", "action": "verify",
+             "domain": {"domain_id": "8d0f6c1e-2c4b-4c47-9f39-3a3a1c1f2b10", "state": "active"}}
+remove 200  {"schema_version": "public-domain-command-v1", "action": "remove", "domain": null}
+```
+
+The answer is a receipt of what the command left behind; its `domain` is what
+the client sends as `domain` in its next command. The TXT record, the
+routing, the lease and the last check are read from the observation. Every
+answer carries `Cache-Control: no-store`.
+
+**Send the binding and the domain you last read; after any `409`, read the
+observation again.** A command is applied only to the state it names: the
+installation's binding as sent and, for verify and remove, the named domain as
+an open domain of this publication in the named state; a claim needs a
+publication with no open domain. KMC checks the caller and the binding before
+anything else (a caller who is not admitted consumes no counter, starts no
+lookup and meets no paid check), and again as the first locking statement of
+every write transaction, with the workspace's ownership epoch of the first
+check. When the binding or the domain is no longer as sent, or the ownership
+changed and changed back during the command, the answer is `409`
+`public_mcp_domain_command_stale` and the domain is unchanged; a verify whose
+check releases a domain that has been suspended for 30 days answers
+`domain: null`, the same release the job makes. After any `409` the client
+reads the observation again and decides from what it shows.
+
+Unlink, reconnect, every stop of managed synchronization (by the owner, the
+billing service or the maintenance pass) and resume advance the installation's
+`generation`, so a command formed before any of them is stale. The
+installation's `state` is not a condition: an unlinked installation keeps its
+endpoint and its alias, and its current binding is accepted. An unpublished or
+republished endpoint is `404` here; this interface never adopts the domain of
+a new publication (the owner API manages it).
+
+Errors (envelope `{"error": "<code>"}`, without `message` or `details`):
+
+| Status | `error` | When | Routes |
+|---|---|---|---|
+| `400` | `invalid_request` | an unknown or repeated query parameter; not JSON; a malformed body, an unknown key, a missing field, a `domain` in a claim, `state: "released"` | all |
+| `413` | `request_too_large` | a body over 8,192 bytes | all |
+| `401` | `invalid_token` | a missing, malformed, expired or revoked token, or one that expires before the commit | all |
+| `403` | `insufficient_scope` | the token, its grant or its client lacks `integrations:manage` | all |
+| `403` | `SLOT-001` | the canonical owner of a slot-suspended workspace | all |
+| `404` | `not_found` | the switch or a prerequisite off; not the current canonical owner or not an `OWNER` member; the workspace missing or deleted; no such installation of this workspace for this client and service generation; the installation's target not live and exact | all |
+| `409` | `public_mcp_domain_command_stale` | the binding is not the installation's current one; the named domain is not an open domain of this publication, or not in the named state; the ownership changed and changed back during the command. Answered only before the command writes a domain row | all (the domain cases: verify, remove) |
+| `409` | `RES-002` | an authority row is held by another transaction (send the same command again); the client has no enabled service registration | all |
+| `409` | `public_mcp_domain_exists` | the publication already has an open domain | claim |
+| `409` | `public_mcp_domain_limit_reached` | the workspace's number of domains | claim |
+| `422` | `public_mcp_domain_hostname_not_allowed` | a malformed or reserved name | claim, verify (the name became reserved) |
+| `403` | `public_mcp_domain_not_entitled` | authority `entitlement` and no active right (a verify of an `active` domain writes the suspension first; of a domain suspended for 30 days, the release) | claim, verify |
+| `409` | `public_mcp_domain_changed` | the domain changed during the lookup; the same command can be sent again | verify |
+| `409` | `public_mcp_endpoint_not_published`, `public_mcp_domain_held`, `public_mcp_domain_in_cooldown` | as in the owner API, only after the caller's own proof was found | verify |
+| `429` | `RATE-001`, `Retry-After` header | over 20 verify calls per hour or 6 activation attempts per day of the workspace | verify |
+| `429` | `temporarily_unavailable`, `Retry-After` header | the OIDC burst limiter (bucket `sync-human`) | all |
+| `503` | `public_mcp_domain_verification_unavailable` | an indeterminate lookup (nothing written) or a counter that cannot be read | verify |
+| `503` | `temporarily_unavailable` | any other failure | all |
+
+Duplicates and retries (nothing is stored per command and there is no
+operation id; a different body is a different command, judged on its own
+state):
+
+| Case | Claim | Verify | Remove |
+|---|---|---|---|
+| The same command again after it was applied (also a retry after a lost answer) | `409` `public_mcp_domain_exists` (or `public_mcp_domain_limit_reached` when the first claim filled the limit); one domain, its TXT value unchanged | the first made the domain `active` or released it: `409` stale, before any counter and lookup; the first left it in the same state: a new check, counted | `409` stale (the domain is no longer open) |
+| Two identical commands at once | one `200`; the other `409` `public_mcp_domain_exists` or `RES-002` | one result is applied; the other `409` `public_mcp_domain_changed`, stale or `RES-002` | one `200`; the other `409` stale or `RES-002` |
+
+How a client reconciles after a lost answer or a `409`, from the observation:
+a claim was applied when the publication has an open domain with that host
+name (a `409` `public_mcp_domain_exists` or `public_mcp_domain_limit_reached`
+after a lost answer can be the client's own success); a remove was applied
+when the id is no longer an open domain; for a verify the client reads the
+state again. Once a client has sent a remove it does not send an earlier,
+unanswered claim again: a claim sent again after its removal creates a new
+`pending` claim with a new TXT value, which holds the publication's one open
+domain and counts toward the workspace's limit until it is removed or deleted
+after 7 days. A remove always names one domain id, never "the current domain"
+or a host name, so a retried remove of an earlier domain never touches a newer
+claim of the same name.
+
+The limits are the owner API's, shared with it: one open domain per
+publication, `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE`, and the same two counters
+of the workspace. The verify call is counted after the caller was admitted and
+the named domain matched, before the lookup; a refused caller, a stale command
+and a `404` count nothing and start no lookup (a change of the binding or the
+token between the first check and the read of the domain still counts that one
+call). The activation attempt is counted in the write transaction, after the
+caller was admitted again, so a busy authority row (`409` `RES-002`) or a
+refused admission counts nothing; the owner API counts it before its write
+transaction.
+
+Each transition writes the owner API's audit row, with the token's user as
+the actor; its metadata also carries `client_id` (the browser client) and
+`installation_id`. A command that changes nothing writes no domain audit row.
+A `401`, `403` or `404` of a caller whose token was already verified is
+recorded as `sync.authority.denied` (best effort, after the rollback), as on
+every synchronization control route; a `409` or `429` writes none.

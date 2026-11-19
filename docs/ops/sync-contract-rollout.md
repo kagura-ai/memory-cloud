@@ -39,7 +39,11 @@ they do not remove diagnostic reads which intentionally survive worker shutdown.
 Public's standard-URL profile requires every listed capability except custom
 domains. Starting without a custom domain must not wait for optional DNS/TLS
 setup. A domain operation additionally requires `public.domains.v1` and its
-current independent entitlement/proof/TLS checks.
+current independent entitlement/proof/TLS checks. Reading an installation's
+domain through scoped OIDC needs `public.domains.observation.v1`; claiming,
+verifying and removing it through the installation's browser client needs
+`public.domains.operations.v1` (experimental, optional for a consumer). A
+client that does not see a capability keeps to the paths it already supports.
 
 The producer model is `models.sync_contract.SyncConfigurationV1`. The pure
 `services.sync_contract.require_sync_contract` helper is an executable consumer
@@ -72,6 +76,8 @@ operate feeds; only the current brand owner controls consent/contracts.
 | `/oidc/*` | Identity-only authorization code/PKCE; isolated from MCP OAuth | [OIDC provider](oidc-provider.md) |
 | `/me/workspaces`, `/me/workspaces/{wid}/access` | `workspaces:read`, current membership | [Workspace access](oidc-workspace-access.md) |
 | `/workspaces/{wid}/sync-authorizations`, `/sync-installations` | `integrations:manage`, current owner and recorded paid consent | [Installations](workspace-sync-installations.md) |
+| `GET /workspaces/{wid}/sync-installations/{iid}/publication-domains` | `workspaces:read`, current canonical owner | [Domains](../public-mcp-domains.md) |
+| `POST /workspaces/{wid}/sync-installations/{iid}/publication-domains/claim`, `/verify`, `/remove` (experimental) | `integrations:manage`, current canonical owner, the confirmed binding | [Domains](../public-mcp-domains.md) |
 | `/sync/installations/{iid}`, `/schema`, `/runs/*` | Installation-bound worker token; `schema:read`, `records:write`, `results:read` | [Credentials](sync-service-credentials.md), [feed protocol](staged-feed-sync.md) |
 | Human `/workspaces/{wid}/sync-installations/{iid}/records` and diff | `sync.records:read`, current Context read rights | [Feed protocol](staged-feed-sync.md) |
 | Human feed config/approval and `/management/*` | `integrations:manage`, current Editor; ownership where required | [Managed data](feed-managed-sync.md) |
@@ -101,7 +107,11 @@ targets or a disabled surface, 409 for changing authority/baselines/approval or
 credential holder over the peer budget: client and user for the human control
 routes, sync client for the service routes; every human control
 route, `sync-authorizations` included, counts in one `sync-human` bucket), and 503
-`temporarily_unavailable` for unavailable authority/replay/burst stores. See the
+`temporarily_unavailable` for unavailable authority/replay/burst stores. The
+installation-bound domain operations also answer 429 `RATE-001` with
+`Retry-After` for the workspace's domain verification limits, and 409
+`public_mcp_domain_command_stale` when the binding or the named domain is no
+longer as the command sent it (read the observation again). See the
 linked contracts/OpenAPI for each route's exact code (including established
 KMC error codes). Public MCP budget refusals are MCP protocol results, not this
 control envelope. Do not retry semantic refusals blindly, reflect internal
