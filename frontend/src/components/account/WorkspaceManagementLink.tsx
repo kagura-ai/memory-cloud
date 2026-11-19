@@ -17,6 +17,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { WORKSPACE_MANAGEMENT_PATH } from "@/lib/navigation/workspaceManagement";
 
 export function WorkspaceManagementLink() {
   const t = useTranslations("workspaceSlots");
@@ -31,7 +32,7 @@ export function WorkspaceManagementLink() {
       </CardHeader>
       <CardContent>
         <Button asChild variant="outline">
-          <Link href="/profile/workspaces">{t("profileLink.open")}</Link>
+          <Link href={WORKSPACE_MANAGEMENT_PATH}>{t("profileLink.open")}</Link>
         </Button>
       </CardContent>
     </Card>

@@ -27,6 +27,7 @@ import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { sidebarNavigationGroups as navigationGroups, type NavItem } from "@/lib/navigation/featureNavigation";
 import { useBetaInvites } from "@/hooks/useBetaInvites";
+import { WORKSPACE_MANAGEMENT_PATH } from "@/lib/navigation/workspaceManagement";
 import {
   hasRole,
   isSystemAdmin,
@@ -798,7 +799,7 @@ export function Sidebar() {
               {workspaceSlotsEnabled && (
                 <DropdownMenuItem
                   onClick={() => {
-                    router.push("/profile/workspaces");
+                    router.push(WORKSPACE_MANAGEMENT_PATH);
                     setIsOpen(false);
                   }}
                 >

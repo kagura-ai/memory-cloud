@@ -64,6 +64,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { WorkspaceRole } from "@/lib/auth/rbac";
+import { WORKSPACE_MANAGEMENT_PATH } from "@/lib/navigation/workspaceManagement";
 import {
   isBlocked,
   type FeatureGate,
@@ -73,11 +74,7 @@ import { cn } from "@/lib/utils/cn";
 
 /** Where every upgrade CTA goes. Only rendered when `gate.canUpgrade`. */
 const PLAN_PAGE_HREF = "/workspace/settings/plan";
-/**
- * #2918: where the owner of a suspended workspace manages it. The in-app path,
- * not the server's absolute `manage_url`: the link stays on this origin.
- */
-export const WORKSPACE_MANAGEMENT_HREF = "/profile/workspaces";
+
 
 export type FeatureGateVariant = "inline" | "page" | "control";
 
@@ -590,7 +587,9 @@ export function FeatureGateNotice(props: FeatureGateNoticeProps) {
   if (text === null) return null;
   const state = gate.state as RefusedGateState;
   const openPlanPage = () => router.push(PLAN_PAGE_HREF);
-  const openManagement = () => router.push(WORKSPACE_MANAGEMENT_HREF);
+  // #2918: the in-app path, not the server's absolute `manage_url`: the link
+  // stays on this origin.
+  const openManagement = () => router.push(WORKSPACE_MANAGEMENT_PATH);
   const manage = text.manage ?? null;
 
   if (props.variant === "page") {

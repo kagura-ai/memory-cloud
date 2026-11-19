@@ -15,6 +15,7 @@
 import Link from 'next/link';
 import { PlanBadge } from '@/components/common/PlanBadge';
 import { Badge } from '@/components/ui/badge';
+import { WORKSPACE_MANAGEMENT_PATH } from '@/lib/navigation/workspaceManagement';
 import type { PlanTier } from '@/lib/utils/planLabel';
 import { useTranslations } from 'next-intl';
 import { Brain, Users } from 'lucide-react';
@@ -70,7 +71,7 @@ export function WorkspaceCard({
         {card}
         <p className={`${compact ? 'px-3 pb-2' : 'px-4 pt-1'} text-xs text-slate-600 dark:text-slate-300`}>
           {workspace.current_user_role === 'owner' ? (
-            <Link href="/profile/workspaces" className="underline">
+            <Link href={WORKSPACE_MANAGEMENT_PATH} className="underline">
               {tSlots('card.manage')}
             </Link>
           ) : (

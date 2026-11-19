@@ -86,6 +86,7 @@ vi.mock("@/contexts/MemoryContextContext", () => ({
 vi.mock("@/components/dashboard/Sidebar", () => ({ Sidebar: () => null }));
 
 import DashboardLayout from "./layout";
+import { resetSelectionPromptFallback } from "@/lib/navigation/workspaceManagement";
 
 beforeEach(() => {
   mockRefetchUser.mockReset();
@@ -100,6 +101,7 @@ beforeEach(() => {
   mockReplace.mockClear();
   mockUser = null;
   window.sessionStorage.clear();
+  resetSelectionPromptFallback();
 });
 
 afterEach(() => {
@@ -301,11 +303,40 @@ describe("(authenticated) layout — Workspace management (#2919)", () => {
     expect(mockPush).not.toHaveBeenCalledWith("/profile/workspaces");
   });
 
-  it("does not redirect before the terms are accepted", async () => {
+  it("redirects once the terms are accepted, not before", async () => {
     mockUser = { ...owner, terms_acceptance_required: true, terms_version: "2026-09", workspace_selection_required: true };
-    render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+    const { rerender } = render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(mockPush).not.toHaveBeenCalled();
+
+    // /auth/me after accepting.
+    mockUser = { ...owner, terms_acceptance_required: false, workspace_selection_required: true };
+    rerender(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+    await waitFor(() => expect(mockPush).toHaveBeenCalledWith("/profile/workspaces"));
+    expect(mockPush).toHaveBeenCalledTimes(1);
+  });
+
+  it("prompts a second account signed in in the same tab too", async () => {
+    mockUser = { ...owner, workspace_selection_required: true };
+    const first = render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+    await waitFor(() => expect(mockPush).toHaveBeenCalledWith("/profile/workspaces"));
+    first.unmount();
+    mockPush.mockClear();
+
+    mockUser = { ...owner, id: "u2", workspace_selection_required: true };
+    render(<DashboardLayout><p>dashboard</p></DashboardLayout>);
+    await waitFor(() => expect(mockPush).toHaveBeenCalledWith("/profile/workspaces"));
+    expect(mockPush).toHaveBeenCalledTimes(1);
+  });
+
+  it("the selection screen always offers signing out, so a member with only a suspended workspace is not stuck", async () => {
+    mockUser = { ...owner, current_workspace_id: null };
+    mockHasSelection = false;
+    mockWorkspaces = [{ id: "w9", name: "Club", current_user_role: "member", slot_suspended: true }];
+    mockLogout.mockResolvedValue(undefined);
+    render(<DashboardLayout><p>protected page</p></DashboardLayout>);
+    fireEvent.click(await screen.findByRole("button", { name: "logOut" }));
+    await waitFor(() => expect(mockLogout).toHaveBeenCalledWith("all"));
   });
 
   it("on the page itself: no redirect, and it counts as this session's prompt", async () => {

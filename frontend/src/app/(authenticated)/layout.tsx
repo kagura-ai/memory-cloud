@@ -28,29 +28,10 @@ import { WorkspaceSelectionScreen } from "@/components/workspaces/WorkspaceSelec
 import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
 import { CapacityLockBanner } from "@/components/common/CapacityLockBanner";
 import { WorkspaceSuspensionNotice } from "@/components/plan/WorkspaceSuspensionNotice";
-
-/** Issue #2919: the owner's Workspace management page. */
-const WORKSPACE_MANAGEMENT_PATH = "/profile/workspaces";
-const SELECTION_PROMPT_KEY = "kagura_workspace_selection_prompted";
-/** Fallback for this page load when sessionStorage is unavailable. */
-let selectionPromptedThisLoad = false;
-
-/**
- * Has this browser session already been sent to Workspace management? Kept
- * in sessionStorage (one redirect per browser session); storage that throws
- * (private mode, blocked site data) falls back to this page load.
- */
-function takeSelectionPrompt(): boolean {
-  try {
-    if (window.sessionStorage.getItem(SELECTION_PROMPT_KEY) === "1") return false;
-    window.sessionStorage.setItem(SELECTION_PROMPT_KEY, "1");
-    return true;
-  } catch {
-    if (selectionPromptedThisLoad) return false;
-    selectionPromptedThisLoad = true;
-    return true;
-  }
-}
+import {
+  WORKSPACE_MANAGEMENT_PATH,
+  takeSelectionPrompt,
+} from "@/lib/navigation/workspaceManagement";
 
 /**
  * Issue #1665: shown INSTEAD of the app while `/auth/me` reports
@@ -238,14 +219,16 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
   // Issue #2919: owned workspaces were suspended and no choice is saved yet.
   // After the terms step, send the owner to Workspace management once per
   // browser session; never from platform administration.
-  const selectionRequired =
-    user?.workspace_selection_required === true && !user.terms_acceptance_required;
+  const promptUserId =
+    user?.workspace_selection_required === true && !user.terms_acceptance_required
+      ? user.id
+      : null;
   const isSystemRoute = pathname === "/admin" || pathname.startsWith("/admin/");
   useEffect(() => {
-    if (!selectionRequired || isSystemRoute) return;
-    if (!takeSelectionPrompt()) return;
+    if (!promptUserId || isSystemRoute) return;
+    if (!takeSelectionPrompt(promptUserId)) return;
     if (pathname !== WORKSPACE_MANAGEMENT_PATH) router.push(WORKSPACE_MANAGEMENT_PATH);
-  }, [selectionRequired, isSystemRoute, pathname, router]);
+  }, [promptUserId, isSystemRoute, pathname, router]);
 
   // Show loading spinner while checking authentication
   if (isLoading) {

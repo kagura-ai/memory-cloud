@@ -9,6 +9,7 @@
  */
 
 import { act, fireEvent, render, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { ApiError } from "@/lib/api/base";
 import type { User } from "@/lib/auth/auth";
@@ -232,6 +233,38 @@ describe("WorkspaceProvider reload trigger", () => {
 });
 
 describe("suspended workspaces (#2919)", () => {
+  it("a quiet refresh keeps loading false and picks up a newly suspended current workspace", async () => {
+    const seen: string[] = [];
+    function QuietProbe() {
+      const { currentWorkspaceId, loading, refreshWorkspaces } = useWorkspace();
+      useEffect(() => {
+        seen.push(String(loading));
+      }, [loading]);
+      return (
+        <div>
+          <span data-testid="ws">{currentWorkspaceId ?? "none"}</span>
+          <button onClick={() => void refreshWorkspaces({ quiet: true })}>quiet</button>
+        </div>
+      );
+    }
+    const { getByTestId, getByText } = render(
+      <WorkspaceProvider>
+        <QuietProbe />
+      </WorkspaceProvider>,
+    );
+    await waitFor(() => expect(getByTestId("ws").textContent).toBe("w1"));
+    mockListWorkspaces.mockResolvedValue([
+      { id: "w1", name: "W1", slot_suspended: true },
+      { id: "w2", name: "W2" },
+    ]);
+    seen.length = 0;
+    await act(async () => {
+      fireEvent.click(getByText("quiet"));
+    });
+    await waitFor(() => expect(getByTestId("ws").textContent).toBe("none"));
+    expect(seen).not.toContain("true");
+  });
+
   it("never makes a slot_suspended row the current workspace", async () => {
     mockListWorkspaces.mockResolvedValue([
       { id: "w1", name: "W1", slot_suspended: true },
@@ -257,4 +290,3 @@ describe("suspended workspaces (#2919)", () => {
     expect(getByTestId("ws").textContent).toBe("w1");
   });
 });
-

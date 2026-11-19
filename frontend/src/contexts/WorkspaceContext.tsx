@@ -25,7 +25,12 @@ interface WorkspaceContextType {
   workspaces: Workspace[];
   loading: boolean;
   loadFailed: boolean;
-  refreshWorkspaces: () => Promise<void>;
+  /**
+   * Reload the list. `quiet` (#2919) keeps `loading` false, so the guard does
+   * not replace the page while the list refreshes, and keeps the last list on
+   * a failure.
+   */
+  refreshWorkspaces: (options?: { quiet?: boolean }) => Promise<void>;
   switchWorkspace: (workspaceId: string) => Promise<void>;
 }
 
@@ -48,13 +53,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // Read the current confirmed selection at call time. A late save in A can
   // still call the refresh function it captured before a switch to B.
   const activeScope = useRef<{ userId: string; workspaceId: string | null } | null>(null);
-  const refreshWorkspaces = useCallback(async () => {
+  const refreshWorkspaces = useCallback(async ({ quiet = false }: { quiet?: boolean } = {}) => {
     const scope = activeScope.current;
     if (!scope) return;
     const selectedId = scope.workspaceId;
     const request = ++generation.current;
-    setLoading(true);
-    setLoadFailed(false);
+    if (!quiet) {
+      setLoading(true);
+      setLoadFailed(false);
+    }
     try {
       const available = await listWorkspaces();
       if (generation.current !== request) return;
@@ -66,12 +73,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         ? available.find(w => w.id === selectedId && !w.slot_suspended) ?? null
         : null);
     } catch {
-      if (generation.current !== request) return;
+      if (generation.current !== request || quiet) return;
       setWorkspaces([]);
       setCurrentWorkspace(null);
       setLoadFailed(true);
     } finally {
-      if (generation.current === request) setLoading(false);
+      if (generation.current === request && !quiet) setLoading(false);
     }
   }, []);
 
