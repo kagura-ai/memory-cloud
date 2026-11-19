@@ -872,6 +872,18 @@ async def test_route_end_to_end_aggregates_only(db_session, monkeypatch) -> None
 
     monkeypatch.setattr(get_settings(), "system_admin_mode", "session")
     monkeypatch.setattr(get_settings(), "file_scan_enabled", True)
+
+    class _AtNow(datetime):
+        """The route's wall clock, pinned to the time the rows were seeded
+        against: ``overdue`` must not depend on how long the session ran
+        before this test."""
+
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            assert tz is UTC
+            return NOW
+
+    monkeypatch.setattr(admin_operations, "datetime", _AtNow)
     app.dependency_overrides[get_db] = _db
     app.dependency_overrides[get_current_user_optional] = _admin
     admin_operations._single_flight.clear()
