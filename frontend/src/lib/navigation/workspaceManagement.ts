@@ -31,6 +31,25 @@ export function takeSelectionPrompt(userId: string): boolean {
   }
 }
 
+/**
+ * Forget every prompt of this tab (sign-out, account switch), so the next
+ * sign-in in the same tab is prompted again.
+ */
+export function clearSelectionPrompts(): void {
+  promptedWithoutStorage.clear();
+  try {
+    // Collect first, then remove: removeItem() re-indexes the storage.
+    const keys: string[] = [];
+    for (let i = 0; i < window.sessionStorage.length; i++) {
+      const key = window.sessionStorage.key(i);
+      if (key?.startsWith(PROMPT_KEY_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) window.sessionStorage.removeItem(key);
+  } catch {
+    // Unavailable storage holds no prompt to forget.
+  }
+}
+
 /** Tests only: forget the page-load fallback. */
 export function resetSelectionPromptFallback(): void {
   promptedWithoutStorage.clear();
