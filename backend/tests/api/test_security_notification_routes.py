@@ -98,6 +98,13 @@ def _new_key(name: str = "deploy") -> SimpleNamespace:
 
 
 class TestApiKeyRoutes:
+    @pytest.fixture(autouse=True)
+    def _owner_holds_workspace(self, monkeypatch) -> None:
+        """The key's owner holds its workspace (#2928); covered on real rows."""
+        monkeypatch.setattr(
+            api_keys_routes, "key_owner_holds_workspace", AsyncMock(return_value=True)
+        )
+
     @pytest.mark.asyncio
     async def test_create_schedules_after_commit_and_email_carries_no_key(
         self, monkeypatch

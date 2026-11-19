@@ -1878,6 +1878,8 @@ Permanently delete an API key (Admin only).
 
 `key_id` is the key's public id from the list or create response: `akey_` followed by 22 letters and digits. The integer database id is not accepted (an integer path id returns `422`), and a key that is not yours returns the same `404` as one that does not exist. The same applies to `/revoke`, `/regenerate` and `/stats`, to the share-key, resource-token and invitation routes (`skey_…`, `rtok_…`, `winv_…`), and to `DELETE /api/v1/workspaces/{workspace_id}/members/{user_id}/credentials/api-keys/{key_id}`.
 
+`/regenerate` of a workspace-scoped key also returns that `404` while the key's owner does not hold the workspace (the condition under which the key authenticates, [#2928](https://github.com/kagura-ai/memory-cloud/issues/2928)). Deleting or revoking your own key always works; the workspace's operation history records it only while you hold that workspace.
+
 **Response:**
 
 ```json
