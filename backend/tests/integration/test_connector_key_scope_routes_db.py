@@ -254,9 +254,13 @@ async def test_ordinary_and_agent_keys_are_not_affected(world, monkeypatch, mode
         member_route = await world.client.get(
             f"/api/v1/workspaces/{world.ws.id}/members", headers=_bearer(world.agent_key)
         )
+        # A member-level read the agent key is served on.
+        served = await world.client.get("/api/v1/memory/stats", headers=_bearer(world.agent_key))
     assert owner.status_code == 200
     assert agent.status_code == 403 and agent.json()["error"] == "AUTH-101"
     assert member_route.json().get("error") != "AUTH-204"
+    assert served.status_code == 200, served.json()
+    assert seen.handlers >= 2  # the owner's list and the agent's read ran
     assert seen.events == []
 
 
@@ -397,3 +401,57 @@ async def test_mcp_runs_a_listed_tool_for_a_connector_key(world) -> None:
     result = response.json()["result"]
     assert "isError" not in result, result
     assert str(world.context_id) in result["content"][0]["text"]
+
+
+async def test_mcp_session_of_a_connector_key_as_the_workers_open_it(world) -> None:
+    """``initialize`` (2025-03-26), then ``tools/call`` on the returned session:
+    a listed tool runs; an unlisted one is refused, charged nothing, recorded
+    nowhere."""
+    import mcp_server.tools as tools_mod
+
+    headers = {**_bearer(world.connector_key), "Accept": "application/json, text/event-stream"}
+    init = await world.client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "connector-worker", "version": "1"},
+            },
+        },
+        headers=headers,
+    )
+    assert init.status_code == 200
+    session = {**headers, "mcp-session-id": init.headers["mcp-session-id"]}
+
+    async def call(request_id: int, name: str, arguments: dict) -> dict:
+        response = await world.client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+            headers=session,
+        )
+        assert response.status_code == 200
+        return response.json()["result"]
+
+    ctx = str(world.context_id)
+    served = await call(2, "get_context_info", {"context_id": ctx})
+    assert "isError" not in served, served
+
+    ws_id = world.ws.id
+    tools_mod.invalidate_rate_limit_cache(ws_id)
+    before = await _usage_rows(world)
+    for request_id, name in ((3, "list"), (4, "get_state")):
+        refused = await call(request_id, name, {"context_id": ctx})
+        assert refused["isError"] is True, name
+        envelope = json.loads(refused["content"][0]["text"])
+        assert (envelope["error"], envelope["error_code"]) == ("permission_denied", "AUTH-204")
+    assert ws_id not in tools_mod._RATE_LIMIT_CACHE
+    assert await _usage_rows(world) == before

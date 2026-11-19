@@ -21,6 +21,7 @@ On real PostgreSQL rows, over HTTP with the share-key and session dependencies:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -155,6 +156,13 @@ async def world(async_engine, db_session: AsyncSession, connector_world):
             name=f"sk-{label}", user_id=creator, context_id=ctx
         )
         keys[label] = SimpleNamespace(plaintext=plaintext, public_id=row.public_id, id=row.id)
+    # Distinct creation times on C, newest first: owner, admin, member.
+    for hours, label in ((3, "member"), (2, "admin"), (1, "owner")):
+        await db_session.execute(
+            update(ShareKey)
+            .where(ShareKey.id == keys[label].id)
+            .values(created_at=datetime(2026, 11, 1, 12, 0, 0) - timedelta(hours=hours))
+        )
     await db_session.commit()
     factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
     app = _app(factory)
@@ -352,8 +360,6 @@ async def test_a_refused_request_records_no_use_of_the_key(world) -> None:
 
 
 async def test_an_honoured_key_is_stamped_once_per_throttle_window(world) -> None:
-    from datetime import timedelta
-
     from config.settings import get_settings
     from tests.integration._slot_world import StatementRecorder
 
@@ -516,8 +522,8 @@ async def _revoke(world, as_user: str, public_id: str):
 async def test_a_caller_who_can_share_the_context_revokes_any_key_bound_to_it(
     world, revoker
 ) -> None:
-    # The admin's key, revoked by the workspace owner, the admin itself
-    # (its creator) or the member who owns the context.
+    # The admin's key, revoked by the workspace owner or by the member who
+    # owns the context; the owner's key, revoked by the admin.
     target = world.keys["admin"] if revoker != "admin" else world.keys["owner"]
     actor = getattr(world, revoker)
     response = await _revoke(world, actor, target.public_id)
@@ -630,13 +636,11 @@ async def test_the_context_owner_lists_every_key_bound_to_the_context(world) -> 
         )
         assert response.status_code == 200
         listed = response.json()
-        assert {k["id"] for k in listed} == {
-            world.keys[label].public_id for label in ("member", "admin", "owner")
-        }
-        assert [k["created_at"] for k in listed] == sorted(
-            (k["created_at"] for k in listed), reverse=True
-        )
-        assert {k["user_id"] for k in listed} == {world.member, world.admin, world.owner}
+        # Newest first.
+        assert [k["id"] for k in listed] == [
+            world.keys[label].public_id for label in ("owner", "admin", "member")
+        ]
+        assert [k["user_id"] for k in listed] == [world.owner, world.admin, world.member]
 
 
 async def test_listing_another_context_is_the_context_routes_404(world) -> None:

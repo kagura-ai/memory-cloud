@@ -47,10 +47,15 @@ VERIFY_API_KEY_CALLERS: dict[tuple[str, str], str] = {
 
 
 def _matches(call: ast.Call, attribute: str | None, name: str | None) -> bool:
+    """``x.<attribute>(...)``; or ``<name>(...)`` and ``<module>.<name>(...)``."""
     func = call.func
     if attribute and isinstance(func, ast.Attribute):
         return func.attr == attribute
-    return bool(name) and isinstance(func, ast.Name) and func.id == name
+    if not name:
+        return False
+    if isinstance(func, ast.Name):
+        return func.id == name
+    return isinstance(func, ast.Attribute) and func.attr == name
 
 
 def _visit(
