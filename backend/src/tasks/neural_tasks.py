@@ -32,6 +32,7 @@ from neural.decay import DecayManager
 from repositories.graph import GraphRepository
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
+from services.workspace_slots import suspended_workspace_ids
 from tasks.env import env_interval_seconds, env_seconds
 from tasks.job_runs import JobResult, job_failed
 from utils.datetime import to_utc_iso, utcnow
@@ -227,6 +228,15 @@ async def consolidation_task() -> JobResult:
                     working_memories = await memory_repo.list(
                         filters={"user_id": user_id, "scope": "working"}
                     )
+                    # #2918: nothing is promoted or deleted in a slot-suspended
+                    # workspace (no statement unless the mode is enforce).
+                    suspended = await suspended_workspace_ids(
+                        db, {m.workspace_id for m in working_memories if m.workspace_id is not None}
+                    )
+                    if suspended:
+                        working_memories = [
+                            m for m in working_memories if m.workspace_id not in suspended
+                        ]
 
                     # #1985: promotions are written in one id-ordered statement
                     # after the loop (no row locks taken against recall's order).

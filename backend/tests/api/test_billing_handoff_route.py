@@ -209,7 +209,7 @@ class TestHandoffOwnerOnly:
         # Caller owns WS_A but requests a handoff for WS_B → owner check raises → 403.
         perm = MagicMock()
 
-        async def _owner_only_of_a(_user_id, workspace_id):
+        async def _owner_only_of_a(_user_id, workspace_id, **_kwargs):
             if workspace_id != WS_A:
                 raise AuthorizationError(reason="not_a_member")
             return MagicMock()

@@ -27,9 +27,15 @@ from services.security_notification_service import (
     SecurityEvent,
     schedule_security_notification,
 )
+from services.workspace_slot_gate import ensure_slot_active
 from utils import db_transaction, get_user_id
 from utils.datetime import utcnow
-from utils.exceptions import BadRequestError, NotFoundException, ValidationError
+from utils.exceptions import (
+    BadRequestError,
+    NotFoundException,
+    ValidationError,
+    WorkspaceSlotSuspendedError,
+)
 from utils.logger import get_logger
 from utils.public_id import APIKeyPublicId, PublicIdPrefix, public_id_pattern
 
@@ -549,6 +555,9 @@ async def regenerate_api_key(
         # can hand it the replacement.
         if old_key.connector_id is not None:
             raise HTTPException(status_code=422, detail=CONNECTOR_KEY_REGENERATE_MESSAGE)
+        # #2918: a slot-suspended workspace issues no new secret (deleting the
+        # key stays possible).
+        await ensure_slot_active(db, old_key.workspace_id, user_id=user_id)
 
         # Store old key info. agent_id / bound_context_id are immutable
         # bindings — the replacement must keep them, otherwise regenerating an
@@ -625,7 +634,7 @@ async def regenerate_api_key(
         # active, bound context still public) — surface that as a client
         # error like the create route does, not a 500.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
-    except HTTPException:
+    except (HTTPException, WorkspaceSlotSuspendedError):
         raise
     except Exception as e:
         logger.error(f"Failed to regenerate API key: {e}")

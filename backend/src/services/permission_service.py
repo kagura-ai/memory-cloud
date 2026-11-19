@@ -39,6 +39,12 @@ from services.plan_seats import (
     member_seat_suspended,
 )
 from services.workspace_service import WorkspaceService
+from services.workspace_slot_gate import (
+    SlotPolicy,
+    active_workspace_predicate,
+    ensure_slot_active,
+    slot_suspended,
+)
 from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 from utils.logger import get_logger
 
@@ -107,12 +113,19 @@ async def reachable_memory_filter(
 
     ``key_workspace_id`` confines a workspace-scoped API key to its own
     workspace (#963), as the context resolvers do.
+
+    A slot-suspended workspace (#2918) is out as well, in the same statement
+    (``active_workspace_predicate``; nothing is added unless the mode is
+    ``enforce``).
     """
     stmt = (
         select(WorkspaceMember, Workspace)
         .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
         .where(WorkspaceMember.user_id == user_id, Workspace.deleted_at.is_(None))
     )
+    slot_active = active_workspace_predicate()
+    if slot_active is not None:
+        stmt = stmt.where(slot_active)
     if key_workspace_id is not None:
         stmt = stmt.where(WorkspaceMember.workspace_id == UUID(str(key_workspace_id)))
     open_workspaces: list[UUID] = []
@@ -194,6 +207,7 @@ class PermissionService:
         required_role: WorkspaceRole | str = WorkspaceRole.MEMBER,
         *,
         require_seat: bool = True,
+        slot: SlotPolicy | None = SlotPolicy.BLOCKED,
     ) -> WorkspaceMember:
         """Check if user has required workspace access.
 
@@ -207,11 +221,20 @@ class PermissionService:
                 (#1943). Only the usage readouts pass ``False``: a
                 seat-suspended member still reads the non-monetary usage
                 meters (#2632, #2714).
+            slot: The workspace slot gate (#2918), after membership and role
+                and before the seat: ``BLOCKED`` refuses a suspended workspace
+                (403 ``SLOT-001``), ``OWNER_MANAGEMENT`` lets its owner through.
+                ``None`` skips it: only the context resolvers, which run the
+                gate themselves after their reach check, and internal callers
+                without a principal. Every non-default value is pinned by
+                ``tests/api/test_slot_suspension_route_table.py``.
 
         Returns:
             Workspace membership
 
         Raises:
+            WorkspaceSlotSuspendedError: 403 ``SLOT-001`` for a suspended
+                workspace (``slot``), once membership and role are established.
             AuthorizationError: 403 if user doesn't have required access or
                 workspace is deleted. The fixed ``"Insufficient permissions"``
                 message uniformly hides which sub-reason fired (CWE-639
@@ -266,6 +289,11 @@ class PermissionService:
                 "Insufficient permissions",
                 reason="role_too_low",
             )
+
+        # #2918: a slot-suspended workspace serves nobody — after membership
+        # and role (a non-member keeps the uniform refusal), before the seat.
+        if slot is not None:
+            await ensure_slot_active(self.db, workspace, user_id=user_id, policy=slot)
 
         # #1943: a member without a seat on the workspace's plan is refused —
         # after membership and role, so a non-member keeps the uniform refusal.
@@ -369,6 +397,7 @@ class PermissionService:
         key_workspace_id: UUID | None = None,
         operation: str | None = None,
         binding_decision_out: list[str] | None = None,
+        slot: SlotPolicy = SlotPolicy.BLOCKED,
     ) -> Context:
         """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
 
@@ -415,6 +444,12 @@ class PermissionService:
                 callers — they carry no key scope (#889) and are governed by
                 membership alone. A mismatch raises the same uniform 404 as every
                 other deny.
+            slot: #2918, the workspace slot gate, run on the context's
+                workspace after the reach check and the agent-binding filter
+                (so a caller outside the reach list keeps the uniform 404)
+                and before the capacity lock, whatever ``capacity`` says.
+                ``OWNER_MANAGEMENT`` lets the workspace's owner through (the
+                export).
 
         Returns:
             The ``Context`` row for ``context_id`` if the caller has the
@@ -485,6 +520,8 @@ class PermissionService:
                 user_id=user_id,
                 workspace_id=context.workspace_id,
                 required_role=required_role,
+                # #2918: the slot gate runs below, after the reach check.
+                slot=None,
             )
         except AuthorizationError as exc:
             reason = exc.reason or "workspace_access_denied"
@@ -529,6 +566,10 @@ class PermissionService:
         # other read callers. ``None`` when no agent scope applies.
         if binding_decision_out is not None and decision is not None:
             binding_decision_out.append(decision)
+
+        # #2918: the slot gate, after every authorization step and before the
+        # capacity lock, whatever the capacity policy.
+        await ensure_slot_active(self.db, context.workspace_id, user_id=user_id, policy=slot)
 
         # #1948: the capacity-over lock, after authorization (never an
         # existence oracle). Only the enum member ALLOWED skips the lock — a
@@ -593,12 +634,19 @@ class PermissionService:
             raise NotFoundException("Context", str(context_id))
         return decision
 
-    async def check_workspace_owner(self, user_id: str, workspace_id: UUID) -> WorkspaceMember:
+    async def check_workspace_owner(
+        self,
+        user_id: str,
+        workspace_id: UUID,
+        *,
+        slot: SlotPolicy | None = SlotPolicy.BLOCKED,
+    ) -> WorkspaceMember:
         """Check if user is workspace owner.
 
         Args:
             user_id: User ID
             workspace_id: Workspace ID
+            slot: The slot gate (#2918), see ``check_workspace_access``.
 
         Returns:
             Workspace membership
@@ -607,15 +655,22 @@ class PermissionService:
             AuthorizationError: 403 if not owner
         """
         return await self.check_workspace_access(
-            user_id, workspace_id, required_role=WorkspaceRole.OWNER
+            user_id, workspace_id, required_role=WorkspaceRole.OWNER, slot=slot
         )
 
-    async def check_workspace_admin(self, user_id: str, workspace_id: UUID) -> WorkspaceMember:
+    async def check_workspace_admin(
+        self,
+        user_id: str,
+        workspace_id: UUID,
+        *,
+        slot: SlotPolicy | None = SlotPolicy.BLOCKED,
+    ) -> WorkspaceMember:
         """Check if user is workspace admin or owner.
 
         Args:
             user_id: User ID
             workspace_id: Workspace ID
+            slot: The slot gate (#2918), see ``check_workspace_access``.
 
         Returns:
             Workspace membership
@@ -624,7 +679,7 @@ class PermissionService:
             AuthorizationError: 403 if not admin/owner
         """
         return await self.check_workspace_access(
-            user_id, workspace_id, required_role=WorkspaceRole.ADMIN
+            user_id, workspace_id, required_role=WorkspaceRole.ADMIN, slot=slot
         )
 
     async def is_workspace_member(self, user_id: str, workspace_id: UUID) -> bool:
@@ -696,6 +751,11 @@ class PermissionService:
     ) -> tuple[Context, ContextRole]:
         """Check if user has required context access.
 
+        #2918: a context of a slot-suspended workspace is refused (403
+        ``SLOT-001``) after the RBAC decision and the agent-binding filter, so
+        a caller who cannot reach it keeps the uniform 404, and before the
+        capacity lock, whatever ``capacity`` says.
+
         #1948: ``capacity`` is required — ``BLOCKED`` applies the capacity-over
         lock (#1941) after the RBAC decision and the agent-binding filter;
         ``ALLOWED`` is the cleanup / inspection surface (see ``CapacityPolicy``).
@@ -758,6 +818,9 @@ class PermissionService:
         await self._apply_agent_binding_filter(
             context_id, access=access, user_id=user_id, operation=operation
         )
+
+        # #2918: the slot gate, after authorization, before the capacity lock.
+        await ensure_slot_active(self.db, context.workspace_id, user_id=user_id)
 
         # #1948: the capacity-over lock, after authorization (never an oracle);
         # only the enum member ALLOWED skips it (a stray value fails closed). ``user_id`` keeps the outsider
@@ -1175,6 +1238,52 @@ class PermissionService:
     # ========================================================================
 
     async def can_access_memory(
+        self,
+        *,
+        user_id: CallerId,
+        memory_user_id: MemoryAuthorId,
+        workspace_id: UUID,
+        context_id: UUID,
+        access: Access = ACCESS_READ,
+        operation: str | None = None,
+        memory_id: UUID | None = None,
+        memory_type: str | None = None,
+        memory_source_type: str | None = None,
+        key_workspace_id: UUID | None = None,
+    ) -> bool:
+        """Whether the caller may access a memory (``_can_access_memory_rbac``),
+        and its workspace is not slot-suspended (#2918).
+
+        The slot gate answers ``False`` instead of raising: batch callers
+        (session rollback, cross-context reads, related-memory candidates)
+        loop over these answers, and one suspended workspace must not abort
+        the others. It runs only once every other check said yes, so it never
+        answers for a memory the caller could not reach.
+        """
+        allowed = await self._can_access_memory_rbac(
+            user_id=user_id,
+            memory_user_id=memory_user_id,
+            workspace_id=workspace_id,
+            context_id=context_id,
+            access=access,
+            operation=operation,
+            memory_id=memory_id,
+            memory_type=memory_type,
+            memory_source_type=memory_source_type,
+            key_workspace_id=key_workspace_id,
+        )
+        if allowed and await slot_suspended(self.db, workspace_id):
+            logger.info(
+                "memory_access_denied",
+                reason="workspace_slot_suspended",
+                memory_id=str(memory_id) if memory_id is not None else None,
+                memory_workspace_id=str(workspace_id),
+                user_id=str(user_id),
+            )
+            return False
+        return allowed
+
+    async def _can_access_memory_rbac(
         self,
         *,
         user_id: CallerId,

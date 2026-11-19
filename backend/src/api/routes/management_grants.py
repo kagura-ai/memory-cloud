@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.management_route import BoundedManagementRoute
-from auth.dependencies import WorkspaceOwner
+from auth.dependencies import WorkspaceOwner, WorkspaceOwnerRevocation
 from auth.management_grants import current_binding
 from config.settings import get_settings
 from db.base import get_db
@@ -148,7 +148,7 @@ async def list_grants(
 
 @router.delete("/{grant_id}", status_code=204)
 async def revoke_grant(
-    grant_id: UUID, owner: WorkspaceOwner, db: AsyncSession = Depends(get_db)
+    grant_id: UUID, owner: WorkspaceOwnerRevocation, db: AsyncSession = Depends(get_db)
 ) -> None:
     """Serialize revocation with in-flight operations; external tokens remain independent."""
     await db.execute(select(Workspace.id).where(Workspace.id == owner[1]).with_for_update())

@@ -692,6 +692,16 @@ async def _execute_tool_call(
     if default_refusal is not None:
         return default_refusal
 
+    # #2918: a call that names no target works on the session workspace; a
+    # slot-suspended one refuses it (fail closed). A named target is checked
+    # after authorization by its resolver, so a context in an active
+    # workspace keeps working from a suspended session and the other way round.
+    from mcp_server.tools._slot_gate import slot_suspension_refusal
+
+    slot_refusal = await slot_suspension_refusal(tool_name, args, user_id, workspace_id)
+    if slot_refusal is not None:
+        return slot_refusal
+
     # #1941: a Free workspace over its capacity loses search and saving until
     # it is cleaned up; listing, deleting and usage stay callable. Every tool
     # is classified in ``_capacity_gate`` (a coverage test pins the split).

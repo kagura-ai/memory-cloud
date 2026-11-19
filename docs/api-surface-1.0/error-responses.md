@@ -503,25 +503,47 @@ under `capacity_lock`.
   "message": "This workspace is suspended because you own more workspaces than your plan allows. ...",
   "details": {
     "gate": "workspace_slot",
-    "workspace_id": "a2d94c1b-55e7-4f0a-8c3e-7b6d2e9f4a21",
-    "manage_url": "<frontend_url>/profile/workspaces"   // the owner's account page; null for a member
+    "workspace_id": "a2d94c1b-55e7-4f0a-8c3e-7b6d2e9f4a21", // absent for a caller outside the workspace
+    "manage_url": "<frontend_url>/profile/workspaces"     // the owner's account page; null for a member
   }
 }
 ```
 
-The `details` depend on who asked: the owner gets `workspace_id` and the absolute `manage_url`
-of the page that chooses which workspaces stay active; a member gets `workspace_id` and
-`manage_url: null` (the message tells them to ask the owner); a caller outside the workspace
-(a public reader, a share key) gets `gate` only. Suspended workspaces are listed with
-`slot_suspended: true` by `GET /api/v1/workspaces`. The owner manages them through
-`/api/v1/me/workspace-slots` (status, preview, selection, exportable contexts), which answers
-`SLOT-002` / `SLOT-003` (no `gate`, see the catalogue) and 422 `VAL-001` with
-`details: {"field": "workspace_ids", "invalid_ids": [...]}` for duplicate ids or ids of
-workspaces the caller does not own (one message whether or not the id exists). A request
+When an owner owns more workspaces than their allowance, the excess ones are suspended (data
+kept) and serve nobody: every member, every credential (session, OAuth, global and workspace
+API keys, agent and connector keys, resource tokens, share keys, management grants, observation
+credentials, the sync worker) and every public reader is refused. The check runs after
+authorization: a caller who cannot reach the workspace or the context gets the usual refusal or
+uniform 404 instead. The `details` depend on who asked: the owner gets `workspace_id` and the
+absolute `manage_url` of the page that chooses which workspaces stay active; a member gets
+`workspace_id` and `manage_url: null` (the message tells them to ask the owner); a caller
+outside the workspace (share key, public reader, management or observation credential, sync
+worker) gets `gate` only. A public MCP endpoint of a suspended workspace pauses (503, like a
+plan pause). The OIDC `GET /api/v1/me/workspaces/{id}/access` answers 200 with `read` and
+`sync.manage` false instead of refusing; the internal billing and sync control routes are not
+gated. What stays usable for the owner only: `GET /api/v1/contexts/{id}/export`,
+`DELETE /api/v1/workspaces/{id}`, `POST /api/v1/billing/handoff`. Revoking a credential is
+never blocked (the member-credential revoke routes, withdrawing a sync authorization, revoking a
+resource token, an observation credential or a management grant): each keeps its own
+authorization. Switching to another workspace and the account routes are not workspace-scoped.
+
+Suspended workspaces are listed with `slot_suspended: true` by `GET /api/v1/workspaces`. The
+owner manages them through `/api/v1/me/workspace-slots` (status, preview, selection, exportable
+contexts), which answers `SLOT-002` / `SLOT-003` (no `gate`, see the catalogue) and 422
+`VAL-001` with `details: {"field": "workspace_ids", "invalid_ids": [...]}` for duplicate ids or
+ids of workspaces the caller does not own (one message whether or not the id exists). A request
 whose shape is wrong (more than 500 ids, a malformed UUID, a missing `expected_version`, an
 unknown `scenario`) is the framework's 422 `VAL-001` with `details.errors` instead. `PUT
 .../selection` answers 409 `RES-002` with `details.reason: "workspace_slots_busy"` while
 another change for the same owner is in progress: nothing was saved, retry the same request.
+
+On MCP the envelope code is `workspace_suspended`, with the same keys as top-level fields and a
+`help` saying who can resume it. A tool call that names its target (`context_id`, `context_ids`,
+`workspace_id`, `file_id`, `report_id`) is checked on that target's workspace, so a context in an
+active workspace keeps working while the session workspace is suspended; a call that names no
+target is checked on the session workspace (`guide` and `describe_tools` always answer).
+`initialize` succeeds: when the selected guardrail context's workspace is suspended, the
+instructions carry one notice line instead of the digest.
 
 ### `quota_type` vocabulary (frozen)
 

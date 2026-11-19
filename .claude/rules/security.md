@@ -28,6 +28,10 @@ paths:
   Every REST route is classified in `tests/api/test_capacity_lock_route_table.py` — a new
   route must be added there (and MCP tools in `mcp_server/tools/_capacity_gate.py`)
 - Never trust client-supplied workspace_id without verification
+- Workspace slot suspension (#2918): a new workspace-scoped route or MCP tool must go through a gated
+  primitive (`check_workspace_access`, the context resolvers, `ensure_slot_active`, …) or be declared
+  in `tests/api/test_slot_suspension_route_table.py`; every `SlotPolicy.OWNER_MANAGEMENT` / `slot=None`
+  call site is pinned there
 
 ## Database Security
 - NEVER use f-strings for SQL (`f"SELECT ... {user_input}"`)

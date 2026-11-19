@@ -39,6 +39,7 @@ from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import is_same_owner, owned_by
 from services.plan_seats import ensure_member_seated
+from services.workspace_slot_gate import SlotPolicy, ensure_slot_active
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
@@ -47,6 +48,7 @@ from utils.exceptions import (
     NotFoundException,
     QuotaExceededError,
     ValidationError,
+    WorkspaceSlotSuspendedError,
 )
 from utils.logger import get_logger
 
@@ -386,6 +388,11 @@ class ContextService:
                         "Admins can create shared contexts."
                     )
 
+        # #2918: a slot-suspended workspace takes no new context, for any
+        # credential (REST and MCP share this path). After the role check, so
+        # a non-member learns nothing; before the capacity lock.
+        await ensure_slot_active(self.db, workspace, user_id=created_by)
+
         # #1941: a workspace over its Free capacity cannot grow until it is
         # cleaned up. After the role check, so a non-member learns nothing.
         from services.capacity_lock import ensure_not_capacity_locked
@@ -588,9 +595,10 @@ class ContextService:
         perm_service = PermissionService(self.db)
         try:
             return await perm_service.get_accessible_contexts(user_id, workspace_id)
-        except FeatureNotAvailableError:
+        except (FeatureNotAvailableError, WorkspaceSlotSuspendedError):
             # #1943: a member without a seat is refused, not shown an empty
             # workspace — the same 403 FEAT-001 every other route answers.
+            # #2918: likewise a slot-suspended workspace (403 SLOT-001).
             raise
         except Exception as e:
             if raise_on_lookup_error:
@@ -647,6 +655,9 @@ class ContextService:
         ):
             raise NotFoundException("Context", str(context_id))
 
+        # #2918: the slot gate, once the caller is known to reach the context.
+        await ensure_slot_active(self.db, context.workspace_id, user_id=user_id)
+
         return context
 
     async def export_context(
@@ -667,9 +678,15 @@ class ContextService:
         already read via ``/memory/list``. Vectors, neural edges, and sessions
         are omitted (regenerated / re-learned on re-import).
 
+        #2918: export is the owner's way out of a slot suspension
+        (``SlotPolicy.OWNER_MANAGEMENT``): the workspace's owner exports from a
+        suspended workspace, a member is refused with ``SLOT-001``.
+
         Raises:
             NotFoundException: context missing, or caller lacks read access.
             ExportTooLargeError: context exceeds ``EXPORT_MAX_MEMORIES`` (413).
+            WorkspaceSlotSuspendedError: a member exporting from a suspended
+                workspace.
         """
         from models.config import ContextSearchConfig
         from models.memory import Memory
@@ -686,6 +703,7 @@ class ContextService:
             context_id=context_id,
             key_workspace_id=key_workspace_id,
             capacity=CapacityPolicy.ALLOWED,  # export is the way out of the lock
+            slot=SlotPolicy.OWNER_MANAGEMENT,  # and of a slot suspension (#2918)
         )
 
         # Read-parity with GET /memory/list: private context => creator-only.

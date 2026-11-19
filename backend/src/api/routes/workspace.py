@@ -42,8 +42,9 @@ from models.memory import Memory
 from services.memory_counts import count_live_memories
 from services.permission_service import PermissionService
 from services.plan_seats import member_seat_suspended
+from services.workspace_slot_gate import ensure_slot_active
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthenticationError
+from utils.exceptions import AuthenticationError, WorkspaceSlotSuspendedError
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,8 @@ async def get_workspace_stats(
             )
 
         _, workspace = row
+        # #2918: a slot-suspended workspace shows nothing, to anyone.
+        await ensure_slot_active(db, workspace, user_id=user_id)
 
         contexts_result = await db.execute(
             select(Context)
@@ -320,7 +323,7 @@ async def get_workspace_stats(
             erased_memories=total_erased,
         )
 
-    except HTTPException:
+    except (HTTPException, WorkspaceSlotSuspendedError):
         raise
     except Exception as e:
         logger.exception(
@@ -852,6 +855,9 @@ async def get_embedding_status(
     workspace_id = user.get("current_workspace_id")
     if not workspace_id:
         raise HTTPException(status_code=400, detail="No active workspace")
+    # #2918: the queue lists memory summaries; a slot-suspended workspace
+    # shows nothing, to anyone.
+    await ensure_slot_active(db, workspace_id, user_id=user.get("user_id"))
 
     # Use indexed Memory.workspace_id directly (no member_ids round-trip)
     conditions = [

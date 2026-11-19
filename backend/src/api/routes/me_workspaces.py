@@ -21,11 +21,13 @@ from models.auth import Workspace, WorkspaceMember
 from services.capacity_lock import CapacityPolicy, capacity_lock_state
 from services.permission_service import PermissionService
 from services.plan_seats import context_writes_suspended
+from services.workspace_slot_gate import slot_suspended
 from utils.exceptions import (
     AuthorizationError,
     FeatureNotAvailableError,
     NotFoundException,
     ValidationError,
+    WorkspaceSlotSuspendedError,
 )
 from utils.logger import get_logger
 
@@ -178,34 +180,53 @@ async def workspace_access(
     db: Database,
     context_id: UUID | None = None,
 ) -> WorkspaceAccess:
-    """Inspect membership and optional resource eligibility with the existing RBAC gates."""
+    """Inspect membership and optional resource eligibility with the existing RBAC gates.
+
+    #2918: a slot-suspended workspace answers like a capacity-locked one: 200,
+    the membership as it is, and nothing readable or manageable (``read`` and
+    ``sync.manage`` false); ``billing.manage`` stays the owner's way back.
+    """
     _query(request, {"context_id"})
     wid = workspace_id
     permissions = PermissionService(db)
     member = await permissions.check_workspace_access(
-        principal.user_id, wid, required_role=WorkspaceRole.VIEWER, require_seat=False
+        principal.user_id,
+        wid,
+        required_role=WorkspaceRole.VIEWER,
+        require_seat=False,
+        # #2918: reported below as nothing usable, never refused here.
+        slot=None,
     )
     workspace = await db.get(Workspace, wid)
     if workspace is None:
         raise NotFoundException("Workspace")
+    suspended = await slot_suspended(db, workspace)
     resource = None
     if context_id is not None:
-        context, role = await permissions.check_context_access(
-            principal.user_id,
-            context_id,
-            capacity=CapacityPolicy.ALLOWED,
-            key_workspace_id=wid,
-        )
-        readable = await capacity_lock_state(db, workspace) is None
-        writable = (
-            readable
-            and role in (ContextRole.EDITOR, ContextRole.OWNER)
-            and not await context_writes_suspended(db, workspace, context)
-        )
-        resource = ResourceAccess(
-            context_id=context.id,
-            permissions=ResourcePermissions(read=readable, sync_manage=writable),
-        )
+        try:
+            context, role = await permissions.check_context_access(
+                principal.user_id,
+                context_id,
+                capacity=CapacityPolicy.ALLOWED,
+                key_workspace_id=wid,
+            )
+        except WorkspaceSlotSuspendedError:
+            # Raised only once the caller is authorized for the context.
+            resource = ResourceAccess(
+                context_id=context_id,
+                permissions=ResourcePermissions(read=False, sync_manage=False),
+            )
+        else:
+            readable = not suspended and await capacity_lock_state(db, workspace) is None
+            writable = (
+                readable
+                and role in (ContextRole.EDITOR, ContextRole.OWNER)
+                and not await context_writes_suspended(db, workspace, context)
+            )
+            resource = ResourceAccess(
+                context_id=context.id,
+                permissions=ResourcePermissions(read=readable, sync_manage=writable),
+            )
     return WorkspaceAccess(
         subject=principal.user_id,
         workspace_id=wid,
@@ -213,7 +234,8 @@ async def workspace_access(
         workspace_permissions=WorkspacePermissions(
             billing_manage=workspace.owner_user_id == principal.user_id
             and member.role == WorkspaceRole.OWNER,
-            usage_read=True,
+            # #2918: the usage routes refuse a slot-suspended workspace.
+            usage_read=not suspended,
         ),
         resource=resource,
     )

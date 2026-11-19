@@ -57,6 +57,7 @@ from utils.exceptions import (
     NotFoundException,
     OperatorPrincipalNotSupportedError,
     ValidationError,
+    WorkspaceSlotSuspendedError,
 )
 from utils.logger import get_logger
 from utils.plan_resolver import (
@@ -670,8 +671,9 @@ async def get_user_detail(
                 for ctx in contexts:
                     all_contexts.append(ctx)
                     context_workspace_map[ctx.id] = (workspace, member.role)
-            except (NotFoundException, AuthorizationError):
-                # Skip if no access
+            except (NotFoundException, AuthorizationError, WorkspaceSlotSuspendedError):
+                # Skip if no access; #2918: a slot-suspended workspace lists
+                # no contexts (the page with the slot-bonus control must load).
                 pass
 
         # Batch fetch all ContextMembers for this user
