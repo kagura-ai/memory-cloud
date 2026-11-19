@@ -139,6 +139,7 @@ from models.auth import (
     ExternalAPIKey,
     OAuth2Client,
     OAuthGrantSetting,
+    ShareKey,
     User,
     UserKnownDevice,
     UserOAuthProvider,
@@ -2547,6 +2548,9 @@ class AccountErasureService:
         # registered name the owner, an agent left without a key is suspended.
         counts.update((await self._settle_departing_credentials(user_id)).counts())
         counts["api_keys"] = await self._count_and_delete(APIKey, APIKey.user_id == user_id)
+        # #2930: the subject's share keys go with its API keys (no foreign key
+        # on ``share_keys.user_id`` would take them, and the row names the sub).
+        counts["share_keys"] = await self._count_and_delete(ShareKey, ShareKey.user_id == user_id)
         counts["graph_memory"] = await self._count_and_delete(
             GraphMemory, GraphMemory.user_id == user_id
         )

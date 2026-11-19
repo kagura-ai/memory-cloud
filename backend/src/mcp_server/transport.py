@@ -669,10 +669,17 @@ async def build_instructions(
     result is the google base text (or its default-context variant) with no
     digest at all: the digest lists rules for when to call tools, which
     Google's connected-apps policy does not allow server text to set.
+
+    #2929: a connector key under ``CONNECTOR_KEY_SCOPE=enforce`` gets the base
+    text of its view and nothing read from a workspace (no digest, no default
+    context's name), with no I/O; ``private`` is ``True`` when the URL carries
+    ``guardrails=`` or ``context=`` and ``False`` when it selects nothing.
     """
     from auth.agent_scope import get_agent_scope
     from mcp_server.auth import get_mcp_connector_credential
+    from mcp_server.tools._connector_scope import connector_key_narrowed
     from mcp_server.tools._default_context import select_default_context
+    from mcp_server.tools._google_profile import GOOGLE_INSTRUCTIONS_BASE
     from mcp_server.tools._helpers import get_mcp_credential_default_context
     from mcp_server.tools._profiles import is_google_view
     from services.guardrail_digest import (
@@ -681,6 +688,17 @@ async def build_instructions(
         select_guardrail_context,
         tool_view_names,
     )
+
+    if connector_key_narrowed():
+        # Pure parses, no I/O: the answer is public only when the URL selects
+        # nothing, since for any other caller such a URL's answer is private.
+        selects = (
+            select_guardrail_context(query_string).mode != "binding"
+            or select_default_context(query_string).mode != "none"
+        )
+        return (
+            GOOGLE_INSTRUCTIONS_BASE if is_google_view(query_string) else SERVER_INSTRUCTIONS_BASE
+        ), selects
 
     settings = get_settings()
     # One budget for the default-context name and the digest together.
@@ -1533,6 +1551,10 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
                 [[b"mcp-session-id", session.session_id.encode()]],
             )
             return
+        # #2929: a connector key is offered the connector worker's tools only.
+        from mcp_server.tools._connector_scope import tools_for_credential
+
+        tools, _narrowed = tools_for_credential(tools)
         await _send_jsonrpc_result(send, session, request_id, {"tools": tools})
         return
 

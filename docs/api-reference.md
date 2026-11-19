@@ -46,6 +46,8 @@ Public-bound keys are immutable: to change which context a key attributes to, re
 
 A workspace-scoped key (agent and connector keys included) authenticates only while its owner holds the workspace: the workspace is not deleted, and the owner is the workspace's owner or has a membership row in it (any role, with or without a plan seat). Otherwise it answers like an unknown key: `401` on REST, and MCP refuses the request at authentication ([#2928](https://github.com/kagura-ai/memory-cloud/issues/2928)). Minting one requires a membership row in the workspace of the path.
 
+A connector key (a connector's write key: linked to its connector, or named `connector:…`) is accepted by no REST route: a route that authenticates an API key answers `403` `AUTH-204` "This credential is not accepted on this route", and a refused key is never tried as a browser session the request may also carry; the public context routes (`/api/v1/public/{context_id}/search`, `/info`) accept only public-bound keys and answer their own `403` `AUTH-101`. On MCP it calls the connector worker's tools only ([MCP tools › Connector keys](mcp-tools.md#connector-keys), [#2929](https://github.com/kagura-ai/memory-cloud/issues/2929)).
+
 A workspace-scoped key you mint for yourself (session only) takes an optional `default_context_id` ([#2188](https://github.com/kagura-ai/memory-cloud/issues/2188)), the key's MCP default context with the same rules as the [config route](#patch-apiv1configapi-keyskey_id): a context you cannot read within the key's workspace is `404` `Context not found` and no key is created, and a public-bound key cannot carry one (`422`). An owner-provisioned key for another member cannot carry one either (`400`). The member key list and create responses carry `default_context_id`, `default_context_name` (`null` when none is set or when you, the viewer, cannot read the context) and `agent_id` (`null` unless the key is agent-bound). A default is changed later with `PATCH /api/v1/config/api-keys/{key_id}`.
 
 ### 2. OAuth2 Access Token
@@ -1901,6 +1903,18 @@ Revoke an API key (soft delete, preserves audit trail).
   "message": "API key revoked successfully"
 }
 ```
+
+---
+
+### Share keys (`/api/v1/config/share-keys`)
+
+A share key (`kagura_sk_…`) lets its holder run `POST /api/v1/share/recall` and `GET /api/v1/share/sessions` against one context, read-only, for at most 30 days. Minting it (`POST /api/v1/config/share-keys`) takes OWNER-level access to that context: on a shared context the workspace owner or an admin, or a member holding the context's owner role whose access list reaches it; on a private context only its creator (or an account linked to the creator); always with a plan seat. The management routes are session-only.
+
+**Lifetime ([#2930](https://github.com/kagura-ai/memory-cloud/issues/2930)).** A share key never outlives its creator's right to share the context: on every request the creator must have that OWNER-level access. When the creator leaves the workspace, loses the context's owner role, loses the context from the access list or has no plan seat (until seated again), the share routes answer `401` "Invalid or missing share key", the same answer as for an unknown, revoked or expired key or a deleted context or workspace; a refused request records no use of the key. Removing a member revokes the member's share keys for that workspace's contexts; deleting or erasing an account deletes its share keys, and migration `f57_2930_share_key_creators` deletes those whose creating account does not exist.
+
+**`GET /api/v1/config/share-keys`** lists the caller's own share keys, newest first. With `?context_id=<uuid>` (experimental): every share key bound to that context, whoever created it (`user_id` names the creator), for a caller with OWNER-level access to it (the rule minting applies); anyone else gets `404` `Context not found`, and a caller with that access gets `403` `SLOT-001` while the workspace is slot-suspended.
+
+**`POST /api/v1/config/share-keys/{key_id}/revoke`** revokes a key (`204`). Allowed for its creator and for a caller with OWNER-level access to its context (the rule minting applies); never blocked by a slot suspension. An unknown id, an already revoked key and a key the caller may not revoke answer the same `404` `Share key not found`. The `credential.revoked` operation record names the caller as actor and the creator as subject.
 
 ---
 

@@ -34,8 +34,10 @@ item, which is not implemented yet.
 **Out of scope**
 
 - Agent registry / binding CRUD (F1, #1258) and the bootstrap contract (F2, #1259).
-- Share keys and public-bound keys (`bound_context_id`) — separate, self-only surfaces;
-  the owner-provisioned flow rejects them by design.
+- Share keys and public-bound keys (`bound_context_id`) — separate surfaces; the
+  owner-provisioned flow rejects them by design. A share key is managed by its creator and by
+  a caller with OWNER-level access to its bound context, who can list and revoke it
+  (`/api/v1/config/share-keys`, #2930).
 - OAuth device tokens (rejected on every credential-management endpoint; see below).
 - Server-side secret-pattern screening (the P1 DLP item — stated here as a pointer only).
 - First-class service accounts (mint without a pre-existing member) — deferred to a separate

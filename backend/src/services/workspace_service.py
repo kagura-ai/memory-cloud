@@ -1106,7 +1106,9 @@ class WorkspaceService:
 
             # Cleanup/Transfer in logical order
             context_cleanup = await cred_service.cleanup_context_members(workspace_id, user_id)
-            cred_cleanup = await cred_service.cleanup_member_credentials(workspace_id, user_id)
+            cred_cleanup = await cred_service.cleanup_member_credentials(
+                workspace_id, user_id, actor_user_id=actor_user_id
+            )
             memory_transfer = await cred_service.cleanup_member_memories(
                 workspace_id, user_id, owner_id
             )
@@ -1175,6 +1177,7 @@ class WorkspaceService:
                 oauth_clients_deleted=cred_cleanup["oauth_clients_deleted"],
                 oauth_tokens_revoked=cred_cleanup["oauth_tokens_revoked"],
                 external_keys_deleted=cred_cleanup["external_keys_deleted"],
+                share_keys_revoked=cred_cleanup["share_keys_revoked"],
                 memories_transferred=memory_transfer["memories_transferred"],
                 contexts_transferred=context_transfer["contexts_transferred"],
                 resource_tokens_transferred=resource_token_transfer["resource_tokens_transferred"],

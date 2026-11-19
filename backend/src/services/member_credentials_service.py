@@ -361,7 +361,9 @@ class MemberCredentialsService:
 
         return member.role if member else None
 
-    async def cleanup_member_credentials(self, workspace_id: UUID, user_id: str) -> dict[str, Any]:
+    async def cleanup_member_credentials(
+        self, workspace_id: UUID, user_id: str, *, actor_user_id: str | None = None
+    ) -> dict[str, Any]:
         """Clean up all credentials for a removed member.
 
         Issue #196: Called when member is removed from workspace
@@ -382,9 +384,16 @@ class MemberCredentialsService:
         - All OAuth tokens for this user + workspace
         - All workspace-scoped external API keys
 
+        Revokes (#2930):
+        - The member's live share keys bound to this workspace's contexts
+          (``ShareKeyManager.revoke_creator_keys``: one ``credential.revoked``
+          record per key, ``actor_user_id`` as actor); the member's share keys
+          in other workspaces are not touched
+
         Args:
             workspace_id: Workspace ID
             user_id: User ID being removed
+            actor_user_id: Who removes the member (the revocation records' actor)
 
         Returns:
             Dict with cleanup stats:
@@ -396,6 +405,7 @@ class MemberCredentialsService:
                 - oauth_clients_deleted: int
                 - oauth_tokens_revoked: int
                 - external_keys_deleted: int
+                - share_keys_revoked: int
         """
         # #2352: the member's live connector keys serve the workspace — hand
         # them to the owner before the delete below takes the rest. #2373: the
@@ -468,6 +478,14 @@ class MemberCredentialsService:
         )
         ext_keys_count = ext_keys_result.rowcount
 
+        # 5. #2930: a share key never outlives its creator's right to share
+        # the context: the member's keys for this workspace's contexts end.
+        from auth.share_keys import ShareKeyManager
+
+        share_keys_count = await ShareKeyManager(self.db).revoke_creator_keys(
+            user_id, workspace_id=workspace_id, actor_user_id=actor_user_id
+        )
+
         logger.info(
             "member_credentials_cleaned_up",
             workspace_id=str(workspace_id),
@@ -477,6 +495,7 @@ class MemberCredentialsService:
             oauth_clients=oauth_clients_count,
             tokens_revoked=tokens_count,
             external_keys=ext_keys_count,
+            share_keys_revoked=share_keys_count,
         )
 
         return {
@@ -485,6 +504,7 @@ class MemberCredentialsService:
             "oauth_clients_deleted": oauth_clients_count,
             "oauth_tokens_revoked": tokens_count,
             "external_keys_deleted": ext_keys_count,
+            "share_keys_revoked": share_keys_count,
         }
 
     async def cleanup_context_members(self, workspace_id: UUID, user_id: str) -> dict[str, Any]:

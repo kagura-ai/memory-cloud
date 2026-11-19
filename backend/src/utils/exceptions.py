@@ -205,6 +205,20 @@ class APIKeyExpiredError(APIKeyError):
         super().__init__("API key has expired", error_code="AUTH-203")
 
 
+class ConnectorKeyScopeError(MemoryCloudException):
+    """A connector key used where a connector key is not accepted (403, #2929).
+
+    A connector key authenticates the MCP tools a connector worker uses and no
+    REST route (``auth.connector_key_scope``). The body names no route or tool
+    list.
+    """
+
+    log_level = "warning"
+
+    def __init__(self, message: str = "This credential is not accepted on this route") -> None:
+        super().__init__(message, status_code=403, error_code="AUTH-204")
+
+
 # Resource Errors (4xx)
 
 
