@@ -130,6 +130,40 @@ test.describe("/profile/workspaces (#2919)", () => {
       await openPage(page);
       await assertNoColorContrastViolations(page, ROWS);
     });
+
+    test(`${colorScheme} mode: the row dialogs have no color-contrast violations`, async ({
+      page,
+    }) => {
+      await page.emulateMedia({ colorScheme });
+      await openPage(page);
+      const suspended = page
+        .locator(ROWS)
+        .filter({ has: page.getByText(T.status.slot_suspended, { exact: true }) })
+        .first();
+      const named = (message: string) =>
+        new RegExp(`^${message.replace("{name}", ".+")}$`);
+      // Each dialog, once its content has loaded (the resume preview, the
+      // export list's note, the delete wording).
+      for (const [action, role, ready] of [
+        [T.actions.resumeNamed, "alertdialog", T.resume.confirm],
+        [T.actions.exportNamed, "dialog", T.export.privateNote],
+        [T.actions.deleteNamed, "alertdialog", en.workspace.deleteWorkspace],
+      ] as const) {
+        await suspended.getByRole("button", { name: named(action) }).click();
+        const dialog = page.getByRole(role);
+        await expect(dialog).toBeVisible();
+        await expect(
+          dialog.getByText(ready, { exact: true }).first(),
+        ).toBeVisible({ timeout: 15_000 });
+        // axe reads computed opacity: let the open animation finish.
+        await page.waitForFunction(() =>
+          document.getAnimations().every((a) => a.playState !== "running"),
+        );
+        await assertNoColorContrastViolations(page, `[role="${role}"]`);
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeHidden();
+      }
+    });
   }
 
   test("keyboard: choose another workspace and preview it without saving", async ({
