@@ -90,6 +90,9 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "me_oauth": ACCOUNT,
     "me_oauth_grants": ACCOUNT,  # grant settings; the context is resolved per call
     "me_terms": ACCOUNT,
+    # The owner's slot overview, selection and exportable contexts (#2918):
+    # account-scoped, and usable while the owner's workspaces are suspended.
+    "me_workspace_slots": ACCOUNT,
     "mfa_settings": ACCOUNT,
     "oauth": ACCOUNT,  # clients and the authorization flow; tokens are refused per call
     "oidc": ACCOUNT,
@@ -100,12 +103,6 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "system": ACCOUNT,
     "users": ACCOUNT,
     "well_known": ACCOUNT,
-}
-
-# Path prefixes of a whole account surface, allowed before its router is
-# mounted (the account API of #2918 lands in another lane).
-PREFIX_DEFAULTS: dict[str, str] = {
-    "/api/v1/me/workspace-slots": ACCOUNT,
 }
 
 # One row per exception route of a router without a default.
@@ -438,9 +435,6 @@ def _category(key: tuple[str, str], module: str) -> str | None:
     """The exception category of a route, or ``None`` for GATED."""
     if key in EXCEPTIONS:
         return EXCEPTIONS[key]
-    for prefix, category in PREFIX_DEFAULTS.items():
-        if key[1] == prefix or key[1].startswith(prefix + "/"):
-            return category
     return ROUTER_DEFAULTS.get(module)
 
 
@@ -634,7 +628,6 @@ def test_every_route_is_gated_or_declared_once() -> None:
     modules = {module for module, _route, _extra in routes.values()}
 
     bad_defaults = sorted(m for m, c in ROUTER_DEFAULTS.items() if c not in _DEFAULTABLE)
-    bad_prefixes = sorted(p for p, c in PREFIX_DEFAULTS.items() if c not in _DEFAULTABLE)
     stale_defaults = sorted(m for m in ROUTER_DEFAULTS if m not in modules)
     stale_rows = sorted(key for key in EXCEPTIONS if key not in routes)
     double = sorted(
@@ -643,10 +636,32 @@ def test_every_route_is_gated_or_declared_once() -> None:
         if key in EXCEPTIONS and module in ROUTER_DEFAULTS
     )
     assert not bad_defaults, f"router defaults allowed only for {_DEFAULTABLE}: {bad_defaults}"
-    assert not bad_prefixes, f"prefix defaults allowed only for {_DEFAULTABLE}: {bad_prefixes}"
     assert not stale_defaults, f"router defaults for modules with no route: {stale_defaults}"
     assert not stale_rows, f"stale rows (route no longer exists): {stale_rows}"
     assert not double, f"routes declared both by row and by router default: {double}"
+
+
+def test_the_workspace_slot_account_routes_are_account_routes() -> None:
+    """The four routes of ``/api/v1/me/workspace-slots`` (#2918) are ACCOUNT.
+
+    The owner reads and changes the selection of a suspended workspace and
+    lists its exportable contexts there, so none of them may reach the gate.
+    """
+    routes = _routes()
+    slot_routes = {
+        key: module
+        for key, (module, _route, _extra) in routes.items()
+        if key[1].startswith("/api/v1/me/workspace-slots")
+    }
+    assert sorted(slot_routes) == [
+        ("GET", "/api/v1/me/workspace-slots"),
+        ("GET", "/api/v1/me/workspace-slots/workspaces/{workspace_id}/contexts"),
+        ("POST", "/api/v1/me/workspace-slots/preview"),
+        ("PUT", "/api/v1/me/workspace-slots/selection"),
+    ]
+    assert {key: _category(key, module) for key, module in slot_routes.items()} == dict.fromkeys(
+        slot_routes, ACCOUNT
+    )
 
 
 def test_every_gated_route_reaches_a_gate() -> None:
