@@ -11,11 +11,11 @@ from datetime import timedelta
 from typing import NamedTuple
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from models.auth import APIKey, Context
+from models.auth import APIKey, Context, Workspace, WorkspaceMember
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
@@ -80,6 +80,36 @@ class VerifiedKey(NamedTuple):
     is_connector_key: bool = False
     default_context_id: UUID | None = None
     public_id: str | None = None
+
+
+async def key_owner_holds_workspace(db: AsyncSession, *, user_id: str, workspace_id: UUID) -> bool:
+    """Whether the owner of a workspace-scoped key holds that workspace (#2928).
+
+    The workspace is live (``deleted_at IS NULL``) and ``user_id`` is its
+    ``owner_user_id`` or has a ``workspace_members`` row in it, any role, with
+    or without a seat on the plan. One statement on the workspace's primary
+    key and the ``(workspace_id, user_id)`` unique index.
+
+    Args:
+        db: Async database session.
+        user_id: The key's owner.
+        workspace_id: The key's workspace.
+
+    Returns:
+        True when the key's owner holds the workspace.
+    """
+    holds = exists().where(
+        Workspace.id == workspace_id,
+        Workspace.deleted_at.is_(None),
+        or_(
+            Workspace.owner_user_id == user_id,
+            exists().where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.user_id == user_id,
+            ),
+        ),
+    )
+    return bool(await db.scalar(select(holds)))
 
 
 def apply_zero_knowledge_hide(key: APIKey) -> None:
@@ -373,7 +403,8 @@ class APIKeyManager:
             api_key: Plaintext API key to verify
 
         Returns:
-            ``VerifiedKey`` if valid, None if not found / revoked / expired.
+            ``VerifiedKey`` if valid, None if not found / revoked / expired, or
+            workspace-scoped while its owner does not hold the live workspace.
 
             - Owner-scoped (global) keys: workspace_id=None, bound_context_id=None
             - Workspace-scoped keys (#169): workspace_id=<UUID>, bound_context_id=None
@@ -406,6 +437,22 @@ class APIKeyManager:
         if key_record.expires_at:
             if utcnow() > key_record.expires_at:
                 return None
+
+        # #2928: a workspace-scoped key (plain, agent or connector) verifies
+        # only while its owner holds the live workspace. Checked before the
+        # connector and agent gates below, so a refused key writes nothing (no
+        # agent liveness touch, no last_used_at); those gates keep their own
+        # answers for a key whose owner does hold the workspace. Global and
+        # public-bound keys have no workspace and skip it.
+        if key_record.workspace_id is not None and not await key_owner_holds_workspace(
+            self.db, user_id=key_record.user_id, workspace_id=key_record.workspace_id
+        ):
+            logger.warning(
+                "api_key_rejected_owner_not_in_workspace",
+                key_prefix=key_record.key_prefix,
+                workspace_id=str(key_record.workspace_id),
+            )
+            return None
 
         # #1944: a connector's write key stops with the connector it serves.
         # #1939 pauses connector ingest (REST/MCP ingest, worker config,

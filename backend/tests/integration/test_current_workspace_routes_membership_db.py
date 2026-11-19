@@ -1,16 +1,17 @@
-"""Routes that act on the caller's current workspace require its membership (#2928).
+"""Reads of the caller's current workspace require its membership (#2928).
 
-The authentication dependency puts a workspace-scoped key's own workspace in
-``current_workspace_id``; these routes read that workspace and go through the
-shared workspace access check first. On real PostgreSQL rows, over HTTP with
-real API keys (and a browser session), and through ``execute_tool_call`` for
-MCP:
+These routes read the caller's current workspace and go through the shared
+workspace access check first. On real PostgreSQL rows, over HTTP with real API
+keys (and a browser session), and through ``execute_tool_call`` for MCP:
 
 * ``GET /workspace/embedding-status``, ``GET /workspace/stats`` and
-  ``GET /system/embedding/models``, and the MCP ``get_usage``,
-  ``get_resource_impact`` and ``get_resource_schema`` tools, answer a key
-  scoped to workspace X whose user is not a member of X (and a session whose
-  stored current workspace is X) with the uniform refusal;
+  ``GET /system/embedding/models`` answer a session whose stored current
+  workspace is X, while its user is not a member of X, with the uniform
+  refusal; a key scoped to X whose user is not a member of X does not
+  authenticate (401);
+* the MCP ``get_usage``, ``get_resource_impact`` and ``get_resource_schema``
+  tools answer a caller whose session workspace is X, while not a member of X,
+  with ``permission_denied``;
 * a member's key and a member's session keep the response they get today.
 """
 
@@ -208,13 +209,14 @@ async def _select_x_for(world, user_id: str) -> None:
 
 
 async def test_embedding_status_requires_membership_of_the_current_workspace(world):
-    """A key scoped to X whose user is not a member of X, and a session whose
-    stored current workspace is X, get the uniform refusal."""
+    """A session whose stored current workspace is X gets the uniform refusal;
+    a key scoped to X whose user is not a member of X does not authenticate."""
     by_key = await _get(world, "/api/v1/workspace/embedding-status", bearer=world.outsider_key)
     await _select_x_for(world, world.outsider)
     by_session = await _get(world, "/api/v1/workspace/embedding-status", session=world.outsider)
 
-    assert [(r.status_code, r.json()) for r in (by_key, by_session)] == [(403, REFUSAL)] * 2
+    assert by_key.status_code == 401, by_key.text
+    assert (by_session.status_code, by_session.json()) == (403, REFUSAL)
 
 
 async def test_embedding_status_for_a_member_is_unchanged(world):
@@ -238,7 +240,8 @@ async def test_current_workspace_reads_require_membership(world, path):
     await _select_x_for(world, world.outsider)
     by_session = await _get(world, path, session=world.outsider)
 
-    assert [(r.status_code, r.json()) for r in (by_key, by_session)] == [(403, REFUSAL)] * 2
+    assert by_key.status_code == 401, by_key.text
+    assert (by_session.status_code, by_session.json()) == (403, REFUSAL)
 
 
 async def test_workspace_stats_for_a_member_is_unchanged(world):

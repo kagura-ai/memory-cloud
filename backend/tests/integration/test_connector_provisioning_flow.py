@@ -408,7 +408,7 @@ async def test_delete_connector_revokes_an_unlinked_key_of_its_name(db_session: 
     from models.auth import APIKey
 
     user_id, workspace = await _seed_workspace(db_session, plan_name="promax")
-    _other_user, other_workspace = await _seed_workspace(db_session, plan_name="promax")
+    other_user, other_workspace = await _seed_workspace(db_session, plan_name="promax")
     service = ConnectorProvisioningService(db_session)
     result = await service.provision_connector(
         workspace_id=workspace.id,
@@ -426,9 +426,9 @@ async def test_delete_connector_revokes_an_unlinked_key_of_its_name(db_session: 
     unlinked_plain, unlinked = await manager.create_key(
         name=name, user_id=f"user-{uuid4().hex}", workspace_id=workspace.id
     )
-    # Same name in another workspace: not this connector's key.
+    # Same name in another workspace (its owner's key): not this connector's key.
     elsewhere_plain, elsewhere = await manager.create_key(
-        name=name, user_id=user_id, workspace_id=other_workspace.id
+        name=name, user_id=other_user, workspace_id=other_workspace.id
     )
     # Another key of the workspace.
     laptop_plain, laptop = await manager.create_key(
