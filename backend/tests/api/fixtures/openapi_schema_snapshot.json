@@ -13210,11 +13210,13 @@
       },
       "SlotContextResponse": {
         "properties": {
+          "display_name": {},
           "id": {},
           "is_private": {},
           "name": {}
         },
         "required": [
+          "display_name",
           "id",
           "is_private",
           "name"

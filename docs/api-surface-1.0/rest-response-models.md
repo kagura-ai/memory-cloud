@@ -995,12 +995,13 @@ Notes:
 > One context the owner can export (the rule of `GET /contexts/{id}/export`).
 - `id: UUID` — required
 - `name: str` — required
+- `display_name: str | None` — required (show it, or `name` when null)
 - `is_private: bool` — required
 
 ### SlotContextsResponse (TZAwareBaseModel)
 > The exportable contexts of one owned live workspace, active or suspended (deleted contexts and other creators' private contexts left out).
 - `workspace_id: UUID` — required
-- `contexts: list[SlotContextResponse]` — required
+- `contexts: list[SlotContextResponse]` — required (ordered by `name`, then `id`)
 
 ### SlotPreviewRequest (BaseModel) (request model)
 - `workspace_ids: list[UUID]` — required (at most 500; duplicates and not-owned ids are a 422 `VAL-001` from the service)

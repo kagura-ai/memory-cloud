@@ -117,6 +117,7 @@ async def _world(db: AsyncSession) -> dict[str, Any]:
     )
     shared = make_context(workspace_id=suspended.id, created_by=member.user_id)
     shared.name = "b-shared"
+    shared.display_name = "Shared notes"
     own_private = make_context(workspace_id=suspended.id, created_by=owner.user_id, is_private=True)
     own_private.name = "a-own-private"
     member_private = make_context(
@@ -170,8 +171,18 @@ async def test_contexts_of_a_suspended_owned_workspace_follow_the_export_rule(
     assert response.json() == {
         "workspace_id": str(world["suspended"].id),
         "contexts": [
-            {"id": str(world["own_private"].id), "name": "a-own-private", "is_private": True},
-            {"id": str(world["shared"].id), "name": "b-shared", "is_private": False},
+            {
+                "id": str(world["own_private"].id),
+                "name": "a-own-private",
+                "display_name": None,
+                "is_private": True,
+            },
+            {
+                "id": str(world["shared"].id),
+                "name": "b-shared",
+                "display_name": "Shared notes",
+                "is_private": False,
+            },
         ],
     }
 

@@ -222,10 +222,11 @@ class SlotPreviewResponse(TZAwareBaseModel):
 
 
 class SlotContextResponse(TZAwareBaseModel):
-    """One context the owner can export."""
+    """One context the owner can export (show ``display_name`` or else ``name``)."""
 
     id: UUID
     name: str
+    display_name: str | None
     is_private: bool
 
 
@@ -398,7 +399,7 @@ async def list_exportable_contexts(
     # The export rule (``ContextService.export_context``): a private context
     # exports only for its creator or an account linked to the creator.
     rows = await db.execute(
-        select(Context.id, Context.name, Context.is_private)
+        select(Context.id, Context.name, Context.display_name, Context.is_private)
         .where(
             Context.workspace_id == workspace_id,
             Context.deleted_at.is_(None),
@@ -409,6 +410,9 @@ async def list_exportable_contexts(
     return SlotContextsResponse(
         workspace_id=workspace_id,
         contexts=[
-            SlotContextResponse(id=row.id, name=row.name, is_private=row.is_private) for row in rows
+            SlotContextResponse(
+                id=row.id, name=row.name, display_name=row.display_name, is_private=row.is_private
+            )
+            for row in rows
         ],
     )
