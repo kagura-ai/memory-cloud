@@ -63,6 +63,9 @@ UNAUDITED_READ_SITES = {
     ("sleep.py", "handle_get_sleep_history"),
     ("sleep.py", "_authorize_report_read"),
     ("sleep.py", "_authorize_report_rollback"),
+    # The caller's own key metadata, not memory rows (#2918: the named
+    # context is resolved for the slot refusal only).
+    ("api_keys.py", "handle_describe_binding"),
 }
 
 
