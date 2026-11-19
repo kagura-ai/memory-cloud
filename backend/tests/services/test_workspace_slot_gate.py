@@ -306,3 +306,25 @@ def test_an_outsider_on_mcp_learns_nothing_more() -> None:
     )
     assert body["help"] == "The workspace that holds this content is suspended."
     assert set(body) == {"status", "error", "message", "gate", "help"}
+
+
+async def test_a_batch_over_one_workspace_reads_the_suspension_once() -> None:
+    """``can_access_memory`` in a loop (related-memory candidates, rollback):
+    one lookup per workspace for one ``PermissionService``."""
+    from services.permission_service import PermissionService
+
+    perm = PermissionService(MagicMock())
+    ws_a, ws_b = uuid4(), uuid4()
+    lookup = AsyncMock(side_effect=lambda _db, wid: wid == ws_b)
+    with (
+        patch.object(PermissionService, "_can_access_memory_rbac", AsyncMock(return_value=True)),
+        patch("services.permission_service.slot_suspended", lookup),
+    ):
+        answers = [
+            await perm.can_access_memory(
+                user_id="u", memory_user_id="u", workspace_id=wid, context_id=uuid4()
+            )
+            for wid in (ws_a, ws_a, ws_a, ws_b, ws_b)
+        ]
+    assert answers == [True, True, True, False, False]
+    assert lookup.await_count == 2

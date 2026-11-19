@@ -1258,7 +1258,10 @@ class PermissionService:
         (session rollback, cross-context reads, related-memory candidates)
         loop over these answers, and one suspended workspace must not abort
         the others. It runs only once every other check said yes, so it never
-        answers for a memory the caller could not reach.
+        answers for a memory the caller could not reach. The answer is
+        remembered per workspace for this ``PermissionService`` (one request
+        or one pass of a batch), so a loop over memories of one workspace
+        costs one lookup.
         """
         allowed = await self._can_access_memory_rbac(
             user_id=user_id,
@@ -1272,7 +1275,7 @@ class PermissionService:
             memory_source_type=memory_source_type,
             key_workspace_id=key_workspace_id,
         )
-        if allowed and await slot_suspended(self.db, workspace_id):
+        if allowed and await self._slot_suspended_once(workspace_id):
             logger.info(
                 "memory_access_denied",
                 reason="workspace_slot_suspended",
@@ -1282,6 +1285,13 @@ class PermissionService:
             )
             return False
         return allowed
+
+    async def _slot_suspended_once(self, workspace_id: UUID) -> bool:
+        """``slot_suspended`` for ``workspace_id``, read once per instance."""
+        memo: dict[UUID, bool] = self.__dict__.setdefault("_slot_suspended_memo", {})
+        if workspace_id not in memo:
+            memo[workspace_id] = await slot_suspended(self.db, workspace_id)
+        return memo[workspace_id]
 
     async def _can_access_memory_rbac(
         self,
