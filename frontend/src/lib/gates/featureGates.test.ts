@@ -73,6 +73,7 @@ const SERVER_GATE_KINDS: RefusedGateState[] = [
   "role",
   "allowlist",
   "capacity",
+  "workspace_slot",
 ];
 
 describe("normalizeGate — not a gate", () => {
@@ -1672,5 +1673,59 @@ describe("normalizeGate — the capacity lock (#1941)", () => {
         cleanup_url: null,
       }),
     ).toEqual({ state: "capacity" });
+  });
+});
+
+describe("normalizeGate — the suspended workspace (#2918, gate kind workspace_slot)", () => {
+  const ownerBody = {
+    gate: "workspace_slot",
+    workspace_id: "w2",
+    manage_url: "https://app.example.com/profile/workspaces",
+  };
+
+  it("reads the owner's management link off details", () => {
+    expect(normalizeGate(403, "SLOT-001", ownerBody)).toEqual({
+      state: "workspace_slot",
+      manageUrl: "https://app.example.com/profile/workspaces",
+    });
+  });
+
+  it("a member's refusal carries no link", () => {
+    expect(
+      normalizeGate(403, "SLOT-001", {
+        gate: "workspace_slot",
+        workspace_id: "w2",
+        manage_url: null,
+      }),
+    ).toEqual({ state: "workspace_slot" });
+  });
+
+  it("recognises SLOT-001 by its code when details.gate is absent", () => {
+    expect(normalizeGate(403, "SLOT-001", {})?.state).toBe("workspace_slot");
+  });
+
+  it("is not a gate at any other status, and SLOT-002 / SLOT-003 are not gates", () => {
+    expect(normalizeGate(500, "SLOT-001", {})).toBeUndefined();
+    expect(normalizeGate(409, "SLOT-002", { cap: 1 })).toBeUndefined();
+    expect(normalizeGate(409, "SLOT-003", {})).toBeUndefined();
+  });
+
+  it("never carries an upgrade", () => {
+    expect(narrowCanUpgrade("workspace_slot", undefined, true)).toBe(false);
+  });
+
+  it("gateFromFacts keeps the owner's link and nothing for a member", () => {
+    const ctx = { fallbackKey: "contexts" as GateKey, canUpgrade: true, locale: "en" };
+    expect(
+      gateFromFacts(normalizeGate(403, "SLOT-001", ownerBody), ctx),
+    ).toEqual({
+      state: "workspace_slot",
+      feature: "contexts",
+      manageUrl: "https://app.example.com/profile/workspaces",
+      canUpgrade: false,
+    });
+    const member = gateFromFacts({ state: "workspace_slot" }, ctx);
+    expect(member?.manageUrl).toBeUndefined();
+    expect(member?.canUpgrade).toBe(false);
   });
 });

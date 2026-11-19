@@ -1092,3 +1092,44 @@ describe("featureGateText for a member who must ask the owner", () => {
     expect(text?.hint).toBe("XL プランへのアップグレードはワークスペースのオーナーに依頼してください");
   });
 });
+
+describe("FeatureGateNotice — a suspended workspace (#2918, workspace_slot)", () => {
+  const owner = gateOf({
+    state: "workspace_slot",
+    manageUrl: "https://app.example.com/profile/workspaces",
+  });
+  const member = gateOf({ state: "workspace_slot" });
+
+  it("gives the owner the link to Workspace management, never an upgrade", () => {
+    const text = featureGateText(owner, gateT("en"));
+    expect(text?.title).toBe(en.gate.workspace_slot.title);
+    expect(text?.description).toBe(en.gate.workspace_slot.description);
+    expect(text?.manage).toBe(en.gate.workspace_slot.manage);
+    expect(text?.action).toBeNull();
+  });
+
+  it("tells a member to ask the owner, with no link", () => {
+    for (const locale of LOCALES) {
+      const text = featureGateText(member, gateT(locale));
+      const messages = CATALOGUES[locale].gate.workspace_slot;
+      expect(text?.description).toContain(messages.description);
+      expect(text?.description).toContain(messages.askOwner);
+      expect(text?.manage).toBeUndefined();
+    }
+  });
+
+  it("the owner's inline notice opens the in-app page, not the server URL", () => {
+    renderIn("en", <FeatureGateNotice gate={owner} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: en.gate.workspace_slot.manage }),
+    );
+    expect(mockPush).toHaveBeenCalledWith("/profile/workspaces");
+  });
+
+  it("a member's notice renders no button", () => {
+    renderIn("ja", <FeatureGateNotice gate={member} />);
+    expect(screen.getByText(ja.gate.workspace_slot.title)).toBeInTheDocument();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+});
+

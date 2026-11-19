@@ -5107,6 +5107,14 @@
         "plural": "Operation history",
         "singular": "Operation history"
       }
+    },
+    "workspace_slot": {
+      "title": "This workspace is suspended",
+      "description": "Its owner has more workspaces than their plan allows. Its data is kept.",
+      "askOwner": "Ask the workspace owner to resume it.",
+      "manage": "Manage workspaces",
+      "badge": "Suspended",
+      "hint": "Suspended: over the workspace allowance"
     }
   },
   "passwordRecovery": {
