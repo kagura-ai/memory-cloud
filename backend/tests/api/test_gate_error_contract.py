@@ -2002,3 +2002,41 @@ class TestTheWorkspaceSlotGate:
         assert stale.details == {"expected_version": 4, "current_version": 5}
         assert transfer.details == {}
         assert busy.details == {"reason": "workspace_slots_busy"}
+
+
+class TestTheWorkspaceSlotRaiseSites:
+    """Lane B of #2918: every SLOT-001 is raised by the gate module alone.
+
+    Surfaces call ``ensure_slot_active`` (or a primitive that does), so the
+    three audiences (owner / member / outsider) are worded in one place and the
+    MCP code ``workspace_suspended`` follows from the exception type.
+    """
+
+    def test_slot_001_is_raised_only_in_ensure_slot_active(self) -> None:
+        sites: set[str] = set()
+        for path in sorted(SRC_ROOT.rglob("*.py")):
+            module = path.relative_to(SRC_ROOT).with_suffix("").as_posix().replace("/", ".")
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)):
+                    continue
+                func = node.exc.func
+                owner = func.value if isinstance(func, ast.Attribute) else func
+                if isinstance(owner, ast.Name) and owner.id == "WorkspaceSlotSuspendedError":
+                    sites.add(module)
+        assert sites == {"services.workspace_slot_gate"}
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_envelope_keeps_the_rest_details(self) -> None:
+        from mcp_server.tools._errors import describe_tool_exception
+        from utils.exceptions import WorkspaceSlotSuspendedError
+
+        wid = uuid4()
+        exc = WorkspaceSlotSuspendedError.for_owner(
+            wid, "https://app.example.com/profile/workspaces"
+        )
+        rest = await _rest_details(exc)
+        mcp = json.loads(describe_tool_exception("recall", exc).response()[0].text)
+        assert mcp["error"] == "workspace_suspended"
+        for key, value in rest.items():
+            assert mcp[key] == value, key

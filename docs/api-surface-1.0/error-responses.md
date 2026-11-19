@@ -488,6 +488,44 @@ one could delete them to lift a lock. `GET /api/v1/workspace/usage/current`
 reports the same numbers under `capacity_lock` (`null` when not locked), and MCP `get_usage`
 under `capacity_lock`.
 
+### `SLOT-001` (403) — workspace slot gate (#2918, experimental)
+
+```jsonc
+{
+  "error": "SLOT-001",
+  "message": "This workspace is suspended because you own more workspaces than your plan allows. ...",
+  "details": {
+    "gate": "workspace_slot",
+    "workspace_id": "<uuid>",                       // absent for a caller outside the workspace
+    "manage_url": "<frontend_url>/profile/workspaces" // the owner only; null for a member
+  }
+}
+```
+
+Only with `WORKSPACE_SLOT_SUSPENSION=enforce`. When an owner owns more workspaces than their
+allowance, the excess ones are suspended (data kept) and serve nobody: every member, every
+credential (session, OAuth, global and workspace API keys, agent and connector keys, resource
+tokens, share keys, management grants, observation credentials, the sync worker) and every
+public reader is refused. The check runs after authorization: a caller who cannot reach the
+workspace or the context gets the usual refusal or uniform 404 instead. The owner gets
+`manage_url` (the account page that resumes it), a member `manage_url: null` (ask the owner),
+a caller outside the workspace (share key, public reader, management or observation credential,
+sync worker) the gate only. A public MCP endpoint of a suspended workspace pauses (503, like a
+plan pause). The OIDC `GET /api/v1/me/workspaces/{id}/access` answers 200 with `read` and
+`sync.manage` false instead of refusing; the internal billing and sync control routes are not
+gated. What stays usable for the owner only: `GET /api/v1/contexts/{id}/export`,
+`DELETE /api/v1/workspaces/{id}`, `POST /api/v1/billing/handoff`, the member-credential revoke
+routes and withdrawing a sync authorization; switching to another workspace and the account
+routes are not workspace-scoped.
+
+On MCP the envelope code is `workspace_suspended`, with the same keys as top-level fields and a
+`help` saying who can resume it. A tool call that names its target (`context_id`, `context_ids`,
+`workspace_id`, `file_id`, `report_id`) is checked on that target's workspace, so a context in an
+active workspace keeps working while the session workspace is suspended; a call that names no
+target is checked on the session workspace (`guide` and `describe_tools` always answer).
+`initialize` succeeds: when the selected guardrail context's workspace is suspended, the
+instructions carry one notice line instead of the digest.
+
 ### `quota_type` vocabulary (frozen)
 
 `contexts`, `members`, `workspace_limit_reached`, `memories_per_day`, `memory_analysis`,
