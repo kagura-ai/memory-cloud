@@ -31,6 +31,7 @@ from models.measurement import Measurement
 from models.memory import Memory, NeuralMemoryEdge
 from models.memory_access_event import MemoryAccessEvent
 from models.operations_status import ScheduledJobStatus
+from models.public_mcp_domain import PublicMcpDomain
 from models.public_mcp_usage import PublicMcpUsageEvent
 from models.resource import IndexerState, Resource, ResourceEvent, WorkspaceConnector
 from models.schemas import RememberRequest
@@ -383,6 +384,20 @@ CASES: list[tuple[str, str, str, Factory, bool]] = [
             **c,
         ),
         False,
+    ),
+    (
+        "public_mcp_domains",
+        "tls_report",
+        "tls_report",
+        lambda s, c: PublicMcpDomain(
+            workspace_id=s.ws.id,
+            endpoint_id=uuid4(),
+            hostname=f"{uuid4().hex}.example.org",
+            state="pending",
+            verification_token=uuid4().hex * 2,
+            **c,
+        ),
+        True,
     ),
     # Append-only (#2678: written in batches, deleted by retention): INSERT only.
     (

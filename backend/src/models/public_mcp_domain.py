@@ -23,10 +23,11 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import BigInteger, CheckConstraint, DateTime, Index, Integer, String, func, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
+from models.json_types import NullableJSONB
 from utils.public_hostname import MAX_HOSTNAME_LENGTH
 
 __all__ = [
@@ -172,7 +173,7 @@ class PublicMcpDomain(Base):
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
     hostname: Mapped[str] = mapped_column(String(253), nullable=False)
-    tls_report: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    tls_report: Mapped[dict | None] = mapped_column(NullableJSONB, nullable=True)
     workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     endpoint_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
