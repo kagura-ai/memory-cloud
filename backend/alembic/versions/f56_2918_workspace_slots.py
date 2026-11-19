@@ -11,10 +11,11 @@ Two new tables, both without foreign keys, and one index:
 Nothing is backfilled. No existing table is altered or referenced, so the
 revision takes no lock on an existing table: ``CREATE TABLE`` and the index
 build lock only the new, empty tables (and the ``alembic_version`` row every
-revision updates). It is safe while the previous release serves traffic, and
-the new code runs no statement on these tables while
-``WORKSPACE_SLOT_SUSPENSION=off`` (the default), so code and migration may be
-deployed in either order.
+revision updates). It is safe while the previous release serves traffic.
+While ``WORKSPACE_SLOT_SUSPENSION=off`` (the default) the triggers, gates,
+sweep and account routes run no statement on these tables; account erasure and
+user deletion delete the subject's rows only when the tables exist. Code and
+migration may therefore be deployed in either order.
 
 ``if_not_exists`` makes a rerun after an interrupted upgrade a no-op.
 

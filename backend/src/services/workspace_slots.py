@@ -27,9 +27,12 @@ Pieces:
 - ``suspended_workspace_ids`` / ``owner_selection_required`` /
   ``suspension_in_force``: the read-time rule for other modules.
 
-``WORKSPACE_SLOT_SUSPENSION`` (``workspace_slot_mode``): ``off`` (default) runs
-no statement on the slot tables; ``shadow`` logs what would be suspended,
-resumes what should resume and never suspends; ``enforce`` suspends.
+``WORKSPACE_SLOT_SUSPENSION`` (``workspace_slot_mode``): with ``off`` (default)
+the triggers, gates, sweep and account routes run no statement on the slot
+tables (``delete_owner_slot_rows`` still deletes an erased or deleted user's
+rows when the tables exist, and the operator CLI reads and writes them);
+``shadow`` logs what would be suspended, resumes what should resume and never
+suspends; ``enforce`` suspends.
 
 Lock order (no deadlock): a workspace row, then the owner lock (taken without
 waiting while a row lock is held), then the slot-table rows. Reconcile takes no

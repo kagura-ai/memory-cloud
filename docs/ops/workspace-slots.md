@@ -10,12 +10,14 @@ workspace takes no slot.
 An event that ends a paid contract, lowers a plan's owned-workspace grant or
 lowers the slot bonus (a subscription ends, a system admin lowers a plan or the
 slot bonus) suspends the excess owned workspaces over the allowance; nothing
-else suspends. Suspended workspaces keep their data,
-nothing is deleted, and every member and every credential is refused with
-`SLOT-001` (MCP: `workspace_suspended`) until the workspace is resumed. The
-owner keeps a management path: they can see the status on the account page
-(`/profile/workspaces`), export contexts, delete the workspace, open billing
-for it, revoke credentials, and choose which workspaces stay active. When slots
+else suspends. A suspended workspace keeps its data, nothing is deleted, and
+every member and every credential is refused with `SLOT-001` (MCP:
+`workspace_suspended`) until the workspace is resumed. The owner keeps a
+management path: they see the status on the account page
+(`/profile/workspaces`), export contexts (with their session, an API key or an
+OAuth token of theirs), delete the workspace, open billing for it, revoke
+member credentials and sync authorizations (other credentials: see Limits),
+and choose which workspaces stay active. When slots
 return (an upgrade, a bonus, a deleted or transferred workspace), suspended
 workspaces are resumed within the new allowance, each with its own plan.
 Suspension never changes a plan, an add-on, the capacity lock (#1941) or any
@@ -49,7 +51,7 @@ when the allowance itself did not change.
 
 | Value | Behaviour |
 |---|---|
-| `off` (default) | Nothing changes. No statement touches the slot tables; the sweep is not scheduled; the account API answers 404. |
+| `off` (default) | Nothing is suspended or refused. The triggers, gates, sweep and account API run no statement on the slot tables (the code may run before the migration); account erasure and user deletion still delete the subject's rows (skipped while the tables do not exist, see below), the operator CLI (`status`, `reconcile --even-when-off`) reads and writes them, and the system-admin plan route locks its workspace row (`FOR NO KEY UPDATE`) in every mode. The sweep is not scheduled; the account API answers 404. |
 | `shadow` | Triggers compute what they would do and log `workspace_slots_would_change`; they never suspend. They do resume: rows that should resume are deleted (a row lock that is not free at once makes them give up and log `workspace_slots_shadow_failed`; the caller is never delayed or failed). The gates ignore every row, so nobody is refused. |
 | `enforce` | Drops suspend, everything else resumes; the gates refuse suspended workspaces; the account API and page are available. Requires `ENFORCE_WORKSPACE_CAP=true` (startup refuses otherwise). |
 
@@ -69,16 +71,19 @@ the new code.
    `details.reason: workspace_slots_busy` (below) before step 4.
 3. Switch to `shadow` for one billing cycle. Read the
    `workspace_slots_would_change` events: every owner listed would lose access
-   to the `would_suspend` workspaces at that event. Owners over the allowance
-   from before lose all their excess at their first drop of any size; this is
-   where you see them.
+   to the `would_suspend` workspaces at that event. A drop that finds the
+   owner's lock busy logs `workspace_slots_deferred` (`lock_busy`) and no
+   `would_change` line: that event was not evaluated. Owners already over their
+   allowance appear in no log until their next drop, where they lose all their
+   excess: list them with
+   `python -m src.cli.workspace_slots status --over-allowance`.
 4. Switch to `enforce` once every serving process runs this release.
 
 ## Triggers
 
 | Trigger | Suspends | Owner lock | When the lock is busy | On an unexpected error |
 |---|---|---|---|---|
-| Ordered billing snapshot (`PUT /internal/workspaces/{id}/billing-snapshot` / `integration-entitlements`, a plan applied) | yes | tried with a short backoff (about 0.75 s) while the workspace row is held, before the sync stop | a change that may lower the allowance: `409 RES-002`, `workspace_slots_busy`, nothing committed; a change that cannot (an upgrade, the same plan): commits, logs `workspace_slots_deferred`, the sweep finishes the resume | may lower: the delivery fails; cannot lower: committed and deferred |
+| Ordered billing snapshot (`PUT /internal/workspaces/{id}/billing-snapshot`, a plan applied) | yes | tried with a short backoff (about 0.75 s) while the workspace row is held, before the sync stop | a change that may lower the allowance: `409 RES-002`, `workspace_slots_busy`, nothing committed; a change that cannot (an upgrade, the same plan): commits, logs `workspace_slots_deferred`, the sweep finishes the resume | may lower: the delivery fails; cannot lower: committed and deferred |
 | Legacy plan push (`PUT /internal/workspaces/{id}/plan`) | yes | as above | as above | as above |
 | System-admin plan change (`PUT /api/v1/admin/plans/workspaces/{id}/plan`) | yes | as above | as above (`409` to the admin) | as above |
 | Slot-bonus change (`PATCH /api/v1/admin/users/{id}/workspace_slot_bonus`) | yes | waited for (5 s) first | `503` as before | the request fails |
@@ -163,24 +168,32 @@ creation, which can hold it for seconds, or the sweep). Retry with backoff.
   of its owner runs.
 - **Resume one owner:** raise their slot bonus
   (`PATCH /api/v1/admin/users/{id}/workspace_slot_bonus`); the change resumes
-  within the new allowance at once.
+  within the new allowance at once. Lowering it again later is a drop. To lift
+  one owner's suspensions without changing their allowance, delete their rows
+  (`DELETE FROM workspace_slot_suspensions WHERE owner_user_id = '<user_id>'`):
+  the gates read the rows per request, and nothing suspends again until that
+  owner's next drop.
 - **CLI** (inside the API container):
 
   ```
   python -m src.cli.workspace_slots status [--owner <user_id>]
+  python -m src.cli.workspace_slots status --over-allowance
   python -m src.cli.workspace_slots reconcile [--owner <user_id>] [--even-when-off]
   ```
 
-  `reconcile` resumes and prunes only, never suspends. While the setting is
-  `off` it refuses unless `--even-when-off` is given. An owner whose reconcile
-  fails or whose lock stays busy is reported and the run goes on; the exit code
-  is then 1.
+  `status --over-allowance` lists the owners with more workspaces active than
+  their allowance. `reconcile` resumes and prunes only, never suspends. While
+  the setting is `off` it refuses unless `--even-when-off` is given. An owner
+  whose reconcile fails (in every mode) or whose lock stays busy is reported and
+  the run goes on; the exit code is then 1.
 
 ## Mode switches
 
 - Drops that happen while the mode is `off` or `shadow` are **never applied
   later** (a replayed delivery does not run the triggers again).
 - `enforce -> shadow` restores all access at once and stops new suspensions.
+- `shadow -> enforce` honours the rows still present at once, with no event:
+  `shadow` keeps resuming, so a row there is one that still holds.
 - `enforce -> off`: no code touches the rows. Before switching back on, run
   `python -m src.cli.workspace_slots reconcile --even-when-off` so rows that no
   longer hold (a workspace upgraded or deleted meanwhile) are gone first; a row
@@ -188,22 +201,29 @@ creation, which can hold it for seconds, or the sweep). Retry with backoff.
 - Downgrading the migration drops both tables and every suspension: only with
   the mode `off`.
 
-## Accepted risks
+## Limits
 
 - An owner's own workspace creation can hold the owner lock for seconds;
   allowance-lowering deliveries for that owner get the retryable 409 meanwhile.
 - A cancellation landing just before a sibling workspace's upgrade can suspend
   workspaces for a moment; the upgrade resumes them.
 - A swap planned on a resume-only path (the sweep, a post-commit reconcile, a
-  deferred upgrade) only resumes: the owner ends one over the allowance until
-  their next drop.
+  deferred upgrade) only resumes: the owner is one over the allowance until
+  their next drop, which may be the end of that same contract.
 - Upgrading a suspended workspace to a tier with no slot grant (Basic) swaps out
   the lowest-priority uncontracted workspace.
 - A Free workspace with a paid integration right can be suspended by the default
   order; the owner keeps it by selecting it.
 - Members lose access without an email; MCP-only owners learn it from the
   refusal.
-- Transferring or deleting the top-tier workspace suspends nothing.
+- Only plan changes and slot-bonus reductions suspend: deleting or transferring
+  a workspace never suspends another.
+- Revoking a resource token, an observation credential or a management grant
+  acts on the caller's current workspace, and a suspended workspace cannot be
+  made current: the owner revokes those after the resume, or with an API key of
+  theirs scoped to that workspace. Member credentials and sync authorizations
+  are revoked by path and work while suspended. Deleting a pending invitation,
+  secret-store revocations and removing a member are refused while suspended.
 - A suspended workspace keeps over-capacity data while it stays suspended (the
   purge pauses); swapping which workspace is suspended restarts its purge clock.
 - Presigned file URLs issued before the suspension stay valid until they expire.

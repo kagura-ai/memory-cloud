@@ -2697,11 +2697,15 @@ class Settings(BaseSettings):
             "window closes — tracked in #677 (sub-C: TOCTOU + enforce flip)."
         ),
     )
-    # Issue #2918: what happens when an owner's allowance falls below the
-    # number of workspaces they own. ``off`` (default): nothing; no statement
-    # touches the slot tables, so the code may run before their migration.
-    # ``shadow``: the triggers log what they would suspend, resume rows that
-    # should resume, and the gates ignore the rows. ``enforce``: excess owned
+    # Issue #2918: what happens to an owner's excess owned workspaces when a
+    # paid contract ends or a grant or the slot bonus goes down. ``off``
+    # (default): the triggers, gates, sweep and account routes run no
+    # statement on the slot tables, so the code may run before their
+    # migration (account erasure and user deletion still delete the subject's
+    # rows when the tables exist, the operator CLI reads and writes them, and
+    # the admin plan route locks its workspace row in every mode). ``shadow``:
+    # the triggers log what they would suspend, resume rows that should
+    # resume, and the gates ignore the rows. ``enforce``: excess owned
     # workspaces are suspended (data kept) and resumed when slots return.
     # Read through ``services.workspace_slots.workspace_slot_mode()``.
     workspace_slot_suspension: Literal["off", "shadow", "enforce"] = Field(

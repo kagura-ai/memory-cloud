@@ -90,12 +90,13 @@ backoff. It is never a `404` for an existing workspace. A retry that keeps
 answering it (for example, the installation's Context was deleted while
 management was off) needs the sync operator, not a different body.
 
-With workspace slot suspension enabled (`WORKSPACE_SLOT_SUSPENSION`, #2918,
+With `WORKSPACE_SLOT_SUSPENSION=shadow` or `enforce` (#2918,
 [Workspace slot suspension](workspace-slots.md)), a delivery that changes a
 workspace's plan also brings its owner's suspended workspaces in line, under a
-per-owner lock it tries for under a second. When that lock is busy and the plan
-change may lower the owner's allowance (a lower tier, or a contract that
-ended), the delivery is refused before anything is kept: `409`, `RES-002`,
+per-owner lock it tries for under a second (`shadow`: once). Only `enforce`
+refuses a delivery: when that lock is busy and the plan change may lower the
+owner's allowance (a lower tier, or a contract that ended), the delivery is
+refused before anything is kept: `409`, `RES-002`,
 `details.reason: workspace_slots_busy`, logged as `workspace_slots_busy`. It is
 retryable like `sync_transition_busy`: retry the same body with backoff. The
 legacy `PUT /internal/workspaces/{workspace_id}/plan` answers the same. An

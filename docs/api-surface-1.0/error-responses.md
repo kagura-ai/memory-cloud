@@ -521,11 +521,14 @@ outside the workspace (share key, public reader, management or observation crede
 worker) gets `gate` only. A public MCP endpoint of a suspended workspace pauses (503, like a
 plan pause). The OIDC `GET /api/v1/me/workspaces/{id}/access` answers 200 with `read` and
 `sync.manage` false instead of refusing; the internal billing and sync control routes are not
-gated. What stays usable for the owner only: `GET /api/v1/contexts/{id}/export`,
-`DELETE /api/v1/workspaces/{id}`, `POST /api/v1/billing/handoff`. Revoking a credential is
-never blocked (the member-credential revoke routes, withdrawing a sync authorization, revoking a
-resource token, an observation credential or a management grant): each keeps its own
-authorization. Switching to another workspace and the account routes are not workspace-scoped.
+gated. What stays usable for the owner only: `GET /api/v1/contexts/{id}/export` (with their
+session, an API key or an OAuth token), `DELETE /api/v1/workspaces/{id}`,
+`POST /api/v1/billing/handoff`. Revoking a credential is never refused by the gate: the
+member-credential revoke routes and withdrawing a sync authorization address the workspace by
+path; revoking a resource token, an observation credential or a management grant acts on the
+caller's current workspace, which a suspended workspace cannot become (an API key scoped to it
+can). Each keeps its own authorization. Switching to another workspace and the account routes
+are not workspace-scoped.
 
 Suspended workspaces are listed with `slot_suspended: true` by `GET /api/v1/workspaces`. The
 owner manages them through `/api/v1/me/workspace-slots` (status, preview, selection, exportable
