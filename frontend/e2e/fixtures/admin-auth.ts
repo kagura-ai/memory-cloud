@@ -55,4 +55,13 @@ export const API_URL =
   process.env.NEXT_PUBLIC_API_URL ??
   "http://localhost:8080";
 
+/**
+ * #2919: a second, separate password user that owns three workspaces with
+ * one slot (two suspended), seeded by `seed_e2e_admin --slot-owner` in the
+ * `frontend-a11y-authed` lane only. Unset everywhere else, so the login in
+ * `auth.setup.ts` and the Workspace management spec skip.
+ */
+export const SLOT_OWNER_LOGIN_ID = process.env.E2E_SLOT_OWNER_LOGIN_ID ?? "";
+export const SLOT_OWNER_PASSWORD = process.env.E2E_SLOT_OWNER_PASSWORD ?? "";
+
 export { test, expect };
