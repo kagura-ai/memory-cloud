@@ -76,11 +76,16 @@ def _seed_domain(engine, ids):
 
 def _snapshot(engine, tables=_TABLES):
     with engine.connect() as conn:
-        return {
+        snapshots = {
             table: list(conn.scalars(text(f"SELECT to_jsonb(t) FROM {table} AS t")))
             for table in _TABLES
             if table in tables
         }
+        # Before f57 a claim has no TLS report. Compare that with SQL NULL
+        # after the additive migration, retaining every other field and value.
+        for claim in snapshots.get("public_mcp_domains", []):
+            claim.setdefault("tls_report", None)
+        return snapshots
 
 
 @pytest.mark.parametrize("starting_heads", [(COMMON,), (MANAGED,), (DOMAINS,), (MANAGED, DOMAINS)])
