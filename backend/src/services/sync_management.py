@@ -3,15 +3,18 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any, TypeVar
 from uuid import UUID
 
 from sqlalchemy import Select, and_, case, cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.sync_identity import SyncPrincipal, load_sync_identity
 from auth.workspace_roles import ContextRole
 from config.settings import get_settings
+from db.base import Base
 from models.auth import Context, IdentityLink, User, Workspace
 from models.management_schemas import digest
 from models.memory import Memory
@@ -32,15 +35,18 @@ from models.sync_mode_access_schemas import (
 )
 from services.capacity_lock import CapacityPolicy
 from services.permission_service import PermissionService
-from services.sync_feed_authority import FeedFence, feed_fence, locked
+from services.sync_feed_authority import FeedFence, feed_fence, locked, locked_retried
 from services.sync_feed_index import index_status
 from services.sync_managed_guard import TargetFence, target_fence
-from services.workspace_locks import lock_workspace_for_update
+from services.workspace_locks import lock_workspace_for_update, lock_workspace_nowait
 from utils.datetime import utcnow
+from utils.db_helpers import is_lock_not_available
 from utils.exceptions import ConflictError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+T = TypeVar("T", bound=Base)
 
 
 @dataclass
@@ -349,16 +355,104 @@ async def finish_stopping(
     return row
 
 
+async def share_locked(db: AsyncSession, model: type[T], *conditions: Any) -> T | None:
+    """``FOR SHARE NOWAIT`` for a management read, with the short retry (#2925).
+
+    A human feed read holds the Context row ``FOR UPDATE`` until it commits;
+    the retry lets a management read wait it out instead of answering 409. The
+    reads call it holding only share locks and with nothing pending, so the
+    savepoint of a try flushes nothing. Under the paid write guard (whose commit
+    hook a savepoint release fires) it takes one attempt.
+
+    Raises:
+        SyncLockBusyError: the row is busy (single attempt; 409 ``RES-002``).
+        ConflictError: the row is still busy after the tries (409 ``RES-002``).
+    """
+    if db.info.get("paid_integration_write"):
+        return await locked(db, model, *conditions)
+    return await locked_retried(db, model, *conditions, write=False)
+
+
+async def lock_management_workspace(db: AsyncSession, wid: UUID, *, shared: bool) -> Workspace:
+    """The workspace row lock of :func:`management_boundary`.
+
+    ``shared=False`` (the controls) takes ``FOR UPDATE NOWAIT`` once.
+    ``shared=True`` (the reads, #2925) takes ``FOR SHARE NOWAIT`` and, holding
+    the ``users`` row, tries again for a moment through ``retry_nowait`` instead
+    of waiting. Each try runs in a savepoint whose release fires
+    ``before_commit``, which the paid write guard refuses; under that guard a
+    shared lock is taken in one attempt, without a savepoint.
+
+    Raises:
+        NotFoundException: the workspace is missing or soft-deleted (404).
+        ConflictError: the row is busy (409 ``RES-002``).
+    """
+    if not shared:
+        return await lock_workspace_for_update(db, wid, nowait=True)
+    if not db.info.get("paid_integration_write"):
+        return await lock_workspace_nowait(db, wid, shared=True)
+    try:
+        workspace = await db.scalar(
+            select(Workspace)
+            .where(Workspace.id == wid, Workspace.deleted_at.is_(None))
+            .with_for_update(read=True, nowait=True)
+            .execution_options(populate_existing=True)
+        )
+    except DBAPIError as exc:
+        if is_lock_not_available(exc):
+            raise ConflictError("Workspace is being modified; retry the operation") from exc
+        raise
+    if workspace is None:
+        raise NotFoundException("Workspace")
+    return workspace
+
+
 @asynccontextmanager
 async def management_boundary(
-    db: AsyncSession, wid: UUID, iid: UUID, principal: SyncPrincipal, *, write: bool = True
+    db: AsyncSession,
+    wid: UUID,
+    iid: UUID,
+    principal: SyncPrincipal,
+    *,
+    write: bool = True,
+    shared: bool = False,
 ) -> AsyncIterator[tuple[SyncInstallation, Workspace, FeedFence]]:
-    """Stopping remains available after revocation/expiry and under a capacity hold."""
+    """Stopping remains available after revocation/expiry and under a capacity hold.
+
+    ``write`` selects the authority (``integrations:manage`` and Context Editor,
+    or ``workspaces:read`` and Viewer); ``shared`` selects the lock mode.
+
+    The controls (``shared=False``: stop, finalize, resume preview, diff and
+    confirm, reconnect, and any caller that does not say otherwise) take the
+    workspace and installation rows ``FOR UPDATE NOWAIT``. The reads
+    (``shared=True``: the mode status, the access profile and the resume receipt
+    lookup, #2925) take both rows ``FOR SHARE NOWAIT``, the workspace row with
+    a short retry (:func:`lock_management_workspace`), so two reads, or a read
+    and a memory save, do not answer 409. ``FOR SHARE`` still conflicts with
+    every writer the boundary fences:
+
+    - ownership transfer, role change, member addition, owner erasure and
+      workspace soft deletion: ``SELECT ... FOR UPDATE`` on the workspace row
+      (``lock_workspace_for_update``);
+    - an ``ownership_epoch`` bump or any other ``UPDATE`` of the workspace row,
+      and a hard ``DELETE``: the row's ``FOR NO KEY UPDATE`` / ``FOR UPDATE``;
+    - the sync state transitions (the controls above, the owner's unlink
+      through ``sync_authority``, a billing stop and the maintenance pass):
+      ``FOR UPDATE`` on the workspace row, then ``UPDATE`` of the installation
+      row; resume confirm, reconnect and provisioning first take it ``FOR
+      UPDATE`` in the paid write guard, which waits for an open read.
+
+    Every writer of the installation row holds the workspace row exclusively, so
+    a read holding the workspace share lock never meets one there; it still
+    share-locks the installation row so its view stays fenced by the row itself,
+    which another ``FOR SHARE`` reader or a foreign-key insert (``FOR KEY
+    SHARE``) does not block.
+    """
     management_enabled()
     async with feed_fence(db) as fence:
         try:
             await locked(db, User, User.user_id == principal.user_id)
-            workspace = await lock_workspace_for_update(db, wid, nowait=True)
+            workspace = await lock_management_workspace(db, wid, shared=shared)
             live = await load_sync_identity(
                 db,
                 principal.token_hash,
@@ -370,7 +464,7 @@ async def management_boundary(
                 SyncInstallation,
                 SyncInstallation.id == iid,
                 SyncInstallation.workspace_id == wid,
-                write=True,
+                write=not shared,
             )
             if row is None or (live.user_id, live.client_id) != (
                 principal.user_id,
@@ -404,7 +498,7 @@ async def read_mode_access(
     db: AsyncSession, wid: UUID, iid: UUID, principal: SyncPrincipal
 ) -> SyncModeAccess:
     """Observe current lifecycle rights without enabling canonical data access."""
-    async with management_boundary(db, wid, iid, principal, write=False) as (
+    async with management_boundary(db, wid, iid, principal, write=False, shared=True) as (
         installation,
         _workspace,
         _fence,
@@ -427,7 +521,7 @@ async def read_mode_access(
         # A capability snapshot must not outlive the Context privacy/linked-owner
         # evidence used to authorize it. Refresh and retain those metadata locks
         # through the final RBAC check and commit, without requiring publication.
-        context = await locked(db, Context, Context.id == installation.context_id)
+        context = await share_locked(db, Context, Context.id == installation.context_id)
         if context is None or context.deleted_at is not None:
             raise NotFoundException("Synchronization target")
         if context.is_private and context.created_by != principal.user_id:
@@ -435,7 +529,7 @@ async def read_mode_access(
                 raise NotFoundException("Synchronization target")
             groups = set()
             for user_id in sorted({principal.user_id, context.created_by}):
-                link = await locked(db, IdentityLink, IdentityLink.user_id == user_id)
+                link = await share_locked(db, IdentityLink, IdentityLink.user_id == user_id)
                 if link is None:
                     raise NotFoundException("Synchronization target")
                 groups.add(link.group_id)
@@ -521,11 +615,15 @@ async def control_mode(
     expected: dict | None = None,
 ) -> dict:
     """Read metadata or execute one idempotent stop/finalize command."""
-    async with management_boundary(db, wid, iid, principal, write=operation_id is not None) as (
-        installation,
-        _workspace,
-        _fence,
-    ):
+    # Without an operation this is the status read: it shares the rows (#2925).
+    async with management_boundary(
+        db,
+        wid,
+        iid,
+        principal,
+        write=operation_id is not None,
+        shared=operation_id is None,
+    ) as (installation, _workspace, _fence):
         action = "finalize" if finalize else "stop"
         request = {"expected": expected} if expected is not None else {}
         receipt = (
