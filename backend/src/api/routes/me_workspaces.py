@@ -11,11 +11,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.oidc_bearer import OIDCPrincipal, identity_principal
 from auth.workspace_roles import ContextRole, WorkspaceRole
+from config.plan_tiers import PlanName
 from db.base import get_db
 from models.auth import Workspace, WorkspaceMember
 from services.capacity_lock import CapacityPolicy, capacity_lock_state
@@ -141,6 +142,27 @@ def _query(request: Request, allowed: set[str]) -> dict[str, str]:
     return dict(pairs)
 
 
+EligibleFor = Literal["kagura-public"]
+
+
+def _eligibility(user_id: str, eligible_for: EligibleFor | None) -> list[ColumnElement[bool]]:
+    """The ``eligible_for`` rule, one definition for the listing and the access check.
+
+    ``kagura-public``: the subject is the workspace's canonical owner, holds
+    the owner role in its membership row, and the workspace is on the Max plan
+    now (``plan_name`` is the current plan; Max is the highest tier). Applied
+    in SQL next to the membership join, so it filters before the page is cut.
+    No value adds nothing.
+    """
+    if eligible_for is None:
+        return []
+    return [
+        Workspace.plan_name == PlanName.PROMAX,
+        Workspace.owner_user_id == user_id,
+        WorkspaceMember.role == WorkspaceRole.OWNER,
+    ]
+
+
 @router.get("", response_model=WorkspaceList)
 async def list_workspaces(
     request: Request,
@@ -148,7 +170,7 @@ async def list_workspaces(
     db: Database,
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
     cursor: UUID | None = None,
-    eligible_for: Literal["kagura-public"] | None = None,
+    eligible_for: EligibleFor | None = None,
 ) -> WorkspaceList:
     """List only the subject's live memberships, without consulting the UI workspace."""
     _query(request, {"limit", "cursor", "eligible_for"})
@@ -159,12 +181,9 @@ async def list_workspaces(
         .order_by(Workspace.id)
         .limit(limit + 1)
     )
-    if eligible_for is not None:
-        stmt = stmt.where(
-            Workspace.plan_name == "promax",
-            Workspace.owner_user_id == principal.user_id,
-            WorkspaceMember.role == WorkspaceRole.OWNER,
-        )
+    eligibility = _eligibility(principal.user_id, eligible_for)
+    if eligibility:
+        stmt = stmt.where(*eligibility)
     if cursor is not None:
         stmt = stmt.where(Workspace.id > cursor)
     rows = (await db.execute(stmt)).all()
@@ -186,7 +205,7 @@ async def workspace_access(
     principal: Principal,
     db: Database,
     context_id: UUID | None = None,
-    eligible_for: Literal["kagura-public"] | None = None,
+    eligible_for: EligibleFor | None = None,
 ) -> WorkspaceAccess:
     """Inspect membership and optional resource eligibility with the existing RBAC gates.
 
@@ -206,14 +225,21 @@ async def workspace_access(
         slot=None,
     )
     workspace = await db.get(Workspace, wid)
-    if workspace is None or (
-        eligible_for is not None
-        and (
-            workspace.plan_name != "promax"
-            or workspace.owner_user_id != principal.user_id
-            or member.role != WorkspaceRole.OWNER
+    if workspace is None:
+        raise NotFoundException("Workspace")
+    eligibility = _eligibility(principal.user_id, eligible_for)
+    if eligibility and not await db.scalar(
+        select(
+            exists().where(
+                Workspace.id == wid,
+                Workspace.deleted_at.is_(None),
+                WorkspaceMember.workspace_id == Workspace.id,
+                WorkspaceMember.user_id == principal.user_id,
+                *eligibility,
+            )
         )
     ):
+        # Answers like a workspace the subject cannot reach.
         raise NotFoundException("Workspace")
     suspended = await slot_suspended(db, workspace)
     resource = None
