@@ -647,8 +647,9 @@ async def owner_selection_required(db: AsyncSession, owner_user_id: str) -> bool
 class _OwnerState:
     """One owner's slot inputs, read with column selects (fresh values).
 
-    ``owned[i].suspended`` follows the read-time rule: an own row on a
-    workspace not under a billing contract. ``own_rows`` holds every own row
+    ``owned[i].suspended`` is the read-time rule (``suspension_in_force``,
+    evaluated in the same statement): an own row on a workspace not under a
+    billing contract. ``own_rows`` holds every own row
     on an owned workspace (contracted ones included) with its time;
     ``foreign_rows`` the rows another owner left on an owned workspace;
     ``orphan_rows`` this owner's rows on workspaces they no longer own.
@@ -692,6 +693,9 @@ async def _read_owner(db: AsyncSession, owner_user_id: str) -> _OwnerState:
                 Workspace.plan_name,
                 Workspace.entitlement_source,
                 Workspace.created_at,
+                # The gate's read-time rule itself, so the overview, the
+                # planner and every gate share one definition.
+                suspension_in_force().label("suspended"),
             ).where(Workspace.owner_user_id == owner_user_id, Workspace.deleted_at.is_(None))
         )
     ).all()
@@ -739,9 +743,7 @@ async def _read_owner(db: AsyncSession, owner_user_id: str) -> _OwnerState:
             plan_name=r.plan_name,
             entitlement_source=r.entitlement_source,
             created_at=r.created_at,
-            suspended=(
-                r.id in own_rows and not billing_contract_active(r.plan_name, r.entitlement_source)
-            ),
+            suspended=bool(r.suspended),
         )
         for r in rows
     )
