@@ -122,6 +122,24 @@ async def test_bad_query_is_safe_and_no_store(api, query):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/me/workspaces?eligible_for=other",
+        "/api/v1/me/workspaces?eligible_for=",
+        "/api/v1/me/workspaces?eligible_for=KAGURA-PUBLIC",
+        "/api/v1/me/workspaces?eligible_for=kagura-public&eligible_for=kagura-public",
+        "/api/v1/me/workspaces/00000000-0000-0000-0000-000000000000/access?eligible_for=other",
+        "/api/v1/me/workspaces/00000000-0000-0000-0000-000000000000/access?eligible_for=",
+    ],
+)
+async def test_unknown_eligible_for_is_invalid_request_not_an_unfiltered_answer(api, path):
+    response = await get(api, path, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert_private(response, 400)
+    assert response.json() == {"error": "invalid_request"}
+
+
+@pytest.mark.asyncio
 async def test_dependency_failures_never_echo_exception_or_credential(api):
     api[1].execute.side_effect = RuntimeError(f"private-connection-error {TOKEN}")
     response = await get(api, headers={"Authorization": f"Bearer {TOKEN}"})
