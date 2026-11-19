@@ -385,6 +385,16 @@ openapi_tags = [
         ),
     },
     {
+        "name": "workspace-slots",
+        "description": (
+            "Workspace slots (Issue #2918, experimental): the signed-in owner's workspace "
+            "allowance, which owned workspaces are active or suspended, the selection of "
+            "workspaces to keep, and the exportable contexts of an owned workspace. "
+            "Browser session only; the whole surface 404s unless the deployment sets "
+            "WORKSPACE_SLOT_SUSPENSION=enforce."
+        ),
+    },
+    {
         "name": "announcement-emails",
         "description": (
             "Announcement-email consent (Issue #2761): the signed-in user's opt-in "
@@ -965,6 +975,7 @@ from api.routes import (  # noqa: E402
     me_oauth,  # Issue #515: manual IdP refresh endpoint
     me_oauth_grants,  # Issue #2129: authorized OAuth apps and their default context
     me_terms,  # Issue #1665: terms-of-service re-acceptance
+    me_workspace_slots,  # Issue #2918: the owner's workspace slots (experimental)
     me_workspaces,  # #2793: identity-only membership and effective access inspection
     member_credentials,
     memory,
@@ -1035,6 +1046,10 @@ app.include_router(me_oauth_grants.router, prefix="/api/v1")
 
 # Terms-of-service re-acceptance (Issue #1665)
 app.include_router(me_terms.router, prefix="/api/v1")
+
+# The owner's workspace allowance and slot selection (Issue #2918, experimental;
+# 404 unless WORKSPACE_SLOT_SUSPENSION=enforce)
+app.include_router(me_workspace_slots.router, prefix="/api/v1")
 
 # Announcement-email consent: settings toggle + unsubscribe link (Issue #2761)
 app.include_router(announcement_emails.me_router, prefix="/api/v1")

@@ -93,6 +93,7 @@ from services.security_notification_service import (
 from services.signup_gate_service import check_signup_access
 from services.terms_service import TermsService, current_terms_version
 from services.workspace_service import WorkspaceService
+from services.workspace_slots import owner_selection_required
 from utils.datetime import utcnow
 from utils.encryption import get_encryptor
 from utils.exceptions import (
@@ -2712,6 +2713,13 @@ async def get_current_user_info(
             # re-acceptance step does not depend on a separate /system/info
             # fetch that may have failed.
             "terms_version": current_terms_version(),
+            # Issue #2918: true while a drop of this owner's workspace allowance
+            # left workspaces suspended that they have not chosen; the web UI then
+            # takes them to the workspace management page. Always false unless
+            # WORKSPACE_SLOT_SUSPENSION=enforce (no statement runs then).
+            "workspace_selection_required": (
+                await owner_selection_required(db, user_id) if user_id else False
+            ),
         }
     }
 

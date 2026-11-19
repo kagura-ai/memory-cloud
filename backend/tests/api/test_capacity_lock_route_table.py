@@ -69,6 +69,8 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "me_oauth": NOT_APPLICABLE,
     "me_oauth_grants": NOT_APPLICABLE,  # #2129: grant settings; names a context only
     "me_terms": NOT_APPLICABLE,
+    # #2918: the owner's allowance and selection; the context list is names only
+    "me_workspace_slots": NOT_APPLICABLE,
     "member_credentials": NOT_APPLICABLE,
     "memory_health": NOT_APPLICABLE,  # #2764: the caller's own health signals, no memory content
     "mfa_settings": NOT_APPLICABLE,

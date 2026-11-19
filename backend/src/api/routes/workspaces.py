@@ -45,6 +45,7 @@ from services.permission_service import PermissionService
 from services.plan_seats import seat_limit
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
+from services.workspace_slots import suspended_workspace_ids
 from utils.auth_helpers import get_user_id
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, ValidationError
@@ -152,6 +153,10 @@ class WorkspaceResponse(BaseModel):
     created_at: str
     current_user_role: str | None = None  # Current user's role in this workspace
     analyses_enabled: bool = False  # Memory Analysis allowlist (#497)
+    # #2918: the workspace is suspended because its owner owns more workspaces
+    # than their allowance. Filled by the list (every row, members' too) and
+    # false elsewhere; always false unless WORKSPACE_SLOT_SUSPENSION=enforce.
+    slot_suspended: bool = False
 
     class Config:
         from_attributes = True
@@ -471,6 +476,8 @@ async def list_workspaces(
     workspace_service = WorkspaceService(db)
 
     workspaces = await workspace_service.list_user_workspaces(user["user_id"])
+    # #2918: one statement for the whole list, none unless the mode is enforce.
+    suspended = await suspended_workspace_ids(db, [w.id for w in workspaces])
 
     # Get stats and user role for each workspace
     result = []
@@ -496,6 +503,7 @@ async def list_workspaces(
                 created_at=to_utc_iso(workspace.created_at) or "",
                 current_user_role=user_role,
                 analyses_enabled=check_workspace_in_allowlist(workspace.id),
+                slot_suspended=workspace.id in suspended,
             )
         )
 
