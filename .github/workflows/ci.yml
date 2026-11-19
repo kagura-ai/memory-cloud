@@ -570,6 +570,14 @@ jobs:
       REDIS_URL: redis://localhost:6379
       CORS_ORIGINS: http://localhost:3000
       E2E_ADMIN_LOGIN_ID: e2e-admin
+      # #2918: the workspace management spec signs in as a second, separate
+      # user whose allowance dropped to one of its three Free workspaces.
+      # Slot suspension is enforced in this job only (enforce needs the
+      # workspace cap enforced; the admin owns one Pro workspace, cap 3, so the
+      # other specs see no change).
+      E2E_SLOT_OWNER_LOGIN_ID: e2e-slot-owner
+      WORKSPACE_SLOT_SUSPENSION: enforce
+      ENFORCE_WORKSPACE_CAP: "true"
       E2E_API_URL: http://localhost:8080
       NEXT_PUBLIC_API_URL: http://localhost:8080
       # #1500: wait-for-api.sh reads the boot-phase INFO lines from the API log.
@@ -645,12 +653,20 @@ jobs:
             echo "AUDIT_HMAC_KEY=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
             echo "E2E_ADMIN_PASSWORD=Ci-$(python -c 'import secrets; print(secrets.token_urlsafe(18))')-9X"
           } >> "$GITHUB_ENV"
+          # #2918: the slot owner's password, masked in the job log.
+          SLOT_OWNER_PASSWORD="Ci-$(python -c 'import secrets; print(secrets.token_urlsafe(18))')-9X"
+          echo "::add-mask::$SLOT_OWNER_PASSWORD"
+          echo "E2E_SLOT_OWNER_PASSWORD=$SLOT_OWNER_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Migrate schema
         run: cd backend && alembic upgrade head
 
       - name: Seed e2e admin
         run: cd backend && python -m src.cli.seed_e2e_admin
+
+      - name: Seed e2e slot owner
+        # #2918: three Free workspaces, two suspended, selection required.
+        run: cd backend && python -m src.cli.seed_e2e_admin --slot-owner
 
       - name: Start API server
         # Logged to a file so the readiness gate can read the boot phases.

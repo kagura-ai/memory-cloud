@@ -26,9 +26,12 @@ export function exportFileName(contextName: string): string {
 export function ExportContextButton({
   contextId,
   contextName,
+  ariaLabel,
 }: {
   contextId: string;
   contextName: string;
+  /** A name that tells several export buttons in one list apart (#2919). */
+  ariaLabel?: string;
 }) {
   const t = useTranslations("contextDetail");
   const { toast } = useToast();
@@ -62,6 +65,7 @@ export function ExportContextButton({
       size="sm"
       onClick={() => void onExport()}
       disabled={busy}
+      aria-label={ariaLabel}
     >
       <Download className="mr-2 h-4 w-4" />
       {t("export")}

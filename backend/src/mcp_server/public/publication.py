@@ -36,11 +36,13 @@ from models.public_mcp_domain import PublicMcpDomain
 from models.resource import Resource
 from services.capacity_lock import ensure_not_capacity_locked
 from services.plan_suspension import ensure_public_serving_allowed
+from services.workspace_slot_gate import ensure_slot_active
 from utils.exceptions import (
     CapacityLockedError,
     NotFoundException,
     QuotaExceededError,
     ValidationError,
+    WorkspaceSlotSuspendedError,
 )
 from utils.logger import get_logger
 
@@ -207,9 +209,9 @@ async def load_serving_endpoint_for_alias(
 
 
 async def serving_paused(db: AsyncSession, endpoint: ServingEndpoint) -> bool:
-    """Whether the workspace's plan pause or capacity lock stops serving now.
+    """Whether the workspace's plan pause, capacity lock or slot suspension stops serving now.
 
-    Only these two refusals are caught; their messages (plan, quota, counts)
+    Only these refusals are caught; their messages (plan, quota, counts)
     are not forwarded — the caller answers a bare 503.
     """
     workspace = endpoint.workspace or await db.get(Workspace, endpoint.workspace_id)
@@ -218,7 +220,9 @@ async def serving_paused(db: AsyncSession, endpoint: ServingEndpoint) -> bool:
     try:
         ensure_public_serving_allowed(workspace)
         await ensure_not_capacity_locked(db, workspace, outsider=True)
-    except (QuotaExceededError, CapacityLockedError):
+        # #2918: a slot-suspended workspace publishes nothing.
+        await ensure_slot_active(db, workspace, user_id=None, outsider=True)
+    except (QuotaExceededError, CapacityLockedError, WorkspaceSlotSuspendedError):
         return True
     return False
 

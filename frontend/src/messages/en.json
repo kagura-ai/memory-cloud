@@ -1183,7 +1183,8 @@
       "appearance": "Appearance",
       "emails": "Emails",
       "mcpNotices": "Notices in AI tools",
-      "deletion": "Account deletion"
+      "deletion": "Account deletion",
+      "workspaces": "Workspace management"
     },
     "title": "Account settings",
     "subtitle": "Manage your user profile, preferences, and security settings.",
@@ -1320,6 +1321,10 @@
     "deleteWorkspaceDialogDesc": "This will permanently delete {workspaceName} and:",
     "allContexts": "All contexts",
     "filterByContext": "Filter by context",
+    "copyContextLink": "Copy link to {name}",
+    "contextLinkCopied": "Link copied",
+    "contextLinkUnavailable": "The linked context is not in this workspace.",
+    "openLinkedContext": "Open the context",
     "allMemories": "All memories",
     "allMembers": "All members",
     "deleting": "Deleting...",
@@ -5107,6 +5112,14 @@
         "plural": "Operation history",
         "singular": "Operation history"
       }
+    },
+    "workspace_slot": {
+      "title": "This workspace is suspended",
+      "description": "Its owner has more workspaces than their allowance. Its data is kept.",
+      "askOwner": "Ask the workspace owner to resume it.",
+      "manage": "Open workspace management",
+      "badge": "Suspended",
+      "hint": "Suspended: over the workspace allowance"
     }
   },
   "passwordRecovery": {
@@ -5714,5 +5727,131 @@
       "token_endpoint_auth_method": "Token authentication method"
     },
     "accountAttribution": "Authenticated account; a shared credential does not identify the individual caller."
+  },
+  "workspaceSlots": {
+    "title": "Workspace management",
+    "description": "See your workspace allowance, choose which workspaces to keep using, and manage suspended ones.",
+    "backToAccount": "Back to account settings",
+    "unavailable": "Workspace management is not available on this deployment.",
+    "loadFailed": "Could not load your workspaces.",
+    "summary": {
+      "label": "Workspace allowance",
+      "active": "Active {active} of {slots}",
+      "owned": "{count} owned",
+      "sharedNotCounted": "Only workspaces you own count. Shared workspaces you have joined do not."
+    },
+    "empty": {
+      "title": "You don't own any workspaces",
+      "description": "Shared workspaces you have joined are managed by their owners. Create a workspace of your own to manage it here.",
+      "action": "Create a workspace"
+    },
+    "selectionRequired": {
+      "title": "Your choice is needed",
+      "description": "Your allowance is now lower than the number of workspaces you own, so some were suspended. Their data is kept. Choose below which ones to keep using."
+    },
+    "stale": "Your workspaces changed since this page loaded.",
+    "staleRefreshed": "The list is up to date now. Review it and try again.",
+    "table": {
+      "caption": "Workspaces you own",
+      "name": "Workspace",
+      "plan": "Plan",
+      "status": "Status",
+      "actions": "Actions",
+      "current": "Current"
+    },
+    "status": {
+      "active": "Active",
+      "slot_suspended": "Suspended",
+      "suspendedOn": "Suspended on {date}"
+    },
+    "reason": "Suspended because you own more workspaces than your allowance. Nobody, members included, can use it until it is resumed. Its data is kept.",
+    "contractNote": "Cannot be deleted while its paid subscription is active.",
+    "changePlan": "Change plan",
+    "planOpening": "Opening the plan page…",
+    "planUnavailable": "Plan changes are not available on this deployment.",
+    "actions": {
+      "export": "Export",
+      "delete": "Delete",
+      "resume": "Resume",
+      "resumeNamed": "Resume {name}",
+      "exportNamed": "Export {name}",
+      "deleteNamed": "Delete {name}",
+      "changePlanNamed": "Change the plan of {name}"
+    },
+    "keep": {
+      "question": "Which workspaces do you want to keep using?",
+      "questionAfterEnd": "Which workspaces do you want to keep using after your paid subscriptions end?",
+      "count": "{count} selected. You can keep up to {max}.",
+      "contracted": "Has a paid subscription, so it stays active.",
+      "preview": "Preview",
+      "previewHint": "Preview your choice to save it.",
+      "save": "Save choice",
+      "saving": "Saving…",
+      "saved": "Your choice was saved.",
+      "previewTitle": "If you save this choice",
+      "staysActive": "Stay active",
+      "willBeSuspended": "Will be suspended",
+      "staysSuspended": "Stay suspended",
+      "unmet": "No slot can be freed for these",
+      "none": "None",
+      "previewFailed": "Could not preview this choice.",
+      "saveFailed": "Could not save your choice."
+    },
+    "current": {
+      "title": "Choose which workspaces to keep using",
+      "description": "Up to {max} of your workspaces can be active now. Choosing a suspended workspace suspends another one instead."
+    },
+    "cancellation": {
+      "title": "If your paid subscriptions end",
+      "description": "If all your paid subscriptions end, up to {cap, plural, one {# workspace} other {# workspaces}} can stay active from the end of the paid term. The billing page shows the date.",
+      "openBilling": "Open the billing page",
+      "wouldSuspend": "With your current choice, these would be suspended then:",
+      "optional": "Choosing now is optional. If you cancel without choosing, the default order decides which workspaces stay active: the one you are using now first, then higher plans, then older workspaces. You can change this on this page at any time."
+    },
+    "full": {
+      "title": "No slot can be freed",
+      "description": "All active slots are used by workspaces with a paid subscription.",
+      "upgrade": "Upgrading a workspace to {plan} raises your allowance to {cap}.",
+      "delete": "Or delete a workspace you no longer need."
+    },
+    "export": {
+      "title": "Export {name}",
+      "description": "Download each context as a JSON file.",
+      "privateNote": "Other members' private contexts are not included.",
+      "private": "Private",
+      "loadFailed": "Could not load the contexts of this workspace.",
+      "emptyTitle": "No contexts to export",
+      "emptyDescription": "This workspace has no contexts you can export."
+    },
+    "resume": {
+      "title": "Resume {name}?",
+      "checking": "Checking for a free slot…",
+      "freeSlot": "A slot is free. {name} will be active again.",
+      "swap": "All your slots are in use. To resume {name}, these will be suspended instead:",
+      "confirm": "Resume",
+      "resuming": "Resuming…",
+      "resumed": "{name} is active again.",
+      "failed": "Could not resume this workspace."
+    },
+    "deleteDialog": {
+      "failed": "Could not delete this workspace."
+    },
+    "busy": "Another change to your workspaces is in progress. Try again in a moment.",
+    "suspendedPlan": {
+      "title": "Change the plan of {name}?",
+      "body": "A paid plan resumes this workspace. If the new plan does not add a slot, another of your workspaces is suspended instead: paid workspaces are kept first, then your selection.",
+      "continue": "Continue to billing"
+    },
+    "card": {
+      "suspended": "Suspended",
+      "manage": "Open workspace management",
+      "askOwner": "Ask the workspace owner to resume it."
+    },
+    "menuEntry": "Workspace management",
+    "profileLink": {
+      "title": "Workspace management",
+      "description": "See your workspace allowance, choose which workspaces to keep using, and manage suspended ones.",
+      "open": "Open workspace management"
+    }
   }
 }

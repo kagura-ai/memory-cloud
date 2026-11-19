@@ -28,6 +28,7 @@ from services.workspace_locks import (
     lock_workspace_nowait,
     retry_nowait,
 )
+from services.workspace_slot_gate import ensure_slot_active
 from utils.datetime import utcnow
 from utils.db_helpers import is_lock_not_available
 from utils.exceptions import ConflictError, NotFoundException, SyncLockBusyError
@@ -244,10 +245,15 @@ async def current_schema(db: AsyncSession, row: SyncInstallation) -> ResourceSch
 async def worker_target(
     db: AsyncSession, row: SyncInstallation, *, content_write: bool = False
 ) -> None:
-    """Called only after the paid service guard owns the Workspace lock."""
+    """Called only after the paid service guard owns the Workspace lock.
+
+    #2918: a slot-suspended workspace is refused to the worker for every
+    operation, reads included (the worker is never a member: redacted form).
+    """
     if not db.info.get("paid_integration_write"):
         raise RuntimeError("Synchronization writes require paid authority")
     await exact_target(db, row)
+    await ensure_slot_active(db, row.workspace_id, user_id=None, outsider=True)
     if content_write:
         await ensure_not_capacity_locked(db, row.workspace_id)
         context = await db.get(Context, row.context_id)

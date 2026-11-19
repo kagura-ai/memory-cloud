@@ -5,9 +5,17 @@
  *
  * Issue #276: Shared component for displaying workspace information.
  * Used by both WorkspaceSwitcher and WorkspaceSelectionScreen.
+ *
+ * Issue #2919: a workspace suspended over its owner's allowance
+ * (`slot_suspended`) is shown, labelled and never selectable. Under the card
+ * the owner gets a link to Workspace management, a member the advice to ask
+ * the owner (a link cannot sit inside the card's button).
  */
 
+import Link from 'next/link';
 import { PlanBadge } from '@/components/common/PlanBadge';
+import { Badge } from '@/components/ui/badge';
+import { WORKSPACE_MANAGEMENT_PATH } from '@/lib/navigation/workspaceManagement';
 import type { PlanTier } from '@/lib/utils/planLabel';
 import { useTranslations } from 'next-intl';
 import { Brain, Users } from 'lucide-react';
@@ -21,6 +29,8 @@ export interface WorkspaceInfo {
   member_count: number;
   context_count: number;
   current_user_role?: string | null;
+  /** #2918: suspended over the owner's workspace allowance. */
+  slot_suspended?: boolean;
 }
 
 interface WorkspaceCardProps {
@@ -39,17 +49,44 @@ export function WorkspaceCard({
   disabled = false,
 }: WorkspaceCardProps) {
   const t = useTranslations('workspace');
+  const tSlots = useTranslations('workspaceSlots');
+  const suspended = workspace.slot_suspended === true;
+  const isDisabled = disabled || suspended;
 
   const baseClasses = `
     w-full text-left transition-all
-    ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+    ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
   `;
 
-  if (variant === 'compact') {
+  const suspendedBadge = suspended ? (
+    <Badge variant="outline" className="text-xs">
+      {tSlots('card.suspended')}
+    </Badge>
+  ) : null;
+
+  const withSuspendedNote = (card: React.ReactNode, compact: boolean) => {
+    if (!suspended) return card;
     return (
+      <div>
+        {card}
+        <p className={`${compact ? 'px-3 pb-2' : 'px-4 pt-1'} text-xs text-slate-600 dark:text-slate-300`}>
+          {workspace.current_user_role === 'owner' ? (
+            <Link href={WORKSPACE_MANAGEMENT_PATH} className="underline">
+              {tSlots('card.manage')}
+            </Link>
+          ) : (
+            tSlots('card.askOwner')
+          )}
+        </p>
+      </div>
+    );
+  };
+
+  if (variant === 'compact') {
+    return withSuspendedNote(
       <button
         onClick={onClick}
-        disabled={disabled}
+        disabled={isDisabled}
         aria-current={isSelected ? true : undefined}
         className={`
           ${baseClasses}
@@ -62,6 +99,7 @@ export function WorkspaceCard({
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <WorkspaceRelationship role={workspace.current_user_role} />
             <PlanBadge planName={workspace.plan_name as PlanTier} size="sm" />
+            {suspendedBadge}
           </div>
         </div>
         {isSelected && (
@@ -73,15 +111,16 @@ export function WorkspaceCard({
             />
           </svg>
         )}
-      </button>
+      </button>,
+      true,
     );
   }
 
   // Full variant for WorkspaceSelectionScreen
-  return (
+  return withSuspendedNote(
     <button
       onClick={onClick}
-      disabled={disabled}
+      disabled={isDisabled}
       aria-current={isSelected ? true : undefined}
       className={`
         ${baseClasses}
@@ -90,7 +129,7 @@ export function WorkspaceCard({
           ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
           : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
         }
-        ${disabled ? '' : 'hover:shadow-md'}
+        ${isDisabled ? '' : 'hover:shadow-md'}
       `}
     >
       <div className="flex items-start justify-between">
@@ -103,6 +142,7 @@ export function WorkspaceCard({
               </h3>
               <PlanBadge planName={workspace.plan_name as PlanTier} size="sm" />
               <WorkspaceRelationship role={workspace.current_user_role} />
+              {suspendedBadge}
             </div>
             {workspace.description && (
               <p className="text-sm text-slate-600 dark:text-slate-400 mb-2 line-clamp-2">
@@ -136,6 +176,7 @@ export function WorkspaceCard({
           </svg>
         )}
       </div>
-    </button>
+    </button>,
+    false,
   );
 }

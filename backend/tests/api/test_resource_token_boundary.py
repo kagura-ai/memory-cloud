@@ -24,7 +24,11 @@ from sqlalchemy.dialects import postgresql
 import api.routes.resource_tokens as route_module
 from api.main import app
 from api.routes.resource_tokens import get_resource_token_manager
-from auth.dependencies import get_user_from_api_key_or_session, require_workspace_owner
+from auth.dependencies import (
+    get_user_from_api_key_or_session,
+    require_workspace_owner,
+    require_workspace_owner_for_revocation,
+)
 from auth.resource_tokens import (
     ResourceTokenManager,
     workspace_regular_active_tokens,
@@ -108,6 +112,8 @@ def owner_client():
 
     app.dependency_overrides[get_user_from_api_key_or_session] = mock_auth
     app.dependency_overrides[require_workspace_owner] = mock_owner
+    # #2918: the revoke route's owner check (never blocked by a slot suspension).
+    app.dependency_overrides[require_workspace_owner_for_revocation] = mock_owner
     app.dependency_overrides[get_db] = mock_db
     app.dependency_overrides[get_resource_token_manager] = mock_manager
     with TestClient(app, raise_server_exceptions=False) as client:

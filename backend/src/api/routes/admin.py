@@ -44,6 +44,7 @@ from models.schemas import (
 )
 from services.email_service import get_email_service
 from services.system_admin_service import SystemAdminService
+from services.workspace_locks import owner_lock_key
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from utils import db_transaction, get_user_id
 from utils.datetime import to_utc_iso
@@ -57,6 +58,7 @@ from utils.exceptions import (
     NotFoundException,
     OperatorPrincipalNotSupportedError,
     ValidationError,
+    WorkspaceSlotSuspendedError,
 )
 from utils.logger import get_logger
 from utils.plan_resolver import (
@@ -670,8 +672,9 @@ async def get_user_detail(
                 for ctx in contexts:
                     all_contexts.append(ctx)
                     context_workspace_map[ctx.id] = (workspace, member.role)
-            except (NotFoundException, AuthorizationError):
-                # Skip if no access
+            except (NotFoundException, AuthorizationError, WorkspaceSlotSuspendedError):
+                # Skip if no access; #2918: a slot-suspended workspace lists
+                # no contexts (the page with the slot-bonus control must load).
                 pass
 
         # Batch fetch all ContextMembers for this user
@@ -958,7 +961,7 @@ async def update_workspace_slot_bonus(
     try:
         await db.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
-                key=f"workspace_create:{user_id}"
+                key=owner_lock_key(user_id)
             )
         )
     except DBAPIError as exc:
@@ -1090,6 +1093,29 @@ async def update_workspace_slot_bonus(
             },
         )
         db.add(audit)
+        # #2918: owned-workspace slots for the new bonus. The owner lock is
+        # held since the top of this handler; a reduction cuts the owner to the
+        # allowance, an increase resumes.
+        from services.workspace_slots import SlotChange, reconcile_workspace_slots
+
+        try:
+            await reconcile_workspace_slots(
+                db,
+                user_id,
+                cause="slot_bonus",
+                allow_suspend=True,
+                change=SlotChange(previous_slot_bonus=before_value),
+            )
+        except Exception as exc:
+            # The request fails as a whole; one line per owner to alert on.
+            logger.warning(
+                "workspace_slots_reconcile_failed",
+                owner_user_id=user_id,
+                workspace_id=None,
+                cause="slot_bonus",
+                error_class=type(exc).__name__,
+            )
+            raise
         await db.commit()
 
     logger.info(

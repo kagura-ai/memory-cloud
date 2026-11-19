@@ -34,6 +34,7 @@ from auth.dependencies import (
     get_user_from_api_key_or_session,
     require_session_auth,
     require_workspace_owner,
+    require_workspace_owner_for_revocation,
 )
 from auth.resource_tokens import ResourceTokenManager, workspace_regular_active_tokens
 from auth.workspace_roles import WorkspaceRole
@@ -177,6 +178,7 @@ async def scenario(async_engine, db_session):
         app.dependency_overrides[get_user_from_api_key_or_session] = override_auth
         app.dependency_overrides[require_session_auth] = override_auth
         app.dependency_overrides[require_workspace_owner] = override_owner
+        app.dependency_overrides[require_workspace_owner_for_revocation] = override_owner
 
     yield {
         "slug": slug,

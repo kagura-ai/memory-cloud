@@ -2567,6 +2567,11 @@ class AccountErasureService:
         counts["context_read_attributions"] = await self._count_and_delete(
             ContextReadAttribution, ContextReadAttribution.user_id == user_id
         )
+        # #2918: the subject's workspace-slot selection and suspension rows
+        # (no foreign key). In every mode, and a no-op before the migration.
+        from services.workspace_slots import delete_owner_slot_rows
+
+        counts.update(await delete_owner_slot_rows(self.db, user_id))
 
         # Workspace memberships and invitations.
         counts["workspace_members"] = await self._count_and_delete(

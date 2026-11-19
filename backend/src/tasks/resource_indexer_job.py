@@ -12,13 +12,15 @@ from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import select
+from sqlalchemy import exists, select
 
 from db.base import get_db
 from db.redis import get_redis_client, increment_counter
+from models.auth import Context
 from models.resource import IndexerState
 from services.resource_indexer import ResourceIndexer, recorded_failed_events
 from services.sync_feed_index import maintain_sync_runs
+from services.workspace_slot_gate import active_workspace_predicate
 from tasks.job_runs import JobResult, job_failed
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -146,17 +148,23 @@ async def run_queued_indexers() -> JobResult:
                     error=str(e),
                 )
             # Find queued indexers ready to run
-            result = await db.execute(
-                select(IndexerState)
-                .where(
-                    IndexerState.job_status == "queued",
-                    IndexerState.next_run_at <= utcnow(),
+            pick = select(IndexerState).where(
+                IndexerState.job_status == "queued",
+                IndexerState.next_run_at <= utcnow(),
+            )
+            # #2918: a slot-suspended workspace's rows stay queued, unpicked,
+            # until it is resumed (nothing is added unless the mode is enforce).
+            slot_active = active_workspace_predicate(Context.workspace_id)
+            if slot_active is not None:
+                pick = pick.where(
+                    exists().where(Context.id == IndexerState.context_id, slot_active)
                 )
-                # Longest-waiting first (#1939): rows held back by a plan
-                # suspension or the memory limit re-queue hourly and must not
-                # crowd runnable rows out of the 10-row pick. id breaks ties.
-                .order_by(IndexerState.next_run_at.asc(), IndexerState.id.asc())
-                .limit(10)  # Process up to 10 per cycle
+            # Longest-waiting first (#1939): rows held back by a plan
+            # suspension or the memory limit re-queue hourly and must not
+            # crowd runnable rows out of the 10-row pick. id breaks ties.
+            # Process up to 10 per cycle.
+            result = await db.execute(
+                pick.order_by(IndexerState.next_run_at.asc(), IndexerState.id.asc()).limit(10)
             )
             states = list(result.scalars().all())
 

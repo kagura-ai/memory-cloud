@@ -41,6 +41,12 @@ export interface Workspace {
    * empty state).
    */
   analyses_enabled?: boolean;
+  /**
+   * #2918: suspended because its owner has more workspaces than their plan
+   * allows. Sent on every row (members see it too); absent on an older API.
+   * A suspended workspace is never selectable as the current one.
+   */
+  slot_suspended?: boolean;
 }
 
 export interface CredentialsStatusInfo {

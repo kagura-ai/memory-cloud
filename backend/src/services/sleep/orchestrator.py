@@ -36,6 +36,7 @@ from services.sleep.merge_retention import MergeRetentionPhase
 from services.sleep.reindex import ReindexPhase
 from services.sleep.related_index import RelatedIndexPhase, index_enabled
 from services.sleep.reporter import LLMSpendTracker, PhaseResult, SleepBudget, SleepReporter
+from services.workspace_slot_gate import slot_suspended
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -330,7 +331,8 @@ class SleepOrchestrator:
         stored 'edges_only' becomes 'skip' (it never ran retention). The
         stored ``Context.sleep_mode`` is left as it is, so re-subscribing
         resumes Sleep with no further action. Every run (nightly sweep, admin
-        trigger) reads its mode here.
+        trigger) reads its mode here. #2918: a slot-suspended workspace is
+        'skip' (nothing runs until it is resumed; the stored mode is kept).
         """
         if not context_id:
             return "skip"
@@ -339,6 +341,15 @@ class SleepOrchestrator:
             result = await self.db.execute(stmt)
             context = result.scalar_one_or_none()
             if context and context.sleep_mode:
+                if context.sleep_mode != "skip" and await slot_suspended(
+                    self.db, context.workspace_id
+                ):
+                    logger.info(
+                        "sleep_skipped_workspace_slot_suspended",
+                        context_id=context_id,
+                        workspace_id=str(context.workspace_id),
+                    )
+                    return "skip"
                 if context.sleep_mode != "skip":
                     workspace = await self.db.get(Workspace, context.workspace_id)
                     if workspace is not None and sleep_suspended(workspace):

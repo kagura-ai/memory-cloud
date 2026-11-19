@@ -192,7 +192,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "user its help once), payload_too_large (limit, "
         "actual: one memory is over 1,000,000 chars — split it by topic), validation_error, "
         "capacity_locked (the workspace is over its Free capacity: help names what "
-        "to remove and cleanup_url; list, forget and delete_context still work)."
+        "to remove and cleanup_url; list, forget and delete_context still work), "
+        "workspace_suspended (its owner has more workspaces than their plan allows; help "
+        "says who can resume it; contexts in other workspaces still work)."
     ),
     # ------------------------------------------------------------------ recall
     "recall.which-tool": (

@@ -22,6 +22,7 @@ import { getContext } from "@/lib/api/contexts";
 import { ApiError } from "@/lib/api/base";
 import type { Context } from "@/lib/types/context";
 import { useSearchParams } from "next/navigation";
+import { isUuid } from "@/lib/utils/uuid";
 
 interface MemoryContextContextValue {
   currentContext: Context | null;
@@ -38,7 +39,10 @@ const MemoryContextContext = createContext<
 
 export function MemoryContextProvider({ children }: { children: ReactNode }) {
   const searchParams = useSearchParams();
-  const contextIdFromUrl = searchParams?.get("context");
+  // The context parameter is read only when it is a UUID; any other value is
+  // treated as absent.
+  const contextParam = searchParams?.get("context");
+  const contextIdFromUrl = isUuid(contextParam) ? contextParam : null;
 
   const [currentContext, setCurrentContext] = useState<Context | null>(null);
   const [isLoading, setIsLoading] = useState(true);

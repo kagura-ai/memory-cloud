@@ -239,3 +239,32 @@ describe("Sidebar beta invites — feature on", () => {
     ).toBeVisible();
   });
 });
+
+// #2919: the Workspace management entry shares this file's pass-through menu.
+describe("Sidebar account menu — Workspace management (#2919)", () => {
+  const entry = () => screen.queryByRole("menuitem", { name: "menuEntry" });
+
+  it("sits right after Settings when the deployment serves it", async () => {
+    // Invites off: its own entry is also called "menuEntry" under the key-echo translator.
+    mockFeatures = { beta_invites: false, workspace_slots: true };
+    render(<Sidebar />);
+    await waitFor(() => expect(entry()).not.toBeNull());
+    const items = screen.getAllByRole("menuitem");
+    const profile = items.findIndex(
+      (el) => el.textContent === "profileSettings",
+    );
+    expect(items[profile + 1]).toBe(entry());
+  });
+
+  it.each([
+    ["the flag is off", { beta_invites: false, workspace_slots: false }],
+    ["an older backend sends no flag", { beta_invites: false }],
+    ["the flags are still loading", null],
+  ])("is hidden when %s", async (_label, features) => {
+    mockFeatures = features;
+    render(<Sidebar />);
+    await screen.findByText("Test User");
+    expect(entry()).toBeNull();
+  });
+});
+

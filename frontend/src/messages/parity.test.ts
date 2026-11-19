@@ -619,6 +619,7 @@ const REFUSAL_SUBTREES = [
   "role.admin",
   "allowlist",
   "capacity",
+  "workspace_slot",
 ] as const;
 
 function gateTranslator(locale: string, messages: unknown) {
@@ -975,6 +976,7 @@ describe.each(CATALOGUES)("%s gate.* contract", (locale, messages) => {
       "role",
       "allowlist",
       "capacity",
+      "workspace_slot",
     ];
     const roles = [
       WorkspaceRole.Owner,

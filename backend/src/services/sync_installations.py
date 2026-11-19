@@ -33,6 +33,7 @@ from services.integration_entitlements import paid_integration_write
 from services.permission_service import PermissionService
 from services.sync_authority import SyncAuthority, audit_sync, registered_service, sync_authority
 from services.sync_provisioning import create_sync_target, installation_view
+from services.workspace_slot_gate import SlotPolicy
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException
 
@@ -169,8 +170,11 @@ async def create_authorization(
 async def revoke_authorization(
     db: AsyncSession, wid: UUID, principal: SyncPrincipal, authorization_id: UUID
 ) -> SyncAuthorizationView:
-    """Withdraw unused consent; active installations require their separate unlink operation."""
-    async with sync_authority(db, wid, principal) as authority:
+    """Withdraw unused consent; active installations require their separate unlink operation.
+
+    #2918: revoking access is never blocked by a slot suspension.
+    """
+    async with sync_authority(db, wid, principal, slot=SlotPolicy.REVOCATION) as authority:
         approval = await _approval(db, wid, authorization_id)
         if approval.used_at is not None:
             raise ConflictError("Authorization was consumed; unlink the installation instead")

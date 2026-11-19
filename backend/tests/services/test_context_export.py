@@ -17,6 +17,7 @@ import pytest
 
 from services.capacity_lock import CapacityPolicy
 from services.context_service import ContextService
+from services.workspace_slot_gate import SlotPolicy
 from utils.exceptions import ExportTooLargeError, NotFoundException
 
 USER = "user-1"
@@ -172,6 +173,7 @@ async def test_export_forwards_key_workspace_id():
         context_id=ctx.id,
         key_workspace_id=key_ws,
         capacity=CapacityPolicy.ALLOWED,  # export is the way out of the lock (#1948)
+        slot=SlotPolicy.OWNER_MANAGEMENT,  # and of a slot suspension (#2918)
     )
 
 

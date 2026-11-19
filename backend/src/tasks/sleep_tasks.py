@@ -6,6 +6,7 @@ the per-context orchestrator loop.
 """
 
 import os
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -171,6 +172,27 @@ async def _refresh_hub_tag_cache(
     return len(hub_tags)
 
 
+def sleep_targets_statement() -> Any:
+    """The distinct ``(user_id, workspace_id, context_id)`` the nightly run visits.
+
+    #2918: a slot-suspended workspace's contexts are left out (no hub-tag
+    refresh, no run); nothing is added unless the mode is ``enforce``.
+    """
+    from sqlalchemy import select
+
+    from models.memory import Memory
+    from services.workspace_slot_gate import active_workspace_predicate
+
+    stmt = (
+        select(Memory.user_id, Memory.workspace_id, Memory.context_id)
+        .distinct()
+        .where(Memory.deleted_at.is_(None))
+        .where(Memory.context_id.isnot(None))
+    )
+    slot_active = active_workspace_predicate(Memory.workspace_id)
+    return stmt if slot_active is None else stmt.where(slot_active)
+
+
 async def sleep_maintenance_task() -> JobResult:
     """Run sleep maintenance for all active users/contexts.
 
@@ -223,9 +245,6 @@ async def _sleep_maintenance_run() -> JobResult:
     """
     try:
         async for db in get_db():
-            from sqlalchemy import select
-
-            from models.memory import Memory
             from neural.config import NeuralMemoryConfig
             from services.sleep.orchestrator import SleepOrchestrator
 
@@ -234,18 +253,7 @@ async def _sleep_maintenance_run() -> JobResult:
             config = await NeuralMemoryConfig.from_db(db)
 
             # Find distinct (user_id, workspace_id, context_id) combinations
-            stmt = (
-                select(
-                    Memory.user_id,
-                    Memory.workspace_id,
-                    Memory.context_id,
-                )
-                .distinct()
-                .where(Memory.deleted_at.is_(None))
-                .where(Memory.context_id.isnot(None))
-            )
-
-            result = await db.execute(stmt)
+            result = await db.execute(sleep_targets_statement())
             contexts = result.all()
 
             total_runs = 0

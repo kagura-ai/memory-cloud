@@ -34,6 +34,7 @@ import models.public_usage_budget  # noqa: F401  # Issue #2805: public usage bud
 import models.resource  # noqa: F401
 import models.secrets  # noqa: F401  # Issue #1128: zero-knowledge secret store
 import models.sleep  # noqa: F401  # Issue #471: SleepReportLLMUsage child added
+import models.workspace_slots  # noqa: F401  # Issue #2918: workspace slot suspension
 from alembic import context
 from config.database import get_database_url, to_async_database_url
 from config.settings import get_settings

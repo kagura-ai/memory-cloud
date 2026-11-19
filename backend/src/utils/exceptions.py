@@ -14,6 +14,7 @@ from config.constants import (
     GATE_DEPLOYMENT,
     GATE_PLAN,
     GATE_QUOTA,
+    GATE_WORKSPACE_SLOT,
     QUOTA_TYPES,
 )
 from utils.datetime import to_utc_iso
@@ -1327,6 +1328,158 @@ class CapacityLockedError(MemoryCloudException):
             "list_contexts and get_usage, delete with forget, delete_context (which frees "
             "the context's files too) or delete_file, clear a context's files in bulk from "
             "the web UI's storage page, and export a context from the web UI."
+        )
+
+
+# Workspace slot suspension (#2918): ``SLOT-*`` codes. An owner whose allowance
+# fell below the number of workspaces they own keeps some of them active and the
+# rest suspended, data kept (``services.workspace_slots``).
+
+
+class WorkspaceSlotSuspendedError(MemoryCloudException):
+    """The workspace is suspended because its owner owns more workspaces than
+    their allowance (403 ``SLOT-001``, Issue #2918).
+
+    ``details.gate`` is ``workspace_slot``. What else ``details`` carries
+    depends on who asked, so build it through the constructors:
+
+    - ``for_owner``: ``workspace_id`` and ``manage_url``, the absolute address
+      of the account page where the owner chooses which workspaces stay active;
+    - ``for_member``: ``workspace_id`` and ``manage_url = None`` (the owner
+      decides; the member is told to ask them);
+    - ``for_outsider``: the gate only, for a caller outside the workspace (a
+      public reader, a share key), who learns nothing about it.
+
+    An expected refusal: logged at warning level.
+    """
+
+    log_level = "warning"
+
+    def __init__(self, message: str, **details: Any) -> None:
+        super().__init__(
+            message,
+            status_code=403,
+            error_code="SLOT-001",
+            gate=GATE_WORKSPACE_SLOT,
+            **details,
+        )
+
+    @classmethod
+    def for_owner(cls, workspace_id: Any, manage_url: str | None) -> "WorkspaceSlotSuspendedError":
+        """The refusal for the workspace's owner, with the page that resumes it."""
+        return cls(
+            "This workspace is suspended because you own more workspaces than your plan "
+            "allows. Its data is kept. Choose which workspaces stay active, or add slots, "
+            "on your account page.",
+            workspace_id=str(workspace_id),
+            manage_url=manage_url,
+        )
+
+    @classmethod
+    def for_member(cls, workspace_id: Any) -> "WorkspaceSlotSuspendedError":
+        """The refusal for a member who is not the owner."""
+        return cls(
+            "This workspace is suspended because its owner has more workspaces than their "
+            "plan allows. Its data is kept. Ask the workspace owner to resume it.",
+            workspace_id=str(workspace_id),
+            manage_url=None,
+        )
+
+    @classmethod
+    def for_outsider(cls) -> "WorkspaceSlotSuspendedError":
+        """The refusal for a caller outside the workspace: the gate and nothing else."""
+        return cls("The workspace that holds this content is suspended.")
+
+
+class WorkspaceSlotsFullError(MemoryCloudException):
+    """No slot can be freed for the selected workspace (409 ``SLOT-002``, #2918).
+
+    Raised by a selection that names a suspended workspace while workspaces
+    under a billing contract already hold every active slot: a contracted
+    workspace is never suspended, so no swap can make room. ``details`` says
+    how many slots there are and what would add one (``next_tier`` /
+    ``cap_on_next_tier``, ``None`` on the top tier); ``unmet`` lists the
+    selected ids that stay suspended.
+    """
+
+    log_level = "warning"
+
+    def __init__(
+        self,
+        *,
+        cap: int,
+        active_slots: int,
+        active_count: int,
+        contracted_count: int,
+        next_tier: str | None,
+        cap_on_next_tier: int | None,
+        unmet: list[str],
+    ) -> None:
+        super().__init__(
+            "All active slots are used by workspaces with a paid subscription. Upgrade a "
+            "workspace, or delete one, to resume another.",
+            status_code=409,
+            error_code="SLOT-002",
+            cap=cap,
+            active_slots=active_slots,
+            active_count=active_count,
+            contracted_count=contracted_count,
+            next_tier=next_tier,
+            cap_on_next_tier=cap_on_next_tier,
+            unmet=unmet,
+        )
+
+
+class WorkspaceSlotVersionConflictError(MemoryCloudException):
+    """The selection was made against an older state (409 ``SLOT-003``, #2918).
+
+    The owner's workspaces, plans or selection changed since the page read
+    ``version``; nothing was saved. The client reads the state again.
+    """
+
+    log_level = "warning"
+
+    def __init__(self, *, expected_version: int, current_version: int) -> None:
+        super().__init__(
+            "Your workspaces changed since this page loaded. Review the list and save again.",
+            status_code=409,
+            error_code="SLOT-003",
+            expected_version=expected_version,
+            current_version=current_version,
+        )
+
+
+class WorkspaceSlotTransferRefusedError(MemoryCloudException):
+    """The recipient of an ownership transfer has no free workspace slot
+    (409 ``SLOT-004``, #2918).
+
+    Only while slot suspension is enforced: the transferred workspace would be
+    suspended on arrival. Nothing about the recipient's workspaces is disclosed.
+    """
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The new owner has no free workspace slot.",
+            status_code=409,
+            error_code="SLOT-004",
+        )
+
+
+class WorkspaceSlotsBusyError(ConflictError):
+    """Another change to the same owner's workspace slots is in progress
+    (409 ``RES-002``, ``details.reason = "workspace_slots_busy"``, #2918).
+
+    Retryable with the same request: nothing was committed. The shape of the
+    other retryable billing refusals (``sync_transition_busy``).
+    """
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Workspace slots of this owner are changing; retry", reason="workspace_slots_busy"
         )
 
 

@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import WorkspaceOwner
+from auth.dependencies import WorkspaceOwner, WorkspaceOwnerRevocation
 from auth.resource_tokens import (
     ResourceTokenManager,
     workspace_tokens,
@@ -483,7 +483,7 @@ async def update_resource_token(
 @router.delete("/{token_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def revoke_resource_token(
     token_id: ResourceTokenPublicId,
-    owner: WorkspaceOwner,
+    owner: WorkspaceOwnerRevocation,
     manager: ResourceTokenManager = Depends(get_resource_token_manager),
     db: AsyncSession = Depends(get_db),
 ):

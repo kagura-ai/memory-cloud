@@ -267,7 +267,7 @@ class _Resolvers:
             ),
             patch(
                 "services.context_service.ContextService.get_context",
-                new=lambda s, u, c: self.get_context(s, u, c),
+                new=lambda s, u, c, **_kw: self.get_context(s, u, c),
             ),
             patch("mcp_server.tools._helpers.ensure_not_capacity_locked", self.lock),
             # The write role a resolver checks before the lock: an owner.

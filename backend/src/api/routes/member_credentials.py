@@ -49,6 +49,7 @@ from services.security_notification_service import (
     SecurityEvent,
     schedule_security_notification,
 )
+from services.workspace_slot_gate import SlotPolicy, ensure_slot_active
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     AuthorizationError,
@@ -56,6 +57,7 @@ from utils.exceptions import (
     FeatureNotAvailableError,
     NotFoundException,
     ValidationError,
+    WorkspaceSlotSuspendedError,
 )
 from utils.logger import get_logger
 from utils.public_id import APIKeyPublicId, PublicIdPrefix, public_id_pattern
@@ -105,6 +107,10 @@ async def _require_path_workspace_member(db: AsyncSession, user: dict, workspace
     not the seat on the plan: a member without a seat still hides, rotates and
     deletes their own credentials.
 
+    Membership only, also for a slot-suspended workspace (#2918): each route
+    runs the slot gate itself after its own authorization, and a revoke route
+    with the ``REVOCATION`` policy, so revoking stays possible.
+
     Raises:
         AuthorizationError: 403 for a non-member or a deleted or unknown workspace.
     """
@@ -113,6 +119,7 @@ async def _require_path_workspace_member(db: AsyncSession, user: dict, workspace
         workspace_id,
         required_role=WorkspaceRole.VIEWER,
         require_seat=False,
+        slot=None,
     )
 
 
@@ -391,18 +398,23 @@ async def get_member_credentials(
     _reject_oauth(user, "view member credentials")
     programmatic = is_api_key_principal(user)
     caller_role: str | None = None
+    service = MemberCredentialsService(db)
     if programmatic:
         # authorize_workspace_management already fetched the caller's owner
         # WorkspaceMember row; reuse its role so the view-permission check below
-        # does not re-SELECT the same row (max code-review, PR #1171).
+        # does not re-SELECT the same row (max code-review, PR #1171). It also
+        # runs the slot gate (#2918).
         principal = await authorize_workspace_management(
             user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
         )
         caller_role = principal.member.role
     else:
         await _require_path_workspace_member(db, user, workspace_id)
-
-    service = MemberCredentialsService(db)
+        # #2918: membership, then the view permission (403 for a member who
+        # may not view another member), then the slot gate, before anything
+        # of the workspace is read or created.
+        caller_role = await service.check_can_view(user["user_id"], workspace_id, user_id)
+        await ensure_slot_active(db, workspace_id, user_id=user["user_id"])
 
     try:
         credentials = await service.get_or_create_credentials(
@@ -432,9 +444,9 @@ async def get_member_credentials(
             raise HTTPException(status_code=404, detail="Member not found")
 
         return MemberCredentialsResponse(**credentials, target_user_role=target_role)
-    except (HTTPException, AuthorizationError):
+    except (HTTPException, AuthorizationError, WorkspaceSlotSuspendedError):
         # A caller without the owner or admin role viewing another member is
-        # the uniform 403, not a server error.
+        # the uniform 403, not a server error; a slot refusal is SLOT-001.
         raise
     except ValueError as e:
         logger.error("get_member_credentials_invalid", error=str(e), user_id=user_id)
@@ -471,6 +483,8 @@ async def hide_api_key(
     # Permission check: owner only
     if user["user_id"] != user_id:
         raise AuthorizationError(message="Only owner can hide API key")
+    # #2918: nothing changes in a slot-suspended workspace but revocation.
+    await ensure_slot_active(db, workspace_id, user_id=user["user_id"])
 
     # Get API key (most recent active key)
     from sqlalchemy import and_, select
@@ -561,6 +575,8 @@ async def regenerate_api_key(
     # Permission check: hierarchical
     service = MemberCredentialsService(db)
     await check_permission(service, user["user_id"], workspace_id, user_id, "regenerate")
+    # #2918: a slot-suspended workspace issues no new secret.
+    await ensure_slot_active(db, workspace_id, user_id=user["user_id"])
 
     from sqlalchemy import and_, or_, select
 
@@ -748,6 +764,8 @@ async def create_api_key(
             message="You can only create your own API keys in a session. "
             "To provision a key for another member, use a workspace-owner API key."
         )
+    # #2918: a slot-suspended workspace issues no new key.
+    await ensure_slot_active(db, workspace_id, user_id=user["user_id"])
 
     # Issue #1165: expires_days is an owner-provisioned-only field. Session
     # self-mint does not plumb expires_days to APIKeyManager — reject it
@@ -995,6 +1013,10 @@ async def delete_api_key(
 
     # Permission check
     await check_permission(service, user["user_id"], workspace_id, user_id, "delete")
+    # #2918: revoking access is never blocked by a slot suspension.
+    await ensure_slot_active(
+        db, workspace_id, user_id=user["user_id"], policy=SlotPolicy.REVOCATION
+    )
 
     # Get and delete key
     from sqlalchemy import and_, select
@@ -1074,7 +1096,12 @@ async def delete_api_key_by_id(
     if programmatic:
         # Owner gate on the path workspace (+ #963 confinement).
         principal = await authorize_workspace_management(
-            user, workspace_id, db, session_required_role=WorkspaceRole.OWNER
+            user,
+            workspace_id,
+            db,
+            session_required_role=WorkspaceRole.OWNER,
+            # #2918: revoking access is never blocked by a slot suspension.
+            slot=SlotPolicy.REVOCATION,
         )
         if user_id != caller_id:
             # Cross-member revoke is owner-provisioned; restrict target role.
@@ -1095,6 +1122,8 @@ async def delete_api_key_by_id(
                 message="You can only delete your own API keys in a session. "
                 "To revoke another member's key, use a workspace-owner API key."
             )
+        # #2918: revoking access is never blocked by a slot suspension.
+        await ensure_slot_active(db, workspace_id, user_id=caller_id, policy=SlotPolicy.REVOCATION)
 
     from sqlalchemy import and_, select
 
@@ -1291,6 +1320,8 @@ async def hide_oauth_app(
     # Permission check: owner only
     if user["user_id"] != user_id:
         raise AuthorizationError(message="Only owner can hide OAuth app")
+    # #2918: nothing changes in a slot-suspended workspace but revocation.
+    await ensure_slot_active(db, workspace_id, user_id=user["user_id"])
 
     from sqlalchemy import and_, select
 
@@ -1371,6 +1402,8 @@ async def regenerate_oauth_secret(
 
     if not can_regenerate:
         raise AuthorizationError(message="Not authorized to regenerate OAuth secret")
+    # #2918: a slot-suspended workspace issues no new secret.
+    await ensure_slot_active(db, workspace_id, user_id=user["user_id"])
 
     import hashlib
     import secrets
@@ -1481,6 +1514,10 @@ async def delete_oauth_app(
 
     if not can_delete:
         raise AuthorizationError(message="Not authorized to delete OAuth app")
+    # #2918: revoking access is never blocked by a slot suspension.
+    await ensure_slot_active(
+        db, workspace_id, user_id=user["user_id"], policy=SlotPolicy.REVOCATION
+    )
 
     # Get and delete app
     from sqlalchemy import and_, select

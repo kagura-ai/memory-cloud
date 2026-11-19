@@ -36,7 +36,7 @@ type Expect<T extends true> = T;
 /**
  * Why a feature is unavailable. Exactly one applies.
  *
- * The six terminal members are byte-identical to the server's `details.gate`
+ * The seven terminal members are byte-identical to the server's `details.gate`
  * vocabulary (`backend/src/config/constants.py` `GATE_KINDS`), so the wire
  * value maps 1:1 onto the descriptor with no translation table.
  * "pending" and "allowed" are client-only and never appear on the wire.
@@ -49,7 +49,8 @@ export type FeatureGateState =
   | "deployment" // an operator flag is off on this deployment
   | "role" // included, but this member's workspace role may not
   | "allowlist" // included, but this workspace is not in the rollout
-  | "capacity"; // #1941: a Free workspace over its capacity — search and saving pause
+  | "capacity" // #1941: a Free workspace over its capacity — search and saving pause
+  | "workspace_slot"; // #2918: suspended — its owner has more workspaces than the plan allows
 
 /** The subset a refusal can carry. */
 export type RefusedGateState = Exclude<FeatureGateState, "pending" | "allowed">;
@@ -61,6 +62,7 @@ const REFUSED_GATE_STATES: readonly RefusedGateState[] = [
   "role",
   "allowlist",
   "capacity",
+  "workspace_slot",
 ];
 
 function isRefusedGateState(v: unknown): v is RefusedGateState {
@@ -70,7 +72,7 @@ function isRefusedGateState(v: unknown): v is RefusedGateState {
   );
 }
 
-/** True for the six refusal states. Exported so no call site writes the negation twice. */
+/** True for the seven refusal states. Exported so no call site writes the negation twice. */
 export function isBlocked(g: { state: FeatureGateState }): boolean {
   return g.state !== "pending" && g.state !== "allowed";
 }
@@ -341,6 +343,11 @@ export interface FeatureGateFacts {
   readonly overBytes?: number;
   /** #1941: the page where the owner cleans up or re-subscribes. Capacity only. */
   readonly cleanupUrl?: string;
+  /**
+   * #2918: the owner's Workspace management page. Only ever set when state ===
+   * "workspace_slot", and only for the owner (a member gets none).
+   */
+  readonly manageUrl?: string;
 }
 
 // ── The UI descriptor ───────────────────────────────────────────────────────
@@ -402,6 +409,12 @@ export interface FeatureGate {
   readonly canUpgrade: boolean;
   /** Billing exists here, but this member needs the workspace owner to act. */
   readonly askOwner?: true;
+  /**
+   * #2918: set on a "workspace_slot" gate exactly when the reader is the
+   * owner: the server sent the owner's Workspace management link. Absent =
+   * a member, who has to ask the owner.
+   */
+  readonly manageUrl?: string;
 
   /**
    * The server DEGRADES rather than refusing (#1648). True only together
@@ -478,6 +491,10 @@ function stateFromErrorCode(
       // #1941: the capacity-over lock. Its own gate, never a quota: no tier
       // key and no single cap lifts it — the workspace holds too much.
       return status === 403 ? "capacity" : undefined;
+    case "SLOT-001":
+      // #2918: the workspace is suspended because its owner is over the
+      // workspace allowance. Its own gate: no tier key, no single cap.
+      return status === 403 ? "workspace_slot" : undefined;
     case "AUTH-101":
       // The role refusal: its details are stripped server-side (CWE-639
       // defence in depth), so the code is the only signal there is.
@@ -492,11 +509,12 @@ function stateFromErrorCode(
  * point. Returns `undefined` when the error is not a gate refusal — and
  * NEVER guesses from a bare status code.
  *
- * 1. `details.gate` wins when it is one of the six terminal states; an
+ * 1. `details.gate` wins when it is one of the seven terminal states; an
  *    unknown value is ignored rather than trusted.
  * 2. Otherwise the semantic error code decides (an older server):
  *    FEAT-001 → plan; QUOTA-001 with a frozen `quota_type`, QUOTA-002 and
- *    CONNECTOR-001 → quota; AUTH-101 at 403 → role; CAPACITY-001 at 403 → capacity.
+ *    CONNECTOR-001 → quota; AUTH-101 at 403 → role; CAPACITY-001 at 403 → capacity;
+ *    SLOT-001 at 403 → workspace_slot.
  * 3. Legacy count names are aliased onto `current` / `limit`, and a
  *    CONNECTOR-001 with no `quota_type` reads as `connectors`.
  */
@@ -553,6 +571,11 @@ export function normalizeGate(
     if (overBytes !== undefined) facts.overBytes = overBytes;
     const cleanupUrl = asString(d.cleanup_url);
     if (cleanupUrl) facts.cleanupUrl = cleanupUrl;
+  }
+
+  if (state === "workspace_slot") {
+    const manageUrl = asString(d.manage_url);
+    if (manageUrl) facts.manageUrl = manageUrl;
   }
 
   return facts;
@@ -793,6 +816,10 @@ export function gateFromFacts(
         resetsAt: facts.resetsAt,
       }),
     ...(requiredRole !== undefined && { requiredRole }),
+    ...(state === "workspace_slot" &&
+      facts.manageUrl !== undefined && {
+        manageUrl: facts.manageUrl,
+      }),
     canUpgrade: narrowCanUpgrade(state, requiredPlan, ctx.canUpgrade),
   };
 }

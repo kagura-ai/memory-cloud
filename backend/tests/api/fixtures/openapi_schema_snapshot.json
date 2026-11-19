@@ -9106,6 +9106,19 @@
         ],
         "type": "object"
       },
+      "PaidPlansEndResponse": {
+        "properties": {
+          "active": {},
+          "cap": {},
+          "suspended": {}
+        },
+        "required": [
+          "active",
+          "cap",
+          "suspended"
+        ],
+        "type": "object"
+      },
       "PasswordChangeBody": {
         "properties": {
           "current_password": {
@@ -13256,6 +13269,164 @@
         ],
         "type": "object"
       },
+      "SlotAllowanceResponse": {
+        "properties": {
+          "base": {},
+          "cap": {},
+          "cap_on_next_tier": {},
+          "next_tier": {},
+          "slot_bonus": {},
+          "tier": {},
+          "tier_grant": {}
+        },
+        "required": [
+          "base",
+          "cap",
+          "cap_on_next_tier",
+          "next_tier",
+          "slot_bonus",
+          "tier",
+          "tier_grant"
+        ],
+        "type": "object"
+      },
+      "SlotChangesResponse": {
+        "properties": {
+          "resume": {},
+          "suspend": {}
+        },
+        "required": [
+          "resume",
+          "suspend"
+        ],
+        "type": "object"
+      },
+      "SlotContextResponse": {
+        "properties": {
+          "display_name": {},
+          "id": {},
+          "is_private": {},
+          "name": {}
+        },
+        "required": [
+          "display_name",
+          "id",
+          "is_private",
+          "name"
+        ],
+        "type": "object"
+      },
+      "SlotContextsResponse": {
+        "properties": {
+          "contexts": {},
+          "workspace_id": {}
+        },
+        "required": [
+          "contexts",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "SlotPreviewRequest": {
+        "properties": {
+          "scenario": {
+            "enum": [
+              "current",
+              "paid_plans_end"
+            ],
+            "type": "string"
+          },
+          "workspace_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 500,
+            "type": "array"
+          }
+        },
+        "required": [
+          "scenario",
+          "workspace_ids"
+        ],
+        "type": "object"
+      },
+      "SlotPreviewResponse": {
+        "properties": {
+          "active": {},
+          "active_slots": {},
+          "cap": {},
+          "changes": {},
+          "scenario": {},
+          "suspended": {},
+          "unmet": {}
+        },
+        "required": [
+          "active",
+          "active_slots",
+          "cap",
+          "changes",
+          "scenario",
+          "suspended",
+          "unmet"
+        ],
+        "type": "object"
+      },
+      "SlotSelectionRequest": {
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "workspace_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 500,
+            "type": "array"
+          }
+        },
+        "required": [
+          "expected_version",
+          "workspace_ids"
+        ],
+        "type": "object"
+      },
+      "SlotSelectionResponse": {
+        "properties": {
+          "saved_at": {},
+          "workspace_ids": {}
+        },
+        "required": [
+          "saved_at",
+          "workspace_ids"
+        ],
+        "type": "object"
+      },
+      "SlotWorkspaceResponse": {
+        "properties": {
+          "created_at": {},
+          "id": {},
+          "is_current": {},
+          "name": {},
+          "plan_name": {},
+          "status": {},
+          "suspended_at": {},
+          "under_billing_contract": {}
+        },
+        "required": [
+          "created_at",
+          "id",
+          "is_current",
+          "name",
+          "plan_name",
+          "status",
+          "suspended_at",
+          "under_billing_contract"
+        ],
+        "type": "object"
+      },
       "SnapshotItemV1": {
         "additionalProperties": false,
         "properties": {
@@ -16772,6 +16943,10 @@
           },
           "plan_name": {
             "type": "string"
+          },
+          "slot_suspended": {
+            "default": false,
+            "type": "boolean"
           }
         },
         "required": [
@@ -16795,6 +16970,33 @@
           "viewer"
         ],
         "type": "string"
+      },
+      "WorkspaceSlotsResponse": {
+        "properties": {
+          "active_count": {},
+          "active_slots": {},
+          "allowance": {},
+          "contracted_count": {},
+          "if_paid_plans_end": {},
+          "owned_count": {},
+          "selection": {},
+          "selection_required": {},
+          "version": {},
+          "workspaces": {}
+        },
+        "required": [
+          "active_count",
+          "active_slots",
+          "allowance",
+          "contracted_count",
+          "if_paid_plans_end",
+          "owned_count",
+          "selection",
+          "selection_required",
+          "version",
+          "workspaces"
+        ],
+        "type": "object"
       },
       "WorkspaceStatsResponse": {
         "properties": {
@@ -29455,6 +29657,215 @@
         },
         "tags": [
           "me-terms"
+        ]
+      }
+    },
+    "/api/v1/me/workspace-slots": {
+      "get": {
+        "operationId": "get_workspace_slots_api_v1_me_workspace_slots_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceSlotsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "workspace-slots"
+        ]
+      }
+    },
+    "/api/v1/me/workspace-slots/preview": {
+      "post": {
+        "operationId": "preview_workspace_selection_api_v1_me_workspace_slots_preview_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlotPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlotPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "workspace-slots"
+        ]
+      }
+    },
+    "/api/v1/me/workspace-slots/selection": {
+      "put": {
+        "operationId": "save_workspace_selection_api_v1_me_workspace_slots_selection_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlotSelectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceSlotsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "workspace-slots"
+        ]
+      }
+    },
+    "/api/v1/me/workspace-slots/workspaces/{workspace_id}/contexts": {
+      "get": {
+        "operationId": "list_exportable_contexts_api_v1_me_workspace_slots_workspaces__workspace_id__contexts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlotContextsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "workspace-slots"
         ]
       }
     },
@@ -44707,6 +45118,9 @@
     },
     {
       "name": "workspace-plan"
+    },
+    {
+      "name": "workspace-slots"
     },
     {
       "name": "workspace-sync"

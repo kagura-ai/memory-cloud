@@ -309,7 +309,9 @@ def digest(monkeypatch):
 
     async def fake_digest(**_kwargs):
         state.digest_reads += 1
-        return SimpleNamespace(entries=["x"], context_id=uuid4(), truncated=False)
+        return SimpleNamespace(
+            entries=["x"], context_id=uuid4(), truncated=False, workspace_suspended=False
+        )
 
     async def fake_name(**_kwargs):
         return state.name

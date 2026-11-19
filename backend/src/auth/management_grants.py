@@ -21,6 +21,7 @@ from models.management_grant import ManagementGrant
 from models.management_schemas import digest, public_fields
 from models.public_mcp import PublicMcpEndpoint
 from models.resource import Resource, ResourceSchema, WorkspaceConnector
+from services.workspace_slot_gate import ensure_slot_active
 from utils.datetime import utcnow
 from utils.exceptions import AuthenticationError, AuthorizationError, BadRequestError, ConflictError
 
@@ -132,6 +133,9 @@ async def current_binding(
         fields = public_fields(schema.field_definitions, grant.approved_fields)
     except ValueError as exc:
         raise ConflictError("Public field approval changed") from exc
+    # #2918: a slot-suspended workspace serves no management credential (the
+    # caller is a service, never a member: the redacted refusal).
+    await ensure_slot_active(db, workspace, user_id=None, outsider=True)
     return resource, workspace, fields
 
 

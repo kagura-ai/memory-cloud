@@ -8,7 +8,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { PageContainer } from "@/components/common/PageContainer";
@@ -23,7 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { RefreshCw, AlertCircle } from "lucide-react";
+import { RefreshCw, AlertCircle, X } from "lucide-react";
 import { apiClient } from "@/lib/api/base";
 import {
   InlineSpinner,
@@ -34,10 +35,12 @@ import { UsageStats, type UsageStatsRef } from "@/components/dashboard/UsageStat
 import { UsageTrends, type UsageTrendsRef } from "@/components/dashboard/UsageTrends";
 import { KpiCards } from "@/components/dashboard/KpiCards";
 import { ContextBreakdownTable } from "@/components/dashboard/ContextBreakdownTable";
+import { CopyContextLinkButton } from "@/components/dashboard/CopyContextLinkButton";
 import { MemoryTimelineChart } from "@/components/dashboard/MemoryTimelineChart";
 import { AdminSections } from "@/components/dashboard/AdminSections";
 import { PlanBadge } from "@/components/common/PlanBadge";
 import type { PlanTier } from "@/lib/utils/planLabel";
+import { isUuid } from "@/lib/utils/uuid";
 import { OnboardingCard } from "@/components/onboarding/OnboardingCard";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -54,6 +57,12 @@ export default function WorkspaceStatsPage() {
   const tCommon = useTranslations("common");
   const navigation = useTranslations("dashboard.sections");
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  // #2936: `?context=<id>` names the context the view is about. Only a UUID
+  // can be a context id; anything else is ignored.
+  const contextParam = searchParams?.get("context") ?? null;
+  const linkedContextId = isUuid(contextParam) ? contextParam : null;
   const {
     currentWorkspace,
     currentWorkspaceId,
@@ -63,7 +72,8 @@ export default function WorkspaceStatsPage() {
 
   // Issue #398: viewer cannot read workspace stats (backend 403's on
   // /workspaces/{id}/contexts/stats with required_role="member"). Send
-  // viewers to the contexts list — their only data-bearing surface.
+  // viewers to the contexts list — their only data-bearing surface. A link
+  // that names a context (#2936) sends them to that context's page instead.
   useEffect(() => {
     if (
       currentWorkspace &&
@@ -72,9 +82,13 @@ export default function WorkspaceStatsPage() {
         WorkspaceRole.Member,
       )
     ) {
-      router.push("/workspace/contexts");
+      router.push(
+        linkedContextId
+          ? `/workspace/contexts/${linkedContextId}`
+          : "/workspace/contexts",
+      );
     }
-  }, [currentWorkspace, router]);
+  }, [currentWorkspace, router, linkedContextId]);
 
   const [activeTab, setActiveTab] = useState("dashboard-summary");
   const usageRef = useRef<UsageStatsRef>(null);
@@ -107,8 +121,69 @@ export default function WorkspaceStatsPage() {
   const [selectedContextId, setSelectedContextId] = useState<string | null>(
     null,
   );
+  // #2936: the id of a linked context that is not in this workspace's stats;
+  // drives the dismissible notice (UUIDs only).
+  const [unavailableContextId, setUnavailableContextId] = useState<
+    string | null
+  >(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // #2936: select the context a link names once the workspace's contexts are
+  // known. Each distinct parameter value is handled once, so a refresh does
+  // not undo a later choice; choosing a context writes the parameter back
+  // (selectContext), which lands here as the same selection.
+  const handledContextParam = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (!stats) return;
+    if (handledContextParam.current === contextParam) return;
+    handledContextParam.current = contextParam;
+    if (!linkedContextId) {
+      // The parameter was removed (e.g. the sidebar item): the address now
+      // means "all contexts", so the view must too.
+      setUnavailableContextId(null);
+      setSelectedContextId(null);
+      return;
+    }
+    const match = stats.contexts.find(
+      (ctx) => ctx.context_id.toLowerCase() === linkedContextId.toLowerCase(),
+    );
+    if (match) {
+      setSelectedContextId(match.context_id);
+      setUnavailableContextId(null);
+    } else {
+      setSelectedContextId(null);
+      setUnavailableContextId(linkedContextId);
+    }
+  }, [stats, contextParam, linkedContextId]);
+
+  // Keep the address in step with the selection without a history entry per
+  // change; "all contexts" drops the parameter and leaves the others alone.
+  const selectContext = (contextId: string | null) => {
+    setSelectedContextId(contextId);
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    if (contextId) {
+      params.set("context", contextId);
+    } else {
+      params.delete("context");
+    }
+    const query = params.toString();
+    router.replace(
+      `${pathname ?? "/workspace/dashboard"}${query ? `?${query}` : ""}${window.location.hash}`,
+      { scroll: false },
+    );
+  };
+
+  // When a refresh shows that the selected context is no longer in the
+  // workspace (it was deleted), go back to all contexts and drop the parameter.
+  useEffect(() => {
+    if (!stats || !selectedContextId) return;
+    if (!stats.contexts.some((ctx) => ctx.context_id === selectedContextId)) {
+      selectContext(null);
+    }
+    // selectContext is recreated each render; the check only depends on these.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stats, selectedContextId]);
 
   const fetchStats = async () => {
     try {
@@ -205,6 +280,10 @@ export default function WorkspaceStatsPage() {
     { id: "dashboard-usage", label: navigation("usage") },
   ];
 
+  const selectedContext = selectedContextId
+    ? stats?.contexts.find((ctx) => ctx.context_id === selectedContextId)
+    : undefined;
+
   const selectedTab = sections.some(section => section.id === activeTab) ? activeTab : "dashboard-summary";
 
   return (
@@ -237,7 +316,7 @@ export default function WorkspaceStatsPage() {
             <Select
               value={selectedContextId || "all"}
               onValueChange={(value) =>
-                setSelectedContextId(value === "all" ? null : value)
+                selectContext(value === "all" ? null : value)
               }
             >
               <SelectTrigger
@@ -256,6 +335,15 @@ export default function WorkspaceStatsPage() {
               </SelectContent>
             </Select>
           )}
+          {/* Fixed-size slot so picking a context does not shift the selector. */}
+          <div data-testid="context-link-slot" className="h-9 w-9 shrink-0">
+            {selectedContext && (
+              <CopyContextLinkButton
+                contextId={selectedContext.context_id}
+                contextName={selectedContext.context_name}
+              />
+            )}
+          </div>
           <Button
             onClick={() => { void fetchStats(); void usageRef.current?.refresh(); void trendsRef.current?.refresh(); }}
             variant="outline"
@@ -299,6 +387,36 @@ export default function WorkspaceStatsPage() {
         />
       ) : stats ? (
         <>
+          {/* #2936: a link to a context that is not in this workspace. The
+              text says nothing about whether the context exists; the detail
+              page already handles switching workspaces and missing contexts. */}
+          {unavailableContextId && (
+            <Alert className="mb-6">
+              <AlertCircle className="h-4 w-4" />
+              <div className="flex items-start justify-between gap-2">
+                <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span>{t("contextLinkUnavailable")}</span>
+                  <Link
+                    href={`/workspace/contexts/${unavailableContextId}`}
+                    className="font-medium underline underline-offset-2"
+                  >
+                    {t("openLinkedContext")}
+                  </Link>
+                </AlertDescription>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 shrink-0"
+                  aria-label={tCommon("close")}
+                  onClick={() => setUnavailableContextId(null)}
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </Button>
+              </div>
+            </Alert>
+          )}
+
           {/* #1496: memories that were saved but cannot be found.
               A failed embedding never reaches Qdrant, and the BM25 sparse
               vectors live there too, so recall misses these in BOTH semantic
