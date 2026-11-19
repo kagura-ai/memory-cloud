@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -21,7 +22,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -49,7 +50,7 @@ from services.public_mcp_domains import (
     PublicMcpDomainVerificationUnavailableError,
 )
 from utils.datetime import utcnow
-from utils.exceptions import NotFoundException
+from utils.exceptions import AuthorizationError, NotFoundException
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -1071,3 +1072,371 @@ async def test_unavailable_check_keeps_state_and_renews_the_lease(world: World) 
     assert after.serve_until > before.serve_until
     assert after.proof_ok_at == before.proof_ok_at
     await w.detach("a", a.id)
+
+
+# ----------------------------------------------------------------------------
+# The command guard (#2921): another interface's admission in every write
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class RecordingGuard:
+    """A command guard without OIDC: it records each admission and can refuse.
+
+    The log holds ``("admitted", paid_guarded, inside_paid_guard,
+    transaction_already_locked_or_wrote)``, every commit of a session it was
+    admitted in, the lifecycle locks (``_record_locks``) and ``("closed",)``
+    when the admission's context ends.
+    """
+
+    endpoint_id: UUID
+    expected_state: str | None
+    log: list[tuple[Any, ...]] = field(default_factory=list)
+    refuse: BaseException | None = None
+    audit_fields: tuple[tuple[str, str], ...] = (
+        ("client_id", "kmc-guard-client"),
+        ("installation_id", "guard-installation"),
+    )
+
+    @asynccontextmanager
+    async def admitted(self, db: AsyncSession, *, paid_guarded: bool) -> AsyncIterator[None]:
+        if not event.contains(db.sync_session, "after_commit", self._committed):
+            event.listen(db.sync_session, "after_commit", self._committed)
+        started = await db.scalar(text("SELECT pg_current_xact_id_if_assigned() IS NOT NULL"))
+        self.log.append(
+            ("admitted", paid_guarded, bool(db.info.get("paid_integration_write")), started)
+        )
+        if self.refuse is not None:
+            raise self.refuse
+        try:
+            yield
+        finally:
+            self.log.append(("closed",))
+
+    def _committed(self, _session: Any) -> None:
+        self.log.append(("commit",))
+
+
+def _record_locks(monkeypatch, log: list[tuple[Any, ...]]) -> None:
+    """Log each lifecycle lock (advisory, endpoint share, domain row) before it is taken."""
+
+    def wrap(name: str, when: Callable[..., bool] = lambda *a, **k: True) -> None:
+        original = getattr(service, name)
+
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if when(*args, **kwargs):
+                log.append(("lock", name))
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(service, name, wrapper)
+
+    wrap("_lock")
+    wrap("_live_endpoint", lambda *a, **k: k.get("share") is True)
+    wrap("_open_row", lambda *a, **k: k.get("lock") is True)
+    wrap("_fenced_row")
+
+
+def _counting(monkeypatch) -> dict[str, int]:
+    """The two owner counters, readable by the test."""
+    counts: dict[str, int] = {}
+
+    async def incr(key: str, amount: int, ttl: int | None = None) -> int:
+        counts[key] = counts.get(key, 0) + amount
+        return counts[key]
+
+    monkeypatch.setattr(service, "incrby_counter", incr)
+    return counts
+
+
+async def _guarded(w: World, fn: Callable[..., Awaitable[Any]], guard: Any, *args: Any) -> Any:
+    async with w.factory() as s:
+        return await fn(s, *args, guard=guard)
+
+
+async def _domain_audits(w: World, domain_id: UUID) -> list[tuple[str, dict[str, Any]]]:
+    async with w.factory() as s:
+        rows = (
+            await s.execute(
+                select(AuditLog.action, AuditLog.user_metadata)
+                .where(AuditLog.resource == f"public_mcp_domain:{domain_id}")
+                .order_by(AuditLog.id)
+            )
+        ).all()
+    return [(action, meta) for action, meta in rows]
+
+
+_ADMITTED_MODE_A = ("admitted", False, False, False)
+_ADMITTED_MODE_B = ("admitted", True, True, True)
+
+
+@pytest.mark.parametrize("authority", ["entitlement", "operator"])
+async def test_every_write_transaction_admits_the_guard_first(
+    world: World, monkeypatch, authority: str
+) -> None:
+    """One admission per write transaction, before the first lifecycle lock.
+
+    ``paid_guarded`` is true exactly under ``entitlement`` inside the paid
+    guard; every other admission opens a transaction that has locked and
+    written nothing yet.
+    """
+    w = world
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_authority", authority)
+    paid = _ADMITTED_MODE_B if authority == "entitlement" else _ADMITTED_MODE_A
+    log: list[tuple[Any, ...]] = []
+    _record_locks(monkeypatch, log)
+
+    def guard(state: str | None) -> RecordingGuard:
+        log.clear()
+        return RecordingGuard(w.endpoint["a"], state, log)
+
+    hostname = w.name("guard")
+    row = await _guarded(w, service.attach_domain, guard(None), *_args(w, "a"), hostname)
+    assert log == [paid, ("lock", "_lock"), ("lock", "_live_endpoint"), ("commit",), ("closed",)]
+
+    # A pending check without the proof: an ordinary, fenced write.
+    assert await _guarded(w, service.verify_domain, guard("pending"), *_args(w, "a"), row.id) == (
+        "pending"
+    )
+    assert log == [_ADMITTED_MODE_A, ("commit",), ("closed",)]
+
+    # The activation.
+    w.dns.publish(hostname, row.verification_token)
+    assert await _guarded(w, service.verify_domain, guard("pending"), *_args(w, "a"), row.id) == (
+        "active"
+    )
+    assert log == [paid, ("lock", "_lock"), ("lock", "_fenced_row"), ("commit",), ("closed",)]
+
+    # A check of an active row, with the right.
+    assert await _guarded(w, service.verify_domain, guard("active"), *_args(w, "a"), row.id) == (
+        "active"
+    )
+    assert log == [paid, ("lock", "_fenced_row"), ("commit",), ("closed",)]
+
+    if authority == "entitlement":
+        # Without the right: the refused entry admits the guard on its own, then
+        # the fallback write (suspension) is a second, ordinary transaction.
+        await _set_license(w, "a", False)
+        try:
+            with pytest.raises(PublicMcpDomainNotEntitledError):
+                await _guarded(w, service.verify_domain, guard("active"), *_args(w, "a"), row.id)
+        finally:
+            await _set_license(w, "a", True)
+        assert log == [
+            _ADMITTED_MODE_A,
+            ("commit",),
+            ("closed",),
+            _ADMITTED_MODE_A,
+            ("lock", "_fenced_row"),
+            ("commit",),
+            ("closed",),
+        ]
+        assert (await w.row(row.id)).state == "suspended"
+
+    state = (await w.row(row.id)).state
+    await _guarded(w, service.detach_domain, guard(state), *_args(w, "a"), row.id)
+    assert log == [_ADMITTED_MODE_A, ("lock", "_open_row"), ("commit",), ("closed",)]
+    assert (await w.row(row.id)).state == "released"
+
+
+def _args(w: World, who: str) -> tuple[str, UUID, str]:
+    return w.users[who], w.ws[who], w.slug[who]
+
+
+async def test_a_guard_refusal_writes_nothing_and_is_not_reported_as_not_entitled(
+    world: World,
+) -> None:
+    """A refusal of the admission inside the paid guard propagates as it is."""
+    w = world
+    refused = AuthorizationError("not admitted")
+    guard = RecordingGuard(w.endpoint["a"], None, refuse=refused)
+    hostname = w.name("refused")
+    with pytest.raises(AuthorizationError) as raised:
+        await _guarded(w, service.attach_domain, guard, *_args(w, "a"), hostname)
+    assert raised.value is refused
+    assert guard.log == [_ADMITTED_MODE_B]
+    assert await _open_rows_of(w, w.endpoint["a"]) == []
+    async with w.factory() as s:
+        attached = (
+            await s.execute(
+                select(AuditLog.user_metadata).where(
+                    AuditLog.action == "public_mcp_domain.attached"
+                )
+            )
+        ).scalars()
+        digests = [meta["hostname_sha256"] for meta in attached if meta]
+    assert service.hostname_digest(hostname) not in digests
+
+    # The activation and the detach: refused, the row unchanged, no audit row.
+    row = await w.attach("a", hostname)
+    w.dns.publish(hostname, row.verification_token)
+    for fn, state in ((service.verify_domain, "pending"), (service.detach_domain, "pending")):
+        guard = RecordingGuard(w.endpoint["a"], state, refuse=refused)
+        with pytest.raises(AuthorizationError) as raised:
+            await _guarded(w, fn, guard, *_args(w, "a"), row.id)
+        assert raised.value is refused
+        after = await w.row(row.id)
+        assert after is not None and (after.state, after.check_seq) == ("pending", 0)
+    assert [action for action, _ in await _domain_audits(w, row.id)] == [
+        "public_mcp_domain.attached"
+    ]
+    await w.detach("a", row.id)
+
+
+@pytest.mark.parametrize("authority", ["entitlement", "operator"])
+async def test_the_guard_context_closes_after_the_commit(
+    world: World, monkeypatch, authority: str
+) -> None:
+    w = world
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_authority", authority)
+    guard = RecordingGuard(w.endpoint["a"], None)
+    async with w.factory() as s:
+        async with service.domain_write(s, w.ws["a"], guard):
+            guard.log.append(("body",))
+    assert [entry[0] for entry in guard.log] == ["admitted", "body", "commit", "closed"]
+
+    guard = RecordingGuard(w.endpoint["a"], None)
+    async with w.factory() as s:
+        async with service._plain_write(s, guard):
+            guard.log.append(("body",))
+    assert [entry[0] for entry in guard.log] == ["admitted", "body", "commit", "closed"]
+
+
+async def test_a_guard_binds_the_publication(world: World, monkeypatch) -> None:
+    """Another publication than the guard's: not found, nothing written, nothing counted."""
+    w = world
+    counts = _counting(monkeypatch)
+    stray = RecordingGuard(uuid4(), None)
+    with pytest.raises(NotFoundException):
+        await _guarded(w, service.attach_domain, stray, *_args(w, "a"), w.name("stray"))
+    assert await _open_rows_of(w, w.endpoint["a"]) == []
+
+    row = await w.attach("a", w.name("stray"))
+    w.dns.publish(row.hostname, row.verification_token)
+    calls = len(w.dns.calls)
+    for fn in (service.verify_domain, service.detach_domain):
+        stray = RecordingGuard(uuid4(), "pending")
+        with pytest.raises(NotFoundException):
+            await _guarded(w, fn, stray, *_args(w, "a"), row.id)
+        after = await w.row(row.id)
+        assert after is not None and (after.state, after.check_seq) == ("pending", 0)
+        assert stray.log == []
+    assert counts == {} and len(w.dns.calls) == calls
+    await w.detach("a", row.id)
+
+    # Unpublished and republished between attach's plain reads and its write:
+    # the guard's publication is gone, so nothing is created on the new one.
+    old_id = w.endpoint["a"]
+    guard = RecordingGuard(old_id, None)
+    pause = Pause(w, monkeypatch, "owner_actor")
+    attach = asyncio.create_task(
+        _guarded(w, service.attach_domain, guard, *_args(w, "a"), w.name("moved"))
+    )
+    await asyncio.wait_for(pause.reached.wait(), 5)
+    async with w.factory() as s:
+        await _unpublish(s, old_id)
+        await s.commit()
+    await _republish(w, "a")
+    pause.release.set()
+    with pytest.raises(NotFoundException):
+        await attach
+    assert await _open_rows_of(w, old_id) == []
+    assert await _open_rows_of(w, w.endpoint["a"]) == []
+    assert ("commit",) not in guard.log
+
+
+async def test_a_guard_binds_the_row_state(world: World, monkeypatch) -> None:
+    w = world
+    counts = _counting(monkeypatch)
+    row = await w.attach("a", w.name("state"))
+    calls = len(w.dns.calls)
+    for fn in (service.verify_domain, service.detach_domain):
+        guard = RecordingGuard(w.endpoint["a"], "active")
+        with pytest.raises(service.PublicMcpDomainCommandStaleError) as raised:
+            await _guarded(w, fn, guard, *_args(w, "a"), row.id)
+        assert (raised.value.status_code, raised.value.error_code) == (
+            409,
+            "public_mcp_domain_command_stale",
+        )
+        after = await w.row(row.id)
+        assert after is not None and (after.state, after.check_seq) == ("pending", 0)
+    assert counts == {} and len(w.dns.calls) == calls
+
+    # A row that is not an open row of the publication: stale with a guard,
+    # not found without one.
+    missing = uuid4()
+    for fn in (service.verify_domain, service.detach_domain):
+        with pytest.raises(service.PublicMcpDomainCommandStaleError):
+            await _guarded(
+                w, fn, RecordingGuard(w.endpoint["a"], "pending"), *_args(w, "a"), missing
+            )
+        with pytest.raises(NotFoundException):
+            await w.run(fn, *_args(w, "a"), missing)
+    assert counts == {} and len(w.dns.calls) == calls
+    await w.detach("a", row.id)
+
+
+async def test_a_guarded_verify_returns_the_state_it_wrote(world: World, monkeypatch) -> None:
+    """With a guard, verify answers from its own write and never reloads (A1)."""
+    w = world
+    row = await w.attach("a", w.name("wrote"))
+
+    def guard(state: str) -> RecordingGuard:
+        return RecordingGuard(w.endpoint["a"], state)
+
+    assert await _guarded(w, service.verify_domain, guard("pending"), *_args(w, "a"), row.id) == (
+        "pending"
+    )
+    w.dns.publish(row.hostname, row.verification_token)
+
+    # Detached by another session right after the activation committed: the
+    # answer is still the state the command wrote.
+    original = service._activate
+
+    async def activate_then_detach(*args: Any, **kwargs: Any) -> None:
+        await original(*args, **kwargs)
+        await w.detach("a", row.id)
+
+    monkeypatch.setattr(service, "_activate", activate_then_detach)
+    assert await _guarded(w, service.verify_domain, guard("pending"), *_args(w, "a"), row.id) == (
+        "active"
+    )
+    monkeypatch.setattr(service, "_activate", original)
+    assert (await w.row(row.id)).state == "released"
+
+    # Suspended for longer than the hold and the proof missing: the check releases it.
+    held = await w.active("a")
+    await w.sql(
+        "UPDATE public_mcp_domains SET state = 'suspended', suspended_reason = 'proof_lost', "
+        "suspended_at = timezone('UTC', statement_timestamp()) - interval '31 days', "
+        "serve_until = NULL WHERE id = :id",
+        id=held.id,
+    )
+    w.dns.withdraw(held.hostname)
+    assert await _guarded(
+        w, service.verify_domain, guard("suspended"), *_args(w, "a"), held.id
+    ) == ("released")
+    released = await w.row(held.id)
+    assert released is not None and released.state == "released"
+    audits = await _domain_audits(w, held.id)
+    assert audits[-1][0] == "public_mcp_domain.released"
+    assert audits[-1][1]["client_id"] == "kmc-guard-client"
+    assert audits[-1][1]["installation_id"] == "guard-installation"
+    # The owner API (no guard) still answers 404 for a released row.
+    with pytest.raises(NotFoundException):
+        await w.verify("a", held.id)
+
+
+async def test_owner_api_audit_rows_carry_no_command_fields(world: World) -> None:
+    """Rows of the owner API keep exactly their metadata keys."""
+    w = world
+    active = await w.active("a")
+    await w.detach("a", active.id)
+    for _action, meta in await _domain_audits(w, active.id):
+        assert set(meta) == {
+            "workspace_id",
+            "endpoint_id",
+            "from_state",
+            "to_state",
+            "reason",
+            "hostname_sha256",
+        }

@@ -134,6 +134,11 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # lease state. No person column, no foreign key (released by the
         # maintenance job after a workspace's hard delete). Never exported.
         "public_mcp_domains",
+        # Edge certificate reports of those domains (#2941): one row per claim id,
+        # the host name and endpoint id it names, a status and four times. No
+        # person column, no foreign key; deleted by the maintenance pass once
+        # past its valid_until. Never exported, nothing for erasure.
+        "public_mcp_domain_tls_reports",
         # Public MCP usage telemetry (#2678): one row per anonymous public
         # tools/call plus gap rows, keyed by endpoint identity and opaque HMAC
         # doc keys; no user id, no content. The doc-key map resolves a key to

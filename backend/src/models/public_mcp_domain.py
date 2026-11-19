@@ -7,7 +7,9 @@ the publication incarnation) of one workspace. The contract is
 No foreign key: the migration locks no existing table, and a row survives the
 hard delete of its workspace as a tombstone that the maintenance job releases
 with a cooldown. No person column: actors go to ``audit_logs``. The host name
-lives on this row only and is deleted with it.
+lives on this row and is deleted with it, and in the claim's edge certificate
+report (``public_mcp_domain_tls_reports``, #2941) until the maintenance pass
+deletes that report.
 
 Every time on the row is the database clock (``timezone('UTC',
 statement_timestamp())``, naive UTC).

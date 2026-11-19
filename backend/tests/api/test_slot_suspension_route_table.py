@@ -304,6 +304,17 @@ SLOT_SERVICE_GATED: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("GET", f"{_WS_SYNC}/publication-domains"): (
         "api.routes.sync_publication_domains:observe_publication_domain"
     ),
+    # #2921: the owner's domain commands; each runs the pre-admission
+    # (sync_authority, the owner check, then the gate) before the lifecycle.
+    ("POST", f"{_WS_SYNC}/publication-domains/claim"): (
+        "services.sync_publication_domain_commands:claim_publication_domain"
+    ),
+    ("POST", f"{_WS_SYNC}/publication-domains/verify"): (
+        "services.sync_publication_domain_commands:verify_publication_domain"
+    ),
+    ("POST", f"{_WS_SYNC}/publication-domains/remove"): (
+        "services.sync_publication_domain_commands:remove_publication_domain"
+    ),
     ("DELETE", _WS_SYNC): "services.sync_installations:unlink_installation",
     ("GET", f"{_WS_SYNC}/management"): "services.sync_management:control_mode",
     ("POST", f"{_WS_SYNC}/management/stop"): "services.sync_management:control_mode",

@@ -200,10 +200,13 @@ and no license is read):
   refuses this id ("Invalid service ID"), so no sync service can share the
   license row.
 - `services.public_mcp_domains.domain_write` is the only code that names the
-  service. A claim (`POST /api/v1/resources/{resource_id}/public-mcp/domains`),
-  an activation (verify of a `pending` domain) and every check of a held
-  domain (owner verify and the scheduler job `public_mcp_domain_maintenance`)
-  commit their plain reads and then enter
+  service. A claim (`POST /api/v1/resources/{resource_id}/public-mcp/domains`,
+  or the installation-bound `POST
+  /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-domains/claim`),
+  an activation (verify of a `pending` domain, through either interface's
+  `.../verify`) and every check of a held domain (owner verify and the
+  scheduler job `public_mcp_domain_maintenance`) commit their plain reads and
+  then enter
   `paid_integration_write(db, workspace_id, "public-mcp-domains")`. A refusal
   at entry or at the final re-check answers the owner `403`
   `public_mcp_domain_not_entitled`; for a check it suspends an `active` domain

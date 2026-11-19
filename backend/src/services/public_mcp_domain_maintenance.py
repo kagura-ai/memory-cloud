@@ -28,6 +28,12 @@ One run of the scheduler job ``public_mcp_domain_maintenance``
    lookup would start after the budget is counted ``budget_skipped`` and
    stays due.
 
+4. While edge certificate reports are configured (#2941), reports whose
+   ``valid_until`` has passed are deleted (``public_mcp_domain_tls_reports``,
+   one bounded statement in a session of its own). A failure there is logged
+   (``public_mcp_domain_tls_report_purge_failed``) and never fails the run;
+   nothing touches that table while the feature is not configured.
+
 The run returns integer counts only. Every time is the database clock; no
 host name, token or DNS answer is logged. Audit rows of the job carry the
 actor ``system:public-mcp-domains``.
@@ -57,6 +63,7 @@ from models.public_mcp_domain import (
     PublicMcpDomain,
 )
 from services import public_mcp_domains as domain_service
+from services.domain_tls_observations import reporting_configured
 from services.public_mcp_domains import SYSTEM_ACTOR, _audit
 from utils.logger import get_logger
 
@@ -69,6 +76,7 @@ __all__ = [
     "MaintenanceCounts",
     "due_domains",
     "housekeeping",
+    "purge_expired_reports",
     "run_maintenance",
 ]
 
@@ -140,6 +148,17 @@ _RELEASE_ORPHAN_HOLDERS = text(
     "  check_seq = p.check_seq + 1"
     " FROM target WHERE p.id = target.id"
     " RETURNING p.id, p.workspace_id, p.endpoint_id, p.hostname, target.state"
+)
+
+
+# Edge certificate reports past their own valid_until (#2941): never shown
+# again, so deleted. A report row locked by a reporter's write is skipped.
+_PURGE_TLS_REPORTS = text(
+    "DELETE FROM public_mcp_domain_tls_reports WHERE domain_id IN ("
+    "  SELECT domain_id FROM public_mcp_domain_tls_reports"
+    "  WHERE valid_until <= now()"
+    "  ORDER BY valid_until LIMIT :limit FOR UPDATE SKIP LOCKED"
+    ") RETURNING domain_id"
 )
 
 
@@ -361,6 +380,22 @@ async def _check_all(
         raise failures[0]
 
 
+async def purge_expired_reports(sessions: SessionFactory) -> None:
+    """Delete certificate reports past their ``valid_until`` (#2941); never fails the run.
+
+    Only while reporting is configured. One bounded statement in a session of
+    its own, after the checks: a failure (the table missing, say) is logged
+    and the run goes on.
+    """
+    if not reporting_configured(get_settings()):
+        return
+    try:
+        async with sessions() as db:
+            await _committed(db, _PURGE_TLS_REPORTS, limit=HOUSEKEEPING_LIMIT)
+    except Exception as exc:  # noqa: BLE001 - the optional table never stops the checks
+        logger.error("public_mcp_domain_tls_report_purge_failed", error_type=type(exc).__name__)
+
+
 async def run_maintenance(session_factory: SessionFactory | None = None) -> MaintenanceCounts:
     """One maintenance run: housekeeping, then the due checks within the budget.
 
@@ -382,5 +417,6 @@ async def run_maintenance(session_factory: SessionFactory | None = None) -> Main
         due = await due_domains(db)
         await db.commit()  # I3: no connection is held during the lookups
     await _check_all(sessions, due, deadline, counts)
+    await purge_expired_reports(sessions)
     logger.info("public_mcp_domain_maintenance_run", **counts.as_dict())
     return counts

@@ -13,6 +13,8 @@ Rows (later work packages add theirs):
   transport's 401 with ``WWW-Authenticate``, exactly as any other Host;
 - the fixed address ``/mcp/public/{id}`` is served under any Host;
 - the certificate permission endpoint answers 404 and opens no session;
+- the certificate report endpoint answers 404 before its body is read or a
+  statement runs (#2941);
 - every owner domain route answers 404 before any statement, signed in or not;
 - ``/api/v1/system/info`` reports ``features.public_mcp_domains = false``;
 - unpublishing an endpoint releases no domain and runs no statement on them.
@@ -228,6 +230,21 @@ async def test_permission_endpoint_is_404_without_a_session(switch_off, monkeypa
     assert r.content == b""
     assert opened == []
     lookup.assert_not_awaited()
+    assert switch_off == []
+
+
+async def test_certificate_report_endpoint_is_404_before_anything(switch_off, monkeypatch) -> None:
+    """#2941: with the switch off a report is refused before its body is read or a statement runs."""
+    token = "reporter-" + "t" * 40
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_tls_reporter_token", token)
+    async with _client("api-blue:8080") as c:
+        r = await c.put(
+            "/internal/public-mcp-domains/tls-observation",
+            content=b"{not json",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+    assert r.status_code == 404
+    assert r.content == b""
     assert switch_off == []
 
 

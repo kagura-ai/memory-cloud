@@ -29,6 +29,7 @@ import models.oidc  # noqa: F401  # #2781: register OIDC tables in Base.metadata
 import models.operation_history  # noqa: F401  # #2739: workspace mutation history
 import models.public_mcp  # noqa: F401  # Issue #2675: anonymous public MCP endpoints
 import models.public_mcp_domain  # noqa: F401  # Issue #2809: verified custom domains
+import models.public_mcp_domain_tls  # noqa: F401  # Issue #2941: edge certificate reports
 import models.public_mcp_usage  # noqa: F401  # Issue #2678: public MCP usage events
 import models.public_usage_budget  # noqa: F401  # Issue #2805: public usage budgets
 import models.resource  # noqa: F401

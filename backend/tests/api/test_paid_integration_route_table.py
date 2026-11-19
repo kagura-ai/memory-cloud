@@ -148,7 +148,9 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "share_keys": NONE,
     "sleep_reports": NONE,
     "system": NONE,
-    "sync_installations": Guarded(services=("services.sync_installations",)),  # #2802
+    # #2802. #2921: the publication-domain commands commit through
+    # services.public_mcp_domains.domain_write.
+    "sync_installations": Guarded(services=("services.sync_installations",)),
     "sync_worker": Guarded(services=("services.sync_credentials",)),
     "sync_feeds": Guarded(services=("services.sync_credentials",)),
     "sync_records": NONE,  # Human RBAC/explicit OIDC scope; no paid worker grant.

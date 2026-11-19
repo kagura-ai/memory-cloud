@@ -288,6 +288,15 @@ events. Two rights are separate and end separately:
   transaction; a later publication gets no alias until the owner adds and
   verifies the domain again.
 
+The canonical owner can also claim, verify and remove that custom domain
+through the installation's registered browser client, with an
+`integrations:manage` token and the binding last read in the domain
+observation (experimental, #2921): advertised as
+`public.domains.operations.v1` while the operator turns
+`SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` on. The states, limits, TXT proof
+and audit rows are those of the owner API. See "Installation-bound owner
+operations" in [Public MCP custom domains](../public-mcp-domains.md).
+
 The sync service id can never be `public-mcp-domains`: `sync_service register`
 refuses that reserved id.
 

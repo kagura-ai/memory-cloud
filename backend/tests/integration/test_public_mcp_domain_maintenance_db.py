@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import pytest_asyncio
+import structlog
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -664,3 +665,30 @@ async def test_housekeeping_leaves_live_rows_alone(world: World) -> None:
         after = await w.row(row.id)
         assert after is not None and after.state == row.state
         assert after.check_seq == row.check_seq
+
+
+async def test_a_failing_report_purge_never_stops_the_checks(world: World, monkeypatch) -> None:
+    """#2941: the purge of expired certificate reports runs after the due checks, on its own.
+
+    While reporting is configured, a purge that fails (here: a statement on a
+    table that does not exist) logs one error event; the due row is still
+    checked and the run returns its counts.
+    """
+    w = world
+    monkeypatch.setattr(
+        get_settings(), "mcp_public_domains_tls_reporter_token", "reporter-" + "p" * 40
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_PURGE_TLS_REPORTS",
+        text("DELETE FROM public_mcp_domain_tls_reports_absent RETURNING 1"),
+    )
+    row = await w.add(last_checked_at=timedelta(hours=-2))
+    with structlog.testing.capture_logs() as events:
+        counts = await w.run()
+    assert counts.checked >= 1
+    after = await w.row(row.id)
+    assert after is not None and after.last_checked_at > row.last_checked_at
+    failures = [e for e in events if e["event"] == "public_mcp_domain_tls_report_purge_failed"]
+    assert len(failures) == 1 and failures[0]["log_level"] == "error"
+    assert [e for e in events if e["event"] == "public_mcp_domain_maintenance_run"]

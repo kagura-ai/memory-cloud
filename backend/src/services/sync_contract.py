@@ -7,6 +7,8 @@ from models.sync_contract import SyncConfigurationV1
 from models.sync_feed_schemas import SCHEMA_HASH
 
 HUMAN_SCOPES = ("openid", "workspaces:read", "integrations:manage", "sync.records:read")
+# #2921: the owner's claim, verify and remove for an installation (experimental, optional).
+DOMAIN_OPERATIONS_CAPABILITY = "public.domains.operations.v1"
 REQUIRED_SYNC_CAPABILITIES = frozenset(
     {
         "identity.oidc.v1",
@@ -50,6 +52,10 @@ def sync_configuration(settings: Settings) -> SyncConfigurationV1:
         "public.domains.observation.v1": controls
         and budget
         and settings.mcp_public_domains_enabled,
+        DOMAIN_OPERATIONS_CAPABILITY: controls
+        and budget
+        and settings.mcp_public_domains_enabled
+        and settings.sync_publication_domain_operations_enabled,
     }
     return SyncConfigurationV1(
         protocol="kmc.sync.v1",

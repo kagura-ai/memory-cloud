@@ -1,33 +1,32 @@
 """Private, finite observations of the exact publication bound to an installation."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from api.routes.public_mcp_domains import PublicMcpDomainResponse, domain_response
 from auth.sync_identity import SyncPrincipal
+from config.settings import get_settings
 from models.api_base import TZAwareBaseModel
 from models.public_mcp_domain import PublicMcpDomain
-from models.sync_installation import SyncAuthorization, SyncInstallation
+from services.domain_tls_observations import (
+    CertificateObservation,
+    ObservedCertificate,
+    current_certificate,
+    load_report,
+    reporting_configured,
+)
 from services.sync_authority import registered_service, sync_authority
-from services.sync_provisioning import installation_view
+from services.sync_publication_domain_commands import bound_installation
 from utils.datetime import utcnow
-from utils.exceptions import NotFoundException
-
-
-class CertificateObservation(BaseModel):
-    """No authenticated certificate issuer or edge observations are available."""
-
-    status: Literal["unreported"] = "unreported"
 
 
 class LiveDomain(PublicMcpDomainResponse):
-    tls: CertificateObservation
+    tls: CertificateObservation | ObservedCertificate
 
 
 class ReleasedDomain(TZAwareBaseModel):
@@ -61,24 +60,11 @@ async def observe_publication_domain(
     """Read current owner, registered client, target identity and one domain in the transaction."""
     async with sync_authority(db, workspace_id, principal) as authority:
         service = await registered_service(db, browser_client_id=principal.client_id)
-        installation = await db.scalar(
-            select(SyncInstallation)
-            .join(SyncAuthorization, SyncAuthorization.id == SyncInstallation.authorization_id)
-            .where(
-                SyncInstallation.id == installation_id,
-                SyncInstallation.workspace_id == workspace_id,
-                SyncInstallation.service_id == service.service_id,
-                SyncInstallation.service_client_id == service.service_client_id,
-                SyncAuthorization.browser_client_id == principal.client_id,
-                SyncAuthorization.service_generation == service.generation,
-            )
-            .with_for_update(read=True, nowait=True)
+        # The selection the domain commands admit with (#2921).
+        _installation, target = await bound_installation(
+            db, workspace_id, installation_id, principal, service
         )
-        if installation is None:
-            raise NotFoundException("Synchronization installation")
-        target = await installation_view(db, installation)
-        if not target.public_id:
-            raise NotFoundException("Publication target")
+        assert target.public_id is not None
 
         # Cooldown is per workspace. The same owner may already have verified
         # this hostname on a different endpoint, even before cooldown ends.
@@ -123,9 +109,22 @@ async def observe_publication_domain(
             until = min(until, row.cooldown_until)
         elif row is not None:
             live = await domain_response(db, row)
-            domain = LiveDomain(**live.model_dump(), tls=CertificateObservation())
+            tls: CertificateObservation | ObservedCertificate = CertificateObservation()
+            # #2941: the certificate report is read only while reporting is configured.
+            if reporting_configured(get_settings()):
+                tls = current_certificate(row, await load_report(db, row.id), observed)
+            domain = LiveDomain(**live.model_dump(), tls=tls)
             if live.serving and row.serve_until is not None:
                 until = min(until, row.serve_until)
+            if isinstance(tls, ObservedCertificate):
+                # The answer never outlives the evidence it carries, and a
+                # valid answer never outlives the certificate. Both are more
+                # than the show margin ahead, so these deadlines are still
+                # ahead at the commit.
+                until = min(until, tls.valid_until.astimezone(UTC).replace(tzinfo=None))
+                if tls.status == "valid" and tls.certificate_not_after is not None:
+                    end = tls.certificate_not_after.astimezone(UTC).replace(tzinfo=None)
+                    until = min(until, end)
         authority.deadlines.append(until)
         result = PublicationDomainObservation(
             subject=principal.user_id,

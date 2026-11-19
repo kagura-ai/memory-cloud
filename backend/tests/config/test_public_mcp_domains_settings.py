@@ -1,6 +1,6 @@
 """Settings of verified custom domains for public MCP endpoints (#2809).
 
-Seven settings, off by default. Switching on needs a routing target; every
+Domain reporting and serving are off by default. Switching on needs a routing target; every
 host-name entry must normalise, or the process refuses to start. A refusal
 names the variable, never its value.
 """
@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from config.settings import Settings
 
 _ENV_KEYS = [
+    "MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN",
     "MCP_PUBLIC_DOMAINS_ENABLED",
     "MCP_PUBLIC_DOMAINS_AUTHORITY",
     "MCP_PUBLIC_DOMAINS_ROUTING_TARGET",
@@ -34,6 +35,7 @@ def clean_env(monkeypatch):
 def test_defaults(clean_env) -> None:
     s = Settings(_env_file=None)
     assert s.mcp_public_domains_enabled is False
+    assert s.mcp_public_domains_tls_reporter_token == ""
     assert s.mcp_public_domains_authority == "entitlement"
     assert s.mcp_public_domains_routing_target == ""
     assert s.mcp_public_domains_app_hosts == ""
@@ -42,9 +44,10 @@ def test_defaults(clean_env) -> None:
     assert s.mcp_public_domains_max_per_workspace == 3
 
 
-def test_exactly_seven_settings() -> None:
+def test_domain_settings_inventory() -> None:
     names = {n for n in Settings.model_fields if n.startswith("mcp_public_domains_")}
     assert names == {
+        "mcp_public_domains_tls_reporter_token",
         "mcp_public_domains_enabled",
         "mcp_public_domains_authority",
         "mcp_public_domains_routing_target",

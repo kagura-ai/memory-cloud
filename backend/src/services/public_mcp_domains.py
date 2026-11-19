@@ -42,6 +42,14 @@ Invariants:
 - I7 A lease, always. No row is ``active`` without ``serve_until``; nothing is
   served past it; it is extended only by a completed check under an active
   right.
+- I8 Command guard (#2921). A caller of another interface passes a guard:
+  every write transaction of the command admits it as its first locking
+  statement and keeps it open through the commit; every row the command
+  touches belongs to ``guard.endpoint_id``; verify and detach require
+  ``guard.expected_state``. A guarded check of a held row without the right
+  admits twice: once on its own when the paid entry refuses, then in the
+  fallback write. Without a guard every function runs the statements it ran
+  before.
 
 The database clock decides every time: no entry point takes a time argument
 or reads the application clock. The writer reads the database clock once in
@@ -54,10 +62,10 @@ import asyncio
 import hashlib
 import secrets
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, Protocol, cast, overload
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, literal_column, or_, select, text, update
@@ -100,9 +108,12 @@ __all__ = [
     "AuditAction",
     "Decision",
     "DomainActor",
+    "DomainCommandGuard",
     "DomainSnapshot",
+    "DomainState",
     "DomainWriteAccess",
     "PublicMcpDomainChangedError",
+    "PublicMcpDomainCommandStaleError",
     "PublicMcpDomainExistsError",
     "PublicMcpDomainHeldError",
     "PublicMcpDomainHostnameNotAllowedError",
@@ -407,6 +418,21 @@ class PublicMcpDomainChangedError(_DomainError):
         )
 
 
+class PublicMcpDomainCommandStaleError(_DomainError):
+    """A command named a publication or a domain state that is no longer current (409).
+
+    Answered only before the command writes a domain row; the caller reads
+    the publication and its domain again.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The publication or its custom domain changed; read it again.",
+            status_code=409,
+            error_code="public_mcp_domain_command_stale",
+        )
+
+
 class PublicMcpDomainVerificationUnavailableError(_DomainError):
     """The DNS check was indeterminate, or a counter could not be read (503)."""
 
@@ -442,12 +468,48 @@ def _iso(value: datetime) -> str:
 # ----------------------------------------------------------------------------
 
 
+class DomainCommandGuard(Protocol):
+    """The admission of a command of another interface (I8).
+
+    ``admitted`` is entered as the first locking statement of every write
+    transaction of the command and stays open through that transaction's
+    commit; it raises to refuse. ``paid_guarded`` is true exactly when the
+    transaction runs inside ``paid_integration_write``.
+    """
+
+    @property
+    def endpoint_id(self) -> UUID:
+        """The only publication the command may touch."""
+        ...
+
+    @property
+    def expected_state(self) -> str | None:
+        """The state of the row the command names; ``None`` for a claim."""
+        ...
+
+    @property
+    def audit_fields(self) -> tuple[tuple[str, str], ...]:
+        """Added to the metadata of the command's audit rows."""
+        ...
+
+    def admitted(
+        self, db: AsyncSession, *, paid_guarded: bool
+    ) -> AbstractAsyncContextManager[None]:
+        """Admit the caller in the current transaction; held to its commit."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class DomainActor:
-    """Who caused a transition: the audit row's ``user_id`` and ``user_email``."""
+    """Who caused a transition: the audit row's ``user_id`` and ``user_email``.
+
+    ``via`` adds fields to the audit row's metadata (a command's client and
+    installation); empty for the owner API, the job and the CLI.
+    """
 
     user_id: str
     email: str
+    via: tuple[tuple[str, str], ...] = ()
 
 
 # The maintenance job. ``AuditLog.user_email`` is NOT NULL: the actor string
@@ -455,10 +517,12 @@ class DomainActor:
 SYSTEM_ACTOR = DomainActor("system:public-mcp-domains", "system:public-mcp-domains")
 
 
-async def owner_actor(db: AsyncSession, user_id: str) -> DomainActor:
+async def owner_actor(
+    db: AsyncSession, user_id: str, guard: DomainCommandGuard | None = None
+) -> DomainActor:
     """The actor of an owner action: the user id and the e-mail of its users row."""
     email = await db.scalar(select(User.email).where(User.user_id == user_id))
-    return DomainActor(user_id, email or user_id)
+    return DomainActor(user_id, email or user_id, guard.audit_fields if guard is not None else ())
 
 
 def hostname_digest(hostname: str) -> str:
@@ -487,6 +551,8 @@ def _audit(
             action=f"public_mcp_domain.{action}",
             resource=f"public_mcp_domain:{domain_id}",
             user_metadata={
+                # A command's client and installation; never one of the keys below.
+                **dict(actor.via),
                 "workspace_id": str(workspace_id),
                 "endpoint_id": str(endpoint_id),
                 "from_state": from_state,
@@ -520,7 +586,9 @@ class DomainWriteAccess:
 
 
 @asynccontextmanager
-async def domain_write(db: AsyncSession, workspace_id: UUID) -> AsyncIterator[DomainWriteAccess]:
+async def domain_write(
+    db: AsyncSession, workspace_id: UUID, guard: DomainCommandGuard | None = None
+) -> AsyncIterator[DomainWriteAccess]:
     """Own one write transaction of a domain change, under the right.
 
     The caller's transaction is committed first (plain reads only may precede
@@ -531,28 +599,62 @@ async def domain_write(db: AsyncSession, workspace_id: UUID) -> AsyncIterator[Do
     ``PublicMcpDomainNotEntitledError`` after the rollback. Under
     ``operator`` every canonical owner has the right: an ordinary transaction
     that this helper commits, ``valid_until = None``. The body never commits.
+
+    With a command guard (I8) the guard is admitted before the body (inside
+    the paid guard under ``entitlement``) and its context closes after the
+    commit. A refusal of the admission propagates as it is. When the right
+    is refused, the guard is admitted in a transaction of its own first, so
+    a caller who lost its authority is answered as such, not as not entitled.
     """
     await db.commit()
     if get_settings().mcp_public_domains_authority == "operator":
+        async with AsyncExitStack() as held:
+            try:
+                if guard is not None:
+                    await held.enter_async_context(guard.admitted(db, paid_guarded=False))
+                yield DomainWriteAccess(None)
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return
+    in_body = False
+    try:
+        async with AsyncExitStack() as held:
+            async with paid_integration_write(db, workspace_id, DOMAIN_SERVICE_ID) as access:
+                if access.valid_until is None:
+                    raise AuthorizationError("Paid integration is not available")
+                in_body = True
+                if guard is not None:
+                    await held.enter_async_context(guard.admitted(db, paid_guarded=True))
+                yield DomainWriteAccess(access.valid_until)
+                in_body = False
+    except AuthorizationError as exc:
+        if in_body:
+            raise
+        if guard is not None:
+            async with _plain_write(db, guard):
+                pass
+        raise PublicMcpDomainNotEntitledError() from exc
+
+
+@asynccontextmanager
+async def _plain_write(db: AsyncSession, guard: DomainCommandGuard | None) -> AsyncIterator[None]:
+    """One ordinary write transaction that needs no right; committed here.
+
+    It continues the caller's transaction (earlier plain reads share it).
+    With a guard, the admission is its first locking statement and its
+    context closes after the commit. Any failure rolls back and re-raises.
+    """
+    async with AsyncExitStack() as held:
         try:
-            yield DomainWriteAccess(None)
+            if guard is not None:
+                await held.enter_async_context(guard.admitted(db, paid_guarded=False))
+            yield
             await db.commit()
         except BaseException:
             await db.rollback()
             raise
-        return
-    in_body = False
-    try:
-        async with paid_integration_write(db, workspace_id, DOMAIN_SERVICE_ID) as access:
-            if access.valid_until is None:
-                raise AuthorizationError("Paid integration is not available")
-            in_body = True
-            yield DomainWriteAccess(access.valid_until)
-            in_body = False
-    except AuthorizationError as exc:
-        if in_body:
-            raise
-        raise PublicMcpDomainNotEntitledError() from exc
 
 
 def _lease(access: DomainWriteAccess | None, db_now: datetime) -> datetime:
@@ -608,6 +710,19 @@ async def _require_live_endpoint(
     if endpoint is None:
         raise NotFoundException("Public MCP endpoint")
     return endpoint
+
+
+def _bound_endpoint(endpoint: PublicMcpEndpoint, guard: DomainCommandGuard | None) -> None:
+    """I8: a command touches only the publication of its guard."""
+    if guard is not None and endpoint.id != guard.endpoint_id:
+        raise NotFoundException("Public MCP endpoint")
+
+
+def _row_gone(guard: DomainCommandGuard | None) -> MemoryCloudException:
+    """The named row is not an open row of the publication: stale for a command."""
+    if guard is not None:
+        return PublicMcpDomainCommandStaleError()
+    return NotFoundException("Public MCP domain")
 
 
 async def _open_row(
@@ -729,12 +844,19 @@ async def _lock(db: AsyncSession, key: str) -> None:
 
 
 async def attach_domain(
-    db: AsyncSession, user_id: str, workspace_id: UUID, resource_id: str, raw_hostname: str
+    db: AsyncSession,
+    user_id: str,
+    workspace_id: UUID,
+    resource_id: str,
+    raw_hostname: str,
+    *,
+    guard: DomainCommandGuard | None = None,
 ) -> PublicMcpDomain:
     """Claim ``raw_hostname`` for the live publication of ``resource_id`` (``pending``).
 
     The claim holds nothing and reads no other workspace's rows; every attach
-    mints a new token.
+    mints a new token. With a command guard (I8) the publication must be the
+    guard's, read before and inside the write transaction.
 
     Raises:
         PublicMcpDomainOwnerRequiredError: The caller is not the canonical owner.
@@ -749,9 +871,10 @@ async def attach_domain(
     hostname = claimable_hostname(raw_hostname)
     if hostname is None:
         raise PublicMcpDomainHostnameNotAllowedError()
-    await _require_live_endpoint(db, workspace_id, resource_id)
-    actor = await owner_actor(db, user_id)
-    async with domain_write(db, workspace_id):
+    live = await _require_live_endpoint(db, workspace_id, resource_id)
+    _bound_endpoint(live, guard)
+    actor = await owner_actor(db, user_id, guard)
+    async with domain_write(db, workspace_id, guard):
         if not await _is_canonical_owner(db, user_id, workspace_id):
             raise PublicMcpDomainOwnerRequiredError()
         await _lock(db, f"public_mcp_domain_ws:{workspace_id}")
@@ -760,6 +883,7 @@ async def attach_domain(
         endpoint = await _live_endpoint(db, workspace_id, resource_id, share=True)
         if endpoint is None:
             raise NotFoundException("Public MCP endpoint")
+        _bound_endpoint(endpoint, guard)
         open_rows = await db.scalar(
             select(func.count())
             .select_from(PublicMcpDomain)
@@ -903,6 +1027,7 @@ async def apply_check(
     seen_seq: int,
     check: DomainCheck,
     actor: DomainActor,
+    guard: DomainCommandGuard | None = None,
 ) -> AppliedCheck:
     """Apply one completed check to an ``active`` / ``suspended`` row.
 
@@ -919,6 +1044,8 @@ async def apply_check(
         seen_seq: ``check_seq`` of the row when the lookup started.
         check: The completed lookup (``unavailable`` included).
         actor: Who caused the check (audit row of a transition).
+        guard: A command's guard (I8), admitted in each write transaction;
+            the job passes none.
 
     Returns:
         What was done; ``fenced`` when the row changed during the lookup.
@@ -930,17 +1057,13 @@ async def apply_check(
         await db.commit()
         return AppliedCheck("fenced", False)
     try:
-        async with domain_write(db, workspace_id) as access:
+        async with domain_write(db, workspace_id, guard) as access:
             applied = await _apply(db, domain_id, seen_seq, check, actor, access)
         return applied
     except PublicMcpDomainNotEntitledError:
         pass
-    try:
+    async with _plain_write(db, guard):
         applied = await _apply(db, domain_id, seen_seq, check, actor, None)
-        await db.commit()
-    except BaseException:
-        await db.rollback()
-        raise
     return applied
 
 
@@ -983,10 +1106,19 @@ async def _activate(
     seen_seq: int,
     check: DomainCheck,
     actor: DomainActor,
+    guard: DomainCommandGuard | None = None,
 ) -> None:
-    """``pending → active`` after the caller's own proof was found (I1)."""
-    await _count_activation(workspace_id)
-    async with domain_write(db, workspace_id) as access:
+    """``pending → active`` after the caller's own proof was found (I1).
+
+    Without a guard the attempt is counted before the write transaction. With
+    one it is counted right after the admission, so a refused admission
+    counts nothing.
+    """
+    if guard is None:
+        await _count_activation(workspace_id)
+    async with domain_write(db, workspace_id, guard) as access:
+        if guard is not None:
+            await _count_activation(workspace_id)
         if not await _is_canonical_owner(db, user_id, workspace_id):
             raise PublicMcpDomainOwnerRequiredError()
         row_hostname = await db.scalar(
@@ -1001,7 +1133,11 @@ async def _activate(
             raise PublicMcpDomainChangedError()
         # A plain read: verify never locks the endpoint row (I4).
         endpoint = await _live_endpoint(db, workspace_id, resource_id)
-        if endpoint is None or endpoint.id != row.endpoint_id:
+        if (
+            endpoint is None
+            or endpoint.id != row.endpoint_id
+            or (guard is not None and row.endpoint_id != guard.endpoint_id)
+        ):
             raise PublicMcpEndpointNotPublishedError()
         if claimable_hostname(row.hostname) is None:
             raise PublicMcpDomainHostnameNotAllowedError()
@@ -1033,10 +1169,14 @@ async def _activate(
 
 
 async def _record_pending_check(
-    db: AsyncSession, domain_id: UUID, seen_seq: int, check: DomainCheck
+    db: AsyncSession,
+    domain_id: UUID,
+    seen_seq: int,
+    check: DomainCheck,
+    guard: DomainCommandGuard | None = None,
 ) -> None:
     """A ``pending`` row whose proof was not found: record the check (fenced)."""
-    try:
+    async with _plain_write(db, guard):
         result = await db.execute(
             update(PublicMcpDomain)
             .where(
@@ -1053,22 +1193,53 @@ async def _record_pending_check(
             .execution_options(synchronize_session=False)
         )
         changed = getattr(result, "rowcount", 0)
-        await db.commit()
-    except BaseException:
-        await db.rollback()
-        raise
     if changed != 1:
         raise PublicMcpDomainChangedError()
 
 
+@overload
 async def verify_domain(
-    db: AsyncSession, user_id: str, workspace_id: UUID, resource_id: str, domain_id: UUID
-) -> PublicMcpDomain:
+    db: AsyncSession,
+    user_id: str,
+    workspace_id: UUID,
+    resource_id: str,
+    domain_id: UUID,
+    *,
+    guard: None = None,
+) -> PublicMcpDomain: ...
+
+
+@overload
+async def verify_domain(
+    db: AsyncSession,
+    user_id: str,
+    workspace_id: UUID,
+    resource_id: str,
+    domain_id: UUID,
+    *,
+    guard: DomainCommandGuard,
+) -> DomainState: ...
+
+
+async def verify_domain(
+    db: AsyncSession,
+    user_id: str,
+    workspace_id: UUID,
+    resource_id: str,
+    domain_id: UUID,
+    *,
+    guard: DomainCommandGuard | None = None,
+) -> PublicMcpDomain | DomainState:
     """Check the proof of a domain now and apply the result.
 
     ``pending``: activation when the proof is found, the right is active and
     the name is free (held / cooldown are answered only then).
     ``active`` / ``suspended``: the same check the job runs (``apply_check``).
+
+    Without a guard the row is read again and returned. With a command guard
+    (I8) the row must be in ``guard.expected_state`` before anything is
+    counted, and the answer is the state the command's own write left
+    (``released`` included), never a read after the commit.
 
     Raises:
         PublicMcpDomainOwnerRequiredError: Not the canonical owner (before the
@@ -1080,34 +1251,47 @@ async def verify_domain(
         PublicMcpDomainNotEntitledError: No active right (an ``active`` row is
             suspended first).
         PublicMcpDomainChangedError: The row changed during the lookup.
+        PublicMcpDomainCommandStaleError: With a guard: the row is not an open
+            row of the publication, or not in ``guard.expected_state``.
     """
     if not await _is_canonical_owner(db, user_id, workspace_id):
         raise PublicMcpDomainOwnerRequiredError()
     endpoint = await _require_live_endpoint(db, workspace_id, resource_id)
+    _bound_endpoint(endpoint, guard)
     row = await _open_row(db, workspace_id, endpoint.id, domain_id, lock=False)
     if row is None:
-        raise NotFoundException("Public MCP domain")
+        raise _row_gone(guard)
+    if guard is not None and row.state != guard.expected_state:
+        raise PublicMcpDomainCommandStaleError()
     await _count_verify(workspace_id)
-    actor = await owner_actor(db, user_id)
+    actor = await owner_actor(db, user_id, guard)
     state, seen_seq = row.state, row.check_seq
     hostname, token = row.hostname, row.verification_token
     await db.commit()  # I3: no connection is held during the lookup
     check = await lookup(hostname, token)
     if check.proof == "unavailable":
         raise PublicMcpDomainVerificationUnavailableError()
+    written: str | None
     if state == "pending":
         if check.proof == "ok":
             await _activate(
-                db, user_id, workspace_id, resource_id, domain_id, seen_seq, check, actor
+                db, user_id, workspace_id, resource_id, domain_id, seen_seq, check, actor, guard
             )
+            written = "active"
         else:
-            await _record_pending_check(db, domain_id, seen_seq, check)
+            await _record_pending_check(db, domain_id, seen_seq, check, guard)
+            written = "pending"
     else:
-        applied = await apply_check(db, domain_id, seen_seq, check, actor)
+        applied = await apply_check(db, domain_id, seen_seq, check, actor, guard)
         if applied.outcome == "fenced":
             raise PublicMcpDomainChangedError()
         if not applied.right_active:
             raise PublicMcpDomainNotEntitledError()
+        written = applied.to_state
+    if guard is not None:
+        if written is None:  # pragma: no cover - an applied check always has a state
+            raise RuntimeError("applied check without a state")
+        return cast(DomainState, written)
     current = await reload_domain(db, domain_id)
     if current is None or current.state == "released":
         raise NotFoundException("Public MCP domain")
@@ -1129,19 +1313,30 @@ def _release(row: PublicMcpDomain, db_now: datetime) -> None:
 
 
 async def detach_domain(
-    db: AsyncSession, user_id: str, workspace_id: UUID, resource_id: str, domain_id: UUID
+    db: AsyncSession,
+    user_id: str,
+    workspace_id: UUID,
+    resource_id: str,
+    domain_id: UUID,
+    *,
+    guard: DomainCommandGuard | None = None,
 ) -> None:
     """Remove a domain of the publication; never needs the right.
 
     ``pending``: the row is deleted. ``active`` / ``suspended``: ``released``
-    with the cooldown. Audited, committed here.
+    with the cooldown. Audited, committed here. With a command guard (I8)
+    the locked row must be in ``guard.expected_state``; a row that is not an
+    open row of the publication is stale rather than not found.
     """
     endpoint = await _require_live_endpoint(db, workspace_id, resource_id)
-    actor = await owner_actor(db, user_id)
-    try:
+    _bound_endpoint(endpoint, guard)
+    actor = await owner_actor(db, user_id, guard)
+    async with _plain_write(db, guard):
         row = await _open_row(db, workspace_id, endpoint.id, domain_id, lock=True)
         if row is None:
-            raise NotFoundException("Public MCP domain")
+            raise _row_gone(guard)
+        if guard is not None and row.state != guard.expected_state:
+            raise PublicMcpDomainCommandStaleError()
         from_state = row.state
         if from_state == "pending":
             await db.delete(row)
@@ -1161,10 +1356,6 @@ async def detach_domain(
             from_state=from_state,
             to_state=to_state,
         )
-        await db.commit()
-    except BaseException:
-        await db.rollback()
-        raise
 
 
 async def release_domains_of_endpoint(

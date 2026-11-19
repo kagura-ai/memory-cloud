@@ -29,14 +29,24 @@ from models.sync_installation_schemas import (
     SyncAuthorizationView,
     SyncInstallationView,
 )
+from models.sync_publication_domain_schemas import (
+    PublicationDomainClaim,
+    PublicationDomainCommand,
+    PublicationDomainCommandResult,
+)
 from models.sync_setup_handoff_schemas import SyncSetupHandoffCreate, SyncSetupHandoffView
-from services.sync_contract import sync_configuration
+from services.sync_contract import DOMAIN_OPERATIONS_CAPABILITY, sync_configuration
 from services.sync_installations import (
     activate_installation,
     create_authorization,
     inspect_installation,
     revoke_authorization,
     unlink_installation,
+)
+from services.sync_publication_domain_commands import (
+    claim_publication_domain,
+    remove_publication_domain,
+    verify_publication_domain,
 )
 from services.sync_setup_handoff import create_setup_handoff
 from utils.exceptions import (
@@ -80,7 +90,11 @@ class SyncControlRoute(APIRoute):
             except (AuthorizationError, NotFoundException):
                 response = JSONResponse({"error": "not_found"}, status_code=404)
             except MemoryCloudException as exc:
-                response = JSONResponse({"error": exc.error_code}, status_code=exc.status_code)
+                response = JSONResponse(
+                    {"error": exc.error_code},
+                    status_code=exc.status_code,
+                    headers=getattr(exc, "response_headers", None),
+                )
             except Exception as exc:
                 logger.warning("sync_control_unavailable", failure_type=type(exc).__name__)
                 response = JSONResponse({"error": "temporarily_unavailable"}, status_code=503)
@@ -199,3 +213,70 @@ async def read_publication_domain(
     if "public.domains.observation.v1" not in sync_configuration(get_settings()).capabilities:
         raise NotFoundException("Publication domain observation")
     return await observe_publication_domain(db, workspace_id, installation_id, principal)
+
+
+async def publication_domain_operations_enabled() -> None:
+    """#2921: the domain commands answer 404 before authentication while not advertised."""
+    if DOMAIN_OPERATIONS_CAPABILITY not in sync_configuration(get_settings()).capabilities:
+        raise NotFoundException("Publication domain operations")
+
+
+DomainOperations = [Depends(publication_domain_operations_enabled)]
+
+
+@router.post(
+    "/sync-installations/{installation_id}/publication-domains/claim",
+    response_model=PublicationDomainCommandResult,
+    dependencies=DomainOperations,
+    openapi_extra=json_body(PublicationDomainClaim),
+)
+async def claim_publication_domain_route(
+    workspace_id: UUID, installation_id: UUID, request: Request, principal: Manager, db: Database
+) -> PublicationDomainCommandResult:
+    """Claim a custom domain for the installation's publication (experimental).
+
+    The canonical owner with ``integrations:manage`` for the installation's
+    browser client. The body carries the binding last read in the
+    observation; the publication must have no open domain.
+    """
+    exact_query(request)
+    body, _size = await bounded_body(request, PublicationDomainClaim)
+    return await claim_publication_domain(db, workspace_id, installation_id, principal, body)
+
+
+@router.post(
+    "/sync-installations/{installation_id}/publication-domains/verify",
+    response_model=PublicationDomainCommandResult,
+    dependencies=DomainOperations,
+    openapi_extra=json_body(PublicationDomainCommand),
+)
+async def verify_publication_domain_route(
+    workspace_id: UUID, installation_id: UUID, request: Request, principal: Manager, db: Database
+) -> PublicationDomainCommandResult:
+    """Check the named custom domain's proof now and apply the result (experimental).
+
+    The body carries the binding and the domain (id and state) last read in
+    the observation; a domain no longer in that state is a stale command.
+    """
+    exact_query(request)
+    body, _size = await bounded_body(request, PublicationDomainCommand)
+    return await verify_publication_domain(db, workspace_id, installation_id, principal, body)
+
+
+@router.post(
+    "/sync-installations/{installation_id}/publication-domains/remove",
+    response_model=PublicationDomainCommandResult,
+    dependencies=DomainOperations,
+    openapi_extra=json_body(PublicationDomainCommand),
+)
+async def remove_publication_domain_route(
+    workspace_id: UUID, installation_id: UUID, request: Request, principal: Manager, db: Database
+) -> PublicationDomainCommandResult:
+    """Remove the named custom domain of the installation's publication (experimental).
+
+    The body carries the binding and the domain (id and state) last read in
+    the observation; a domain no longer in that state is a stale command.
+    """
+    exact_query(request)
+    body, _size = await bounded_body(request, PublicationDomainCommand)
+    return await remove_publication_domain(db, workspace_id, installation_id, principal, body)
