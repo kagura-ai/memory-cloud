@@ -266,7 +266,7 @@ describe("dashboard context permalink (#2936)", () => {
 
     expect(mockToast).toHaveBeenCalledWith({
       title: "error",
-      description: "copyFailedManualHint",
+      description: "copyFailed",
       variant: "destructive",
     });
     expect(mockToast).not.toHaveBeenCalledWith({
@@ -381,5 +381,39 @@ describe("dashboard context permalink (#2936)", () => {
     });
     expect(button).toHaveAttribute("title", "copyContextLink:Alpha");
     expect(button.tagName).toBe("BUTTON");
+  });
+
+  it("clears the selection when ?context= is removed from outside the page", async () => {
+    mockQuery = `context=${CTX_A}`;
+    const { rerender } = renderPage();
+    await waitFor(() =>
+      expect(mockGetTimeline).toHaveBeenLastCalledWith("ws-1", 30, CTX_A),
+    );
+
+    mockQuery = "";
+    rerender(<WorkspaceStatsPage />);
+
+    await waitFor(() =>
+      expect(mockGetTimeline).toHaveBeenLastCalledWith("ws-1", 30, undefined),
+    );
+    expect(
+      screen.queryByRole("button", { name: "copyContextLink:Alpha" }),
+    ).toBeNull();
+  });
+
+  it("keeps the selector row's width when a context is picked (reserved slot)", async () => {
+    renderPage();
+    await screen.findByRole("combobox", { name: "filterByContext" });
+    const slot = screen.getByTestId("context-link-slot");
+    expect(slot).toHaveClass("h-9", "w-9");
+    expect(slot.querySelector("button")).toBeNull();
+
+    cleanup();
+    mockQuery = `context=${CTX_A}`;
+    renderPage();
+    const button = await screen.findByRole("button", {
+      name: "copyContextLink:Alpha",
+    });
+    expect(screen.getByTestId("context-link-slot")).toContainElement(button);
   });
 });

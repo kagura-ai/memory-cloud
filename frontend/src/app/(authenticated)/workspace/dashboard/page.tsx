@@ -139,7 +139,10 @@ export default function WorkspaceStatsPage() {
     if (handledContextParam.current === contextParam) return;
     handledContextParam.current = contextParam;
     if (!linkedContextId) {
+      // The parameter was removed (e.g. the sidebar item): the address now
+      // means "all contexts", so the view must too.
       setUnavailableContextId(null);
+      setSelectedContextId(null);
       return;
     }
     const match = stats.contexts.find(
@@ -321,12 +324,15 @@ export default function WorkspaceStatsPage() {
               </SelectContent>
             </Select>
           )}
-          {selectedContext && (
-            <CopyContextLinkButton
-              contextId={selectedContext.context_id}
-              contextName={selectedContext.context_name}
-            />
-          )}
+          {/* Fixed-size slot so picking a context does not shift the selector. */}
+          <div data-testid="context-link-slot" className="h-9 w-9 shrink-0">
+            {selectedContext && (
+              <CopyContextLinkButton
+                contextId={selectedContext.context_id}
+                contextName={selectedContext.context_name}
+              />
+            )}
+          </div>
           <Button
             onClick={() => { void fetchStats(); void usageRef.current?.refresh(); void trendsRef.current?.refresh(); }}
             variant="outline"

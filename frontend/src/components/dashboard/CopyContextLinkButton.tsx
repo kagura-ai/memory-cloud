@@ -26,7 +26,7 @@ interface CopyContextLinkButtonProps {
 /**
  * Icon button that copies the dashboard permalink of one context (#2936).
  * The accessible name includes the context's name; the same name is the
- * hover tooltip. A failed copy shows the shared clipboard error message.
+ * hover tooltip. A failed copy shows the workspace clipboard error message.
  */
 export function CopyContextLinkButton({
   contextId,
@@ -60,7 +60,7 @@ export function CopyContextLinkButton({
       console.error("Failed to copy context link:", error);
       toast({
         title: tCommon("error"),
-        description: tCommon("copyFailedManualHint"),
+        description: t("copyFailed"),
         variant: "destructive",
       });
     }
