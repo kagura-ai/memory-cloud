@@ -779,8 +779,8 @@ async def require_workspace_slots_enabled() -> None:
     """Reject with 404 unless workspace slot suspension is enforced (#2918).
 
     The account routes under ``/api/v1/me/workspace-slots`` exist only while
-    ``WORKSPACE_SLOT_SUSPENSION=enforce``; in ``off`` and ``shadow`` they answer
-    the same ``HTTP-404`` "Not Found" as a path that does not exist. Like
+    ``WORKSPACE_SLOT_SUSPENSION=enforce``; in ``off`` and ``shadow`` every route
+    of the surface answers 404 ``HTTP-404`` "Not Found". Like
     :func:`require_byok_enabled` it is parameterless and listed before the auth
     dependency, so every caller (anonymous or signed in) sees the same 404, and
     it reads only the setting: no statement runs.

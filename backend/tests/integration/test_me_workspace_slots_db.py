@@ -21,16 +21,18 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from api.main import app
 from auth.dependencies import require_session_auth
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import WorkspaceMember
+from models.auth import Context, IdentityLink, WorkspaceMember
 from models.workspace_slots import WorkspaceSlotState, WorkspaceSlotSuspension
+from services.context_service import ContextService
 from utils.datetime import utcnow
+from utils.exceptions import NotFoundException
 
 from ._admin_helpers import make_context, make_user, make_workspace
 
@@ -237,6 +239,63 @@ async def test_contexts_route_runs_no_statement_unless_enforced(
     assert holder["r"].status_code == 404
     assert holder["r"].json()["error"] == "HTTP-404"
     assert statements == []
+
+
+@pytest.mark.parametrize("which", ["active", "suspended"])
+async def test_contexts_list_exactly_what_the_export_lets_the_owner_export(
+    db_session: AsyncSession, mode, which: str
+) -> None:
+    """A private context created by an account LINKED to the owner (#1784) is
+    the owner's own: the export lets the owner export it, so the list shows it;
+    a member's private context is neither exportable nor listed."""
+    mode("enforce")
+    world = await _world(db_session)
+    owner = world["owner"]
+    workspace = world[which]
+    linked = make_user(name="Linked account")
+    db_session.add(linked)
+    await db_session.flush()
+    group = uuid4()
+    db_session.add_all(
+        [
+            IdentityLink(group_id=group, user_id=owner.user_id),
+            IdentityLink(group_id=group, user_id=linked.user_id),
+        ]
+    )
+    linked_private = make_context(
+        workspace_id=workspace.id, created_by=linked.user_id, is_private=True
+    )
+    member_private = make_context(
+        workspace_id=workspace.id, created_by=world["member"].user_id, is_private=True
+    )
+    shared = make_context(workspace_id=workspace.id, created_by=world["member"].user_id)
+    db_session.add_all([linked_private, member_private, shared])
+    await db_session.commit()
+
+    async with _http(db_session, owner.user_id) as client:
+        response = await client.get(f"{BASE}/workspaces/{workspace.id}/contexts")
+    assert response.status_code == 200, response.text
+    listed = {row["id"] for row in response.json()["contexts"]}
+
+    candidates = (
+        await db_session.execute(
+            select(Context.id).where(
+                Context.workspace_id == workspace.id, Context.deleted_at.is_(None)
+            )
+        )
+    ).scalars()
+    exportable = set()
+    for context_id in candidates:
+        try:
+            await ContextService(db_session).export_context(owner.user_id, context_id)
+        except NotFoundException:
+            continue
+        exportable.add(str(context_id))
+
+    assert listed == exportable
+    assert str(linked_private.id) in listed
+    assert str(member_private.id) not in listed
+    assert str(shared.id) in listed
 
 
 # ---------------------------------------------------------------------------

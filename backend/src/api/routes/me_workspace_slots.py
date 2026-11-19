@@ -11,10 +11,12 @@ The surface is **experimental**: it may change in a minor release.
 
 - Browser session only (``SessionUser``): an API key or an OAuth access token
   gets the existing 403.
-- Exists only while ``WORKSPACE_SLOT_SUSPENSION=enforce``. In ``off`` and
-  ``shadow`` every route answers the ``HTTP-404`` of a path that does not
-  exist, from a router-level dependency evaluated before authentication, and
-  no statement runs.
+- Served only while ``WORKSPACE_SLOT_SUSPENSION=enforce``. In ``off`` and
+  ``shadow`` every route of this surface answers 404 ``HTTP-404`` "Not Found"
+  (the body of an unknown path), from a router-level dependency evaluated
+  before authentication, and no statement runs. A method a route does not
+  serve (405) and the trailing-slash redirect (307) come from the framework's
+  routing as on any other path.
 - Ownership is ``Workspace.owner_user_id``; membership in somebody else's
   workspace takes no slot and is not listed.
 """

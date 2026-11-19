@@ -5,8 +5,10 @@ every route is pinned here field for field (``Z`` timestamps on nested models
 too), with every refusal body. The service functions are patched; the same
 routes on real rows are in ``tests/integration/test_me_workspace_slots_db.py``.
 
-- ``off`` / ``shadow``: every route answers the ``HTTP-404`` of a missing path
-  before authentication, and never opens a database session.
+- ``off`` / ``shadow``: every route of the surface answers 404 ``HTTP-404``
+  before authentication (the body of an unknown path) and never opens a
+  database session; other methods and the trailing slash get the framework's
+  405 / 307.
 - ``enforce``: browser session only (an API key gets 403, no credential 401).
 """
 
@@ -617,3 +619,40 @@ class TestContexts:
         }
         assert second.json() == first.json()
         assert session.execute.await_count == 2
+
+
+class TestFeatureOffOtherMethodsAndTheTrailingSlash:
+    """What the framework's routing answers around the four routes with the
+    feature off: the 405 of a method a route does not serve and the 307 of the
+    trailing slash, as on any other path. No database session is opened."""
+
+    @pytest.mark.parametrize("value", ["off", "shadow"])
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("DELETE", BASE),
+            ("OPTIONS", BASE),
+            ("GET", f"{BASE}/selection"),
+            ("GET", f"{BASE}/preview"),
+            ("POST", f"{BASE}/workspaces/{RESEARCH}/contexts"),
+        ],
+    )
+    def test_an_unserved_method_is_405(self, anonymous, db_opened, mode, value, method, path):
+        mode(value)
+        response = anonymous.request(method, path)
+        assert response.status_code == 405
+        assert response.json()["error"] == "HTTP-405"
+        assert db_opened == []
+
+    @pytest.mark.parametrize("value", ["off", "shadow"])
+    def test_the_trailing_slash_redirects_to_the_route(
+        self, anonymous, db_opened, mode, value
+    ) -> None:
+        mode(value)
+        response = anonymous.get(f"{BASE}/", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"].endswith(BASE)
+        followed = anonymous.get(f"{BASE}/")
+        assert followed.status_code == 404
+        assert followed.json() == NOT_FOUND
+        assert db_opened == []
