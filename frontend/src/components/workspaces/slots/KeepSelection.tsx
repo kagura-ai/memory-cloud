@@ -12,6 +12,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -31,6 +32,7 @@ import {
   SLOT_STALE,
   errorCode,
   errorMessage,
+  isSlotsBusy,
   slotsFullDetails,
 } from "./slotErrors";
 import { SlotsFullRemedies } from "./SlotsFullRemedies";
@@ -79,6 +81,7 @@ export function KeepSelection({
   const [preview, setPreview] = useState<ShownPreview | null>(null);
   const [busy, setBusy] = useState<"preview" | "save" | null>(null);
   const [full, setFull] = useState<WorkspaceSlotsFullDetails | null>(null);
+  const [slotsBusy, setSlotsBusy] = useState(false);
 
   const names = useMemo(
     () => new Map(workspaces.map((w) => [w.id, w.name])),
@@ -99,6 +102,7 @@ export function KeepSelection({
 
   const toggle = (id: string, checked: boolean) => {
     setFull(null);
+    setSlotsBusy(false);
     setSelected((prev) =>
       checked
         ? prev.includes(id) || prev.length >= max
@@ -129,6 +133,7 @@ export function KeepSelection({
   const save = async () => {
     if (current === null) return;
     setBusy("save");
+    setSlotsBusy(false);
     try {
       const next = await saveWorkspaceSelection(selected, version);
       toast({ title: t("keep.saved") });
@@ -136,6 +141,11 @@ export function KeepSelection({
     } catch (error) {
       if (errorCode(error) === SLOT_STALE) {
         onStale();
+        return;
+      }
+      // Selection and preview stay; Save stays enabled for the retry.
+      if (isSlotsBusy(error)) {
+        setSlotsBusy(true);
         return;
       }
       const details = slotsFullDetails(error);
@@ -294,6 +304,12 @@ export function KeepSelection({
           {unmet.length > 0 &&
             outcome(t("keep.unmet"), `${ids.previewTitle}-unmet`, unmet)}
         </section>
+      )}
+
+      {slotsBusy && (
+        <Alert variant="warning">
+          <AlertDescription>{t("busy")}</AlertDescription>
+        </Alert>
       )}
 
       {full && (

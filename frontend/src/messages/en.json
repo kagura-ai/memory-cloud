@@ -5832,6 +5832,12 @@
     "deleteDialog": {
       "failed": "Could not delete this workspace."
     },
+    "busy": "Another change to your workspaces is in progress. Try again in a moment.",
+    "suspendedPlan": {
+      "title": "Change the plan of {name}?",
+      "body": "A paid plan resumes this workspace. If the new plan does not add a slot, another of your workspaces is suspended instead: paid workspaces are kept first, then your selection.",
+      "continue": "Continue to billing"
+    },
     "card": {
       "suspended": "Suspended",
       "manage": "Open workspace management",

@@ -42,6 +42,7 @@ import { KeepSelection } from "@/components/workspaces/slots/KeepSelection";
 import { ExportWorkspaceDialog } from "@/components/workspaces/slots/ExportWorkspaceDialog";
 import { DeleteWorkspaceDialog } from "@/components/workspaces/slots/DeleteWorkspaceDialog";
 import { ResumeWorkspaceDialog } from "@/components/workspaces/slots/ResumeWorkspaceDialog";
+import { SuspendedPlanDialog } from "@/components/workspaces/slots/SuspendedPlanDialog";
 
 const PLAN_PAGE = "/workspace/settings/plan";
 
@@ -111,6 +112,7 @@ export default function WorkspaceManagementPage() {
   const [exporting, setExporting] = useState<SlotWorkspace | null>(null);
   const [deleting, setDeleting] = useState<SlotWorkspace | null>(null);
   const [resuming, setResuming] = useState<SlotWorkspace | null>(null);
+  const [planFor, setPlanFor] = useState<SlotWorkspace | null>(null);
   const [openingPlanFor, setOpeningPlanFor] = useState<string | null>(null);
   const [focusTick, setFocusTick] = useState(0);
 
@@ -266,21 +268,23 @@ export default function WorkspaceManagementPage() {
   };
 
   // The plan page is scoped to the current workspace: an active workspace is
-  // switched to first; a suspended one cannot be, so it goes through billing.
+  // switched to first; a suspended one cannot be, so it goes through billing,
+  // after a dialog that says what an upgrade does to the other workspaces.
   // Either list saying "suspended" is enough; a refused switch pushes nothing
   // (it throws before the push).
-  const changePlan = (w: SlotWorkspace) =>
-    planAction(w.id, async () => {
-      const suspended =
-        w.status === "slot_suspended" ||
-        listed.some((l) => l.id === w.id && l.slot_suspended === true);
-      if (suspended) {
-        await openBilling(w.id);
-        return;
-      }
+  const changePlan = (w: SlotWorkspace) => {
+    const suspended =
+      w.status === "slot_suspended" ||
+      listed.some((l) => l.id === w.id && l.slot_suspended === true);
+    if (suspended) {
+      openDialog(setPlanFor, w);
+      return;
+    }
+    void planAction(w.id, async () => {
       if (currentWorkspaceId !== w.id) await switchWorkspace(w.id);
       router.push(PLAN_PAGE);
     });
+  };
 
   const anySuspended = data.workspaces.some((w) => w.status === "slot_suspended");
   const ifEnd = data.if_paid_plans_end;
@@ -338,7 +342,7 @@ export default function WorkspaceManagementPage() {
           labelledBy={`${baseId}-table`}
           planPage={planPage}
           openingPlanFor={openingPlanFor}
-          onChangePlan={(w) => void changePlan(w)}
+          onChangePlan={changePlan}
           onExport={(w) => openDialog(setExporting, w)}
           onDelete={(w) => openDialog(setDeleting, w)}
           onResume={(w) => openDialog(setResuming, w)}
@@ -455,6 +459,12 @@ export default function WorkspaceManagementPage() {
           applied(next);
         }}
         onStale={() => onStale(false)}
+      />
+      <SuspendedPlanDialog
+        key={`plan-${dialogSeq}`}
+        workspace={planFor}
+        onClose={() => setPlanFor(null)}
+        onCloseAutoFocus={restoreFocus}
       />
     </>,
   );

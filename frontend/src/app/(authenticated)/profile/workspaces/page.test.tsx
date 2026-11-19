@@ -362,17 +362,61 @@ describe("AC1 list, slots, owned only, plan link", () => {
     expect(mockSwitchWorkspace).not.toHaveBeenCalled();
   });
 
-  it("plan link of a suspended workspace goes through the billing handoff, never a switch", async () => {
-    mockHandoff.mockResolvedValue({ url: null });
+  it("plan link of a suspended workspace asks first; Continue hands off to billing, never a switch", async () => {
+    mockHandoff.mockReturnValue(new Promise(() => {}));
     await renderLoaded(afterTermEnd());
-    fireEvent.click(rowButton("w2", "changePlanNamed", "Research"));
+    const opener = rowButton("w2", "changePlanNamed", "Research");
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = await screen.findByRole("alertdialog");
+    expect(
+      within(dialog).getByText('suspendedPlan.title|{"name":"Research"}'),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("suspendedPlan.body")).toBeInTheDocument();
+    expect(mockHandoff).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "suspendedPlan.continue" }),
+    );
     await waitFor(() => expect(mockHandoff).toHaveBeenCalledWith("w2"));
     expect(mockSwitchWorkspace).not.toHaveBeenCalled();
-    await waitFor(() =>
-      expect(mockToast).toHaveBeenCalledWith(
-        expect.objectContaining({ title: "planUnavailable" }),
-      ),
+  });
+
+  it("Cancel closes the plan dialog without a handoff and returns focus", async () => {
+    await renderLoaded(afterTermEnd());
+    const opener = rowButton("w2", "changePlanNamed", "Research");
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(mockHandoff).not.toHaveBeenCalled();
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it.each([
+    ["no billing URL on this deployment", () => mockHandoff.mockResolvedValue({ url: null }), "planUnavailable"],
+    ["billing not configured (503)", () => mockHandoff.mockRejectedValue(apiError(503, "BILLING-002")), "planUnavailable"],
+    ["another refusal", () => mockHandoff.mockRejectedValue(apiError(429, "RATE-001")), "RATE-001 message"],
+  ])("a handoff failure (%s) is said inside the plan dialog", async (_label, arrange, text) => {
+    arrange();
+    await renderLoaded(afterTermEnd());
+    fireEvent.click(rowButton("w2", "changePlanNamed", "Research"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "suspendedPlan.continue" }),
     );
+    expect(await within(dialog).findByText(text)).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(mockToast).not.toHaveBeenCalled();
+  });
+
+  it("an active workspace's plan link opens no dialog", async () => {
+    await renderLoaded(beforeTermEnd());
+    fireEvent.click(rowButton("w3", "changePlanNamed", "Side project"));
+    await waitFor(() =>
+      expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan"),
+    );
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("a refused switch opens no plan page", async () => {
@@ -392,6 +436,10 @@ describe("AC1 list, slots, owned only, plan link", () => {
     mockHandoff.mockResolvedValue({ url: null });
     await renderLoaded(beforeTermEnd());
     fireEvent.click(rowButton("w3", "changePlanNamed", "Side project"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "suspendedPlan.continue" }),
+    );
     await waitFor(() => expect(mockHandoff).toHaveBeenCalledWith("w3"));
     expect(mockSwitchWorkspace).not.toHaveBeenCalled();
     expect(mockPush).not.toHaveBeenCalled();
@@ -1029,3 +1077,78 @@ describe("AC5 resumed after an upgrade", () => {
     expect(mockRefreshWorkspaces).not.toHaveBeenCalled();
   });
 });
+
+describe("another change in progress (409 RES-002 workspace_slots_busy)", () => {
+  const busy = () =>
+    apiError(409, "RES-002", { reason: "workspace_slots_busy" });
+
+  it("Save says try again in a moment, keeps the selection and the preview, and stays enabled", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        active: ["w2"],
+        suspended: ["w1", "w3"],
+        changes: { suspend: ["w1"], resume: ["w2"] },
+      }),
+    );
+    mockSave.mockRejectedValueOnce(busy());
+    await renderLoaded(afterTermEnd());
+    pressSpace(screen.getByRole("checkbox", { name: /Personal/ }));
+    pressSpace(screen.getByRole("checkbox", { name: /Research/ }));
+    await previewAndWait();
+    fireEvent.click(screen.getByRole("button", { name: "keep.save" }));
+    expect(await screen.findByText("busy")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Research/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(
+      screen.getByRole("region", { name: "keep.previewTitle" }),
+    ).toBeInTheDocument();
+    const save = screen.getByRole("button", { name: "keep.save" });
+    expect(save).not.toBeDisabled();
+    expect(mockToast).not.toHaveBeenCalled();
+
+    // The retry goes through.
+    mockSave.mockResolvedValueOnce(afterTermEnd({ version: 5 }));
+    fireEvent.click(save);
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(2));
+    expect(mockSave).toHaveBeenLastCalledWith(["w2"], 4);
+  });
+
+  it("any other 409 RES-002 keeps the generic failure", async () => {
+    mockPreview.mockResolvedValue(previewOf({ active: ["w1"], suspended: ["w2", "w3"] }));
+    mockSave.mockRejectedValueOnce(apiError(409, "RES-002", { reason: "other" }));
+    await renderLoaded(afterTermEnd());
+    await previewAndWait();
+    fireEvent.click(screen.getByRole("button", { name: "keep.save" }));
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "destructive", title: "keep.saveFailed" }),
+      ),
+    );
+    expect(screen.queryByText("busy")).toBeNull();
+  });
+
+  it("Resume says try again in a moment inside the dialog and keeps Resume enabled", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        active: ["w2"],
+        suspended: ["w1", "w3"],
+        changes: { suspend: ["w1"], resume: ["w2"] },
+      }),
+    );
+    mockSave.mockRejectedValueOnce(busy());
+    await renderLoaded(afterTermEnd());
+    fireEvent.click(rowButton("w2", "resumeNamed", "Research"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "resume.confirm" }),
+    );
+    expect(await within(dialog).findByText("busy")).toBeInTheDocument();
+    expect(within(dialog).getByText('resume.swap|{"name":"Research"}')).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: "resume.confirm" }),
+    ).not.toBeDisabled();
+  });
+});
+

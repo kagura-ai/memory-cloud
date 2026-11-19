@@ -40,6 +40,7 @@ import {
   SLOT_STALE,
   errorCode,
   errorMessage,
+  isSlotsBusy,
   slotsFullDetails,
 } from "./slotErrors";
 import { SlotsFullRemedies } from "./SlotsFullRemedies";
@@ -141,6 +142,11 @@ export function ResumeWorkspaceDialog({
         setPreview(null);
         setError(t("stale"));
         onStale();
+        return;
+      }
+      // The preview stays and Resume stays enabled for the retry.
+      if (isSlotsBusy(e)) {
+        setError(t("busy"));
         return;
       }
       const details = slotsFullDetails(e);
