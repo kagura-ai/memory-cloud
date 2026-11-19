@@ -60,6 +60,7 @@ from models.memory import DELETED_BY_SLEEP_MERGE, Memory, NeuralMemoryEdge
 from models.sleep import SLEEP_REPORT_SOURCES, SleepReport
 from repositories.neural_edge import one_row_per_pair
 from services.identity_link_service import linked_user_ids
+from services.workspace_slot_gate import active_workspace_predicate
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
@@ -255,6 +256,8 @@ class MemoryHealthService:
         lookup each per report (#1874), plus the live workspaces it owns
         (#2764)."""
         owners = await linked_user_ids(self.db, user_id)
+        predicate = active_workspace_predicate()
+        slot_active = [predicate] if predicate is not None else []
         rows = await self.db.execute(
             select(
                 WorkspaceMember.workspace_id,
@@ -262,7 +265,13 @@ class MemoryHealthService:
                 WorkspaceMember.allowed_context_ids,
             )
             .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
-            .where(WorkspaceMember.user_id == user_id, Workspace.deleted_at.is_(None))
+            .where(
+                WorkspaceMember.user_id == user_id,
+                Workspace.deleted_at.is_(None),
+                # #2918: a slot-suspended workspace shows nothing (nothing is
+                # added unless the mode is enforce).
+                *slot_active,
+            )
         )
         open_workspaces: set[uuid.UUID] = set()
         whitelists: list[tuple[uuid.UUID, frozenset[uuid.UUID]]] = []
@@ -281,7 +290,7 @@ class MemoryHealthService:
         member_of = {workspace_id for workspace_id, _ in whitelists} | open_workspaces
         owned_rows = await self.db.execute(
             select(Workspace.id).where(
-                Workspace.owner_user_id == user_id, Workspace.deleted_at.is_(None)
+                Workspace.owner_user_id == user_id, Workspace.deleted_at.is_(None), *slot_active
             )
         )
         for (workspace_id,) in owned_rows.all():

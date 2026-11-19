@@ -49,6 +49,7 @@ from services.worker_app_identity import (
     identity_revision,
     opaque_revision,
 )
+from services.workspace_slot_gate import slot_suspended
 from utils.exceptions import (
     WorkerAppDisabledError,
     WorkerAppNotFoundError,
@@ -425,6 +426,16 @@ async def get_worker_config(
     # config_version, so a matching ETag would otherwise keep a worker on the
     # cached config of the paid days.
     if await _connectors_suspended_for(db, connector.workspace_id):
+        raise WorkerConnectorNotReadyError()
+    # #2918: a slot-suspended workspace is not ready either, for the same
+    # reason and before the conditional GET (a suspension bumps no
+    # config_version): the worker stops dispatching to it.
+    if await slot_suspended(db, connector.workspace_id):
+        logger.info(
+            "worker_config_not_ready",
+            connector_id=str(connector.id),
+            reason="workspace_slot_suspended",
+        )
         raise WorkerConnectorNotReadyError()
 
     # #1447: readiness is decided BEFORE the conditional-GET short-circuit. A 304

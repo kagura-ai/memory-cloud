@@ -46,6 +46,17 @@ _T = TypeVar("_T")
 NOWAIT_LOCK_TRIES = 5
 NOWAIT_LOCK_BACKOFF_SECONDS = 0.05
 
+# The per-owner transaction advisory lock (``pg_advisory_xact_lock(
+# hashtextextended(key, 0))``) that serializes an owner's workspace creation,
+# slot-bonus change and workspace-slot reconcile (#1550, #2918). One key for
+# all three, so they exclude each other.
+OWNER_LOCK_PREFIX = "workspace_create:"
+
+
+def owner_lock_key(owner_user_id: str) -> str:
+    """The per-owner advisory-lock key (``workspace_create:<owner>``)."""
+    return f"{OWNER_LOCK_PREFIX}{owner_user_id}"
+
 
 async def retry_nowait(
     db: AsyncSession,

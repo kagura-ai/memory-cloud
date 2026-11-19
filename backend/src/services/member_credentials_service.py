@@ -282,6 +282,25 @@ class MemberCredentialsService:
         # Member/Viewer: No management of others
         return False
 
+    async def check_can_view(
+        self, requester_id: str, workspace_id: UUID, target_user_id: str
+    ) -> str | None:
+        """``_check_can_view`` for a caller that authorizes before it reads.
+
+        Returns:
+            The requester's workspace role when it was read (a view of another
+            member), for ``get_or_create_credentials(requester_role=...)``;
+            ``None`` for a view of one's own page.
+
+        Raises:
+            AuthorizationError: If not allowed (403)
+        """
+        if requester_id == target_user_id:
+            return None
+        role = await self.get_workspace_role(requester_id, workspace_id)
+        await self._check_can_view(requester_id, workspace_id, target_user_id, requester_role=role)
+        return role
+
     async def _check_can_view(
         self,
         requester_id: str,

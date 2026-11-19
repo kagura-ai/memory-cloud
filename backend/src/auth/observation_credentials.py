@@ -38,6 +38,7 @@ from db.base import get_db
 from db.redis import incrby_counter
 from models.auth import Workspace
 from models.observation_credential import ObservationCredential
+from services.workspace_slot_gate import ensure_slot_active
 from utils.datetime import utcnow
 from utils.exceptions import (
     AuthenticationError,
@@ -412,6 +413,8 @@ async def get_observation_principal(
             is read).
         ObservabilityRateLimitError: The credential's minute budget is spent (429).
         AuthenticationError: No valid observation credential (401, one message).
+        WorkspaceSlotSuspendedError: The bound workspace is slot-suspended
+            (403 ``SLOT-001``, the redacted form: a credential is no member).
     """
     if not get_settings().observability_api_enabled:
         raise ObservabilityNotFoundError()
@@ -435,4 +438,6 @@ async def get_observation_principal(
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("observation_last_used_commit_failed", error_type=type(exc).__name__)
         await db.rollback()
+    # #2918: a slot-suspended workspace serves no observation credential.
+    await ensure_slot_active(db, scope.workspace_id, user_id=None, outsider=True)
     return scope

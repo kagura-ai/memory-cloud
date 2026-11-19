@@ -493,6 +493,8 @@ async def _read_digest(
                 context_id=context_id,
                 key_workspace_id=key_workspace_id,
                 limit=INSTRUCTIONS_CAPS.entries,
+                # #2918: a suspended workspace is a notice line, not a failure.
+                slot_notice=True,
             )
     return None  # pragma: no cover - get_db always yields
 
@@ -517,7 +519,11 @@ async def _read_default_context_name(
     from db.base import get_db
     from services.capacity_lock import CapacityPolicy
     from services.permission_service import PermissionService
-    from utils.exceptions import FeatureNotAvailableError, NotFoundException
+    from utils.exceptions import (
+        FeatureNotAvailableError,
+        NotFoundException,
+        WorkspaceSlotSuspendedError,
+    )
 
     async with contextlib.aclosing(get_db()) as sessions:
         async for db in sessions:
@@ -533,7 +539,8 @@ async def _read_default_context_name(
                     key_workspace_id=key_workspace_id,
                     capacity=CapacityPolicy.ALLOWED,  # naming it reads no memory
                 )
-            except (NotFoundException, FeatureNotAvailableError):
+            except (NotFoundException, FeatureNotAvailableError, WorkspaceSlotSuspendedError):
+                # #2918: a slot-suspended workspace is a state, not a failure.
                 logger.debug("mcp_default_context_instructions_denied")
                 return None
             return context.name
@@ -737,6 +744,11 @@ async def build_instructions(
     except Exception as e:  # noqa: BLE001 - fail open to the base text
         logger.warning("mcp_guardrail_digest_failed: reason=%s era=%s", type(e).__name__, era)
         return base, True
+
+    if entries is not None and entries.workspace_suspended:
+        # #2918: no entries, one notice line; the handshake succeeds.
+        logger.info("mcp_guardrail_digest_workspace_suspended: era=%s", era)
+        return render_instructions(base, entries, tool_names=None), True
 
     if entries is None or not entries.entries:
         return base, True

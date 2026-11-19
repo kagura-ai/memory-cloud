@@ -24,6 +24,7 @@ from auth.system_admin_mode import (
 )
 from db.base import get_db
 from models.auth import User
+from services.workspace_slot_gate import SlotPolicy
 from utils.exceptions import (
     AuthorizationError,
     OperatorPrincipalNotSupportedError,
@@ -771,13 +772,61 @@ async def require_cost_display_enabled() -> None:
 
 
 # ============================================================================
+# Workspace slot management gate (Issue #2918)
+# ============================================================================
+
+
+async def require_workspace_slots_enabled() -> None:
+    """Reject with 404 unless workspace slot suspension is enforced (#2918).
+
+    The account routes under ``/api/v1/me/workspace-slots`` exist only while
+    ``WORKSPACE_SLOT_SUSPENSION=enforce``; in ``off`` and ``shadow`` every route
+    of the surface answers 404 ``HTTP-404`` "Not Found". Like
+    :func:`require_byok_enabled` it is parameterless and listed before the auth
+    dependency, so every caller (anonymous or signed in) sees the same 404, and
+    it reads only the setting: no statement runs.
+
+    Raises:
+        HTTPException: 404 when the mode is not ``enforce``.
+    """
+    from services.workspace_slots import workspace_slots_enforced
+
+    if not workspace_slots_enforced():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+# ============================================================================
 # Workspace Owner (API Key + Session)
 # ============================================================================
+
+
+async def require_workspace_owner_for_revocation(
+    user: dict = Depends(get_user_from_api_key_or_session),
+    db: AsyncSession = Depends(get_db),
+) -> tuple[str, UUID]:
+    """``require_workspace_owner`` for a route that only revokes a credential.
+
+    #2918: revoking access is never blocked by a slot suspension
+    (``SlotPolicy.REVOCATION``); the owner check itself is unchanged. Use it
+    only on a route that deactivates a credential and returns no workspace
+    data (pinned by ``tests/api/test_slot_suspension_route_table.py``).
+    """
+    return await _require_workspace_owner(user, db, slot=SlotPolicy.REVOCATION)
 
 
 async def require_workspace_owner(
     user: dict = Depends(get_user_from_api_key_or_session),
     db: AsyncSession = Depends(get_db),
+) -> tuple[str, UUID]:
+    """Verify user is workspace owner and return (user_id, workspace_id).
+
+    See ``_require_workspace_owner``.
+    """
+    return await _require_workspace_owner(user, db)
+
+
+async def _require_workspace_owner(
+    user: dict, db: AsyncSession, *, slot: SlotPolicy = SlotPolicy.BLOCKED
 ) -> tuple[str, UUID]:
     """Verify user is workspace owner and return (user_id, workspace_id).
 
@@ -810,7 +859,7 @@ async def require_workspace_owner(
 
     perm_service = PermissionService(db)
     try:
-        await perm_service.check_workspace_owner(user_id, workspace_id)
+        await perm_service.check_workspace_owner(user_id, workspace_id, slot=slot)
     except AuthorizationError as exc:
         # WARN on deny so audit pipelines can surface workspace-owner violations
         # (#389 gate1 review). The structured ``reason`` (workspace_deleted /
@@ -1039,6 +1088,12 @@ async def get_share_key_principal(
         # Key bound to a context that is gone/deleted → treat as invalid.
         raise HTTPException(status_code=401, detail="Invalid or missing share key")
 
+    # #2918: a share-key reader is never a member: a slot-suspended workspace
+    # refuses it in the redacted form.
+    from services.workspace_slot_gate import ensure_slot_active
+
+    await ensure_slot_active(db, context.workspace_id, user_id=None, outsider=True)
+
     return {
         "user_id": verified.user_id,
         "email": f"{verified.user_id}@share",
@@ -1065,6 +1120,10 @@ APIKeyUser = Annotated[dict, Depends(verify_api_key_user)]
 APIKeyOrSessionUser = Annotated[dict, Depends(get_user_from_api_key_or_session)]
 SessionUser = Annotated[dict, Depends(require_session_auth)]  # Issue #252
 WorkspaceOwner = Annotated[tuple[str, UUID], Depends(require_workspace_owner)]  # Issue #276
+# #2918: a route that only revokes a credential (never blocked by a slot suspension).
+WorkspaceOwnerRevocation = Annotated[
+    tuple[str, UUID], Depends(require_workspace_owner_for_revocation)
+]
 ShareKeyUser = Annotated[dict, Depends(get_share_key_principal)]  # Issue #1027
 WorkspaceAdmin = Annotated[dict, Depends(require_workspace_admin)]  # Issue #398
 WorkspaceAdminSession = Annotated[dict, Depends(require_workspace_admin_session)]  # Issue #398

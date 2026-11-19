@@ -20,6 +20,7 @@ from auth.programmatic_workspace_auth import (
     authorize_workspace_management,
 )
 from auth.workspace_roles import WorkspaceRole
+from services.workspace_slot_gate import SlotPolicy
 from utils.exceptions import AuthorizationError, NotFoundException
 
 _WS = uuid.uuid4()
@@ -80,7 +81,7 @@ class TestApiKeyPrincipal:
         )
         assert who.kind == "api_key"
         assert who.member is perm.check_workspace_owner.return_value
-        perm.check_workspace_owner.assert_awaited_once_with("u-key", _WS)
+        perm.check_workspace_owner.assert_awaited_once_with("u-key", _WS, slot=SlotPolicy.BLOCKED)
         perm.check_workspace_access.assert_not_called()
 
     async def test_disabled_kill_switch_rejects_api_key(self, perm, monkeypatch):
@@ -124,7 +125,7 @@ class TestApiKeyPrincipal:
             db=None,
             session_required_role=WorkspaceRole.MEMBER,
         )
-        perm.check_workspace_owner.assert_awaited_once_with("u-key", _WS)
+        perm.check_workspace_owner.assert_awaited_once_with("u-key", _WS, slot=SlotPolicy.BLOCKED)
 
     async def test_scoped_key_foreign_path_uniform_404(self, perm):
         # #963 confinement: scoped key bound to a different workspace → 404,
@@ -159,7 +160,7 @@ class TestSessionPrincipal:
         assert who.member is perm.check_workspace_access.return_value
         # Session keeps its endpoint-specific role gate; owner-only does NOT apply.
         perm.check_workspace_access.assert_awaited_once_with(
-            "u-session", _WS, required_role=WorkspaceRole.ADMIN
+            "u-session", _WS, required_role=WorkspaceRole.ADMIN, slot=SlotPolicy.BLOCKED
         )
         perm.check_workspace_owner.assert_not_called()
 

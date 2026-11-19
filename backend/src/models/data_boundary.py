@@ -93,6 +93,14 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "sync_manual_retirements",
         "sync_manual_requests",
         "sync_manual_runs",
+        # Workspace slot suspension (#2918): an owner's ordered keep-selection
+        # (workspace ids) and which owned workspaces are suspended for the
+        # allowance, stamped with the owner. Ids and timestamps only, no
+        # content; no foreign keys (inert once the owner or workspace is gone,
+        # pruned by the sweep). Erasure and user deletion delete the subject's
+        # rows. Never exported.
+        "workspace_slot_states",
+        "workspace_slot_suspensions",
         # Agent Registry (#1274, RFC-0002 P0-1) — control-plane metadata about
         # agent deployments (kill switch, enforcement mode); no user knowledge
         # content, no learned structure. Governed by the auth/security regime +

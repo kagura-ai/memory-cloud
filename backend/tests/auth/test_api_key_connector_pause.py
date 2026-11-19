@@ -447,3 +447,55 @@ class TestVerifiedKeyConnectorFlag:
 
         assert verified is not None and verified.is_connector_key is False
         assert verified.public_id == record.public_id
+
+
+@pytest.mark.usefixtures("owner_holds_workspace")
+class TestVerifyKeySlotSuspension:
+    """#2918: a connector key of a slot-suspended workspace fails
+    verification, so it reaches no route, the owner's management routes
+    included. Only in ``enforce``, and only connector keys pay the lookup."""
+
+    @staticmethod
+    def _mode(mode: str):
+        return patch("services.workspace_slots.workspace_slot_mode", return_value=mode)
+
+    @pytest.mark.asyncio
+    async def test_a_connector_key_of_a_suspended_workspace_is_refused(self) -> None:
+        record = _connector_record()
+        db = _db(record, _workspace(3))
+        lookup = AsyncMock(return_value=frozenset({WORKSPACE_ID}))
+        with (
+            self._mode("enforce"),
+            patch("services.workspace_slot_gate.suspended_workspace_ids", lookup),
+            patch("auth.api_keys.logger") as logger,
+        ):
+            assert await _verify(db) is None
+        lookup.assert_awaited_once_with(db, [WORKSPACE_ID])
+        assert record.last_used_at is None
+        assert logger.info.call_args.args[0] == "api_key_rejected_workspace_slot_suspended"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["off", "shadow"])
+    async def test_no_lookup_unless_enforced(self, mode: str) -> None:
+        record = _connector_record()
+        db = _db(record, _workspace(3))
+        lookup = AsyncMock(return_value=frozenset({WORKSPACE_ID}))
+        with (
+            self._mode(mode),
+            patch("services.workspace_slot_gate.suspended_workspace_ids", lookup),
+        ):
+            assert await _verify(db) is not None
+        lookup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_key_pays_no_lookup(self) -> None:
+        """The owner's own key is refused per call by the gates, not here."""
+        record = _key_record("ci")
+        db = _db(record)
+        lookup = AsyncMock(return_value=frozenset({WORKSPACE_ID}))
+        with (
+            self._mode("enforce"),
+            patch("services.workspace_slot_gate.suspended_workspace_ids", lookup),
+        ):
+            assert await _verify(db) is not None
+        lookup.assert_not_awaited()

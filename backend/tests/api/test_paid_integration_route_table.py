@@ -116,6 +116,7 @@ PAID_INTEGRATION_ROUTERS: dict[str, str | Guarded] = {
     "me_oauth": NONE,
     "me_oauth_grants": NONE,
     "me_terms": NONE,
+    "me_workspace_slots": NONE,  # #2918: workspace slots of the owner
     "me_workspaces": NONE,
     "member_credentials": NONE,
     "memory": NONE,

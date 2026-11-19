@@ -45,6 +45,8 @@ from services.permission_service import PermissionService
 from services.plan_seats import seat_limit
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
+from services.workspace_slot_gate import SlotPolicy
+from services.workspace_slots import suspended_workspace_ids
 from utils.auth_helpers import get_user_id
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import NotFoundException, ValidationError
@@ -152,6 +154,10 @@ class WorkspaceResponse(BaseModel):
     created_at: str
     current_user_role: str | None = None  # Current user's role in this workspace
     analyses_enabled: bool = False  # Memory Analysis allowlist (#497)
+    # #2918: the workspace is suspended because its owner owns more workspaces
+    # than their allowance. Filled by the list (every row, members' too) and
+    # false elsewhere; always false unless WORKSPACE_SLOT_SUSPENSION=enforce.
+    slot_suspended: bool = False
 
     class Config:
         from_attributes = True
@@ -471,6 +477,8 @@ async def list_workspaces(
     workspace_service = WorkspaceService(db)
 
     workspaces = await workspace_service.list_user_workspaces(user["user_id"])
+    # #2918: one statement for the whole list, none unless the mode is enforce.
+    suspended = await suspended_workspace_ids(db, [w.id for w in workspaces])
 
     # Get stats and user role for each workspace
     result = []
@@ -496,6 +504,7 @@ async def list_workspaces(
                 created_at=to_utc_iso(workspace.created_at) or "",
                 current_user_role=user_role,
                 analyses_enabled=check_workspace_in_allowlist(workspace.id),
+                slot_suspended=workspace.id in suspended,
             )
         )
 
@@ -596,7 +605,10 @@ async def delete_workspace(
     # SECURITY: Workspace boundary check for destructive operation
     # Issue #269: check_workspace_owner verifies ownership (sufficient for security)
     # Additional owner_user_id check for extra safety on destructive operations
-    await perm_service.check_workspace_owner(user["user_id"], workspace_id)
+    # #2918: deleting is the owner's way out of a slot suspension too.
+    await perm_service.check_workspace_owner(
+        user["user_id"], workspace_id, slot=SlotPolicy.OWNER_MANAGEMENT
+    )
 
     # Double verification for destructive operation
     from models.auth import Workspace
@@ -1617,6 +1629,11 @@ async def transfer_workspace_ownership(
     session). The owner check binds to the **path** ``workspace_id``, never the
     caller's current workspace. Atomic single-owner invariant under a row lock,
     idempotent, and writes an audit row + bumps the ownership epoch on success.
+
+    #2918, with ``WORKSPACE_SLOT_SUSPENSION=enforce``: a slot-suspended
+    workspace answers 403 ``SLOT-001``; 409 ``SLOT-004`` when the new owner
+    has no free workspace slot; 409 ``RES-002`` (``workspace_slots_busy``)
+    while another change for the new owner is in progress (retry).
     """
     user_id = get_user_id(user)
     # Owner-only against the explicit path workspace_id (#389 cross-tenant guard).

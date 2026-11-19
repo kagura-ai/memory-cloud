@@ -207,7 +207,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `SYSADMIN-003` | `OperatorEmailInvalidError` (a `BadRequestError`) — exceptions.py | 400 | #2767: `X-Operator-Email` missing, repeated, or not a plain ASCII address (local part `[a-z0-9._+-]`, at most 246 characters). Checked only after the credential passed; the value is never echoed. |
 | `SYSADMIN-004` | `OperatorPrincipalNotSupportedError` — exceptions.py | 403 | #2767: a service operator called a route that acts on the caller's own account (sleep run, undo-merge, the deprecated `GET /admin/memory-health`) or applied `POST /admin/contexts/recover` (`dry_run=false`). |
 | `RES-001` | `NotFoundException` — exceptions.py:159 | 404 | Resource not found. |
-| `RES-002` | `ConflictError` — exceptions.py:188; `DuplicateFileError`, `ConnectorTeamConnectedHereError`, `ConnectorTeamConnectedElsewhereError` (subclasses) | 409 | Resource conflict. `DuplicateFileError` is the files dedup on `POST /files/reserve`: for a same-context `uploaded` duplicate the body adds a top-level `existing_file` (see [the note above](#1-rest--structured-errors-memorycloudexception-family), #1693). The two connector-team subclasses (#1753) add `details.reason`: `connector_team_connected_here` (with `connector_id`, `display_name` of the caller's own connector) or `connector_team_connected_elsewhere` (no other details — nothing about the other workspace). |
+| `RES-002` | `ConflictError` — exceptions.py:188; `DuplicateFileError`, `ConnectorTeamConnectedHereError`, `ConnectorTeamConnectedElsewhereError` (subclasses) | 409 | Resource conflict. `DuplicateFileError` is the files dedup on `POST /files/reserve`: for a same-context `uploaded` duplicate the body adds a top-level `existing_file` (see [the note above](#1-rest--structured-errors-memorycloudexception-family), #1693). The two connector-team subclasses (#1753) add `details.reason`: `connector_team_connected_here` (with `connector_id`, `display_name` of the caller's own connector) or `connector_team_connected_elsewhere` (no other details — nothing about the other workspace). `WorkspaceSlotsBusyError` (#2918, experimental) adds `details.reason: "workspace_slots_busy"`: another change to the same owner's workspace slots is in progress; retry the same request (nothing was committed). |
 | `RES-003` | `MemoryGoneError` — exceptions.py:174; `BetaInviteGoneError` — exceptions.py:595 | 410 | Resource soft-deleted (distinct from 404 so clients stop retrying). Since #1581 also a closed-beta invite link that existed but is expired or already redeemed (`GET /beta-invites/{token}/preview`) — one message for both reasons. |
 | `RES-004` | *(no class — inline `JSONResponse`)* — api/routes/attachments.py:30 | 410 | Deprecated `/api/v1/attachments/*` retired; carries Sunset/Deprecation/Link headers. |
 | `VAL-001` | `ValidationError` — exceptions.py:195 | 422 | Service-layer validation error (shape/format). ⚠ Coexists with the non-conforming FastAPI 422. Since #1644 the shared-context refusal is **no longer** here — it moved to `FEAT-001` at 403, matching what the REST route already answered for the same condition. The managed-LLM refusal stays `VAL-001`/422 and gains a [gate annotation](#gate-refusals-1644) (`plan` when the deployment has a managed model, `deployment` when it has none). |
@@ -243,6 +243,10 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `ERASURE-006` | `ErasureAlreadyInProgressError` — exceptions.py:630 | 409 | Erasure request already pending/in progress. Since #2282 also `DELETE /me/account/erasure-request` when the hourly sweep claimed the request between the read and the cancel (compare-and-set on its status); `details.existing_status` names the request's current status and the erasure runs. |
 | `ERASURE-007` | `ErasureRetryScheduledError` — exceptions.py:1409 | 503 | #2282: the vector-store delete (the erasure's first step) failed; nothing was erased in Postgres and the request is back in `cooling_off`, run again by the first hourly sweep after `details.scheduled_for`; the subject cannot cancel it. #2418: also when the workspace or Postgres step met a row lock another operation holds (`error_class` `LockNotAvailable` or `DeadlockDetected`; the step is rolled back), on the same attempt budget. Only `POST /admin/users/{id}/erase` returns it (it runs the erasure inline). `details`: `request_id`, `attempt`, `max_attempts`, `scheduled_for`, `error_class`. After the last attempt the request is `failed` and the call answers the vector store's own error (or 409 `RES-002` for a lock conflict). |
 | `BILLING-005` | `BillingContractActiveError` — exceptions.py:1177 | 409 | #1940: a paid subscription is still running (including a scheduled cancellation). Refuses `DELETE /workspaces/{id}` on that workspace, and `POST /me/account/erasure-request` / `erasure-confirm` while the user owns one; a self-service erasure that reaches the sweep in that state ends `failed`. `details.workspace_ids` lists the workspaces. Deletable once billing has pushed the workspace back to Free. |
+| `SLOT-001` | `WorkspaceSlotSuspendedError` — exceptions.py | 403 | #2918 (**experimental**): the workspace is suspended because its owner owns more workspaces than their allowance (a subscription ended, or an admin lowered a plan or the slot bonus); its data is kept. Only while `WORKSPACE_SLOT_SUSPENSION=enforce`. Carries the [workspace slot gate block](#slot-001-403--workspace-slot-gate-2918). On MCP the envelope code is `workspace_suspended`. |
+| `SLOT-002` | `WorkspaceSlotsFullError` — exceptions.py | 409 | #2918 (**experimental**): `PUT /me/workspace-slots/selection` names a suspended workspace while workspaces with a paid subscription hold every active slot, so no swap can make room. No `gate`. `details`: `cap`, `active_slots`, `active_count`, `contracted_count`, `next_tier`, `cap_on_next_tier` (both null on the top tier), `unmet` (the selected ids that stay suspended). |
+| `SLOT-003` | `WorkspaceSlotVersionConflictError` — exceptions.py | 409 | #2918 (**experimental**): `PUT /me/workspace-slots/selection` with an `expected_version` other than the current one; nothing was saved. No `gate`. `details`: `expected_version`, `current_version`. Read the state again and resubmit. |
+| `SLOT-004` | `WorkspaceSlotTransferRefusedError` — exceptions.py | 409 | #2918 (**experimental**): a voluntary ownership transfer while slot suspension is enforced, and the new owner has no free workspace slot: their allowance after the transfer (counting the incoming workspace's tier and contract) is not above the number of workspaces they have active now. Their saved selection plays no part, and a workspace under a billing contract into a full account is refused too. No `details`: nothing about the recipient's workspaces is disclosed. |
 | `BETA-INVITE-001` | `BetaInviteQuotaExceededError` — exceptions.py:552 | 409 | #1581: `POST /beta-invites` at the per-user cap. Since #1595 also `POST /beta-invites/{id}/reissue` of an `expired` invite at the cap (the invite is left untouched). `details.reason` = `"quota_exceeded"` (stable discriminator), `details.quota` = the cap. |
 | `BETA-INVITE-002` | `BetaInviteAlreadyRedeemedError` — exceptions.py:565 | 409 | #1581: `DELETE /beta-invites/{id}` — and since #1595 `POST /beta-invites/{id}/reissue` — on an invite that was already used. `details.reason` = `"already_redeemed"`. |
 | `BETA-INVITE-003` | `BetaInviteAlreadyRevokedError` — exceptions.py:579 | 409 | #1595: `POST /beta-invites/{id}/reissue` on an invite that was already revoked (including the second request of a double-click — nothing is minted). `DELETE` stays idempotent and never emits it. `details.reason` = `"already_revoked"`. |
@@ -329,6 +333,7 @@ status, the same message and the same pre-existing detail fields it always did.
 | `allowlist` | A rollout kill switch. Plan-neutral: no tier turns it on. | Never. |
 | `deployment` | The operator disabled the feature on this deployment. | Never. |
 | `capacity` | The workspace holds more than its Free plan allows (#1941); search and saving pause until it is cleaned up. | Re-subscribing lifts it; so does deleting down to the cap. |
+| `workspace_slot` | The workspace is suspended because its owner owns more workspaces than their allowance (#2918, experimental); data is kept. | The owner resumes it on the account page (`manage_url`), by choosing it within the allowance, adding a slot or upgrading. |
 | `role` | Vocabulary member only — **never serialized**. Role refusals are `AUTH-101` and have their `details` stripped wholesale (CWE-639 defence in depth); a client identifies them by the code. | — |
 
 ### `FEAT-001` (403) — feature gate
@@ -487,6 +492,61 @@ counter) but are not counted toward the lock or eligibility: no listing shows th
 one could delete them to lift a lock. `GET /api/v1/workspace/usage/current`
 reports the same numbers under `capacity_lock` (`null` when not locked), and MCP `get_usage`
 under `capacity_lock`.
+
+### `SLOT-001` (403) — workspace slot gate (#2918)
+
+**Experimental** (may change in a minor release); only while `WORKSPACE_SLOT_SUSPENSION=enforce`.
+
+```jsonc
+{
+  "error": "SLOT-001",
+  "message": "This workspace is suspended because you own more workspaces than your plan allows. ...",
+  "details": {
+    "gate": "workspace_slot",
+    "workspace_id": "a2d94c1b-55e7-4f0a-8c3e-7b6d2e9f4a21", // absent for a caller outside the workspace
+    "manage_url": "<frontend_url>/profile/workspaces"     // the owner's account page; null for a member
+  }
+}
+```
+
+When an owner owns more workspaces than their allowance, the excess ones are suspended (data
+kept) and serve nobody: every member, every credential (session, OAuth, global and workspace
+API keys, agent and connector keys, resource tokens, share keys, management grants, observation
+credentials, the sync worker) and every public reader is refused. The check runs after
+authorization: a caller who cannot reach the workspace or the context gets the usual refusal or
+uniform 404 instead. The `details` depend on who asked: the owner gets `workspace_id` and the
+absolute `manage_url` of the page that chooses which workspaces stay active; a member gets
+`workspace_id` and `manage_url: null` (the message tells them to ask the owner); a caller
+outside the workspace (share key, public reader, management or observation credential, sync
+worker) gets `gate` only. A public MCP endpoint of a suspended workspace pauses (503, like a
+plan pause). The OIDC `GET /api/v1/me/workspaces/{id}/access` answers 200 with `read` and
+`sync.manage` false instead of refusing; the internal billing and sync control routes are not
+gated. What stays usable for the owner only: `GET /api/v1/contexts/{id}/export` (with their
+session, an API key or an OAuth token), `DELETE /api/v1/workspaces/{id}`,
+`POST /api/v1/billing/handoff`. Revoking a credential is never refused by the gate: the
+member-credential revoke routes and withdrawing a sync authorization address the workspace by
+path; revoking a resource token, an observation credential or a management grant acts on the
+caller's current workspace, which a suspended workspace cannot become (an API key scoped to it
+can). Each keeps its own authorization. Switching to another workspace and the account routes
+are not workspace-scoped.
+
+Suspended workspaces are listed with `slot_suspended: true` by `GET /api/v1/workspaces`. The
+owner manages them through `/api/v1/me/workspace-slots` (status, preview, selection, exportable
+contexts), which answers `SLOT-002` / `SLOT-003` (no `gate`, see the catalogue) and 422
+`VAL-001` with `details: {"field": "workspace_ids", "invalid_ids": [...]}` for duplicate ids or
+ids of workspaces the caller does not own (one message whether or not the id exists). A request
+whose shape is wrong (more than 500 ids, a malformed UUID, a missing `expected_version`, an
+unknown `scenario`) is the framework's 422 `VAL-001` with `details.errors` instead. `PUT
+.../selection` answers 409 `RES-002` with `details.reason: "workspace_slots_busy"` while
+another change for the same owner is in progress: nothing was saved, retry the same request.
+
+On MCP the envelope code is `workspace_suspended`, with the same keys as top-level fields and a
+`help` saying who can resume it. A tool call that names its target (`context_id`, `context_ids`,
+`workspace_id`, `file_id`, `report_id`) is checked on that target's workspace, so a context in an
+active workspace keeps working while the session workspace is suspended; a call that names no
+target is checked on the session workspace (`guide` and `describe_tools` always answer).
+`initialize` succeeds: when the selected guardrail context's workspace is suspended, the
+instructions carry one notice line instead of the digest.
 
 ### `quota_type` vocabulary (frozen)
 

@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import WorkspaceRole
 from models.auth import WorkspaceMember
 from services.permission_service import PermissionService
+from services.workspace_slot_gate import SlotPolicy
 from utils.exceptions import AuthorizationError, NotFoundException
 from utils.logger import get_logger
 
@@ -87,6 +88,7 @@ async def authorize_workspace_management(
     db: AsyncSession,
     *,
     session_required_role: WorkspaceRole,
+    slot: SlotPolicy = SlotPolicy.BLOCKED,
 ) -> AuthorizedPrincipal:
     """Authorize a workspace-management request across auth modes.
 
@@ -100,6 +102,9 @@ async def authorize_workspace_management(
         session_required_role: The role a SESSION principal must hold for this
             endpoint (unchanged per-endpoint semantics). Ignored for API-key
             principals, which are always owner-gated.
+        slot: The workspace slot gate (#2918) of the permission check:
+            ``REVOCATION`` only for the credential revoke routes (pinned by
+            ``tests/api/test_slot_suspension_route_table.py``).
 
     Returns:
         An ``AuthorizedPrincipal`` carrying the principal ``kind``
@@ -162,13 +167,13 @@ async def authorize_workspace_management(
             # NotFoundException already appends " not found" — pass the bare
             # resource name, else the detail reads "Workspace not found not found".
             raise NotFoundException("Workspace")
-        member = await perm_service.check_workspace_owner(user_id, workspace_id)
+        member = await perm_service.check_workspace_owner(user_id, workspace_id, slot=slot)
         return AuthorizedPrincipal(kind="api_key", member=member)
 
     # Session → unchanged endpoint role gate.
     if is_session_principal(user):
         member = await perm_service.check_workspace_access(
-            user_id, workspace_id, required_role=session_required_role
+            user_id, workspace_id, required_role=session_required_role, slot=slot
         )
         return AuthorizedPrincipal(kind="session", member=member)
 

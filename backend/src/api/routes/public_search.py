@@ -31,6 +31,7 @@ from services.public_usage_budget import (
 )
 from services.resource_lookup import get_latest_schema
 from services.search_service import SearchService
+from services.workspace_slot_gate import ensure_slot_active
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     APIKeyError,
@@ -556,6 +557,8 @@ async def public_search(
     # Every caller of this route is an outsider (anonymous or bound key), so
     # it gets the redacted refusal.
     await ensure_not_capacity_locked(db, workspace, outsider=True)
+    # #2918: a slot-suspended workspace serves no public read (redacted).
+    await ensure_slot_active(db, workspace, user_id=None, outsider=True)
 
     # #2805: an anonymous search of a context with a live public MCP
     # publication spends the workspace's public usage budget, like a public
@@ -737,6 +740,8 @@ async def get_public_context_info(
     workspace = await db.get(Workspace, context.workspace_id)
     if workspace is not None:
         ensure_public_serving_allowed(workspace)
+        # #2918: nor while the workspace is slot-suspended (redacted, as /search).
+        await ensure_slot_active(db, workspace, user_id=None, outsider=True)
 
     # Load schema if resource-backed.
     schema = (

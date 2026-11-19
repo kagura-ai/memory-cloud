@@ -63,6 +63,7 @@ from .scheduler import get_scheduler, shutdown_scheduler, start_scheduler
 from .security_notification_tasks import schedule_security_notification_tasks
 from .semantic_edge_reverify import schedule_semantic_edge_reverify_tasks
 from .sleep_tasks import schedule_sleep_tasks
+from .workspace_slot_tasks import schedule_workspace_slot_tasks
 
 
 def register_scheduled_jobs(scheduler: AsyncIOScheduler) -> None:
@@ -87,6 +88,7 @@ def register_scheduled_jobs(scheduler: AsyncIOScheduler) -> None:
     schedule_erasure_tasks(scheduler)
     schedule_file_tasks(scheduler)
     schedule_capacity_purge_tasks(scheduler)
+    schedule_workspace_slot_tasks(scheduler)
     schedule_semantic_edge_reverify_tasks(scheduler)
     schedule_referral_tasks(scheduler)
     schedule_public_mcp_usage_tasks(scheduler)
@@ -117,6 +119,7 @@ __all__ = [
     "schedule_file_tasks",
     "schedule_semantic_edge_reverify_tasks",
     "schedule_capacity_purge_tasks",
+    "schedule_workspace_slot_tasks",
     "schedule_referral_tasks",
     "schedule_public_mcp_usage_tasks",
     "schedule_operation_history_tasks",

@@ -21,15 +21,22 @@ from auth.connector_keys import CONNECTOR_KEY_REGENERATE_MESSAGE, reject_reserve
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import APIKey
+from models.auth import APIKey, Context
 from services.credential_default_context import default_context_names, readable_context
 from services.security_notification_service import (
     SecurityEvent,
     schedule_security_notification,
 )
+from services.workspace_slot_gate import ensure_slot_active
+from services.workspace_slots import workspace_slots_enforced
 from utils import db_transaction, get_user_id
 from utils.datetime import utcnow
-from utils.exceptions import BadRequestError, NotFoundException, ValidationError
+from utils.exceptions import (
+    BadRequestError,
+    NotFoundException,
+    ValidationError,
+    WorkspaceSlotSuspendedError,
+)
 from utils.logger import get_logger
 from utils.public_id import APIKeyPublicId, PublicIdPrefix, public_id_pattern
 
@@ -570,6 +577,19 @@ async def regenerate_api_key(
         # can hand it the replacement.
         if old_key.connector_id is not None:
             raise HTTPException(status_code=422, detail=CONNECTOR_KEY_REGENERATE_MESSAGE)
+        # #2918: a slot-suspended workspace issues no new secret (deleting the
+        # key stays possible): the key's workspace, or for a public-bound key
+        # the workspace of its bound context (read only in enforce).
+        gated_workspace = old_key.workspace_id
+        if (
+            gated_workspace is None
+            and old_key.bound_context_id is not None
+            and workspace_slots_enforced()
+        ):
+            gated_workspace = await db.scalar(
+                select(Context.workspace_id).where(Context.id == old_key.bound_context_id)
+            )
+        await ensure_slot_active(db, gated_workspace, user_id=user_id)
 
         # Store old key info. agent_id / bound_context_id are immutable
         # bindings — the replacement must keep them, otherwise regenerating an
@@ -646,7 +666,7 @@ async def regenerate_api_key(
         # active, bound context still public) — surface that as a client
         # error like the create route does, not a 500.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
-    except HTTPException:
+    except (HTTPException, WorkspaceSlotSuspendedError):
         raise
     except Exception as e:
         logger.error(f"Failed to regenerate API key: {e}")

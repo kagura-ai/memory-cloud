@@ -3911,10 +3911,12 @@ the banner also projects unsent notices onto future runs.
 after every 1,000-memory chunk, the purge reads the workspace row again and
 checks whether anyone other than the purge deleted a memory or a context of
 the workspace since the purge started. The purge stops if the workspace
-re-subscribed, was erased, or the owner started cleaning up themselves. A
+re-subscribed, was erased, was slot-suspended (#2918), or the owner started cleaning up
+themselves. A slot-suspended workspace is never stamped and loses an existing stamp, so a
+fresh 30 days starts after it is resumed. A
 file deleted on its own does not count, because `file_objects` has no
 `deleted_by`. The stamp is cleared, the audit row has `"aborted": true` and
-`"aborted_reason"` (`resubscribed`, `erased` or `owner_cleanup`),
+`"aborted_reason"` (`resubscribed`, `erased`, `owner_cleanup` or `slot_suspended`),
 `capacity_purge_aborted` is logged with the same reason, and no completion
 mail is sent. If the workspace is still over the cap, the next stamp run
 starts a new 30 days. Non-default contexts are purged first
@@ -4671,7 +4673,12 @@ grant (0 / 0 / 2 / 19) comes from the highest tier among the workspaces the
 user owns. Admin/referral slot bonuses stack on top. Only creating another
 workspace is gated — a user above the cap (e.g. after a downgrade) keeps
 every workspace. Enforcement is behind `ENFORCE_WORKSPACE_CAP` (default
-`false` = log-only); see `docs/ops/workspace-cap-rollback.md`.
+`false` = log-only); see `docs/ops/workspace-cap-rollback.md`. With
+`WORKSPACE_SLOT_SUSPENSION=enforce` (#2918, default `off`; needs
+`ENFORCE_WORKSPACE_CAP=true`) an event that ends a paid contract or lowers a
+plan's grant or the slot bonus, and does not raise the allowance, also suspends
+the excess owned workspaces over the allowance, data kept, until slots return or the owner chooses others;
+see [Workspace slot suspension](ops/workspace-slots.md).
 
 Feature availability (the `features` set on each tier):
 

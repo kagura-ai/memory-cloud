@@ -109,6 +109,18 @@ class DigestEntries:
     # client computes over ``load_guardrails.tool_triggered`` alone. NOT
     # ``load_guardrails.version`` (which also covers the pinned list).
     tool_triggered_version: str
+    # #2918: the context's workspace is slot-suspended. No entries; the MCP
+    # ``instructions`` carry one notice line instead (``render_instructions``).
+    workspace_suspended: bool = False
+
+
+# #2918: the one line ``initialize`` adds when the selected context's
+# workspace is slot-suspended. It names no workspace and no plan.
+WORKSPACE_SUSPENDED_NOTICE = (
+    "The workspace of this connection's context is suspended because its owner has more "
+    "workspaces than their plan allows; its data is kept. Tool calls on it answer "
+    "workspace_suspended until the owner resumes it."
+)
 
 
 SelectionMode = Literal["off", "explicit", "binding", "ignored"]
@@ -317,8 +329,11 @@ def render_instructions(
 
     ``base`` alone when there is nothing to render. ``tool_names`` is the
     URL's tool view (``tool_view_names``): the suffix names ``load_guardrails``
-    only when it is listed, ``get_context_info`` otherwise.
+    only when it is listed, ``get_context_info`` otherwise. #2918: for a
+    slot-suspended workspace, the base text and one notice line.
     """
+    if entries is not None and entries.workspace_suspended:
+        return f"{base}\n\n{WORKSPACE_SUSPENDED_NOTICE}"
     if entries is None or not entries.entries:
         return base
     caps = INSTRUCTIONS_CAPS
@@ -510,7 +525,11 @@ async def select_last_used_context(
 
     from services.context_service import ContextService
     from services.permission_service import PermissionService
-    from utils.exceptions import AuthorizationError, FeatureNotAvailableError
+    from utils.exceptions import (
+        AuthorizationError,
+        FeatureNotAvailableError,
+        WorkspaceSlotSuspendedError,
+    )
 
     try:
         if key_workspace_id is not None:
@@ -519,9 +538,10 @@ async def select_last_used_context(
             )
         else:
             contexts = await ContextService(db).list_contexts(user_id, raise_on_lookup_error=True)
-    except (AuthorizationError, FeatureNotAvailableError) as e:
-        # Not a member any more, or no seat: a state of the account, not a
-        # failure of the handshake — no digest, nothing above debug.
+    except (AuthorizationError, FeatureNotAvailableError, WorkspaceSlotSuspendedError) as e:
+        # Not a member any more, no seat, or a slot-suspended workspace (#2918):
+        # a state of the account, not a failure of the handshake — no digest,
+        # nothing above debug.
         logger.debug("guardrail_digest_no_listing", reason=type(e).__name__)
         return None
     return contexts[0].id if len(contexts) == 1 else None
@@ -534,6 +554,7 @@ async def fetch_entries(
     context_id: UUID,
     key_workspace_id: UUID | None,
     limit: int,
+    slot_notice: bool = False,
 ) -> DigestEntries | None:
     """Resolve the context through the read chokepoint, then read its set.
 
@@ -542,9 +563,14 @@ async def fetch_entries(
     signal about whether the context exists. Same chokepoint as
     ``load_guardrails`` and the MCP read tools, so an OAuth caller, a
     workspace-scoped key and an agent-bound key are confined identically.
+
+    #2918: a slot-suspended workspace raises ``WorkspaceSlotSuspendedError``
+    (the REST route answers ``SLOT-001``); with ``slot_notice`` (the MCP
+    handshake) it is an empty set flagged ``workspace_suspended`` instead, so
+    ``initialize`` succeeds with one notice line and logs no warning.
     """
     from services.permission_service import PermissionService
-    from utils.exceptions import NotFoundException
+    from utils.exceptions import NotFoundException, WorkspaceSlotSuspendedError
 
     try:
         context = await PermissionService(db).resolve_context_for_workspace_read(
@@ -558,4 +584,16 @@ async def fetch_entries(
     except NotFoundException:
         logger.debug("guardrail_digest_context_denied", context_id=str(context_id))
         return None
+    except WorkspaceSlotSuspendedError:
+        if not slot_notice:
+            raise
+        logger.debug("guardrail_digest_workspace_suspended", context_id=str(context_id))
+        return DigestEntries(
+            context_id=context_id,
+            entries=[],
+            total_available=0,
+            truncated=False,
+            tool_triggered_version="",
+            workspace_suspended=True,
+        )
     return await fetch_entries_for_context(db, user_id=user_id, context=context, limit=limit)

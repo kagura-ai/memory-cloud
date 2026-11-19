@@ -54,7 +54,8 @@ async def readable_context(
     Read through ``resolve_context_for_workspace_read`` (capacity ALLOWED:
     naming a context reads no memory). Every deny — unknown, deleted, other
     workspace, outside ``key_workspace_id``, private non-creator, whitelist
-    miss, no seat — is ``None``, with nothing that tells them apart.
+    miss, no seat, a slot-suspended workspace (#2918) — is ``None``, with
+    nothing that tells them apart.
 
     Args:
         db: The request's session.
@@ -67,7 +68,12 @@ async def readable_context(
         The ``Context`` row, or ``None`` when the user cannot read it.
     """
     from services.permission_service import PermissionService
-    from utils.exceptions import AuthorizationError, FeatureNotAvailableError, NotFoundException
+    from utils.exceptions import (
+        AuthorizationError,
+        FeatureNotAvailableError,
+        NotFoundException,
+        WorkspaceSlotSuspendedError,
+    )
 
     try:
         return await PermissionService(db).resolve_context_for_workspace_read(
@@ -77,7 +83,12 @@ async def readable_context(
             key_workspace_id=key_workspace_id,
             capacity=CapacityPolicy.ALLOWED,
         )
-    except (NotFoundException, FeatureNotAvailableError, AuthorizationError):
+    except (
+        NotFoundException,
+        FeatureNotAvailableError,
+        AuthorizationError,
+        WorkspaceSlotSuspendedError,
+    ):
         logger.debug("credential_default_context_unreadable")
         return None
 
@@ -144,7 +155,12 @@ async def readable_context_options(
     name, then context name; capped at ``limit``.
     """
     from services.permission_service import PermissionService
-    from utils.exceptions import AuthorizationError, FeatureNotAvailableError, NotFoundException
+    from utils.exceptions import (
+        AuthorizationError,
+        FeatureNotAvailableError,
+        NotFoundException,
+        WorkspaceSlotSuspendedError,
+    )
 
     rows = (
         await db.execute(
@@ -159,7 +175,13 @@ async def readable_context_options(
     for workspace_id, workspace_name in rows:
         try:
             contexts = await permissions.get_accessible_contexts(user_id, workspace_id)
-        except (AuthorizationError, FeatureNotAvailableError, NotFoundException):
+        except (
+            AuthorizationError,
+            FeatureNotAvailableError,
+            NotFoundException,
+            # #2918: a slot-suspended workspace offers no default context.
+            WorkspaceSlotSuspendedError,
+        ):
             continue
         for context in sorted(contexts, key=lambda c: (c.name or "").lower()):
             options.append(ContextOption(context.id, context.name, workspace_name, workspace_id))
