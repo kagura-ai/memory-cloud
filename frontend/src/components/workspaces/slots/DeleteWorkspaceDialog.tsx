@@ -28,11 +28,13 @@ export function DeleteWorkspaceDialog({
   workspace,
   onClose,
   onDeleted,
+  onCloseAutoFocus,
 }: {
   /** The workspace to delete; null = closed. */
   workspace: SlotWorkspace | null;
   onClose: () => void;
   onDeleted: () => void;
+  onCloseAutoFocus?: (event: Event) => void;
 }) {
   const t = useTranslations("workspace");
   const tSlots = useTranslations("workspaceSlots");
@@ -68,7 +70,7 @@ export function DeleteWorkspaceDialog({
 
   return (
     <AlertDialog open={workspace !== null} onOpenChange={(open) => !open && close()}>
-      <AlertDialogContent>
+      <AlertDialogContent onCloseAutoFocus={onCloseAutoFocus}>
         <AlertDialogHeader>
           <AlertDialogTitle className="text-red-600 dark:text-red-400">
             {t("deleteConfirmTitle")}

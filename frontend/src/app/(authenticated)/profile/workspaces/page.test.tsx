@@ -5,7 +5,7 @@
  * carry the acceptance bullet they cover:
  *   AC1 list, plan, slots, owned only, plan link
  *   AC2 cancellation: which to keep, preview before saving, optional
- *   AC3 reachable (the guard side is in layout.test.tsx)
+ *   AC3 selection after the term ended (the guard side is in layout.test.tsx)
  *   AC4 suspended workspace: reason, export, delete, resume, no-slot remedies, #1940
  *   AC5 resumed workspaces show as active with their own plan
  */
@@ -23,6 +23,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api/base";
 import type {
   SlotWorkspace,
+  WorkspaceSlotPreview,
   WorkspaceSlots,
 } from "@/lib/api/workspaceSlots";
 
@@ -84,8 +85,16 @@ vi.mock("@/lib/api/billing", () => ({
   mintBillingHandoff: (...a: unknown[]) => mockHandoff(...a),
 }));
 vi.mock("@/components/contexts/ExportContextButton", () => ({
-  ExportContextButton: ({ contextName }: { contextName: string }) => (
-    <button type="button">{`export:${contextName}`}</button>
+  ExportContextButton: ({
+    contextName,
+    ariaLabel,
+  }: {
+    contextName: string;
+    ariaLabel?: string;
+  }) => (
+    <button type="button" aria-label={ariaLabel}>
+      {`export:${contextName}`}
+    </button>
   ),
 }));
 
@@ -198,6 +207,48 @@ beforeEach(() => {
   mockRefreshWorkspaces.mockResolvedValue(undefined);
 });
 
+// ---------- Helpers ----------------------------------------------------------
+
+function previewOf(over: Partial<WorkspaceSlotPreview>): WorkspaceSlotPreview {
+  return {
+    scenario: "current",
+    cap: 1,
+    active_slots: 1,
+    active: [],
+    suspended: [],
+    unmet: [],
+    changes: { suspend: [], resume: [] },
+    ...over,
+  };
+}
+
+const named = (key: string, name: string) =>
+  `actions.${key}|${JSON.stringify({ name })}`;
+const rowButton = (id: string, key: string, name: string) =>
+  within(row(id)).getByRole("button", { name: named(key, name) });
+const listItems = (name: string) =>
+  within(screen.getByRole("list", { name }))
+    .getAllByRole("listitem")
+    .map((li) => li.textContent);
+
+/**
+ * Space on a focused button-checkbox as a browser handles it: keydown and
+ * keyup, then the button's activation (a click) unless the keydown's default
+ * was prevented. happy-dom dispatches the key events but has no activation
+ * behaviour, so the last step is the browser's, written out.
+ */
+function pressSpace(el: HTMLElement) {
+  el.focus();
+  const notPrevented = fireEvent.keyDown(el, { key: " ", code: "Space" });
+  fireEvent.keyUp(el, { key: " ", code: "Space" });
+  if (notPrevented) fireEvent.click(el);
+}
+
+async function previewAndWait() {
+  fireEvent.click(screen.getByRole("button", { name: "keep.preview" }));
+  return screen.findByRole("region", { name: "keep.previewTitle" });
+}
+
 // ---------- Tests ------------------------------------------------------------
 
 describe("states", () => {
@@ -215,6 +266,13 @@ describe("states", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("loadFailed");
   });
 
+  it("a 404 from the API although the flag is on reads as not available, not as an error", async () => {
+    mockGetSlots.mockRejectedValue(apiError(404, "HTTP-404"));
+    render(<WorkspaceManagementPage />);
+    expect(await screen.findByText("unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("loadFailed")).toBeNull();
+  });
+
   it("an owner of nothing gets an empty state with a create action", async () => {
     mockGetSlots.mockResolvedValue(
       afterTermEnd({
@@ -225,7 +283,9 @@ describe("states", () => {
       }),
     );
     render(<WorkspaceManagementPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "empty.action" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "empty.action" }),
+    );
     expect(screen.getByText("empty.title")).toBeInTheDocument();
     expect(mockPush).toHaveBeenCalledWith("/workspace/settings?create=true");
   });
@@ -264,6 +324,13 @@ describe("AC1 list, slots, owned only, plan link", () => {
     }
   });
 
+  it("the table is named by its section heading", async () => {
+    await renderLoaded(afterTermEnd());
+    expect(
+      screen.getByRole("table", { name: "table.caption" }),
+    ).toBeInTheDocument();
+  });
+
   it("says that shared workspaces the user joined do not count", async () => {
     await renderLoaded(afterTermEnd());
     expect(screen.getByText("summary.sharedNotCounted")).toBeInTheDocument();
@@ -271,7 +338,7 @@ describe("AC1 list, slots, owned only, plan link", () => {
 
   it("plan link of an active workspace switches to it, then opens its plan page", async () => {
     await renderLoaded(beforeTermEnd());
-    fireEvent.click(within(row("w2")).getByRole("button", { name: /changePlan/ }));
+    fireEvent.click(rowButton("w2", "changePlanNamed", "Research"));
     await waitFor(() =>
       expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan"),
     );
@@ -281,7 +348,7 @@ describe("AC1 list, slots, owned only, plan link", () => {
 
   it("plan link of the current workspace opens the plan page without a switch", async () => {
     await renderLoaded(beforeTermEnd());
-    fireEvent.click(within(row("w1")).getByRole("button", { name: /changePlan/ }));
+    fireEvent.click(rowButton("w1", "changePlanNamed", "Personal"));
     await waitFor(() =>
       expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan"),
     );
@@ -291,10 +358,9 @@ describe("AC1 list, slots, owned only, plan link", () => {
   it("plan link of a suspended workspace goes through the billing handoff, never a switch", async () => {
     mockHandoff.mockResolvedValue({ url: null });
     await renderLoaded(afterTermEnd());
-    fireEvent.click(within(row("w2")).getByRole("button", { name: /changePlan/ }));
+    fireEvent.click(rowButton("w2", "changePlanNamed", "Research"));
     await waitFor(() => expect(mockHandoff).toHaveBeenCalledWith("w2"));
     expect(mockSwitchWorkspace).not.toHaveBeenCalled();
-    // No ready URL on this deployment: said, not silently ignored.
     await waitFor(() =>
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({ title: "planUnavailable" }),
@@ -305,150 +371,319 @@ describe("AC1 list, slots, owned only, plan link", () => {
   it("no plan link when the deployment serves no plan page", async () => {
     mockInfo = { features: { workspace_slots: true } };
     await renderLoaded(afterTermEnd());
-    expect(screen.queryByRole("button", { name: /changePlan/ })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /changePlanNamed/ }),
+    ).toBeNull();
   });
 });
 
 describe("AC2 cancellation: which workspaces to keep", () => {
-  it("appears only when ending the paid plans would suspend something", async () => {
+  it("with nothing suspended, the cancellation block carries the selection control", async () => {
     await renderLoaded(beforeTermEnd());
     expect(screen.getByText("cancellation.title")).toBeInTheDocument();
     expect(
       screen.getByText('cancellation.description|{"cap":1}'),
     ).toBeInTheDocument();
     expect(screen.getByText("cancellation.optional")).toBeInTheDocument();
-    expect(screen.getByText("keep.question")).toBeInTheDocument();
+    expect(
+      screen.getByRole("group", { name: "keep.questionAfterEnd" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("current.title")).toBeNull();
   });
 
   it.each([
     ["nothing is under a contract", null],
-    ["everything would still fit", { cap: 3, active: ["w1", "w2", "w3"], suspended: [] }],
+    [
+      "everything would still fit",
+      { cap: 3, active: ["w1", "w2", "w3"], suspended: [] },
+    ],
   ])("is absent when %s", async (_label, ifEnd) => {
     await renderLoaded(beforeTermEnd({ if_paid_plans_end: ifEnd }));
     expect(screen.queryByText("cancellation.title")).toBeNull();
-    expect(screen.queryByText("keep.question")).toBeNull();
+    expect(screen.queryByRole("group")).toBeNull();
   });
 
-  it("keyboard selection: a box takes focus and toggles, the cap disables the rest and the live text says the cap", async () => {
+  it("the fieldset is described by the count, which names the cap", async () => {
+    await renderLoaded(beforeTermEnd());
+    const group = screen.getByRole("group", { name: "keep.questionAfterEnd" });
+    const count = screen.getByText('keep.count|{"count":1,"max":1}');
+    expect(group).toHaveAttribute("aria-describedby", count.id);
+    expect(count).toHaveAttribute("role", "status");
+    expect(count).toHaveAttribute("aria-live", "polite");
+    // The count and the buttons sit inside the group.
+    expect(group).toContainElement(count);
+    expect(group).toContainElement(
+      screen.getByRole("button", { name: "keep.preview" }),
+    );
+  });
+
+  it("keyboard selection with Space: the cap disables the rest and the live text follows", async () => {
     await renderLoaded(beforeTermEnd());
     const personal = screen.getByRole("checkbox", { name: /Personal/ });
     const research = screen.getByRole("checkbox", { name: /Research/ });
     const side = screen.getByRole("checkbox", { name: /Side project/ });
-    const live = screen.getByText('keep.count|{"count":1,"max":1}');
-    expect(live).toHaveAttribute("role", "status");
-    expect(live).toHaveAttribute("aria-live", "polite");
 
-    // At the cap (1): the kept one is checked, the others are disabled and
-    // so out of the tab order — the live text names the cap.
     expect(personal).toHaveAttribute("aria-checked", "true");
     expect(research).toBeDisabled();
     expect(side).toBeDisabled();
 
-    // Space on a focused button-checkbox activates it (a click event).
-    personal.focus();
+    pressSpace(personal);
     expect(personal).toHaveFocus();
-    fireEvent.click(personal);
     expect(personal).toHaveAttribute("aria-checked", "false");
     expect(research).not.toBeDisabled();
     expect(side).not.toBeDisabled();
-    expect(live).toHaveTextContent('keep.count|{"count":0,"max":1}');
+    expect(
+      screen.getByText('keep.count|{"count":0,"max":1}'),
+    ).toBeInTheDocument();
 
-    side.focus();
-    fireEvent.click(side);
+    pressSpace(side);
+    expect(side).toHaveFocus();
     expect(side).toHaveAttribute("aria-checked", "true");
     expect(personal).toBeDisabled();
-    expect(live).toHaveTextContent('keep.count|{"count":1,"max":1}');
+    expect(
+      screen.getByText('keep.count|{"count":1,"max":1}'),
+    ).toBeInTheDocument();
   });
 
-  it("preview shows which stay active and which will be suspended, and saves nothing", async () => {
-    mockPreview.mockResolvedValue({
-      scenario: "paid_plans_end",
-      cap: 1,
-      active_slots: 1,
-      active: ["w3"],
-      suspended: ["w1", "w2"],
-      unmet: [],
-      changes: { suspend: ["w1", "w2"], resume: ["w3"] },
-    });
+  it("preview lists what stays active and what will be suspended, moves focus there and saves nothing", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        scenario: "paid_plans_end",
+        active: ["w3"],
+        suspended: ["w1", "w2"],
+        changes: { suspend: ["w1", "w2"], resume: [] },
+      }),
+    );
     await renderLoaded(beforeTermEnd());
     fireEvent.click(screen.getByRole("checkbox", { name: /Personal/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: /Side project/ }));
     const save = screen.getByRole("button", { name: "keep.save" });
     expect(save).toBeDisabled();
+    expect(screen.getByText("keep.previewHint")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "keep.preview" }));
-    const result = await screen.findByRole("region", { name: "keep.previewTitle" });
+    await previewAndWait();
     expect(mockPreview).toHaveBeenCalledWith(["w3"], "paid_plans_end");
-    const [stays, suspended] = within(result).getAllByRole("list");
-    expect(within(stays).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
-      "Side project",
-    ]);
     expect(
-      within(suspended).getAllByRole("listitem").map((li) => li.textContent),
-    ).toEqual(["Personal", "Research"]);
+      screen.getByRole("heading", { name: "keep.previewTitle" }),
+    ).toHaveFocus();
+    expect(listItems("keep.staysActive")).toEqual(["Side project"]);
+    expect(listItems("keep.willBeSuspended")).toEqual(["Personal", "Research"]);
+    // "No slot can be freed" belongs to the current scenario only.
+    expect(screen.queryByText("keep.unmet")).toBeNull();
     expect(mockSave).not.toHaveBeenCalled();
     expect(save).not.toBeDisabled();
+    expect(screen.queryByText("keep.previewHint")).toBeNull();
   });
 
-  it("save sends the selection with expected_version and shows the saved state", async () => {
-    mockPreview.mockResolvedValue({
-      scenario: "paid_plans_end",
-      cap: 1,
-      active_slots: 1,
-      active: ["w1"],
-      suspended: ["w2", "w3"],
-      unmet: [],
-      changes: { suspend: ["w2", "w3"], resume: [] },
+  it("a preview answering after the selection changed never enables Save", async () => {
+    let answer!: (p: WorkspaceSlotPreview) => void;
+    mockPreview.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    await renderLoaded(beforeTermEnd());
+    fireEvent.click(screen.getByRole("button", { name: "keep.preview" }));
+    // Selection A = [w1] is being previewed; switch to B = [w3].
+    fireEvent.click(screen.getByRole("checkbox", { name: /Personal/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Side project/ }));
+    await act(async () => {
+      answer(
+        previewOf({
+          scenario: "paid_plans_end",
+          active: ["w1"],
+          suspended: ["w2", "w3"],
+          changes: { suspend: ["w2", "w3"], resume: [] },
+        }),
+      );
     });
+    expect(screen.getByRole("button", { name: "keep.save" })).toBeDisabled();
+    expect(
+      screen.queryByRole("region", { name: "keep.previewTitle" }),
+    ).toBeNull();
+  });
+
+  it("save sends the selection with expected_version and moves focus to the section heading", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        scenario: "paid_plans_end",
+        active: ["w1"],
+        suspended: ["w2", "w3"],
+        changes: { suspend: ["w2", "w3"], resume: [] },
+      }),
+    );
     const saved = beforeTermEnd({
       version: 8,
       selection: { workspace_ids: ["w1"], saved_at: "2026-11-19T00:00:00Z" },
     });
     mockSave.mockResolvedValue(saved);
     await renderLoaded(beforeTermEnd());
-    fireEvent.click(screen.getByRole("button", { name: "keep.preview" }));
-    await screen.findByRole("region", { name: "keep.previewTitle" });
+    await previewAndWait();
     fireEvent.click(screen.getByRole("button", { name: "keep.save" }));
     await waitFor(() => expect(mockSave).toHaveBeenCalledWith(["w1"], 7));
     await waitFor(() =>
       expect(mockToast).toHaveBeenCalledWith({ title: "keep.saved" }),
     );
-    expect(mockRefreshWorkspaces).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "cancellation.title" }),
+      ).toHaveFocus(),
+    );
+    expect(mockRefreshWorkspaces).toHaveBeenCalledWith({ quiet: true });
   });
 
-  it("a stale version (SLOT-003) refetches and asks to review again", async () => {
-    mockPreview.mockResolvedValue({
-      scenario: "paid_plans_end",
-      cap: 1,
-      active_slots: 1,
-      active: ["w1"],
-      suspended: ["w2", "w3"],
-      unmet: [],
-      changes: { suspend: [], resume: [] },
-    });
+  it("a stale version (SLOT-003) refetches, and says the list is up to date only after it is", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        scenario: "paid_plans_end",
+        active: ["w1"],
+        suspended: ["w2", "w3"],
+      }),
+    );
     mockSave.mockRejectedValue(
       apiError(409, "SLOT-003", { expected_version: 7, current_version: 8 }),
     );
     await renderLoaded(beforeTermEnd());
-    fireEvent.click(screen.getByRole("button", { name: "keep.preview" }));
-    await screen.findByRole("region", { name: "keep.previewTitle" });
+    let refetched!: (d: WorkspaceSlots) => void;
+    mockGetSlots.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          refetched = resolve;
+        }),
+    );
+    await previewAndWait();
     fireEvent.click(screen.getByRole("button", { name: "keep.save" }));
     expect(await screen.findByText("stale")).toBeInTheDocument();
-    await waitFor(() => expect(mockGetSlots).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("staleRefreshed")).toBeNull();
+    await act(async () => {
+      refetched(beforeTermEnd({ version: 8 }));
+    });
+    expect(await screen.findByText("staleRefreshed")).toBeInTheDocument();
     expect(mockToast).not.toHaveBeenCalledWith(
       expect.objectContaining({ variant: "destructive" }),
     );
   });
 });
 
-describe("AC3 selection required after the term ended", () => {
-  it("shows the selection-required notice and the choice for the current allowance", async () => {
+describe("AC3 the choice for the current allowance", () => {
+  it("the UI check: three owned, one slot — pick another, preview, save", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        active: ["w2"],
+        suspended: ["w1", "w3"],
+        changes: { suspend: ["w1"], resume: ["w2"] },
+      }),
+    );
+    mockSave.mockResolvedValue(afterTermEnd({ version: 5 }));
     await renderLoaded(afterTermEnd());
     expect(screen.getByText("selectionRequired.title")).toBeInTheDocument();
-    expect(screen.getByText("current.title")).toBeInTheDocument();
+    const group = screen.getByRole("group", { name: "keep.question" });
+    pressSpace(within(group).getByRole("checkbox", { name: /Personal/ }));
+    pressSpace(within(group).getByRole("checkbox", { name: /Research/ }));
     expect(
-      screen.getByRole("checkbox", { name: /Personal/ }),
-    ).toHaveAttribute("aria-checked", "true");
+      screen.getByText('keep.count|{"count":1,"max":1}'),
+    ).toBeInTheDocument();
+
+    await previewAndWait();
+    expect(mockPreview).toHaveBeenCalledWith(["w2"], "current");
+    expect(listItems("keep.staysActive")).toEqual(["Research"]);
+    expect(listItems("keep.willBeSuspended")).toEqual(["Personal"]);
+    expect(listItems("keep.staysSuspended")).toEqual(["Side project"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "keep.save" }));
+    await waitFor(() => expect(mockSave).toHaveBeenCalledWith(["w2"], 4));
+  });
+
+  it("while anything is suspended there is one selection control; the end-of-term block is information only", async () => {
+    await renderLoaded(
+      afterTermEnd({
+        if_paid_plans_end: { cap: 1, active: ["w1"], suspended: ["w2", "w3"] },
+      }),
+    );
+    expect(screen.getAllByRole("group")).toHaveLength(1);
+    expect(
+      screen.getByRole("group", { name: "keep.question" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("cancellation.title")).toBeInTheDocument();
+    expect(screen.getByText("cancellation.wouldSuspend")).toBeInTheDocument();
+    expect(screen.queryByText("cancellation.optional")).toBeNull();
+    expect(
+      screen.getAllByRole("button", { name: "keep.preview" }),
+    ).toHaveLength(1);
+  });
+
+  it("workspaces under a paid subscription are locked, counted, and max is active_slots", async () => {
+    await renderLoaded(
+      afterTermEnd({
+        active_count: 2,
+        active_slots: 2,
+        contracted_count: 1,
+        selection_required: false,
+        workspaces: [
+          ws("w1", "Personal", { is_current: true }),
+          ws("w2", "Research", {
+            plan_name: "pro",
+            under_billing_contract: true,
+          }),
+          ws("w3", "Side project", {
+            status: "slot_suspended",
+            suspended_at: "2026-12-01T00:00:12Z",
+          }),
+        ],
+      }),
+    );
+    const research = screen.getByRole("checkbox", { name: /Research/ });
+    expect(research).toHaveAttribute("aria-checked", "true");
+    expect(research).toBeDisabled();
+    const note = screen.getByText("keep.contracted");
+    expect(research).toHaveAttribute("aria-describedby", note.id);
+    expect(
+      screen.getByText('keep.count|{"count":2,"max":2}'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: /Side project/ }),
+    ).toBeDisabled();
+    // Unchecking the uncontracted one frees the cap for the suspended one.
+    pressSpace(screen.getByRole("checkbox", { name: /Personal/ }));
+    expect(
+      screen.getByRole("checkbox", { name: /Side project/ }),
+    ).not.toBeDisabled();
+    expect(research).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("no slot can be freed: the preview names those ids, and a Save refused with SLOT-002 shows the remedies", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        active: ["w1"],
+        suspended: ["w2", "w3"],
+        unmet: ["w3"],
+        changes: { suspend: [], resume: [] },
+      }),
+    );
+    mockSave.mockRejectedValue(
+      apiError(409, "SLOT-002", {
+        cap: 1,
+        active_slots: 1,
+        active_count: 1,
+        contracted_count: 1,
+        next_tier: "pro",
+        cap_on_next_tier: 3,
+        unmet: ["w3"],
+      }),
+    );
+    await renderLoaded(afterTermEnd());
+    pressSpace(screen.getByRole("checkbox", { name: /Personal/ }));
+    pressSpace(screen.getByRole("checkbox", { name: /Side project/ }));
+    await previewAndWait();
+    expect(listItems("keep.unmet")).toEqual(["Side project"]);
+    expect(listItems("keep.staysSuspended")).toEqual(["Research"]);
+    fireEvent.click(screen.getByRole("button", { name: "keep.save" }));
+    expect(await screen.findByText("full.title")).toBeInTheDocument();
+    expect(screen.getByText(/^full\.upgrade\|/)).toHaveTextContent('"cap":3');
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ variant: "destructive" }),
+    );
   });
 
   it("no choice section while nothing is suspended and no contract could end", async () => {
@@ -461,15 +696,18 @@ describe("AC3 selection required after the term ended", () => {
 });
 
 describe("AC4 a suspended workspace", () => {
-  it("explains the reason and offers resume, export and delete; an active one has none", async () => {
+  it("explains the reason and offers resume, export and delete, each named after the workspace", async () => {
     await renderLoaded(afterTermEnd());
     const research = within(row("w2"));
     expect(research.getByText("reason")).toBeInTheDocument();
     expect(research.getByText(/status\.suspendedOn/)).toBeInTheDocument();
-    for (const name of ["actions.resume", "actions.export", "actions.delete"]) {
-      expect(research.getByRole("button", { name })).toBeInTheDocument();
+    for (const key of ["resumeNamed", "exportNamed", "deleteNamed"]) {
+      expect(rowButton("w2", key, "Research")).toBeInTheDocument();
+      expect(rowButton("w3", key, "Side project")).toBeInTheDocument();
     }
-    expect(within(row("w1")).queryByRole("button", { name: "actions.resume" })).toBeNull();
+    expect(
+      within(row("w1")).queryByRole("button", { name: /resumeNamed/ }),
+    ).toBeNull();
   });
 
   it("an active workspace under a paid subscription says it cannot be deleted (#1940)", async () => {
@@ -478,7 +716,7 @@ describe("AC4 a suspended workspace", () => {
     expect(within(row("w3")).queryByText("contractNote")).toBeNull();
   });
 
-  it("export lists the contexts with a button each and says other members' private contexts are left out", async () => {
+  it("export lists the contexts, each button named after its context, and returns focus to the opener", async () => {
     mockListContexts.mockResolvedValue({
       workspace_id: "w2",
       contexts: [
@@ -487,33 +725,54 @@ describe("AC4 a suspended workspace", () => {
       ],
     });
     await renderLoaded(afterTermEnd());
-    fireEvent.click(within(row("w2")).getByRole("button", { name: "actions.export" }));
+    const opener = rowButton("w2", "exportNamed", "Research");
+    opener.focus();
+    fireEvent.click(opener);
     const dialog = await screen.findByRole("dialog");
     expect(mockListContexts).toHaveBeenCalledWith("w2");
-    expect(await within(dialog).findByRole("button", { name: "export:Papers" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "export:My drafts" })).toBeInTheDocument();
+    expect(
+      await within(dialog).findByRole("button", {
+        name: named("exportNamed", "Papers"),
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", {
+        name: named("exportNamed", "My drafts"),
+      }),
+    ).toBeInTheDocument();
     expect(within(dialog).getByText("export.private")).toBeInTheDocument();
     expect(within(dialog).getByText("export.privateNote")).toBeInTheDocument();
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(opener).toHaveFocus());
   });
 
   it("export of a workspace without contexts is an empty state", async () => {
     mockListContexts.mockResolvedValue({ workspace_id: "w3", contexts: [] });
     await renderLoaded(afterTermEnd());
-    fireEvent.click(within(row("w3")).getByRole("button", { name: "actions.export" }));
+    fireEvent.click(rowButton("w3", "exportNamed", "Side project"));
     expect(await screen.findByText("export.emptyTitle")).toBeInTheDocument();
   });
 
-  it("delete asks first, deletes, and refreshes", async () => {
+  it("delete asks first, deletes, refreshes quietly and puts focus on the table heading", async () => {
     mockDeleteWorkspace.mockResolvedValue(undefined);
     await renderLoaded(afterTermEnd());
-    fireEvent.click(within(row("w3")).getByRole("button", { name: "actions.delete" }));
+    fireEvent.click(rowButton("w3", "deleteNamed", "Side project"));
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText("deleteConfirmTitle")).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole("button", { name: "deleteWorkspace" }));
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "deleteWorkspace" }),
+    );
     await waitFor(() => expect(mockDeleteWorkspace).toHaveBeenCalledWith("w3"));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(mockGetSlots).toHaveBeenCalledTimes(2);
-    expect(mockRefreshWorkspaces).toHaveBeenCalled();
+    expect(mockRefreshWorkspaces).toHaveBeenCalledWith({ quiet: true });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "table.caption" }),
+      ).toHaveFocus(),
+    );
   });
 
   it("a running paid subscription (409 BILLING-005) is said inside the delete dialog", async () => {
@@ -521,9 +780,11 @@ describe("AC4 a suspended workspace", () => {
       apiError(409, "BILLING-005", { workspace_ids: ["w3"] }),
     );
     await renderLoaded(afterTermEnd());
-    fireEvent.click(within(row("w3")).getByRole("button", { name: "actions.delete" }));
+    fireEvent.click(rowButton("w3", "deleteNamed", "Side project"));
     const dialog = await screen.findByRole("alertdialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "deleteWorkspace" }));
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "deleteWorkspace" }),
+    );
     expect(
       await within(dialog).findByText("deleteBlockedBySubscription"),
     ).toBeInTheDocument();
@@ -531,42 +792,89 @@ describe("AC4 a suspended workspace", () => {
     expect(mockToast).not.toHaveBeenCalled();
   });
 
-  it("resume with a free slot says so and saves the workspace first", async () => {
+  it("resume with a free slot says so (politely announced) and saves the workspace first", async () => {
     const data = afterTermEnd({ active_slots: 2, active_count: 1 });
-    mockPreview.mockResolvedValue({
-      scenario: "current",
-      cap: 2,
-      active_slots: 2,
-      active: ["w2", "w1"],
-      suspended: ["w3"],
-      unmet: [],
-      changes: { suspend: [], resume: ["w2"] },
-    });
+    mockPreview.mockResolvedValue(
+      previewOf({
+        cap: 2,
+        active_slots: 2,
+        active: ["w2", "w1"],
+        suspended: ["w3"],
+        changes: { suspend: [], resume: ["w2"] },
+      }),
+    );
     mockSave.mockResolvedValue(afterTermEnd({ version: 5 }));
     await renderLoaded(data);
-    fireEvent.click(within(row("w2")).getByRole("button", { name: "actions.resume" }));
+    fireEvent.click(rowButton("w2", "resumeNamed", "Research"));
     const dialog = await screen.findByRole("alertdialog");
-    expect(
-      await within(dialog).findByText('resume.freeSlot|{"name":"Research"}'),
-    ).toBeInTheDocument();
+    const text = await within(dialog).findByText(
+      'resume.freeSlot|{"name":"Research"}',
+    );
+    expect(text.closest("[aria-live]")).toHaveAttribute("aria-live", "polite");
     expect(mockPreview).toHaveBeenCalledWith(["w2", "w1"], "current");
-    fireEvent.click(within(dialog).getByRole("button", { name: "resume.confirm" }));
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "resume.confirm" }),
+    );
     await waitFor(() => expect(mockSave).toHaveBeenCalledWith(["w2", "w1"], 4));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
   });
 
-  it("resume as a swap names the workspace that is suspended instead", async () => {
-    mockPreview.mockResolvedValue({
-      scenario: "current",
-      cap: 1,
-      active_slots: 1,
-      active: ["w2"],
-      suspended: ["w1", "w3"],
-      unmet: [],
-      changes: { suspend: ["w1"], resume: ["w2"] },
-    });
+  it("resume confirms what it previewed: a refetch while the dialog is open does not change the order or version", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        active: ["w2"],
+        suspended: ["w1", "w3"],
+        changes: { suspend: ["w1"], resume: ["w2"] },
+      }),
+    );
+    mockSave.mockRejectedValue(
+      apiError(409, "SLOT-003", { expected_version: 4, current_version: 9 }),
+    );
     await renderLoaded(afterTermEnd());
-    fireEvent.click(within(row("w2")).getByRole("button", { name: "actions.resume" }));
+    fireEvent.click(rowButton("w2", "resumeNamed", "Research"));
+    const dialog = await screen.findByRole("alertdialog");
+    await within(dialog).findByText('resume.swap|{"name":"Research"}');
+
+    // Meanwhile another tab swapped Side project in.
+    mockGetSlots.mockResolvedValue(
+      afterTermEnd({
+        version: 9,
+        workspaces: [
+          ws("w1", "Personal", {
+            status: "slot_suspended",
+            suspended_at: "2026-12-02T00:00:00Z",
+          }),
+          ws("w2", "Research", {
+            status: "slot_suspended",
+            suspended_at: "2026-12-01T00:00:12Z",
+          }),
+          ws("w3", "Side project"),
+        ],
+      }),
+    );
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(mockGetSlots).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "resume.confirm" }),
+    );
+    await waitFor(() => expect(mockSave).toHaveBeenCalledWith(["w2", "w1"], 4));
+    expect(await within(dialog).findByText("stale")).toBeInTheDocument();
+    expect(mockPreview).toHaveBeenCalledTimes(1);
+  });
+
+  it("resume as a swap names the workspace that is suspended instead", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        active: ["w2"],
+        suspended: ["w1", "w3"],
+        changes: { suspend: ["w1"], resume: ["w2"] },
+      }),
+    );
+    await renderLoaded(afterTermEnd());
+    fireEvent.click(rowButton("w2", "resumeNamed", "Research"));
     const dialog = await screen.findByRole("alertdialog");
     expect(
       await within(dialog).findByText('resume.swap|{"name":"Research"}'),
@@ -574,16 +882,14 @@ describe("AC4 a suspended workspace", () => {
     expect(within(dialog).getByRole("listitem")).toHaveTextContent("Personal");
   });
 
-  it("no slot can be freed (SLOT-002): the remedies name the next plan and deleting", async () => {
-    mockPreview.mockResolvedValue({
-      scenario: "current",
-      cap: 1,
-      active_slots: 1,
-      active: ["w2"],
-      suspended: ["w1", "w3"],
-      unmet: [],
-      changes: { suspend: ["w1"], resume: ["w2"] },
-    });
+  it("no slot can be freed (SLOT-002 on resume): the remedies name the next plan and deleting", async () => {
+    mockPreview.mockResolvedValue(
+      previewOf({
+        active: ["w2"],
+        suspended: ["w1", "w3"],
+        changes: { suspend: ["w1"], resume: ["w2"] },
+      }),
+    );
     mockSave.mockRejectedValue(
       apiError(409, "SLOT-002", {
         cap: 1,
@@ -596,26 +902,26 @@ describe("AC4 a suspended workspace", () => {
       }),
     );
     await renderLoaded(afterTermEnd());
-    fireEvent.click(within(row("w2")).getByRole("button", { name: "actions.resume" }));
+    fireEvent.click(rowButton("w2", "resumeNamed", "Research"));
     const dialog = await screen.findByRole("alertdialog");
     fireEvent.click(
       await within(dialog).findByRole("button", { name: "resume.confirm" }),
     );
     expect(await within(dialog).findByText("full.title")).toBeInTheDocument();
-    expect(within(dialog).getByText(/^full\.upgrade\|/)).toHaveTextContent('"cap":3');
+    expect(within(dialog).getByText(/^full\.upgrade\|/)).toHaveTextContent(
+      '"cap":3',
+    );
     expect(within(dialog).getByText("full.delete")).toBeInTheDocument();
   });
 
   it("no slot can be freed on the top plan: no upgrade sentence", async () => {
-    mockPreview.mockResolvedValue({
-      scenario: "current",
-      cap: 1,
-      active_slots: 1,
-      active: ["w1"],
-      suspended: ["w2", "w3"],
-      unmet: ["w2"],
-      changes: { suspend: [], resume: [] },
-    });
+    mockPreview.mockResolvedValue(
+      previewOf({
+        active: ["w1"],
+        suspended: ["w2", "w3"],
+        unmet: ["w2"],
+      }),
+    );
     await renderLoaded(
       afterTermEnd({
         allowance: {
@@ -629,12 +935,14 @@ describe("AC4 a suspended workspace", () => {
         },
       }),
     );
-    fireEvent.click(within(row("w2")).getByRole("button", { name: "actions.resume" }));
+    fireEvent.click(rowButton("w2", "resumeNamed", "Research"));
     const dialog = await screen.findByRole("alertdialog");
     expect(await within(dialog).findByText("full.title")).toBeInTheDocument();
     expect(within(dialog).queryByText(/^full\.upgrade/)).toBeNull();
     expect(within(dialog).getByText("full.delete")).toBeInTheDocument();
-    expect(within(dialog).queryByRole("button", { name: "resume.confirm" })).toBeNull();
+    expect(
+      within(dialog).queryByRole("button", { name: "resume.confirm" }),
+    ).toBeNull();
   });
 });
 
@@ -664,7 +972,7 @@ describe("AC5 resumed after an upgrade", () => {
     for (const id of ["w1", "w2", "w3"]) {
       expect(within(row(id)).getByText("status.active")).toBeInTheDocument();
     }
-    expect(screen.queryByRole("button", { name: "actions.resume" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /resumeNamed/ })).toBeNull();
     expect(screen.queryByText("selectionRequired.title")).toBeNull();
   });
 });

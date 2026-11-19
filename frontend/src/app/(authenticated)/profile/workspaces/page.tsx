@@ -4,21 +4,23 @@
  * Account settings > Workspace management (#2919, account API of #2918).
  *
  * One place for an owner to see how many owned workspaces may be active, to
- * choose which ones to keep using (now, or for when a paid subscription
- * ends), and to export, delete or resume a suspended workspace. Reachable
- * without a usable current workspace: the layout's workspace guard exempts
- * this route, so the page reads `/system/info` directly instead of a
- * workspace-scoped feature gate.
+ * choose which ones to keep using, and to export, delete or resume a
+ * suspended workspace. Reachable without a usable current workspace: the
+ * layout's workspace guard exempts this route, so the page reads
+ * `/system/info` directly instead of a workspace-scoped feature gate.
+ *
+ * One selection control at a time (design 12.7): while anything is suspended
+ * it is the one for the current allowance (a save applies at once); with
+ * nothing suspended it sits in the "if your paid subscriptions end" block.
  */
 
-import { useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ArrowLeft, Building2 } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
-import { Section } from "@/components/common/Section";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -33,6 +35,7 @@ import {
 import { ApiError } from "@/lib/api/base";
 import { mintBillingHandoff } from "@/lib/api/billing";
 import type { SlotWorkspace, WorkspaceSlots } from "@/lib/api/workspaceSlots";
+import { cn, spacing, typography } from "@/styles/design-tokens";
 import { useWorkspaceSlots } from "@/components/workspaces/slots/useWorkspaceSlots";
 import { OwnedWorkspacesTable } from "@/components/workspaces/slots/OwnedWorkspacesTable";
 import { KeepSelection } from "@/components/workspaces/slots/KeepSelection";
@@ -51,6 +54,38 @@ function activeInSavedOrder(slots: WorkspaceSlots): string[] {
   return [...saved, ...active.filter((id) => !saved.includes(id))];
 }
 
+/** A page section whose heading can take focus. */
+function PageSection({
+  headingId,
+  headingRef,
+  title,
+  description,
+  children,
+}: {
+  headingId: string;
+  headingRef?: RefObject<HTMLHeadingElement | null>;
+  title: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section aria-labelledby={headingId} className={spacing.sectionMargin}>
+      <h2
+        id={headingId}
+        ref={headingRef}
+        tabIndex={-1}
+        className={cn(typography.h3, "mb-1 focus:outline-none")}
+      >
+        {title}
+      </h2>
+      {description && (
+        <p className={cn(typography.description, "mb-4")}>{description}</p>
+      )}
+      {children}
+    </section>
+  );
+}
+
 export default function WorkspaceManagementPage() {
   const t = useTranslations("workspaceSlots");
   const access = useTranslations("featureAccess");
@@ -62,11 +97,25 @@ export default function WorkspaceManagementPage() {
   const { currentWorkspaceId, switchWorkspace, refreshWorkspaces } =
     useWorkspace();
   const slots = useWorkspaceSlots(enabled);
-  const [stale, setStale] = useState(false);
+  const baseId = useId();
+  const tableHeading = useRef<HTMLHeadingElement>(null);
+  const selectionHeading = useRef<HTMLHeadingElement>(null);
+  /** The control that opened the dialog, focused again when it closes. */
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const [stale, setStale] = useState<"none" | "pending" | "refreshed">("none");
+  const [dialogSeq, setDialogSeq] = useState(0);
   const [exporting, setExporting] = useState<SlotWorkspace | null>(null);
   const [deleting, setDeleting] = useState<SlotWorkspace | null>(null);
   const [resuming, setResuming] = useState<SlotWorkspace | null>(null);
   const [openingPlanFor, setOpeningPlanFor] = useState<string | null>(null);
+  const [savedTick, setSavedTick] = useState(0);
+
+  // After a save the selection control is rebuilt from the new answer: put
+  // focus on its section heading (the table's when the section is gone).
+  useEffect(() => {
+    if (savedTick === 0) return;
+    (selectionHeading.current ?? tableHeading.current)?.focus();
+  }, [savedTick]);
 
   const header = (
     <>
@@ -80,87 +129,79 @@ export default function WorkspaceManagementPage() {
       <PageHeader title={t("title")} description={t("description")} />
     </>
   );
+  const page = (body: ReactNode) => (
+    <PageContainer>
+      {header}
+      {body}
+    </PageContainer>
+  );
 
-  if (info === null) {
-    return (
-      <PageContainer>
-        {header}
-        <TableLoadingState rows={3} />
-      </PageContainer>
-    );
-  }
+  if (info === null) return page(<TableLoadingState rows={3} />);
   if (isSystemInfoUnavailable(info)) {
-    return (
-      <PageContainer>
-        {header}
-        <Alert>
-          <AlertDescription>
-            {access("lookupFailed")}{" "}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => window.location.reload()}
-            >
-              {access("retry")}
-            </Button>
-          </AlertDescription>
-        </Alert>
-      </PageContainer>
+    return page(
+      <Alert>
+        <AlertDescription>
+          {access("lookupFailed")}{" "}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.location.reload()}
+          >
+            {access("retry")}
+          </Button>
+        </AlertDescription>
+      </Alert>,
     );
   }
-  if (!enabled) {
-    return (
-      <PageContainer>
-        {header}
-        <Alert>
-          <AlertDescription>{t("unavailable")}</AlertDescription>
-        </Alert>
-      </PageContainer>
+  if (!enabled || slots.unavailable) {
+    return page(
+      <Alert>
+        <AlertDescription>{t("unavailable")}</AlertDescription>
+      </Alert>,
     );
   }
 
   const data = slots.data;
-  if (slots.loading && data === null) {
-    return (
-      <PageContainer>
-        {header}
-        <TableLoadingState rows={3} />
-      </PageContainer>
-    );
-  }
-  if (data === null) {
-    return (
-      <PageContainer>
-        {header}
-        <ErrorBanner error={t("loadFailed")} />
-      </PageContainer>
-    );
-  }
+  if (slots.loading && data === null) return page(<TableLoadingState rows={3} />);
+  if (data === null) return page(<ErrorBanner error={t("loadFailed")} />);
   if (data.workspaces.length === 0) {
-    return (
-      <PageContainer>
-        {header}
-        <EmptyState
-          icon={Building2}
-          title={t("empty.title")}
-          description={t("empty.description")}
-          actionLabel={t("empty.action")}
-          onAction={() => router.push("/workspace/settings?create=true")}
-        />
-      </PageContainer>
+    return page(
+      <EmptyState
+        icon={Building2}
+        title={t("empty.title")}
+        description={t("empty.description")}
+        actionLabel={t("empty.action")}
+        onAction={() => router.push("/workspace/settings?create=true")}
+      />,
     );
   }
 
   // The active set changed: the switcher and the guard read the workspace
-  // list, so it is reloaded too.
+  // list, so it is reloaded too, quietly (the page stays mounted).
   const applied = (next: WorkspaceSlots) => {
-    setStale(false);
+    setStale("none");
     slots.replace(next);
-    void refreshWorkspaces();
+    void refreshWorkspaces({ quiet: true });
   };
   const onStale = () => {
-    setStale(true);
-    void slots.reload({ background: true });
+    setStale("pending");
+    void slots.reload({ background: true }).then((fresh) => {
+      if (fresh) setStale("refreshed");
+    });
+  };
+
+  const openDialog = (open: (w: SlotWorkspace) => void, w: SlotWorkspace) => {
+    returnFocus.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setDialogSeq((n) => n + 1);
+    open(w);
+  };
+  const restoreFocus = (event: Event) => {
+    event.preventDefault();
+    const opener = returnFocus.current;
+    returnFocus.current = null;
+    if (opener?.isConnected) opener.focus();
+    else tableHeading.current?.focus();
   };
 
   const openBilling = async (workspaceId: string) => {
@@ -210,14 +251,19 @@ export default function WorkspaceManagementPage() {
   const showCancellation = ifEnd !== null && ifEnd.suspended.length > 0;
   const names = new Map(data.workspaces.map((w) => [w.id, w.name]));
   const contracted = data.workspaces.filter((w) => w.under_billing_contract);
+  const onSaved = (next: WorkspaceSlots) => {
+    applied(next);
+    setSavedTick((n) => n + 1);
+  };
 
-  return (
-    <PageContainer>
-      {header}
-
-      {stale && (
+  return page(
+    <>
+      {stale !== "none" && (
         <Alert variant="warning" className="mb-4">
-          <AlertDescription>{t("stale")}</AlertDescription>
+          <AlertDescription>
+            <p>{t("stale")}</p>
+            {stale === "refreshed" && <p>{t("staleRefreshed")}</p>}
+          </AlertDescription>
         </Alert>
       )}
 
@@ -246,42 +292,52 @@ export default function WorkspaceManagementPage() {
         </p>
       </section>
 
-      <Section title={t("table.caption")}>
+      <PageSection
+        headingId={`${baseId}-table`}
+        headingRef={tableHeading}
+        title={t("table.caption")}
+      >
         <OwnedWorkspacesTable
           workspaces={data.workspaces}
+          labelledBy={`${baseId}-table`}
           planPage={planPage}
           openingPlanFor={openingPlanFor}
           onChangePlan={(w) => void changePlan(w)}
-          onExport={setExporting}
-          onDelete={setDeleting}
-          onResume={setResuming}
+          onExport={(w) => openDialog(setExporting, w)}
+          onDelete={(w) => openDialog(setDeleting, w)}
+          onResume={(w) => openDialog(setResuming, w)}
         />
         <span role="status" aria-live="polite" className="sr-only">
           {openingPlanFor !== null ? t("planOpening") : ""}
         </span>
-      </Section>
+      </PageSection>
 
       {anySuspended && (
-        <Section
+        <PageSection
+          headingId={`${baseId}-current`}
+          headingRef={selectionHeading}
           title={t("current.title")}
           description={t("current.description", { max: data.active_slots })}
         >
           <KeepSelection
             key={`current-${data.version}`}
             scenario="current"
+            legend={t("keep.question")}
             workspaces={data.workspaces}
             initial={activeInSavedOrder(data)}
             max={data.active_slots}
             lockedIds={contracted.map((w) => w.id)}
             version={data.version}
-            onSaved={applied}
+            onSaved={onSaved}
             onStale={onStale}
           />
-        </Section>
+        </PageSection>
       )}
 
       {showCancellation && ifEnd && (
-        <Section
+        <PageSection
+          headingId={`${baseId}-end`}
+          headingRef={anySuspended ? undefined : selectionHeading}
           title={t("cancellation.title")}
           description={t("cancellation.description", { cap: ifEnd.cap })}
         >
@@ -308,48 +364,63 @@ export default function WorkspaceManagementPage() {
                 ))}
               </ul>
             </div>
-            <p className="text-sm text-muted-foreground">
-              {t("cancellation.optional")}
-            </p>
-            <KeepSelection
-              key={`end-${data.version}`}
-              scenario="paid_plans_end"
-              workspaces={data.workspaces}
-              initial={ifEnd.active}
-              max={ifEnd.cap}
-              version={data.version}
-              onSaved={applied}
-              onStale={onStale}
-            />
+            {/* While anything is suspended a save applies at once, so the
+                only selection control is the one for the current allowance. */}
+            {!anySuspended && (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  {t("cancellation.optional")}
+                </p>
+                <KeepSelection
+                  key={`end-${data.version}`}
+                  scenario="paid_plans_end"
+                  legend={t("keep.questionAfterEnd")}
+                  workspaces={data.workspaces}
+                  initial={ifEnd.active}
+                  max={ifEnd.cap}
+                  version={data.version}
+                  onSaved={onSaved}
+                  onStale={onStale}
+                />
+              </>
+            )}
           </div>
-        </Section>
+        </PageSection>
       )}
 
       <ExportWorkspaceDialog
-        key={`export-${exporting?.id ?? ""}`}
+        key={`export-${dialogSeq}`}
         workspace={exporting}
         onClose={() => setExporting(null)}
+        onCloseAutoFocus={restoreFocus}
       />
       <DeleteWorkspaceDialog
+        key={`delete-${dialogSeq}`}
         workspace={deleting}
         onClose={() => setDeleting(null)}
+        onCloseAutoFocus={restoreFocus}
         onDeleted={() => {
+          // The row goes away: focus falls back to the table heading.
+          returnFocus.current = null;
           setDeleting(null);
           void slots.reload({ background: true });
-          void refreshWorkspaces();
+          void refreshWorkspaces({ quiet: true });
         }}
       />
       <ResumeWorkspaceDialog
-        key={`resume-${resuming?.id ?? ""}`}
+        key={`resume-${dialogSeq}`}
         workspace={resuming}
         slots={data}
         onClose={() => setResuming(null)}
+        onCloseAutoFocus={restoreFocus}
         onResumed={(next) => {
+          // The row's actions go away: focus falls back to the table heading.
+          returnFocus.current = null;
           setResuming(null);
           applied(next);
         }}
         onStale={onStale}
       />
-    </PageContainer>
+    </>,
   );
 }

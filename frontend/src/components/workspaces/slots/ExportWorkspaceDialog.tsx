@@ -30,10 +30,12 @@ import {
 export function ExportWorkspaceDialog({
   workspace,
   onClose,
+  onCloseAutoFocus,
 }: {
   /** The workspace to export; null = closed. */
   workspace: SlotWorkspace | null;
   onClose: () => void;
+  onCloseAutoFocus?: (event: Event) => void;
 }) {
   const t = useTranslations("workspaceSlots");
   const [contexts, setContexts] = useState<SlotWorkspaceContext[] | null>(null);
@@ -57,7 +59,7 @@ export function ExportWorkspaceDialog({
 
   return (
     <Dialog open={workspace !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>
             {t("export.title", { name: workspace?.name ?? "" })}
@@ -90,7 +92,11 @@ export function ExportWorkspaceDialog({
                     </Badge>
                   )}
                 </span>
-                <ExportContextButton contextId={c.id} contextName={c.name} />
+                <ExportContextButton
+                  contextId={c.id}
+                  contextName={c.name}
+                  ariaLabel={t("actions.exportNamed", { name: c.name })}
+                />
               </li>
             ))}
           </ul>

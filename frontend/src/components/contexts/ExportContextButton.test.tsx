@@ -59,3 +59,13 @@ describe("ExportContextButton", () => {
     );
   });
 });
+
+describe("ExportContextButton accessible name (#2919)", () => {
+  it("takes a name that tells several buttons in one list apart", () => {
+    render(
+      <ExportContextButton contextId="c1" contextName="notes" ariaLabel="Export notes" />,
+    );
+    expect(screen.getByRole("button", { name: "Export notes" })).toBeInTheDocument();
+  });
+});
+

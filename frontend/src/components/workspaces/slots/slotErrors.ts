@@ -8,7 +8,7 @@ import type { WorkspaceSlotsFullDetails } from "@/lib/api/workspaceSlots";
 /** The selection was saved against an older `version`. */
 export const SLOT_STALE = "SLOT-003";
 /** No active slot can be freed for a suspended workspace. */
-export const SLOT_FULL = "SLOT-002";
+const SLOT_FULL = "SLOT-002";
 /** A running paid subscription blocks deleting the workspace (#1940). */
 export const BILLING_CONTRACT_ACTIVE = "BILLING-005";
 
@@ -22,6 +22,11 @@ export function slotsFullDetails(
 ): WorkspaceSlotsFullDetails | null {
   if (errorCode(error) !== SLOT_FULL) return null;
   return ((error as ApiError).details ?? {}) as WorkspaceSlotsFullDetails;
+}
+
+/** A 404 from the account API: the deployment has the feature off. */
+export function isNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
 }
 
 export function errorMessage(error: unknown, fallback: string): string {

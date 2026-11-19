@@ -10,7 +10,6 @@ import { Download, Play, Trash2 } from "lucide-react";
 import {
   Table,
   TableBody,
-  TableCaption,
   TableCell,
   TableHead,
   TableHeader,
@@ -25,8 +24,10 @@ import { useLocale } from "@/i18n";
 import { formatDate } from "@/lib/utils/datetime";
 import type { SlotWorkspace } from "@/lib/api/workspaceSlots";
 
-export interface OwnedWorkspacesTableProps {
+interface OwnedWorkspacesTableProps {
   workspaces: SlotWorkspace[];
+  /** The id of the heading that names the table. */
+  labelledBy: string;
   /** Plan changes are served on this deployment (`features.plan_page`). */
   planPage: boolean;
   /** The workspace whose plan page is opening, if any. */
@@ -39,6 +40,7 @@ export interface OwnedWorkspacesTableProps {
 
 export function OwnedWorkspacesTable({
   workspaces,
+  labelledBy,
   planPage,
   openingPlanFor,
   onChangePlan,
@@ -52,8 +54,7 @@ export function OwnedWorkspacesTable({
   const timezone = user?.timezone || "UTC";
 
   return (
-    <Table>
-      <TableCaption className="sr-only">{t("table.caption")}</TableCaption>
+    <Table aria-labelledby={labelledBy}>
       <TableHeader>
         <TableRow>
           <TableHead>{t("table.name")}</TableHead>
@@ -86,6 +87,7 @@ export function OwnedWorkspacesTable({
                       size="sm"
                       className="h-auto p-0"
                       onClick={() => onChangePlan(w)}
+                      aria-label={t("actions.changePlanNamed", { name: w.name })}
                       disabled={openingPlanFor !== null}
                       aria-busy={opening}
                     >
@@ -125,7 +127,12 @@ export function OwnedWorkspacesTable({
               <TableCell className="align-top">
                 {suspended ? (
                   <div className="flex flex-wrap gap-2">
-                    <Button type="button" size="sm" onClick={() => onResume(w)}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => onResume(w)}
+                      aria-label={t("actions.resumeNamed", { name: w.name })}
+                    >
                       <Play className="mr-1 h-4 w-4" aria-hidden="true" />
                       {t("actions.resume")}
                     </Button>
@@ -134,6 +141,7 @@ export function OwnedWorkspacesTable({
                       size="sm"
                       variant="outline"
                       onClick={() => onExport(w)}
+                      aria-label={t("actions.exportNamed", { name: w.name })}
                     >
                       <Download className="mr-1 h-4 w-4" aria-hidden="true" />
                       {t("actions.export")}
@@ -144,6 +152,7 @@ export function OwnedWorkspacesTable({
                       variant="outline"
                       className="text-red-700 dark:text-red-300"
                       onClick={() => onDelete(w)}
+                      aria-label={t("actions.deleteNamed", { name: w.name })}
                     >
                       <Trash2 className="mr-1 h-4 w-4" aria-hidden="true" />
                       {t("actions.delete")}
