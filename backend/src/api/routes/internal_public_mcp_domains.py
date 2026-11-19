@@ -28,6 +28,14 @@ database pool than that. Plan pause and capacity lock do not withdraw the
 permission; they answer 503 on the alias at request time. No log line carries
 the name (``utils.logger`` also removes the query of this path from every
 rendered line).
+
+``PUT /internal/public-mcp-domains/tls-observation`` (#2941) is the other route
+here: the certificate operator's report about one claim, with its own bearer
+credential (``MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN``). It is checked in a fixed
+order (not configured, credential, size, body, binding, then freshness and
+order) and stored in ``public_mcp_domain_tls_reports`` by
+``services.domain_tls_observations``; it never authorizes serving and never
+writes the domain row.
 """
 
 from __future__ import annotations
