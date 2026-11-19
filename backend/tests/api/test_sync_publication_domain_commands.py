@@ -7,6 +7,7 @@ API passes no guard to the lifecycle.
 """
 
 import ast
+import json
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -224,6 +225,23 @@ async def test_command_bodies_are_strict(app, session, action, query, body, stat
     response = await _post(app, _path(action) + query, body)
     expected = {"error": "request_too_large" if status == 413 else "invalid_request"}
     assert (response.status_code, response.json()) == (status, expected)
+    assert response.headers["cache-control"] == "no-store"
+    assert session.statements == []
+    session.scalar.assert_not_called()
+    session.get.assert_not_called()
+    session.add.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+async def test_a_body_that_is_not_json_is_refused(app, session, action):
+    """The same JSON text with another content type: 400 before the first statement."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as c:
+        response = await c.post(
+            _path(action),
+            content=json.dumps(_body(action)),
+            headers={"content-type": "text/plain"},
+        )
+    assert (response.status_code, response.json()) == (400, {"error": "invalid_request"})
     assert response.headers["cache-control"] == "no-store"
     assert session.statements == []
     session.scalar.assert_not_called()

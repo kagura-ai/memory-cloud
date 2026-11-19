@@ -782,24 +782,41 @@ async def test_verify_and_remove_need_the_named_row_in_the_named_state(env):
             state="pending",
             verification_token="1" * 64,
         )
-        foreign = PublicMcpDomain(
-            hostname=name("foreign"),
-            workspace_id=store.other,
-            endpoint_id=uuid4(),
-            state="pending",
-            verification_token="2" * 64,
-        )
-        db.add_all([sibling, foreign])
+        db.add(sibling)
         await db.commit()
-        named = [(uuid4(), "pending"), (domain_id, "active"), (sibling.id, "pending")]
-        named.append((foreign.id, "pending"))
+    named = [(uuid4(), "pending"), (domain_id, "active"), (sibling.id, "pending")]
     for row_id, state in named:
         for action in ("verify", "remove"):
             response = await command(store, target, action, row_body(target, row_id, state))
             assert (response.status_code, response.json()) == (409, STALE), (row_id, action)
-    for row_id in (domain_id, sibling.id, foreign.id):
+    for row_id in (domain_id, sibling.id):
         row = await row_of(store, row_id)
         assert row is not None and (row.state, row.check_seq) == ("pending", 0)
+
+    # A row of another workspace on this very publication (its endpoint id):
+    # only the workspace condition of the row read can refuse it. The
+    # publication has no open domain of its own first (one per endpoint).
+    removed = await command(store, target, "remove", row_body(target, domain_id, "pending"))
+    assert removed.status_code == 200, removed.text
+    async with store.factory() as db:
+        foreign = PublicMcpDomain(
+            hostname=name("foreign"),
+            workspace_id=store.other,
+            endpoint_id=UUID(target["endpoint_id"]),
+            state="pending",
+            verification_token="2" * 64,
+        )
+        db.add(foreign)
+        await db.commit()
+    for action in ("verify", "remove"):
+        response = await command(store, target, action, row_body(target, foreign.id, "pending"))
+        assert (response.status_code, response.json()) == (409, STALE), action
+    row = await row_of(store, foreign.id)
+    assert row is not None and (row.workspace_id, row.state, row.check_seq) == (
+        store.other,
+        "pending",
+        0,
+    )
     assert env.counts == {} and env.dns.calls == []
 
 
@@ -1207,6 +1224,186 @@ async def test_a_busy_workspace_at_activation_counts_nothing(env):
     assert activation_count(env) == 0 and verify_count(env) == 1
     row = await row_of(store, domain_id)
     assert row is not None and (row.state, row.check_seq) == ("pending", 0)
+
+
+# ----------------------------------------------------------------------------
+# The lifecycle's own answers through the commands
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("authority", ["operator", "entitlement"])
+async def test_a_counter_failure_inside_the_activation_transaction_writes_nothing(env, authority):
+    """The activation is counted inside the guarded write: a counter failure rolls it back (503)."""
+    store = env.store
+    enable(env.monkeypatch, authority)
+    target = await installed(store)
+    if authority == "entitlement":
+        await rights(store, 2, domains=True)
+    hostname, domain_id = await claimed(env, target)
+    env.dns.publish(hostname, await token_of(store, domain_id))
+    counting = lifecycle.incrby_counter
+
+    async def failing(key: str, amount: int, ttl: int | None = None) -> int:
+        if key.startswith("public_mcp_domain_activate:"):
+            raise ConnectionError("counter store unavailable")
+        return await counting(key, amount, ttl=ttl)
+
+    env.monkeypatch.setattr(lifecycle, "incrby_counter", failing)
+    body = row_body(target, domain_id, "pending")
+    response = await command(store, target, "verify", body)
+    assert (response.status_code, response.json()) == (
+        503,
+        {"error": "public_mcp_domain_verification_unavailable"},
+    )
+    row = await row_of(store, domain_id)
+    assert row is not None and (row.state, row.check_seq) == ("pending", 0)
+    assert [action for action, _, _ in await audits(store, domain_id)] == [
+        "public_mcp_domain.attached"
+    ]
+    # The next command, a new request, is answered normally.
+    env.monkeypatch.setattr(lifecycle, "incrby_counter", counting)
+    again = await command(store, target, "verify", body)
+    assert again.status_code == 200, again.text
+    assert again.json()["domain"] == {"domain_id": domain_id, "state": "active"}
+
+
+@pytest.mark.parametrize("action", ["claim", "verify"])
+async def test_an_owner_lost_before_the_lifecycle_reads_it_answers_the_uniform_404(env, action):
+    """A transfer right after the pre-admission meets the lifecycle's own owner read first.
+
+    Its refusal (owner required) is answered as every caller who is not admitted
+    is: one 404 body, nothing counted, looked up or written.
+    """
+    store = env.store
+    target = await installed(store)
+    domain_id = None
+    if action == "verify":
+        hostname, domain_id = await claimed(env, target)
+        env.dns.publish(hostname, await token_of(store, domain_id))
+    before = [(str(row.id), row.state, row.check_seq) for row in await rows_of(store)]
+
+    async def transfer() -> None:
+        await fixtures.transfer(store, "next")
+
+    once_after(env, commands, "_precheck", transfer)
+    body = (
+        claim_body(target, name("owner-lost"))
+        if action == "claim"
+        else row_body(target, domain_id, "pending")
+    )
+    response = await command(store, target, action, body)
+    assert (response.status_code, response.content) == (404, NOT_FOUND)
+    assert [(str(row.id), row.state, row.check_seq) for row in await rows_of(store)] == before
+    assert env.counts == {} and env.dns.calls == []
+
+
+async def test_a_reserved_or_malformed_name_is_refused_after_the_admission(env):
+    store = env.store
+    target = await installed(store)
+    for hostname in ("edge.example.com", "localhost", "has space.example.org"):
+        body = claim_body(target, hostname)
+        refused = await command(store, target, "claim", body)
+        assert (refused.status_code, refused.json()) == (
+            422,
+            {"error": "public_mcp_domain_hostname_not_allowed"},
+        ), hostname
+        outsider = await command(store, target, "claim", body, role="member")
+        assert (outsider.status_code, outsider.content) == (404, NOT_FOUND), hostname
+    assert await rows_of(store) == []
+
+
+async def test_verify_answers_held_and_cooldown_only_after_the_own_proof(env):
+    store = env.store
+    target = await installed(store)
+    hostname = name("taken")
+    holder = uuid4()
+    now = utcnow()
+    async with store.factory() as db:
+        db.add(
+            PublicMcpDomain(
+                id=holder,
+                hostname=hostname,
+                workspace_id=store.other,
+                endpoint_id=uuid4(),
+                state="active",
+                verification_token="3" * 64,
+                verified_at=now,
+                proof_ok_at=now,
+                serve_until=now + timedelta(hours=1),
+            )
+        )
+        await db.commit()
+    claim = await command(store, target, "claim", claim_body(target, hostname))
+    assert claim.status_code == 200, claim.text
+    domain_id = claim.json()["domain"]["domain_id"]
+    body = row_body(target, domain_id, "pending")
+    silent = await command(store, target, "verify", body)  # no own proof: nothing about the holder
+    assert silent.json()["domain"] == {"domain_id": domain_id, "state": "pending"}
+    env.dns.publish(hostname, await token_of(store, domain_id))
+    held = await command(store, target, "verify", body)
+    assert (held.status_code, held.json()) == (409, {"error": "public_mcp_domain_held"})
+
+    async with store.factory() as db:
+        await db.execute(
+            text(
+                "UPDATE public_mcp_domains SET state = 'released', serve_until = NULL, "
+                "released_at = timezone('UTC', statement_timestamp()), "
+                "cooldown_until = timezone('UTC', statement_timestamp()) + interval '1 day' "
+                "WHERE id = :id"
+            ),
+            {"id": holder},
+        )
+        await db.commit()
+    cooling = await command(store, target, "verify", body)
+    assert (cooling.status_code, cooling.json()) == (
+        409,
+        {"error": "public_mcp_domain_in_cooldown"},
+    )
+    row = await row_of(store, domain_id)
+    assert row is not None and row.state == "pending"
+
+
+async def test_a_domain_changed_during_the_lookup_answers_changed(env):
+    """The fence (I2) through the commands: a pending record and a held check, both refused."""
+    store = env.store
+    target = await installed(store)
+    _hostname, pending = await claimed(env, target, "fenced")
+
+    def bump(domain_id: str) -> Callable[[], Awaitable[None]]:
+        async def hook() -> None:
+            async with store.factory() as db:
+                await db.execute(
+                    text("UPDATE public_mcp_domains SET check_seq = check_seq + 1 WHERE id = :id"),
+                    {"id": domain_id},
+                )
+                await db.commit()
+
+        return hook
+
+    env.dns.during = bump(pending)
+    response = await command(store, target, "verify", row_body(target, pending, "pending"))
+    assert (response.status_code, response.json()) == (409, {"error": "public_mcp_domain_changed"})
+    row = await row_of(store, pending)
+    assert row is not None and (row.state, row.check_seq, row.last_checked_at) == (
+        "pending",
+        1,
+        None,
+    )
+    removed = await command(store, target, "remove", row_body(target, pending, "pending"))
+    assert removed.status_code == 200, removed.text
+
+    _hostname, active = await activated(env, target, "fenced-held")
+    before = await row_of(store, active)
+    assert before is not None
+    env.dns.during = bump(active)
+    response = await command(store, target, "verify", row_body(target, active, "active"))
+    assert (response.status_code, response.json()) == (409, {"error": "public_mcp_domain_changed"})
+    row = await row_of(store, active)
+    assert row is not None and (row.state, row.check_seq, row.last_checked_at) == (
+        "active",
+        before.check_seq + 1,
+        before.last_checked_at,
+    )
 
 
 # ----------------------------------------------------------------------------
