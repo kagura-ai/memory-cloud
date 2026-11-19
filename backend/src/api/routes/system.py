@@ -221,6 +221,10 @@ async def system_info():
             # offers per-channel destination contexts; when false a PATCH that
             # creates or changes a route is refused (stored routes still apply).
             "connector_channel_routing": settings.connector_channel_routing_enabled,
+            # Issue #2918: true only with WORKSPACE_SLOT_SUSPENSION=enforce. The web
+            # UI then shows the workspace management page and its menu item; the
+            # /me/workspace-slots routes 404 otherwise.
+            "workspace_slots": settings.workspace_slot_suspension == "enforce",
         },
     }
 
