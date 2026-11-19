@@ -17,7 +17,8 @@ from uuid import UUID
 
 import pytest
 import structlog
-from sqlalchemy import delete, select
+from fastapi import HTTPException
+from sqlalchemy import delete, select, text
 
 from api.routes.admin import update_workspace_slot_bonus
 from api.routes.admin_plans import AdminUpdatePlanRequest, update_workspace_plan
@@ -438,7 +439,11 @@ class TestAdminPlan:
         with slot_mode("off"), StatementRecorder(async_engine) as recorder:
             await _admin_plan(slot_world, pro, "free")
         assert recorder.touching_slot_tables() == []
-        locking = [s for s in recorder.statements if s.startswith("SELECT") and "FOR UPDATE" in s]
+        # FOR NO KEY UPDATE (review C2): serializes with the billing writers'
+        # FOR UPDATE without blocking foreign-key inserts of child rows.
+        locking = [
+            s for s in recorder.statements if s.startswith("SELECT") and "FOR NO KEY UPDATE" in s
+        ]
         assert any("FROM workspaces" in s for s in locking), recorder.statements
         assert await slot_world.plan_of(pro) == ("free", "admin_grant")
 
@@ -492,3 +497,205 @@ class TestSlotBonus:
             await release()
             await asyncio.wait_for(task, 10)
         assert len(await slot_world.rows(owner)) == 1
+
+
+class TestChangedWorkspaceHoldingARow:
+    """Review A1: a suspended workspace that gets a paid plan with no extra
+    slot swaps out an active one; it is not counted as active already."""
+
+    async def test_a_suspended_free_workspace_bought_as_basic_swaps_and_its_end_keeps_one(
+        self, slot_world: SlotWorld
+    ) -> None:
+        owner = await slot_world.user("swap")
+        kept = await slot_world.workspace(owner, current=True)
+        bought = await slot_world.workspace(owner)
+        await slot_world.suspend_row(bought, owner)
+        with slot_mode("enforce"):
+            await _deliver(slot_world, bought, 1, "basic")
+            assert await slot_world.rows(owner) == {kept: owner}
+            await _deliver(slot_world, bought, 2, "free")
+        assert await slot_world.rows(owner) == {kept: owner}
+        assert await slot_world.plan_of(bought) == ("free", "external_billing")
+
+    @pytest.mark.parametrize("first", ["cancel", "buy"])
+    async def test_a_cancellation_and_a_basic_purchase_end_alike_in_either_order(
+        self, slot_world: SlotWorld, first: str
+    ) -> None:
+        owner = await slot_world.user("mixed")
+        pro = await slot_world.workspace(owner, current=True)
+        free_a = await slot_world.workspace(owner)
+        free_b = await slot_world.workspace(owner)
+        with slot_mode("enforce"):
+            await _deliver(slot_world, pro, 1, "pro")
+            events = [(pro, 2, "free"), (free_a, 1, "basic")]
+            for wid, revision, plan in events if first == "cancel" else reversed(events):
+                await _deliver(slot_world, wid, revision, plan)
+        assert set(await slot_world.rows(owner)) == {pro, free_b}
+
+
+def _failing_inside_the_savepoint(monkeypatch) -> None:
+    """Make the reconcile run a failing SQL statement (a database error, not a
+    Python one): without its savepoint the caller's transaction would be
+    aborted and could not commit."""
+    real = slots._read_owner
+
+    async def failing(db, owner_user_id):
+        state = await real(db, owner_user_id)
+        await db.execute(text("SELECT 1 / 0"))
+        return state
+
+    monkeypatch.setattr(slots, "_read_owner", failing)
+
+
+class TestSavepointsHoldADatabaseError:
+    """Review D: the savepoint branches with an error raised by the database."""
+
+    async def test_a_non_decreasing_snapshot_commits_after_a_database_error(
+        self, slot_world: SlotWorld, monkeypatch
+    ) -> None:
+        owner, maxed, free_a, free_b = await _owner_with_max(slot_world)
+        with slot_mode("enforce"):
+            await _deliver(slot_world, maxed, 2, "free")
+        _failing_inside_the_savepoint(monkeypatch)
+        with slot_mode("enforce"), structlog.testing.capture_logs() as logs:
+            async with slot_world.maker() as s:
+                await apply_integration_entitlements(s, free_b, _snapshot(1, "promax"))
+                assert await s.scalar(text("SELECT 1")) == 1  # still usable
+                await s.commit()
+        assert await slot_world.plan_of(free_b) == ("promax", "external_billing")
+        assert [e["reason"] for e in logs if e["event"] == "workspace_slots_deferred"] == ["error"]
+
+    async def test_shadow_commits_after_a_database_error(
+        self, slot_world: SlotWorld, monkeypatch
+    ) -> None:
+        owner, maxed, *_ = await _owner_with_max(slot_world)
+        _failing_inside_the_savepoint(monkeypatch)
+        with slot_mode("shadow"), structlog.testing.capture_logs() as logs:
+            async with slot_world.maker() as s:
+                await apply_integration_entitlements(s, maxed, _snapshot(2, "free"))
+                assert await s.scalar(text("SELECT 1")) == 1
+                await s.commit()
+        assert await slot_world.plan_of(maxed) == ("free", "external_billing")
+        assert [e["event"] for e in logs if e["event"].startswith("workspace_slots")] == [
+            "workspace_slots_shadow_failed"
+        ]
+
+    async def test_shadow_does_not_wait_on_a_locked_row(
+        self, slot_world: SlotWorld, async_engine
+    ) -> None:
+        """Review C7: a shadow delete that meets a locked row gives up at once."""
+        owner = await slot_world.user("shadow-locked", bonus=1)
+        await slot_world.workspace(owner, current=True)
+        waiting = await slot_world.workspace(owner)
+        await slot_world.suspend_row(waiting, owner)
+        holder = slot_world.maker()
+        await holder.execute(
+            text("SELECT 1 FROM workspace_slot_suspensions WHERE workspace_id = :w FOR UPDATE"),
+            {"w": waiting},
+        )
+        try:
+            with slot_mode("shadow"), structlog.testing.capture_logs() as logs:
+                async with slot_world.maker() as s:
+                    started = asyncio.get_running_loop().time()
+                    assert await slots.owner_slot_lock(s, owner, wait=False, tries=1)
+                    await slots.reconcile_workspace_slots(
+                        s, owner, cause="sweep", allow_suspend=False
+                    )
+                    elapsed = asyncio.get_running_loop().time() - started
+                    assert await s.scalar(text("SELECT current_setting('lock_timeout')")) == "0"
+                    await s.commit()
+        finally:
+            await holder.rollback()
+            await holder.close()
+        assert elapsed < 2
+        assert [e["event"] for e in logs] == ["workspace_slots_shadow_failed"]
+        assert await slot_world.rows(owner) == {waiting: owner}
+
+
+class TestLockBeforeTheSyncStop:
+    async def test_the_owner_lock_is_tried_before_the_sync_stop(
+        self, slot_world: SlotWorld, monkeypatch
+    ) -> None:
+        """Review D: only the workspace row is held while the try-lock backs off."""
+        import services.sync_management as sync_management
+
+        owner, maxed, *_ = await _owner_with_max(slot_world)
+        order: list[str] = []
+        real_lock, real_stop = slots.owner_slot_lock, sync_management.stop_ineligible_workspace
+
+        async def lock(*args, **kwargs):
+            order.append("owner_lock")
+            return await real_lock(*args, **kwargs)
+
+        async def stop(*args, **kwargs):
+            order.append("sync_stop")
+            return await real_stop(*args, **kwargs)
+
+        monkeypatch.setattr(slots, "owner_slot_lock", lock)
+        monkeypatch.setattr(sync_management, "stop_ineligible_workspace", stop)
+        with slot_mode("enforce"):
+            await _deliver(slot_world, maxed, 2, "free")
+        assert order == ["owner_lock", "sync_stop"]
+
+
+class TestLegacyAndAdminBranches:
+    """Review D: the busy and error branches of the legacy push and the admin
+    plan route, as the snapshot tests drive them."""
+
+    @pytest.mark.parametrize("route", ["legacy", "admin"])
+    async def test_a_non_decreasing_change_with_a_busy_lock_commits_and_defers(
+        self, slot_world: SlotWorld, route: str
+    ) -> None:
+        owner = await slot_world.user(f"{route}-up")
+        free = await slot_world.workspace(owner, current=True)
+        await slot_world.workspace(owner)
+        release = await slot_world.hold_owner_lock(owner)
+        try:
+            with slot_mode("enforce"), structlog.testing.capture_logs() as logs:
+                if route == "legacy":
+                    await _push(slot_world, free, "basic")
+                else:
+                    await _admin_plan(slot_world, free, "pro")
+        finally:
+            await release()
+        expected = ("basic", "external_billing") if route == "legacy" else ("pro", "admin_grant")
+        assert await slot_world.plan_of(free) == expected
+        assert [e["reason"] for e in logs if e["event"] == "workspace_slots_deferred"] == [
+            "lock_busy"
+        ]
+
+    @pytest.mark.parametrize("route", ["legacy", "admin"])
+    async def test_a_non_decreasing_change_whose_reconcile_fails_commits_and_defers(
+        self, slot_world: SlotWorld, route: str, monkeypatch
+    ) -> None:
+        owner = await slot_world.user(f"{route}-up-error")
+        free = await slot_world.workspace(owner, current=True)
+        _failing_inside_the_savepoint(monkeypatch)
+        with slot_mode("enforce"), structlog.testing.capture_logs() as logs:
+            if route == "legacy":
+                await _push(slot_world, free, "basic")
+            else:
+                await _admin_plan(slot_world, free, "pro")
+        expected = ("basic", "external_billing") if route == "legacy" else ("pro", "admin_grant")
+        assert await slot_world.plan_of(free) == expected
+        assert [e["reason"] for e in logs if e["event"] == "workspace_slots_deferred"] == ["error"]
+
+    @pytest.mark.parametrize("route", ["legacy", "admin"])
+    async def test_a_lowering_change_whose_reconcile_fails_fails_the_request(
+        self, slot_world: SlotWorld, route: str, monkeypatch
+    ) -> None:
+        owner = await slot_world.user(f"{route}-down-error")
+        source = "external_billing" if route == "legacy" else "admin_grant"
+        pro = await slot_world.workspace(owner, plan="pro", source=source, current=True)
+        await slot_world.workspace(owner)
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(slots, "_reconcile", broken)
+        with slot_mode("enforce"), pytest.raises((RuntimeError, HTTPException)):
+            if route == "legacy":
+                await _push(slot_world, pro, "free")
+            else:
+                await _admin_plan(slot_world, pro, "free")
+        assert await slot_world.plan_of(pro) == ("pro", source)

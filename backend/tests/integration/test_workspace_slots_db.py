@@ -289,9 +289,8 @@ class TestReconcile:
                 change=SlotChange(free_b, "free", "admin_grant"),
             )
         assert outcome.drop is False
-        # The upgraded one was already active by the read-time rule (under a
-        # contract); its row goes with the other's.
-        assert outcome.resumed == (maxed,)
+        # The upgraded one still held its row: it counts as resumed too.
+        assert set(outcome.resumed) == {maxed, free_b}
         assert await slot_world.rows(owner) == {}
         state = await slot_world.state(owner)
         assert (state.selection_required_since, state.version) == (None, 2)
@@ -476,3 +475,30 @@ class TestSeedDefaultSuspension:
         with slot_mode("enforce"):
             async with slot_world.maker() as s:
                 assert await owner_selection_required(s, owner) is True
+
+
+class TestRowLocksInOneOrderedStatement:
+    async def test_foreign_and_own_rows_are_locked_together_in_workspace_order(
+        self, slot_world: SlotWorld, async_engine
+    ) -> None:
+        """Review C1: workspaces moved both ways between two owners leave rows
+        that both owners' reconciles delete; each locks all of them in ONE
+        ordered statement, so the two never lock them in opposite orders."""
+        a = await slot_world.user("cross-a")
+        b = await slot_world.user("cross-b")
+        x = await slot_world.workspace(a, current=True)  # was B's, row stamped for B
+        y = await slot_world.workspace(b, current=True)  # was A's, row stamped for A
+        await slot_world.suspend_row(x, b)
+        await slot_world.suspend_row(y, a)
+        with slot_mode("enforce"), StatementRecorder(async_engine) as recorder:
+            outcome = await _reconcile(slot_world, a, cause="sweep", allow_suspend=False)
+        locking = [
+            s
+            for s in recorder.statements
+            if "FROM workspace_slot_suspensions" in s and "FOR UPDATE" in s
+        ]
+        assert len(locking) == 1, recorder.statements
+        assert "ORDER BY workspace_slot_suspensions.workspace_id" in locking[0]
+        assert outcome.pruned == 2
+        assert await slot_world.row_of(x) is None
+        assert await slot_world.row_of(y) is None

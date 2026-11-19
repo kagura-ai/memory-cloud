@@ -288,3 +288,55 @@ class TestSelectionErrors:
 async def _overview_off(world: SlotWorld, owner: str):
     async with world.maker() as s:
         return await get_slot_overview(s, owner)
+
+
+class TestSelectionVersionAndEmptyList:
+    async def test_saving_the_same_selection_again_keeps_the_version(
+        self, slot_world: SlotWorld
+    ) -> None:
+        """Review A3: a retried or repeated save is not a conflict."""
+        owner, personal, research, side = await _issue_owner(slot_world)
+        with slot_mode("enforce"):
+            first = await _save(slot_world, owner, [side], 0)
+            again = await _save(slot_world, owner, [side], first.version)
+            retry = await _save(slot_world, owner, [side], first.version)
+        assert first.version == 1
+        assert again.version == retry.version == first.version
+        assert retry.selection.saved_at == first.selection.saved_at
+
+    async def test_an_identical_save_still_clears_the_prompt(self, slot_world: SlotWorld) -> None:
+        owner, personal, research, side = await _issue_owner(slot_world)
+        await slot_world.set_plan(research, "free", "external_billing")
+        with slot_mode("enforce"):
+            await _drop(slot_world, owner, research, "promax", "external_billing")
+            before = await _overview(slot_world, owner)
+            assert before.selection_required is True
+            # The stored (default) list is empty; saving it is the owner acting.
+            saved = await _save(slot_world, owner, [], before.version)
+        assert saved.selection_required is False
+        assert saved.version == before.version
+
+    async def test_an_empty_saved_list_does_not_stop_a_later_prompt(
+        self, slot_world: SlotWorld
+    ) -> None:
+        """Review A4: an empty list is the default order, not a choice."""
+        owner, personal, research, side = await _issue_owner(slot_world)
+        with slot_mode("enforce"):
+            await _save(slot_world, owner, [], 0)
+            await slot_world.set_plan(research, "free", "external_billing")
+            await _drop(slot_world, owner, research, "promax", "external_billing")
+            after = await _overview(slot_world, owner)
+        assert after.selection_required is True
+
+    async def test_a_saved_list_of_workspaces_no_longer_owned_does_not_stop_a_prompt(
+        self, slot_world: SlotWorld
+    ) -> None:
+        owner, personal, research, side = await _issue_owner(slot_world)
+        with slot_mode("enforce"):
+            await _save(slot_world, owner, [side], 0)
+            await slot_world.soft_delete(side)
+            await slot_world.workspace(owner)
+            await slot_world.set_plan(research, "free", "external_billing")
+            await _drop(slot_world, owner, research, "promax", "external_billing")
+            after = await _overview(slot_world, owner)
+        assert after.selection_required is True

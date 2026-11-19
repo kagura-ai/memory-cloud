@@ -22,6 +22,7 @@ from services.workspace_slots import (
     change_is_non_decreasing,
     is_allowance_drop,
     plan_active_set,
+    plan_transition,
     slot_allowance,
 )
 
@@ -245,9 +246,12 @@ class TestIssueExample:
         assert set(chosen.suspended) == {IDS[0], IDS[2]}
 
         # Later they upgrade a suspended Free workspace to Max: the allowance
-        # covers all three, so all three resume; only that one has Max.
+        # covers all three, so all three resume; only that one has Max. Built
+        # as the reader builds it: the upgraded workspace is under a contract,
+        # so the read-time rule counts it active although its row is still
+        # there; the transition treats it as suspended going in.
         upgraded = OwnedWorkspace(
-            IDS[2], "promax", "external_billing", BASE + timedelta(days=2), suspended=True
+            IDS[2], "promax", "external_billing", BASE + timedelta(days=2), suspended=False
         )
         now = [
             OwnedWorkspace(IDS[0], "free", "external_billing", BASE, suspended=True),
@@ -260,8 +264,18 @@ class TestIssueExample:
             previous_entitlement_source="admin_grant",
         )
         assert not is_allowance_drop(now, 0, up)
-        resumed = plan_active_set(now, slot_allowance(now, 0).summary.cap, drop=False)
-        assert set(resumed.active) == {IDS[0], IDS[1], IDS[2]}
+        decision = plan_transition(
+            now,
+            {IDS[0], IDS[2]},
+            0,
+            change=up,
+            allow_suspend=True,
+            keep_ids=(IDS[1],),
+            current_workspace_id=IDS[0],
+        )
+        assert set(decision.plan.active) == {IDS[0], IDS[1], IDS[2]}
+        assert set(decision.resumed) == {IDS[0], IDS[2]}
+        assert decision.suspend == ()
         assert [w.plan_name for w in now] == ["free", "free", "promax"]
 
 

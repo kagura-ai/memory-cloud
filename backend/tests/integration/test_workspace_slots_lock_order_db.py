@@ -112,10 +112,16 @@ async def test_the_waiting_paths_take_the_owner_lock_first(
     _assert_global_order(trace)
     owner_txs = _transactions_with_owner_lock(trace)
     waited = [tx for tx in owner_txs if ("owner_slot", False) in tx]
-    # bonus PATCH, selection PUT, delete (one owner), transfer (two owners)
-    assert len(waited) >= 5
+    # The bonus PATCH and the selection save wait for the lock, first.
+    assert len(waited) == 2
     for tx in waited:
         assert tx[0] == ("owner_slot", False), tx
+    # The selection save then takes the account fence (users KEY SHARE).
+    assert any(tx[:2] == [("owner_slot", False), ("users", False)] for tx in waited), waited
+    # The post-commit reconciles (delete: one owner, transfer: two) and the
+    # sweep only try it, as their first lock.
+    tried_first = [tx for tx in owner_txs if tx[0] == ("owner_slot", True)]
+    assert len(tried_first) >= 3, owner_txs
     # The transfer's recipient check tries the lock under its rows.
     tried = [tx for tx in owner_txs if ("owner_slot", True) in tx and ("ws_live", True) in tx]
     assert tried, owner_txs

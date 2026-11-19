@@ -10,9 +10,11 @@ The sweep resumes and prunes, never suspends.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import structlog
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 
 from cli.workspace_slots import _main as cli_main
 from cli.workspace_slots import _parse as cli_parse
@@ -22,7 +24,11 @@ from services.user_deletion_service import delete_user_rows
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
 from services.workspace_slots import delete_owner_slot_rows, sweep_workspace_slots
-from utils.exceptions import WorkspaceSlotsBusyError, WorkspaceSlotTransferRefusedError
+from utils.exceptions import (
+    NotFoundException,
+    WorkspaceSlotsBusyError,
+    WorkspaceSlotTransferRefusedError,
+)
 
 from ._slot_world import T0, SlotWorld, StatementRecorder, slot_mode
 from .test_erasure_lock_order_db import _external_stores_stubbed
@@ -129,16 +135,69 @@ class TestTransfer:
             await _transfer(slot_world, gift, owner, recipient)
         assert await slot_world.owner_of(gift) == recipient
 
-    async def test_a_contracted_workspace_always_finds_a_slot(self, slot_world: SlotWorld) -> None:
+    async def test_a_contracted_workspace_into_a_full_account_is_refused(
+        self, slot_world: SlotWorld
+    ) -> None:
+        """Review A2: the recipient needs a truly free slot; a contracted
+        workspace would only be active by pushing an active one out."""
         owner = await slot_world.user("giver")
         recipient = await slot_world.user("taker")
         await slot_world.workspace(recipient, current=True)
         paid = await slot_world.workspace(
             owner, plan="basic", source="external_billing", members={recipient: "admin"}
         )
-        with slot_mode("enforce"):
+        with slot_mode("enforce"), pytest.raises(WorkspaceSlotTransferRefusedError):
             await _transfer(slot_world, paid, owner, recipient)
-        assert await slot_world.owner_of(paid) == recipient
+        assert await slot_world.owner_of(paid) == owner
+
+    async def test_an_incoming_higher_tier_makes_room(self, slot_world: SlotWorld) -> None:
+        owner = await slot_world.user("giver")
+        recipient = await slot_world.user("taker")
+        await slot_world.workspace(recipient, current=True)
+        pro = await slot_world.workspace(
+            owner, plan="pro", source="admin_grant", members={recipient: "admin"}
+        )
+        with slot_mode("enforce"):
+            await _transfer(slot_world, pro, owner, recipient)
+        assert await slot_world.owner_of(pro) == recipient
+
+    @pytest.mark.parametrize("variant", ["saved_selection", "billed_basic"])
+    async def test_a_round_trip_through_an_empty_account_gains_nothing(
+        self, slot_world: SlotWorld, variant: str
+    ) -> None:
+        """Review A2 (a) and (b): W1 leaves, W2 resumes, W1 cannot come back."""
+        owner = await slot_world.user("trip")
+        second = await slot_world.user("trip-second")
+        if variant == "billed_basic":
+            w1 = await slot_world.workspace(
+                owner,
+                plan="basic",
+                source="external_billing",
+                current=True,
+                members={second: "admin"},
+            )
+        else:
+            w1 = await slot_world.workspace(owner, current=True, members={second: "admin"})
+        w2 = await slot_world.workspace(owner)
+        await slot_world.suspend_row(w2, owner)
+        if variant == "saved_selection":
+            async with slot_world.maker() as s:
+                await slots._write_state(
+                    s,
+                    owner,
+                    now=T0,
+                    version=1,
+                    selection_required_since=None,
+                    keep_ids=[w1],
+                    selection_saved_at=T0,
+                )
+                await s.commit()
+        with slot_mode("enforce"):
+            await _transfer(slot_world, w1, owner, second)
+            assert await slot_world.rows(owner) == {}  # W2 resumed
+            with pytest.raises(WorkspaceSlotTransferRefusedError):
+                await _transfer(slot_world, w1, second, owner)
+        assert await slot_world.owner_of(w1) == second
 
     async def test_a_busy_recipient_lock_is_a_retryable_409(self, slot_world: SlotWorld) -> None:
         owner = await slot_world.user("giver")
@@ -363,3 +422,81 @@ class TestCli:
         out = capsys.readouterr().out
         assert "WORKSPACE_SLOT_SUSPENSION=enforce" in out
         assert f"owner {owner}: cap 2" in out
+
+
+class TestNoRowsOutliveAnErasedAccount:
+    """Review B: a reconcile racing the erasure of its owner never re-creates
+    the owner's state row; a selection save waits for the erasure and finds
+    the account gone."""
+
+    async def _erasing(self, slot_world: SlotWorld, user: str):
+        """A second session holding what erasure holds: the users row, then
+        the subject's slot rows deleted (not committed yet)."""
+        session = slot_world.maker()
+        await session.execute(select(User.id).where(User.user_id == user).with_for_update())
+        await delete_owner_slot_rows(session, user)
+        return session
+
+    async def test_a_sweep_racing_the_erasure_leaves_no_state_row(
+        self, slot_world: SlotWorld
+    ) -> None:
+        user = await slot_world.user("racing", bonus=1)
+        await slot_world.workspace(user, current=True)
+        waiting = await slot_world.workspace(user)
+        await slot_world.suspend_row(waiting, user)
+        async with slot_world.maker() as s:
+            await slots._write_state(s, user, now=T0, version=3, selection_required_since=T0)
+            await s.commit()
+        erasure = await self._erasing(slot_world, user)
+        try:
+            with slot_mode("enforce"):
+                sweep = asyncio.create_task(_sweep_one(slot_world, user))
+                await asyncio.sleep(0.5)
+                assert not sweep.done()  # waiting on the erasure's row locks
+                await erasure.commit()
+                await asyncio.wait_for(sweep, 10)
+        finally:
+            await erasure.close()
+        assert await slot_world.state(user) is None
+        assert await slot_world.rows(user) == {}
+
+    async def test_a_selection_save_during_the_erasure_finds_the_account_gone(
+        self, slot_world: SlotWorld
+    ) -> None:
+        user = await slot_world.user("racing-put")
+        await slot_world.workspace(user, current=True)
+        async with slot_world.maker() as s:
+            await slots._write_state(s, user, now=T0, version=0, selection_required_since=None)
+            await s.commit()
+        erasure = await self._erasing(slot_world, user)
+        try:
+            with slot_mode("enforce"):
+                put = asyncio.create_task(_save_selection(slot_world, user))
+                await asyncio.sleep(0.5)
+                assert not put.done()
+                await erasure.execute(
+                    text("UPDATE users SET current_workspace_id = NULL WHERE user_id = :u"),
+                    {"u": user},
+                )
+                await erasure.execute(
+                    text("DELETE FROM workspace_members WHERE user_id = :u"), {"u": user}
+                )
+                await erasure.execute(text("DELETE FROM users WHERE user_id = :u"), {"u": user})
+                await erasure.commit()
+                with pytest.raises(NotFoundException):
+                    await asyncio.wait_for(put, 10)
+        finally:
+            await erasure.close()
+        assert await slot_world.state(user) is None
+
+
+async def _sweep_one(world: SlotWorld, owner: str) -> None:
+    async with world.maker() as s:
+        assert await slots.owner_slot_lock(s, owner, wait=True)
+        await slots.reconcile_workspace_slots(s, owner, cause="sweep", allow_suspend=False)
+        await s.commit()
+
+
+async def _save_selection(world: SlotWorld, owner: str):
+    async with world.maker() as s:
+        return await slots.save_selection(s, owner, [], 0)
