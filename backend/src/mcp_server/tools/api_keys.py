@@ -47,6 +47,7 @@ from mcp_server.tools._helpers import (
     _success_response,
     get_mcp_key_workspace_scope,
 )
+from services.workspace_slots import workspace_slots_enforced
 from utils.datetime import to_utc_iso
 from utils.exceptions import FeatureNotAvailableError, WorkspaceSlotSuspendedError
 from utils.public_id import PublicIdPrefix, public_id_pattern
@@ -171,19 +172,23 @@ async def handle_describe_binding(
 
     start_time = time.time()
     async for db in get_db():
-        if context_id is not None:
-            # #2918: a named context goes through the read resolver of every
-            # context read: a context in a slot-suspended workspace gets the
-            # same refusal there. A context the caller cannot read keeps the
-            # uniform binding_not_found of the lookup below.
-            try:
-                await _resolve_context_for_read(db, user_id, context_id)
-            except (_ContextNotFoundError, FeatureNotAvailableError):
-                pass
-            except WorkspaceSlotSuspendedError as exc:
-                await db.rollback()
-                return _tool_exception_response("describe_binding", exc)
         try:
+            if context_id is not None and workspace_slots_enforced():
+                # #2918: a named context goes through the read resolver of every
+                # context read: a context in a slot-suspended workspace gets the
+                # same refusal there. A context the caller cannot read keeps the
+                # uniform binding_not_found of the lookup below. Nothing runs
+                # unless the mode is enforce.
+                try:
+                    await _resolve_context_for_read(db, user_id, context_id)
+                except (_ContextNotFoundError, FeatureNotAvailableError):
+                    pass
+                except WorkspaceSlotSuspendedError as exc:
+                    await db.rollback()
+                    await _log_tool_usage(
+                        db, user_id, "describe_binding", start_time, 403, None, workspace_id
+                    )
+                    return _tool_exception_response("describe_binding", exc)
             conditions = [
                 APIKey.user_id == user_id,
                 APIKey.bound_context_id.is_not(None),
