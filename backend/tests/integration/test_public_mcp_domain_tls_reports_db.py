@@ -369,3 +369,201 @@ async def test_the_maintenance_pass_deletes_expired_reports_only(edge):
         await maintenance.housekeeping(db, maintenance.MaintenanceCounts())
     assert await stored(edge, old.id) is None
     assert await stored(edge, fresh.id) is not None
+
+
+# ----------------------------------------------------------------------------
+# The route: the order of its checks
+# ----------------------------------------------------------------------------
+
+INVALID = {"domain_id": "x"}
+
+
+@pytest.mark.parametrize(
+    "switch",
+    [
+        ("mcp_public_domains_tls_reporter_token", ""),
+        ("mcp_public_domains_enabled", False),
+        ("mcp_public_endpoints_enabled", False),
+    ],
+)
+async def test_a_report_is_404_while_not_configured_even_with_an_invalid_body(edge, switch):
+    edge.monkeypatch.setattr(get_settings(), *switch)
+    with recorded(edge) as seen:
+        for body in (INVALID, report(nowhere())):
+            response = await put(edge, body)
+            assert (response.status_code, response.content) == (404, b"")
+        assert (await put(edge, None, raw=b"{not json")).status_code == 404
+    assert seen == []
+
+
+def nowhere() -> SimpleNamespace:
+    """A report target that names no row (for refusals decided before any read)."""
+    return SimpleNamespace(id=uuid4(), hostname=name(), endpoint_id=uuid4())
+
+
+@pytest.mark.parametrize("token", [None, "", "wrong-" + "w" * 40, TOKEN + "x", TOKEN.upper()])
+async def test_a_missing_or_wrong_credential_is_401_even_with_an_invalid_body(edge, token):
+    with recorded(edge) as seen:
+        for body in (INVALID, report(nowhere())):
+            response = await put(edge, body, token=token)
+            assert (response.status_code, response.content) == (401, b"")
+        assert (await put(edge, None, token=token, raw=b"{not json")).status_code == 401
+    assert seen == []
+
+
+async def test_two_authorization_headers_are_401(edge):
+    async with AsyncClient(
+        transport=ASGITransport(app=edge.store.app), base_url="https://test"
+    ) as client:
+        response = await client.put(
+            ROUTE,
+            json=report(nowhere()),
+            headers=[("Authorization", f"Bearer {TOKEN}"), ("Authorization", f"Bearer {TOKEN}")],
+        )
+    assert response.status_code == 401
+
+
+async def test_a_body_over_four_kibibytes_is_413_before_it_is_parsed(edge):
+    padded = b'{"domain_id": "' + b"a" * 4096 + b'"}'
+    with recorded(edge) as seen:
+        response = await put(edge, None, raw=padded)
+        assert (response.status_code, response.content) == (413, b"")
+        exact = b" " * (4096 - 2) + b"{}"  # exactly the limit: parsed (and invalid)
+        assert (await put(edge, None, raw=exact)).status_code == 422
+    assert seen == []
+
+
+def _tls(body: dict, **changes: Any) -> dict:
+    return {**body, "tls": {**body["tls"], **changes}}
+
+
+INVALID_BODIES: dict[str, Any] = {
+    "tls without its times": lambda b: {**b, "tls": {"status": "valid"}},
+    "an empty host name": lambda b: {**b, "hostname": ""},
+    "a domain id that is not a uuid": lambda b: {**b, "domain_id": "not-a-uuid"},
+    "an unknown key": lambda b: {**b, "source": "edge"},
+    "an unknown status": lambda b: _tls(b, status="revoked"),
+    "an early time out of range in utc": lambda b: _tls(
+        b, certificate_not_after="0001-01-01T00:00:00+05:00"
+    ),
+    "a late time out of range in utc": lambda b: _tls(b, observed_at="9999-12-31T23:59:59-05:00"),
+    "a time without a zone": lambda b: _tls(b, observed_at="2026-11-01T12:00:00"),
+    "a window over five minutes": lambda b: _tls(
+        b, valid_until=iso(datetime.fromisoformat(b["tls"]["observed_at"]) + timedelta(minutes=6))
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(INVALID_BODIES))
+async def test_an_invalid_body_is_422_before_any_statement(edge, case):
+    body = INVALID_BODIES[case](report(nowhere()))
+    with recorded(edge) as seen:
+        response = await put(edge, body)
+        assert (response.status_code, response.content) == (422, b""), case
+    assert seen == []
+
+
+@pytest.mark.parametrize("field", ["domain_id", "hostname", "endpoint_id"])
+async def test_each_identifier_mismatched_on_its_own_is_404(edge, field):
+    row = await held(edge)
+    body = report(row)
+    body[field] = str(uuid4()) if field != "hostname" else name("other")
+    response = await put(edge, body)
+    assert (response.status_code, response.content) == (404, b"")
+    assert await stored(edge, row.id) is None
+
+
+@pytest.mark.parametrize("state", ["pending", "released"])
+async def test_a_claim_that_holds_no_name_is_404(edge, state):
+    if state == "released":
+        row = await held(edge, state="active")
+        async with edge.store.factory() as db:
+            await db.execute(
+                text(
+                    "UPDATE public_mcp_domains SET state = 'released', serve_until = NULL, "
+                    "released_at = now(), cooldown_until = now() + interval '1 day' "
+                    "WHERE id = :id"
+                ),
+                {"id": row.id},
+            )
+            await db.commit()
+    else:
+        row = await held(edge, state=state)
+    response = await put(edge, report(row))
+    assert (response.status_code, response.content) == (404, b"")
+    assert await stored(edge, row.id) is None
+
+
+async def test_a_suspended_claim_accepts_and_shows_a_report(edge):
+    row = await held(edge, state="suspended")
+    body = report(row, status="renewal_failed")
+    assert (await put(edge, body)).status_code == 204
+    assert (await observe(edge))["domain"]["tls"] == body["tls"]
+
+
+async def test_a_report_observed_before_the_claim_was_created_is_404(edge):
+    row = await held(edge, created=timedelta(seconds=30))
+    response = await put(edge, report(row, observed_at=now() - timedelta(seconds=60)))
+    assert (response.status_code, response.content) == (404, b"")
+
+
+async def test_a_report_from_the_future_or_already_expired_is_409(edge):
+    row = await held(edge)
+    future = report(row, observed_at=now() + timedelta(seconds=60))
+    assert (await put(edge, future)).status_code == 409
+    past = now() - timedelta(minutes=4)
+    expired = report(row, observed_at=past, valid_until=past + timedelta(minutes=3))
+    assert (await put(edge, expired)).status_code == 409
+    assert await stored(edge, row.id) is None
+
+
+# ----------------------------------------------------------------------------
+# What the observation shows
+# ----------------------------------------------------------------------------
+
+
+async def test_the_observation_shows_a_report_until_its_valid_until(edge):
+    from api.routes import sync_publication_domains as observation
+
+    row = await held(edge)
+    body = report(row, status="valid")
+    assert (await put(edge, body)).status_code == 204
+    assert (await observe(edge))["domain"]["tls"] == body["tls"]
+    later = utcnow() + timedelta(minutes=4)  # past the report's valid_until
+    edge.monkeypatch.setattr(observation, "utcnow", lambda: later)
+    assert (await observe(edge))["domain"]["tls"] == {"status": "unreported"}
+
+
+async def test_a_valid_report_past_its_certificate_end_is_shown_as_expired(edge):
+    row = await held(edge)
+    observed = now() - timedelta(seconds=30)
+    body = report(row, observed_at=observed, certificate_not_after=observed + timedelta(seconds=10))
+    assert (await put(edge, body)).status_code == 204
+    shown = (await observe(edge))["domain"]["tls"]
+    assert shown == {**body["tls"], "status": "expired"}
+
+
+async def test_a_reassigned_publication_starts_unreported(edge):
+    """Release and claim again on the same publication: the old id is refused, the new row
+    shows nothing until a report for it, observed after it was created, arrives."""
+    old = await held(edge)
+    assert (await put(edge, report(old))).status_code == 204
+    async with edge.store.factory() as db:
+        await db.execute(
+            text(
+                "UPDATE public_mcp_domains SET state = 'released', serve_until = NULL, "
+                "released_at = now(), cooldown_until = now() + interval '1 day' WHERE id = :id"
+            ),
+            {"id": old.id},
+        )
+        await db.commit()
+    new = await held(edge, created=timedelta(seconds=20))
+    assert (await put(edge, report(old, observed_at=now()))).status_code == 404
+    assert (await observe(edge))["domain"]["domain_id"] == str(new.id)
+    assert (await observe(edge))["domain"]["tls"] == {"status": "unreported"}
+    # Observed before the new claim existed: not its evidence.
+    early = report(new, observed_at=now() - timedelta(seconds=40))
+    assert (await put(edge, early)).status_code == 404
+    fresh = report(new)
+    assert (await put(edge, fresh)).status_code == 204
+    assert (await observe(edge))["domain"]["tls"] == fresh["tls"]
