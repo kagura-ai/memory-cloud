@@ -141,6 +141,11 @@ export type SystemFeatures = Record<string, boolean> & {
    * really be sent). Per deployment, never per address. Absent ⇒ off.
    */
   provider_link_confirmation?: boolean;
+  /**
+   * #2918: owned workspaces over the allowance are suspended, and the account
+   * page Workspace management is served. Absent ⇒ off.
+   */
+  workspace_slots?: boolean;
 };
 
 export interface SystemInfo {

@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 import { BETA_INVITE_CARD_DISMISS_KEY } from "@/components/beta-invites/InviteFriendCard";
 import { clearIdentityScopedClientState } from "./clearClientState";
+import { takeSelectionPrompt } from "@/lib/navigation/workspaceManagement";
 
 beforeEach(() => {
   localStorage.clear();
@@ -21,6 +22,17 @@ afterEach(() => {
 });
 
 describe("clearIdentityScopedClientState", () => {
+  it("forgets the Workspace management prompt, so the next sign-in in this tab is prompted (#2919)", () => {
+    sessionStorage.clear();
+    sessionStorage.setItem("unrelated", "kept");
+    expect(takeSelectionPrompt("alice")).toBe(true);
+    expect(takeSelectionPrompt("alice")).toBe(false);
+    clearIdentityScopedClientState();
+    expect(takeSelectionPrompt("alice")).toBe(true);
+    expect(sessionStorage.getItem("unrelated")).toBe("kept");
+    sessionStorage.clear();
+  });
+
   it("drops the workspace preselect", () => {
     // The visible symptom: sign out as A, back in as B, and B's workspace
     // picker opens on A's workspace.

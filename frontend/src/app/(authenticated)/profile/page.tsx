@@ -49,6 +49,7 @@ import { MfaSettings } from "@/components/auth/MfaSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
 import { AnnouncementEmailSettings } from "@/components/account/AnnouncementEmailSettings";
 import { McpNoticeSettings } from "@/components/account/McpNoticeSettings";
+import { WorkspaceManagementLink } from "@/components/account/WorkspaceManagementLink";
 import {
   getSignInMethodLabel,
   getProviderName,
@@ -63,6 +64,7 @@ const sections = [
   ["profile-appearance", "appearance"],
   ["profile-emails", "emails"],
   ["profile-mcp-notices", "mcpNotices"],
+  ["profile-workspaces", "workspaces"],
   ["profile-deletion", "deletion"],
 ] as const;
 
@@ -72,6 +74,7 @@ export default function ProfilePage() {
   const { user, refetchUser } = useAuth();
   // #2767: the System Administrator field only where the role grants something.
   const systemFeatures = useSystemFeatures();
+  const showWorkspaces = systemFeatures?.workspace_slots === true;
   const passwordSetup = usePasswordSetup(user?.id);
   const { toast } = useToast();
   const [isEditMode, setIsEditMode] = useState(false);
@@ -315,6 +318,7 @@ export default function ProfilePage() {
         sections={sections
           .filter(([id]) => id !== "profile-emails" || showEmails)
           .filter(([id]) => id !== "profile-mcp-notices" || showMcpNotices)
+          .filter(([id]) => id !== "profile-workspaces" || showWorkspaces)
           .map(([id, key]) => ({ id, label: t(`sections.${key}`) }))}
       />
 
@@ -569,6 +573,11 @@ export default function ProfilePage() {
       {/* Service notices in AI tools (Issue #2762): the person's own opt-in,
           off by default. Mounted and hidden like the Emails card above. */}
       <section id="profile-mcp-notices" tabIndex={-1} aria-label={t("sections.mcpNotices")} hidden={!showMcpNotices} className="scroll-mt-24"><McpNoticeSettings key={`mcp-notices-${user?.id}`} onVisibilityChange={setShowMcpNotices} /></section>
+
+      {/* Workspace management (Issue #2919): only where the deployment serves it. */}
+      {showWorkspaces && (
+        <section id="profile-workspaces" tabIndex={-1} aria-label={t("sections.workspaces")} className="scroll-mt-24"><WorkspaceManagementLink /></section>
+      )}
 
       {/* Danger zone: self-serve account & data deletion (Issue #953) */}
       <section id="profile-deletion" tabIndex={-1} aria-label={t("sections.deletion")} className="scroll-mt-24"><DeleteAccountSection /></section>

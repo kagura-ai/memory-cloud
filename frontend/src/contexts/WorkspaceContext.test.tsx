@@ -9,10 +9,11 @@
  */
 
 import { act, fireEvent, render, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { ApiError } from "@/lib/api/base";
 import type { User } from "@/lib/auth/auth";
-import { WorkspaceProvider, useWorkspace } from "./WorkspaceContext";
+import { WorkspaceProvider, WorkspaceSuspendedError, useWorkspace } from "./WorkspaceContext";
 
 const { authHolder, mockListWorkspaces, mockSwitch } = vi.hoisted(() => ({
   authHolder: {
@@ -51,7 +52,7 @@ const workspaces = [
   { id: "w2", name: "W2" },
 ];
 
-let savedRefresh: (() => Promise<void>) | undefined;
+let savedRefresh: ((options?: { quiet?: boolean }) => Promise<void>) | undefined;
 function Probe() {
   const { currentWorkspaceId, loading, loadFailed, switchWorkspace, refreshWorkspaces } = useWorkspace();
   return (
@@ -228,5 +229,160 @@ describe("WorkspaceProvider reload trigger", () => {
     );
 
     await waitFor(() => expect(mockListWorkspaces).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("suspended workspaces (#2919)", () => {
+  it("a quiet refresh keeps loading false and picks up a newly suspended current workspace", async () => {
+    const seen: string[] = [];
+    function QuietProbe() {
+      const { currentWorkspaceId, loading, refreshWorkspaces } = useWorkspace();
+      useEffect(() => {
+        seen.push(String(loading));
+      }, [loading]);
+      return (
+        <div>
+          <span data-testid="ws">{currentWorkspaceId ?? "none"}</span>
+          <button onClick={() => void refreshWorkspaces({ quiet: true })}>quiet</button>
+        </div>
+      );
+    }
+    const { getByTestId, getByText } = render(
+      <WorkspaceProvider>
+        <QuietProbe />
+      </WorkspaceProvider>,
+    );
+    await waitFor(() => expect(getByTestId("ws").textContent).toBe("w1"));
+    mockListWorkspaces.mockResolvedValue([
+      { id: "w1", name: "W1", slot_suspended: true },
+      { id: "w2", name: "W2" },
+    ]);
+    seen.length = 0;
+    await act(async () => {
+      fireEvent.click(getByText("quiet"));
+    });
+    await waitFor(() => expect(getByTestId("ws").textContent).toBe("none"));
+    expect(seen).not.toContain("true");
+  });
+
+  it("never makes a slot_suspended row the current workspace", async () => {
+    mockListWorkspaces.mockResolvedValue([
+      { id: "w1", name: "W1", slot_suspended: true },
+      { id: "w2", name: "W2" },
+    ]);
+    const { getByTestId } = renderProvider();
+    await waitFor(() => expect(getByTestId("loading").textContent).toBe("false"));
+    expect(getByTestId("ws").textContent).toBe("none");
+    expect(getByTestId("loadFailed").textContent).toBe("false");
+  });
+
+  it("rejects a switch to a slot_suspended row without asking the server", async () => {
+    mockListWorkspaces.mockResolvedValue([
+      { id: "w1", name: "W1" },
+      { id: "w2", name: "W2", slot_suspended: true },
+    ]);
+    let outcome: unknown = "pending";
+    function SwitchProbe() {
+      const { currentWorkspaceId, switchWorkspace } = useWorkspace();
+      return (
+        <div>
+          <span data-testid="ws">{currentWorkspaceId ?? "none"}</span>
+          <button
+            onClick={() =>
+              switchWorkspace("w2").then(
+                () => { outcome = "resolved"; },
+                (error: unknown) => { outcome = error; },
+              )
+            }
+          >
+            switch
+          </button>
+        </div>
+      );
+    }
+    const { getByTestId, getByText } = render(
+      <WorkspaceProvider>
+        <SwitchProbe />
+      </WorkspaceProvider>,
+    );
+    await waitFor(() => expect(getByTestId("ws").textContent).toBe("w1"));
+    await act(async () => {
+      fireEvent.click(getByText("switch"));
+    });
+    expect(outcome).toBeInstanceOf(WorkspaceSuspendedError);
+    expect(mockSwitch).not.toHaveBeenCalled();
+    expect(getByTestId("ws").textContent).toBe("w1");
+  });
+
+  it("a quiet refresh that supersedes a loud one still clears loading", async () => {
+    const page = renderProvider();
+    await waitFor(() => expect(page.getByTestId("ws").textContent).toBe("w1"));
+    fireEvent.click(page.getByRole("button", { name: "capture" }));
+    const refresh = savedRefresh!;
+    let loudAnswer!: (list: typeof workspaces) => void;
+    let quietAnswer!: (list: typeof workspaces) => void;
+    mockListWorkspaces
+      .mockImplementationOnce(() => new Promise((resolve) => { loudAnswer = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { quietAnswer = resolve; }));
+    await act(async () => {
+      void refresh();
+    });
+    expect(page.getByTestId("loading").textContent).toBe("true");
+    await act(async () => {
+      void refresh({ quiet: true });
+    });
+    // The loud answer is dropped (superseded); the quiet one finishes last.
+    await act(async () => { loudAnswer(workspaces); });
+    expect(page.getByTestId("loading").textContent).toBe("true");
+    await act(async () => { quietAnswer(workspaces); });
+    expect(page.getByTestId("loading").textContent).toBe("false");
+    expect(page.getByTestId("ws").textContent).toBe("w1");
+  });
+
+  it("a quiet refresh that supersedes a loud one reports the failure the loud one would have", async () => {
+    const page = renderProvider();
+    await waitFor(() => expect(page.getByTestId("ws").textContent).toBe("w1"));
+    fireEvent.click(page.getByRole("button", { name: "capture" }));
+    const refresh = savedRefresh!;
+    mockListWorkspaces
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockRejectedValueOnce(new Error("offline"));
+    await act(async () => {
+      void refresh();
+      void refresh({ quiet: true });
+    });
+    await waitFor(() => expect(page.getByTestId("loadFailed").textContent).toBe("true"));
+    expect(page.getByTestId("loading").textContent).toBe("false");
+  });
+
+  it("a quiet refresh alone never shows loading and keeps the list on a failure", async () => {
+    const page = renderProvider();
+    await waitFor(() => expect(page.getByTestId("ws").textContent).toBe("w1"));
+    fireEvent.click(page.getByRole("button", { name: "capture" }));
+    mockListWorkspaces.mockRejectedValueOnce(new Error("offline"));
+    await act(async () => {
+      await savedRefresh!({ quiet: true });
+    });
+    expect(page.getByTestId("loading").textContent).toBe("false");
+    expect(page.getByTestId("loadFailed").textContent).toBe("false");
+    expect(page.getByTestId("ws").textContent).toBe("w1");
+  });
+
+  it("a refused pick without a current workspace reloads the list instead of the load error", async () => {
+    authHolder.current.user = { ...baseUser, current_workspace_id: null };
+    authHolder.current.refetchUser.mockResolvedValueOnce({ ...baseUser, current_workspace_id: null });
+    mockSwitch.mockRejectedValueOnce(
+      new ApiError({ status: 403, error: "SLOT-001", message: "suspended" }),
+    );
+    mockListWorkspaces
+      .mockResolvedValueOnce(workspaces)
+      .mockResolvedValueOnce([workspaces[0], { ...workspaces[1], slot_suspended: true }]);
+    const page = renderProvider();
+    await waitFor(() => expect(page.getByTestId("loading").textContent).toBe("false"));
+    fireEvent.click(page.getByRole("button", { name: "switch" }));
+    await waitFor(() => expect(mockListWorkspaces).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(page.getByTestId("loading").textContent).toBe("false"));
+    expect(page.getByTestId("loadFailed").textContent).toBe("false");
+    expect(page.getByTestId("ws").textContent).toBe("none");
   });
 });

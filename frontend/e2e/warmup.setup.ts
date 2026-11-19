@@ -27,6 +27,7 @@ const WARM_ROUTES = [
   "/invite/e2e-a11y-warmup-token",
   "/workspace/dashboard",
   "/profile",
+  "/profile/workspaces",
   "/admin/users/e2e-a11y-warmup-user",
 ];
 

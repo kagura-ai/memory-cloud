@@ -19,13 +19,26 @@ import {
   Workspace,
 } from '@/lib/api/workspaces';
 
+/** #2919: a switch to a workspace the list marks suspended is never sent. */
+export class WorkspaceSuspendedError extends Error {
+  constructor(readonly workspaceId: string) {
+    super("This workspace is suspended");
+    this.name = "WorkspaceSuspendedError";
+  }
+}
+
 interface WorkspaceContextType {
   currentWorkspace: Workspace | null;
   currentWorkspaceId: string | null;
   workspaces: Workspace[];
   loading: boolean;
   loadFailed: boolean;
-  refreshWorkspaces: () => Promise<void>;
+  /**
+   * Reload the list. `quiet` (#2919) keeps `loading` false, so the guard does
+   * not replace the page while the list refreshes, and keeps the last list on
+   * a failure.
+   */
+  refreshWorkspaces: (options?: { quiet?: boolean }) => Promise<void>;
   switchWorkspace: (workspaceId: string) => Promise<void>;
 }
 
@@ -48,32 +61,53 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // Read the current confirmed selection at call time. A late save in A can
   // still call the refresh function it captured before a switch to B.
   const activeScope = useRef<{ userId: string; workspaceId: string | null } | null>(null);
-  const refreshWorkspaces = useCallback(async () => {
+  // A loud load is in flight. A quiet call that supersedes it takes its
+  // place (#2919): it shows the loading state and reports a failure, so a
+  // dropped loud answer never leaves `loading` set or a stale list unreported.
+  const loudInFlight = useRef(false);
+  const refreshWorkspaces = useCallback(async ({ quiet = false }: { quiet?: boolean } = {}) => {
     const scope = activeScope.current;
     if (!scope) return;
     const selectedId = scope.workspaceId;
     const request = ++generation.current;
-    setLoading(true);
-    setLoadFailed(false);
+    const loud = !quiet || loudInFlight.current;
+    if (loud) {
+      loudInFlight.current = true;
+      setLoading(true);
+      setLoadFailed(false);
+    }
     try {
       const available = await listWorkspaces();
       if (generation.current !== request) return;
       setWorkspaces(available);
+      // #2919: a workspace suspended over its owner's allowance is never the
+      // current one; the guard then asks for another (or exempts the page
+      // where the owner manages it).
       setCurrentWorkspace(selectedId
-        ? available.find(w => w.id === selectedId) ?? null
+        ? available.find(w => w.id === selectedId && !w.slot_suspended) ?? null
         : null);
     } catch {
-      if (generation.current !== request) return;
+      // A quiet refresh keeps the last list on a failure.
+      if (generation.current !== request || !loud) return;
       setWorkspaces([]);
       setCurrentWorkspace(null);
       setLoadFailed(true);
     } finally {
-      if (generation.current === request) setLoading(false);
+      // Whichever call finishes last leaves `loading` false.
+      if (generation.current === request) {
+        loudInFlight.current = false;
+        setLoading(false);
+      }
     }
   }, []);
 
   const switchWorkspace = async (workspaceId: string) => {
     if (switchingRef.current) return;
+    // #2919: the server refuses a switch to a suspended workspace; never ask,
+    // and fail like a refused switch so the caller says so.
+    if (workspaces.some(w => w.id === workspaceId && w.slot_suspended)) {
+      throw new WorkspaceSuspendedError(workspaceId);
+    }
     switchingRef.current = true;
     setSwitching(true);
     const previous = activeScope.current;
@@ -92,11 +126,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       router.refresh();
     } catch (error) {
       // Only the switch response itself can prove the server kept the old scope.
-      if (!switchAccepted && previous?.workspaceId && error instanceof ApiError &&
+      // That includes having no selection yet (#2919): a refused pick on the
+      // selection screen reloads the list (a card may now show as suspended)
+      // instead of the full-screen load error.
+      if (!switchAccepted && previous && error instanceof ApiError &&
           [403, 404, 410].includes(error.status)) {
         // Other tabs can change the account-wide selection while B is pending.
         const identity = await refetchUser().catch(() => undefined);
-        if (identity?.id === previous.userId && identity.current_workspace_id === previous.workspaceId) {
+        if (identity?.id === previous.userId &&
+            (identity.current_workspace_id ?? null) === previous.workspaceId) {
           activeScope.current = previous;
           await refreshWorkspaces();
           throw error;
@@ -105,6 +143,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       activeScope.current = null;
       // A lost response is ambiguous: the server may already have switched.
       ++generation.current;
+      loudInFlight.current = false;
       setCurrentWorkspace(null);
       setLoadFailed(true);
       setLoading(false);

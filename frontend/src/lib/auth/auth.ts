@@ -69,6 +69,9 @@ export interface User {
   // Issue #1784: the OTHER accounts linked to this one as the same person.
   // Absent on an older backend — treat as none.
   linked_user_ids?: string[];
+  // Issue #2918: owned workspaces were suspended without a saved choice; the
+  // layout sends the owner to Workspace management once per browser session.
+  workspace_selection_required?: boolean;
 }
 
 /**

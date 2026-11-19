@@ -52,6 +52,7 @@ import {
   AlertTriangle,
   Info,
   Lock,
+  PauseCircle,
   ShieldAlert,
   type LucideIcon,
 } from "lucide-react";
@@ -63,6 +64,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { WorkspaceRole } from "@/lib/auth/rbac";
+import { WORKSPACE_MANAGEMENT_PATH } from "@/lib/navigation/workspaceManagement";
 import {
   isBlocked,
   type FeatureGate,
@@ -72,6 +74,7 @@ import { cn } from "@/lib/utils/cn";
 
 /** Where every upgrade CTA goes. Only rendered when `gate.canUpgrade`. */
 const PLAN_PAGE_HREF = "/workspace/settings/plan";
+
 
 export type FeatureGateVariant = "inline" | "page" | "control";
 
@@ -126,7 +129,13 @@ export type GateMessageKey =
   | "capacity.title"
   | "capacity.description"
   | "capacity.badge"
-  | "capacity.hint";
+  | "capacity.hint"
+  | "workspace_slot.title"
+  | "workspace_slot.description"
+  | "workspace_slot.askOwner"
+  | "workspace_slot.manage"
+  | "workspace_slot.badge"
+  | "workspace_slot.hint";
 
 /**
  * Which `gate.features.<key>` sub-key a message interpolates as `{feature}`:
@@ -190,6 +199,13 @@ export const GATE_NOUN_FORM: Readonly<
   "capacity.description": null,
   "capacity.badge": null,
   "capacity.hint": null,
+  // #2918: the whole workspace is suspended, so no message names a feature.
+  "workspace_slot.title": null,
+  "workspace_slot.description": null,
+  "workspace_slot.askOwner": null,
+  "workspace_slot.manage": null,
+  "workspace_slot.badge": null,
+  "workspace_slot.hint": null,
 };
 
 /** The messages one refusal renders. `null` = that slot does not exist. */
@@ -325,6 +341,19 @@ export function gateMessageKeys(
         badge: "capacity.badge",
         hint: "capacity.hint",
       };
+    case "workspace_slot":
+      // #2918: not one feature — the whole workspace is suspended because its
+      // owner has more workspaces than the plan allows. The owner gets a link
+      // to Workspace management (not an upgrade CTA); a member is told to ask
+      // the owner (`featureGateText`).
+      return {
+        title: "workspace_slot.title",
+        description: "workspace_slot.description",
+        upsell: null,
+        action: null,
+        badge: "workspace_slot.badge",
+        hint: "workspace_slot.hint",
+      };
   }
 }
 
@@ -340,6 +369,12 @@ export type GateTranslator = (
 
 /** A refusal's copy, formatted. */
 export interface FeatureGateText {
+  /**
+   * #2918: the label of the link to Workspace management — present exactly
+   * on a "workspace_slot" gate whose reader is the owner (`gate.manageUrl`).
+   * Not an upgrade CTA.
+   */
+  readonly manage?: string;
   readonly title: string;
   /**
    * The body copy. On a quota gate the member may upgrade, it ends with the
@@ -411,7 +446,15 @@ export function featureGateText(
   // A member cannot upgrade: one instruction to ask the owner, never "Upgrade
   // to …" followed by "ask your owner".
   const askOwner = gate.askOwner === true && hasRequiredPlan;
-  const description = !askOwner
+  // #2918: only the owner can resume a suspended workspace.
+  const slotOwner = state === "workspace_slot" && gate.manageUrl !== undefined;
+  const slotMember = state === "workspace_slot" && !slotOwner;
+  const description = slotMember
+    ? joinSentences(
+        format(keys.description),
+        format("workspace_slot.askOwner"),
+      )
+    : !askOwner
     ? format(keys.description)
     : keys.description === "plan.description"
       ? format("plan.askOwnerDescription")
@@ -432,6 +475,7 @@ export function featureGateText(
       keys.action !== null && mayOfferUpgrade ? format(keys.action) : null,
     badge: keys.badge === null ? null : format(keys.badge),
     hint: askOwner ? format("plan.askOwnerHint") : format(keys.hint),
+    ...(slotOwner && { manage: format("workspace_slot.manage") }),
   };
 }
 
@@ -477,6 +521,7 @@ const ALERT_VARIANT: Readonly<
   role: "default",
   allowlist: "default",
   capacity: "warning",
+  workspace_slot: "warning",
 };
 
 const ICON: Readonly<Record<RefusedGateState, LucideIcon>> = {
@@ -486,6 +531,7 @@ const ICON: Readonly<Record<RefusedGateState, LucideIcon>> = {
   role: ShieldAlert,
   allowlist: Lock,
   capacity: AlertTriangle,
+  workspace_slot: PauseCircle,
 };
 
 interface FeatureGateNoticeBaseProps {
@@ -541,6 +587,10 @@ export function FeatureGateNotice(props: FeatureGateNoticeProps) {
   if (text === null) return null;
   const state = gate.state as RefusedGateState;
   const openPlanPage = () => router.push(PLAN_PAGE_HREF);
+  // #2918: the in-app path, not the server's absolute `manage_url`: the link
+  // stays on this origin.
+  const openManagement = () => router.push(WORKSPACE_MANAGEMENT_PATH);
+  const manage = text.manage ?? null;
 
   if (props.variant === "page") {
     const body = (
@@ -551,7 +601,9 @@ export function FeatureGateNotice(props: FeatureGateNoticeProps) {
           description={text.description}
           {...(text.action !== null
             ? { actionLabel: text.action, onAction: openPlanPage }
-            : {})}
+            : manage !== null
+              ? { actionLabel: manage, onAction: openManagement }
+              : {})}
         />
       </div>
     );
@@ -596,6 +648,17 @@ export function FeatureGateNotice(props: FeatureGateNoticeProps) {
             {text.action}
           </Button>
         )}
+        {manage !== null && (
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="h-auto p-0 text-xs"
+            onClick={openManagement}
+          >
+            {manage}
+          </Button>
+        )}
       </div>
     );
   }
@@ -619,6 +682,16 @@ export function FeatureGateNotice(props: FeatureGateNoticeProps) {
             onClick={openPlanPage}
           >
             {text.action}
+          </Button>
+        )}
+        {manage !== null && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={openManagement}
+          >
+            {manage}
           </Button>
         )}
       </AlertDescription>

@@ -22,6 +22,8 @@
  * belongs to, so both must clear it.
  */
 
+import { clearSelectionPrompts } from "@/lib/navigation/workspaceManagement";
+
 /** Exact keys written without any user scoping. */
 const IDENTITY_SCOPED_KEYS = [
   // Preselects the workspace card, and survives a sign-out (#276).
@@ -39,6 +41,10 @@ const IDENTITY_SCOPED_PREFIXES = ["feature-guide:"];
 
 export function clearIdentityScopedClientState(): void {
   if (typeof window === "undefined") return;
+
+  // #2919: the once-per-session Workspace management prompt (sessionStorage):
+  // the next sign-in in this tab is prompted again.
+  clearSelectionPrompts();
 
   try {
     for (const key of IDENTITY_SCOPED_KEYS) {
