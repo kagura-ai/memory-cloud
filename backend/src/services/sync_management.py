@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any, TypeVar
 from uuid import UUID
 
 from sqlalchemy import Select, and_, case, cast, func, or_, select, update
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.sync_identity import SyncPrincipal, load_sync_identity
 from auth.workspace_roles import ContextRole
 from config.settings import get_settings
+from db.base import Base
 from models.auth import Context, IdentityLink, User, Workspace
 from models.management_schemas import digest
 from models.memory import Memory
@@ -33,7 +35,7 @@ from models.sync_mode_access_schemas import (
 )
 from services.capacity_lock import CapacityPolicy
 from services.permission_service import PermissionService
-from services.sync_feed_authority import FeedFence, feed_fence, locked
+from services.sync_feed_authority import FeedFence, feed_fence, locked, locked_retried
 from services.sync_feed_index import index_status
 from services.sync_managed_guard import TargetFence, target_fence
 from services.workspace_locks import lock_workspace_for_update, lock_workspace_nowait
@@ -43,6 +45,8 @@ from utils.exceptions import ConflictError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+T = TypeVar("T", bound=Base)
 
 
 @dataclass
@@ -351,6 +355,24 @@ async def finish_stopping(
     return row
 
 
+async def share_locked(db: AsyncSession, model: type[T], *conditions: Any) -> T | None:
+    """``FOR SHARE NOWAIT`` for a management read, with the short retry (#2925).
+
+    A human feed read holds the Context row ``FOR UPDATE`` until it commits;
+    the retry lets a management read wait it out instead of answering 409. The
+    reads call it holding only share locks and with nothing pending, so the
+    savepoint of a try flushes nothing. Under the paid write guard (whose commit
+    hook a savepoint release fires) it takes one attempt.
+
+    Raises:
+        SyncLockBusyError: the row is busy (single attempt; 409 ``RES-002``).
+        ConflictError: the row is still busy after the tries (409 ``RES-002``).
+    """
+    if db.info.get("paid_integration_write"):
+        return await locked(db, model, *conditions)
+    return await locked_retried(db, model, *conditions, write=False)
+
+
 async def lock_management_workspace(db: AsyncSession, wid: UUID, *, shared: bool) -> Workspace:
     """The workspace row lock of :func:`management_boundary`.
 
@@ -499,7 +521,7 @@ async def read_mode_access(
         # A capability snapshot must not outlive the Context privacy/linked-owner
         # evidence used to authorize it. Refresh and retain those metadata locks
         # through the final RBAC check and commit, without requiring publication.
-        context = await locked(db, Context, Context.id == installation.context_id)
+        context = await share_locked(db, Context, Context.id == installation.context_id)
         if context is None or context.deleted_at is not None:
             raise NotFoundException("Synchronization target")
         if context.is_private and context.created_by != principal.user_id:
@@ -507,7 +529,7 @@ async def read_mode_access(
                 raise NotFoundException("Synchronization target")
             groups = set()
             for user_id in sorted({principal.user_id, context.created_by}):
-                link = await locked(db, IdentityLink, IdentityLink.user_id == user_id)
+                link = await share_locked(db, IdentityLink, IdentityLink.user_id == user_id)
                 if link is None:
                     raise NotFoundException("Synchronization target")
                 groups.add(link.group_id)

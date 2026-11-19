@@ -10,13 +10,13 @@ second HTTP request) next to the read, so the lock modes are the database's own.
 
 import asyncio
 import time
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.exc import DBAPIError
 
-from models.auth import Workspace
+from models.auth import Context, IdentityLink, Workspace
 from models.sync_installation import SyncInstallation
 from services import sync_management
 from services.workspace_locks import NOWAIT_LOCK_BACKOFF_SECONDS, lock_workspace_for_update
@@ -192,6 +192,86 @@ async def test_installation_update_still_refuses_a_management_read(managed):
     ok(await read(managed, "access"))
 
 
+# ---- the Context and identity-link share locks of the access and receipt reads ----
+
+
+def lock_authority_row(holder, managed, row):
+    """What a human feed read takes on the Context row (FOR UPDATE until it commits),
+    or an unlink on the admin's identity-link row."""
+    model, condition = (
+        (Context, Context.id == UUID(managed.target["context_id"]))
+        if row == "context"
+        else (IdentityLink, IdentityLink.user_id == managed.store.users["admin"])
+    )
+    return holder.execute(select(model.id).where(condition).with_for_update())
+
+
+async def linked_private_target(managed):
+    """A private Context the admin reaches through an identity link to its owner."""
+    from tests.integration.test_sync_mode_access_db import private_target
+
+    await private_target(managed, linked=True)
+
+
+@pytest.mark.parametrize("kind", ["access", "receipt"])
+@pytest.mark.parametrize("row", ["context", "link"])
+async def test_management_read_waits_out_a_short_authority_row_holder(managed, kind, row):
+    if row == "link":
+        await linked_private_target(managed)
+    async with managed.factory() as holder:
+        await lock_authority_row(holder, managed, row)
+
+        async def let_go():
+            await asyncio.sleep(SHORT_HOLD_SECONDS)
+            await holder.rollback()
+
+        released = asyncio.create_task(let_go())
+        response = await read(managed, kind, role="admin")
+        await released
+    ok(response)
+
+
+@pytest.mark.parametrize("kind", ["access", "receipt"])
+@pytest.mark.parametrize("row", ["context", "link"])
+async def test_management_read_past_the_retry_window_on_an_authority_row_is_the_409(
+    managed, kind, row
+):
+    if row == "link":
+        await linked_private_target(managed)
+    async with managed.factory() as holder:
+        await lock_authority_row(holder, managed, row)
+        response = await read(managed, kind, role="admin")
+        busy(response)
+        assert "permissions" not in response.text and "as_of" not in response.text
+        await holder.rollback()
+    ok(await read(managed, kind, role="admin"))
+
+
+@pytest.mark.parametrize("kind", ["access", "receipt"])
+async def test_management_read_waits_out_an_open_human_feed_read(managed, monkeypatch, kind):
+    """A feed read holds the Context row FOR UPDATE until it commits."""
+    from services import sync_feed_human
+    from tests.integration.sync_feed_fixtures import committed, product
+
+    await committed(managed, [product("one")])
+    inside = asyncio.Event()
+    original = sync_feed_human.current_schema
+
+    async def slow(db, installation):
+        # Called with the Context row held: keep the feed read open for a moment.
+        if not inside.is_set():
+            inside.set()
+            await asyncio.sleep(SHORT_HOLD_SECONDS)
+        return await original(db, installation)
+
+    monkeypatch.setattr(sync_feed_human, "current_schema", slow)
+    feed_read = asyncio.create_task(human(managed, "GET", "records"))
+    await asyncio.wait_for(inside.wait(), timeout=10)
+    response = await read(managed, kind)
+    assert (await feed_read).status_code == 200, (await feed_read).text
+    ok(response)
+
+
 # ---- writers the shared read fences (one per writer class) ----
 
 
@@ -295,23 +375,42 @@ async def test_sync_transition_cannot_pass_an_open_management_read(managed, monk
 # ---- write callers keep their exclusive lock ----
 
 
+def workspace_locks_emitted(managed):
+    """Record every row-locking statement on ``workspaces`` the engine runs."""
+    seen: list[str] = []
+    engine = managed.factory.kw["bind"].sync_engine
+
+    def record(_conn, _cursor, statement, *_args):
+        flat = " ".join(statement.split())
+        if "FROM workspaces" in flat and " FOR " in flat:
+            seen.append(flat[flat.rindex(" FOR ") + 1 :])
+
+    event.listen(engine, "before_cursor_execute", record)
+    return seen, lambda: event.remove(engine, "before_cursor_execute", record)
+
+
 @pytest.mark.parametrize("action", ["stop", "finalize", "preview", "diff"])
 async def test_management_write_keeps_its_exclusive_workspace_lock(managed, action):
     async with managed.factory() as holder:
         await holder.execute(
             select(Workspace.id).where(Workspace.id == managed.store.wid).with_for_update(read=True)
         )
-        started = time.monotonic()
-        if action in ("stop", "finalize"):
-            response = await human(
-                managed, "POST", "management/" + action, body={"operation_id": str(uuid4())}
-            )
-        elif action == "preview":
-            response = await human(managed, "POST", "management/resume/preview")
-        else:
-            response = await human(managed, "GET", f"management/resume/diff?preview_id={uuid4()}")
-        # One NOWAIT attempt, no retry: refused at once.
-        assert time.monotonic() - started < NOWAIT_LOCK_BACKOFF_SECONDS * 4
+        seen, stop_recording = workspace_locks_emitted(managed)
+        try:
+            if action in ("stop", "finalize"):
+                response = await human(
+                    managed, "POST", "management/" + action, body={"operation_id": str(uuid4())}
+                )
+            elif action == "preview":
+                response = await human(managed, "POST", "management/resume/preview")
+            else:
+                response = await human(
+                    managed, "GET", f"management/resume/diff?preview_id={uuid4()}"
+                )
+        finally:
+            stop_recording()
+        # One exclusive NOWAIT attempt and no retry: no shared lock, no second try.
+        assert seen == ["FOR UPDATE NOWAIT"], seen
         busy(response)
         await holder.rollback()
     stopped = await human(managed, "POST", "management/stop", body={"operation_id": str(uuid4())})
@@ -350,11 +449,30 @@ async def test_shared_workspace_lock_under_the_paid_guard_takes_one_attempt(mana
         async with managed.factory() as db:
             event.listen(db.sync_session, "before_commit", commits.append)
             db.info["paid_integration_write"] = True
+            await db.execute(text("SELECT 1"))  # open the connection outside the timing
             started = time.monotonic()
             with pytest.raises(ConflictError, match="Workspace is being modified"):
                 await sync_management.lock_management_workspace(db, managed.store.wid, shared=True)
-            assert time.monotonic() - started < NOWAIT_LOCK_BACKOFF_SECONDS
+            # The proof is that no savepoint was released; the bound is loose: the
+            # retries sleep about 0.75 s in all.
             assert commits == []
+            assert time.monotonic() - started < 0.5
+            db.info.pop("paid_integration_write", None)
+            await db.rollback()
+        await holder.rollback()
+
+
+async def test_authority_share_lock_under_the_paid_guard_takes_one_attempt(managed):
+    commits = []
+    context_id = UUID(managed.target["context_id"])
+    async with managed.factory() as holder:
+        await lock_authority_row(holder, managed, "context")
+        async with managed.factory() as db:
+            event.listen(db.sync_session, "before_commit", commits.append)
+            db.info["paid_integration_write"] = True
+            with pytest.raises(ConflictError):
+                await sync_management.share_locked(db, Context, Context.id == context_id)
+            assert commits == []  # one attempt, no savepoint
             db.info.pop("paid_integration_write", None)
             await db.rollback()
         await holder.rollback()

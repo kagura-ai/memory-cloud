@@ -136,7 +136,7 @@ async def test_in_flight_receipt_lookup_fences_guarded_controls_but_not_access(
     expected = await expected_state(managed)
     body = {"operation_id": str(uuid4()), "expected": expected}
     question = lookup(managed)
-    original = sync_resume_receipt.locked
+    original = sync_resume_receipt.share_locked
     seen = {}
 
     async def observed_mid_lookup(db, model, *conditions, **kwargs):
@@ -146,9 +146,9 @@ async def test_in_flight_receipt_lookup_fences_guarded_controls_but_not_access(
             seen["access"] = await access(managed)
         return row
 
-    monkeypatch.setattr(sync_resume_receipt, "locked", observed_mid_lookup)
+    monkeypatch.setattr(sync_resume_receipt, "share_locked", observed_mid_lookup)
     observed = await receipt(managed, question)
-    monkeypatch.setattr(sync_resume_receipt, "locked", original)
+    monkeypatch.setattr(sync_resume_receipt, "share_locked", original)
     assert observed.status_code == 200 and observed.json()["result"] == "not_found", observed.text
     assert set(seen) == {"control", "access"}
     busy(seen["control"])
