@@ -520,6 +520,8 @@ async def transfer_user_ownership(
             performed_by_email=actor_email,
             performed_by_user_id=actor_user_id,
             commit=False,
+            # #2918: admin deletion transfers are exempt from the slot check.
+            check_recipient_slots=False,
         )
         changed[workspace.id] = successor
     for context in selectable:
@@ -953,6 +955,11 @@ async def delete_user_rows(
     # in surviving workspaces must not keep the departed account's identifiers.
     await erase_operation_history(db, user_id, erasure_pseudonym(user_id))
     await clear_allowlist_inviter(db, user_id)
+    # #2918: the account's workspace-slot rows (no foreign key); in every
+    # mode, and a no-op before the migration.
+    from services.workspace_slots import delete_owner_slot_rows
+
+    await delete_owner_slot_rows(db, user_id)
     await db.execute(delete(User).where(User.user_id == user_id))
     return result
 
