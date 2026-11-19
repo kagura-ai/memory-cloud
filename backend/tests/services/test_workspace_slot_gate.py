@@ -265,15 +265,44 @@ async def test_the_dispatcher_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_any_object_carrying_a_workspace_id_is_gated() -> None:
-    """A workspace-like object (not the ORM row) is never read as "no id"."""
+async def test_only_a_workspace_row_or_an_id_is_accepted() -> None:
+    """Nothing is guessed from attributes: another object is a programming
+    error (in enforce), and a row without its owner has the owner read."""
     from types import SimpleNamespace
 
     db = _db()
     wid = uuid4()
-    with _mode("enforce"), _suspended(wid), pytest.raises(WorkspaceSlotSuspendedError) as exc:
-        await gate.ensure_slot_active(
-            db, SimpleNamespace(id=wid, owner_user_id=OWNER), user_id=OWNER
-        )
-    assert exc.value.details["manage_url"] == gate.manage_url()
-    db.scalar.assert_not_awaited()
+    with _mode("enforce"), _suspended(wid):
+        with pytest.raises(TypeError):
+            await gate.ensure_slot_active(
+                db, SimpleNamespace(id=wid, owner_user_id=OWNER), user_id=OWNER
+            )
+        with pytest.raises(TypeError):
+            await gate.slot_suspended(db, SimpleNamespace(id=wid))
+        row = Workspace(id=wid, name="w", plan_name="free")  # owner not loaded
+        db.scalar = AsyncMock(return_value=OWNER)
+        await gate.ensure_slot_active(db, row, user_id=OWNER, policy=SlotPolicy.OWNER_MANAGEMENT)
+        db.scalar.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_revocation_never_refuses_and_runs_no_statement() -> None:
+    db = _db()
+    ws = _workspace()
+    lookup = AsyncMock(return_value=frozenset({ws.id}))
+    with _mode("enforce"), patch("services.workspace_slot_gate.suspended_workspace_ids", lookup):
+        for user in (OWNER, "member-1", None):
+            await gate.ensure_slot_active(db, ws, user_id=user, policy=SlotPolicy.REVOCATION)
+    lookup.assert_not_awaited()
+
+
+def test_an_outsider_on_mcp_learns_nothing_more() -> None:
+    from mcp_server.tools._errors import describe_tool_exception
+
+    body = json.loads(
+        describe_tool_exception("recall", WorkspaceSlotSuspendedError.for_outsider())
+        .response()[0]
+        .text
+    )
+    assert body["help"] == "The workspace that holds this content is suspended."
+    assert set(body) == {"status", "error", "message", "gate", "help"}

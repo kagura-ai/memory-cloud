@@ -67,14 +67,19 @@ class SlotPolicy(StrEnum):
 
     * ``BLOCKED`` — refused for everyone, the owner included (the default).
     * ``OWNER_MANAGEMENT`` — the workspace's owner passes (export, delete, the
-      billing handoff, revoking credentials); a member or admin is refused.
-      Every use is pinned to an exact set of call sites by a test.
+      billing handoff); a member or admin is refused.
+    * ``REVOCATION`` — the gate does not refuse: a route that only revokes or
+      deactivates a credential and returns no workspace data keeps its own
+      authorization exactly as for an active workspace (revoking access is
+      never blocked).
 
-    A value that is neither member (a stray string) is treated as ``BLOCKED``.
+    Every non-default use is pinned to an exact set of call sites by a test.
+    A value that is no member (a stray string) is treated as ``BLOCKED``.
     """
 
     BLOCKED = "blocked"
     OWNER_MANAGEMENT = "owner_management"
+    REVOCATION = "revocation"
 
 
 def manage_url() -> str:
@@ -93,12 +98,19 @@ def _as_uuid(value: object) -> UUID | None:
 
 
 def _workspace_id_of(workspace_or_id: Workspace | UUID | str | None) -> UUID | None:
+    """The id of a ``Workspace`` row or a workspace id; ``None`` for ``None``.
+
+    Anything else is a programming error, never guessed from its attributes.
+    """
     if workspace_or_id is None:
         return None
+    if isinstance(workspace_or_id, Workspace):
+        return _as_uuid(workspace_or_id.id)
     if isinstance(workspace_or_id, (UUID, str)):
         return _as_uuid(workspace_or_id)
-    # A workspace row (or any object carrying one's ``id``): never read as "no id".
-    return _as_uuid(getattr(workspace_or_id, "id", None))
+    raise TypeError(
+        f"the slot gate takes a Workspace row or a workspace id, not {type(workspace_or_id)!r}"
+    )
 
 
 async def slot_suspended(db: AsyncSession, workspace_or_id: Workspace | UUID | str | None) -> bool:
@@ -137,7 +149,8 @@ async def ensure_slot_active(
         user_id: The caller. The owner is told where to resume it
             (``manage_url``), a member to ask the owner; anyone else, or
             ``None``, gets the gate only.
-        policy: ``OWNER_MANAGEMENT`` lets the workspace's owner through.
+        policy: ``OWNER_MANAGEMENT`` lets the workspace's owner through;
+            ``REVOCATION`` never refuses (and runs no statement).
         outsider: The caller is never a member (a public reader, a share-key
             reader, a management grant): always the redacted refusal.
 
@@ -145,21 +158,23 @@ async def ensure_slot_active(
         WorkspaceSlotSuspendedError: the workspace is suspended and the caller
             is not let through.
     """
-    if not workspace_slots_enforced():
+    if policy is SlotPolicy.REVOCATION or not workspace_slots_enforced():
         return
+    # A wrong type is a programming error (TypeError): fail closed.
     workspace_id = _workspace_id_of(workspace_or_id)
     if workspace_id is None or not await slot_suspended(db, workspace_id):
         return
     if outsider or user_id is None:
         _log_refusal(workspace_id, user_id, audience="outsider", policy=policy)
         raise WorkspaceSlotSuspendedError.for_outsider()
-    owner_user_id: str | None
-    if isinstance(workspace_or_id, (UUID, str)):
+    owner_user_id = (
+        workspace_or_id.owner_user_id if isinstance(workspace_or_id, Workspace) else None
+    )
+    if owner_user_id is None:
+        # An id, or a row without its owner loaded: read it, never guess.
         owner_user_id = await db.scalar(
             select(Workspace.owner_user_id).where(Workspace.id == workspace_id)
         )
-    else:
-        owner_user_id = getattr(workspace_or_id, "owner_user_id", None)
     if owner_user_id is not None and owner_user_id == user_id:
         # Only the enum member lets the owner through; anything else fails closed.
         if policy is SlotPolicy.OWNER_MANAGEMENT:

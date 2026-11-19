@@ -470,8 +470,11 @@ async def test_resource_tokens_are_refused_for_a_suspended_workspace(world: Worl
         await _enforce_workspace_membership(w.session, request, token, context)
 
     with _mode("enforce"):
-        with pytest.raises(WorkspaceSlotSuspendedError):
+        with pytest.raises(WorkspaceSlotSuspendedError) as exc:
             await ingest("s")
+        # The token's holder learns nothing: no workspace id, no manage URL,
+        # although the token's creator is the owner.
+        assert exc.value.details == {"gate": "workspace_slot"}
         await ingest("k")
     with _mode("off"):
         await ingest("s")
@@ -595,7 +598,7 @@ async def test_the_oidc_inspection_reports_nothing_usable(world: World) -> None:
     assert suspended.status_code == 200, suspended.text
     body = suspended.json()
     assert body["resource"]["permissions"] == {"read": False, "sync.manage": False}
-    assert body["workspace_permissions"]["billing.manage"] is True
+    assert body["workspace_permissions"] == {"billing.manage": True, "usage.read": False}
     assert served.status_code == 200, served.text
     assert served.json()["resource"]["permissions"].get("read") is True
 
@@ -664,7 +667,9 @@ async def test_sleep_skips_a_suspended_workspace(world: World) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_revoking_a_credential_works_for_the_owner_only(world: World) -> None:
+async def test_revoking_a_credential_is_never_blocked(world: World) -> None:
+    """REVOCATION: the route's own authorization decides, as for an active
+    workspace — the owner, an admin, and a member for their own key."""
     import httpx
 
     from api.main import app
@@ -691,21 +696,315 @@ async def test_revoking_a_credential_works_for_the_owner_only(world: World) -> N
             yield s
             await s.commit()
 
-    url = f"/api/v1/workspaces/{w.ws['s']}/members/{w.member}/credentials/api-key"
+    base = f"/api/v1/workspaces/{w.ws['s']}/members/{w.member}/credentials"
     app.dependency_overrides[get_db] = _db
+    results = []
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://t"
         ) as client:
-            await _key()
             with _mode("enforce"):
-                app.dependency_overrides[require_session_auth] = lambda: {"user_id": w.admin}
-                refused = await client.delete(url)
-                app.dependency_overrides[require_session_auth] = lambda: {"user_id": w.owner}
-                revoked = await client.delete(url)
+                for caller in (w.admin, w.owner):
+                    await _key()
+                    app.dependency_overrides[require_session_auth] = lambda c=caller: {"user_id": c}
+                    results.append(await client.delete(f"{base}/api-key"))
+                # A member revoking their own key (the session self-path).
+                own = await _key()
+                principal = {"user_id": w.member, "sub": w.member, "auth_type": "session"}
+                from auth.dependencies import get_user_from_api_key_or_session
+
+                app.dependency_overrides[get_user_from_api_key_or_session] = lambda: principal
+                results.append(await client.delete(f"{base}/api-keys/{own}"))
+                # Minting stays blocked.
+                app.dependency_overrides[require_session_auth] = lambda: {"user_id": w.member}
+                minted = await client.post(f"{base}/api-key/regenerate")
     finally:
         app.dependency_overrides.clear()
-    assert refused.status_code == 403, refused.text
-    assert refused.json()["error"] == "SLOT-001"
-    assert revoked.status_code == 200, revoked.text
-    assert revoked.json()["status"] == "deleted"
+    for resp in results:
+        assert resp.status_code == 200, resp.text
+    assert minted.status_code == 403, minted.text
+    assert minted.json()["error"] == "SLOT-001"
+
+
+# ---------------------------------------------------------------------------
+# Review round: membership, health, jobs, notices, keys, admin, consent
+# ---------------------------------------------------------------------------
+
+
+async def test_an_invitation_to_a_suspended_workspace_is_refused(world: World) -> None:
+    from models.auth import WorkspaceInvitation
+    from services.invitation_service import InvitationService
+
+    w = world
+    token = uuid4().hex + uuid4().hex
+    w.session.add(
+        WorkspaceInvitation(
+            workspace_id=w.ws["s"], token=token, role=WorkspaceRole.MEMBER, invited_by=w.owner
+        )
+    )
+    await w.session.commit()
+    with _mode("enforce"), pytest.raises(WorkspaceSlotSuspendedError) as exc:
+        await InvitationService(w.session).accept_invitation(
+            token, w.outsider, f"{w.outsider}@example.test"
+        )
+    assert exc.value.details == {"gate": "workspace_slot"}
+    await w.session.rollback()
+    joined = await w.session.scalar(
+        select(WorkspaceMember.id).where(
+            WorkspaceMember.workspace_id == w.ws["s"], WorkspaceMember.user_id == w.outsider
+        )
+    )
+    assert joined is None
+    current = await w.session.scalar(
+        select(User.current_workspace_id).where(User.user_id == w.outsider)
+    )
+    assert current != w.ws["s"]
+
+
+async def test_memory_health_leaves_a_suspended_workspace_out(world: World) -> None:
+    from services.memory_health_service import MemoryHealthService
+
+    w = world
+    with _mode("enforce"):
+        scope = await MemoryHealthService(w.session)._resolve_caller_scope(w.owner)
+    assert w.ws["s"] not in scope.open_workspaces and w.ws["k"] in scope.open_workspaces
+    with _mode("off"):
+        scope = await MemoryHealthService(w.session)._resolve_caller_scope(w.owner)
+    assert {w.ws["s"], w.ws["k"]} <= scope.open_workspaces
+
+
+async def test_the_nightly_sleep_run_skips_a_suspended_workspace(world: World) -> None:
+    from tasks.sleep_tasks import sleep_targets_statement
+
+    w = world
+    with _mode("enforce"):
+        rows = (await w.session.execute(sleep_targets_statement())).all()
+    contexts = {row[2] for row in rows}
+    assert w.ctx["k1"] in contexts and w.ctx["s1"] not in contexts
+    with _mode("shadow"):
+        rows = (await w.session.execute(sleep_targets_statement())).all()
+    assert {w.ctx["k1"], w.ctx["s1"]} <= {row[2] for row in rows}
+
+
+async def test_no_countdown_mail_for_a_suspended_workspace(world: World) -> None:
+    from services import capacity_purge
+
+    w = world
+    ws = await w.session.get(Workspace, w.ws["f"])
+    assert ws is not None
+    ws.capacity_locked_since = datetime(2031, 4, 1, 12, 0, 0)  # 30 days before T0
+    await w.session.commit()
+    email = AsyncMock()
+    try:
+        with (
+            _mode("enforce"),
+            patch.object(capacity_purge, "capacity_lock_state", AsyncMock(return_value=_lock())),
+        ):
+            counts = await capacity_purge.send_due_purge_notices(
+                w.session, now=T0, redis=AsyncMock(), email=email
+            )
+        assert counts.sent == 0 and counts.skipped >= 1
+        await w.session.refresh(ws)
+        assert (ws.capacity_purge_first_notice_at, ws.capacity_purge_final_notice_at) == (
+            None,
+            None,
+        )
+        assert not email.mock_calls
+    finally:
+        ws.capacity_locked_since = None
+        await w.session.commit()
+
+
+async def test_a_running_purge_stops_with_slot_suspended(world: World) -> None:
+    from models.auth import AuditLog
+    from services import capacity_purge
+    from services.context_service import ContextService, WorkspacePurgeReport
+
+    w = world
+    await _resume(w, "f")
+    ws = await w.session.get(Workspace, w.ws["f"])
+    assert ws is not None
+    ws.capacity_locked_since = datetime(2031, 3, 1, 12, 0, 0)
+    ws.capacity_purge_first_notice_at = datetime(2031, 3, 20, 12, 0, 0)
+    ws.capacity_purge_final_notice_at = datetime(2031, 3, 30, 12, 0, 0)
+    await w.session.commit()
+
+    async def purge(self, ws_id, *, actor, should_continue):  # noqa: ARG001
+        # The owner's allowance dropped while the purge ran.
+        w.session.add(
+            WorkspaceSlotSuspension(
+                workspace_id=ws_id, owner_user_id=w.owner, cause="admin_plan", suspended_at=T0
+            )
+        )
+        await w.session.flush()
+        assert await should_continue() is False
+        return WorkspacePurgeReport(0, 0, 0, 0, 0, aborted=True)
+
+    with (
+        _mode("enforce"),
+        patch.object(capacity_purge, "capacity_lock_state", AsyncMock(return_value=_lock())),
+        patch.object(capacity_purge, "_owner_contact", AsyncMock(return_value=None)),
+        patch.object(ContextService, "purge_workspace_data", purge),
+    ):
+        counts = await capacity_purge.purge_expired_workspaces(w.session, now=T0, email=AsyncMock())
+    assert counts.aborted == 1, counts
+    reasons = [
+        (row.user_metadata or {}).get("aborted_reason")
+        for row in (
+            await w.session.execute(
+                select(AuditLog).where(AuditLog.resource == f"workspace:{w.ws['f']}")
+            )
+        ).scalars()
+    ]
+    assert "slot_suspended" in reasons, reasons
+
+
+@contextlib.asynccontextmanager
+async def _client(w: World, overrides: dict) -> AsyncIterator[Any]:
+    import httpx
+
+    from api.main import app
+    from db.base import get_db
+
+    async def _db() -> AsyncIterator[AsyncSession]:
+        async with w.factory() as s:
+            yield s
+            await s.commit()
+
+    app.dependency_overrides[get_db] = _db
+    app.dependency_overrides.update(overrides)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_a_global_key_of_a_suspended_workspace_is_not_regenerated(world: World) -> None:
+    from auth.dependencies import require_session_auth
+    from models.auth import APIKey
+
+    w = world
+    key = APIKey(
+        user_id=w.owner,
+        name=f"slot-{uuid4().hex[:6]}",
+        key_hash=uuid4().hex + uuid4().hex,
+        key_prefix="kmc_" + uuid4().hex[:8],
+        workspace_id=w.ws["s"],
+    )
+    w.session.add(key)
+    await w.session.commit()
+    session = {require_session_auth: lambda: {"user_id": w.owner, "sub": w.owner}}
+    async with _client(w, session) as client:
+        with _mode("enforce"):
+            regenerated = await client.post(f"/api/v1/config/api-keys/{key.public_id}/regenerate")
+            deleted = await client.delete(f"/api/v1/config/api-keys/{key.public_id}")
+    assert regenerated.status_code == 403, regenerated.text
+    assert regenerated.json()["error"] == "SLOT-001"
+    assert deleted.status_code in (200, 204), deleted.text
+
+
+async def test_the_admin_user_page_loads_with_a_suspended_workspace(world: World) -> None:
+    from auth.dependencies import require_admin
+
+    w = world
+    admin = {require_admin: lambda: {"user_id": "operator", "role": "admin"}}
+    async with _client(w, admin) as client:
+        with _mode("enforce"):
+            resp = await client.get(f"/api/v1/admin/users/{w.owner}")
+    assert resp.status_code == 200, resp.text
+
+
+async def test_the_consent_page_keeps_the_other_workspaces_contexts(world: World) -> None:
+    from services.credential_default_context import readable_context_options
+
+    w = world
+    with _mode("enforce"):
+        options = await readable_context_options(w.session, user_id=w.owner)
+    ids = {o.context_id for o in options}
+    assert w.ctx["k1"] in ids and w.ctx["s1"] not in ids
+
+
+# ---------------------------------------------------------------------------
+# Owner management over REST
+# ---------------------------------------------------------------------------
+
+
+async def test_export_works_for_the_owner_only(world: World) -> None:
+    from auth.dependencies import get_user_from_api_key_or_session
+
+    w = world
+    url = f"/api/v1/contexts/{w.ctx['s1']}/export"
+    principals = {
+        "owner session": ({"user_id": w.owner, "auth_type": "session"}, 200),
+        "owner key": (
+            {"user_id": w.owner, "auth_type": "api_key", "api_key_workspace_id": w.ws["s"]},
+            200,
+        ),
+        "admin session": ({"user_id": w.admin, "auth_type": "session"}, 403),
+    }
+    for label, (principal, expected) in principals.items():
+        overrides = {get_user_from_api_key_or_session: lambda p=principal: p}
+        async with _client(w, overrides) as client:
+            with _mode("enforce"):
+                resp = await client.get(url)
+        assert resp.status_code == expected, (label, resp.text)
+        if expected == 403:
+            assert resp.json()["error"] == "SLOT-001", label
+
+
+async def test_switching_away_works_and_switching_to_a_suspended_workspace_is_refused(
+    world: World,
+) -> None:
+    w = world
+    with (
+        _mode("enforce"),
+        patch(
+            "api.routes.workspaces.get_current_user",
+            AsyncMock(return_value={"user_id": w.owner}),
+        ),
+    ):
+        async with _client(w, {}) as client:
+            away = await client.put(f"/api/v1/workspaces/{w.ws['k']}/switch")
+            into = await client.put(f"/api/v1/workspaces/{w.ws['s']}/switch")
+    assert away.status_code == 200, away.text
+    assert into.status_code == 403, into.text
+    assert into.json()["error"] == "SLOT-001"
+
+
+async def test_billing_handoff_passes_the_gate_for_the_owner_only(world: World) -> None:
+    from auth.dependencies import require_session_auth
+
+    w = world
+    body = {"workspace_id": str(w.ws["s"])}
+    outcomes = {}
+    for caller in (w.owner, w.admin):
+        overrides = {require_session_auth: lambda c=caller: {"user_id": c, "sub": c}}
+        async with _client(w, overrides) as client:
+            with _mode("enforce"):
+                outcomes[caller] = await client.post("/api/v1/billing/handoff", json=body)
+    # The owner is never refused by the gate (the handoff itself may need
+    # billing settings this test does not configure).
+    owner = outcomes[w.owner]
+    assert owner.status_code != 403 or owner.json().get("error") != "SLOT-001", owner.text
+    assert outcomes[w.admin].status_code == 403, outcomes[w.admin].text
+
+
+async def test_the_owner_deletes_a_suspended_workspace_and_an_admin_cannot(world: World) -> None:
+    w = world
+    for caller, expected in ((w.admin, 403), (w.owner, 204)):
+        with (
+            _mode("enforce"),
+            patch(
+                "api.routes.workspaces.get_current_user",
+                AsyncMock(return_value={"user_id": caller}),
+            ),
+        ):
+            async with _client(w, {}) as client:
+                resp = await client.delete(f"/api/v1/workspaces/{w.ws['s']}")
+        assert resp.status_code == expected, (caller, resp.text)
+    w.session.expire_all()
+    deleted = await w.session.scalar(select(Workspace.deleted_at).where(Workspace.id == w.ws["s"]))
+    assert deleted is not None

@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.dependencies import WorkspaceOwner
+from auth.dependencies import WorkspaceOwner, WorkspaceOwnerRevocation
 from auth.observation_credentials import (
     OBSERVATION_KEY_DEFAULT_TTL_DAYS,
     OBSERVATION_KEY_MAX_TTL_DAYS,
@@ -237,7 +237,7 @@ async def rotate_observation_credential(
 @router.delete("/{credential_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def revoke_observation_credential(
     credential_id: ObservationCredentialPublicId,
-    owner: WorkspaceOwner,
+    owner: WorkspaceOwnerRevocation,
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Revoke a credential (revoking it again is a no-op).

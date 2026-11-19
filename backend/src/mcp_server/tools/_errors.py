@@ -189,11 +189,9 @@ _REFUSAL_HELP: dict[str, str] = {
         "The workspace is over its Free plan capacity. list, forget, delete_context, "
         "delete_file and get_usage still work; remove data or re-subscribe from the web UI."
     ),
-    # #2918: the real help is built per refusal (``_slot_help``); this is the fallback.
-    "workspace_suspended": (
-        "The workspace is suspended because its owner has more workspaces than their plan "
-        "allows; its data is kept. The owner can resume it from the account page."
-    ),
+    # #2918: the owner's and a member's help is built per refusal
+    # (``_slot_help``); a caller outside the workspace learns nothing more.
+    "workspace_suspended": "The workspace that holds this content is suspended.",
 }
 
 

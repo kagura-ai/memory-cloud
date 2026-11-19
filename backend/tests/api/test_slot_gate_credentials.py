@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import pytest
 
+from models.auth import Workspace
 from utils.exceptions import WorkspaceSlotSuspendedError
 
 
@@ -46,7 +47,7 @@ async def test_a_management_grant_is_refused_for_a_suspended_workspace(mode, ref
     from auth import management_grants
 
     wid, resource_id, ctx_id, endpoint_id = uuid4(), uuid4(), uuid4(), uuid4()
-    workspace = SimpleNamespace(id=wid, deleted_at=None, plan_name="pro", owner_user_id="o")
+    workspace = Workspace(id=wid, name="w", plan_name="pro", owner_user_id="o")
     member = SimpleNamespace(role="owner")
     resource = SimpleNamespace(id=resource_id, resource_id="res")
     context = SimpleNamespace(id=ctx_id, is_private=False, is_public=True, resource_id="res")
@@ -146,7 +147,7 @@ async def test_the_public_context_info_is_refused_in_the_redacted_form(mode, ref
         created_at=None,
         updated_at=None,
     )
-    workspace = SimpleNamespace(id=wid, owner_user_id="o", plan_name="pro")
+    workspace = Workspace(id=wid, name="w", owner_user_id="o", plan_name="pro")
     db = MagicMock()
     db.get = AsyncMock(side_effect=[context, workspace])
     with (

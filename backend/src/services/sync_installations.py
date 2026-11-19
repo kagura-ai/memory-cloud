@@ -172,9 +172,9 @@ async def revoke_authorization(
 ) -> SyncAuthorizationView:
     """Withdraw unused consent; active installations require their separate unlink operation.
 
-    #2918: revoking stays possible for the owner of a slot-suspended workspace.
+    #2918: revoking access is never blocked by a slot suspension.
     """
-    async with sync_authority(db, wid, principal, slot=SlotPolicy.OWNER_MANAGEMENT) as authority:
+    async with sync_authority(db, wid, principal, slot=SlotPolicy.REVOCATION) as authority:
         approval = await _approval(db, wid, authorization_id)
         if approval.used_at is not None:
             raise ConflictError("Authorization was consumed; unlink the installation instead")

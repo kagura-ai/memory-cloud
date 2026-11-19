@@ -964,9 +964,9 @@ async def delete_api_key(
 
     # Permission check
     await check_permission(service, user["user_id"], workspace_id, user_id, "delete")
-    # #2918: revoking stays possible for the owner of a slot-suspended workspace.
+    # #2918: revoking access is never blocked by a slot suspension.
     await ensure_slot_active(
-        db, workspace_id, user_id=user["user_id"], policy=SlotPolicy.OWNER_MANAGEMENT
+        db, workspace_id, user_id=user["user_id"], policy=SlotPolicy.REVOCATION
     )
 
     # Get and delete key
@@ -1051,8 +1051,8 @@ async def delete_api_key_by_id(
             workspace_id,
             db,
             session_required_role=WorkspaceRole.OWNER,
-            # #2918: revoking stays possible for the owner of a suspended workspace.
-            slot=SlotPolicy.OWNER_MANAGEMENT,
+            # #2918: revoking access is never blocked by a slot suspension.
+            slot=SlotPolicy.REVOCATION,
         )
         if user_id != caller_id:
             # Cross-member revoke is owner-provisioned; restrict target role.
@@ -1072,10 +1072,8 @@ async def delete_api_key_by_id(
                 message="You can only delete your own API keys in a session. "
                 "To revoke another member's key, use a workspace-owner API key."
             )
-        # #2918: revoking stays possible for the owner of a suspended workspace.
-        await ensure_slot_active(
-            db, workspace_id, user_id=caller_id, policy=SlotPolicy.OWNER_MANAGEMENT
-        )
+        # #2918: revoking access is never blocked by a slot suspension.
+        await ensure_slot_active(db, workspace_id, user_id=caller_id, policy=SlotPolicy.REVOCATION)
 
     from sqlalchemy import and_, select
 
@@ -1463,9 +1461,9 @@ async def delete_oauth_app(
 
     if not can_delete:
         raise AuthorizationError(message="Not authorized to delete OAuth app")
-    # #2918: revoking stays possible for the owner of a slot-suspended workspace.
+    # #2918: revoking access is never blocked by a slot suspension.
     await ensure_slot_active(
-        db, workspace_id, user_id=user["user_id"], policy=SlotPolicy.OWNER_MANAGEMENT
+        db, workspace_id, user_id=user["user_id"], policy=SlotPolicy.REVOCATION
     )
 
     # Get and delete app
