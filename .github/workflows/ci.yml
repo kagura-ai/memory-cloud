@@ -652,8 +652,11 @@ jobs:
             echo "API_KEY_SECRET=$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
             echo "AUDIT_HMAC_KEY=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
             echo "E2E_ADMIN_PASSWORD=Ci-$(python -c 'import secrets; print(secrets.token_urlsafe(18))')-9X"
-            echo "E2E_SLOT_OWNER_PASSWORD=Ci-$(python -c 'import secrets; print(secrets.token_urlsafe(18))')-9X"
           } >> "$GITHUB_ENV"
+          # #2918: the slot owner's password, masked in the job log.
+          SLOT_OWNER_PASSWORD="Ci-$(python -c 'import secrets; print(secrets.token_urlsafe(18))')-9X"
+          echo "::add-mask::$SLOT_OWNER_PASSWORD"
+          echo "E2E_SLOT_OWNER_PASSWORD=$SLOT_OWNER_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Migrate schema
         run: cd backend && alembic upgrade head
