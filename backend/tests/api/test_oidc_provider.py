@@ -761,3 +761,73 @@ def test_operator_client_revocation_disables_already_issued_tokens(api, store):
         ).status_code
         == 401
     )
+
+
+class _NoDatabase:
+    def __enter__(self):
+        raise AssertionError("a malformed request reached the database")
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize(
+    "where", ["token-form", "token-client-credentials", "authorize-query", "revoke-form"]
+)
+def test_nul_byte_in_a_parameter_is_a_malformed_request(api, monkeypatch, caplog, where):
+    """#2946: PostgreSQL rejects a NUL in text; refuse it as 400 before any lookup, never 503."""
+    monkeypatch.setattr(oidc, "get_sync_session", _NoDatabase)
+    bad = CLIENT + "\x00x"
+    with caplog.at_level(logging.WARNING):
+        if where == "token-form":
+            response = api.post(
+                "/oidc/token",
+                data={"grant_type": "refresh_token", "client_id": bad, "refresh_token": "x"},
+            )
+        elif where == "token-client-credentials":
+            response = api.post(
+                "/oidc/token", data={"grant_type": "client_credentials", "client_id": bad}
+            )
+        elif where == "authorize-query":
+            _, params = authorization_params(client_id=bad)
+            response = api.get("/oidc/authorize", params=params)
+        else:
+            response = api.post("/oidc/revoke", data={"token": "x", "client_id": bad})
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == "invalid_request"
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.parametrize("path", ["/oidc/token", "/oidc/revoke"])
+@pytest.mark.parametrize("raw", [CLIENT.encode() + b"\x00x:" + SECRET.encode(), b"\xff\xfe:secret"])
+def test_malformed_basic_credentials_are_invalid_client(api, monkeypatch, caplog, path, raw):
+    """#2946: a NUL or non-UTF-8 Basic header is invalid_client (401), never 503."""
+    import base64
+
+    from auth.oidc_server import IdentityServer
+
+    def no_lookup(self, client_id):
+        raise AssertionError("a malformed Basic header reached the client lookup")
+
+    monkeypatch.setattr(IdentityServer, "query_client", no_lookup)
+    header = {"Authorization": "Basic " + base64.b64encode(raw).decode()}
+    data = (
+        {"grant_type": "refresh_token", "refresh_token": "x"}
+        if path == "/oidc/token"
+        else {"token": "x"}
+    )
+    with caplog.at_level(logging.WARNING):
+        response = api.post(path, headers=header, data=data)
+    assert response.status_code == 401, response.text
+    assert response.json()["error"] == "invalid_client"
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_query_client_never_sends_a_nul_byte_to_the_database():
+    from auth.oidc_server import IdentityServer
+
+    class NoDatabase:
+        def scalar(self, _statement):
+            raise AssertionError("query sent to the database")
+
+    assert IdentityServer.query_client(SimpleNamespace(db=NoDatabase()), "client\x00") is None

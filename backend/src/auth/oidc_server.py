@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from auth.oauth2_server import authenticate_client_secret_basic
 from auth.oidc_config import OIDCConfig
 from auth.oidc_logging import install_oidc_log_redaction
 from auth.starlette_oauth2_request import StarletteOAuth2Request
@@ -244,6 +245,9 @@ class IdentityServer(AuthorizationServer):
         self.persist_revocation = False
         self.auth_time: int = 0
         self.session_live: Callable[[], bool] = lambda: False
+        # Authlib's own Basic decoder lets a non-UTF-8 or NUL header escape as an
+        # exception (503); the strict one answers invalid_client (#2778, #2946).
+        self.register_client_auth_method("client_secret_basic", authenticate_client_secret_basic)
         self.register_token_generator("default", self.generate_identity_token)
         self.register_grant(
             IdentityAuthorizationCodeGrant, [CodeChallenge(required=True), IdentityCode(self)]
@@ -251,6 +255,8 @@ class IdentityServer(AuthorizationServer):
         self.register_grant(IdentityRefreshGrant)
 
     def query_client(self, client_id: str) -> Any:
+        if "\x00" in client_id:  # PostgreSQL text cannot hold it (#2946)
+            return None
         return self.db.scalar(
             select(OIDCClient)
             .where(OIDCClient.client_id == client_id, OIDCClient.revoked_at.is_(None))

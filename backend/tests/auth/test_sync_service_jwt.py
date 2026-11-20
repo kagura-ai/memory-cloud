@@ -168,3 +168,16 @@ def test_key_material_fingerprint_is_independent_of_alias_and_integer_padding(ke
     except ValueError:
         return  # Refusing noncanonical integers is also safe.
     assert fingerprint == key_fingerprint(document)
+
+
+def test_nul_byte_in_kid_is_rejected_before_any_key_lookup():
+    """#2946: the kid selects a key row in PostgreSQL, which cannot hold a NUL."""
+
+    def segment(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    token = ".".join(
+        [segment({"alg": "RS256", "kid": "key\u0000x"}), segment({"iss": "client"}), "c2ln"]
+    )
+    with pytest.raises((InvalidAssertion, ValueError)):
+        assertion_header(token)

@@ -6,7 +6,8 @@ import logging
 import re
 from typing import Any
 
-_CREDENTIAL = re.compile(r"(kmc_oidc_(?:code|at|rt)_)[A-Za-z0-9_-]+")
+# OIDC codes / access / refresh tokens and sync service access tokens (#2946).
+_CREDENTIAL = re.compile(r"(kmc_oidc_(?:code|at|rt)_|kmc_sync_at_)[A-Za-z0-9_-]+")
 _AUTHLIB_GRANT_LOGGERS = (
     "authlib.oauth2.rfc6749.grants.authorization_code",
     "authlib.oauth2.rfc6749.grants.refresh_token",
@@ -14,7 +15,7 @@ _AUTHLIB_GRANT_LOGGERS = (
 
 
 def redact_oidc_credentials(text: str) -> str:
-    """Scrub only this provider's codes/access/refresh tokens from rendered text."""
+    """Scrub this provider's codes/access/refresh tokens and sync access tokens."""
     return _CREDENTIAL.sub(r"\1[redacted]", text)
 
 

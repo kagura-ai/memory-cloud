@@ -42,8 +42,12 @@ from models.sync_installation import SYNC_OPERATIONS, SyncInstallation, SyncServ
 from services.integration_entitlements import paid_integration_write
 from utils.datetime import utcnow
 from utils.db_helpers import is_lock_not_available
+from utils.text_guard import has_nul
 
 TOKEN_PATTERN = re.compile(r"kmc_sync_at_[A-Za-z0-9_-]{43}\Z")
+# A token's created_at is the minting instance's clock; another instance may run a
+# little behind it. Tolerate that much before treating the row as from the future (#2946).
+TOKEN_CLOCK_SKEW = timedelta(seconds=30)
 
 
 class SyncCredentialError(ValueError):
@@ -268,7 +272,7 @@ class CredentialAuthority:
                 and (
                     self.token.revoked_at is not None
                     or now >= self.token.expires_at
-                    or self.token.created_at > now
+                    or self.token.created_at > now + TOKEN_CLOCK_SKEW
                     or self.token.expires_at - self.token.created_at != timedelta(seconds=300)
                     or self.token_identity() != self.token_snapshot
                 )
@@ -363,6 +367,8 @@ def _audit(db: AsyncSession, authority: CredentialAuthority, action: str) -> Non
 
 async def issue_token(db: AsyncSession, form: dict[str, str]) -> dict[str, Any]:
     """Consume one client assertion and atomically issue paid installation authority."""
+    if has_nul(form.items()):  # the route refuses it first; keep the service safe on its own
+        raise SyncCredentialError("invalid_request", 400)
     if (
         set(form)
         != {

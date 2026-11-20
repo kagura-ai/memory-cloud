@@ -50,6 +50,7 @@ from utils.datetime import utcnow
 from utils.exceptions import MemoryCloudException
 from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
+from utils.text_guard import has_nul
 
 router = APIRouter(tags=["oidc"])
 logger = get_logger(__name__)
@@ -103,6 +104,8 @@ def _query_valid(request: Request) -> bool:
         return False
     if any(len(params.getlist(key)) != 1 for key in params):
         return False
+    if has_nul(params.multi_items()):
+        return False
     # These optional request modes are not implemented by this first-party profile.
     return params.get("response_mode", "query") == "query" and not set(params) & {
         "request",
@@ -127,7 +130,7 @@ async def _load_form(request: Request) -> dict[str, str] | None:
     except (ValueError, UnicodeError):
         return None
     result = dict(items)
-    if len(result) != len(items):
+    if len(result) != len(items) or has_nul(items):
         return None
     request.state.form_data = result
     request.state.form_items = items
