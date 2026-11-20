@@ -42,6 +42,7 @@ from models.sync_installation import SYNC_OPERATIONS, SyncInstallation, SyncServ
 from services.integration_entitlements import paid_integration_write
 from utils.datetime import utcnow
 from utils.db_helpers import is_lock_not_available
+from utils.text_guard import has_nul
 
 TOKEN_PATTERN = re.compile(r"kmc_sync_at_[A-Za-z0-9_-]{43}\Z")
 # A token's created_at is the minting instance's clock; another instance may run a
@@ -366,8 +367,8 @@ def _audit(db: AsyncSession, authority: CredentialAuthority, action: str) -> Non
 
 async def issue_token(db: AsyncSession, form: dict[str, str]) -> dict[str, Any]:
     """Consume one client assertion and atomically issue paid installation authority."""
-    if any("\x00" in key or "\x00" in value for key, value in form.items()):
-        raise SyncCredentialError("invalid_request", 400)  # PostgreSQL text cannot hold it
+    if has_nul(form.items()):  # the route refuses it first; keep the service safe on its own
+        raise SyncCredentialError("invalid_request", 400)
     if (
         set(form)
         != {
