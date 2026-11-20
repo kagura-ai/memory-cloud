@@ -32,7 +32,11 @@ from services.capacity_lock import CapacityPolicy
 from services.integration_entitlements import paid_integration_write
 from services.permission_service import PermissionService
 from services.sync_authority import SyncAuthority, audit_sync, registered_service, sync_authority
-from services.sync_provisioning import create_sync_target, installation_view
+from services.sync_provisioning import (
+    create_sync_target,
+    ensure_sync_target_collection,
+    installation_view,
+)
 from services.workspace_slot_gate import SlotPolicy
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException
@@ -405,7 +409,9 @@ async def activate_installation(
             audit_sync(db, authority, "sync.installation.activated", row.id, installation=row)
             await db.flush()
             result = await installation_view(db, row)
-        return result
+    # Committed above; outside the transaction and its fences (#2952).
+    await ensure_sync_target_collection()
+    return result
 
 
 async def inspect_installation(

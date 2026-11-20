@@ -22,6 +22,7 @@ from typing import Any, cast
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for deterministic point_id
 
 # Third-party imports (PEP8)
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import PointStruct, SparseVector
 from sqlalchemy import case, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +35,7 @@ from db.qdrant import (
     KAGURA_MEMORIES_VECTOR_NAME,
     delete_chunk_points,
     delete_points_from_qdrant,
+    ensure_kagura_memories_collection,
     get_qdrant_client,
 )
 from models.auth import Context, Workspace
@@ -1332,6 +1334,31 @@ class ResourceIndexer:
 
         return opaque_details, source_uri
 
+    async def _upsert_point(
+        self, collection_name: str, point: PointStruct, dimensions: int
+    ) -> None:
+        """Write one point; create the collection once if Qdrant says it is missing (#2952).
+
+        A context created without its model's collection (the first sync target
+        on a fresh vector store, or an ensure that failed) would otherwise fail
+        every event until an operator created it by hand. Qdrant answers 404
+        only for a missing collection on upsert.
+        """
+        try:
+            await self.qdrant_client.upsert(
+                collection_name=collection_name, points=[point], wait=True
+            )
+        except UnexpectedResponse as e:
+            if e.status_code != 404:
+                raise
+            logger.warning(
+                "qdrant_collection_missing_ensuring", collection=collection_name, dim=dimensions
+            )
+            await ensure_kagura_memories_collection(dimensions, collection_name)
+            await self.qdrant_client.upsert(
+                collection_name=collection_name, points=[point], wait=True
+            )
+
     async def _apply_upsert(
         self,
         event: ResourceEvent,
@@ -1557,11 +1584,7 @@ class ResourceIndexer:
         # lock, defer while a batch runs — forget's to the deferred point
         # delete drain (#2476), the drains' to the sweep.
         try:
-            await self.qdrant_client.upsert(
-                collection_name=collection_name,
-                points=[point],
-                wait=True,
-            )
+            await self._upsert_point(collection_name, point, len(embedding))
 
             # Code quality: Use info for important business events
             logger.info(
