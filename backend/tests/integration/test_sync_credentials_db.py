@@ -86,6 +86,37 @@ async def test_current_revocation_and_expiry_reject_an_existing_token(worker, ki
                 pytest.fail("Revoked authority reached the consumer")
 
 
+@pytest.mark.parametrize("behind, admitted", [(10, True), (30, True), (31, False)])
+async def test_token_minted_on_an_instance_whose_clock_runs_ahead(worker, behind, admitted):
+    """#2946: a validating instance a little behind the minting one still admits the token."""
+    result = await mint(worker)
+    iid = UUID(worker.target["installation_id"])
+    worker.store.clock.now -= timedelta(seconds=behind)
+    async with worker.factory() as db:
+        if admitted:
+            async with service.sync_token_boundary(
+                db, result["access_token"], iid, operation="results:read"
+            ) as authority:
+                assert authority.token is not None
+        else:
+            with pytest.raises(service.SyncCredentialError):
+                async with service.sync_token_boundary(
+                    db, result["access_token"], iid, operation="results:read"
+                ):
+                    pytest.fail("A token from beyond the skew allowance was admitted")
+
+
+@pytest.mark.parametrize("field", ["client_id", "client_assertion", "resource"])
+async def test_nul_byte_in_the_token_form_is_a_client_error(worker, field):
+    """#2946: PostgreSQL rejects a NUL in text; issuance answers 400, never an unhandled error."""
+    form = token_form(worker)
+    form[field] = form[field] + "\x00"
+    async with worker.factory() as db:
+        with pytest.raises(service.SyncCredentialError) as raised:
+            await service.issue_token(db, form)
+    assert raised.value.status == 400
+
+
 async def test_target_and_operation_substitution_cannot_expand_token(worker):
     result = await mint(worker)
     for iid, operation in [

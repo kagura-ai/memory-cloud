@@ -761,3 +761,47 @@ def test_operator_client_revocation_disables_already_issued_tokens(api, store):
         ).status_code
         == 401
     )
+
+
+@pytest.mark.parametrize("where", ["token-form", "token-basic", "authorize-query", "revoke-form"])
+def test_nul_byte_in_client_id_is_refused_before_the_database(api, monkeypatch, where):
+    """#2946: PostgreSQL rejects a NUL in text; the provider answers 400, never 503."""
+
+    class NoDatabase:
+        def __enter__(self):
+            raise AssertionError("a NUL-bearing request reached the database")
+
+        def __exit__(self, *exc):
+            return False
+
+    bad = CLIENT + "\x00x"
+    if where != "token-basic":
+        monkeypatch.setattr(oidc, "get_sync_session", NoDatabase)
+    if where == "token-form":
+        response = api.post(
+            "/oidc/token",
+            data={"grant_type": "refresh_token", "client_id": bad, "refresh_token": "x"},
+        )
+    elif where == "token-basic":
+        response = api.post(
+            "/oidc/token",
+            auth=(bad, SECRET),
+            data={"grant_type": "refresh_token", "refresh_token": "x"},
+        )
+    elif where == "authorize-query":
+        _, params = authorization_params(client_id=bad)
+        response = api.get("/oidc/authorize", params=params)
+    else:
+        response = api.post("/oidc/revoke", data={"token": "x", "client_id": bad})
+    assert response.status_code in (400, 401), response.text
+    assert response.json()["error"] in ("invalid_request", "invalid_client")
+
+
+def test_query_client_never_sends_a_nul_byte_to_the_database():
+    from auth.oidc_server import IdentityServer
+
+    class NoDatabase:
+        def scalar(self, _statement):
+            raise AssertionError("query sent to the database")
+
+    assert IdentityServer.query_client(SimpleNamespace(db=NoDatabase()), "client\x00") is None

@@ -251,6 +251,8 @@ class IdentityServer(AuthorizationServer):
         self.register_grant(IdentityRefreshGrant)
 
     def query_client(self, client_id: str) -> Any:
+        if "\x00" in client_id:  # e.g. from Basic auth; PostgreSQL text cannot hold it (#2946)
+            return None
         return self.db.scalar(
             select(OIDCClient)
             .where(OIDCClient.client_id == client_id, OIDCClient.revoked_at.is_(None))

@@ -83,3 +83,21 @@ def test_shared_structured_and_stdlib_chokepoints_scrub_oidc_prefixes():
     )
     handler.handle(record)
     assert _REFRESH not in stream.getvalue()
+
+
+def test_sync_service_access_tokens_are_scrubbed_like_oidc_credentials():
+    """#2946: a sync access token never reaches a log in clear."""
+    sync_token = "kmc_sync_at_" + "d" * 43
+    rendered = redact_oidc_credentials(f"token={sync_token} installation=abc")
+    assert sync_token not in rendered
+    assert "kmc_sync_at_[redacted]" in rendered
+    assert "installation=abc" in rendered
+    event = redact_pg_detail(None, "warning", {"event": "sync", "nested": [{"t": sync_token}]})
+    assert sync_token not in repr(event)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(_RedactingStdlibFormatter())
+    handler.handle(
+        logging.LogRecord("sync-test", logging.ERROR, __file__, 1, "failed %s", (sync_token,), None)
+    )
+    assert sync_token not in stream.getvalue()

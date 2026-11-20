@@ -97,11 +97,18 @@ def _csrf(request: Request, identity: tuple[str, str]) -> str:
     return hmac_sha256_hex(payload, get_settings().audit_hmac_key)
 
 
+def _has_nul(items: list[tuple[str, str]]) -> bool:
+    """PostgreSQL text cannot hold a NUL: refuse it as a malformed request (#2946)."""
+    return any("\x00" in key or "\x00" in value for key, value in items)
+
+
 def _query_valid(request: Request) -> bool:
     params = request.query_params
     if len(str(params)) > 8192 or len(params) > 32:
         return False
     if any(len(params.getlist(key)) != 1 for key in params):
+        return False
+    if _has_nul(params.multi_items()):
         return False
     # These optional request modes are not implemented by this first-party profile.
     return params.get("response_mode", "query") == "query" and not set(params) & {
@@ -127,7 +134,7 @@ async def _load_form(request: Request) -> dict[str, str] | None:
     except (ValueError, UnicodeError):
         return None
     result = dict(items)
-    if len(result) != len(items):
+    if len(result) != len(items) or _has_nul(items):
         return None
     request.state.form_data = result
     request.state.form_items = items
