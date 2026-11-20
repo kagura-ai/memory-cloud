@@ -31,6 +31,9 @@ from utils.datetime import utcnow
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def store(async_engine, monkeypatch):
+    # Activation ensures the vector collection after commit (#2952); keep these
+    # suites off the vector store (the lifecycle test asserts the call itself).
+    monkeypatch.setattr("services.sync_provisioning.ensure_kagura_memories_collection", AsyncMock())
     factory = async_sessionmaker(async_engine, expire_on_commit=False)
     prefix = "sync-" + uuid4().hex
     users = {

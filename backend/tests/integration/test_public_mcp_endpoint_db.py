@@ -43,6 +43,7 @@ from models.llm_call_log import LLMCallLog
 from models.memory import Memory, NeuralMemoryEdge
 from models.resource import Resource
 from services.llm_call_log_writer import LLMCallLogWriter
+from services.resource_indexer import resource_point_id
 from services.search_service import SearchService
 from utils.datetime import utcnow
 
@@ -64,6 +65,9 @@ class World:
     ws: dict[str, UUID] = field(default_factory=dict)
     ctx: dict[str, UUID] = field(default_factory=dict)
     mem: dict[str, UUID] = field(default_factory=dict)
+    # The Qdrant point id of each row, as the search returns it (#2953): a resource
+    # row's point is resource_point_id(), kept in summary_embedding_id.
+    point: dict[str, UUID] = field(default_factory=dict)
     slug: dict[str, str] = field(default_factory=dict)
     names: list[str] = field(default_factory=list)
 
@@ -83,6 +87,8 @@ def _memory(ws: UUID, ctx: UUID, author: str, summary: str, **kw: Any) -> Memory
     slug = kw.pop("slug", None)
     doc = kw.pop("doc", None)
     details = {"resource_id": slug, "doc_id": doc} if slug else {"note": "hand-written"}
+    if slug:
+        kw.setdefault("summary_embedding_id", resource_point_id(slug, doc, 1))
     return Memory(
         id=uuid4(),
         workspace_id=ws,
@@ -219,6 +225,7 @@ async def world(async_engine) -> AsyncIterator[World]:
         s.add_all(list(mems.values()))
         await s.flush()
         w.mem = {k: v.id for k, v in mems.items()}
+        w.point = {k: v.summary_embedding_id or v.id for k, v in mems.items()}
 
         def edge(user: str, src: str, dst: str, weight: float, edge_type: str = "related_to"):
             return NeuralMemoryEdge(
@@ -372,7 +379,7 @@ async def harness(world: World, monkeypatch) -> AsyncIterator[Harness]:
         counts[key] = counts.get(key, 0) + amount
         return counts[key]
 
-    every_id = list(world.mem.values())
+    every_id = list(world.point.values())  # what the real search returns (#2953)
 
     async def search(**kwargs: Any) -> list[dict[str, Any]]:
         return [

@@ -178,8 +178,43 @@ async def test_recall_projects_only_rows_the_predicate_returns(session, search) 
     assert kwargs["workspace_id"] == str(ENDPOINT.workspace_id)
     assert kwargs["context_id"] == str(ENDPOINT.context_id)
     assert kwargs["use_rerank"] is False
-    assert kwargs["k"] == 5
+    assert kwargs["k"] == 10  # twice k: a row hit twice is served once (#2953)
     assert kwargs["filters"] is None
+
+
+async def test_recall_resolves_resource_point_ids_to_their_rows(session, search) -> None:
+    """#2953: a resource hit carries the point id (summary_embedding_id), not memories.id."""
+    from services.resource_indexer import resource_point_id
+
+    row = _memory()
+    row.summary_embedding_id = resource_point_id("catalog", "sku-1", 1)
+    search.return_value = [
+        {"id": str(row.summary_embedding_id), "score": 0.9, "payload": {}},
+        {"id": str(row.id), "score": 0.5, "payload": {}},  # the same row twice: served once
+    ]
+    session.queue.append([row])
+    body = _body(await tools.public_recall(ENDPOINT, {"query": "shoes"}))
+    assert body["count"] == 1
+    assert body["results"][0]["memory_id"] == str(row.id)  # never the point id
+    assert body["results"][0]["score"] == 0.9
+    sql = _sql(session.statements[0])
+    assert "memories.summary_embedding_id IN" in sql and "memories.id IN" in sql
+    _assert_predicate(session.statements[0])
+
+
+async def test_recall_fills_k_when_a_row_is_hit_twice(session, search) -> None:
+    """#2953: a row hit by its point and its id is served once; the margin fills k."""
+    rows = [_memory(doc_id=f"sku-{i}") for i in range(3)]
+    rows[0].summary_embedding_id = uuid4()
+    search.return_value = [
+        {"id": str(rows[0].summary_embedding_id), "score": 0.9},
+        {"id": str(rows[0].id), "score": 0.8},
+        {"id": str(rows[1].id), "score": 0.7},
+        {"id": str(rows[2].id), "score": 0.6},
+    ]
+    session.queue.append(rows)
+    body = _body(await tools.public_recall(ENDPOINT, {"query": "q", "k": 2}))
+    assert [r["memory_id"] for r in body["results"]] == [str(rows[0].id), str(rows[1].id)]
 
 
 async def test_recall_optional_fields_are_omitted(session, search) -> None:
@@ -238,7 +273,7 @@ async def test_recall_tags_filter_all_and_rechecked(session, search) -> None:
     session.queue.append([m])
     await tools.public_recall(ENDPOINT, {"query": "q", "tags": ["shoes", "red"], "k": 3})
     assert search.await_args.kwargs["filters"] == {"tags": ["shoes", "red"], "tags_match": "all"}
-    assert search.await_args.kwargs["k"] == 3
+    assert search.await_args.kwargs["k"] == 6  # 2 * k (#2953)
     assert "memories.tags @> " in _sql(session.statements[0])
 
 

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.constants import EMBEDDING_MODEL_REGISTRY
 from config.plan_tiers import has_feature
 from config.settings import get_settings
+from db.qdrant import ensure_kagura_memories_collection, get_collection_name
 from mcp_server.public.publication import public_endpoints_enabled
 from models.auth import Context, Workspace
 from models.config import ContextSearchConfig
@@ -20,6 +21,36 @@ from services.capacity_lock import ensure_not_capacity_locked
 from services.content_chunk_policy import new_context_content_chunks
 from services.quota_service import QuotaService
 from utils.exceptions import ConflictError, FeatureNotAvailableError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def _target_embedding() -> tuple[str, int]:
+    """The embedding model and dimensions a new sync target's context gets."""
+    settings = get_settings()
+    model = settings.embedding_model
+    return model, EMBEDDING_MODEL_REGISTRY.get(model, (settings.embedding_dimensions,))[0]
+
+
+async def ensure_sync_target_collection() -> None:
+    """Ensure the vector collection a new sync target writes to (#2952).
+
+    The other context paths ensure it when they create the context; a sync
+    target's context is created inside the activation transaction, so this
+    runs after that commit. Best effort: a failure is logged, and the resource
+    indexer ensures the collection itself when an upsert finds it missing.
+    """
+    model, dimensions = _target_embedding()
+    collection = get_collection_name(model, dimensions)
+    try:
+        await ensure_kagura_memories_collection(dimensions, collection)
+    except Exception as exc:
+        logger.warning(
+            "sync_target_collection_ensure_failed",
+            collection=collection,
+            error_class=type(exc).__name__,
+        )
 
 
 async def create_sync_target(
@@ -56,8 +87,7 @@ async def create_sync_target(
     db.add(context)
     await db.flush()
     settings = get_settings()
-    model = settings.embedding_model
-    dimensions = EMBEDDING_MODEL_REGISTRY.get(model, (settings.embedding_dimensions,))[0]
+    model, dimensions = _target_embedding()
     chunks = await new_context_content_chunks(db, workspace.id, resource_context=True)
     db.add(
         ContextSearchConfig(

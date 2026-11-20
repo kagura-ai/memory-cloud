@@ -607,7 +607,9 @@ async def public_search(
 
         formatted_results = [
             PublicSearchResult(
-                memory_id=str(result["id"]),
+                # The hit id is the Qdrant point id; a resource point is not the
+                # row's id, the payload carries it (#2953).
+                memory_id=str(result.get("payload", {}).get("memory_id") or result["id"]),
                 content=result.get("payload", {}).get(
                     "summary", result.get("payload", {}).get("content", "")
                 ),

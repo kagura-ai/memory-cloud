@@ -12586,7 +12586,7 @@
           },
           "field_definitions": {
             "items": {
-              "$ref": "#/components/schemas/FieldDefinition"
+              "$ref": "#/components/schemas/StoredFieldDefinition"
             },
             "type": "array"
           },
@@ -13640,6 +13640,78 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "StoredFieldDefinition": {
+        "properties": {
+          "classification": {
+            "default": "public",
+            "pattern": "^(public|internal|pii|confidential)$",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "enum_values": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "example": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "index_hint": {
+            "default": "",
+            "maxLength": 100,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "required": {
+            "default": false,
+            "type": "boolean"
+          },
+          "type": {
+            "pattern": "^(text|number|boolean|date|array|object)$",
+            "type": "string"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ],
         "type": "object"
       },
       "SupersedeAcceptance": {

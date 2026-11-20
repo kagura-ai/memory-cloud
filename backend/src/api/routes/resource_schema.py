@@ -61,6 +61,18 @@ class FieldDefinition(BaseModel):
     required: bool = Field(False, description="Whether field is required")
 
 
+class StoredFieldDefinition(FieldDefinition):
+    """A stored field definition as the API returns it.
+
+    ``description`` is required when an owner writes a schema, but schemas
+    written by sync provisioning (``models.sync_feed_schemas.DEFINITIONS``)
+    carry none and must stay byte-identical for the feed's hash check, so the
+    response does not require it (#2951).
+    """
+
+    description: str = Field("", max_length=500, description="Human-readable description")
+
+
 class SchemaCreateRequest(BaseModel):
     """Request to create a new resource schema."""
 
@@ -75,7 +87,7 @@ class SchemaResponse(BaseModel):
 
     resource_id: str
     schema_version: int
-    field_definitions: list[FieldDefinition]
+    field_definitions: list[StoredFieldDefinition]
     created_at: str
 
 
