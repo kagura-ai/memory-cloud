@@ -4,6 +4,15 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.173.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.173.1) — 2026-11-20
+
+Follow-ups for the OIDC provider and sync credentials. No migration, no new setting.
+
+### Fixed
+- **Malformed client input on the OIDC endpoints answers 4xx, not 503** ([#2946](https://github.com/kagura-ai/memory-cloud/issues/2946)): a NUL byte in a form or query parameter of `/oidc/token`, `/oidc/revoke` or `/oidc/authorize` (including the sync `client_credentials` grant) is `400 invalid_request`, refused before any database lookup; a `client_secret_basic` header with a NUL or non-UTF-8 bytes is `401 invalid_client` (the identity server now uses the strict Basic decoder of the MCP OAuth server). Before, PostgreSQL rejected the NUL and the endpoint answered `503 temporarily_unavailable` with an error log.
+- **Sync access tokens tolerate clock skew between instances** ([#2946](https://github.com/kagura-ai/memory-cloud/issues/2946)): a token is no longer refused when the validating instance's clock is up to 30 seconds behind the instance that issued it. The 300-second lifetime is unchanged.
+- **Sync access tokens are redacted in logs** ([#2946](https://github.com/kagura-ai/memory-cloud/issues/2946)): `kmc_sync_at_` values are scrubbed in every log path, like the OIDC codes and tokens.
+
 ## [v0.173.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.173.0) — 2026-11-19
 
 Owner domain commands for a selected installation, edge certificate reports for custom domains (both off by default), and two rules for credentials that act for someone else: what a connector key can call, and how long a share key is honoured.
