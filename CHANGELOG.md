@@ -4,6 +4,15 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.173.2](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.173.2) — 2026-11-20
+
+Fixes found in an acceptance run of Kagura Public: public recall on resource data, and resources created by sync. No migration, no new setting.
+
+### Fixed
+- **Public MCP `recall` returned no results for resource data** ([#2953](https://github.com/kagura-ai/memory-cloud/issues/2953)): the public tool looked search hits up by `memories.id`, but a resource document's hit carries its resource point id (`memories.summary_embedding_id`), so every hit was dropped and every published endpoint answered `count: 0`. Hits now resolve by either id (still limited to the endpoint's published rows), each row is served once, and the result's `memory_id` is the row's id. The REST public search (`POST /api/v1/public/{context_id}/search`) now also answers the row's `memory_id` for resource hits instead of the point id.
+- **The schema route answered 500 for a sync-created resource** ([#2951](https://github.com/kagura-ai/memory-cloud/issues/2951)): `GET /api/v1/resources/{resource_id}/schema` required a `description` on every field, which the catalog schema stored by sync provisioning does not carry. In the response `description` is now optional (empty string); writing a schema still requires it. The stored definitions are unchanged.
+- **The first sync-created context had no vector collection** ([#2952](https://github.com/kagura-ai/memory-cloud/issues/2952)): activating a sync installation now ensures the Qdrant collection of the target's embedding model after it commits, and the resource indexer creates a missing collection once and retries the point instead of failing every event. On a fresh vector store the first runs are indexed without an operator step.
+
 ## [v0.173.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.173.1) — 2026-11-20
 
 Follow-ups for the OIDC provider and sync credentials. No migration, no new setting.
