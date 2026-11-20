@@ -182,6 +182,26 @@ async def test_recall_projects_only_rows_the_predicate_returns(session, search) 
     assert kwargs["filters"] is None
 
 
+async def test_recall_resolves_resource_point_ids_to_their_rows(session, search) -> None:
+    """#2953: a resource hit carries the point id (summary_embedding_id), not memories.id."""
+    from services.resource_indexer import resource_point_id
+
+    row = _memory()
+    row.summary_embedding_id = resource_point_id("catalog", "sku-1", 1)
+    search.return_value = [
+        {"id": str(row.summary_embedding_id), "score": 0.9, "payload": {}},
+        {"id": str(row.id), "score": 0.5, "payload": {}},  # the same row twice: served once
+    ]
+    session.queue.append([row])
+    body = _body(await tools.public_recall(ENDPOINT, {"query": "shoes"}))
+    assert body["count"] == 1
+    assert body["results"][0]["memory_id"] == str(row.id)  # never the point id
+    assert body["results"][0]["score"] == 0.9
+    sql = _sql(session.statements[0])
+    assert "memories.summary_embedding_id IN" in sql and "memories.id IN" in sql
+    _assert_predicate(session.statements[0])
+
+
 async def test_recall_optional_fields_are_omitted(session, search) -> None:
     bare = _memory(tags=[], source_uri="file:///etc/passwd", updated_at=None)
     observed = _memory(

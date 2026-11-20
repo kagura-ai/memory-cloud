@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from mcp.types import TextContent
-from sqlalchemy import event, func, select, union_all
+from sqlalchemy import event, func, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mcp_server.public.limits import (
@@ -275,18 +275,30 @@ async def public_recall(endpoint: ServingEndpoint, args: dict[str, Any]) -> Publ
             except (KeyError, ValueError):
                 continue
             scores.setdefault(memory_id, float(hit.get("score") or 0.0))
+        # A hit's id is the Qdrant point id: memories.id for a written memory,
+        # but the deterministic resource point (memories.summary_embedding_id)
+        # for a resource document, which is all a public endpoint serves (#2953).
         rows: dict[UUID, Memory] = {}
         if scores:
-            stmt = select(Memory).where(Memory.id.in_(list(scores)), public_rows(endpoint))
+            hit_ids = list(scores)
+            stmt = select(Memory).where(
+                or_(Memory.id.in_(hit_ids), Memory.summary_embedding_id.in_(hit_ids)),
+                public_rows(endpoint),
+            )
             if tags:
                 stmt = stmt.where(Memory.tags.contains(tags))
-            rows = {m.id: m for m in (await db.execute(stmt)).scalars()}
+            for m in (await db.execute(stmt)).scalars():
+                rows[m.id] = m
+                if m.summary_embedding_id is not None:
+                    rows[m.summary_embedding_id] = m
 
     results = []
-    for memory_id, score in scores.items():
-        memory = rows.get(memory_id)
-        if memory is None:
+    served: set[UUID] = set()
+    for hit_id, score in scores.items():
+        memory = rows.get(hit_id)
+        if memory is None or memory.id in served:
             continue
+        served.add(memory.id)
         results.append(_project(memory, score))
         if len(results) == k:
             break
