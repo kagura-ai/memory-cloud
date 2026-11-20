@@ -758,6 +758,14 @@ class RetiredVersionRow:
     collection: str
 
 
+def _dense_dimensions(point: PointStruct) -> int:
+    """The dense vector's length of a point built by ``build_resource_point``."""
+    vector = point.vector
+    if isinstance(vector, dict):
+        vector = vector.get(KAGURA_MEMORIES_VECTOR_NAME)
+    return len(vector) if isinstance(vector, list) else 0
+
+
 class ResourceIndexer:
     """Incremental indexer for public contexts.
 
@@ -1354,7 +1362,16 @@ class ResourceIndexer:
             logger.warning(
                 "qdrant_collection_missing_ensuring", collection=collection_name, dim=dimensions
             )
-            await ensure_kagura_memories_collection(dimensions, collection_name)
+            try:
+                await ensure_kagura_memories_collection(dimensions, collection_name)
+            except Exception as ensure_error:
+                # Another writer may have created it between the check and the
+                # create (409); the retried upsert tells whether it exists now.
+                logger.warning(
+                    "qdrant_collection_ensure_failed",
+                    collection=collection_name,
+                    error_class=type(ensure_error).__name__,
+                )
             await self.qdrant_client.upsert(
                 collection_name=collection_name, points=[point], wait=True
             )
@@ -2126,11 +2143,7 @@ class ResourceIndexer:
         if point.payload is not None:
             point.payload["user_id"] = memory.user_id
         try:
-            await self.qdrant_client.upsert(
-                collection_name=collection_name,
-                points=[point],
-                wait=True,
-            )
+            await self._upsert_point(collection_name, point, _dense_dimensions(point))
         except Exception as e:
             raise QdrantError(f"Failed to upsert point: {e}") from e
 

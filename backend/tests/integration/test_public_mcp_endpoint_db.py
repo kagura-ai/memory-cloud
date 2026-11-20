@@ -42,8 +42,8 @@ from models.auth import Context, User, Workspace, WorkspaceMember
 from models.llm_call_log import LLMCallLog
 from models.memory import Memory, NeuralMemoryEdge
 from models.resource import Resource
-from services.resource_indexer import resource_point_id
 from services.llm_call_log_writer import LLMCallLogWriter
+from services.resource_indexer import resource_point_id
 from services.search_service import SearchService
 from utils.datetime import utcnow
 

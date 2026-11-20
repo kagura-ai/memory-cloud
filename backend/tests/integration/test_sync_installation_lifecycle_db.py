@@ -100,8 +100,6 @@ async def test_activation_ensures_the_vector_collection_after_commit(
     """#2952: the first sync-created context must not leave its collection missing."""
     from unittest.mock import AsyncMock
 
-    from config.constants import EMBEDDING_MODEL_REGISTRY
-    from config.settings import get_settings
     from db.qdrant import get_collection_name
     from services import sync_provisioning
 
@@ -111,11 +109,8 @@ async def test_activation_ensures_the_vector_collection_after_commit(
     await paid(store)
     first = await http(store, "POST", "sync-installations", body=activation(approval))
     assert first.status_code == 201, first.text  # a failed ensure never fails activation
-    settings = get_settings()
-    dims = EMBEDDING_MODEL_REGISTRY.get(settings.embedding_model, (settings.embedding_dimensions,))[
-        0
-    ]
-    ensure.assert_awaited_once_with(dims, get_collection_name(settings.embedding_model, dims))
+    model, dims = sync_provisioning._target_embedding()
+    ensure.assert_awaited_once_with(dims, get_collection_name(model, dims))
     assert await targets(store) == (1, 1, 1)
 
 

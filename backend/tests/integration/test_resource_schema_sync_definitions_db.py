@@ -19,9 +19,9 @@ from auth.dependencies import get_user_from_api_key_or_session, require_workspac
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.auth import Context, Workspace, WorkspaceMember
+from models.management_schemas import digest
 from models.resource import Resource, ResourceSchema
 from models.sync_feed_schemas import DEFINITIONS, SCHEMA_HASH
-from models.management_schemas import digest
 
 
 def _session_override(engine):

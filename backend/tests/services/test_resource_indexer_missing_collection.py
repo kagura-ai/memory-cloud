@@ -57,3 +57,24 @@ async def test_a_second_404_after_the_ensure_propagates(monkeypatch):
     with pytest.raises(UnexpectedResponse):
         await _indexer(upsert)._upsert_point("c", POINT, 1024)
     assert upsert.await_count == 2
+
+
+async def test_a_failed_ensure_still_retries_the_upsert(monkeypatch):
+    """Another writer created the collection first (409 on create): the point still lands."""
+    ensure = AsyncMock(side_effect=RuntimeError("already exists"))
+    monkeypatch.setattr(resource_indexer, "ensure_kagura_memories_collection", ensure)
+    upsert = AsyncMock(side_effect=[_qdrant_error(404), None])
+    await _indexer(upsert)._upsert_point("c", POINT, 1024)
+    assert upsert.await_count == 2
+
+
+def test_dense_dimensions_reads_the_named_dense_vector():
+    from db.qdrant import KAGURA_MEMORIES_VECTOR_NAME
+    from services.resource_indexer import _dense_dimensions
+
+    point = PointStruct(
+        id="00000000-0000-0000-0000-000000000002",
+        vector={KAGURA_MEMORIES_VECTOR_NAME: [0.1] * 1024},
+        payload={},
+    )
+    assert _dense_dimensions(point) == 1024

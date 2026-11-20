@@ -262,7 +262,9 @@ async def public_recall(endpoint: ServingEndpoint, args: dict[str, Any]) -> Publ
             user_id=endpoint.owner_user_id,
             workspace_id=str(endpoint.workspace_id),
             context_id=str(endpoint.context_id),
-            k=k,
+            # A row can be hit twice (its resource point and its id); fetch a
+            # margin so serving each row once still fills k (#2953).
+            k=2 * k,
             use_rerank=False,
             filters={"tags": tags, "tags_match": "all"} if tags else None,
             search_mode=search_mode,

@@ -188,3 +188,19 @@ def test_a_session_does_not_skip_the_per_minute_bucket(user_id: str) -> None:
     assert response.json()["error"] == "RATE-001"
     rig.charge.assert_not_awaited()
     rig.search.return_value.hybrid_search.assert_not_awaited()
+
+
+def test_a_resource_point_hit_answers_the_row_memory_id() -> None:
+    """#2953: the point id of a resource document is not the row's id."""
+    rig = _Rig(None)
+    point_id, row_id = str(uuid4()), str(uuid4())
+    rig.search.return_value.hybrid_search = AsyncMock(
+        return_value=[
+            {"id": point_id, "score": 0.9, "payload": {"memory_id": row_id, "summary": "s"}},
+            {"id": row_id, "score": 0.5, "payload": {"summary": "written memory"}},
+        ]
+    )
+    response = rig.post(cookie=False)
+    assert response.status_code == 200, response.text
+    ids = [r["memory_id"] for r in response.json()["results"]]
+    assert ids == [row_id, row_id]
