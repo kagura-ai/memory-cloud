@@ -4,6 +4,20 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.174.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.174.0) — 2026-11-21
+
+The OIDC consent page in Japanese, more settings in the admin environment read, a hybrid recall that keeps answering when the self-hosted inference server is down, and an api image that applies Debian updates at build time. No migration, no new setting.
+
+### Added
+- **Japanese OIDC consent page** ([#2949](https://github.com/kagura-ai/memory-cloud/issues/2949)): the consent page renders in English or Japanese. The language comes from the `ui_locales` request parameter (a space-separated list in preference order; the first tag whose primary subtag is supported wins), then the signed-in account's saved language, then `Accept-Language`, then English. Unsupported or malformed tags, a `ui_locales` longer than 255 characters and an `Accept-Language` longer than 1024 characters are skipped. Discovery lists `ui_locales_supported`. An account's saved language is `en` unless the user chose another, so a relying party that wants the Japanese page passes `ui_locales=ja`.
+- **Sign-up, rewards and operations settings in the admin environment read** ([#2954](https://github.com/kagura-ai/memory-cloud/issues/2954)): `GET /api/v1/admin/environment` and the Environment page show three more categories: `signup` (`ALLOW_REGISTRATION`, `ENABLE_EMAIL_SIGNUP`, `ENABLE_PROVIDER_LINK_CONFIRMATION`, `ENABLE_BETA_INVITES`, `BETA_INVITE_QUOTA_PER_USER`), `rewards` (`ENABLE_REFERRALS` and the `REFERRAL_*` settings) and `operations` (`MCP_NOTICES_ENABLED`, `REQUIRE_DUAL_CONTROL_FORCE_TRANSFER`, `BM25_DRIFT_CRON_ENABLED`, `BM25_REVEAL_RATE_LIMIT_PER_HOUR`, `OPERATIONS_PROBE_INTERVAL_SECONDS`, `FILE_SCAN_ENABLED`, `SLEEP_LLM_FORCE_ENV`). They are admin-only (`GET /api/v1/config` does not serve them to non-admins) and read-only: the settings are still set through the environment and take effect on restart.
+
+### Changed
+- **The api image applies Debian updates at build time** ([#2962](https://github.com/kagura-ai/memory-cloud/issues/2962)): the `base` stage of `backend/Dockerfile` runs `apt-get upgrade -y`, so updates published since the upstream `python:3.11-slim` image was last rebuilt are included (today `zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1`, CVE-2026-85091). The upgrade runs when that layer is built: a build that reuses a cached layer keeps the packages of the build that made it, and `docker build --pull --no-cache` refreshes it. The first build of this version rebuilds the layer.
+
+### Fixed
+- **A hybrid recall failed with 500 when the self-hosted inference server could not be reached** ([#2957](https://github.com/kagura-ai/memory-cloud/issues/2957)): it now answers from keyword search with `degraded: true` and `degraded_reason: "embedding_unavailable"` instead of 500 `CFG-001`. "Cannot be reached" means a connection failure, or a 502 / 503 / 504 from a proxy in front of the server. The degrade log records the error class only. An explicit `search_mode="semantic"` still raises, and so does a server that answers 401 / 403, another 4xx or 500. There is no start-up probe, so a wrong `SELF_HOSTED_BASE_URL`, or a proxy pointing at a wrong upstream, now also degrades hybrid recalls instead of failing them.
+
 ## [v0.173.2](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.173.2) — 2026-11-20
 
 Fixes found in an acceptance run of Kagura Public: public recall on resource data, and resources created by sync. No migration, no new setting.
