@@ -895,8 +895,9 @@ class RecallResponse(BaseModel):
         default=None,
         description=(
             "Why the search degraded: 'embedding_unavailable' (the embedding "
-            "provider failed) or 'vector_search_unavailable' (the vector store "
-            "failed). Absent when the search ran normally."
+            "provider failed or the self-hosted inference server could not be "
+            "reached) or 'vector_search_unavailable' (the vector store failed). "
+            "Absent when the search ran normally."
         ),
     )
     # #1306: internal hand-off from MemoryService to the authorized bootstrap
