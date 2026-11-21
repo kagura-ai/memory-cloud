@@ -223,6 +223,7 @@ def test_api_base_upgrades_debian_packages() -> None:
     assert upgrades, "the base stage upgrades the packages the base image came with"
     for line in upgrades:
         # In the layer that refreshed the lists, and before they are removed.
+        assert "apt-get update" in line and "rm -rf /var/lib/apt/lists/*" in line, line
         assert line.index("apt-get update") < line.index("apt-get upgrade"), line
         assert line.index("apt-get upgrade") < line.index("rm -rf /var/lib/apt/lists/*"), line
     for target in ("dev", _API_SHIPPED):

@@ -18,7 +18,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.19 /uv /uvx /bin/
 
 # Install system dependencies. No compiler: every locked package ships a wheel.
 # The upgrade brings in the Debian updates published since the base image was
-# last rebuilt (#2962).
+# last rebuilt (#2962). It runs when this layer is built: a build that reuses
+# the cached layer keeps the packages of the build that made it.
 RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
