@@ -84,17 +84,17 @@ class TestTheLookup:
         below, above = (_sql(s) for s in statements)
         # The nearest ids on each side of the asked one share its longest
         # leading part, so one query walks down from it and one walks up.
-        assert f"memories.id >= '{low}' AND memories.id < '{asked}'" in below
-        assert "ORDER BY memories.id DESC LIMIT 10" in below
-        assert f"memories.id > '{asked}' AND memories.id <= '{high}'" in above
-        assert "ORDER BY memories.id ASC LIMIT 10" in above
+        assert below.count(f"memories.id >= '{low}' AND memories.id < '{asked}'") == 1
+        assert below.count("ORDER BY memories.id DESC LIMIT 10") == 1
+        assert above.count(f"memories.id > '{asked}' AND memories.id <= '{high}'") == 1
+        assert above.count("ORDER BY memories.id ASC LIMIT 10") == 1
         for sql in (below, above):
-            assert f"memories.context_id = '{context_id}'" in sql
-            assert f"memories.workspace_id = '{workspace_id}'" in sql
-            assert "memories.deleted_at IS NULL" in sql
+            assert sql.count(f"memories.context_id = '{context_id}'") == 1
+            assert sql.count(f"memories.workspace_id = '{workspace_id}'") == 1
+            assert sql.count("memories.deleted_at IS NULL") == 1
             # Plain columns: never the content or a whole row.
-            assert "memories.content" not in sql
-            assert "memories.summary" in sql
+            assert sql.count("memories.content") == 0
+            assert sql.count("memories.summary") == 1
 
     async def test_no_row_in_the_range_means_no_permission_or_lock_check(self):
         service, statements = _service([], [])
