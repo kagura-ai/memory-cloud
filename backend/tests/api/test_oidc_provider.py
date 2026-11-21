@@ -561,9 +561,9 @@ class _ConsentPage(HTMLParser):
             self.title += data
 
 
-def _consent_page(api) -> tuple[_ConsentPage, object]:
-    _, params = authorization_params()
-    page = api.get("/oidc/authorize", params=params)
+def _consent_page(api, headers: dict[str, str] | None = None, **changes: str):
+    _, params = authorization_params(**changes)
+    page = api.get("/oidc/authorize", params=params, headers=headers)
     assert page.status_code == 200, page.text
     parsed = _ConsentPage()
     parsed.feed(page.text)
@@ -575,12 +575,13 @@ def _csp(page) -> dict[str, list[str]]:
     return {name: values for name, *values in directives}
 
 
-def test_consent_page_escapes_client_name_account_and_query_values(api, store):
+@pytest.mark.parametrize("language", [{}, {"ui_locales": "ja"}], ids=["en", "ja"])
+def test_consent_page_escapes_client_name_account_and_query_values(api, store, language):
     with store.factory() as db:
         db.scalars(select(OIDCClient)).one().client_name = 'Shop <script>alert(1)</script> "x"'
         db.scalars(select(User)).one().name = '<img src=x onerror=alert(2)> "me"'
         db.commit()
-    _, params = authorization_params(state='"><script>alert(3)</script>')
+    _, params = authorization_params(state='"><script>alert(3)</script>', **language)
     page = api.get("/oidc/authorize", params=params)
     assert page.status_code == 200, page.text
     assert page.text.count("<script") == 0
@@ -601,10 +602,11 @@ def test_consent_page_escapes_client_name_account_and_query_values(api, store):
     assert re.findall(r"&(?!amp;)", raw_action) == []
 
 
-def test_consent_page_style_nonce_is_fresh_per_response_and_the_only_style_source(api):
+@pytest.mark.parametrize("language", [{}, {"ui_locales": "ja"}], ids=["en", "ja"])
+def test_consent_page_style_nonce_is_fresh_per_response_and_the_only_style_source(api, language):
     nonces = []
     for _ in range(2):
-        parsed, page = _consent_page(api)
+        parsed, page = _consent_page(api, **language)
         csp = _csp(page)
         (style,) = [attrs for tag, attrs in parsed.tags if tag == "style"]
         nonce = style["nonce"] or ""
@@ -617,8 +619,9 @@ def test_consent_page_style_nonce_is_fresh_per_response_and_the_only_style_sourc
     assert nonces[0] != nonces[1]
 
 
-def test_consent_page_loads_only_same_origin_images_and_no_script(api):
-    parsed, page = _consent_page(api)
+@pytest.mark.parametrize("language", [{}, {"ui_locales": "ja"}], ids=["en", "ja"])
+def test_consent_page_loads_only_same_origin_images_and_no_script(api, language):
+    parsed, page = _consent_page(api, **language)
     csp = _csp(page)
     assert csp == {
         "default-src": ["'none'"],
@@ -645,12 +648,20 @@ def test_consent_page_loads_only_same_origin_images_and_no_script(api):
     assert (repo / "frontend" / "src" / "app" / "icon.png").is_file()
 
 
-def test_consent_page_structure_is_accessible(api):
-    parsed, page = _consent_page(api)
+@pytest.mark.parametrize(
+    "language,lang,title",
+    [
+        ({}, "en", "Confirm sign in · Kagura Memory Cloud"),
+        ({"ui_locales": "ja"}, "ja", "サインインの確認 · Kagura Memory Cloud"),
+    ],
+    ids=["en", "ja"],
+)
+def test_consent_page_structure_is_accessible(api, language, lang, title):
+    parsed, page = _consent_page(api, **language)
     tags = [tag for tag, _ in parsed.tags]
     (html_attrs,) = [attrs for tag, attrs in parsed.tags if tag == "html"]
-    assert html_attrs["lang"] == "en"
-    assert parsed.title.strip() == "Confirm sign in · Kagura Memory Cloud"
+    assert html_attrs["lang"] == lang
+    assert parsed.title.strip() == title
     assert tags.count("main") == 1 and tags.count("h1") == 1
     (img,) = [attrs for tag, attrs in parsed.tags if tag == "img"]
     assert img["alt"] == ""  # decorative: the brand name follows as text
@@ -677,6 +688,189 @@ def _luminance(colour: str) -> float:
 def _contrast(a: str, b: str) -> float:
     high, low = sorted((_luminance(a), _luminance(b)), reverse=True)
     return (high + 0.05) / (low + 0.05)
+
+
+class _VisibleText(HTMLParser):
+    """The text a reader sees: every text node outside <style>, plus <title>."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.chunks: list[str] = []
+        self._style = False
+
+    def handle_starttag(self, tag, attrs):
+        self._style = tag == "style"
+
+    def handle_endtag(self, tag):
+        self._style = False
+
+    def handle_data(self, data):
+        if not self._style and data.strip():
+            self.chunks.append(" ".join(data.split()))
+
+
+def _visible(page) -> list[str]:
+    parsed = _VisibleText()
+    parsed.feed(page.text)
+    return parsed.chunks
+
+
+def _lang(page) -> str | None:
+    parsed = _ConsentPage()
+    parsed.feed(page.text)
+    (html_attrs,) = [attrs for tag, attrs in parsed.tags if tag == "html"]
+    return html_attrs["lang"]
+
+
+def _set_account_locale(store, locale: str) -> None:
+    with store.factory() as db:
+        db.scalars(select(User)).one().locale = locale
+        db.commit()
+
+
+_JA_PAGE = [
+    "サインインの確認 · Kagura Memory Cloud",
+    "Kagura Memory Cloud",
+    "Identity test にサインイン",
+    "Identity User",
+    "として続行します。",
+    "このアプリに次の操作を許可します:",
+    "KMC アカウントの識別",
+    "表示名とプロフィール画像の読み取り",
+    "ワークスペースのメンバーシップと権限の読み取り",
+    "続行",
+    "キャンセル",
+]
+
+_EN_PAGE = [
+    "Confirm sign in · Kagura Memory Cloud",
+    "Kagura Memory Cloud",
+    "Sign in to Identity test",
+    "Continue as",
+    "Identity User",
+    ".",
+    "Allow this application to:",
+    "Identify your KMC account",
+    "Read your display name and profile picture",
+    "Read your workspace memberships and permissions",
+    "Continue",
+    "Cancel",
+]
+
+
+def test_consent_page_ui_locales_ja_renders_fully_in_japanese(api):
+    """#2949: every visible string, the <title> and <html lang> are Japanese."""
+    _, page = _consent_page(api, ui_locales="ja")
+    assert _lang(page) == "ja"
+    assert _visible(page) == _JA_PAGE
+
+
+def test_consent_page_without_a_language_hint_is_english(api):
+    _, page = _consent_page(api)
+    assert _lang(page) == "en"
+    assert _visible(page) == _EN_PAGE
+
+
+def test_consent_page_ja_account_without_ui_locales_is_japanese(api, store):
+    _set_account_locale(store, "ja")
+    _, page = _consent_page(api)
+    assert _lang(page) == "ja"
+    assert _visible(page) == _JA_PAGE
+
+
+def test_consent_page_ui_locales_en_on_a_ja_account_is_english(api, store):
+    _set_account_locale(store, "ja")
+    _, page = _consent_page(api, ui_locales="en")
+    assert _lang(page) == "en"
+    assert _visible(page) == _EN_PAGE
+
+
+def test_consent_page_unsupported_ui_locales_falls_to_the_account_locale(api, store):
+    _set_account_locale(store, "ja")
+    _, page = _consent_page(api, ui_locales="fr de")
+    assert _lang(page) == "ja"
+    _set_account_locale(store, "en")
+    _, page = _consent_page(api, ui_locales="fr de")
+    assert _lang(page) == "en"
+
+
+def test_consent_page_ui_locales_first_supported_tag_wins(api):
+    _, page = _consent_page(api, ui_locales="fr ja")
+    assert _lang(page) == "ja"
+    assert _visible(page) == _JA_PAGE
+    _, page = _consent_page(api, ui_locales="fr-CA JA-jp en")
+    assert _lang(page) == "ja"
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        '"><script>alert(1)</script>',
+        "ja<b>x</b>",
+        "en' onload='x",
+        "fr " * 100 + "ja",
+        "zz-" + "q" * 300,
+    ],
+    ids=["markup", "tag-in-tag", "attribute", "oversized-list", "oversized-tag"],
+)
+def test_consent_page_junk_ui_locales_falls_back_cleanly(api, store, junk):
+    _set_account_locale(store, "ja")
+    _, page = _consent_page(api, ui_locales=junk)
+    assert page.status_code == 200
+    assert _lang(page) == "ja"
+    assert _visible(page) == _JA_PAGE
+    # Only the form action carries the query (percent-encoded, as before):
+    # the raw value reaches no text and no other attribute.
+    outside_action = re.sub(r'<form method="post" action="[^"]*">', "<form>", page.text)
+    assert outside_action.count(junk) == 0
+    assert outside_action.count("qqqq") == 0
+    assert outside_action.count("fr fr") == 0
+    assert page.text.count("<script") == 0
+    assert page.text.count("<b>") == 0
+
+
+def test_consent_page_en_account_with_accept_language_ja_stays_english(api):
+    # The account's saved language ("en" unless the user chose another)
+    # answers before Accept-Language.
+    _, page = _consent_page(api, headers={"Accept-Language": "ja"})
+    assert _lang(page) == "en"
+    assert _visible(page) == _EN_PAGE
+
+
+def test_consent_page_falls_back_to_the_japanese_account_label(api, store):
+    with store.factory() as db:
+        db.scalars(select(User)).one().name = None
+        db.commit()
+    _, page = _consent_page(api, ui_locales="ja")
+    assert "現在の KMC アカウント" in _visible(page)
+    _, page = _consent_page(api)
+    assert "your current KMC account" in _visible(page)
+
+
+def test_every_grantable_scope_has_an_english_and_a_japanese_permission_line():
+    from auth.oidc_server import IDENTITY_SCOPES
+    from utils.oidc_messages import OIDC_MESSAGES, get_oidc_messages
+
+    en = get_oidc_messages("en")["permissions"]
+    ja = get_oidc_messages("ja")["permissions"]
+    assert set(en) == set(IDENTITY_SCOPES)
+    assert set(ja) == set(IDENTITY_SCOPES)
+    for scope in IDENTITY_SCOPES:
+        assert ja[scope] and ja[scope] != en[scope]
+    # Same keys, nothing left in English on a ja page.
+    assert set(OIDC_MESSAGES) == {"en", "ja"}
+    assert set(OIDC_MESSAGES["en"]) == set(OIDC_MESSAGES["ja"])
+    for key, value in OIDC_MESSAGES["en"].items():
+        if key != "permissions" and any(ch.isalpha() for ch in value):
+            assert OIDC_MESSAGES["ja"][key] != value, key
+    assert get_oidc_messages("fr") is OIDC_MESSAGES["en"]
+
+
+def test_discovery_advertises_ui_locales_supported(api):
+    from utils.user_prefs import SUPPORTED_LOCALES
+
+    metadata = api.get("/oidc/.well-known/openid-configuration").json()
+    assert metadata["ui_locales_supported"] == list(SUPPORTED_LOCALES)
 
 
 def test_consent_page_text_contrast_is_at_least_4_5_to_1(api):

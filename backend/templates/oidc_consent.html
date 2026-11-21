@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{ locale }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/png" href="/icon.png">
-  <title>Confirm sign in · Kagura Memory Cloud</title>
+  <title>{{ messages.page_title }}</title>
   <style nonce="{{ style_nonce }}">
     :root { color-scheme: light; font-family: "Noto Sans JP", system-ui, sans-serif; color: #1e2923; background: #f6f8f6; }
     * { box-sizing: border-box; }
@@ -28,14 +28,14 @@
 <body>
   <main>
     <p class="brand"><img src="/icon.png" width="36" height="36" alt="">Kagura Memory Cloud</p>
-    <h1>Sign in to {{ client_name }}</h1>
-    <p class="account">Continue as <strong>{{ account }}</strong>.</p>
-    <h2>Allow this application to:</h2>
+    <h1>{{ messages.heading_before_client }}{{ client_name }}{{ messages.heading_after_client }}</h1>
+    <p class="account">{{ messages.account_before }}<strong>{{ account }}</strong>{{ messages.account_after }}</p>
+    <h2>{{ messages.permissions_heading }}</h2>
     <ul>{% for permission in permissions %}<li>{{ permission }}</li>{% endfor %}</ul>
     <form method="post" action="{{ action }}">
       <input type="hidden" name="csrf_token" value="{{ csrf }}">
-      <button class="primary" name="confirm" value="yes">Continue</button>
-      <button name="confirm" value="no">Cancel</button>
+      <button class="primary" name="confirm" value="yes">{{ messages.continue }}</button>
+      <button name="confirm" value="no">{{ messages.cancel }}</button>
     </form>
   </main>
 </body>
