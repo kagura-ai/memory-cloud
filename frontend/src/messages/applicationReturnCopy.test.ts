@@ -24,6 +24,7 @@ const KEYS = [
   "checkAgain",
   "dismiss",
   "nowOnPlan",
+  "checkFailed",
 ] as const;
 
 const FORBIDDEN = {
@@ -53,7 +54,11 @@ const FORBIDDEN = {
     /購入/,
     /課金/,
     /契約/,
-    /待/,
+    // A wait stated as a fact; "少し待ってから" (wait a moment, then try
+    // again) in checkFailed is an instruction, not a statement.
+    /待って(い|お)/,
+    /お待ち/,
+    /待機/,
     /必要/,
     /来ました/,
     /戻ってきた/,
@@ -71,7 +76,7 @@ const CATALOGUES = [
 ] as const;
 
 describe("application-return texts (#2950)", () => {
-  it.each(CATALOGUES)("%s has exactly the nine keys", (_locale, texts) => {
+  it.each(CATALOGUES)("%s has exactly the ten keys", (_locale, texts) => {
     expect(Object.keys(texts).sort()).toEqual([...KEYS].sort());
     for (const key of KEYS) expect(texts[key].trim()).not.toBe("");
   });
@@ -113,5 +118,6 @@ describe("application-return texts (#2950)", () => {
     expect(stated).toMatch(/Max/);
     expect(t("onPlan", { workspace: "Research", plan: "Max" })).toMatch(/Research/);
     expect(t("nowOnPlan", { plan: "Max" })).toMatch(/Max/);
+    expect(t("checkFailed").trim()).not.toBe("");
   });
 });

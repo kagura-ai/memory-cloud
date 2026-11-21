@@ -15,6 +15,7 @@ import {
   APPLICATION_RETURN_LIFETIME_MS,
   APPLICATION_RETURN_LOGIN_PATH,
   APPLICATION_RETURN_STORAGE_KEY,
+  APPLICATION_RETURN_TOP_PLAN,
   PLAN_PAGE_PATH,
   forgetApplicationReturn,
   hasApplicationReturn,
@@ -35,6 +36,13 @@ afterEach(() => {
   vi.restoreAllMocks();
   window.sessionStorage.clear();
   resetApplicationReturnFallback();
+});
+
+describe("the top plan of the notice (#2950)", () => {
+  it("is the workspace picker's plan name, compared exactly", () => {
+    // The server's rule for eligible_for=kagura-public: plan name `promax`.
+    expect(APPLICATION_RETURN_TOP_PLAN).toBe("promax");
+  });
 });
 
 describe("isApplicationReturnArrival (#2950)", () => {

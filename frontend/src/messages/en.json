@@ -1486,7 +1486,8 @@
         "returnLink": "Return to the application",
         "checkAgain": "Check again",
         "dismiss": "Hide this notice",
-        "nowOnPlan": "The workspace is now on the {plan} plan."
+        "nowOnPlan": "The workspace is now on the {plan} plan.",
+        "checkFailed": "Could not check the plan. Try again in a moment."
       }
     },
     "planMatrix": {

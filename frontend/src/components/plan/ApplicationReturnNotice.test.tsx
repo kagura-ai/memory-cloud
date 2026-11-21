@@ -65,6 +65,11 @@ vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: mockUser, refetchUser: mockRefetchUser }),
 }));
 
+const mockToast = vi.fn();
+vi.mock("@/hooks/use-toast", () => ({
+  useToast: () => ({ toast: mockToast }),
+}));
+
 const mockRefreshWorkspaces = vi.fn();
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({ refreshWorkspaces: mockRefreshWorkspaces }),
@@ -143,6 +148,7 @@ beforeEach(() => {
   mockRefetchUser.mockReset().mockImplementation(async () => mockUser);
   mockRefreshWorkspaces.mockReset().mockResolvedValue(undefined);
   onRechecked.mockReset();
+  mockToast.mockReset();
   mockPathname = PLAN_PAGE_PATH;
   mockSearchParams = new URLSearchParams();
   mockUser = OWNER;
@@ -616,5 +622,71 @@ describe("ApplicationReturnNotice keyboard focus (#2950)", () => {
     await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "false"));
     expect(mockRefreshWorkspaces).toHaveBeenCalledTimes(1);
     expect(document.activeElement).toBe(button);
+  });
+});
+
+describe("ApplicationReturnNotice failed re-check (#2950)", () => {
+  const checkAgain = () =>
+    screen.getByRole("button", { name: "planPage.applicationReturn.checkAgain" });
+
+  it.each([
+    [
+      "the workspace re-read fails",
+      () => {
+        mockRefreshWorkspaces.mockResolvedValue(false);
+      },
+    ],
+    [
+      "the user re-read fails",
+      () => {
+        // What AuthContext.refetchUser answers on a transient failure.
+        mockRefetchUser.mockResolvedValue(undefined);
+      },
+    ],
+  ])(
+    "a failed re-check shows a destructive toast and announces nothing (%s)",
+    async (_label, fail) => {
+      rememberApplicationReturn();
+      fail();
+      renderNotice(workspaceWith());
+      // Had the re-check counted, the page would now pass the top plan.
+      mockPageWorkspace = workspaceWith({ plan_name: "promax" });
+      fireEvent.click(checkAgain());
+      await waitFor(() => expect(mockToast).toHaveBeenCalledTimes(1));
+      expect(mockToast).toHaveBeenCalledWith({
+        variant: "destructive",
+        title: "error",
+        description: "planPage.applicationReturn.checkFailed",
+      });
+      expect(onRechecked).not.toHaveBeenCalled();
+      await waitFor(() => expect(checkAgain()).toHaveAttribute("aria-disabled", "false"));
+      expect(screen.getByRole("status")).toHaveTextContent("");
+      expect(
+        screen.getByText("planPage.applicationReturn.notOnPlan Research|Max"),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("a failed re-check leaves focus on Check again", async () => {
+    rememberApplicationReturn();
+    mockRefreshWorkspaces.mockResolvedValue(false);
+    renderNotice();
+    const button = checkAgain();
+    button.focus();
+    fireEvent.click(button);
+    await waitFor(() => expect(mockToast).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "false"));
+    expect(checkAgain()).toBe(button);
+    expect(document.activeElement).toBe(button);
+    expect(document.activeElement).not.toBe(planSection());
+  });
+
+  it("a workspace re-read that answers nothing is not a failure", async () => {
+    rememberApplicationReturn();
+    mockRefreshWorkspaces.mockResolvedValue(undefined);
+    renderNotice();
+    fireEvent.click(checkAgain());
+    await waitFor(() => expect(onRechecked).toHaveBeenCalledTimes(1));
+    expect(mockToast).not.toHaveBeenCalled();
   });
 });

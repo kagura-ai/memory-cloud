@@ -1486,7 +1486,8 @@
         "returnLink": "アプリケーションに戻る",
         "checkAgain": "もう一度確認する",
         "dismiss": "この案内を閉じる",
-        "nowOnPlan": "ワークスペースが {plan} プランになりました。"
+        "nowOnPlan": "ワークスペースが {plan} プランになりました。",
+        "checkFailed": "プランを確認できませんでした。少し待ってから、もう一度お試しください。"
       }
     },
     "planMatrix": {

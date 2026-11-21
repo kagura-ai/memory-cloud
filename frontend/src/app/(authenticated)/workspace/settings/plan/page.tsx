@@ -40,6 +40,7 @@ import {
 import { PlanFeatureMatrix } from "@/components/plan/PlanFeatureMatrix";
 import { SuspendedFeaturesBanner } from "@/components/plan/SuspendedFeaturesBanner";
 import { ApplicationReturnNotice } from "@/components/plan/ApplicationReturnNotice";
+import { APPLICATION_RETURN_TOP_PLAN } from "@/lib/navigation/applicationReturn";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
@@ -201,7 +202,7 @@ export default function WorkspacePlanPage() {
       {isOwner && currentWorkspace && (
         <ApplicationReturnNotice
           workspace={currentWorkspace}
-          planLabel={planLabelFromEnv("promax", locale)}
+          planLabel={planLabelFromEnv(APPLICATION_RETURN_TOP_PLAN, locale)}
           onRechecked={() => void loadPlan({ quiet: true })}
           focusTargetRef={planSectionRef}
         />

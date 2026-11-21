@@ -36,9 +36,11 @@ interface WorkspaceContextType {
   /**
    * Reload the list. `quiet` (#2919) keeps `loading` false, so the guard does
    * not replace the page while the list refreshes, and keeps the last list on
-   * a failure.
+   * a failure. Answers false only when this call's own read failed (#2950);
+   * true when the list was read, a newer call took over, or there was nothing
+   * to refresh.
    */
-  refreshWorkspaces: (options?: { quiet?: boolean }) => Promise<void>;
+  refreshWorkspaces: (options?: { quiet?: boolean }) => Promise<boolean>;
   switchWorkspace: (workspaceId: string) => Promise<void>;
 }
 
@@ -65,9 +67,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // place (#2919): it shows the loading state and reports a failure, so a
   // dropped loud answer never leaves `loading` set or a stale list unreported.
   const loudInFlight = useRef(false);
-  const refreshWorkspaces = useCallback(async ({ quiet = false }: { quiet?: boolean } = {}) => {
+  const refreshWorkspaces = useCallback(async ({ quiet = false }: { quiet?: boolean } = {}): Promise<boolean> => {
     const scope = activeScope.current;
-    if (!scope) return;
+    if (!scope) return true;
     const selectedId = scope.workspaceId;
     const request = ++generation.current;
     const loud = !quiet || loudInFlight.current;
@@ -78,7 +80,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
     try {
       const available = await listWorkspaces();
-      if (generation.current !== request) return;
+      if (generation.current !== request) return true;
       setWorkspaces(available);
       // #2919: a workspace suspended over its owner's allowance is never the
       // current one; the guard then asks for another (or exempts the page
@@ -86,12 +88,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setCurrentWorkspace(selectedId
         ? available.find(w => w.id === selectedId && !w.slot_suspended) ?? null
         : null);
+      return true;
     } catch {
+      // A newer call took over: its answer counts, not this one's.
+      if (generation.current !== request) return true;
       // A quiet refresh keeps the last list on a failure.
-      if (generation.current !== request || !loud) return;
-      setWorkspaces([]);
-      setCurrentWorkspace(null);
-      setLoadFailed(true);
+      if (loud) {
+        setWorkspaces([]);
+        setCurrentWorkspace(null);
+        setLoadFailed(true);
+      }
+      return false;
     } finally {
       // Whichever call finishes last leaves `loading` false.
       if (generation.current === request) {
