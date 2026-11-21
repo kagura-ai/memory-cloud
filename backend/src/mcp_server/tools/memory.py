@@ -3,6 +3,7 @@
 Extracted from tools.py for modularity (Issue #7).
 """
 
+import contextlib
 import logging
 import time
 from typing import Any
@@ -45,6 +46,7 @@ from mcp_server.tools._reference_adoption import mark_first_read, unmark_read
 from services.memory_service import (
     DEDUPE_MODES,
     DEDUPE_SUGGEST,
+    SIMILAR_ID_TIMEOUT_SECONDS,
     DedupeUnavailableError,
     DuplicateCandidateError,
 )
@@ -2474,12 +2476,15 @@ async def _similar_ids_for_miss(
 ) -> list[tuple[UUID, str]]:
     """The #2959 lookup for a ``reference`` miss, bounded and fail-soft.
 
-    Advisory only: a failure or a timeout logs one warning (the error class,
-    never its text) and the miss answers as it always did. The lookup is
-    read-only, so its transaction is rolled back when it is done.
+    Advisory only: it has a short budget of its own
+    (``SIMILAR_ID_TIMEOUT_SECONDS``, under the name ``reference_id_hint``), and
+    a failure or a timeout logs one warning (the error class, never its text)
+    while the miss answers as it always did. The lookup is read-only: its
+    transaction is rolled back whatever happened, and that rollback cannot
+    raise.
     """
     try:
-        similar = await execute_with_timeout(
+        return await execute_with_timeout(
             service.similar_id_candidates(
                 memory_id,
                 user_id,
@@ -2487,13 +2492,17 @@ async def _similar_ids_for_miss(
                 workspace_id=workspace_id,
                 key_workspace_id=get_mcp_key_workspace_scope(),
             ),
-            operation_name="reference",
+            timeout=SIMILAR_ID_TIMEOUT_SECONDS,
+            operation_name="reference_id_hint",
         )
-        await db.rollback()
     except Exception as exc:
         _struct_logger.warning("reference_id_hint_failed", error_class=type(exc).__name__)
         return []
-    return similar
+    finally:
+        # The session is closed right after the answer; a failed rollback
+        # here must not turn the miss into an error.
+        with contextlib.suppress(Exception):
+            await db.rollback()
 
 
 async def handle_reference(

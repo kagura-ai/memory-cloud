@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+import structlog
 
 from mcp_server.tools._helpers import _touch_context_last_used
 from mcp_server.tools.memory import (
@@ -403,6 +404,8 @@ async def test_reference_bumps_context_but_not_on_memory_miss():
     )
     service = MagicMock()
     service.reference = AsyncMock(return_value=reference_result)
+    # #2959: a miss looks for memories with a similar id; none here.
+    service.similar_id_candidates = AsyncMock(return_value=[])
 
     with (
         _patched_settings(),
@@ -426,13 +429,19 @@ async def test_reference_bumps_context_but_not_on_memory_miss():
         from utils.exceptions import NotFoundException
 
         service.reference = AsyncMock(side_effect=NotFoundException("Memory"))
-        result = await handle_reference(
-            {"memory_id": str(uuid4()), "context_id": str(uuid4())},
-            user_id="u1",
-            workspace_id=None,
-        )
-        assert json.loads(result[0].text)["error"] == "memory_not_found"
+        with structlog.testing.capture_logs() as logs:
+            result = await handle_reference(
+                {"memory_id": str(uuid4()), "context_id": str(uuid4())},
+                user_id="u1",
+                workspace_id=None,
+            )
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "memory_not_found"
+        assert "similar_ids" not in payload
         assert len(_touch_statements(db)) == 0
+        # #2959: the miss ran the similar-id lookup normally, not through its
+        # fail-soft branch.
+        assert [e for e in logs if e["event"] == "reference_id_hint_failed"] == []
 
 
 # ============================================================================

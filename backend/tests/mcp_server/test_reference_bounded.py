@@ -1157,3 +1157,79 @@ async def test_an_invalid_id_keeps_its_own_error_and_looks_for_nothing():
     text, svc = await _call({"memory_id": "2347bb5a-not-a-uuid"})
     assert _error(text)["error"] == "invalid_memory_id_format"
     svc.similar_id_candidates.assert_not_awaited()
+
+
+def test_the_hint_lookup_has_its_own_short_budget():
+    """The lookup gets 2 seconds of its own, well under the read's budget."""
+    from mcp_server.tools._constants import get_tool_timeout
+    from services.memory_service import SIMILAR_ID_TIMEOUT_SECONDS
+
+    assert SIMILAR_ID_TIMEOUT_SECONDS == 2.0
+    assert SIMILAR_ID_TIMEOUT_SECONDS < get_tool_timeout("reference")
+
+
+@pytest.mark.asyncio
+async def test_a_slow_lookup_is_cut_at_the_hint_budget(monkeypatch, caplog):
+    """A slow lookup neither doubles the time of a miss nor reads as the tool
+    timing out: it stops at the hint's budget, under its own name, and the
+    plain miss comes back."""
+    import asyncio
+    import logging
+    import time
+
+    import mcp_server.tools.memory as memory_module
+
+    monkeypatch.setattr(memory_module, "SIMILAR_ID_TIMEOUT_SECONDS", 0.2, raising=False)
+
+    async def slow(*_args, **_kwargs):
+        await asyncio.sleep(30)
+        return []
+
+    caplog.set_level(logging.ERROR, logger="mcp_server.tools._helpers")
+    started = time.monotonic()
+    text, _ = await _call(
+        {},
+        service_error=NotFoundException("Memory", str(MEM_ID)),
+        similar=AsyncMock(side_effect=slow),
+    )
+    elapsed = time.monotonic() - started
+
+    assert text == _plain_miss_text(MEM_ID)
+    assert elapsed < 5
+    timeouts = [r.getMessage() for r in caplog.records if r.name == "mcp_server.tools._helpers"]
+    assert timeouts == ["Tool execution timeout: operation=reference_id_hint, timeout=0.2s"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_still_rolls_its_transaction_back():
+    from sqlalchemy.exc import DBAPIError
+
+    from mcp_server.tools.memory import _similar_ids_for_miss
+
+    db = AsyncMock()
+    failure = DBAPIError("SELECT", {}, Exception("connection reset"))
+    service = MagicMock(similar_id_candidates=AsyncMock(side_effect=failure))
+
+    found = await _similar_ids_for_miss(
+        db, service, MEM_ID, "u", context_id=CTX_ID, workspace_id=uuid4()
+    )
+
+    assert found == []
+    db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_rollback_after_the_lookup_cannot_raise():
+    from mcp_server.tools.memory import _similar_ids_for_miss
+
+    db = AsyncMock()
+    db.rollback = AsyncMock(side_effect=RuntimeError("connection gone"))
+    candidate = (uuid4(), "deploy runbook")
+    service = MagicMock(similar_id_candidates=AsyncMock(return_value=[candidate]))
+
+    found = await _similar_ids_for_miss(
+        db, service, MEM_ID, "u", context_id=CTX_ID, workspace_id=uuid4()
+    )
+
+    assert found == [candidate]
+    db.rollback.assert_awaited_once()

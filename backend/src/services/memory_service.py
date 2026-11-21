@@ -656,6 +656,9 @@ def _prune_unhydrated_hits(
 SIMILAR_ID_PREFIX_HEX = 8
 SIMILAR_ID_LIMIT = 3
 SIMILAR_ID_SCAN_PER_SIDE = 10
+#: Seconds the lookup may take, a budget of its own after the read's: past it
+#: the miss answers without the hint.
+SIMILAR_ID_TIMEOUT_SECONDS = 2.0
 
 
 def _shared_hex_prefix(a: str, b: str) -> int:

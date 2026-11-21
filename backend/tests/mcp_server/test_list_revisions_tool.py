@@ -200,6 +200,9 @@ def _historical(mem_id: Any) -> ReferenceResponse:
 
 
 async def _reference(args: dict[str, Any], service: MagicMock) -> dict[str, Any]:
+    # #2959: a miss looks for memories with a similar id; none here, so no
+    # test leans on the lookup's fail-soft path.
+    service.similar_id_candidates = AsyncMock(return_value=[])
     with _run(handle_reference, args, service):
         return _payload(await handle_reference(args, user_id="u", workspace_id=uuid4()))
 

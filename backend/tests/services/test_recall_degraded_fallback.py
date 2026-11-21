@@ -544,3 +544,15 @@ class TestRoutedSemanticDegrades:
         embed_svc.embed_with_usage.assert_not_called()
         assert [r["id"] for r in results] == ["m1"]
         assert degradation == {}
+
+
+def test_search_mode_explicit_is_keyword_only():
+    """#2960: the flag can only be passed by name, so a positional call can
+    never set it by accident."""
+    import inspect
+
+    from services.search_service import SearchService
+
+    parameter = inspect.signature(SearchService.hybrid_search).parameters["search_mode_explicit"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is True

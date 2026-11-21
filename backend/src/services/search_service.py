@@ -80,6 +80,7 @@ class SearchService:
         is_shared_context_read: bool = False,
         degradation: dict[str, Any] | None = None,
         timings: RecallTimings | None = None,
+        *,
         search_mode_explicit: bool = True,
     ) -> list[dict]:
         """Search with configurable mode: hybrid, semantic, or keyword.
