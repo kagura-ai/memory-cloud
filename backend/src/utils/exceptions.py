@@ -1691,8 +1691,10 @@ class SelfHostedUnreachableError(ConfigurationError):
     """The self-hosted inference server could not be reached (500, #2049).
 
     Raised for a transport error (connect timeout, refused, reset) of the
-    ``/v1/models`` reachability probe, which can be a transient blip. A server
-    that answers with an error status stays a plain ``ConfigurationError``.
+    ``/v1/models`` reachability probe, or for a 502 / 503 / 504 from a proxy
+    in front of the server (#2957); either can be a transient blip. A server
+    that answers with any other error status stays a plain
+    ``ConfigurationError``.
     A subclass, so every existing ``ConfigurationError`` handling holds:
     CFG-001 on the API path, and the embedding sweep retries it without
     spending the retry budget; the class name tells the two apart in logs.

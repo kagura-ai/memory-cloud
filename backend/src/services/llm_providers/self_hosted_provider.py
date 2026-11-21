@@ -123,7 +123,8 @@ async def ensure_self_hosted_reachable(
 
     Raises:
         ConfigurationError: the server answered with an error status.
-        SelfHostedUnreachableError: the probe could not reach the server.
+        SelfHostedUnreachableError: the probe could not reach the server, or
+            a proxy in front of it answered 502 / 503 / 504.
     """
     key = _reachability_key(base_url, api_key)
     if _REACHABLE_UNTIL.get(key, 0.0) > time.monotonic():
