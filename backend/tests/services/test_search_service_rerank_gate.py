@@ -244,23 +244,35 @@ class TestFailOpen:
         assert event["status_code"] is None
 
     async def test_unreachable_self_hosted_reranker_fails_open_to_unreranked_order(
-        self, service, settings
+        self, service, settings, monkeypatch
     ):
-        """#2957: a self-hosted reranker that cannot be reached gives the
-        un-reranked hybrid order, never a failed recall (pins the existing
-        fail-open for the CFG-001 subclass)."""
-        from utils.exceptions import SelfHostedUnreachableError
+        """#2957: a self-hosted reranker whose server cannot be reached gives
+        the un-reranked hybrid order, never a failed recall. Pins the existing
+        path end to end: every per-document request fails with a connect
+        error, ``SelfHostedReranker`` raises its "backend unavailable"
+        ``RuntimeError`` and ``hybrid_search`` fails open with
+        ``rerank_failed_open``."""
+        from services.reranker_service import SelfHostedReranker
 
-        service.reranker_service.rerank = AsyncMock(
-            side_effect=SelfHostedUnreachableError(
-                "Cannot connect to self-hosted inference server at http://gpu.example.com:8002."
-            )
+        async def _refused(self, url, json=None, headers=None, **kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", _refused)
+        service.reranker_service = RerankerService(MagicMock())
+        service.reranker_service.get_active_provider = AsyncMock(
+            return_value=SelfHostedReranker("http://gpu.example.com:8002", prompt_format="raw")
         )
         with structlog.testing.capture_logs() as logs:
             results = await _search(service, use_rerank=None, config=_config(True, "self_hosted"))
         assert [r["id"] for r in results] == ["m1", "m2"]
+        assert [
+            e["error_class"] for e in logs if e["event"] == "self_hosted_rerank_score_failed"
+        ] == [
+            "ConnectError",
+            "ConnectError",
+        ]
         (event,) = [e for e in logs if e["event"] == "rerank_failed_open"]
-        assert event["error_class"] == "SelfHostedUnreachableError"
+        assert event["error_class"] == "RuntimeError"
         assert "error" not in event
 
 

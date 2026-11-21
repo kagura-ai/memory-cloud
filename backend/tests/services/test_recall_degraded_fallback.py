@@ -15,7 +15,9 @@ arm to fall back to there, and returning BM25 hits to a caller who asked for
 vector search answers a different question than the one asked.
 """
 
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -36,7 +38,7 @@ def _fake_config() -> SimpleNamespace:
     )
 
 
-def _embed_svc_that(*, raises: Exception | None = None) -> MagicMock:
+def _embed_svc_that(*, raises: Exception | Callable[..., Any] | None = None) -> MagicMock:
     svc = MagicMock()
     svc.provider = "openai"
     svc.model = "text-embedding-3-small"
@@ -51,7 +53,7 @@ def _embed_svc_that(*, raises: Exception | None = None) -> MagicMock:
 async def _search(
     *,
     search_mode: str,
-    embed_error: Exception | None,
+    embed_error: Exception | Callable[..., Any] | None,
     keyword_hits: list[dict] | None = None,
     degradation: dict | None = None,
 ):
@@ -308,3 +310,45 @@ class TestSelfHostedUnreachableDegrades:
         assert event["reason"] == "embedding_unavailable"
         assert event["error"] == str(err)
         assert degradation["detail"] == str(err)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_degrades_when_a_gateway_reports_the_self_hosted_server_down():
+    """#2957: the exception the real probe raises for a 503 from a proxy in
+    front of the server degrades a hybrid recall like a connect failure."""
+    import structlog
+
+    from services.llm_providers.self_hosted_provider import ensure_self_hosted_reachable
+
+    gateway_down = MagicMock()
+    gateway_down.status_code = 503
+    http = MagicMock()
+    http.get = AsyncMock(return_value=gateway_down)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+
+    async def _embed_through_the_probe(*args, **kwargs):
+        await ensure_self_hosted_reachable(_UNREACHABLE_BASE_URL, None, label="inference server")
+        return ([0.1] * 8, 0)
+
+    degradation: dict = {}
+    with (
+        patch("httpx.AsyncClient", return_value=http),
+        structlog.testing.capture_logs() as logs,
+    ):
+        results, _ = await _search(
+            search_mode="hybrid",
+            embed_error=_embed_through_the_probe,
+            keyword_hits=[{"id": "m1", "score": 0.9, "payload": {}}],
+            degradation=degradation,
+        )
+    http.get.assert_awaited_once()
+    assert [r["id"] for r in results] == ["m1"]
+    assert degradation == {
+        "degraded": True,
+        "reason": "embedding_unavailable",
+        "detail": "self-hosted inference server unreachable",
+    }
+    (event,) = [e for e in logs if e["event"] == "recall_degraded_to_keyword"]
+    assert sorted(event) == ["context_id", "error_class", "event", "log_level", "reason"]
+    assert event["error_class"] == "SelfHostedUnreachableError"
