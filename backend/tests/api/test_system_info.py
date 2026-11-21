@@ -25,6 +25,7 @@ _RERANK_ENV = [
     "DEFAULT_CONTENT_CHUNKS_ENABLED",
     "CONTENT_CHUNKS_REQUIRE_PLAN",
     "CHATGPT_APP_URL",
+    "KAGURA_PUBLIC_RETURN_URL",
 ]
 
 
@@ -251,6 +252,69 @@ def test_chatgpt_app_url_refuses_anything_but_an_https_url_with_a_host(
     monkeypatch.delenv("CHATGPT_APP_URL", raising=False)
     with pytest.raises(ValidationError, match="CHATGPT_APP_URL"):
         Settings(_env_file=None, chatgpt_app_url=value)
+
+
+# ---------------------------------------------------------------------------
+# #2950: kagura_public_return_url (KAGURA_PUBLIC_RETURN_URL), the address the
+# plan page links back to
+# ---------------------------------------------------------------------------
+
+_RETURN = "https://app.example.com/return"
+
+
+def test_system_info_kagura_public_return_url_is_null_when_unset(info_with) -> None:
+    """Unset (the default): null, and nothing else in the document moves."""
+    body = info_with().json()
+    assert body["kagura_public_return_url"] is None
+    with_url = info_with(kagura_public_return_url=_RETURN).json()
+    with_url.pop("kagura_public_return_url")
+    body.pop("kagura_public_return_url")
+    assert with_url == body
+
+
+def test_system_info_returns_the_kagura_public_return_url_as_is(info_with) -> None:
+    body = info_with(kagura_public_return_url=_RETURN).json()
+    assert body["kagura_public_return_url"] == _RETURN
+    # The two operator links are independent settings.
+    assert body["chatgpt_app_url"] is None
+
+
+def test_kagura_public_return_url_is_trimmed_and_blank_means_unset(monkeypatch) -> None:
+    monkeypatch.delenv("KAGURA_PUBLIC_RETURN_URL", raising=False)
+    assert (
+        Settings(_env_file=None, kagura_public_return_url=f"  {_RETURN}\n").kagura_public_return_url
+        == _RETURN
+    )
+    assert Settings(_env_file=None, kagura_public_return_url="   ").kagura_public_return_url == ""
+    assert Settings(_env_file=None).kagura_public_return_url == ""
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://app.example.com/return",
+        "return",
+        "javascript:alert(1)",
+        "https://",
+        "https:///return",
+        "//app.example.com/return",
+        "https://app.example.com:70000/return",
+        "https://app.example.com:abc/return",
+        "https://app.exa<mple.com/return",
+        "https://app.exa\x07mple.com/return",
+        "https://app.example.com/re\x7fturn",
+        "https://app.example@example.com/return",
+        "https://user:pass@app.example.com/return",
+    ],
+)
+def test_kagura_public_return_url_refuses_anything_but_an_https_url_with_a_host(
+    value: str, monkeypatch
+) -> None:
+    """The CHATGPT_APP_URL rules: a value the UI could not safely link to fails
+    startup, and the message names this setting."""
+    monkeypatch.delenv("KAGURA_PUBLIC_RETURN_URL", raising=False)
+    with pytest.raises(ValidationError, match="KAGURA_PUBLIC_RETURN_URL"):
+        Settings(_env_file=None, kagura_public_return_url=value)
 
 
 def test_system_info_exposes_the_public_mcp_domains_switch(info_with) -> None:

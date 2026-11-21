@@ -174,6 +174,13 @@ export interface SystemInfo {
    * `CHATGPT_APP_URL` is empty. Absent on older backends — treat like null.
    */
   chatgpt_app_url?: string | null;
+  /**
+   * The address the plan page links back to after an arrival from the
+   * application (#2950), or null when `KAGURA_PUBLIC_RETURN_URL` is empty.
+   * Absent on older backends — treat like null. The link is shown only for an
+   * https value (`httpsHref`); the address is never taken from anywhere else.
+   */
+  kagura_public_return_url?: string | null;
 }
 
 /**

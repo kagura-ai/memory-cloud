@@ -12,6 +12,7 @@
 > Changed by #1868: `FailedMemoryInfo` gains the optional `embedding_attempted_at` (the time the embedding last failed); `updated_at` there is the last edit and is null for a never-edited memory. `failed_memories` is ordered latest failure first.
 > Changed by #565: `FileObjectOut` gains the required `scan_status` (`unscanned` | `pending` | `clean` | `infected` | `error`, the file's malware-scan state), returned by the file list, the upload confirm and the dedup 409's `existing_file`. It is the only response change while `FILE_SCAN_ENABLED` is off; the download-url refusals it explains (409 `SCAN-001` / `SCAN-002`) are in `error-responses.md`. The field list below also gains `context_id`, which the model already had.
 > Changed by #2918 (**experimental**, may change in a minor release): new `me_workspace_slots.py` models for `/api/v1/me/workspace-slots` (below; the routes 404 unless `WORKSPACE_SLOT_SUSPENSION=enforce`); `WorkspaceResponse` gains `slot_suspended` (filled by `GET /workspaces` on every row, false elsewhere and unless enforced); `/auth/me` gains `user.workspace_selection_required` and `/system/info` gains `features.workspace_slots` (plain dicts, outside this enumeration's scope). The refusals (`SLOT-001`..`SLOT-004`) are in `error-responses.md`.
+> Changed by #2950: `/system/info` gains `kagura_public_return_url` (the deployment's `KAGURA_PUBLIC_RETURN_URL`, or `null`; a plain dict, outside this enumeration's scope). No model changes.
 
 Notes:
 

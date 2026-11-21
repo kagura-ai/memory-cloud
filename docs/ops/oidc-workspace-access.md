@@ -46,6 +46,12 @@ routes answer as before.
 "On the Max plan now" means the workspace's current plan name; the billing
 access window and integration licenses are not consulted by this filter.
 
+The plan page's notice with the link back to the application uses the same
+rule: it shows only to the canonical owner holding the `owner` role, and says
+the workspace is on the Max plan only when its current plan name is `promax`
+([Link back to the application on the plan page](../deployment.md#link-back-to-the-application-on-the-plan-page-issue-2950)).
+The application still checks eligibility with this parameter by itself.
+
 A slot-suspended workspace that meets the rule stays listed. While slot
 suspension is enforced, its access answer reports `read`, `sync.manage` and
 `usage.read` as `false` and keeps `billing.manage`, so a client checks the
