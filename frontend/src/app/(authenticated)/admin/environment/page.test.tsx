@@ -197,6 +197,25 @@ describe("EnvironmentPage (read-only console)", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the sign-up, rewards and operations categories under their own titles", async () => {
+    mockApi([
+      ...CONFIGS,
+      item("ALLOW_REGISTRATION", false, "signup"),
+      item("ENABLE_REFERRALS", true, "rewards"),
+      item("FILE_SCAN_ENABLED", true, "operations"),
+    ]);
+    render(<EnvironmentPage />);
+
+    for (const category of ["signup", "rewards", "operations"]) {
+      const title = await screen.findByText(
+        `admin.environment.sections.${category}`,
+      );
+      // a category icon of its own, not the fallback for an unknown one
+      expect(title.textContent).not.toContain("📁");
+    }
+    expect(screen.queryByText("signup")).not.toBeInTheDocument();
+  });
+
   it("only ever reads from the config API", async () => {
     render(<EnvironmentPage />);
     await screen.findByText("ENABLE_RERANKING");

@@ -303,6 +303,9 @@ export default function EnvironmentPage() {
       memory: "💾",
       system: "⚙️",
       hosted: "☁️",
+      signup: "🚪",
+      rewards: "🎁",
+      operations: "🛠️",
     };
     return icons[category] || "📁";
   };
@@ -315,6 +318,9 @@ export default function EnvironmentPage() {
       memory: t("sections.memory"),
       system: t("sections.system"),
       hosted: t("sections.hosted"),
+      signup: t("sections.signup"),
+      rewards: t("sections.rewards"),
+      operations: t("sections.operations"),
     };
     return titles[category] || category;
   };

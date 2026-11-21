@@ -40,9 +40,38 @@ HOSTED_KEYS = [
     "RERANK_MODEL",
 ]
 
+# #2954: the admin-only categories added after ``hosted``.
+NEW_ADMIN_CATEGORIES = {
+    "signup": [
+        "ALLOW_REGISTRATION",
+        "ENABLE_EMAIL_SIGNUP",
+        "ENABLE_PROVIDER_LINK_CONFIRMATION",
+        "ENABLE_BETA_INVITES",
+        "BETA_INVITE_QUOTA_PER_USER",
+    ],
+    "rewards": [
+        "ENABLE_REFERRALS",
+        "REFERRAL_REFEREE_REWARD_MEMORIES",
+        "REFERRAL_REFERRER_REWARD_MEMORIES",
+        "REFERRAL_MAX_GRANTS_PER_REFERRER",
+        "REFERRAL_REDEEM_WINDOW_HOURS",
+    ],
+    "operations": [
+        "MCP_NOTICES_ENABLED",
+        "REQUIRE_DUAL_CONTROL_FORCE_TRANSFER",
+        "BM25_DRIFT_CRON_ENABLED",
+        "BM25_REVEAL_RATE_LIMIT_PER_HOUR",
+        "OPERATIONS_PROBE_INTERVAL_SECONDS",
+        "FILE_SCAN_ENABLED",
+        "SLEEP_LLM_FORCE_ENV",
+    ],
+}
+NEW_ADMIN_KEYS = [key for keys in NEW_ADMIN_CATEGORIES.values() for key in keys]
+
 # Env that would leak into a fresh Settings / NeuralMemoryConfig.from_env().
 _ENV_KEYS = [
     *HOSTED_KEYS,
+    *NEW_ADMIN_KEYS,
     "ENABLE_RERANKING",
     "SELF_HOSTED_BASE_URL",
     "TRACK_CO_ACTIVATION",
@@ -167,6 +196,103 @@ class TestGetConfig:
         assert resp.status_code == 200
         assert ("hosted" in resp.json()["categories"]) is listed
 
+    def test_the_new_categories_follow_hosted_with_their_keys(self):
+        categories = get_config_categories()
+        assert list(categories) == [
+            "embedding",
+            "search",
+            "system",
+            "hosted",
+            "signup",
+            "rewards",
+            "operations",
+        ]
+        for category, keys in NEW_ADMIN_CATEGORIES.items():
+            assert categories[category] == keys, category
+
+    @pytest.mark.parametrize("category", list(NEW_ADMIN_CATEGORIES))
+    def test_new_admin_categories_are_hidden_from_a_non_admin(self, client_as, category):
+        configs = _values(client_as("member").get("/api/v1/config"))
+
+        assert not set(NEW_ADMIN_CATEGORIES[category]) & set(configs)
+        assert category not in {item["category"] for item in configs.values()}
+        assert "ENABLE_RERANKING" in configs
+
+    @pytest.mark.parametrize("category", list(NEW_ADMIN_CATEGORIES))
+    def test_new_admin_categories_are_visible_to_an_admin(self, client_as, category):
+        configs = _values(client_as().get("/api/v1/config"))
+
+        keys = NEW_ADMIN_CATEGORIES[category]
+        assert {k: configs[k]["category"] for k in keys} == dict.fromkeys(keys, category)
+        for key in NEW_ADMIN_CATEGORIES[category]:
+            assert configs[key]["is_sensitive"] is False, key
+
+    @pytest.mark.parametrize("category", list(NEW_ADMIN_CATEGORIES))
+    @pytest.mark.parametrize(("role", "listed"), [("admin", True), ("member", False)])
+    def test_categories_list_the_new_categories_for_admins_only(
+        self, client_as, role, listed, category
+    ):
+        resp = client_as(role).get("/api/v1/config/categories")
+
+        assert resp.status_code == 200
+        assert (category in resp.json()["categories"]) is listed
+
+    def test_new_admin_keys_answer_their_effective_values(self, client_as):
+        client = client_as(
+            allow_registration=True,
+            enable_email_signup=True,
+            enable_provider_link_confirmation=False,
+            enable_beta_invites=True,
+            beta_invite_quota_per_user=7,
+            enable_referrals=True,
+            referral_referee_reward_memories=123,
+            referral_referrer_reward_memories=456,
+            referral_max_grants_per_referrer=9,
+            referral_redeem_window_hours=48,
+            mcp_notices_enabled=True,
+            require_dual_control_force_transfer=True,
+            bm25_drift_cron_enabled=True,
+            bm25_reveal_rate_limit_per_hour=17,
+            operations_probe_interval_seconds=600,
+            file_scan_enabled=True,
+        )
+        configs = _values(client.get("/api/v1/config?mask_sensitive=true"))
+
+        assert {k: configs[k]["value"] for k in NEW_ADMIN_KEYS} == {
+            "ALLOW_REGISTRATION": True,
+            "ENABLE_EMAIL_SIGNUP": True,
+            "ENABLE_PROVIDER_LINK_CONFIRMATION": False,
+            "ENABLE_BETA_INVITES": True,
+            "BETA_INVITE_QUOTA_PER_USER": 7,
+            "ENABLE_REFERRALS": True,
+            "REFERRAL_REFEREE_REWARD_MEMORIES": 123,
+            "REFERRAL_REFERRER_REWARD_MEMORIES": 456,
+            "REFERRAL_MAX_GRANTS_PER_REFERRER": 9,
+            "REFERRAL_REDEEM_WINDOW_HOURS": 48,
+            "MCP_NOTICES_ENABLED": True,
+            "REQUIRE_DUAL_CONTROL_FORCE_TRANSFER": True,
+            "BM25_DRIFT_CRON_ENABLED": True,
+            "BM25_REVEAL_RATE_LIMIT_PER_HOUR": 17,
+            "OPERATIONS_PROBE_INTERVAL_SECONDS": 600,
+            "FILE_SCAN_ENABLED": True,
+            "SLEEP_LLM_FORCE_ENV": False,
+        }
+
+    @pytest.mark.parametrize("raw", ["1", "true", "YES", " yes "])
+    def test_sleep_llm_force_env_answers_true(self, client_as, monkeypatch, raw):
+        client = client_as()
+        monkeypatch.setenv("SLEEP_LLM_FORCE_ENV", raw)
+
+        assert _values(client.get("/api/v1/config"))["SLEEP_LLM_FORCE_ENV"]["value"] is True
+
+    @pytest.mark.parametrize("raw", [None, "", "0", "false", "no", "on"])
+    def test_sleep_llm_force_env_answers_false(self, client_as, monkeypatch, raw):
+        client = client_as()
+        if raw is not None:
+            monkeypatch.setenv("SLEEP_LLM_FORCE_ENV", raw)
+
+        assert _values(client.get("/api/v1/config"))["SLEEP_LLM_FORCE_ENV"]["value"] is False
+
     @pytest.mark.parametrize("mask_sensitive", ["true", "false"])
     def test_rerank_base_url_never_shows_embedded_credentials(self, client_as, mask_sensitive):
         client = client_as(rerank_base_url="https://svc:s3cr3t@reranker.internal:8443/v1")
@@ -267,6 +393,37 @@ class TestSchema:
 
         for key in HOSTED_KEYS:
             assert schema[key].category == "hosted", key
+
+    def test_new_admin_keys_have_schema_metadata(self):
+        schema = get_config_schema()
+
+        for category, keys in NEW_ADMIN_CATEGORIES.items():
+            for key in keys:
+                assert schema[key].category == category, key
+                assert schema[key].type in ("boolean", "number"), key
+                assert schema[key].description, key
+                assert schema[key].is_sensitive is False, key
+        assert schema["SLEEP_LLM_FORCE_ENV"].type == "boolean"
+        assert schema["SLEEP_LLM_FORCE_ENV"].default_value is False
+
+    def test_schema_types_and_bounds_match_the_settings_fields(self):
+        """Booleans are ``boolean``; integers are ``number`` with the Field's bounds."""
+        import annotated_types
+
+        schema = get_config_schema()
+        for key in NEW_ADMIN_KEYS:
+            field = Settings.model_fields.get(key.lower())
+            if field is None:
+                continue
+            if field.annotation is bool:
+                assert schema[key].type == "boolean", key
+                assert (schema[key].min_value, schema[key].max_value) == (None, None), key
+                continue
+            assert field.annotation is int, key
+            assert schema[key].type == "number", key
+            ge = next((m.ge for m in field.metadata if isinstance(m, annotated_types.Ge)), None)
+            le = next((m.le for m in field.metadata if isinstance(m, annotated_types.Le)), None)
+            assert (schema[key].min_value, schema[key].max_value) == (ge, le), key
 
     def test_schema_defaults_match_the_settings_defaults(self):
         """Drift guard: the console's default_value is the Settings default."""

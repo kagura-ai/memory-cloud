@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from api.routes.config import get_config_categories, get_sensitive_keys, get_visible_categories
+from api.routes.config import (
+    get_admin_only_categories,
+    get_config_categories,
+    get_sensitive_keys,
+    get_visible_categories,
+)
 from config.settings import get_settings
 
 ADMIN = {"user_id": "1", "email": "admin@example.com", "role": "admin"}
@@ -19,13 +24,20 @@ def mode(monkeypatch):
     return _set
 
 
+def test_the_admin_only_categories():
+    # #2954: the sign-up, referral and operations posture is the operator's business.
+    assert get_admin_only_categories() == {"hosted", "signup", "rewards", "operations"}
+    assert get_admin_only_categories() <= set(get_config_categories())
+
+
+@pytest.mark.parametrize("category", ["hosted", "signup", "rewards", "operations"])
 @pytest.mark.parametrize(
     ("value", "listed"), [("session", True), ("off", False), ("service", False)]
 )
-def test_hosted_category_needs_an_effective_session_admin(mode, value, listed):
+def test_hosted_category_needs_an_effective_session_admin(mode, value, listed, category):
     mode(value)
-    assert ("hosted" in get_visible_categories(ADMIN)) is listed
-    assert "hosted" not in get_visible_categories(USER)
+    assert (category in get_visible_categories(ADMIN)) is listed
+    assert category not in get_visible_categories(USER)
 
 
 def test_no_category_lists_a_secret_unless_it_is_masked():

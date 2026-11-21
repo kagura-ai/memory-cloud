@@ -3473,7 +3473,10 @@
         "search": "Search Configuration",
         "memory": "Memory Configuration",
         "system": "System Configuration",
-        "hosted": "Hosted-mode Configuration"
+        "hosted": "Hosted-mode Configuration",
+        "signup": "Sign-up and Invite Configuration",
+        "rewards": "Referral Rewards Configuration",
+        "operations": "Operations Configuration"
       },
       "systemStatus": {
         "title": "System Status",

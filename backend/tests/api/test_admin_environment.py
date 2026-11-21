@@ -108,6 +108,11 @@ def _items(response) -> dict[str, dict]:
     return {item["key"]: item for item in response.json()["configs"]}
 
 
+def _key_count() -> int:
+    """How many keys the categories hold today (derived, not pinned)."""
+    return sum(len(keys) for keys in config_routes.get_config_categories().values())
+
+
 def _with_category_key(monkeypatch: pytest.MonkeyPatch, key: str) -> None:
     """Put ``key`` at the end of the ``hosted`` category, as a later change would."""
     categories = config_routes.get_config_categories()
@@ -125,7 +130,7 @@ def test_the_answered_keys_are_exactly_the_category_keys() -> None:
     assert isinstance(ANSWERED_KEYS, frozenset)
     # D3: a key added to the categories is withheld until it is added here on purpose
     assert ANSWERED_KEYS == set(category_keys)
-    assert len(category_keys) == len(ANSWERED_KEYS) == 23
+    assert len(category_keys) == len(ANSWERED_KEYS) == _key_count()
     assert ANSWERED_KEYS & config_routes.get_sensitive_keys() == set()
     assert REDACTED_VALUE == MARKER
 
@@ -211,13 +216,13 @@ def test_service_operator_gets_the_hosted_settings_too(client, mode, monkeypatch
     hosted = [key for key, item in items.items() if item["category"] == "hosted"]
     assert hosted == config_routes.get_config_categories()["hosted"]
     assert items["MANAGED_LLM_MODEL"]["value"] == "model-x"
-    assert len(items) == 23
+    assert len(items) == _key_count()
     [entry] = [e for e in logs if e["event"] == "admin_environment_read"]
     assert entry == {
         "event": "admin_environment_read",
         "log_level": "info",
         "admin_user": f"operator:{OPERATOR}",
-        "count": 23,
+        "count": _key_count(),
     }
     # the same answer as a session admin gets
     operator_body = response.json()
@@ -251,11 +256,12 @@ def test_a_sensitive_key_added_to_the_categories_is_withheld(admin, monkeypatch)
     sentinel = _edge_sentinel()
     assert len(sentinel) == 40
     assert "GOOGLE_CLIENT_SECRET" in config_routes.get_sensitive_keys()
+    before = _key_count()
     _with_category_key(monkeypatch, "GOOGLE_CLIENT_SECRET")
     monkeypatch.setattr(get_settings(), "google_client_secret", sentinel)
     response = admin.get(URL)
     _assert_withheld(response, "GOOGLE_CLIENT_SECRET", sentinel)
-    assert len(_items(response)) == 24
+    assert len(_items(response)) == before + 1
 
 
 def test_an_answered_key_that_becomes_sensitive_is_withheld(admin, monkeypatch) -> None:
@@ -293,6 +299,7 @@ def test_the_marker_does_not_depend_on_the_value(admin, monkeypatch, value) -> N
 
 
 def test_a_withheld_key_is_never_resolved(admin, monkeypatch) -> None:
+    answered = _key_count()
     _with_category_key(monkeypatch, "AUDIT_HMAC_KEY")
     resolved: list[str] = []
     original = config_routes.get_effective_value
@@ -303,7 +310,7 @@ def test_a_withheld_key_is_never_resolved(admin, monkeypatch) -> None:
 
     monkeypatch.setattr(config_routes, "get_effective_value", _recording)
     assert admin.get(URL).status_code == 200
-    assert len(resolved) == 23
+    assert len(resolved) == answered
     assert "AUDIT_HMAC_KEY" not in resolved
 
 
@@ -433,6 +440,106 @@ def test_the_log_line_names_the_caller_and_the_count_only(admin, monkeypatch) ->
         "event": "admin_environment_read",
         "log_level": "info",
         "admin_user": "1001",
-        "count": 23,
+        "count": _key_count(),
     }
     assert sentinel not in repr(logs)
+
+
+# --- sign-up, rewards and operations (#2954) -----------------------------------------
+
+NEW_CATEGORY_VALUES: dict[str, dict[str, Any]] = {
+    "signup": {
+        "ALLOW_REGISTRATION": True,
+        "ENABLE_EMAIL_SIGNUP": True,
+        "ENABLE_PROVIDER_LINK_CONFIRMATION": False,
+        "ENABLE_BETA_INVITES": True,
+        "BETA_INVITE_QUOTA_PER_USER": 7,
+    },
+    "rewards": {
+        "ENABLE_REFERRALS": True,
+        "REFERRAL_REFEREE_REWARD_MEMORIES": 123,
+        "REFERRAL_REFERRER_REWARD_MEMORIES": 456,
+        "REFERRAL_MAX_GRANTS_PER_REFERRER": 9,
+        "REFERRAL_REDEEM_WINDOW_HOURS": 48,
+    },
+    "operations": {
+        "MCP_NOTICES_ENABLED": True,
+        "REQUIRE_DUAL_CONTROL_FORCE_TRANSFER": True,
+        "BM25_DRIFT_CRON_ENABLED": True,
+        "BM25_REVEAL_RATE_LIMIT_PER_HOUR": 17,
+        "OPERATIONS_PROBE_INTERVAL_SECONDS": 600,
+        "FILE_SCAN_ENABLED": True,
+        "SLEEP_LLM_FORCE_ENV": True,
+    },
+}
+
+
+def _set_effective(monkeypatch: pytest.MonkeyPatch, values: dict[str, Any]) -> None:
+    """Set each value explicitly: never rely on a default a CI variable could change."""
+    settings = get_settings()
+    for key, value in values.items():
+        if key == "SLEEP_LLM_FORCE_ENV":
+            monkeypatch.setenv(key, "1" if value else "0")
+        else:
+            monkeypatch.setattr(settings, key.lower(), value)
+
+
+def _assert_category_answered(client, mode, monkeypatch, category: str) -> None:
+    values = NEW_CATEGORY_VALUES[category]
+    _set_effective(monkeypatch, values)
+    schema = config_routes.get_config_schema()
+
+    mode("session")
+    _as(ADMIN_SESSION)
+    session_response = client.get(URL)
+    session_items = _items(session_response)
+
+    token = secrets.token_hex(32)
+    mode("service", system_admin_service_token=token)
+    _as(None)
+    service_response = client.get(
+        URL, headers={"Authorization": f"Bearer {token}", "X-Operator-Email": OPERATOR}
+    )
+    service_items = _items(service_response)
+
+    for items in (session_items, service_items):
+        answered = {key: item for key, item in items.items() if item["category"] == category}
+        assert list(answered) == list(values)
+        assert {key: item["value"] for key, item in answered.items()} == values
+        for key, item in answered.items():
+            assert item["value"] != MARKER, key
+            assert item["type"] == schema[key].type, key
+            assert item["requires_restart"] is True, key
+            assert item["description"] == schema[key].description, key
+    assert session_response.json() == service_response.json()
+
+
+def test_signup_category_answers_its_effective_values(client, mode, monkeypatch) -> None:
+    _assert_category_answered(client, mode, monkeypatch, "signup")
+
+
+def test_rewards_category_answers_its_effective_values(client, mode, monkeypatch) -> None:
+    _assert_category_answered(client, mode, monkeypatch, "rewards")
+
+
+def test_operations_category_answers_its_effective_values(client, mode, monkeypatch) -> None:
+    _assert_category_answered(client, mode, monkeypatch, "operations")
+
+
+def test_sleep_llm_force_env_unset_answers_false(admin, monkeypatch) -> None:
+    monkeypatch.delenv("SLEEP_LLM_FORCE_ENV", raising=False)
+    assert _items(admin.get(URL))["SLEEP_LLM_FORCE_ENV"]["value"] is False
+
+
+def test_no_new_key_is_sensitive_or_answered_masked(admin, monkeypatch) -> None:
+    from api.routes.admin_environment import ANSWERED_KEYS
+
+    new_keys = {key for values in NEW_CATEGORY_VALUES.values() for key in values}
+    assert new_keys <= ANSWERED_KEYS
+    assert new_keys & config_routes.get_sensitive_keys() == set()
+    # the values at their defaults too: a False or 0 is answered, not withheld
+    response = admin.get(URL)
+    items = _items(response)
+    for key in new_keys:
+        assert items[key]["value"] != MARKER, key
+    assert MARKER not in response.text

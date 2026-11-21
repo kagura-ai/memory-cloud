@@ -840,3 +840,42 @@ class TestSleepArchiveExemptTagsConfig:
         config = await NeuralMemoryConfig.from_db(db)
 
         assert config.sleep_archive_exempt_tags == ()
+
+
+class TestSleepLlmForceEnv:
+    """#2954: one parse of SLEEP_LLM_FORCE_ENV, shared by the Sleep judge's
+    provider/model resolution and the admin environment read, so the answer
+    cannot drift from the behaviour."""
+
+    @pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", " Yes ", "true\n"])
+    def test_truthy_forms_force_env(self, monkeypatch, raw):
+        from neural.config import sleep_llm_force_env
+
+        monkeypatch.setenv("SLEEP_LLM_FORCE_ENV", raw)
+        assert sleep_llm_force_env() is True
+
+    @pytest.mark.parametrize("raw", ["", "0", "false", "no", "on", "y", "2", "truthy"])
+    def test_anything_else_does_not(self, monkeypatch, raw):
+        from neural.config import sleep_llm_force_env
+
+        monkeypatch.setenv("SLEEP_LLM_FORCE_ENV", raw)
+        assert sleep_llm_force_env() is False
+
+    def test_unset_does_not(self, monkeypatch):
+        from neural.config import sleep_llm_force_env
+
+        monkeypatch.delenv("SLEEP_LLM_FORCE_ENV", raising=False)
+        assert sleep_llm_force_env() is False
+
+    async def test_the_sleep_resolution_uses_the_helper(self, monkeypatch):
+        import neural.config as neural_config_mod
+
+        monkeypatch.delenv("SLEEP_LLM_FORCE_ENV", raising=False)
+        monkeypatch.setenv("SLEEP_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("SLEEP_LLM_MODEL", "env-model")
+        monkeypatch.setattr(neural_config_mod, "sleep_llm_force_env", lambda: True)
+        base = NeuralMemoryConfig.from_env()
+        resolved = NeuralMemoryConfig._resolve_sleep_llm(
+            {"sleep_llm_provider": "anthropic", "sleep_llm_model": "db-model"}, base
+        )
+        assert resolved == {"sleep_llm_provider": "openai", "sleep_llm_model": "env-model"}

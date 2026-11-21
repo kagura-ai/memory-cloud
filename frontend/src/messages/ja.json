@@ -3473,7 +3473,10 @@
         "search": "検索設定",
         "memory": "メモリー設定",
         "system": "システム設定",
-        "hosted": "ホステッドモード設定"
+        "hosted": "ホステッドモード設定",
+        "signup": "サインアップ・招待設定",
+        "rewards": "紹介特典設定",
+        "operations": "運用設定"
       },
       "systemStatus": {
         "title": "システムステータス",
