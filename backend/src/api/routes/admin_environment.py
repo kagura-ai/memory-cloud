@@ -5,7 +5,8 @@ categories with the value the answering process uses, and the embedding
 models the deployment offers. Behind the system-admin gate in every
 ``SYSTEM_ADMIN_MODE`` (``AdminUser``: a system admin in ``session`` mode, an
 operator principal in ``service`` mode; ``off`` is 404). Every caller of the
-route gets every category, ``hosted`` included.
+route gets every category, the admin-only ones (``hosted``, ``signup``,
+``rewards``, ``operations``) included.
 
 Which values are answered is an allow-list: ``ANSWERED_KEYS``. A category key
 that is not on it, or that is in ``get_sensitive_keys()``, answers the
@@ -66,6 +67,26 @@ ANSWERED_KEYS: frozenset[str] = frozenset(
         "DEFAULT_CONTENT_CHUNKS_ENABLED",
         "RERANK_BASE_URL",
         "RERANK_MODEL",
+        # signup (#2954)
+        "ALLOW_REGISTRATION",
+        "ENABLE_EMAIL_SIGNUP",
+        "ENABLE_PROVIDER_LINK_CONFIRMATION",
+        "ENABLE_BETA_INVITES",
+        "BETA_INVITE_QUOTA_PER_USER",
+        # rewards (#2954)
+        "ENABLE_REFERRALS",
+        "REFERRAL_REFEREE_REWARD_MEMORIES",
+        "REFERRAL_REFERRER_REWARD_MEMORIES",
+        "REFERRAL_MAX_GRANTS_PER_REFERRER",
+        "REFERRAL_REDEEM_WINDOW_HOURS",
+        # operations (#2954)
+        "MCP_NOTICES_ENABLED",
+        "REQUIRE_DUAL_CONTROL_FORCE_TRANSFER",
+        "BM25_DRIFT_CRON_ENABLED",
+        "BM25_REVEAL_RATE_LIMIT_PER_HOUR",
+        "OPERATIONS_PROBE_INTERVAL_SECONDS",
+        "FILE_SCAN_ENABLED",
+        "SLEEP_LLM_FORCE_ENV",
     }
 )
 
@@ -139,7 +160,8 @@ async def get_environment(admin: AdminUser) -> EnvironmentResponse:
     """The environment-backed settings as the process that answers uses them.
 
     - `configs`: every key of the Environment console's categories
-      (`embedding`, `search`, `system`, `hosted`), in that order, with its
+      (`embedding`, `search`, `system`, `hosted`, `signup`, `rewards`,
+      `operations`), in that order, with its
       effective `value` and the `type`, `description` and `requires_restart`
       of its schema entry (null for a key without one). Every key is set by
       the environment and applied on restart. Credentials in a URL value are

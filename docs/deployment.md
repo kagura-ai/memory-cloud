@@ -504,7 +504,8 @@ needs no LLM key for it): see
 [Operations status](#operations-status-scheduled-jobs-backlogs-llm-lanes--issue-2768).
 
 From v0.165.0 (#2837) the console reads the environment-backed settings from
-`GET /api/v1/admin/environment`, the `hosted` category included
+`GET /api/v1/admin/environment`, the admin-only categories included (`hosted`;
+from v0.174.0 also `signup`, `rewards` and `operations`, #2954)
 ([Environment Console](api-reference.md#environment-console)). The values are
 those of the process that answers: in this setup the `service` process, so
 give it the same values as the public processes for the settings you want to

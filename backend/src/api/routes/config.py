@@ -139,6 +139,31 @@ def get_config_categories() -> dict[str, list[str]]:
             "RERANK_BASE_URL",
             "RERANK_MODEL",
         ],
+        # Issue #2954: who may sign up, what a referral grants, and operational
+        # switches an admin flow depends on. Admin-only like ``hosted``.
+        "signup": [
+            "ALLOW_REGISTRATION",
+            "ENABLE_EMAIL_SIGNUP",
+            "ENABLE_PROVIDER_LINK_CONFIRMATION",
+            "ENABLE_BETA_INVITES",
+            "BETA_INVITE_QUOTA_PER_USER",
+        ],
+        "rewards": [
+            "ENABLE_REFERRALS",
+            "REFERRAL_REFEREE_REWARD_MEMORIES",
+            "REFERRAL_REFERRER_REWARD_MEMORIES",
+            "REFERRAL_MAX_GRANTS_PER_REFERRER",
+            "REFERRAL_REDEEM_WINDOW_HOURS",
+        ],
+        "operations": [
+            "MCP_NOTICES_ENABLED",
+            "REQUIRE_DUAL_CONTROL_FORCE_TRANSFER",
+            "BM25_DRIFT_CRON_ENABLED",
+            "BM25_REVEAL_RATE_LIMIT_PER_HOUR",
+            "OPERATIONS_PROBE_INTERVAL_SECONDS",
+            "FILE_SCAN_ENABLED",
+            "SLEEP_LLM_FORCE_ENV",
+        ],
         # Note: All tunable Neural Memory parameters (learning_rate, top_m_edges,
         # scoring weights, gradient_clipping, etc.) are managed via /admin/neural-config (Issue #107)
     }
@@ -150,8 +175,10 @@ def get_admin_only_categories() -> set[str]:
     GET /config is open to any authenticated caller. The hosted-mode category
     names the managed LLM and an internal reranker URL, which are the
     operator's business (same posture as the #991 ``ollama_base_url`` drop).
+    The sign-up, rewards and operations categories (#2954) describe who the
+    deployment admits and what it grants: the operator's business too.
     """
-    return {"hosted"}
+    return {"hosted", "signup", "rewards", "operations"}
 
 
 def get_visible_categories(user: dict) -> dict[str, list[str]]:
@@ -220,7 +247,13 @@ def get_effective_value(key: str, settings: Settings) -> Any:
         The effective value, with URL credentials masked
     """
     attr = key.lower()
-    if attr in Settings.model_fields:
+    if key == "SLEEP_LLM_FORCE_ENV":
+        # Not a Settings field and not a NeuralMemoryConfig attribute: the
+        # Sleep resolution reads the environment through this same helper.
+        from neural.config import sleep_llm_force_env
+
+        value = sleep_llm_force_env()
+    elif attr in Settings.model_fields:
         value = getattr(settings, attr)
     else:
         # TRACK_CO_ACTIVATION / ENABLE_DECAY / ENABLE_TRUST_MODULATION are not
@@ -883,6 +916,233 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             default_value="qwen3-reranker-0.6b",
             requires_restart=True,
             impact="Only consulted when RERANK_BASE_URL is set.",
+        ),
+        "ALLOW_REGISTRATION": ConfigKeySchema(
+            key="ALLOW_REGISTRATION",
+            type="boolean",
+            category="signup",
+            description=(
+                "Let anyone register while the admin sign-up gate is off: Google / GitHub "
+                "sign-in, and email sign-up when ENABLE_EMAIL_SIGNUP is on"
+            ),
+            default_value=False,
+            requires_restart=True,
+            impact=(
+                "Ignored while the sign-up gate is on. With the gate off, false admits only "
+                "allowlisted identities, users with a pending workspace invitation and the "
+                "first admin."
+            ),
+            examples=["true", "false"],
+        ),
+        "ENABLE_EMAIL_SIGNUP": ConfigKeySchema(
+            key="ENABLE_EMAIL_SIGNUP",
+            type="boolean",
+            category="signup",
+            description=(
+                "Let a person create an account with an email address and a password (#1734)"
+            ),
+            default_value=False,
+            requires_restart=True,
+            impact=(
+                "Same sign-up controls as Google / GitHub. False: every /auth/signup/email route answers 404."
+            ),
+            examples=["true", "false"],
+        ),
+        "ENABLE_PROVIDER_LINK_CONFIRMATION": ConfigKeySchema(
+            key="ENABLE_PROVIDER_LINK_CONFIRMATION",
+            type="boolean",
+            category="signup",
+            description=(
+                "Email a confirmation link that connects a GitHub or Google sign-in to an account "
+                "created by email sign-up with the same address (#2786)"
+            ),
+            default_value=True,
+            requires_restart=True,
+            impact=(
+                "False: such sign-ins end at email_in_use, nothing is mailed and every "
+                "/auth/link-confirm route answers 404."
+            ),
+            examples=["true", "false"],
+        ),
+        "ENABLE_BETA_INVITES": ConfigKeySchema(
+            key="ENABLE_BETA_INVITES",
+            type="boolean",
+            category="signup",
+            description=("Let signed-in users mint one-time closed-beta invite links (#1581)"),
+            default_value=False,
+            requires_restart=True,
+            impact=(
+                "Also the kill switch: false answers 404 on every /beta-invites route and stops "
+                "redemption at sign-in."
+            ),
+            examples=["true", "false"],
+        ),
+        "BETA_INVITE_QUOTA_PER_USER": ConfigKeySchema(
+            key="BETA_INVITE_QUOTA_PER_USER",
+            type="number",
+            category="signup",
+            description=("How many invite links a non-admin user may hold at once (#1581)"),
+            default_value=4,
+            min_value=0,
+            requires_restart=True,
+            impact=(
+                "Active and redeemed links count; system admins are uncapped. 0 = only system "
+                "admins can mint."
+            ),
+        ),
+        "ENABLE_REFERRALS": ConfigKeySchema(
+            key="ENABLE_REFERRALS",
+            type="boolean",
+            category="rewards",
+            description=(
+                "Enable the referral program: both sides of a referral earn a memory-quota bonus (#1470)"
+            ),
+            default_value=False,
+            requires_restart=True,
+            impact=(
+                "Also the kill switch: false stops new redemptions; bonuses already granted stay."
+            ),
+            examples=["true", "false"],
+        ),
+        "REFERRAL_REFEREE_REWARD_MEMORIES": ConfigKeySchema(
+            key="REFERRAL_REFEREE_REWARD_MEMORIES",
+            type="number",
+            category="rewards",
+            description=("Memory-quota bonus granted to the invited user on redemption (#1470)"),
+            default_value=500,
+            min_value=0,
+            max_value=2000,
+            requires_restart=True,
+            impact=("Applies to redemptions from now on."),
+        ),
+        "REFERRAL_REFERRER_REWARD_MEMORIES": ConfigKeySchema(
+            key="REFERRAL_REFERRER_REWARD_MEMORIES",
+            type="number",
+            category="rewards",
+            description=(
+                "Memory-quota bonus granted to the inviter per successful referral (#1470)"
+            ),
+            default_value=500,
+            min_value=0,
+            max_value=2000,
+            requires_restart=True,
+            impact=("Applies to redemptions from now on."),
+        ),
+        "REFERRAL_MAX_GRANTS_PER_REFERRER": ConfigKeySchema(
+            key="REFERRAL_MAX_GRANTS_PER_REFERRER",
+            type="number",
+            category="rewards",
+            description=("Lifetime cap on successful referrals per inviter (#1470)"),
+            default_value=3,
+            min_value=0,
+            max_value=10,
+            requires_restart=True,
+            impact=(
+                "Raising the cap is non-breaking; lowering it strands slots users already earned."
+            ),
+        ),
+        "REFERRAL_REDEEM_WINDOW_HOURS": ConfigKeySchema(
+            key="REFERRAL_REDEEM_WINDOW_HOURS",
+            type="number",
+            category="rewards",
+            description=(
+                "How long after sign-up a user may redeem a referral code, in hours (#1470)"
+            ),
+            default_value=72,
+            min_value=1,
+            max_value=720,
+            requires_restart=True,
+            impact=("An account older than this cannot redeem a code."),
+        ),
+        "MCP_NOTICES_ENABLED": ConfigKeySchema(
+            key="MCP_NOTICES_ENABLED",
+            type="boolean",
+            category="operations",
+            description=("Deliver service notices in the MCP bootstrap reply (#2762)"),
+            default_value=False,
+            requires_restart=True,
+            impact=(
+                "False: no account-settings toggle and no notice query; the admin notice routes "
+                "work either way."
+            ),
+            examples=["true", "false"],
+        ),
+        "REQUIRE_DUAL_CONTROL_FORCE_TRANSFER": ConfigKeySchema(
+            key="REQUIRE_DUAL_CONTROL_FORCE_TRANSFER",
+            type="boolean",
+            category="operations",
+            description=(
+                "Require a second, distinct system admin to approve an ownership force-transfer"
+            ),
+            default_value=False,
+            requires_restart=True,
+            impact=(
+                "True needs at least two system admins; with one, no force-transfer can be approved."
+            ),
+            examples=["true", "false"],
+        ),
+        "BM25_DRIFT_CRON_ENABLED": ConfigKeySchema(
+            key="BM25_DRIFT_CRON_ENABLED",
+            type="boolean",
+            category="operations",
+            description=("Run the BM25 IDF drift cron (#378)"),
+            default_value=False,
+            requires_restart=True,
+            impact=("False: the scheduled drift check does not run."),
+            examples=["true", "false"],
+        ),
+        "BM25_REVEAL_RATE_LIMIT_PER_HOUR": ConfigKeySchema(
+            key="BM25_REVEAL_RATE_LIMIT_PER_HOUR",
+            type="number",
+            category="operations",
+            description=("Max BM25 reveal-terms calls per user per hour (#377)"),
+            default_value=10,
+            requires_restart=True,
+            impact=("Further calls in the hour are refused."),
+        ),
+        "OPERATIONS_PROBE_INTERVAL_SECONDS": ConfigKeySchema(
+            key="OPERATIONS_PROBE_INTERVAL_SECONDS",
+            type="number",
+            category="operations",
+            description=(
+                "How often the scheduler leader probes each platform LLM lane for the operations "
+                "status, in seconds (#2768)"
+            ),
+            default_value=0,
+            min_value=0,
+            requires_restart=True,
+            impact=(
+                "0 = the probe is off; otherwise at least 300. Each probe is a paid call on the "
+                "platform credentials."
+            ),
+        ),
+        "FILE_SCAN_ENABLED": ConfigKeySchema(
+            key="FILE_SCAN_ENABLED",
+            type="boolean",
+            category="operations",
+            description=(
+                "Scan uploaded files with clamd and hold their downloads until scanned (#565)"
+            ),
+            default_value=False,
+            requires_restart=True,
+            impact=("Per process: enable it on every API process at once."),
+            examples=["true", "false"],
+        ),
+        "SLEEP_LLM_FORCE_ENV": ConfigKeySchema(
+            key="SLEEP_LLM_FORCE_ENV",
+            type="boolean",
+            category="operations",
+            description=(
+                "Let the SLEEP_LLM_PROVIDER / SLEEP_LLM_MODEL environment variables win over a "
+                "stored Sleep judge configuration row (#1182); only matters when those "
+                "variables are set and a stored row exists"
+            ),
+            default_value=False,
+            requires_restart=True,
+            impact=(
+                "Without both, the stored row (or the environment) is used whatever this value is."
+            ),
+            examples=["true", "false"],
         ),
     }
 

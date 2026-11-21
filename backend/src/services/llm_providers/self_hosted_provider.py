@@ -45,10 +45,12 @@ async def verify_self_hosted_reachable(
     subject in the error message ("LLM backend" vs "inference server").
 
     Raises:
-        ConfigurationError: non-200 response (the server answered: it is
-            misconfigured, or rejects the key).
-        SelfHostedUnreachableError: any httpx transport error (#2049) — a
-            ``ConfigurationError`` subclass, so callers keep handling it alike.
+        ConfigurationError: any other non-200 response (the server answered:
+            it is misconfigured, or rejects the key).
+        SelfHostedUnreachableError: any httpx transport error (#2049), or a
+            502 / 503 / 504 from a proxy in front of the server reporting it
+            down (#2957) — a ``ConfigurationError`` subclass, so callers keep
+            handling it alike.
     """
     import httpx
 
@@ -64,6 +66,13 @@ async def verify_self_hosted_reachable(
                     f"Self-hosted {label} at {base_url} rejected the request "
                     f"(HTTP {resp.status_code}) — set or check SELF_HOSTED_API_KEY; "
                     "this backend requires a bearer token (e.g. vLLM --api-key)."
+                )
+            if resp.status_code in (502, 503, 504):
+                # #2957: a gateway in front of the server reports it down; the
+                # same transient outage as a refused connection.
+                raise SelfHostedUnreachableError(
+                    f"Self-hosted {label} at {base_url} is unavailable behind its gateway "
+                    f"(HTTP {resp.status_code}). Is your inference server running?"
                 )
             if resp.status_code != 200:
                 raise ConfigurationError(
@@ -114,7 +123,8 @@ async def ensure_self_hosted_reachable(
 
     Raises:
         ConfigurationError: the server answered with an error status.
-        SelfHostedUnreachableError: the probe could not reach the server.
+        SelfHostedUnreachableError: the probe could not reach the server, or
+            a proxy in front of it answered 502 / 503 / 504.
     """
     key = _reachability_key(base_url, api_key)
     if _REACHABLE_UNTIL.get(key, 0.0) > time.monotonic():

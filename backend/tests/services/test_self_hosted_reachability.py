@@ -93,6 +93,22 @@ async def test_a_misconfigured_server_fails_loud_every_time(code):
     assert http.get.await_count == 2
 
 
+@pytest.mark.parametrize("code", [502, 503, 504])
+async def test_a_gateway_reporting_the_server_down_is_unreachable_and_not_cached(code):
+    """#2957: behind a reverse proxy an outage answers 502 / 503 / 504; that is
+    the server being unreachable, not misconfiguration."""
+    http = _http(_status(code), _status(code))
+    with patch("httpx.AsyncClient", return_value=http):
+        for _ in range(2):
+            with pytest.raises(SelfHostedUnreachableError) as err:
+                await sh.ensure_self_hosted_reachable(BASE, None, label="inference server")
+            # Still a ConfigurationError: CFG-001 on the API path, and the
+            # embedding sweep retries it without spending the budget.
+            assert isinstance(err.value, ConfigurationError)
+            assert str(code) in str(err.value)
+    assert http.get.await_count == 2
+
+
 async def test_the_cache_is_keyed_by_base_url_and_key():
     http = _http(_ok(), _ok(), _ok())
     with patch("httpx.AsyncClient", return_value=http):

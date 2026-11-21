@@ -15,7 +15,9 @@ arm to fall back to there, and returning BM25 hits to a caller who asked for
 vector search answers a different question than the one asked.
 """
 
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -36,7 +38,7 @@ def _fake_config() -> SimpleNamespace:
     )
 
 
-def _embed_svc_that(*, raises: Exception | None = None) -> MagicMock:
+def _embed_svc_that(*, raises: Exception | Callable[..., Any] | None = None) -> MagicMock:
     svc = MagicMock()
     svc.provider = "openai"
     svc.model = "text-embedding-3-small"
@@ -51,7 +53,7 @@ def _embed_svc_that(*, raises: Exception | None = None) -> MagicMock:
 async def _search(
     *,
     search_mode: str,
-    embed_error: Exception | None,
+    embed_error: Exception | Callable[..., Any] | None,
     keyword_hits: list[dict] | None = None,
     degradation: dict | None = None,
 ):
@@ -201,3 +203,152 @@ class TestSemanticStillRaises:
         embed_svc.embed_with_usage.assert_not_called()
         assert [r["id"] for r in results] == ["m1"]
         assert degradation == {}
+
+
+# #2957: a self-hosted embedding server that cannot be reached raises
+# ``SelfHostedUnreachableError`` (a ``ConfigurationError`` subclass, CFG-001)
+# from the reachability probe. That is a transient outage, like a provider
+# that answers 5xx, so a hybrid recall serves its keyword arm instead of 500.
+# A server that answered and refused (401/403) stays a plain
+# ``ConfigurationError`` and keeps failing loudly.
+_UNREACHABLE_BASE_URL = "http://inference.example.com:8000"
+
+
+def _unreachable() -> Exception:
+    from utils.exceptions import SelfHostedUnreachableError
+
+    return SelfHostedUnreachableError(
+        f"Cannot connect to self-hosted inference server at {_UNREACHABLE_BASE_URL}. "
+        "Is your inference server running?"
+    )
+
+
+@pytest.mark.asyncio
+class TestSelfHostedUnreachableDegrades:
+    async def test_hybrid_unreachable_self_hosted_returns_keyword_hits_flagged_embedding_unavailable(
+        self,
+    ):
+        degradation: dict = {}
+        results, _ = await _search(
+            search_mode="hybrid",
+            embed_error=_unreachable(),
+            keyword_hits=[{"id": "m1", "score": 0.9, "payload": {}}],
+            degradation=degradation,
+        )
+        assert [r["id"] for r in results] == ["m1"]
+        assert degradation["degraded"] is True
+        assert degradation["reason"] == "embedding_unavailable"
+
+    async def test_semantic_unreachable_self_hosted_still_raises(self):
+        from utils.exceptions import SelfHostedUnreachableError
+
+        with pytest.raises(SelfHostedUnreachableError) as excinfo:
+            await _search(
+                search_mode="semantic",
+                embed_error=_unreachable(),
+                keyword_hits=[{"id": "m1", "score": 0.9, "payload": {}}],
+            )
+        assert excinfo.value.status_code == 500
+        assert excinfo.value.error_code == "CFG-001"
+
+    async def test_hybrid_rejected_self_hosted_request_still_raises_cfg_001(self):
+        # The probe's 401/403 answer: the server is up and refuses the key.
+        # A misconfiguration, so it keeps failing loudly instead of degrading.
+        from utils.exceptions import ConfigurationError, SelfHostedUnreachableError
+
+        rejected = ConfigurationError(
+            f"Self-hosted inference server at {_UNREACHABLE_BASE_URL} rejected the request "
+            "(HTTP 401) — set or check SELF_HOSTED_API_KEY"
+        )
+        degradation: dict = {}
+        with pytest.raises(ConfigurationError) as excinfo:
+            await _search(
+                search_mode="hybrid",
+                embed_error=rejected,
+                keyword_hits=[{"id": "m1", "score": 0.9, "payload": {}}],
+                degradation=degradation,
+            )
+        assert not isinstance(excinfo.value, SelfHostedUnreachableError)
+        assert excinfo.value.error_code == "CFG-001"
+        assert degradation == {}
+
+    async def test_unreachable_degrade_log_and_detail_carry_no_base_url(self):
+        import structlog
+
+        degradation: dict = {}
+        with structlog.testing.capture_logs() as logs:
+            await _search(
+                search_mode="hybrid",
+                embed_error=_unreachable(),
+                keyword_hits=[],
+                degradation=degradation,
+            )
+        (event,) = [e for e in logs if e["event"] == "recall_degraded_to_keyword"]
+        assert event["log_level"] == "warning"
+        assert event["reason"] == "embedding_unavailable"
+        assert event["error_class"] == "SelfHostedUnreachableError"
+        # The exception text names the configured base URL: only the class is
+        # logged, and the detail is a fixed text.
+        assert "error" not in event
+        assert sorted(event) == ["context_id", "error_class", "event", "log_level", "reason"]
+        assert degradation["detail"] == "self-hosted inference server unreachable"
+
+    async def test_provider_failure_keeps_its_error_text_in_the_degrade_log(self):
+        # The causes caught before #2957 keep their existing log fields.
+        import structlog
+
+        err = OpenAIError("Embedding generation failed: upstream down")
+        degradation: dict = {}
+        with structlog.testing.capture_logs() as logs:
+            await _search(
+                search_mode="hybrid",
+                embed_error=err,
+                keyword_hits=[],
+                degradation=degradation,
+            )
+        (event,) = [e for e in logs if e["event"] == "recall_degraded_to_keyword"]
+        assert event["reason"] == "embedding_unavailable"
+        assert event["error"] == str(err)
+        assert degradation["detail"] == str(err)
+
+
+@pytest.mark.asyncio
+async def test_hybrid_degrades_when_a_gateway_reports_the_self_hosted_server_down():
+    """#2957: the exception the real probe raises for a 503 from a proxy in
+    front of the server degrades a hybrid recall like a connect failure."""
+    import structlog
+
+    from services.llm_providers.self_hosted_provider import ensure_self_hosted_reachable
+
+    gateway_down = MagicMock()
+    gateway_down.status_code = 503
+    http = MagicMock()
+    http.get = AsyncMock(return_value=gateway_down)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+
+    async def _embed_through_the_probe(*args, **kwargs):
+        await ensure_self_hosted_reachable(_UNREACHABLE_BASE_URL, None, label="inference server")
+        return ([0.1] * 8, 0)
+
+    degradation: dict = {}
+    with (
+        patch("httpx.AsyncClient", return_value=http),
+        structlog.testing.capture_logs() as logs,
+    ):
+        results, _ = await _search(
+            search_mode="hybrid",
+            embed_error=_embed_through_the_probe,
+            keyword_hits=[{"id": "m1", "score": 0.9, "payload": {}}],
+            degradation=degradation,
+        )
+    http.get.assert_awaited_once()
+    assert [r["id"] for r in results] == ["m1"]
+    assert degradation == {
+        "degraded": True,
+        "reason": "embedding_unavailable",
+        "detail": "self-hosted inference server unreachable",
+    }
+    (event,) = [e for e in logs if e["event"] == "recall_degraded_to_keyword"]
+    assert sorted(event) == ["context_id", "error_class", "event", "log_level", "reason"]
+    assert event["error_class"] == "SelfHostedUnreachableError"

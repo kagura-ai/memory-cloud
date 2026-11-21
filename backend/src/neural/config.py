@@ -123,6 +123,18 @@ def sleep_archive_exempt_tags_from_env() -> tuple[str, ...]:
     return tuple(dict.fromkeys(tag.strip() for tag in items if tag.strip()))
 
 
+def sleep_llm_force_env() -> bool:
+    """Whether ``SLEEP_LLM_FORCE_ENV`` pins the Sleep judge's env over DB rows (#1182).
+
+    ``1`` / ``true`` / ``yes`` (any case, surrounding blanks ignored) turn it
+    on; anything else, or unset, leaves it off. The one parse the Sleep
+    resolution and the admin environment read (#2954) both use.
+    """
+    import os
+
+    return os.getenv("SLEEP_LLM_FORCE_ENV", "").strip().lower() in ("1", "true", "yes")
+
+
 @dataclass
 class NeuralMemoryConfig:
     """Configuration for Neural Memory Network.
@@ -890,7 +902,7 @@ class NeuralMemoryConfig:
         """
         import os
 
-        force_env = os.getenv("SLEEP_LLM_FORCE_ENV", "").strip().lower() in ("1", "true", "yes")
+        force_env = sleep_llm_force_env()
         resolved: dict[str, str] = {}
         for cfg_key, env_var, env_value in (
             ("sleep_llm_provider", "SLEEP_LLM_PROVIDER", base_config.sleep_llm_provider),

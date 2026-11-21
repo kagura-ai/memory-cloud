@@ -33,7 +33,7 @@ from utils.content_chunks import (
     CONTENT_CHUNK_DENSE_OVERSAMPLE,
     collapse_chunk_hits,
 )
-from utils.exceptions import ExternalServiceError, OpenAIError
+from utils.exceptions import ExternalServiceError, OpenAIError, SelfHostedUnreachableError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -405,35 +405,53 @@ class SearchService:
                             dense_hits=dense_hits,
                             collapsed_memories=len(semantic_results),
                         )
-            except ExternalServiceError as exc:
-                # The semantic arm is down (embedding provider or vector
-                # store). A hybrid search can still answer from BM25, so
+            except (ExternalServiceError, SelfHostedUnreachableError) as exc:
+                # The semantic arm is down (embedding provider, vector store,
+                # or a self-hosted inference server that cannot be reached,
+                # #2957). A hybrid search can still answer from BM25, so
                 # degrade instead of failing the whole request — but record
                 # it, because keyword-only hits carry no raw cosine and their
                 # confidence is therefore computed on a different basis.
+                #
+                # Only the unreachable subclass of ConfigurationError degrades:
+                # a server that answered and refused (401/403), a missing key
+                # and every other ConfigurationError keep raising CFG-001.
                 #
                 # An explicitly requested "semantic" search has no arm to
                 # fall back to: returning BM25 hits there would answer a
                 # different question than the caller asked, so it re-raises.
                 if search_mode != "hybrid":
                     raise
-                reason = (
-                    "embedding_unavailable"
-                    if isinstance(exc, OpenAIError)
-                    else "vector_search_unavailable"
-                )
-                logger.warning(
-                    "recall_degraded_to_keyword",
-                    reason=reason,
-                    error=str(exc),
-                    context_id=str(primary_context_id),
-                )
+                if isinstance(exc, SelfHostedUnreachableError):
+                    reason = "embedding_unavailable"
+                    # The message names the configured base URL: log the
+                    # class only (same shape as ``rerank_failed_open``).
+                    logger.warning(
+                        "recall_degraded_to_keyword",
+                        reason=reason,
+                        error_class=type(exc).__name__,
+                        context_id=str(primary_context_id),
+                    )
+                    detail = "self-hosted inference server unreachable"
+                else:
+                    reason = (
+                        "embedding_unavailable"
+                        if isinstance(exc, OpenAIError)
+                        else "vector_search_unavailable"
+                    )
+                    logger.warning(
+                        "recall_degraded_to_keyword",
+                        reason=reason,
+                        error=str(exc),
+                        context_id=str(primary_context_id),
+                    )
+                    detail = str(exc)
                 semantic_results = []
                 effective_search_mode = "keyword"
                 if degradation is not None:
                     degradation["degraded"] = True
                     degradation["reason"] = reason
-                    degradation["detail"] = str(exc)
+                    degradation["detail"] = detail
 
         if search_mode in ("hybrid", "keyword"):
             logger.debug(

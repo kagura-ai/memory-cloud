@@ -22,6 +22,7 @@ from utils.user_prefs import (
     TIMEZONE_MAX_LENGTH,
     is_valid_locale,
     is_valid_timezone,
+    negotiate_locale,
 )
 
 
@@ -49,6 +50,110 @@ class TestLocale:
         pattern = UpdateUserProfileRequest.model_json_schema()["properties"]["locale"]
         assert "^(en|ja)$" in str(pattern)
         assert SUPPORTED_LOCALES == ("en", "ja")
+
+
+class TestNegotiateLocale:
+    """#2949: the consent page's language. Order: the OIDC ``ui_locales``
+    parameter, the account's saved locale, ``Accept-Language``, then ``en``.
+    Only a code of :data:`SUPPORTED_LOCALES` ever comes out."""
+
+    def test_nothing_known_answers_english(self) -> None:
+        assert negotiate_locale() == "en"
+        assert negotiate_locale(ui_locales=None, account_locale=None, accept_language=None) == "en"
+
+    @pytest.mark.parametrize("value", ["ja", "JA", "ja-JP", "Ja-jp", "ja-Hira-JP"])
+    def test_ui_locales_primary_subtag_case_insensitive(self, value) -> None:
+        assert negotiate_locale(ui_locales=value) == "ja"
+
+    def test_ui_locales_first_supported_tag_in_preference_order_wins(self) -> None:
+        assert negotiate_locale(ui_locales="fr ja en") == "ja"
+        assert negotiate_locale(ui_locales="fr-CA en-US ja") == "en"
+        assert negotiate_locale(ui_locales="  ja  ") == "ja"
+
+    def test_ui_locales_beats_the_account_and_accept_language(self) -> None:
+        assert negotiate_locale(ui_locales="en", account_locale="ja", accept_language="ja") == "en"
+        assert negotiate_locale(ui_locales="ja", account_locale="en", accept_language="en") == "ja"
+
+    def test_unsupported_ui_locales_falls_to_the_account(self) -> None:
+        assert negotiate_locale(ui_locales="fr de", account_locale="ja") == "ja"
+
+    def test_account_locale_beats_accept_language(self) -> None:
+        assert negotiate_locale(account_locale="en", accept_language="ja") == "en"
+        assert negotiate_locale(account_locale="ja", accept_language="en") == "ja"
+
+    @pytest.mark.parametrize("account", [None, "", "fr", "JA", "ja-JP", "xx"])
+    def test_unsupported_account_locale_falls_to_accept_language(self, account) -> None:
+        assert negotiate_locale(account_locale=account, accept_language="ja") == "ja"
+
+    @pytest.mark.parametrize(
+        "header,expected",
+        [
+            ("ja", "ja"),
+            ("ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7", "ja"),
+            ("en-US,en;q=0.9,ja;q=0.8", "en"),
+            ("fr;q=1, ja;q=0.5", "ja"),
+            ("en;q=0.3, ja;q=0.9", "ja"),
+            ("en;q=0.3, JA-jp;q=0.9", "ja"),
+            ("ja;q=0, en;q=0.1", "en"),
+            ("ja;q=0", "en"),
+            ("*", "en"),
+            ("fr, de", "en"),
+        ],
+    )
+    def test_accept_language_with_q_values(self, header, expected) -> None:
+        assert negotiate_locale(accept_language=header) == expected
+
+    @pytest.mark.parametrize(
+        "header",
+        ["ja;q=abc", "ja;q=2", "ja;q=-1", "ja;q=nan", "ja;q=", ";;;", ",,,", "j@;q=1"],
+    )
+    def test_malformed_accept_language_entries_are_skipped(self, header) -> None:
+        assert negotiate_locale(accept_language=header) == "en"
+
+    def test_a_malformed_entry_does_not_hide_a_good_one(self) -> None:
+        assert negotiate_locale(accept_language="ja;q=abc, ja-JP;q=0.4") == "ja"
+
+    @pytest.mark.parametrize(
+        "junk",
+        [
+            "",
+            "   ",
+            '"><script>alert(1)</script>',
+            "ja<script>",
+            "ja-<b>",
+            "ja_JP",
+            "ja;q=1",
+            "ja,en",
+            "../ja",
+            "ja\x00",
+            "j" * 9,
+            "ja-" + "x" * 9,
+        ],
+    )
+    def test_junk_ui_locales_is_skipped_and_the_next_tier_answers(self, junk) -> None:
+        assert negotiate_locale(ui_locales=junk) == "en"
+        assert negotiate_locale(ui_locales=junk, account_locale="ja") == "ja"
+
+    def test_oversized_ui_locales_is_skipped_whole(self) -> None:
+        oversized = "fr " * 100 + "ja"
+        assert negotiate_locale(ui_locales=oversized) == "en"
+        assert negotiate_locale(ui_locales=oversized, account_locale="ja") == "ja"
+
+    def test_oversized_accept_language_is_skipped_whole(self) -> None:
+        oversized = "fr;q=0.1, " * 200 + "ja"
+        assert negotiate_locale(accept_language=oversized) == "en"
+
+    @pytest.mark.parametrize(
+        "value",
+        ["ja", "EN", "fr", "<x>", "ja-JP", "*", "ja;q=0.5", "x" * 5000, "\u3042", "-ja", "ja-"],
+    )
+    def test_only_a_supported_code_ever_comes_out(self, value) -> None:
+        for kwargs in (
+            {"ui_locales": value},
+            {"account_locale": value},
+            {"accept_language": value},
+        ):
+            assert negotiate_locale(**kwargs) in SUPPORTED_LOCALES
 
 
 class TestTimezone:

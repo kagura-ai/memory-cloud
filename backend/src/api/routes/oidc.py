@@ -50,7 +50,9 @@ from utils.datetime import utcnow
 from utils.exceptions import MemoryCloudException
 from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
+from utils.oidc_messages import get_oidc_messages
 from utils.text_guard import has_nul
+from utils.user_prefs import SUPPORTED_LOCALES, negotiate_locale
 
 router = APIRouter(tags=["oidc"])
 logger = get_logger(__name__)
@@ -184,6 +186,7 @@ async def discovery() -> Response:
                 else {}
             ),
             "code_challenge_methods_supported": ["S256"],
+            "ui_locales_supported": list(SUPPORTED_LOCALES),
             "scopes_supported": sorted(
                 IDENTITY_SCOPES | ({"resource.sync"} if sync_enabled else set())
             ),
@@ -272,15 +275,18 @@ async def authorize(request: Request) -> Response:
                 if request.method == "GET":
                     csrf = _csrf(request, identity)
                     action = "/oidc/authorize?" + str(request.query_params)
-                    descriptions = {
-                        "openid": "Identify your KMC account",
-                        "profile": "Read your display name and profile picture",
-                        "workspaces:read": "Read your workspace memberships and permissions",
-                        "integrations:manage": "Manage integrations within your current KMC permissions",
-                        "sync.records:read": "Read approved synchronized product and FAQ records within your current KMC permissions",
-                    }
+                    # #2949: ui_locales, then the account's saved language,
+                    # then Accept-Language, then en. Only a supported code
+                    # comes out; it alone picks the messages and <html lang>.
+                    locale = negotiate_locale(
+                        ui_locales=request.query_params.get("ui_locales"),
+                        account_locale=user.locale,
+                        accept_language=request.headers.get("accept-language"),
+                    )
+                    messages = get_oidc_messages(locale)
+                    descriptions = cast(dict[str, str], messages["permissions"])
                     client_name = cast(OIDCClient, oauth_request.client).client_name
-                    account = user.name or "your current KMC account"
+                    account = user.name or cast(str, messages["account_fallback"])
                     style_nonce = secrets.token_urlsafe(24)
                     db.rollback()
                     # No form-action (#2909): browsers apply it to every
@@ -290,6 +296,8 @@ async def authorize(request: Request) -> Response:
                         request=request,
                         name="oidc_consent.html",
                         context={
+                            "locale": locale,
+                            "messages": messages,
                             "style_nonce": style_nonce,
                             "client_name": client_name,
                             "account": account,

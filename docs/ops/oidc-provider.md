@@ -128,6 +128,29 @@ requires PKCE S256 and a nonce for every client. Register the issuer with the
 client library and use its standard signature, issuer, audience, nonce, state
 and PKCE validation. Do not use an ID token as an API access token.
 
+### Consent page language
+
+The consent page is shown in English or Japanese (the values discovery lists
+as `ui_locales_supported`). The language is chosen in this order:
+
+1. the authorization request's `ui_locales` parameter (OIDC Core 3.1.2.1): a
+   space-separated list in preference order; the first tag whose primary
+   subtag is supported wins, ignoring case (`ja-JP` and `JA` both give
+   Japanese);
+2. the signed-in account's saved language;
+3. the browser's `Accept-Language` header (q-values respected);
+4. English.
+
+Unsupported or malformed tags, a `ui_locales` longer than 255 characters and
+an `Accept-Language` header longer than 1024 characters are skipped without
+an error and the next source decides; the authorization request's overall
+size limit and the one-value-per-parameter rule still apply. An account's
+saved language is `en` unless the user chose another, so a relying party that
+wants the Japanese page for such an account passes `ui_locales=ja`;
+`Accept-Language` decides only when the account has no supported saved
+language. `ui_locales` is optional and covered by the consent form's binding
+to the request like every other authorization parameter.
+
 ## Protocol burst limits
 
 `OIDC_RATE_LIMIT_PER_MINUTE` (default 120) is applied per minute in two
