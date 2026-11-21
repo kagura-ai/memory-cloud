@@ -921,10 +921,16 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             key="ALLOW_REGISTRATION",
             type="boolean",
             category="signup",
-            description=("Let new users register through Google / GitHub sign-in"),
+            description=(
+                "Let anyone register while the admin sign-up gate is off: Google / GitHub "
+                "sign-in, and email sign-up when ENABLE_EMAIL_SIGNUP is on"
+            ),
             default_value=False,
             requires_restart=True,
-            impact=("When false, only invited users and the first admin can register."),
+            impact=(
+                "Ignored while the sign-up gate is on. With the gate off, false admits only "
+                "users with a pending workspace invitation and the first admin."
+            ),
             examples=["true", "false"],
         ),
         "ENABLE_EMAIL_SIGNUP": ConfigKeySchema(
@@ -1127,13 +1133,13 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             category="operations",
             description=(
                 "Let the SLEEP_LLM_PROVIDER / SLEEP_LLM_MODEL environment variables win over a "
-                "stored Sleep judge configuration row (#1182)"
+                "stored Sleep judge configuration row (#1182); only matters when those "
+                "variables are set and a stored row exists"
             ),
             default_value=False,
             requires_restart=True,
             impact=(
-                "Only matters when those environment variables are set and a stored row exists; "
-                "otherwise the row (or the environment) is used as before."
+                "Without both, the stored row (or the environment) is used whatever this value is."
             ),
             examples=["true", "false"],
         ),
