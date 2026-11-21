@@ -2139,6 +2139,58 @@ it by its MCP URL as before ([MCP clients › ChatGPT](mcp-clients.md#chatgpt-de
 The web UI also renders the link only for an `https:` URL, whatever the API
 returns.
 
+## Link back to the application on the plan page (Issue #2950)
+
+An application that sends a workspace owner to this deployment's plan page to
+change the plan can offer the owner a way back. The application links to the
+plan page with one fixed parameter:
+
+```
+https://kmc.example.com/workspace/settings/plan?return=kagura-public
+```
+
+`return` must appear exactly once with exactly this value; nothing else in the
+URL is read. When the workspace's canonical owner (the account that owns the
+workspace and holds the `owner` role) opens it, the plan page keeps a marker in
+that browser tab (`sessionStorage`, a timestamp only: no user, workspace or
+address) and takes the parameter out of the address bar; for anyone else the
+URL is left alone. While the marker is valid, the plan page shows that owner a
+notice above "Current plan":
+
+- the signed-in account (its email, or its name);
+- whether the workspace on screen is on the top plan (`promax`, shown by its
+  label), read from this deployment's own data, with "Check again" (one re-read,
+  no polling) while it is not;
+- a plain link, in the same tab, to the address below, and "Hide this notice".
+
+The owner changes the plan with the existing plan button and comes back to the
+plan page by the payment service's own links; payment and the billing handoff
+are unchanged. The notice never navigates by itself, and nothing is stored on
+the server.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `KAGURA_PUBLIC_RETURN_URL` | *(empty)* | The application's return address, e.g. `https://app.example.com/return`. **Empty shows nothing**: no notice, no marker, the URL is left alone. When set, `GET /api/v1/system/info` returns it as `kagura_public_return_url` (`null` when empty) and the link goes to exactly this address, with nothing appended. Checked at startup by the `CHATGPT_APP_URL` rules: surrounding whitespace is trimmed; anything but an absolute `https://` URL with a host (`http://`, `javascript:`, a bare word, a relative URL, whitespace or control characters inside, an invalid port, user info such as `user@`) fails startup. The web UI also shows the link only for an `https:` URL. |
+
+What else to know:
+
+- The setting shows nothing unless the plan page is on (`ENABLE_PLAN_PAGE=true`).
+  It is of use only where the billing handoff is configured too: without it the
+  notice still shows, but the plan button cannot change the plan.
+- The marker belongs to one web origin and one browser tab. The application
+  must link to the same web origin the payment service sends owners back to:
+  another host name for the same site shows no notice after checkout. A second
+  tab or another browser shows none either; following the application's link
+  again shows it at any time, also after the plan changed.
+- Nothing is shown 24 hours after the visit with the parameter, and the page
+  says nothing about it.
+- A signed-out visitor who opens the link signs in and comes back to it.
+  Signing out on the plan page goes to the sign-in page as any sign-out does.
+- The notice states what this deployment knows about the signed-in account and
+  the workspace on screen. An application that links here checks eligibility
+  by itself, for example with `eligible_for=kagura-public`
+  ([OIDC workspace access](ops/oidc-workspace-access.md#kagura-public-eligibility)).
+
 ## Google connected apps (Issue #2773)
 
 Google's connected apps program links an MCP server into Google's apps. Its

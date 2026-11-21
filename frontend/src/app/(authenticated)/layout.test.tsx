@@ -50,12 +50,14 @@ vi.mock("next-intl", () => ({
 }));
 
 let mockPathname = "/workspace/dashboard";
+// One stable object per test, as the real hook returns between renders.
+let mockSearchParams = new URLSearchParams();
 const mockPush = vi.fn();
 const mockReplace = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush, replace: mockReplace }),
   usePathname: () => mockPathname,
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => mockSearchParams,
 }));
 
 const mockSwitchWorkspace = vi.fn();
@@ -87,6 +89,7 @@ vi.mock("@/components/dashboard/Sidebar", () => ({ Sidebar: () => null }));
 
 import DashboardLayout from "./layout";
 import { resetSelectionPromptFallback } from "@/lib/navigation/workspaceManagement";
+import { APPLICATION_RETURN_LOGIN_PATH } from "@/lib/navigation/applicationReturn";
 
 beforeEach(() => {
   mockRefetchUser.mockReset();
@@ -95,6 +98,7 @@ beforeEach(() => {
   mockHasSelection = true;
   mockAcceptTerms.mockReset();
   mockPathname = "/workspace/dashboard";
+  mockSearchParams = new URLSearchParams();
   mockSystemInfo = null;
   mockWorkspaces = [{ id: "w1", current_user_role: "member" }];
   mockPush.mockClear();
@@ -372,3 +376,50 @@ describe("(authenticated) layout — Workspace management (#2919)", () => {
   });
 });
 
+describe("(authenticated) layout — signed-out arrival from the application (#2950)", () => {
+  it("a signed-out arrival goes to the constant login path", async () => {
+    mockUser = null;
+    mockPathname = "/workspace/settings/plan";
+    mockSearchParams = new URLSearchParams("return=kagura-public");
+    render(<DashboardLayout><p>plan page</p></DashboardLayout>);
+    await waitFor(() => expect(mockPush).toHaveBeenCalledWith(APPLICATION_RETURN_LOGIN_PATH));
+    expect(APPLICATION_RETURN_LOGIN_PATH).toBe(
+      "/login?return_to=%2Fworkspace%2Fsettings%2Fplan%3Freturn%3Dkagura-public",
+    );
+    expect(mockPush).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("plan page")).toBeNull();
+  });
+
+  it("signing out on the arrival URL goes to /login", async () => {
+    // The parameter stays in the address bar whenever the notice may not show
+    // (no address set, not the canonical owner). Signing out there is not an
+    // arrival: the next sign-in goes where it always went.
+    mockUser = { id: "u1", email: "u@example.test", name: "U", terms_acceptance_required: false };
+    mockPathname = "/workspace/settings/plan";
+    mockSearchParams = new URLSearchParams("return=kagura-public");
+    const { rerender } = render(<DashboardLayout><p>plan page</p></DashboardLayout>);
+    expect(await screen.findByTestId("app")).toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalledWith("/login");
+    expect(mockPush).not.toHaveBeenCalledWith(APPLICATION_RETURN_LOGIN_PATH);
+
+    mockUser = null;
+    rerender(<DashboardLayout><p>plan page</p></DashboardLayout>);
+    await waitFor(() => expect(mockPush).toHaveBeenCalledWith("/login"));
+    expect(mockPush).not.toHaveBeenCalledWith(APPLICATION_RETURN_LOGIN_PATH);
+  });
+
+  it.each([
+    ["the plan page without the parameter", "/workspace/settings/plan", ""],
+    ["another value", "/workspace/settings/plan", "return=other"],
+    ["a repeated parameter", "/workspace/settings/plan", "return=kagura-public&return=kagura-public"],
+    ["another page with the parameter", "/workspace/dashboard", "return=kagura-public"],
+    ["a payment return", "/workspace/settings/plan", "session_id=cs_test_123&changed=1"],
+  ])("any other signed-out path goes to /login (%s)", async (_label, path, query) => {
+    mockUser = null;
+    mockPathname = path;
+    mockSearchParams = new URLSearchParams(query);
+    render(<DashboardLayout><p>page</p></DashboardLayout>);
+    await waitFor(() => expect(mockPush).toHaveBeenCalledWith("/login"));
+    expect(mockPush).toHaveBeenCalledTimes(1);
+  });
+});

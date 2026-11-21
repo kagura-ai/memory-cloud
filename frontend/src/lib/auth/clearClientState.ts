@@ -18,6 +18,11 @@
  * the leak it would prevent, since none of the three says anything about who
  * you are.
  *
+ * `kagura_application_return` (sessionStorage, #2950) is kept too: a timestamp
+ * of an arrival from the application, naming no user, workspace or address.
+ * After a sign-out or an account switch in the same tab the plan page shows
+ * its notice for the account then signed in, about that account's workspace.
+ *
  * Called on sign-out AND on account switch: both change who the cached data
  * belongs to, so both must clear it.
  */

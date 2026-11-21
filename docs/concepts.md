@@ -222,7 +222,12 @@ character-class counting, sub-millisecond): set `routing_mode` via
   (`query_router_decision`, numeric features only — never query text) with
   **zero ranking change**. Enable this first to measure your real traffic mix.
 - `active` — `recall()` calls that **omit** `search_mode` use the routed lane.
-  An explicitly passed `search_mode` always wins, in every mode.
+  An explicitly passed `search_mode` always wins, in every mode. When the
+  embedding cannot be computed (a provider error, a self-hosted inference
+  server that cannot be reached) or the vector store fails, a routed
+  `semantic` lane answers from keyword search with `degraded: true` and
+  `degraded_reason`, as a hybrid search does (#2960). An explicitly passed
+  `search_mode="semantic"` returns the error instead.
 
 The router does not become the default until it clears the stage-3 calibration
 gate on the frozen eval corpus (beat semantic-only overall AND beat the

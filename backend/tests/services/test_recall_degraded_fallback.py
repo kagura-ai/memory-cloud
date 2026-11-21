@@ -56,13 +56,27 @@ async def _search(
     embed_error: Exception | Callable[..., Any] | None,
     keyword_hits: list[dict] | None = None,
     degradation: dict | None = None,
+    search_mode_explicit: bool | None = None,
+    fulltext: AsyncMock | None = None,
+    vector_search: AsyncMock | None = None,
 ):
     """Run hybrid_search with every IO boundary mocked (same shape as
-    test_recall_llm_instrumentation._run_hybrid_search)."""
+    test_recall_llm_instrumentation._run_hybrid_search).
+
+    ``search_mode_explicit`` None leaves the keyword out of the call (the
+    default every caller but ``MemoryService.recall`` relies on). ``fulltext``
+    and ``vector_search`` let a test keep the BM25 / vector-store mocks to
+    assert on them.
+    """
     from services.search_service import SearchService
 
     embed_svc = _embed_svc_that(raises=embed_error)
     hits = keyword_hits if keyword_hits is not None else []
+    fulltext_mock = fulltext if fulltext is not None else AsyncMock(return_value=hits)
+    vector_mock = vector_search if vector_search is not None else AsyncMock(return_value=[])
+    explicit_kwarg: dict[str, Any] = (
+        {} if search_mode_explicit is None else {"search_mode_explicit": search_mode_explicit}
+    )
 
     with (
         patch("services.search_service.LLMCallLogWriter", MagicMock()),
@@ -70,14 +84,8 @@ async def _search(
             "services.search_service.resolve_routing_from_config",
             return_value=("default", embed_svc),
         ),
-        patch(
-            "services.search_service.search_memories_qdrant",
-            new=AsyncMock(return_value=[]),
-        ),
-        patch(
-            "services.search_service.search_memories_fulltext",
-            new=AsyncMock(return_value=hits),
-        ),
+        patch("services.search_service.search_memories_qdrant", new=vector_mock),
+        patch("services.search_service.search_memories_fulltext", new=fulltext_mock),
         patch(
             "services.context_service.ContextService.is_context_shared",
             new=AsyncMock(return_value=False),
@@ -96,6 +104,7 @@ async def _search(
             filters=None,
             search_mode=search_mode,
             degradation=degradation,
+            **explicit_kwarg,
         )
     return results, embed_svc
 
@@ -352,3 +361,198 @@ async def test_hybrid_degrades_when_a_gateway_reports_the_self_hosted_server_dow
     (event,) = [e for e in logs if e["event"] == "recall_degraded_to_keyword"]
     assert sorted(event) == ["context_id", "error_class", "event", "log_level", "reason"]
     assert event["error_class"] == "SelfHostedUnreachableError"
+
+
+# #2960: with ``routing_mode='active'`` and no ``search_mode`` the query router
+# picks the lane, by default ``semantic``. The caller never asked for vector
+# search, so that lane degrades to keyword like hybrid does, with the same
+# answer shape. ``MemoryService.recall`` says so with
+# ``search_mode_explicit=False``; an explicit ``semantic`` (the default, True)
+# keeps raising as #1515 decided.
+def _provider_error() -> OpenAIError:
+    return OpenAIError("Embedding generation failed: upstream down")
+
+
+def _keyword_hit() -> dict:
+    return {"id": "m1", "score": 0.9, "payload": {}}
+
+
+@pytest.mark.asyncio
+class TestRoutedSemanticDegrades:
+    async def test_routed_semantic_unreachable_self_hosted_returns_keyword_hits_flagged_embedding_unavailable(
+        self,
+    ):
+        fulltext = AsyncMock(return_value=[_keyword_hit()])
+        degradation: dict = {}
+        results, _ = await _search(
+            search_mode="semantic",
+            search_mode_explicit=False,
+            embed_error=_unreachable(),
+            fulltext=fulltext,
+            degradation=degradation,
+        )
+        assert [r["id"] for r in results] == ["m1"]
+        assert degradation == {
+            "degraded": True,
+            "reason": "embedding_unavailable",
+            "detail": "self-hosted inference server unreachable",
+        }
+        fulltext.assert_awaited_once()
+
+    async def test_routed_semantic_provider_failure_returns_keyword_hits(self):
+        err = _provider_error()
+        fulltext = AsyncMock(return_value=[_keyword_hit()])
+        degradation: dict = {}
+        results, _ = await _search(
+            search_mode="semantic",
+            search_mode_explicit=False,
+            embed_error=err,
+            fulltext=fulltext,
+            degradation=degradation,
+        )
+        assert [r["id"] for r in results] == ["m1"]
+        # The provider arm keeps its fields, exactly as for a hybrid search.
+        assert degradation == {
+            "degraded": True,
+            "reason": "embedding_unavailable",
+            "detail": str(err),
+        }
+        fulltext.assert_awaited_once()
+
+    async def test_routed_semantic_vector_store_failure_degrades_like_hybrid(self):
+        fulltext = AsyncMock(return_value=[{"id": "m2", "score": 0.5, "payload": {}}])
+        degradation: dict = {}
+        results, _ = await _search(
+            search_mode="semantic",
+            search_mode_explicit=False,
+            embed_error=None,
+            fulltext=fulltext,
+            vector_search=AsyncMock(side_effect=QdrantError("vector store unreachable")),
+            degradation=degradation,
+        )
+        assert [r["id"] for r in results] == ["m2"]
+        assert degradation["degraded"] is True
+        assert degradation["reason"] == "vector_search_unavailable"
+
+    async def test_routed_semantic_degrade_log_and_detail_carry_no_base_url(self):
+        import structlog
+
+        degradation: dict = {}
+        with structlog.testing.capture_logs() as logs:
+            await _search(
+                search_mode="semantic",
+                search_mode_explicit=False,
+                embed_error=_unreachable(),
+                keyword_hits=[],
+                degradation=degradation,
+            )
+        (event,) = [e for e in logs if e["event"] == "recall_degraded_to_keyword"]
+        # The same event, with the same key set, as a degraded hybrid search:
+        # every value but the context id is fixed, so none carries the URL.
+        assert sorted(event) == ["context_id", "error_class", "event", "log_level", "reason"]
+        assert {k: v for k, v in event.items() if k != "context_id"} == {
+            "event": "recall_degraded_to_keyword",
+            "log_level": "warning",
+            "reason": "embedding_unavailable",
+            "error_class": "SelfHostedUnreachableError",
+        }
+        assert degradation["detail"] == "self-hosted inference server unreachable"
+
+    @pytest.mark.parametrize("explicit", [True, None], ids=["flag_true", "flag_omitted"])
+    async def test_explicit_semantic_still_raises_on_an_unreachable_server(self, explicit):
+        from utils.exceptions import SelfHostedUnreachableError
+
+        fulltext = AsyncMock(return_value=[_keyword_hit()])
+        degradation: dict = {}
+        with pytest.raises(SelfHostedUnreachableError) as excinfo:
+            await _search(
+                search_mode="semantic",
+                search_mode_explicit=explicit,
+                embed_error=_unreachable(),
+                fulltext=fulltext,
+                degradation=degradation,
+            )
+        assert excinfo.value.status_code == 500
+        assert excinfo.value.error_code == "CFG-001"
+        assert degradation == {}
+        fulltext.assert_not_called()
+
+    @pytest.mark.parametrize("explicit", [True, None], ids=["flag_true", "flag_omitted"])
+    async def test_explicit_semantic_still_raises_on_a_provider_error(self, explicit):
+        fulltext = AsyncMock(return_value=[_keyword_hit()])
+        degradation: dict = {}
+        with pytest.raises(OpenAIError):
+            await _search(
+                search_mode="semantic",
+                search_mode_explicit=explicit,
+                embed_error=_provider_error(),
+                fulltext=fulltext,
+                degradation=degradation,
+            )
+        assert degradation == {}
+        fulltext.assert_not_called()
+
+    async def test_routed_semantic_rejected_self_hosted_request_still_raises_cfg_001(self):
+        # A server that answered and refused is a misconfiguration in every
+        # mode, routed or not.
+        from utils.exceptions import ConfigurationError, SelfHostedUnreachableError
+
+        rejected = ConfigurationError(
+            f"Self-hosted inference server at {_UNREACHABLE_BASE_URL} rejected the request "
+            "(HTTP 401) — set or check SELF_HOSTED_API_KEY"
+        )
+        fulltext = AsyncMock(return_value=[_keyword_hit()])
+        degradation: dict = {}
+        with pytest.raises(ConfigurationError) as excinfo:
+            await _search(
+                search_mode="semantic",
+                search_mode_explicit=False,
+                embed_error=rejected,
+                fulltext=fulltext,
+                degradation=degradation,
+            )
+        assert not isinstance(excinfo.value, SelfHostedUnreachableError)
+        assert excinfo.value.error_code == "CFG-001"
+        assert degradation == {}
+        fulltext.assert_not_called()
+
+    async def test_healthy_routed_semantic_runs_no_keyword_arm(self):
+        fulltext = AsyncMock(return_value=[_keyword_hit()])
+        degradation: dict = {}
+        results, embed_svc = await _search(
+            search_mode="semantic",
+            search_mode_explicit=False,
+            embed_error=None,
+            fulltext=fulltext,
+            vector_search=AsyncMock(return_value=[{"id": "v1", "score": 0.8, "payload": {}}]),
+            degradation=degradation,
+        )
+        embed_svc.embed_with_usage.assert_awaited_once()
+        fulltext.assert_not_called()
+        assert [r["id"] for r in results] == ["v1"]
+        assert degradation == {}
+
+    async def test_routed_keyword_lane_never_touches_the_embedding_provider(self):
+        degradation: dict = {}
+        results, embed_svc = await _search(
+            search_mode="keyword",
+            search_mode_explicit=False,
+            embed_error=OpenAIError("would explode if called"),
+            keyword_hits=[_keyword_hit()],
+            degradation=degradation,
+        )
+        embed_svc.embed_with_usage.assert_not_called()
+        assert [r["id"] for r in results] == ["m1"]
+        assert degradation == {}
+
+
+def test_search_mode_explicit_is_keyword_only():
+    """#2960: the flag can only be passed by name, so a positional call can
+    never set it by accident."""
+    import inspect
+
+    from services.search_service import SearchService
+
+    parameter = inspect.signature(SearchService.hybrid_search).parameters["search_mode_explicit"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is True

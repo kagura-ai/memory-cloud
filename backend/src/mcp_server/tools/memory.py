@@ -3,6 +3,7 @@
 Extracted from tools.py for modularity (Issue #7).
 """
 
+import contextlib
 import logging
 import time
 from typing import Any
@@ -45,6 +46,7 @@ from mcp_server.tools._reference_adoption import mark_first_read, unmark_read
 from services.memory_service import (
     DEDUPE_MODES,
     DEDUPE_SUGGEST,
+    SIMILAR_ID_TIMEOUT_SECONDS,
     DedupeUnavailableError,
     DuplicateCandidateError,
 )
@@ -60,11 +62,14 @@ from utils.exceptions import (
     SupersedeEdgeConflictError,
     VersionConflictError,
 )
+from utils.logger import get_logger
 from utils.observed_at import observed_fields
 from utils.recall_projection import (
+    COMPACT_SUMMARY_CHARS,
     RECALL_CONTENT_KEYS,
     RECALL_MAX_FULL,
     RECALL_VERBOSITIES,
+    compact_summary,
     recall_result_item,
 )
 from utils.response_budget import (
@@ -78,6 +83,8 @@ from utils.response_budget import (
 )
 
 logger = logging.getLogger(__name__)
+# Key-value events (structlog), for the #2959 id hint.
+_struct_logger = get_logger(__name__)
 
 # #1743: recall_upcoming / recall_nearby with include_details=true. Items keep
 # their order; from the last one backwards, details is replaced by
@@ -2415,6 +2422,89 @@ async def _record_session_read(
         )
 
 
+_REFERENCE_NOT_FOUND_HELP = "Use recall() to find memories you have access to."
+# #2959: the help of a reference miss that names memories with a similar id.
+# The retry sentence names no other tool, so the google view keeps it; the
+# second keeps the pointer for an agent that finds none of them is the memory
+# it meant (the google view drops it, as it drops every pointer to another tool).
+_REFERENCE_SIMILAR_IDS_HELP = (
+    "The memories in similar_ids are in this context and their ids start like the one "
+    "you sent; if one of them is the memory you meant, call reference again with its "
+    "memory_id exactly as listed. Otherwise use recall() to find memories you have "
+    "access to."
+)
+
+
+def _reference_not_found(
+    memory_id: UUID, similar: list[tuple[UUID, str]] | None = None
+) -> list[TextContent]:
+    """The ``memory_not_found`` answer of ``reference``.
+
+    ``similar`` (#2959) are memories of the named context whose ids start like
+    ``memory_id``, as ``MemoryService.similar_id_candidates`` found them. With
+    any, they follow as ``similar_ids`` (summaries cut as compact recall rows
+    are) and ``help`` says to retry with one exactly as listed, and otherwise
+    to use recall; ``error`` and ``message`` stay the same. Without any, the
+    answer is the one ``reference`` always gave.
+    """
+    message = f"Memory not found or you don't have access: {memory_id}"
+    if not similar:
+        return _error_response("memory_not_found", message, help=_REFERENCE_NOT_FOUND_HELP)
+    listed = []
+    for similar_id, summary in similar:
+        head, cut = compact_summary(summary, COMPACT_SUMMARY_CHARS)
+        listed.append(
+            {
+                "memory_id": str(similar_id),
+                "summary": head,
+                **({"summary_cut": True} if cut else {}),
+            }
+        )
+    return _error_response(
+        "memory_not_found", message, help=_REFERENCE_SIMILAR_IDS_HELP, similar_ids=listed
+    )
+
+
+async def _similar_ids_for_miss(
+    db: Any,
+    service: Any,
+    memory_id: UUID,
+    user_id: str,
+    *,
+    context_id: UUID,
+    workspace_id: UUID,
+) -> list[tuple[UUID, str]]:
+    """The #2959 lookup for a ``reference`` miss, bounded and fail-soft.
+
+    Advisory only: it has a short budget of its own
+    (``SIMILAR_ID_TIMEOUT_SECONDS``, under the name ``reference_id_hint``), and
+    a failure or a timeout logs one warning (the error class, never its text)
+    while the miss answers as it always did. The lookup is read-only: its
+    transaction is rolled back whatever happened, and that rollback cannot
+    raise.
+    """
+    try:
+        return await execute_with_timeout(
+            service.similar_id_candidates(
+                memory_id,
+                user_id,
+                context_id=context_id,
+                workspace_id=workspace_id,
+                key_workspace_id=get_mcp_key_workspace_scope(),
+            ),
+            timeout=SIMILAR_ID_TIMEOUT_SECONDS,
+            operation_name="reference_id_hint",
+        )
+    except Exception as exc:
+        _struct_logger.warning("reference_id_hint_failed", error_class=type(exc).__name__)
+        return []
+    finally:
+        # The session is closed right after the answer; a failed rollback
+        # here must not turn the miss into an error.
+        with contextlib.suppress(Exception):
+            await db.rollback()
+
+
 async def handle_reference(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -2489,17 +2579,26 @@ async def handle_reference(
                     help="list_revisions(memory_id) lists the versions.",
                 )
             except NotFoundException:
+                # #2959: plain values for the id hint, read before the
+                # rollback: it expires the context row, and an attribute read
+                # after it would load under the async session and fail.
+                hint_context_id = current_context.id
+                hint_workspace_id = current_context.workspace_id
                 # #1316 review: record the 404 in usage telemetry, keeping
                 # reference and explore symmetric for the identical outcome.
                 await db.rollback()
+                similar = await _similar_ids_for_miss(
+                    db,
+                    service,
+                    request.memory_id,
+                    user_id,
+                    context_id=hint_context_id,
+                    workspace_id=hint_workspace_id,
+                )
                 await _log_tool_usage(
                     db, user_id, "reference", start_time, 404, current_context_id, workspace_id
                 )
-                return _error_response(
-                    "memory_not_found",
-                    f"Memory not found or you don't have access: {request.memory_id}",
-                    help="Use recall() to find memories you have access to.",
-                )
+                return _reference_not_found(request.memory_id, similar)
 
             # Surface the FULL ReferenceResponse the service already builds: the
             # handler previously dropped scope/updated_at (#434), source provenance

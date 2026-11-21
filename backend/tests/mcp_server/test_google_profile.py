@@ -526,6 +526,31 @@ async def test_pointer_sentences_leave_help_hint_and_message(handlers, google_vi
 
 
 @pytest.mark.asyncio
+async def test_reference_similar_ids_and_their_help_survive_the_google_view(handlers, google_view):
+    """#2959: the miss that names memories with a similar id keeps the key and
+    the retry sentence of its help on the google view (it names no other
+    tool); the second sentence, which points to recall, is dropped there."""
+    from mcp_server.tools.memory import _reference_not_found
+
+    reply = _reference_not_found(uuid4(), [(uuid4(), "deploy runbook")])
+    expected = json.loads(reply[0].text)
+    retry, pointer = expected["help"].split(". Otherwise ")
+    assert pointer == "use recall() to find memories you have access to."
+
+    async def handler(_args, _user_id, _workspace_id):
+        return reply
+
+    tools_mod._TOOL_REGISTRY["reference"] = handler
+    result = await execute_tool_call("reference", _ids(), "u", None)
+
+    assert isinstance(result, tools_mod.ToolErrorContent)
+    payload = _payload(result)
+    assert payload == {**expected, "help": retry + "."}
+    assert list(payload) == ["status", "error", "message", "help", "similar_ids"]
+    assert _names_a_tool(payload, "reference") == set()
+
+
+@pytest.mark.asyncio
 async def test_a_success_hint_loses_its_pointer_sentence(handlers, google_view):
     handlers["list_contexts"] = (
         False,

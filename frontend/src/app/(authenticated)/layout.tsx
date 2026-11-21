@@ -12,7 +12,7 @@
  * workspace, and an owner who must choose is sent there once per session
  */
 
-import { Fragment, Suspense, useEffect, useState } from "react";
+import { Fragment, Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLocale } from "@/i18n";
@@ -32,6 +32,10 @@ import {
   WORKSPACE_MANAGEMENT_PATH,
   takeSelectionPrompt,
 } from "@/lib/navigation/workspaceManagement";
+import {
+  APPLICATION_RETURN_LOGIN_PATH,
+  isApplicationReturnArrival,
+} from "@/lib/navigation/applicationReturn";
 
 /**
  * Issue #1665: shown INSTEAD of the app while `/auth/me` reports
@@ -209,12 +213,23 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
       pathname === "/workspace/settings/general") &&
     searchParams.get("create") === "true";
 
-  // Redirect to login for protected routes (not homepage)
+  // Redirect to login for protected routes (not homepage). #2950: a visitor
+  // who arrives signed out from the application signs in and comes back to
+  // it, through a login path built from constants only (nothing of the URL is
+  // carried over). Signing out on that URL is not an arrival: it goes to
+  // /login like any sign-out, so this layout remembers having had a user.
+  const applicationReturnArrival = isApplicationReturnArrival(pathname, searchParams);
+  const hadUser = useRef(false);
+  useEffect(() => {
+    if (user) hadUser.current = true;
+  }, [user]);
   useEffect(() => {
     if (!isLoading && !user && pathname !== "/") {
-      router.push("/login");
+      router.push(
+        applicationReturnArrival && !hadUser.current ? APPLICATION_RETURN_LOGIN_PATH : "/login",
+      );
     }
-  }, [user, isLoading, pathname, router]);
+  }, [user, isLoading, pathname, router, applicationReturnArrival]);
 
   // Issue #2919: owned workspaces were suspended and no choice is saved yet.
   // After the terms step, send the owner to Workspace management once per

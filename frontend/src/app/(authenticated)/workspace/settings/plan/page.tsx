@@ -39,6 +39,8 @@ import {
 } from "@/lib/utils/planLabel";
 import { PlanFeatureMatrix } from "@/components/plan/PlanFeatureMatrix";
 import { SuspendedFeaturesBanner } from "@/components/plan/SuspendedFeaturesBanner";
+import { ApplicationReturnNotice } from "@/components/plan/ApplicationReturnNotice";
+import { APPLICATION_RETURN_TOP_PLAN } from "@/lib/navigation/applicationReturn";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
@@ -61,20 +63,26 @@ export default function WorkspacePlanPage() {
   const [error, setError] = useState<Error | null>(null);
   const [pendingWorkspace, setPendingWorkspace] = useState<string | null>(null);
   const handoffRequest = useRef<symbol | null>(null);
+  // #2950: where keyboard focus goes when the application-return notice goes away.
+  const planSectionRef = useRef<HTMLDivElement>(null);
   const upgrading = pendingWorkspace !== null && pendingWorkspace === currentWorkspaceId;
 
   const isOwner = currentWorkspace?.current_user_role === "owner";
 
-  const loadPlan = useCallback(async () => {
+  // `quiet` (#2950, the notice's "Check again"): keep the page and the last
+  // plan on screen, set neither `loading` nor `error`.
+  const loadPlan = useCallback(async ({ quiet = false }: { quiet?: boolean } = {}) => {
     if (!currentWorkspaceId) return;
     try {
-      setLoading(true);
-      setError(null);
+      if (!quiet) {
+        setLoading(true);
+        setError(null);
+      }
       setPlan(await getWorkspacePlan(currentWorkspaceId));
     } catch (e) {
-      setError(e instanceof Error ? e : new Error(String(e)));
+      if (!quiet) setError(e instanceof Error ? e : new Error(String(e)));
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, [currentWorkspaceId]);
 
@@ -189,52 +197,65 @@ export default function WorkspacePlanPage() {
         <SuspendedFeaturesBanner suspended={plan.suspended} className="mb-6" />
       )}
 
-      <Section title={t("planPage.currentPlan")}>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-2xl font-semibold capitalize">{planName}</p>
-            {isSubscribed && (
+      {/* #2950: the link back to the application, for the workspace's
+          canonical owner after an arrival from it (the notice decides). */}
+      {isOwner && currentWorkspace && (
+        <ApplicationReturnNotice
+          workspace={currentWorkspace}
+          planLabel={planLabelFromEnv(APPLICATION_RETURN_TOP_PLAN, locale)}
+          onRechecked={() => void loadPlan({ quiet: true })}
+          focusTargetRef={planSectionRef}
+        />
+      )}
+
+      <div ref={planSectionRef} tabIndex={-1} className="focus:outline-none">
+        <Section title={t("planPage.currentPlan")}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-2xl font-semibold capitalize">{planName}</p>
+              {isSubscribed && (
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  {t("planPage.billingAmountHint")}
+                </p>
+              )}
+            </div>
+            {isOwner ? (
+              // Keep the label stable while the handoff is in flight — billing-
+              // disabled deployments 503 in milliseconds, and a label swap
+              // (label → "opening…" → label) reads as a flicker. The in-flight
+              // state is the icon-turned-spinner + disabled + aria-busy, and the
+              // change is announced to screen readers via a role="status" live
+              // region (a bare sr-only span isn't reliably re-read on toggle).
+              <>
+                <Button
+                  onClick={handleManageBilling}
+                  disabled={upgrading}
+                  aria-busy={upgrading}
+                >
+                  {upgrading ? (
+                    <InlineSpinner size="sm" className="mr-2" />
+                  ) : (
+                    <Sparkles className="mr-2 h-4 w-4" />
+                  )}
+                  {isSubscribed
+                    ? t("planPage.reviewOrChangePlan")
+                    : t("planPage.manageBilling")}
+                </Button>
+                {/* Always-mounted live region so the in-flight state is
+                    reliably announced when its text flips (a conditionally
+                    rendered sr-only span is not re-read on toggle). */}
+                <span role="status" aria-live="polite" className="sr-only">
+                  {upgrading ? t("planPage.opening") : ""}
+                </span>
+              </>
+            ) : (
               <p className="text-sm text-gray-500 dark:text-gray-400">
-                {t("planPage.billingAmountHint")}
+                {t("planPage.ownerOnly")}
               </p>
             )}
           </div>
-          {isOwner ? (
-            // Keep the label stable while the handoff is in flight — billing-
-            // disabled deployments 503 in milliseconds, and a label swap
-            // (label → "opening…" → label) reads as a flicker. The in-flight
-            // state is the icon-turned-spinner + disabled + aria-busy, and the
-            // change is announced to screen readers via a role="status" live
-            // region (a bare sr-only span isn't reliably re-read on toggle).
-            <>
-              <Button
-                onClick={handleManageBilling}
-                disabled={upgrading}
-                aria-busy={upgrading}
-              >
-                {upgrading ? (
-                  <InlineSpinner size="sm" className="mr-2" />
-                ) : (
-                  <Sparkles className="mr-2 h-4 w-4" />
-                )}
-                {isSubscribed
-                  ? t("planPage.reviewOrChangePlan")
-                  : t("planPage.manageBilling")}
-              </Button>
-              {/* Always-mounted live region so the in-flight state is
-                  reliably announced when its text flips (a conditionally
-                  rendered sr-only span is not re-read on toggle). */}
-              <span role="status" aria-live="polite" className="sr-only">
-                {upgrading ? t("planPage.opening") : ""}
-              </span>
-            </>
-          ) : (
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              {t("planPage.ownerOnly")}
-            </p>
-          )}
-        </div>
-      </Section>
+        </Section>
+      </div>
 
       {/* #1560: this block is the workspace's EFFECTIVE entitlements (what it
           runs under today), while the matrix below is the CREATE view (#1551).

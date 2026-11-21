@@ -52,7 +52,7 @@ const workspaces = [
   { id: "w2", name: "W2" },
 ];
 
-let savedRefresh: ((options?: { quiet?: boolean }) => Promise<void>) | undefined;
+let savedRefresh: ((options?: { quiet?: boolean }) => Promise<boolean>) | undefined;
 function Probe() {
   const { currentWorkspaceId, loading, loadFailed, switchWorkspace, refreshWorkspaces } = useWorkspace();
   return (
@@ -365,6 +365,46 @@ describe("suspended workspaces (#2919)", () => {
     });
     expect(page.getByTestId("loading").textContent).toBe("false");
     expect(page.getByTestId("loadFailed").textContent).toBe("false");
+    expect(page.getByTestId("ws").textContent).toBe("w1");
+  });
+
+  it("a quiet refresh answers false when its read fails and true when it succeeds", async () => {
+    const page = renderProvider();
+    await waitFor(() => expect(page.getByTestId("ws").textContent).toBe("w1"));
+    fireEvent.click(page.getByRole("button", { name: "capture" }));
+    const refresh = savedRefresh!;
+
+    mockListWorkspaces.mockRejectedValueOnce(new Error("offline"));
+    let failed: boolean | undefined;
+    await act(async () => {
+      failed = await refresh({ quiet: true });
+    });
+    expect(failed).toBe(false);
+    // The list is kept on the failure, as before.
+    expect(page.getByTestId("ws").textContent).toBe("w1");
+    expect(page.getByTestId("loadFailed").textContent).toBe("false");
+    expect(page.getByTestId("loading").textContent).toBe("false");
+
+    let read: boolean | undefined;
+    await act(async () => {
+      read = await refresh({ quiet: true });
+    });
+    expect(read).toBe(true);
+
+    // A call a newer one took over is not a failure of its own read.
+    let rejectFirst!: (error: Error) => void;
+    mockListWorkspaces
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }))
+      .mockResolvedValueOnce(workspaces);
+    let superseded: Promise<boolean> | undefined;
+    let newer: boolean | undefined;
+    await act(async () => {
+      superseded = refresh({ quiet: true });
+      newer = await refresh({ quiet: true });
+    });
+    await act(async () => { rejectFirst(new Error("offline")); });
+    expect(await superseded).toBe(true);
+    expect(newer).toBe(true);
     expect(page.getByTestId("ws").textContent).toBe("w1");
   });
 

@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from config.constants import RerankPromptFormat
@@ -2388,15 +2388,32 @@ class Settings(BaseSettings):
         ),
     )
 
-    @field_validator("chatgpt_app_url", mode="before")
+    # Link back to the application on the plan page (Issue #2950)
+    kagura_public_return_url: str = Field(
+        default="",
+        description=(
+            "Public https address of the application the plan page links back to "
+            "(#2950). When set, the plan page opened as "
+            "/workspace/settings/plan?return=kagura-public shows the workspace's "
+            "canonical owner a notice with the signed-in account, the workspace's "
+            "plan and a plain link to this address, for 24 hours in that browser "
+            "tab. Empty (the default) shows nothing. Needs the plan page "
+            "(ENABLE_PLAN_PAGE) to do anything. Must be an absolute https:// URL "
+            "with a host (the CHATGPT_APP_URL rules) — anything else fails startup. "
+            "Surfaced via GET /api/v1/system/info kagura_public_return_url."
+        ),
+    )
+
+    @field_validator("chatgpt_app_url", "kagura_public_return_url", mode="before")
     @classmethod
-    def _check_chatgpt_app_url(cls, v: Any) -> Any:
+    def _check_chatgpt_app_url(cls, v: Any, info: ValidationInfo) -> Any:
         """Trim whitespace; refuse anything the web UI could not link to safely.
 
         The value is rendered as a link on public-facing pages, so only an
         absolute ``https://`` URL with a host passes (no ``http:``, no
         ``javascript:``, no relative or host-less value). Empty stays empty
-        (= no link).
+        (= no link). Shared by CHATGPT_APP_URL and KAGURA_PUBLIC_RETURN_URL;
+        the message names the setting that failed.
         """
         if v is None:
             return ""
@@ -2405,7 +2422,7 @@ class Settings(BaseSettings):
         v = v.strip()
         if not v:
             return ""
-        error = "CHATGPT_APP_URL must be an absolute https:// URL with a host"
+        error = f"{str(info.field_name).upper()} must be an absolute https:// URL with a host"
         # No whitespace or control characters anywhere: the value is rendered
         # as is, so what passes here must be what the browser parses.
         if any(c.isspace() or not c.isprintable() for c in v):
