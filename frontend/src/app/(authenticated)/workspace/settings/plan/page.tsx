@@ -39,6 +39,7 @@ import {
 } from "@/lib/utils/planLabel";
 import { PlanFeatureMatrix } from "@/components/plan/PlanFeatureMatrix";
 import { SuspendedFeaturesBanner } from "@/components/plan/SuspendedFeaturesBanner";
+import { ApplicationReturnNotice } from "@/components/plan/ApplicationReturnNotice";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
@@ -65,16 +66,20 @@ export default function WorkspacePlanPage() {
 
   const isOwner = currentWorkspace?.current_user_role === "owner";
 
-  const loadPlan = useCallback(async () => {
+  // `quiet` (#2950, the notice's "Check again"): keep the page and the last
+  // plan on screen, set neither `loading` nor `error`.
+  const loadPlan = useCallback(async ({ quiet = false }: { quiet?: boolean } = {}) => {
     if (!currentWorkspaceId) return;
     try {
-      setLoading(true);
-      setError(null);
+      if (!quiet) {
+        setLoading(true);
+        setError(null);
+      }
       setPlan(await getWorkspacePlan(currentWorkspaceId));
     } catch (e) {
-      setError(e instanceof Error ? e : new Error(String(e)));
+      if (!quiet) setError(e instanceof Error ? e : new Error(String(e)));
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, [currentWorkspaceId]);
 
@@ -187,6 +192,16 @@ export default function WorkspacePlanPage() {
       {/* #1939: back on Free with paid-only objects left — say what paused. */}
       {plan?.suspended && plan.suspended.length > 0 && (
         <SuspendedFeaturesBanner suspended={plan.suspended} className="mb-6" />
+      )}
+
+      {/* #2950: the link back to the application, for the workspace's
+          canonical owner after an arrival from it (the notice decides). */}
+      {isOwner && currentWorkspace && (
+        <ApplicationReturnNotice
+          workspace={currentWorkspace}
+          planLabel={planLabelFromEnv("promax", locale)}
+          onRechecked={() => void loadPlan({ quiet: true })}
+        />
       )}
 
       <Section title={t("planPage.currentPlan")}>

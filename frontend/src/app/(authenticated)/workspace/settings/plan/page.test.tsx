@@ -18,6 +18,8 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import type { ApplicationReturnNoticeProps } from "@/components/plan/ApplicationReturnNotice";
+
 import WorkspacePlanPage from "./page";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -42,8 +44,11 @@ vi.mock("@/hooks/usePlanFeatures", () => ({
 }));
 vi.mock("@/i18n", () => ({ useLocale: () => ({ locale: "en" }) }));
 
-let mockWorkspace: { current_user_role?: string; plan_name?: string } | null =
-  null;
+let mockWorkspace: {
+  name?: string;
+  current_user_role?: string;
+  plan_name?: string;
+} | null = null;
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({
     currentWorkspaceId: "ws-1",
@@ -82,6 +87,15 @@ vi.mock("@/lib/utils/planLabel", async () => ({
 vi.mock("@/components/plan/PlanFeatureMatrix", () => ({
   PlanFeatureMatrix: () => null,
 }));
+// #2950: the notice has its own test; here only whether and how the page
+// renders it. The stub keeps the props it was given.
+let mockNoticeProps: ApplicationReturnNoticeProps | null = null;
+vi.mock("@/components/plan/ApplicationReturnNotice", () => ({
+  ApplicationReturnNotice: (props: ApplicationReturnNoticeProps) => {
+    mockNoticeProps = props;
+    return <div data-testid="application-return-notice" data-plan-label={props.planLabel} />;
+  },
+}));
 // #1145: the page is gated behind the backend ENABLE_PLAN_PAGE flag. Default
 // the mocked hook to enabled; flip per-test for the disabled-notice case.
 let mockFeatures: Record<string, boolean> | null = { plan_page: true };
@@ -112,6 +126,7 @@ const planInfo = (overrides: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockNoticeProps = null;
   mockFeatures = { plan_page: true };
   mockGetWorkspacePlan.mockResolvedValue(planInfo());
 });
@@ -268,6 +283,63 @@ describe("WorkspacePlanPage (#1141)", () => {
     expect(await screen.findByText("planPage.ownerOnly")).toBeInTheDocument();
     expect(screen.queryByText("planPage.reviewOrChangePlan")).toBeNull();
     expect(screen.queryByText("planPage.manageBilling")).toBeNull();
+  });
+});
+
+describe("WorkspacePlanPage link back to the application (#2950)", () => {
+  it("renders the notice for an owner", async () => {
+    mockWorkspace = { name: "Research", current_user_role: "owner", plan_name: "free" };
+    render(<WorkspacePlanPage />);
+    const notice = await screen.findByTestId("application-return-notice");
+    // The top plan's label, whatever the workspace is on.
+    expect(notice).toHaveAttribute("data-plan-label", "promax");
+    expect(mockNoticeProps?.workspace).toBe(mockWorkspace);
+    // Above "Current plan".
+    const currentPlan = screen.getByText("planPage.currentPlan");
+    expect(
+      notice.compareDocumentPosition(currentPlan) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it.each(["admin", "member", "viewer"])("not for a non-owner (%s)", async (role) => {
+    mockWorkspace = { name: "Research", current_user_role: role, plan_name: "free" };
+    render(<WorkspacePlanPage />);
+    await screen.findByText("planPage.ownerOnly");
+    expect(screen.queryByTestId("application-return-notice")).toBeNull();
+  });
+
+  it("a quiet plan reload keeps the page and the last plan on failure", async () => {
+    mockWorkspace = { name: "Research", current_user_role: "owner", plan_name: "free" };
+    mockGetWorkspacePlan.mockResolvedValueOnce(planInfo({ plan_display_name: "Starter" }));
+    render(<WorkspacePlanPage />);
+    await screen.findByTestId("application-return-notice");
+    expect(screen.getByText("planPage.usageTitle")).toBeInTheDocument();
+    expect(mockGetWorkspacePlan).toHaveBeenCalledTimes(1);
+
+    let rejectReload!: (reason: Error) => void;
+    mockGetWorkspacePlan.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectReload = reject; }),
+    );
+    act(() => { mockNoticeProps?.onRechecked(); });
+    // No spinner while the quiet reload is in flight.
+    expect(screen.queryByText("loading")).toBeNull();
+    expect(screen.getByTestId("application-return-notice")).toBeInTheDocument();
+    await act(async () => { rejectReload(new Error("network down")); });
+
+    expect(mockGetWorkspacePlan).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("network down")).toBeNull();
+    expect(screen.queryByText("loading")).toBeNull();
+    expect(screen.getByText("planPage.currentPlan")).toBeInTheDocument();
+    // The last plan stays on the page.
+    expect(screen.getByText("planPage.usageTitle")).toBeInTheDocument();
+    expect(screen.getByTestId("application-return-notice")).toBeInTheDocument();
+
+    // A successful quiet reload replaces the plan.
+    mockGetWorkspacePlan.mockResolvedValueOnce(
+      planInfo({ suspended: ["connectors"] }),
+    );
+    await act(async () => { mockNoticeProps?.onRechecked(); });
+    expect(await screen.findByText("planPage.suspended.title")).toBeInTheDocument();
   });
 });
 

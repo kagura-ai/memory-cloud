@@ -11,6 +11,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { BETA_INVITE_CARD_DISMISS_KEY } from "@/components/beta-invites/InviteFriendCard";
 import { clearIdentityScopedClientState } from "./clearClientState";
 import { takeSelectionPrompt } from "@/lib/navigation/workspaceManagement";
+import {
+  APPLICATION_RETURN_STORAGE_KEY,
+  hasApplicationReturn,
+  rememberApplicationReturn,
+} from "@/lib/navigation/applicationReturn";
 
 beforeEach(() => {
   localStorage.clear();
@@ -85,6 +90,21 @@ describe("clearIdentityScopedClientState", () => {
     expect(localStorage.getItem("sidebar-collapsed-sections")).toBe(
       '{"admin":true}',
     );
+  });
+
+  it("keeps the application-return marker", () => {
+    // #2950: the marker names no user and survives a sign-out and an account
+    // switch on purpose, so the notice can show the account now signed in.
+    sessionStorage.clear();
+    rememberApplicationReturn();
+    const marker = sessionStorage.getItem(APPLICATION_RETURN_STORAGE_KEY);
+    expect(marker).not.toBeNull();
+
+    clearIdentityScopedClientState();
+
+    expect(sessionStorage.getItem(APPLICATION_RETURN_STORAGE_KEY)).toBe(marker);
+    expect(hasApplicationReturn()).toBe(true);
+    sessionStorage.clear();
   });
 
   it("does not throw when storage is unavailable", () => {

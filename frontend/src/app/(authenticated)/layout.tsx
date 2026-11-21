@@ -32,6 +32,10 @@ import {
   WORKSPACE_MANAGEMENT_PATH,
   takeSelectionPrompt,
 } from "@/lib/navigation/workspaceManagement";
+import {
+  APPLICATION_RETURN_LOGIN_PATH,
+  isApplicationReturnArrival,
+} from "@/lib/navigation/applicationReturn";
 
 /**
  * Issue #1665: shown INSTEAD of the app while `/auth/me` reports
@@ -209,12 +213,15 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
       pathname === "/workspace/settings/general") &&
     searchParams.get("create") === "true";
 
-  // Redirect to login for protected routes (not homepage)
+  // Redirect to login for protected routes (not homepage). #2950: an arrival
+  // from the application signs in and comes back to it, through a login path
+  // built from constants only (nothing of the URL is carried over).
+  const applicationReturnArrival = isApplicationReturnArrival(pathname, searchParams);
   useEffect(() => {
     if (!isLoading && !user && pathname !== "/") {
-      router.push("/login");
+      router.push(applicationReturnArrival ? APPLICATION_RETURN_LOGIN_PATH : "/login");
     }
-  }, [user, isLoading, pathname, router]);
+  }, [user, isLoading, pathname, router, applicationReturnArrival]);
 
   // Issue #2919: owned workspaces were suspended and no choice is saved yet.
   // After the terms step, send the owner to Workspace management once per

@@ -3,25 +3,16 @@
 import { ArrowUpRight } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useSystemInfo } from "@/hooks/useSystemFeatures";
+import { httpsHref } from "@/lib/utils/httpsHref";
 
 /**
  * The deployment's ChatGPT app listing (#2760), or null when there is nothing
  * safe to link to. The URL is a deployment setting (`CHATGPT_APP_URL`, never
  * hardcoded: a listing connects to one MCP server and this app is also run
- * self-hosted). The backend refuses a non-https value at startup; the UI still
- * never turns an arbitrary string into a link, whatever the API returned.
+ * self-hosted). The check is `httpsHref` (#2950 moved it there), kept under
+ * this name.
  */
-export function chatGptAppHref(value: string | null | undefined): string | null {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    // No userinfo: `https://a.example@b.example` reads as one host, opens another.
-    const safe = url.protocol === "https:" && url.hostname && !url.username && !url.password;
-    return safe ? value : null;
-  } catch {
-    return null;
-  }
-}
+export const chatGptAppHref = httpsHref;
 
 /**
  * Opens the listing in a new tab, next to the plugin guide link (#2736).

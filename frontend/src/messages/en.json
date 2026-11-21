@@ -1476,6 +1476,17 @@
         },
         "resume": "Upgrade or re-subscribe to resume them — or bring the workspace back under the plan's limits (remove members, delete or merge older contexts). A private context another member created uses a slot too; removing that member hands it to the owner, who can then delete it.",
         "viewPlan": "View plan"
+      },
+      "applicationReturn": {
+        "title": "If you opened this page from the application",
+        "signedInAs": "Signed in as {account}",
+        "notOnPlan": "Workspace “{workspace}” is not on the {plan} plan. You can change the plan in the section below. A change can take a moment to appear here.",
+        "onPlan": "Workspace “{workspace}” is on the {plan} plan.",
+        "switchHint": "If this is not the account or workspace you use with the application, switch to it first, then open this page again in this tab.",
+        "returnLink": "Return to the application",
+        "checkAgain": "Check again",
+        "dismiss": "Hide this notice",
+        "nowOnPlan": "The workspace is now on the {plan} plan."
       }
     },
     "planMatrix": {
